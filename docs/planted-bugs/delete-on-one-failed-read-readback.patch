@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index e247971..4c7a675 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1572,7 +1572,7 @@ impl Actor {
+         };
+         // One failed read says nothing about the bytes: act only when a read on
+         // a later tick fails too.
+-        if self.engine.maintain.suspect.replace(key) != Some(key) {
++        if self.engine.maintain.suspect.replace(key) != Some(key) && false {
+             let again = now.saturating_add(self.kept.cfg.retry_interval);
+             self.engine.maintain.stale = false;
+             self.engine.maintain.until = Some(again);

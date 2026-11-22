@@ -9,7 +9,8 @@
 //! libFuzzer.
 //!
 //! The input of each target is a small binary format of its own, documented
-//! on the function. Raw files of the format under test are turned into seeds by
+//! on the function, or for the targets judged by a spec (`plan_contract`,
+//! `plan_lazy`) a structure built with `arbitrary`. Raw files of the format under test are turned into seeds by
 //! the ignored test `tests/fuzzing/seed.rs` (`just fuzz-seed`).
 
 #![forbid(unsafe_code)]
@@ -18,7 +19,9 @@ mod bytes;
 mod decode;
 mod index;
 mod key;
+mod listing;
 mod plan;
+mod plan_contract;
 mod wal;
 
 pub use bytes::violation;
@@ -26,4 +29,5 @@ pub use decode::decode;
 pub use index::{HEADER_SPEC_LEN, header_spec, index};
 pub use key::key;
 pub use plan::{PLAN_RECORD_LEN, plan, plan_input};
+pub use plan_contract::{plan_contract, plan_lazy};
 pub use wal::{WAL_BIG_ENDIAN, WAL_PREFIX_LEN, WAL_RECHAIN, WAL_REWRITE_HEADER, wal};

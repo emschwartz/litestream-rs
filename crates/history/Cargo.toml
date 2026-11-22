@@ -1,0 +1,40 @@
+[package]
+name = "lsr-history"
+version = "0.0.0"
+description = "A judge of restored databases against the tree of histories the application committed, sharing no code with the engine."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# The judge may not name the engine: no lsr-* crate under [dependencies], ever. A judge that can
+# call the engine's parsers or read its txids and WAL origins inherits their mistakes.
+# `tests/history/manifest.rs` holds this file and the sources to it. The dev-dependencies are the
+# engine the standalone tests drive, never the judge.
+
+# The judge as a command for drivers outside Rust (scripts/lazyfs.py): `lsr-history judge LOG`.
+[[bin]]
+name = "lsr-history"
+required-features = ["sqlite"]
+
+[features]
+# Reading a restored SQLite file: integrity check and the self-certifying chain table.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { workspace = true, optional = true }
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+lsr-core = { workspace = true, features = ["testing"] }
+lsr-history = { workspace = true, features = ["sqlite"] }
+lsr-replica = { workspace = true, features = ["rusqlite", "testing"] }
+lsr-sqlite = { workspace = true, features = ["testing"] }
+lsr-store-fs.workspace = true
+lsr-store-s3.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -921,6 +921,7 @@ fn a_successful_compaction_aborts_nothing() {
 // Memory.
 
 #[test]
+#[cfg_attr(miri, ignore = "compacts 64000 pages; native runs measure the bound")]
 fn thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound() {
     let ps = size(512);
     let source = MemStore::new();
@@ -1060,6 +1061,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
+    #[cfg_attr(miri, ignore = "32 random cases of whole compactions; native runs cover them")]
     fn restoring_the_snapshot_and_the_chain_equals_restoring_the_compacted_file(
         drafts in drafts(),
         ps_pick in 0_usize..3,
@@ -1104,6 +1106,7 @@ proptest! {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "32 random cases of whole compactions; native runs cover them")]
     fn compacting_two_compactions_equals_compacting_everything_at_once(
         drafts in drafts(),
         ps_pick in 0_usize..3,

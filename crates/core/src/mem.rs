@@ -22,6 +22,9 @@ struct Object {
     /// What a lazy-mode listing reports: the store's clock at commit unless a
     /// test moved it.
     last_modified: Timestamp,
+    /// The stored created-at time was lost ([`MemStore::drop_created_at`]), so
+    /// reads fall back to `last_modified`, as S3 does without metadata.
+    dropped: bool,
 }
 
 impl Object {
@@ -29,7 +32,15 @@ impl Object {
         if lazy {
             ListedTime::LastModified(self.last_modified)
         } else {
-            ListedTime::Created(CreatedAt::mtime(self.created_at))
+            ListedTime::Created(self.created_at())
+        }
+    }
+
+    fn created_at(&self) -> CreatedAt {
+        if self.dropped {
+            CreatedAt::fallback(self.last_modified)
+        } else {
+            CreatedAt::mtime(self.created_at)
         }
     }
 }
@@ -94,6 +105,16 @@ impl MemStore {
     pub fn set_last_modified(&self, key: &FileKey, at: Timestamp) {
         if let Some(object) = self.lock().objects.get_mut(key) {
             object.last_modified = at;
+        }
+    }
+
+    /// Forgets the created-at time stored with `key`, as a writer before Go
+    /// v0.5.1 or a bucket copy that drops metadata leaves it: from now on the
+    /// store reports [`CreatedAt::fallback`] of the object's last-modified
+    /// time. Does nothing for a key that is not stored.
+    pub fn drop_created_at(&self, key: &FileKey) {
+        if let Some(object) = self.lock().objects.get_mut(key) {
+            object.dropped = true;
         }
     }
 
@@ -186,7 +207,7 @@ impl MemStore {
                 kind: std::io::ErrorKind::InvalidData,
             });
         }
-        Ok(CreatedAt::mtime(object.created_at))
+        Ok(object.created_at())
     }
 
     fn read_with_created_at_now(
@@ -199,7 +220,7 @@ impl MemStore {
             .lock()
             .objects
             .get(&file.key)
-            .map(|object| CreatedAt::mtime(object.created_at))
+            .map(Object::created_at)
             .ok_or(StoreError::NotFound { key: file.key })?;
         Ok((bytes, created_at))
     }
@@ -292,6 +313,7 @@ impl Upload for MemUpload {
                 bytes: self.buf,
                 created_at: self.created_at,
                 last_modified: Timestamp::from_unix_millis(state.clock),
+                dropped: false,
             };
             let listed = object.listed(state.lazy);
             state.objects.insert(self.key, object);

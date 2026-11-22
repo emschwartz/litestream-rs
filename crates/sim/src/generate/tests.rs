@@ -135,3 +135,25 @@ fn the_scenario_only_steps_are_drawn_too() {
         }
     )));
 }
+
+/// The frozen second generator is the live one for every seed whose mix
+/// draws nothing the second did not know: until the live generator gains a
+/// draw, that is every seed, and after, at least every default-mix seed.
+#[test]
+fn the_second_frozen_generator_draws_what_the_live_one_drew() {
+    let mut compared = 0;
+    for n in 0..200 {
+        let weights = Weights::mixed(seed(n));
+        if weights.staging_replace_running != 0 {
+            continue;
+        }
+        let live = history(seed(n), 300, &weights);
+        assert_eq!(
+            frozen_history(seed(n), 300, Generator::V2),
+            live,
+            "seed {n}"
+        );
+        compared += 1;
+    }
+    assert!(compared > 100, "{compared}");
+}

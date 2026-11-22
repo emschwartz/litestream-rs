@@ -6,7 +6,7 @@ use std::future::Future;
 use std::io::ErrorKind;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp};
+use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, WalOrigin};
 use proptest::prelude::*;
 
 use super::*;
@@ -52,7 +52,8 @@ async fn upload_tick<L: ObjectStore, S: ObjectStore>(
                 next: Next::Now,
             });
         }
-        let step = upload_next(state, staging, remote, newest_staged).await?;
+        let witnesses = Witnesses::trust_all(staging);
+        let step = upload_next(state, staging, remote, newest_staged, &witnesses).await?;
         state = step.state;
         match step.did {
             Did::Nothing => {
@@ -62,7 +63,7 @@ async fn upload_tick<L: ObjectStore, S: ObjectStore>(
                     next: Next::OnWalChange,
                 });
             }
-            Did::Listed { .. } => {}
+            Did::Listed { .. } | Did::Diverged { .. } => {}
             Did::Put(_) => put = put.saturating_add(1),
         }
     }
@@ -86,22 +87,35 @@ fn created_at(n: u64) -> Timestamp {
 
 /// A level-0 file for one transaction. Bytes differ per transaction.
 fn encode(n: u64) -> Vec<u8> {
+    encode_pages(n, u8::try_from(n % 251).unwrap())
+}
+
+/// A level-0 file for transaction `n` whose pages are filled with `seed`.
+fn encode_pages(n: u64, seed: u8) -> Vec<u8> {
+    encode_file(n, seed, ps(), None)
+}
+
+/// A level-0 file for transaction `n` of `page_size` pages filled with
+/// `seed`, read from `wal` when it names a WAL range.
+fn encode_file(n: u64, seed: u8, page_size: PageSize, wal: Option<WalOrigin>) -> Vec<u8> {
     let header = Header::new(HeaderFields {
         tracked: false,
-        page_size: ps(),
+        page_size,
         commit: 2,
         txids: TxidRange::single(txid(n)),
         timestamp: created_at(n),
         pre_apply: None,
-        wal: None,
+        wal,
         node_id: 0,
     })
     .unwrap();
     let mut encoder = Encoder::new(Vec::new(), header).unwrap();
-    let seed = u8::try_from(n % 251).unwrap();
     for pgno in 1..=2_u32 {
         encoder
-            .write_page(PageNo::new(pgno, ps()).unwrap(), &vec![seed; ps().bytes()])
+            .write_page(
+                PageNo::new(pgno, page_size).unwrap(),
+                &vec![seed; page_size.bytes()],
+            )
             .unwrap();
     }
     encoder.finish(None).unwrap().0
@@ -307,13 +321,33 @@ impl Upload for ProbeUpload {
     }
 }
 
+/// One step, with a witness for every file staged now.
 fn next<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     staging: &L,
     remote: &S,
     position: u64,
 ) -> Result<Uploaded, UploadFailed> {
-    block_on(upload_next(state, staging, remote, Txid::new(position)))
+    let witnesses = Witnesses::trust_all(staging);
+    next_with(state, staging, remote, position, &witnesses)
+}
+
+/// One step with the given witnesses, taken before a fault was armed or a
+/// probe that counts reads was put in front of staging.
+fn next_with<L: ObjectStore, S: ObjectStore>(
+    state: UploadState,
+    staging: &L,
+    remote: &S,
+    position: u64,
+    witnesses: &Witnesses,
+) -> Result<Uploaded, UploadFailed> {
+    block_on(upload_next(
+        state,
+        staging,
+        remote,
+        Txid::new(position),
+        witnesses,
+    ))
 }
 
 fn failure(result: Result<Uploaded, UploadFailed>) -> UploadFailed {
@@ -559,8 +593,9 @@ fn errors_before_the_commit_leave_the_state_and_cost_no_listing() {
     remote.log().write_fail.push_back(transient());
     let failed = failure(next(state, &staging, &remote, 1));
     assert_eq!(failed.state, state);
+    let witnesses = Witnesses::trust_all(&staging);
     staging.inject_failure(StoreOp::Read, transient());
-    let failed = failure(next(state, &staging, &remote, 1));
+    let failed = failure(next_with(state, &staging, &remote, 1, &witnesses));
     assert_eq!((failed.state, failed.fault), (state, Fault::LocalIo));
     assert_eq!(remote.log().lists, 0);
     assert!(files(&remote.inner).is_empty());
@@ -656,11 +691,12 @@ fn a_staged_file_larger_than_one_chunk_is_streamed_whole() {
     let quarter_mib = 256 * 1024;
     assert!(bytes.len() > quarter_mib * 2);
     put_bytes(&staging, key(1), &bytes);
+    let witnesses = Witnesses::trust_all(&staging);
     let staging = Probe {
         inner: staging,
         log: Arc::default(),
     };
-    let put = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    let put = next_with(UploadState::At(None), &staging, &remote, 1, &witnesses).unwrap();
     assert!(matches!(put.did, Did::Put(_)));
     assert_eq!(read_all(&remote, &key(1)), bytes);
     // Read a quarter mebibyte at a time: few round trips, bounded memory.
@@ -965,6 +1001,86 @@ fn a_listing_confirms_by_content_not_size() {
     assert_eq!(read_all(&remote, &key(1)), bytes);
 }
 
+/// The replica's newest object verifies and holds another transaction than
+/// the staged file under the same key (a run before a power loss uploaded it,
+/// or a staging backup was put back). It may already be compacted into level
+/// 1 and above, so writing the staged file over it would give one id two
+/// contents: the object stands and the listing reports the divergence.
+#[test]
+fn a_verifying_listed_key_unlike_the_staged_file_is_never_written_over() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 2);
+    put_bytes(&remote.inner, key(1), &encode(1));
+    let theirs = encode_pages(2, 200);
+    put_bytes(&remote.inner, key(2), &theirs);
+    let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(2))));
+    assert_eq!(
+        listed.did,
+        Did::Diverged {
+            confirmed: txid(2),
+            from: txid(2)
+        }
+    );
+    next(listed.state, &staging, &remote, 2).unwrap();
+    assert!(remote.log().begins.is_empty());
+    assert_eq!(read_all(&remote.inner, &key(2)), theirs);
+}
+
+/// A file reaches the replica only with its witness: with none, it is
+/// refused unread, as a lost file is, and nothing begins on the replica.
+#[test]
+fn a_staged_file_without_a_witness_is_refused_unread() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    let state = UploadState::At(None);
+    let none = Witnesses::new();
+    let failed = failure(block_on(upload_next(
+        state,
+        &staging,
+        &remote,
+        Some(txid(1)),
+        &none,
+    )));
+    assert_eq!(failed.fault, Fault::StagedLost);
+    assert_eq!(failed.state, state);
+    assert!(remote.log().begins.is_empty());
+}
+
+/// The witness binds the bytes, not the name: a staged file replaced after
+/// it was witnessed by another whole, valid file under the same key (a
+/// staging backup put back under a running engine) is refused on the
+/// upload's own read, and the upload it began is aborted unpublished.
+#[test]
+fn a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    let witnesses = Witnesses::trust_all(&staging);
+    put_bytes(&staging, key(1), &encode_pages(1, 77));
+    let state = UploadState::At(None);
+    let failed = failure(block_on(upload_next(
+        state,
+        &staging,
+        &remote,
+        Some(txid(1)),
+        &witnesses,
+    )));
+    assert_eq!(failed.fault, Fault::StagedLost);
+    assert_eq!(failed.state, state);
+    assert!(files(&remote.inner).is_empty());
+    assert_eq!(remote.log().aborts, 1);
+    // The bytes it was witnessed for go up.
+    put_bytes(&staging, key(1), &encode(1));
+    let put = block_on(upload_next(
+        state,
+        &staging,
+        &remote,
+        Some(txid(1)),
+        &witnesses,
+    ));
+    assert!(matches!(put.map(|up| up.did), Ok(Did::Put(_))));
+}
+
 #[test]
 fn a_listing_confirms_a_listed_key_equal_to_the_staged_file() {
     let (staging, remote) = (MemStore::new(), MemStore::new());
@@ -1044,4 +1160,28 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(MemStore::new());
     let got = block_on(drop_staged_from(&staging, txid(1)));
     assert_eq!(got, Err(Fault::LocalIo));
+}
+
+/// The file checksum covers an LTX file's decompressed content, not its LZ4
+/// framing, so some single-byte changes still verify with the same checksum
+/// (a frame descriptor's own checksum byte, for one). A staged file read with
+/// such a change (a bad read, or bytes replaced) is not the file this engine
+/// staged: the upload refuses it rather than publish other bytes.
+#[test]
+fn a_staged_file_whose_bytes_differ_but_still_verify_is_refused() {
+    let bytes = encode_pages(1, 7);
+    let silent = (0..bytes.len()).find_map(|at| {
+        let mut changed = bytes.clone();
+        changed[at] ^= 1;
+        Witnessed::of_bytes(key(1), &changed).map(|_| changed)
+    });
+    let changed = silent.expect("a byte change the decoder does not see");
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&staging, key(1), &bytes);
+    let witnesses = Witnesses::trust_all(&staging);
+    put_bytes(&staging, key(1), &changed);
+    let state = UploadState::At(None);
+    let failed = failure(next_with(state, &staging, &remote, 1, &witnesses));
+    assert_eq!(failed.fault, Fault::StagedLost);
+    assert!(files(&remote.inner).is_empty());
 }

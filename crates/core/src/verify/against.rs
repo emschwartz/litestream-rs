@@ -153,7 +153,7 @@ pub async fn verify_against<S: ObjectStore>(
     let mut restored = BTreeMap::new();
     let target = RestoreTarget::Txid(live.txid);
     let (result, files_read, bytes_read) =
-        digest_restore(store, inventory.clone(), target, &mut restored).await;
+        digest_restore(store, &inventory, target, &mut restored).await;
     let compared = match result {
         Ok(done) => compare(live, &restored, done.commit().get()),
         Err(RestoreError::Inventory(err)) => return Err(VerifyError::Inventory(err)),

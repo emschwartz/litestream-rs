@@ -3,7 +3,8 @@
 # credentials: the root user and password below exist only inside the
 # container this script starts and are also the test suite's defaults.
 #
-#   minio.sh up       start the container and create the bucket (skips, exit 0, when Docker is down)
+#   minio.sh up       start the container and create the bucket (fails when Docker is down,
+#                     unless LSR_SKIP names minio)
 #   minio.sh running  exit 0 when the container is up
 #   minio.sh down     remove the container
 #   minio.sh env      print the export lines the test recipes eval (endpoint, bucket, credentials)
@@ -55,8 +56,18 @@ make_bucket() {
 case "${1:-}" in
     up)
         if ! have_docker; then
-            echo "minio: Docker is not running; S3 tests skipped"
-            exit 0
+            case ",${LSR_SKIP:-}," in
+                *,minio,*)
+                    if [ -n "${CI:-}" ]; then
+                        echo "minio: LSR_SKIP is set under CI; CI never skips" >&2
+                        exit 1
+                    fi
+                    echo "minio: Docker is not running; skipped by LSR_SKIP=minio"
+                    exit 0
+                    ;;
+            esac
+            echo "minio: Docker is not running (opt out on purpose with LSR_SKIP=minio)" >&2
+            exit 1
         fi
         if ! running; then
             docker rm -f "$NAME" >/dev/null 2>&1 || true

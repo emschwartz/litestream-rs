@@ -36,6 +36,8 @@ mod ltx_read;
 mod maintain;
 #[cfg(any(test, feature = "testing"))]
 mod mem;
+#[cfg(any(test, feature = "testing"))]
+pub mod needs;
 mod pages;
 mod plan;
 mod position;
@@ -44,12 +46,15 @@ mod restore;
 mod retry;
 mod snapshot;
 mod source;
+#[cfg(feature = "testing")]
+pub mod spec_view;
 mod store;
 #[cfg(test)]
 mod stuck;
 mod sync;
 mod upload;
 mod verify;
+mod witness;
 
 pub use actor::{
     Actor, ActorConfig, Degraded, Env, Event, MaintainedEvent, Phase, Task, Tick, Unfinished,
@@ -80,8 +85,8 @@ pub use fault::{
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
-    CreatedAt, CreatedAtSource, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
-    ParseKeyError, RangeSide, cmp_range, file_name, is_scratch_name, parse_file_name,
+    CreatedAt, CreatedAtSource, Dating, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
+    ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
@@ -100,8 +105,8 @@ pub use position::{
     WalFileLen,
 };
 pub use recover::{
-    FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent,
-    Recovered, Verdict, WalView, recover, recover_traced,
+    BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
+    RecoverEvent, Recovered, Verdict, WalView, recover, recover_traced,
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
@@ -129,3 +134,4 @@ pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,
 };
+pub use witness::{Witnessed, Witnesses};

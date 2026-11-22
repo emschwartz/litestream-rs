@@ -6,13 +6,13 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use lsr_core::{RestoreError, RestoreTarget, Restored};
+use lsr_core::{RestoreError, RestoreOptions, RestoreTarget, Restored};
 use lsr_ltx::Txid;
 
 use crate::error::CompatError;
 use crate::handover;
 use crate::replica::{Summary, l0_starting_at, newest_txid};
-use crate::rsrestore::restore_replica;
+use crate::rsrestore::{restore_replica, restore_replica_with};
 use crate::s3::S3Replica;
 
 /// A fixture's replica.
@@ -70,6 +70,22 @@ impl Remote {
         match self {
             Self::Dir(dir) => restore_replica(dir, target, out),
             Self::S3(s3) => s3.restore(target, out),
+        }
+    }
+
+    /// [`Remote::restore`] with `options` for the cases the executor can either refuse or accept.
+    ///
+    /// # Errors
+    /// [`CompatError`] when the sink cannot be created; the executor's refusal is the inner `Err`.
+    pub fn restore_with(
+        &self,
+        target: RestoreTarget,
+        options: RestoreOptions,
+        out: &Path,
+    ) -> Result<Result<Restored, RestoreError>, CompatError> {
+        match self {
+            Self::Dir(dir) => restore_replica_with(dir, target, options, out),
+            Self::S3(s3) => s3.restore_with(target, options, out),
         }
     }
 

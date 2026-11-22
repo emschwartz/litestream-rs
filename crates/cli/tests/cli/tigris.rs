@@ -49,6 +49,7 @@ use lsr_compat::{
     integrity_check, real_now_ms, restore_with_go, rfc3339_millis, wait_until,
 };
 use lsr_core::conformance::block_on;
+use lsr_core::needs::{Resource, must};
 use lsr_core::{
     Depth, FileInfo, Inventory, Level, ObjectStore, PageLimit, PlanOutcome, ReadLen, RestoreError,
     Restored, restore, verify,
@@ -123,7 +124,9 @@ impl Size {
 }
 
 fn var(name: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set: run just tigris-restore"))
+    must(Resource::Tigris, || {
+        std::env::var(name).map_err(|_unset| format!("{name} is not set"))
+    })
 }
 
 /// The bucket and the replica's prefix under the run prefix.

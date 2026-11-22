@@ -16,15 +16,21 @@ publish = false
 lsr-compat = { path = "crates/compat" }
 lsr-config = { path = "crates/config" }
 lsr-core = { path = "crates/core" }
+lsr-heap = { path = "crates/heap" }
+lsr-history = { path = "crates/history" }
 lsr-local = { path = "crates/local" }
 lsr-replica = { path = "crates/replica" }
 lsr-sidecar = { path = "crates/sidecar" }
 lsr-ltx = { path = "crates/ltx" }
 lsr-sim = { path = "crates/sim" }
+lsr-spec = { path = "crates/spec" }
 lsr-sqlite = { path = "crates/sqlite" }
 lsr-store-fs = { path = "crates/store-fs" }
 lsr-store-s3 = { path = "crates/store-s3" }
 lsr-wal = { path = "crates/wal" }
+# Structure-aware fuzz input (MIT OR Apache-2.0): `lsr-fuzzing` only, builds typed listings
+# from libFuzzer's bytes. No derive feature, so no proc-macro build.
+arbitrary = { version = "1.4", default-features = false }
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 crc = "3.4.0"
 jiff = { version = "1.0", default-features = false, features = ["std"] }
@@ -48,6 +54,9 @@ rusqlite = { version = "0.43", default-features = false, features = ["bundled"] 
 rustix = { version = "1.1.6", default-features = false, features = ["std", "process"] }
 rusty-s3 = { version = "0.12", default-features = false, features = ["rustcrypto", "full"] }
 saphyr-parser = { version = "0.3.4", default-features = false }
+# Randomized schedule exploration (Apache-2.0). Dev-dependency only, and only under
+# `--cfg shuttle` (`just shuttle`), so no other build compiles it.
+shuttle = { version = "0.9.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 sha2 = { version = "0.11.1", default-features = false }
@@ -123,6 +132,8 @@ expect_used = "warn"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+# `shuttle` is the cfg of `just shuttle`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 

@@ -1,0 +1,16 @@
+diff --git a/crates/sim/src/sqlite.rs b/crates/sim/src/sqlite.rs
+index 6285cbf..ff29009 100644
+--- a/crates/sim/src/sqlite.rs
++++ b/crates/sim/src/sqlite.rs
+@@ -1462,11 +1462,6 @@ impl WalSource for SimSource {
+ 
+     fn committed(&mut self) -> Result<CommittedRead, SourceError> {
+         let mut state = lock(&self.state);
+-        state.faults.take(SourceOp::Committed)?;
+-        // The real source retakes a lapsed read transaction before it reads
+-        // (`ensure_read_lock_held`), so every answer belongs to a hold that is
+-        // still held; the retake is a new hold.
+-        state.begin(Conn::Ours);
+         if mem::take(&mut state.faults.shm_busy) {
+             return Err(SourceError::Busy);
+         }

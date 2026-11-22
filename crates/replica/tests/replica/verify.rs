@@ -4,6 +4,7 @@
 
 use crate::common;
 
+use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,8 +13,8 @@ use std::time::Duration;
 use common::{PATIENCE, Site, config, fake, wait};
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CreatedAt, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
-    Upload,
+    CreatedAt, FileInfo, FileKey, L0Retention, Level, Listing, Maintenance, ObjectStore, PageLimit,
+    ReadLen, StoreError, Upload,
 };
 use lsr_ltx::{Encoder, Event as LtxEvent, ReadDecoder, TxidRange};
 use lsr_replica::{
@@ -32,6 +33,38 @@ fn verifying() -> Config {
         verify_interval: NonZeroDuration::new(EVERY),
         ..config()
     }
+}
+
+/// [`verifying`] with a maintenance schedule that writes its first level-1 file and its first
+/// level-9 snapshot as soon as it can, then nothing for a day (the next day boundary is 6,400
+/// s after [`common::START`], and these tests run for minutes). A snapshot reads the live
+/// database, and a restore prefers it to the level-0 files it covers, so a test that
+/// corrupts a level-0 file needs the snapshot written before the transaction it corrupts
+/// and none after.
+fn verifying_quietly() -> Config {
+    let day = Duration::from_secs(86_400);
+    let two_days = day.saturating_mul(2);
+    Config {
+        maintenance: Maintenance::new(vec![day], two_days, two_days, L0Retention::Keep).unwrap(),
+        ..verifying()
+    }
+}
+
+/// The most polls the first level-1 file and level-9 snapshot take to land.
+const SETTLE_POLLS: usize = 10;
+
+/// Moves the clock a poll at a time until the replica holds a level-9 snapshot (written
+/// after the first level-1 file): from then on [`verifying_quietly`] writes neither.
+fn settle_maintenance(replicator: &Replicator, clock: &lsr_replica::FakeClockHandle, site: &Site) {
+    let store = FsStore::new(&site.replica);
+    for _ in 0..SETTLE_POLLS {
+        let snapshots = block_on(store.list(Level::SNAPSHOT, None, PageLimit::MAX)).unwrap();
+        if !snapshots.files.is_empty() {
+            return;
+        }
+        advance(replicator, clock, POLL);
+    }
+    panic!("no level-9 snapshot after {SETTLE_POLLS} polls");
 }
 
 fn replicated(health: &Health) -> Option<Txid> {
@@ -65,14 +98,22 @@ fn any_verified(events: &EventReceiver) -> bool {
         .any(|event| matches!(event, Event::Verified { .. }))
 }
 
-/// The next scheduled verify event, waiting for it: the thread writes the health snapshot
-/// before it sends the event.
-fn next_verified(events: &EventReceiver) -> (Txid, VerifyOutcome) {
-    loop {
-        if let Event::Verified { txid, outcome } = events.recv().unwrap() {
-            return (txid, outcome);
+/// The next scheduled verify event, waiting for it (the thread writes the health snapshot
+/// before it sends the event). It looks at the queue each time the health changes, so the
+/// bound of [`wait`] ends a wait for an event that never comes.
+fn next_verified(replicator: &Replicator, events: &EventReceiver) -> (Txid, VerifyOutcome) {
+    let found = Cell::new(None);
+    wait(replicator, |_| {
+        while found.get().is_none()
+            && let Some(event) = events.try_recv()
+        {
+            if let Event::Verified { txid, outcome } = event {
+                found.set(Some((txid, outcome)));
+            }
         }
-    }
+        found.get().is_some()
+    });
+    found.get().unwrap()
 }
 
 /// Moves the clock and waits for the thread to have turned at the new time.
@@ -84,7 +125,9 @@ fn advance(replicator: &Replicator, clock: &lsr_replica::FakeClockHandle, by: Du
 
 /// Rewrites one page of the newest level-0 file on the replica, through the store, as a
 /// stale page would look: every file still decodes and verifies, and the restore of its
-/// transaction holds a page the database never had. Returns the transaction and the page.
+/// transaction holds a page the database never had, provided that restore reads this file
+/// (no snapshot or compacted file ends at the same transaction: see
+/// [`verifying_quietly`]). Returns the transaction and the page.
 fn rewrite_newest_page(site: &Site) -> (Txid, u32) {
     let store = FsStore::new(&site.replica);
     block_on(async {
@@ -164,7 +207,7 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     assert_eq!(check.kept_restore_point, None);
     assert_eq!(check.worst_finding, None);
     assert!(!first.is_degraded());
-    let seen = next_verified(&events);
+    let seen = next_verified(&replicator, &events);
     assert!(
         matches!(seen, (txid, VerifyOutcome::Passed { pages }) if Some(txid) == replicated(&health) && pages > 0),
         "{seen:?}"
@@ -198,11 +241,13 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     let store = site.store();
     let (runtime, clock) = fake();
     let replicator =
-        Replicator::start_with(&site.db, Arc::clone(&store), verifying(), runtime).unwrap();
+        Replicator::start_with(&site.db, Arc::clone(&store), verifying_quietly(), runtime).unwrap();
     let events = events(&replicator);
     site.commit(3);
     advance(&replicator, &clock, POLL);
     let good = replicated(&wait(&replicator, caught_up)).unwrap();
+    // Before the transaction it corrupts: a snapshot ending there would hide the page.
+    settle_maintenance(&replicator, &clock, &site);
     clock.advance(EVERY);
     wait(&replicator, |h| h.verification.runs.passed == 1);
     site.commit(2);
@@ -211,7 +256,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     let (txid, page) = rewrite_newest_page(&site);
     assert_eq!(Some(txid), replicated(&health));
     assert!(matches!(
-        next_verified(&events).1,
+        next_verified(&replicator, &events).1,
         VerifyOutcome::Passed { .. }
     ));
     clock.advance(EVERY);
@@ -225,7 +270,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     assert_eq!(failed.verification.kept_restore_point, Some(good));
     assert!(failed.is_degraded());
     assert_eq!(failed.phase, Phase::Running, "a degraded state, not a stop");
-    let seen = next_verified(&events);
+    let seen = next_verified(&replicator, &events);
     assert!(
         matches!(seen, (at, VerifyOutcome::Failed(Mismatch::Pages { first, .. })) if at == txid && first == page),
         "{seen:?}"

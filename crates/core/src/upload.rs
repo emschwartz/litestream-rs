@@ -10,10 +10,15 @@
 //! A file is confirmed in exactly two ways: its commit returned the key with
 //! the size that was written, or a listing found the key and the listed object,
 //! read back, is the staged file byte for byte. A size alone confirms nothing:
-//! a store that acknowledged wrong bytes of the right size would pass it. Any
-//! difference (a short object, other bytes, a leftover of a crashed run)
-//! confirms nothing and the key is uploaded again over the same name, which
-//! replaces it. A key with no staged counterpart (staging is dropped once a
+//! a store that acknowledged wrong bytes of the right size would pass it. A
+//! listed object that is not a whole LTX file naming its key (a short object,
+//! a torn write) confirms nothing and the key is uploaded again over the same
+//! name, which replaces it. A listed object that verifies but differs from the
+//! staged file (a run before a power loss uploaded another commit under the
+//! id, or a staging backup was put back) is never written over: it may
+//! already be compacted into higher levels, so it stands, and the listing
+//! reports [`Did::Diverged`] for the actor to drop the staged files from it on
+//! and snapshot above it. A key with no staged counterpart (staging is dropped once a
 //! file is confirmed) must decode and verify as LTX naming that key, else the
 //! replica is corrupt. The read-back runs at boot and after an ambiguous commit
 //! only, so steady state makes no list and no read call. A listing is also
@@ -22,12 +27,16 @@
 //!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
 //! bytes are written to an upload that no listing can see, and the upload is
-//! committed only after the decoder verified the whole file and its header names
-//! exactly the key. Otherwise the upload is aborted and the staged file is
-//! reported lost (`Fault::StagedLost`): a bad staged file never becomes
-//! visible. The actor then deletes it and everything staged after it
-//! ([`drop_staged_from`]) and snapshots in its place; at boot,
-//! [`sweep_staged`] does the same before anything is uploaded.
+//! committed only after the decoder verified the whole file, its header names
+//! exactly the key, and its length and trailer checksum are the ones its
+//! [`Witnessed`] token was minted for (`crate::witness`). Otherwise the upload
+//! is aborted and the staged file is reported lost (`Fault::StagedLost`): a
+//! bad staged file, one with no token, or one replaced after it got its token
+//! never becomes visible. One failed read is evidence about the read, not the
+//! file, so the actor retries; when a read on a later tick fails too, it
+//! deletes the file and everything staged after it ([`drop_staged_from`]) and
+//! snapshots in its place. At boot, [`sweep_staged`] applies the same rule
+//! before anything is uploaded.
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
@@ -45,6 +54,7 @@ use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, Upload};
+use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
@@ -106,6 +116,21 @@ pub enum Did {
     },
     /// One file was committed.
     Put(FileInfo),
+    /// The replica was listed and the staged files from `from` on cannot
+    /// continue it, so they must go and new content takes a transaction above
+    /// `confirmed`: the replica's newest level-0 object verifies and differs
+    /// from the staged file under the same key (`from` is that key's
+    /// transaction). It stands and is confirmed, since it may already be
+    /// compacted into higher levels and writing over it would give one
+    /// transaction two contents. Whether the staged files after it continue
+    /// the replica is not a listing's to judge: each needs its witness
+    /// (`crate::witness`), which a boot takes from the live WAL.
+    Diverged {
+        /// The newest transaction the replica holds, now confirmed.
+        confirmed: Txid,
+        /// The first staged transaction that cannot follow it.
+        from: Txid,
+    },
 }
 
 /// A step that went through.
@@ -150,7 +175,9 @@ pub(crate) fn plan_upload(state: &UploadState, newest_staged: Option<Txid>) -> U
 
 /// Runs one step of [`plan_upload`]: a listing, one upload, or nothing.
 ///
-/// `staging` holds the staged L0 files; `remote` is the replica.
+/// `staging` holds the staged L0 files; `remote` is the replica. A file is
+/// uploaded only with its token in `witnesses`, and only when the bytes read
+/// for the upload are the bytes the token was minted for (`crate::witness`).
 ///
 /// # Errors
 /// [`UploadFailed`] with the state to continue from and the fault. A listing
@@ -162,6 +189,7 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
     newest_staged: Option<Txid>,
+    witnesses: &Witnesses,
 ) -> Result<Uploaded, UploadFailed> {
     match plan_upload(&state, newest_staged) {
         UploadPlan::Idle => Ok(Uploaded {
@@ -169,7 +197,11 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
             did: Did::Nothing,
         }),
         UploadPlan::List => list_step(state, staging, remote, newest_staged).await,
-        UploadPlan::Upload(key) => put_step(state, staging, remote, key).await,
+        UploadPlan::Upload(key) => match witnesses.get(&key) {
+            Some(token) => put_step(state, staging, remote, token).await,
+            // No witness: the file is refused unread, as a lost one is.
+            None => Err(fail(state, Fault::StagedLost)),
+        },
     }
 }
 
@@ -206,13 +238,15 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     }
     let known = match newest {
         Some(tail) if newest > confirmed => {
-            let sound = tail_is_sound(&inventory, staging, remote, tail)
+            let verdict = judge_tail(&inventory, staging, remote, tail)
                 .await
                 .map_err(|fault| fail(state, fault))?;
-            if sound {
-                newest
-            } else {
-                tail.prev().max(confirmed)
+            match verdict {
+                TailVerdict::Sound => newest,
+                TailVerdict::Replace => tail.prev().max(confirmed),
+                TailVerdict::Diverged => {
+                    return Ok(diverged(tail, tail));
+                }
             }
         }
         _ => newest,
@@ -223,24 +257,43 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     })
 }
 
-/// Whether the replica's newest level-0 file is sound: equal to the staged file
-/// under the same key, or, with no staged file, a verified LTX file naming it.
-/// Only the newest key is read back: an older one was confirmed by its own
-/// commit in an earlier run, and reading every key at boot would be a whole
-/// replica scan.
-async fn tail_is_sound<L: ObjectStore, S: ObjectStore>(
+fn diverged(confirmed: Txid, from: Txid) -> Uploaded {
+    Uploaded {
+        state: UploadState::At(Some(confirmed)),
+        did: Did::Diverged { confirmed, from },
+    }
+}
+
+/// What a listing's read-back found at the replica's newest level-0 key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TailVerdict {
+    /// Equal to the staged file, or with no usable staged file, a verified
+    /// LTX file naming the key: confirmed.
+    Sound,
+    /// Not a whole LTX file naming the key, beside a staged file that is: the
+    /// staged file is uploaded over it (nothing could have compacted it).
+    Replace,
+    /// Both copies verify and differ: the replica's object stands.
+    Diverged,
+}
+
+/// Judges the replica's newest level-0 file against the staged file under
+/// the same key. Only the newest key is read back: an older one was confirmed
+/// by its own commit in an earlier run, and reading every key at boot would be
+/// a whole replica scan.
+async fn judge_tail<L: ObjectStore, S: ObjectStore>(
     inventory: &Inventory,
     staging: &L,
     remote: &S,
     tail: Txid,
-) -> Result<bool, Fault> {
+) -> Result<TailVerdict, Fault> {
     let key = staged_key(tail);
     let Some(listed) = inventory
         .level(Level::ZERO)
         .iter()
         .find(|info| info.key == key)
     else {
-        return Ok(true);
+        return Ok(TailVerdict::Sound);
     };
     let after = tail.prev().map(TxidRange::single);
     let limit = PageLimit::ONE;
@@ -250,14 +303,30 @@ async fn tail_is_sound<L: ObjectStore, S: ObjectStore>(
         .map_err(|err| Fault::from_staging(&err))?;
     match page.files.first() {
         Some(staged) if staged.key == key => {
-            let same = staged.size == listed.size && same_bytes(staging, remote, &key).await?;
-            if same || staged_verifies(staging, &key).await? {
-                return Ok(same);
+            if staged.size == listed.size && same_bytes(staging, remote, &key).await? {
+                return Ok(TailVerdict::Sound);
+            }
+            if staged_verifies(staging, &key).await? {
+                if !remote_verifies(remote, &key).await? {
+                    return Ok(TailVerdict::Replace);
+                }
+                // Both copies verify on their own reads, so the first compare
+                // read something wrong or they differ: a second compare
+                // decides, as one read never condemns a file.
+                return Ok(if same_bytes(staging, remote, &key).await? {
+                    TailVerdict::Sound
+                } else {
+                    TailVerdict::Diverged
+                });
             }
             // A torn staged copy says nothing about the replica's object.
-            remote_decodes(remote, &key).await.map(|()| true)
+            remote_decodes(remote, &key)
+                .await
+                .map(|()| TailVerdict::Sound)
         }
-        _ => remote_decodes(remote, &key).await.map(|()| true),
+        _ => remote_decodes(remote, &key)
+            .await
+            .map(|()| TailVerdict::Sound),
     }
 }
 
@@ -322,7 +391,7 @@ async fn staged_verifies<L: ObjectStore>(staging: &L, key: &FileKey) -> Result<b
 
 /// The staged level-0 files whose last transaction is at least `from`
 /// (every one when `None`), oldest first.
-async fn staged_from<L: ObjectStore>(
+pub(crate) async fn staged_from<L: ObjectStore>(
     staging: &L,
     from: Option<Txid>,
 ) -> Result<Vec<FileInfo>, Fault> {
@@ -364,26 +433,44 @@ pub(crate) async fn drop_staged_from<L: ObjectStore>(staging: &L, from: Txid) ->
     Ok(())
 }
 
+/// What a sweep of the staged files found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Swept {
+    /// Every staged file the replica may still need verifies.
+    Clean,
+    /// This file failed verification on its first failed read: nothing was
+    /// deleted, since one read says nothing about the stored bytes.
+    Suspect(FileKey),
+    /// The suspect failed again: it and every staged file after it were
+    /// deleted, from this transaction on.
+    Dropped(Txid),
+}
+
 /// Verifies every staged level-0 file the replica may still need: from
 /// `confirmed`, the replica's newest transaction, on (everything when the
-/// replica is empty). The first that does not verify, and every one after it,
-/// is deleted ([`drop_staged_from`]). Returns the first transaction deleted,
-/// when anything was.
+/// replica is empty). The first that does not verify is deleted, with every
+/// one after it ([`drop_staged_from`]), only when it is `suspect`, the file an
+/// earlier tick's read already failed on; otherwise it is reported as the new
+/// suspect and nothing is deleted.
 ///
 /// # Errors
 /// The staging store's fault when it cannot list, read or delete.
 pub(crate) async fn sweep_staged<L: ObjectStore>(
     staging: &L,
     confirmed: Option<Txid>,
-) -> Result<Option<Txid>, Fault> {
+    suspect: Option<FileKey>,
+) -> Result<Swept, Fault> {
     for info in staged_from(staging, confirmed).await? {
         if !staged_verifies(staging, &info.key).await? {
+            if suspect != Some(info.key) {
+                return Ok(Swept::Suspect(info.key));
+            }
             let from = info.key.range().min();
             drop_staged_from(staging, from).await?;
-            return Ok(Some(from));
+            return Ok(Swept::Dropped(from));
         }
     }
-    Ok(None)
+    Ok(Swept::Clean)
 }
 
 /// Why a copy did not commit, and so what the state becomes.
@@ -401,9 +488,10 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     staging: &L,
     remote: &S,
-    key: FileKey,
+    token: &Witnessed,
 ) -> Result<Uploaded, UploadFailed> {
-    match put_staged(staging, remote, &key).await {
+    let key = token.key();
+    match put_staged(staging, remote, token).await {
         Ok(info) => Ok(Uploaded {
             state: UploadState::At(Some(key.range().max())),
             did: Did::Put(info),
@@ -427,10 +515,11 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
 async fn put_staged<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
-    key: &FileKey,
+    token: &Witnessed,
 ) -> Result<FileInfo, PutError> {
+    let key = &token.key();
     let mut upload = None;
-    let wrote = match copy_verified(staging, remote, key, &mut upload).await {
+    let wrote = match copy_verified(staging, remote, token, &mut upload).await {
         Ok(wrote) => wrote,
         Err(err) => {
             if let Some(open) = upload {
@@ -481,22 +570,27 @@ fn names_key(header: &Header, key: &FileKey) -> Result<(), PutError> {
 
 /// Reads the staged file in chunks, decodes each, and forwards it to an upload
 /// begun as soon as the header is known. Returns the bytes written once the
-/// decoder has verified the whole file.
+/// decoder has verified the whole file and its length and trailer checksum,
+/// on this read, are the ones `token` was minted for: a file replaced after
+/// it was witnessed is refused before the commit.
 async fn copy_verified<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
-    key: &FileKey,
+    token: &Witnessed,
     upload: &mut Option<S::Upload>,
 ) -> Result<u64, PutError> {
+    let key = &token.key();
     let len = CHUNK;
     let mut decoder = Decoder::new();
     let mut held = Vec::new();
     let mut offset = 0_u64;
+    let mut bytes = ByteTally::new();
     loop {
         let chunk = staging
             .read(key, offset, len)
             .await
             .map_err(|err| PutError::Before(Fault::from_staging(&err)))?;
+        bytes.add(&chunk);
         if !feed_all(&mut decoder, &chunk).map_err(PutError::Before)? {
             return Err(PutError::Before(Fault::StagedLost));
         }
@@ -523,6 +617,9 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
         .finish()
         .map_err(|_undecodable| PutError::Before(Fault::StagedLost))?;
     names_key(verified.header(), key)?;
+    if !token.matches(bytes, verified.trailer().file_checksum()) {
+        return Err(PutError::Before(Fault::StagedLost));
+    }
     Ok(offset)
 }
 

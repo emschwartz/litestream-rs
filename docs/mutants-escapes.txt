@@ -1,0 +1,21 @@
+# Documented equivalent mutants, one regex per line (Rust `regex` syntax, matched anywhere in a
+# mutant's name such as `crates/ltx/src/ids.rs:61:9: replace | with ^ in <impl FromStr for Txid>::from_str`).
+# `just mutants-diff` passes each line to cargo-mutants as --exclude-re, so a matching mutant is
+# not run and cannot fail a PR. Every line carries the reason, and the reason lives in
+# docs/mutants.md ("Equivalent" tables); add the line and the table row in one commit.
+# Do not put line numbers in a regex: they move.
+
+# ltx checksum.rs DbChecksum::toggle: both operands carry bit 63, so OR and XOR agree.
+replace \| with \^ in .*DbChecksum::toggle
+# ltx ids.rs Txid::from_str: the shifted value has a clear low nibble, so OR and XOR agree.
+replace \| with \^ in .*Txid.*from_str
+# ltx index.rs put_uvarint: `v & 0x7f` has bit 7 clear, so OR and XOR of 0x80 agree.
+replace \| with \^ in put_uvarint
+# core layout.rs FileKey::from_str: same shift-and-digit argument as Txid.
+replace \| with \^ in .*FileKey.*from_str
+# core plan.rs extend: `preference` ends in the file's own range, so two distinct files never tie and `>` vs `>=` cannot pick differently.
+replace > with >= in extend
+# core plan.rs Sweep::next: `sweep_order` includes the key, unique per file, so `<` vs `<=` never meets a tie.
+replace < with <= in <impl Iterator for Sweep<'a>>::next
+# core witness.rs decode: every file the boot pass decodes already passed sweep_staged or the listing's read-back, both of which require the header to name the key.
+replace match guard verified.header\(\).txids\(\) == key.range\(\) with true in decode

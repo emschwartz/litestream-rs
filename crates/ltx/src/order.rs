@@ -147,6 +147,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "pushes about a million pages one at a time; native runs cover it"
+    )]
     fn snapshot_crosses_the_lock_page_at_every_size() {
         for size in sizes() {
             let lock = lock_page(size);
@@ -161,6 +165,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "pushes about a million pages one at a time; native runs cover it"
+    )]
     fn lock_page_is_rejected_at_every_size() {
         for size in sizes() {
             let lock = lock_page(size);

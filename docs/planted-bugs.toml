@@ -1,0 +1,228 @@
+# The planted-bug ledger (docs/planted-bugs.md). One entry per defect fixed on main:
+# `just planted-bugs` re-introduces each one by applying its `patch` to a scratch copy of the tree
+# and fails unless every test in `tests` passes on the clean tree and fails on the planted one.
+#
+#   name     short unique name; the patch is docs/planted-bugs/<name>.patch
+#   fix      the commit that fixed it (provenance; the patch is its production change re-expressed
+#            against the current tree, because later renames stop the commit's own diff applying)
+#   package  the cargo package whose tests are run
+#   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
+#   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#
+# Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
+# unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
+# ab0021d (a feature: reverting it does not compile). Retired with the code they planted into:
+# staged-file-cannot-follow (bf78f6d) and staged-snapshot-of-earlier-wal (be104a7), the listing's header
+# link between a staged file and the replica's newest, which the boot witness replaced (2fb603f); the
+# rules they guarded are planted below as the witness-* entries. page-size-after-vacuum (b352aba): its
+# arm (an unusable newest staged file still names its page size) decides only with an empty replica,
+# where every staged file is pending and the boot witness now deletes an unusable one first.
+
+[[bug]]
+name = "asof-straddle"
+fix = "bf8724b"
+package = "lsr-core"
+tests = [
+    "plan::tests::a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction",
+    "a_later_snapshot_ending_right_after_the_chain_does_not_hide_a_straddle",
+]
+
+[[bug]]
+name = "inside-file-sole-base"
+fix = "b4e89d9"
+package = "lsr-core"
+tests = ["a_target_inside_the_only_transaction_one_file_names_it"]
+
+[[bug]]
+name = "listing-cursor"
+fix = "1293587"
+package = "lsr-core"
+tests = [
+    "pages::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
+    "recover::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
+]
+
+[[bug]]
+name = "recover-before-trusting-snapshot"
+fix = "b1b9b1e"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page"]
+
+[[bug]]
+name = "boot-snapshot-cause"
+fix = "aedecc4"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_request_before_boot_keeps_the_boots_own_snapshot_cause"]
+
+[[bug]]
+name = "sim-read-lock-retake"
+fix = "617c183"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_restart_after_a_lapsed_read_lock_loses_no_commit"]
+
+[[bug]]
+name = "sim-oracle-reissued-snapshot"
+fix = "8cd91db"
+package = "lsr-sim"
+tests = [
+    "oracle::tests::oracle_pairs_a_reissued_snapshot_with_its_newest_note",
+    "a_snapshot_id_taken_again_after_a_lost_staged_snapshot",
+]
+
+[[bug]]
+name = "time-provenance"
+fix = "a427b57"
+package = "lsr-core"
+tests = [
+    "plan::tests::a_fallback_created_at_does_not_date_the_next_transaction",
+    "lazy::a_fallback_created_at_does_not_date_the_next_transaction",
+]
+
+# The same plant, judged by the simulator: stored created-at times dropped, AsOf judged by origin.
+[[bug]]
+name = "time-provenance-sim"
+fix = "a427b57"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["as_of_never_takes_an_upload_time_for_a_commit_time"]
+
+[[bug]]
+name = "verifying-object-written-over"
+fix = "bb83d0c"
+package = "lsr-core"
+tests = [
+    "upload::tests::a_verifying_listed_key_unlike_the_staged_file_is_never_written_over",
+]
+
+[[bug]]
+name = "delete-on-one-failed-read-upload"
+fix = "8d820b4"
+package = "lsr-core"
+tests = [
+    "one_bad_read_of_a_staged_file_while_uploading_drops_nothing",
+]
+
+[[bug]]
+name = "delete-on-one-failed-read-boot"
+fix = "8d820b4"
+package = "lsr-core"
+tests = [
+    "one_bad_read_of_a_staged_file_at_boot_drops_nothing",
+]
+
+[[bug]]
+name = "delete-on-one-failed-read-readback"
+fix = "8d820b4"
+package = "lsr-core"
+tests = [
+    "one_bad_read_of_a_sound_snapshot_deletes_nothing",
+]
+
+[[bug]]
+name = "maintenance-another-writer"
+fix = "bc34b37"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "maintenance_stops_on_another_writer_seed_0x50c",
+]
+
+[[bug]]
+name = "relist-acknowledged-mark"
+fix = "c38534d"
+package = "lsr-core"
+tests = [
+    "a_relist_never_takes_an_acknowledged_transaction_again",
+]
+
+[[bug]]
+name = "level-one-from-unlike-staged"
+fix = "3ab9b7b"
+package = "lsr-core"
+tests = [
+    "level_one_is_built_from_the_replica_when_the_local_copy_differs",
+]
+
+[[bug]]
+name = "boot-page-size-stale-staged"
+fix = "138f575"
+package = "lsr-core"
+tests = [
+    "a_replica_ahead_of_staging_names_the_page_size",
+]
+
+[[bug]]
+name = "relist-after-failed-drop"
+fix = "4e76863"
+package = "lsr-core"
+tests = [
+    "a_failed_drop_after_a_divergence_uploads_nothing_built_on_it",
+]
+
+[[bug]]
+name = "wal-barrier"
+fix = "claude/wal-barrier"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "a_power_cut_after_a_settle_leaves_the_database_at_least_as_far_as_the_replica",
+    "a_failed_wal_sync_stages_nothing_and_a_later_sync_does_not_clear_it",
+]
+
+[[bug]]
+name = "witness-trailer-compare"
+fix = "39ac68b"
+package = "lsr-core"
+tests = [
+    "a_staged_file_replaced_under_a_running_engine_is_never_uploaded",
+    "a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible",
+]
+
+[[bug]]
+name = "witness-db-page-under-a-frame"
+fix = "beedd48"
+package = "lsr-core"
+tests = [
+    "a_pending_snapshot_the_wal_cannot_prove_is_taken_again",
+]
+
+[[bug]]
+name = "witness-snapshot-short"
+fix = "beedd48"
+package = "lsr-core"
+tests = [
+    "a_pending_snapshot_short_of_the_replicas_newest_is_refused",
+]
+
+[[bug]]
+name = "witness-wal-residue"
+fix = "1b5ac06"
+package = "lsr-core"
+tests = [
+    "frames_past_the_committed_end_prove_no_staged_file",
+]
+
+[[bug]]
+name = "witness-byte-digest"
+fix = "1b5ac06"
+package = "lsr-core"
+tests = [
+    "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
+]
+
+# Killed unaided: no test was written for this defect. The swarm's own history (seed 44's drawn
+# mix) fails under it. The same plant at the witness's own anchor (`held || true` in witness.rs)
+# survives 3000 seeds in each of three mixes: the witness's page-by-page check of each pending file
+# against the live WAL refuses what the anchor wrongly accepts. It re-expresses on main the plant the history
+# judge's work measured on the boot-witness branch: the boot accepts the newest staged file as
+# its position whenever the WAL holds a commit frame at its end in the same generation, without
+# comparing its last page or the range it covers.
+[[bug]]
+name = "anchor-any-tail"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["unaided::swarm_seed_44_restores_only_committed_states"]

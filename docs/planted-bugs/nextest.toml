@@ -1,0 +1,4 @@
+# nextest config for `just planted-bugs`: a planted bug may make a test loop, so every test is
+# killed after 90 s (45 s * 2). A kill counts as a failure and the table says "timeout".
+[profile.default]
+slow-timeout = { period = "45s", terminate-after = 2, grace-period = "5s" }

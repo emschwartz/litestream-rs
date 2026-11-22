@@ -20,8 +20,11 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
-use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history};
-use crate::oracle::{Bound, Violation, Windows, bug_fault, within};
+use crate::crash_law::CrashLaw;
+use crate::generate::{
+    AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
+};
+use crate::oracle::{Bound, Incarnation, Violation, Windows, bug_fault, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
@@ -190,6 +193,32 @@ pub struct Opts {
     /// is skipped, and the model is checked against SQLite's rules before
     /// every step. [`run_with`] sets it.
     pub drawn: bool,
+    /// With `drawn`, a power loss keeps the block law's draw instead of a
+    /// drawn prefix ([`Weights::block_crash_law`]). [`run_with`] sets it.
+    pub block_crash_law: bool,
+    /// What the app does after each restart ([`Weights::after_restart`]).
+    /// [`run_with`] sets it.
+    pub after_restart: AfterRestart,
+    /// Which judges run: the oracle, the history judge, or both (the default).
+    pub judges: Judges,
+}
+
+/// Which judges a run consults. Both by default; one alone measures what it catches unaided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Judges {
+    /// The oracle ([`crate::oracle`]): restores judged through the engine's WAL origins.
+    pub oracle: bool,
+    /// The history judge ([`crate::history`]): restores judged by content alone.
+    pub history: bool,
+}
+
+impl Default for Judges {
+    fn default() -> Self {
+        Self {
+            oracle: true,
+            history: true,
+        }
+    }
 }
 
 /// The configuration every run gives the actor.
@@ -225,6 +254,7 @@ fn windows(maintenance: &Maintenance) -> Windows {
 }
 
 /// What one actor step came to.
+#[derive(PartialEq, Eq)]
 enum Step {
     Ran,
     /// A task kept trying a persistent fault.
@@ -263,6 +293,9 @@ struct Runner {
     /// measured from it, since an earlier reading is clamped.
     latest: Option<Timestamp>,
     saved: Option<StagedCopy>,
+    /// The commit each file in `saved` held when it was copied, noted again
+    /// when the copy is put back.
+    saved_notes: Vec<(Txid, Option<crate::model::WalEnd>, crate::CommitId)>,
     /// The app's automatic checkpoint threshold each engine is told.
     app_autocheckpoint: Option<NonZeroU32>,
     /// What engines replaced so far saw of the app's checkpoints.
@@ -275,11 +308,22 @@ struct Runner {
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
-    /// A drawn step put a staging backup back.
-    restored_staging: bool,
+    /// The engine incarnation running now: what its level-0 puts are judged
+    /// against ([`judge_put`]).
+    life: Incarnation,
+    /// Replica recorder events already judged by [`judge_put`].
+    puts_judged: usize,
+    /// The staging recorder's length when a staging backup was last put
+    /// back: staged files are the engine's only if it wrote them since.
+    put_back: usize,
     /// A store fault fails calls at a rate and has not healed: a drain may
     /// end at its deadline.
     rate_active: bool,
+    judges: Judges,
+    /// What the app does after a restart, and its own log of commits.
+    app: after_restart::App,
+    /// The WAL's committed end, in frames, as the current operation began.
+    op_began_at: u32,
 }
 
 fn below(rng: &SeededEntropy, upper: u64) -> u64 {
@@ -316,13 +360,19 @@ impl Runner {
             degraded: [false; 5],
             latest: None,
             saved: None,
+            saved_notes: Vec::new(),
             app_autocheckpoint: Some(lsr_core::SQLITE_AUTOCHECKPOINT),
             app_before: AppCheckpoints::NONE,
             expected: Vec::new(),
             lenient: false,
             expected_sizes: Vec::new(),
-            restored_staging: false,
+            life: Incarnation::default(),
+            puts_judged: 0,
+            put_back: 0,
             rate_active: false,
+            judges: Judges::default(),
+            app: after_restart::App::new(seed),
+            op_began_at: 0,
         }
     }
 
@@ -331,6 +381,10 @@ impl Runner {
     }
 
     fn reboot(&mut self) {
+        self.life = Incarnation {
+            staged_from: self.w.staging_recorder.len(),
+            ..Incarnation::default()
+        };
         self.w.start_driver();
         let base = actor_config();
         self.app_before = self.app_seen();
@@ -457,6 +511,7 @@ impl Runner {
 
     fn crashed(&mut self, kind: CrashKind) {
         self.reboot();
+        self.app.restarted(self.op_began_at);
         self.report.reach.bump(format!("crash.{}", variant(&kind)));
         self.report.crashes = self.report.crashes.saturating_add(1);
         if kind == CrashKind::Power {
@@ -464,6 +519,19 @@ impl Runner {
             self.spilled.clear();
             self.readers.clear();
         }
+    }
+
+    /// Judges every level-0 put the replica took since the last call as
+    /// made by the incarnation running now ([`judge_put`]).
+    fn judge_puts(&mut self) -> Result<(), Violation> {
+        let remote = self.w.remote_recorder.events();
+        let staging = self.w.staging_recorder.events();
+        for put in remote.iter().skip(self.puts_judged) {
+            let judged = judge_put(&self.w.model, &staging, &self.w.remote_raw, put, self.life)?;
+            self.report.reach.bump(format!("witness.{judged:?}"));
+        }
+        self.puts_judged = remote.len();
+        Ok(())
     }
 
     fn note_tick(&mut self, began: Timestamp, remote0: crate::store::RecorderCounts) {
@@ -491,7 +559,15 @@ impl Runner {
         let passive0 = self.tally.count(lsr_core::CheckpointMode::Passive);
         let total0 = self.tally.total();
         let began = self.now();
+        let booting = !self.actor.booted();
+        let salts = self.w.sqlite.salts();
+        let commits = self.w.model.commits().len();
         let ended = self.run_one(plan);
+        if booting && self.actor.booted() {
+            self.life.boot_salts = Some(salts);
+            self.life.boot_commits = commits;
+        }
+        self.judge_puts()?;
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
@@ -677,7 +753,10 @@ impl Runner {
         let mut degraded = false;
         for _ in 0..DRAIN_TICKS {
             match self.step(None)?.0 {
-                Step::Drained(txid) => return self.drained(txid),
+                Step::Drained(txid) => {
+                    self.drained(txid)?;
+                    return self.judge_drained();
+                }
                 Step::Stopped(StopCause::Shutdown) if degraded || self.rate_active => {
                     return Ok(());
                 }
@@ -710,9 +789,11 @@ impl Runner {
     /// staged level-0 file and that the replica's newest level-0 file reaches:
     /// nothing staged was left behind.
     fn drained(&self, txid: Option<Txid>) -> Result<(), Violation> {
+        // A staging backup put back under a running engine holds files it
+        // never staged and does not upload.
         let staged = self
             .w
-            .newest_staged()
+            .newest_engine_staged(self.put_back)
             .map_err(|e| bug_fault(e.to_string()))?;
         let staged = staged.map(|file| file.key.range().max());
         let remote = self
@@ -794,7 +875,9 @@ impl Runner {
         let mut all = std::mem::take(&mut self.spilled);
         all.append(&mut pages);
         let before = self.w.sqlite.db_size();
-        if self.w.app_commit(&all, db_size).is_some() {
+        if let Some(id) = self.w.app_commit(&all, db_size) {
+            self.app
+                .logged(id, &all, db_size, self.w.sqlite.page_size());
             if db_size < before {
                 self.report.reach.bump("commit.shrinks");
             }
@@ -848,12 +931,7 @@ impl Runner {
     /// holds one, so a change the replica did not follow stops the engine
     /// before it stages anything. `None` while there is no file.
     fn replica_page_size(&self) -> Result<Option<PageSize>, Violation> {
-        // A staging backup put back holds what an older engine staged, which
-        // the running engine refuses rather than uploads.
-        let sizes = self
-            .w
-            .page_sizes(!self.restored_staging)
-            .map_err(bug_fault)?;
+        let sizes = self.w.page_sizes(self.put_back).map_err(bug_fault)?;
         let Some((_, first)) = sizes.first() else {
             return Ok(None);
         };
@@ -925,6 +1003,29 @@ impl Runner {
     /// the engine again. The engine may have listed it, so nothing it
     /// acknowledged before the removal is held against `Latest`.
     fn second_writer(&mut self, ticks: u8) -> Result<(), Violation> {
+        // A file at or below what this engine has staged collides with one of
+        // its own transactions (after a bucket rollback, say): telling the two
+        // writers apart needs writer identity on the replica, which the engine
+        // does not have, so the step puts nothing then.
+        let ours = self
+            .w
+            .newest_staged()
+            .map_err(|err| bug_fault(format!("listing staging failed: {err}")))?
+            .map(|info| info.key.range().max())
+            .max(self.actor.staged());
+        let theirs = self
+            .w
+            .remote_level_zero()
+            .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
+            .last()
+            .and_then(|info| info.key.range().max().next());
+        // Likewise one at or below what any level of the replica already holds.
+        let held = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
+            .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
+            .newest();
+        if theirs.is_none_or(|theirs| Some(theirs) <= ours.max(held)) {
+            return Ok(());
+        }
         let put = self
             .w
             .remote_put_foreign()
@@ -934,12 +1035,66 @@ impl Runner {
         };
         self.report.reach.bump("remote.second_writer");
         self.expect(StopCause::OtherWriter);
+        // Only an engine that was running when the file appeared, and has not
+        // booted since, owes the stop: a boot takes a replica ahead as history.
+        let mut watching = self.actor.booted();
         for _ in 0..ticks {
-            self.tick()?;
+            watching &= self.actor.booted();
+            let lists = self.w.remote_recorder.counts().lists;
+            let step = self.step(None)?.0;
+            let stopped = step == Step::Stopped(StopCause::OtherWriter);
+            match step {
+                Step::Stopped(cause) if self.stop_expected(cause) => {}
+                Step::Stopped(cause) => {
+                    return Err(bug_fault(format!("the engine stopped: {cause:?}")));
+                }
+                Step::Degraded(cause) => self.degraded_expected(cause)?,
+                Step::Ran | Step::Drained(_) | Step::Crashed => {}
+            }
+            if stopped {
+                break;
+            }
+            // A running engine that listed the replica in this tick while the
+            // other writer's file stood past its own position holds the proof
+            // of another writer: it must stop. A boot's listing is recovery's to
+            // judge, and an engine already at that transaction replaces the
+            // file with its own upload (no writer identity can tell them apart).
+            // A whole listing is one call per level at least; a listing cut
+            // short by a fault showed the engine nothing.
+            let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
+            let listed = self.w.remote_recorder.counts().lists.saturating_sub(lists) >= levels;
+            let theirs = self.w.remote_holds(key, &bytes).map_err(|err| {
+                bug_fault(format!("reading the second writer's file failed: {err}"))
+            })?;
+            // Confirming the other writer's object (it stands over a staged
+            // file of the same id) and snapshotting above it is not behind.
+            let ours = self.actor.staged().max(self.actor.replicated());
+            let behind = ours < Some(key.range().max());
+            if watching && listed && theirs && behind {
+                return Err(Violation::OtherWriterMissed {
+                    key: key.to_string(),
+                });
+            }
         }
-        self.w
-            .remote_remove_if(key, &bytes)
+        self.remove_foreign(key, &bytes)
+    }
+
+    /// The operator removes the other writer's newest file if it still holds
+    /// `bytes`, and restarts the engine.
+    fn remove_foreign(&mut self, key: lsr_core::FileKey, bytes: &[u8]) -> Result<(), Violation> {
+        let removed = self
+            .w
+            .remote_remove_if(key, bytes)
             .map_err(|err| bug_fault(format!("removing the second writer's file failed: {err}")))?;
+        // A boot may have taken the file as history and built on it; the
+        // operator's removal then takes that transaction for good.
+        if removed {
+            self.w.lost.insert(key.range().max());
+            let index = self.w.foreign.len().saturating_sub(1);
+            self.w
+                .foreign_removed
+                .push((index, self.w.remote_recorder.len()));
+        }
         self.w.acked.note_rewound();
         self.w.crash(CrashKind::Process);
         self.crashed(CrashKind::Process);
@@ -1016,7 +1171,11 @@ impl Runner {
                 })
             }
             RemoteOp::RollBack => self.w.remote_roll_back(),
+            RemoteOp::DropCreatedAt => self.w.remote_drop_created_at(),
         };
+        if matches!(op, RemoteOp::RollBack | RemoteOp::RemoveUnrecognized) {
+            self.w.history.excuse_regression();
+        }
         if matches!(op, RemoteOp::RollBack) {
             self.w.acked.note_rewound();
             self.expect(StopCause::RemoteRegressed);
@@ -1062,15 +1221,72 @@ impl Runner {
         Ok(())
     }
 
-    fn clock_jump(&self, millis: i64) {
-        let to = self.now().unix_millis().saturating_add(millis);
-        self.w.clock.set(Timestamp::from_unix_millis(to));
+    fn clock_jump(&mut self, millis: i64) {
+        let to = Timestamp::from_unix_millis(self.now().unix_millis().saturating_add(millis));
+        self.w.clock.set(to);
+        self.w.history.note_time(to);
     }
 
+    /// Applies `op`, checks the model still follows SQLite's recovery, then judges the replica
+    /// by content at random (see [`crate::history`]).
+    fn apply_judged(&mut self, op: &Op) -> Result<(), Violation> {
+        self.op_began_at = self.w.sqlite.mx_frame();
+        self.apply(op)?;
+        self.after_restart();
+        self.recovery_agrees()?;
+        if self.judges.history && self.w.history.draw() {
+            return self.judge_history(crate::history::Ask::default());
+        }
+        Ok(())
+    }
+
+    /// The history judge over the raw replica now.
+    fn judge_history(&mut self, ask: crate::history::Ask) -> Result<(), Violation> {
+        if !self.judges.history {
+            return Ok(());
+        }
+        let damaged = self.w.remote_faults.damaged();
+        let now = self.now();
+        self.w.history.judge(&self.w.remote_raw, now, &damaged, ask)
+    }
+
+    /// After a drain that finished: `Latest` is the local head, unless a bucket rollback
+    /// took files the engine had already confirmed.
+    fn judge_drained(&mut self) -> Result<(), Violation> {
+        let drained = self.w.lost.is_empty();
+        self.judge_history(crate::history::Ask {
+            sweep: false,
+            drained,
+        })
+    }
+
+    /// Both judges over the whole replica; where one fails and the other passes, the
+    /// disagreement is counted in reach, keyed by the failing judge and its violation.
     fn restore_all(&mut self) -> Result<(), Violation> {
         self.report.checks = self.report.checks.saturating_add(1);
-        let checked = self.w.check(Some(windows(&actor_config().maintenance)))?;
-        checked.tally(&mut self.report.reach);
+        let oracle = self
+            .judges
+            .oracle
+            .then(|| self.w.check(Some(windows(&actor_config().maintenance))));
+        let history = self.judge_history(crate::history::Ask {
+            sweep: true,
+            drained: false,
+        });
+        match (&oracle, &history) {
+            (Some(Err(violation)), Ok(())) if self.judges.history => {
+                let key = format!("history.disagree.oracle_only.{}", variant(violation));
+                self.report.reach.bump(key);
+            }
+            (Some(Ok(_)), Err(violation)) => {
+                let key = format!("history.disagree.history_only.{}", variant(violation));
+                self.report.reach.bump(key);
+            }
+            (Some(_) | None, _) => {}
+        }
+        if let Some(checked) = oracle {
+            checked?.tally(&mut self.report.reach);
+        }
+        history?;
         self.replica_page_size()?;
         if self.record {
             self.report.seen.push(Seen::Oracle);
@@ -1099,21 +1315,30 @@ impl Runner {
             MetaOp::Save => w
                 .copy_staging()
                 .map(|copy| {
+                    self.saved_notes = copy
+                        .origins()
+                        .into_iter()
+                        .filter_map(|(key, origin)| {
+                            let txid = key.range().max();
+                            let commit = w.model.staged_commit(txid, origin)?;
+                            Some((txid, origin, commit))
+                        })
+                        .collect();
                     self.saved = Some(copy);
                     true
                 })
                 .map_err(StagedEditError::from),
-            MetaOp::Restore if self.lenient && self.saved.is_some() => {
-                self.restored_staging = true;
-                match &self.saved {
+            MetaOp::Restore => {
+                let done = match &self.saved {
                     Some(copy) => w.replace_staging(copy).map(|()| true),
                     None => Ok(false),
+                };
+                if matches!(done, Ok(true)) {
+                    self.put_back = self.w.staging_recorder.len();
+                    self.renote_saved();
                 }
+                done
             }
-            MetaOp::Restore => match &self.saved {
-                Some(copy) => w.replace_staging(copy).map(|()| true),
-                None => Ok(false),
-            },
             MetaOp::DeleteNewest => w.delete_newest_staged().map_err(StagedEditError::from),
             MetaOp::FlipNewestByte => w.edit_newest_staged(|bytes| {
                 let middle = bytes.len() / 2;
@@ -1130,8 +1355,18 @@ impl Runner {
                 let half = bytes.len() / 2;
                 bytes.truncate(half);
             }),
+            MetaOp::ForgeNewest => w.forge_newest_staged(),
         };
         self.step_done(&format!("{op:?}"), done)
+    }
+
+    /// A restored backup holds the files it copied: the oracle maps each
+    /// id to the commit its copy held, not to whatever was staged since.
+    fn renote_saved(&mut self) {
+        let at = self.w.remote_recorder.len();
+        for (txid, origin, commit) in &self.saved_notes {
+            self.w.model.note_restored(*txid, *origin, *commit, at);
+        }
     }
 
     fn wal_damage(&mut self, op: WalOp) -> Result<(), Violation> {
@@ -1234,11 +1469,13 @@ impl Runner {
                 self.report.shutdowns = self.report.shutdowns.saturating_add(1);
                 self.drain()?;
                 self.reboot();
+                self.app.restarted(self.op_began_at);
             }
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),
             Op::PowerLoss => self.restart(CrashKind::Power),
+            Op::LyingWalSync => self.w.sqlite.lie_on_our_sync(),
             Op::Meta(op) => self.meta(*op)?,
             Op::Wal(op) => self.wal_damage(*op)?,
             Op::Remote(op) => self.remote(*op)?,
@@ -1338,6 +1575,26 @@ impl Runner {
         }
     }
 
+    /// What a drawn run's power losses keep of the unsynced WAL writes: a
+    /// drawn prefix, or the block law's draw.
+    fn draw_power_law(&self, seed: Seed, blocks: bool) {
+        self.w.sqlite.tear_on_power_loss(seed.stream(14));
+        if blocks {
+            self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
+        }
+    }
+
+    /// Every power loss so far was recovered alike by SQLite and by the
+    /// engine's WAL parser, and the rules' image matched SQLite's.
+    fn recovery_agrees(&self) -> Result<(), Violation> {
+        match self.w.sqlite.recovery_disagreements().first() {
+            Some(first) => Err(bug_fault(format!(
+                "SQLite's recovery disagrees with the simulator: {first}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// The end of a history: drain, judge the replica, check the resources.
     fn finish(&mut self) -> Result<(), Violation> {
         if self.lenient && !self.w.model_matches_sqlite() {
@@ -1369,6 +1626,8 @@ impl Runner {
             &self.w.remote_recorder.events(),
             self.w.remote_recorder.counts(),
             spent,
+            &self.w.lost,
+            &self.w.foreign_sizes,
         )?;
         self.idle()?;
         self.replica_page_size().map(drop)
@@ -1406,6 +1665,10 @@ impl Runner {
         let (kept, cut) = self.w.sqlite.torn_losses();
         reach.add("power.kept_unsynced_wal", u64::from(kept));
         reach.add("power.kept_cut_frame", u64::from(cut));
+        let (kept, holes) = self.w.sqlite.block_losses();
+        reach.add("power.block_kept_unsynced", u64::from(kept));
+        reach.add("power.block_hole", u64::from(holes));
+        reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
         reach.add(
             "batch.remote_calls",
             u64::from(self.w.remote_faults.batched()),
@@ -1494,6 +1757,8 @@ pub fn run_with(
 ) -> Result<RunReport, Failure> {
     let opts = Opts {
         drawn: true,
+        block_crash_law: weights.block_crash_law,
+        after_restart: weights.after_restart,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -1512,7 +1777,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     let mut runner = Runner::new(seed);
     runner.lenient = opts.drawn;
     if opts.drawn {
-        runner.w.sqlite.tear_on_power_loss(seed.stream(14));
+        runner.draw_power_law(seed, opts.block_crash_law);
         runner.draw_batch_widths(seed);
     }
     runner.trace = opts.trace;
@@ -1520,6 +1785,8 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     runner.allow_stop = opts.allow_stop;
     runner.responses = opts.responses;
     runner.retention = opts.retention;
+    runner.judges = opts.judges;
+    runner.app.set(opts.after_restart);
     runner.reboot();
     for (index, op) in ops.iter().enumerate() {
         let step = u32::try_from(index).unwrap_or(u32::MAX);
@@ -1550,7 +1817,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
                 ..fail(bug_fault("the model no longer matches SQLite's rules"))
             });
         }
-        if let Err(violation) = runner.apply(op) {
+        if let Err(violation) = runner.apply_judged(op) {
             return Err(Failure {
                 trace: runner.report.trace,
                 ..fail(violation)
@@ -1566,6 +1833,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         trace: std::mem::take(&mut runner.report.trace),
     })?;
     runner.tally_stores();
+    runner.w.history.tally(&mut runner.report.reach);
     runner.report.app_checkpoints = runner.app_seen();
     runner.report.app_autocheckpoints = runner.w.sqlite.app_autocheckpoints();
     if opts.record {
@@ -1596,6 +1864,8 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
     }
     Some(high)
 }
+
+mod after_restart;
 
 #[cfg(test)]
 mod tests;

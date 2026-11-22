@@ -7,9 +7,13 @@ on:
 permissions:
   contents: read
 
+env:
+  NEXTEST_PROFILE: ci
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -18,9 +22,42 @@ jobs:
           tool: cargo-nextest,just
       - run: just check
 
+  # Schedule exploration (`just shuttle`) needs its own build (RUSTFLAGS --cfg shuttle), so it is
+  # not in `just check`. It runs here only when what it explores changed: the replica thread's
+  # command handshake and the S3 batch's scoped threads. Nightly runs 500000 schedules.
+  # Not a path-filtered workflow, which would leave a required check pending; the job
+  # decides inside, so it always reports.
+  shuttle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: changed
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "origin/$BASE_REF...HEAD" -- crates/store-s3 crates/replica Cargo.lock justfile rust-toolchain.toml; then
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          BASE_REF: ${{ github.base_ref }}
+      - if: steps.changed.outputs.relevant == 'true'
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - if: steps.changed.outputs.relevant == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - if: steps.changed.outputs.relevant == 'true'
+        run: just shuttle
+
   # Advisories, bans, licenses and sources (deny.toml), over all features.
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: taiki-e/install-action@v2
@@ -33,6 +70,7 @@ jobs:
   commit-check:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
         with:
@@ -46,6 +84,7 @@ jobs:
   # already in scripts/minio.sh. Nothing else is configured or reachable.
   test-s3:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -58,6 +97,7 @@ jobs:
   # upstream main run nightly in compat-releases.yml, never here.
   compat:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -85,3 +125,31 @@ jobs:
           tool: cargo-nextest,just
       - uses: ./.github/actions/go-compat
       - run: just compat-s3
+
+
+  # Mutation-tests only the lines the pull request changed in lsr-core and lsr-ltx. Fails on a missed
+  # mutant that docs/mutants-escapes.txt does not list (docs/mutants.md). Bounded: 40 minutes of
+  # mutants (MUTANTS_DIFF_BUDGET) inside the job's 50.
+  mutants-diff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    # Four disjoint slices in parallel: a large diff (the witness touched ~1000 lines of boot
+    # code) needs more than one job's 40 minutes, and raising the ceiling would only hide that.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just,cargo-mutants@27.1.0
+      - run: just mutants-diff "origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          MUTANTS_JOBS: "4"
+          MUTANTS_SHARD: "${{ matrix.shard }}/4"

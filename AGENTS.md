@@ -19,7 +19,7 @@
 ## Rust style
 - The lint set is in `Cargo.toml`; gates run with `-D warnings`. No `unwrap`, `expect`, `panic`, `as`, indexing or unchecked arithmetic in non-test code. An exception is `#[expect(lint, reason = "the invariant")]` on the smallest item, never `allow`.
 - Functions are at most 70 lines.
-- `unsafe` is denied workspace-wide; only the SQLite crate may opt in, one reasoned `#[expect(unsafe_code)]` per site.
+- `unsafe` is denied workspace-wide; only the SQLite crate may opt in, one reasoned `#[expect(unsafe_code)]` per site. The one other exception is `lsr-heap`, the counting allocator the memory gates install (`GlobalAlloc` is an unsafe trait); it is a dev-dependency and never linked into a shipped binary.
 - Errors are typed (`thiserror`), one enum per crate boundary, each variant carrying what a caller needs to act. No stringly errors, no `anyhow` in library crates.
 - Every public item has a doc comment. Comments say why, never what. Mechanism goes in the module's `//!` doc.
 - No mid-sentence em dashes in docs or comments.
@@ -30,6 +30,7 @@
 - A bug fix starts with a test that fails on the old code.
 - Go compatibility is differential: generate with Go, read with Rust, and the reverse, comparing restored pages.
 - Tests wait on conditions, never on the clock. No sleeps.
+- A test that needs something outside the process (MinIO, Go builds, Tigris, a C compiler, disk) gets it through `lsr_core::needs` and fails without it; the only skip is the runner's `LSR_SKIP=<name>`, never under CI. A walk over files or fixtures asserts it found some. A hang is killed by nextest (`.config/nextest.toml`), not waited out.
 - Property tests (`proptest`) for every codec and every pure planner. Keep each test under a second where possible.
 - A crate's integration tests are one binary, `crates/<name>/tests/<name>/main.rs`, with a module per file: add a module there, not a new `tests/*.rs` file, which would link a binary of its own (lsr-compat's `layout` test refuses a second one). A test that starts the binary again as a child names its test by full path (`sidecar::exec_child`), or uses the crate root's `child_process_entry` (lsr-sqlite).
 
@@ -38,7 +39,7 @@
 - `just check` is the land gate: format, clippy, tests. Scope while iterating: `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo nextest run -p <crate> <test name>`. The README lists which tests need nothing, Docker, Go or Tigris.
 - `just upstream` clones the pinned upstream sources into `.upstream/` (read-only reference: `litestream` at 041a8c3, `ltx` at v0.5.3). [docs/go-terms.md](docs/go-terms.md) maps our terms to Go's, LTX's and SQLite's for the same things.
 - Crates live in `crates/<name>` and are named `lsr-<name>` (working prefix).
-- New dependencies: prefer none. Each one is named in the report with why and its license. Every dependency, external or `lsr-*`, is declared once in the root `[workspace.dependencies]` and referenced as `name.workspace = true`; a crate may add features, never a version or path. (The `fuzz/` crate is outside the workspace and keeps its own.)
+- New runtime dependencies: prefer none. Dev- and test-only dependencies that strengthen correctness checking (fuzzing, schedule exploration, sanitizer support) are welcome. Either way, each one is named in the report with why and its license. Every dependency, external or `lsr-*`, is declared once in the root `[workspace.dependencies]` and referenced as `name.workspace = true`; a crate may add features, never a version or path. (The `fuzz/` crate is outside the workspace and keeps its own.)
 
 ## Branches and landing
 - The repository lives on GitHub (`origin`, github.com/emschwartz/litestream-rs); work lands on its `main`, which stays green.
@@ -47,7 +48,7 @@
 - A session working on a branch commits there and does not push, open pull requests or comment on GitHub unless asked; landing and pushing are the parent session's.
 - Commit messages follow Conventional Commits (commitizen's default format): a subject `type(scope): summary`, imperative, lower-case after the colon, at most 72 characters, no trailing period; a blank line; a body that says why; optional footers.
   - Types: `feat` (new behaviour), `fix` (a bug), `perf`, `refactor` (no behaviour change), `test`, `docs`, `build` (dependencies, Cargo, the justfile), `ci`, `chore`, `revert`.
-  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `local`, `sqlite`, `replica`, `config`, `sidecar`, `sim`, `compat`, `cli`, `fuzzing`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
+  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `local`, `sqlite`, `replica`, `config`, `sidecar`, `sim`, `history`, `compat`, `cli`, `fuzzing`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
   - A change that breaks a public API or the replica format takes `!` after the scope and a `BREAKING CHANGE:` footer saying what breaks.
   - Decisions made mid-task are `Call: <what> (why; cost if wrong)` footers.
   - `just commit-check` checks the subjects of the commits on the branch since local `main` (or `origin/main` when there is none; `just commit-check <base>` names another).

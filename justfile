@@ -11,11 +11,16 @@ fmt-check:
 deny:
     cargo deny --locked check
 
+# Every feature at once: the features are additive, so this lints a superset of the default build,
+# and it shares its build with `test`, `doctest` and `upstream-test-map-fresh`. The one code path
+# the superset hides, `cfg(not(feature = "ureq"))` in the S3 store, is linted by `features`.
 clippy:
-    cargo clippy --workspace --all-targets --locked -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+# Every test that is not ignored, over every feature: ureq's and reqwest's transport tests
+# and the native-tls classification tests among them.
 test:
-    cargo nextest run --workspace --locked --no-tests=warn
+    cargo nextest run --workspace --all-features --locked --no-tests=warn
 
 # Commit subjects on this branch since `base` follow Conventional Commits (AGENTS.md).
 # The default base is local `main`, which `just spawn` branches from; without one, `origin/main`.
@@ -41,15 +46,12 @@ commit-check base="":
         exit 1
     fi
 
-# The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended):
-# each builds alone, all build together, and reqwest's own tests run (ureq's run in `test`),
-# then the test of an application's native-tls client, which needs the `native-tls` feature.
+# The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended): each builds
+# alone, which `clippy` over all features cannot show. Their tests run in `test`, which has ureq,
+# reqwest and native-tls on at once.
 features:
     cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
     cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
-    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-    cargo nextest run -p lsr-store-s3 --features reqwest --lib --locked
-    cargo nextest run -p lsr-store-s3 --features native-tls --lib --locked native_tls
 
 # nextest does not run doctests, and the compile-fail proofs (a proof token is not Clone) live there.
 doctest:
@@ -73,6 +75,63 @@ sim-soak seconds base=`date +%s`:
 # variables only, never as shell text.
 sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
     env -u LSR_SIM_BASE_SEED cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+
+# The nightly toolchain for the sanitizer, Miri and fuzz recipes; override with LSR_NIGHTLY=nightly-YYYY-MM-DD.
+nightly := env("LSR_NIGHTLY", "nightly")
+
+# AddressSanitizer over the crate with `unsafe` FFI (sqlite) and the replica thread tests.
+# Nightly only (-Zsanitizer, -Zbuild-std so the standard library is instrumented too); its own
+# target dir, since the flags rebuild everything. Bundled SQLite's C code is not instrumented,
+# but its allocations go through the sanitizer's allocator. Not part of check.
+asan:
+    RUSTFLAGS="-Zsanitizer=address" RUSTDOCFLAGS="-Zsanitizer=address" CARGO_TARGET_DIR=target/asan \
+        cargo +{{nightly}} test -Zbuild-std --target x86_64-unknown-linux-gnu --locked \
+        -p lsr-sqlite -p lsr-replica --lib --tests
+
+# ThreadSanitizer over the same crates. The standard library is rebuilt with it (-Zbuild-std),
+# or its mutexes and channels would look like unsynchronised memory.
+tsan:
+    RUSTFLAGS="-Zsanitizer=thread" CARGO_TARGET_DIR=target/tsan \
+        cargo +{{nightly}} test -Zbuild-std --target x86_64-unknown-linux-gnu --locked \
+        -p lsr-sqlite -p lsr-replica --lib --tests
+
+# Miri over the pure crates (ltx, wal) and the core's decision code (plan, retry, position,
+# layout, checkpoint, compact): no I/O, no FFI. Miri runs about 1000 times slower than native,
+# so the core's engine-sized suites (actor, maintain, recover, sync and the rest, 500 tests) are
+# left to the native run, the few whole-database tests inside the chosen modules are ignored
+# under `cfg(miri)`, and the proptest case count is cut. Environment reaches the program only
+# through -Zmiri-env-forward. Not part of check.
+miri:
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
+        PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
+        cargo +{{nightly}} miri test --locked -p lsr-ltx -p lsr-wal --lib
+    MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
+        PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
+        cargo +{{nightly}} miri test --locked -p lsr-core --lib -- \
+        plan:: retry:: position:: layout:: checkpoint:: compact::
+
+# Schedule exploration with shuttle: the replica thread's command handshake and the S3 batch's
+# scoped threads, under many random interleavings. Shuttle is a dev-dependency behind
+# `--cfg shuttle`, so no other build sees it, and it needs its own target dir and a full rebuild, so it is
+# not part of check: CI runs it on pull requests that touch store-s3 or replica, and nightly for 500000 schedules.
+shuttle iterations="200":
+    RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
+        cargo clippy -p lsr-store-s3 -p lsr-replica --all-targets --locked -- -D warnings
+    SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
+        cargo test --locked -p lsr-store-s3 --lib shuttle_tests
+    SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
+        cargo test --locked -p lsr-replica --test replica shuttle::
+
+# Every fixed defect is re-planted in a scratch tree and its named tests must fail
+# (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
+# Nightly in CI; about 20 minutes cold. `just planted-bugs --only listing-cursor` runs one entry.
+planted-bugs *args:
+    uv run scripts/planted-bugs.py {{args}}
+
+# Mutation-tests the lines this branch changed in core and ltx against `base`; fails on a missed
+# mutant not in docs/mutants-escapes.txt. Runs on pull requests in CI.
+mutants-diff base="origin/main":
+    scripts/mutants-diff.sh {{base}}
 
 # Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
 # Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.
@@ -98,9 +157,10 @@ sqlite-big:
 # SQLITE3_LIBS when set, then on macOS Homebrew's (`brew install sqlite`; the system one lacks
 # the function), then `pkg-config sqlite3`, then plain -lsqlite3 (crates/compat/src/vfs.rs).
 # The test map's counterpart check is ignored too, but it needs the listing upstream-test-map-fresh writes.
+# The s3:: tests need MinIO, so they belong to compat-s3, which starts it; here they would fail closed.
 compat:
     ./scripts/build-go-litestream.sh
-    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists)'
+    cargo nextest run -p lsr-compat --run-ignored all --locked -E 'not test(=upstream_test_map::every_counterpart_exists) and not test(/^s3::/)'
 
 # Build the named Go versions (tags, commits, `releases` for every v0.5.N tag, `main` for
 # upstream's newest staged file) and run the live tests over exactly those: just compat-live v0.5.3 main.
@@ -124,7 +184,8 @@ compat-regen *args:
     ./scripts/build-go-litestream.sh
     cargo run --locked -p lsr-compat --bin compat-regen -- {{args}}
 
-# Run one fuzz target (decode, index, plan, key, wal) for N seconds; new inputs join fuzz/corpus.
+# Run one fuzz target (decode, index, plan, plan_contract, plan_lazy, key, wal) for N seconds;
+# new inputs join fuzz/corpus.
 fuzz target seconds:
     cargo +nightly fuzz run {{target}} --fuzz-dir fuzz -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1
 
@@ -137,36 +198,41 @@ fuzz-cmin target *args:
 fuzz-seed:
     cargo nextest run -p lsr-fuzzing --test fuzzing -E 'test(/^seed::/)' --run-ignored only --locked
 
-# A throwaway MinIO in Docker for the S3 conformance suite (skips when Docker is down).
+# A throwaway MinIO in Docker for the S3 conformance suite. Fails when Docker is down, unless the
+# runner opts out on purpose with LSR_SKIP=minio (never under CI).
 minio-up:
     ./scripts/minio.sh up
 
 minio-down:
     ./scripts/minio.sh down
 
-# The S3 store against a real server; not part of check, which never needs Docker.
-# Locally it skips (exit 0) when Docker is down. Under CI (the CI variable, which GitHub sets) or
-# with LSR_REQUIRE_MINIO set, the tests are told a server is required: they fail, never skip,
-# when MinIO is missing or unreachable, so a green run means they ran against it.
+# The S3 store against a real server; not part of check, which never needs Docker (these tests are
+# #[ignore]d there). Without MinIO the tests fail, so a green run means they ran against it. The
+# one opt-out is LSR_SKIP=minio (`LSR_SKIP=minio just test-s3` runs nothing and says so); under
+# CI, which GitHub marks with the CI variable, any LSR_SKIP is itself a failure.
 test-s3: minio-up
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -n "${CI:-}" ] && [ -z "${LSR_REQUIRE_MINIO:-}" ]; then
-        export LSR_REQUIRE_MINIO=1
-    fi
-    if [ -z "${LSR_REQUIRE_MINIO:-}" ] && ! ./scripts/minio.sh running; then
-        echo "test-s3: MinIO is not running; S3 tests skipped"
-        exit 0
-    fi
+    case ",${LSR_SKIP:-}," in
+        *,minio,*)
+            if [ -n "${CI:-}" ]; then
+                echo "test-s3: LSR_SKIP is set under CI; CI never skips" >&2
+                exit 1
+            fi
+            echo "test-s3: skipped by LSR_SKIP=minio; nothing ran"
+            exit 0
+            ;;
+    esac
     eval "$(./scripts/minio.sh env)"
-    cargo nextest run -p lsr-store-s3 --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
+    cargo nextest run -p lsr-store-s3 --test store-s3 -E 'test(/^minio::/)' --run-ignored all --locked --no-fail-fast
     LSR_S3_TRANSPORT=reqwest \
-        cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --locked --no-fail-fast
-    cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --locked --no-fail-fast
+        cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^minio::/)' --run-ignored all --locked --no-fail-fast
+    cargo nextest run -p lsr-cli --test cli -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
+    cargo nextest run -p lsr-history --test history -E 'test(/^replicator::/)' --run-ignored all --locked --no-fail-fast
 
 # Each restores what the other wrote at Latest, a txid and an instant, and they hand one prefix
 # over both ways, over the pinned builds (crates/compat/tests/compat/s3.rs). Needs Docker; fails, never
-# skips, when MinIO is not up. Never a real store: every AWS_* and LITESTREAM_* variable is unset
+# skips, when MinIO is not up (LSR_SKIP=minio opts out on purpose, outside CI). Never a real store: every AWS_* and LITESTREAM_* variable is unset
 # first, the tests read only the LSR_COMPAT_S3_* ones set here (MinIO's throwaway credentials
 # from scripts/minio.sh) and refuse any endpoint but loopback http.
 # Go and Rust on one MinIO bucket: restores and handovers both ways.
@@ -250,3 +316,38 @@ upstream-test-map:
 # up to five files, and of four files over a wider range. Minutes; not part of check.
 plan-exhaustive:
     cargo nextest run -p lsr-core --test core --run-ignored only --no-capture --locked -E 'test(/^plan_exhaustive::/)'
+
+# The memory gates at scale (crates/core/tests/core/mem_big.rs): restore from 1 to 4 GiB of
+# database and from a million-file inventory, in release. The same laws run at small sizes in
+# `check` (crates/core/tests/core/mem.rs). Needs 5 GiB of temporary disk, one database at a time.
+mem-big:
+    cargo nextest run --release -p lsr-core --test core -E 'test(/^mem_big::/)' --run-ignored only --no-capture --locked
+
+# Linux with /dev/fuse, fusermount3 and FUSE allowed (root, or user_allow_other); builds LazyFS once
+# into ~/.cache/lsr-lazyfs (cmake, g++, git, libfuse3-dev). Not in `check`: a cycle takes about 3 s.
+# Exit 1 on any anomaly; the last line printed is a JSON summary.
+# Power-loss cycles of the real `lsr replicate` on LazyFS, judged by restores (scripts/lazyfs.py).
+lazyfs cycles="50" *args:
+    cargo build --release --locked -p lsr-cli
+    cargo build --release --locked -p lsr-history --features sqlite
+    test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
+    uv run scripts/lazyfs.py run --cycles {{cycles}} {{args}}
+
+# A plant is scripts/lazyfs-plants/<name>.patch or docs/planted-bugs/<name>.patch, applied to a
+# scratch worktree of HEAD and built into target/lazyfs-plants/<name>.
+# The LazyFS rig against a planted defect, until its first anomaly: just lazyfs-plant wal-barrier 200
+lazyfs-plant name cycles="200" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    patch="scripts/lazyfs-plants/{{name}}.patch"
+    [ -f "$patch" ] || patch="docs/planted-bugs/{{name}}.patch"
+    [ -f "$patch" ] || { echo "lazyfs-plant: no plant named {{name}}" >&2; exit 2; }
+    tree=".worktrees/lazyfs-plant-{{name}}"
+    git worktree add --detach "$tree" HEAD >/dev/null
+    trap 'git worktree remove --force "$tree"' EXIT
+    git -C "$tree" apply "$PWD/$patch"
+    # The judge comes from this tree, never the planted one.
+    cargo build --release --locked -p lsr-history --features sqlite
+    CARGO_TARGET_DIR="$PWD/target/lazyfs-plants/{{name}}" cargo build --release --locked -p lsr-cli --manifest-path "$tree/Cargo.toml"
+    test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
+    uv run scripts/lazyfs.py run --cycles {{cycles}} --stop-on-anomaly --lsr "target/lazyfs-plants/{{name}}/release/lsr" --work "target/lazyfs-plant-{{name}}" {{args}}

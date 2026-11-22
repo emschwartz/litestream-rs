@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2070,7 +2070,7 @@
+         Some(NewestStagedFile::Readable { page_size, .. }) => Some(*page_size),
+         Some(NewestStagedFile::Unreadable { .. }) | None => None,
+     };
+-    let behind = confirmed > newest_staged.map(NewestStagedFile::txid);
++    let behind = false;
+     if confirmed.is_some() && (behind || staged.is_none()) {
+         return Ok(replica_page_size(remote).await?.or(staged));
+     }

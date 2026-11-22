@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use common::{PATIENCE, Site, config, fake, wait};
+use common::{Site, config, fake, stopped, wait};
 use lsr_replica::{
     Config, DegradedCause, DynStore, FinalSync, Health, NonZeroDuration, Phase, Replicator,
     Response, Responses, SnapshotCause, StopCause, Stopped, Task,
@@ -144,10 +144,7 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     let site = Site::new();
     let (runtime, _clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    assert!(matches!(
-        first.stop(PATIENCE).wait(),
-        Stopped::Drained { .. }
-    ));
+    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
     drop(first);
     let faulty = site.faulty();
     faulty.panics.store(2, Ordering::SeqCst);
@@ -169,10 +166,7 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     site.commit(1);
     clock.advance(POLL);
     wait(&replicator, |h| caught_up(h) && h.resnapshot.is_none());
-    assert!(matches!(
-        replicator.stop(PATIENCE).wait(),
-        Stopped::Drained { .. }
-    ));
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
 
@@ -212,10 +206,7 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.release();
     wait(&replicator, |h| caught_up(h) && !h.is_degraded());
-    assert!(matches!(
-        replicator.stop(PATIENCE).wait(),
-        Stopped::Drained { .. }
-    ));
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
 
 /// Moves another database over the replicated one's path, journal files and all, as a restore in
@@ -309,7 +300,7 @@ fn a_database_replaced_after_a_panic_stops_when_configured_to() {
     assert_eq!(health.phase, Phase::Stopped(StopCause::WalUnlinked));
     assert!(!has_replicator_tables(&replaced));
     assert_eq!(
-        replicator.stop(PATIENCE).wait(),
+        stopped(&replicator),
         Stopped::Stopped(StopCause::WalUnlinked)
     );
 }

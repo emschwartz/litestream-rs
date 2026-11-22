@@ -33,6 +33,7 @@ mod soak {
 
     use lsr_compat::{PageDigest, SplitMix, Step, Workload, hash_pages, integrity_check};
     use lsr_core::conformance::block_on;
+    use lsr_core::needs::{Resource, must};
     use lsr_core::{Level, ObjectStore, PageLimit, ReadLen};
     use lsr_ltx::{HEADER_LEN, Header};
     use lsr_store_s3::{S3Credentials, S3Store, SecretString, UreqTransport};
@@ -44,7 +45,9 @@ mod soak {
     const RETENTION_HOURS: u64 = 6;
 
     fn var(name: &str) -> String {
-        std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set: run just soak-tigris"))
+        must(Resource::Tigris, || {
+            std::env::var(name).map_err(|_unset| format!("{name} is not set"))
+        })
     }
 
     fn number(name: &str, default: f64) -> f64 {

@@ -1,7 +1,7 @@
 # Mutation testing
 
 `just mutants <crate>` runs cargo-mutants 27.1.0 over `lsr-<crate>` with nextest, four jobs, the tree copied with
-its `.git`, results in `target/mutants/mutants.out/`. It runs on demand, not in CI. Phase 2's exit criterion is that every
+its `.git`, results in `target/mutants/mutants.out/`. It runs on demand for a whole crate, and on pull requests for the changed lines only (`just mutants-diff`, docs/planted-bugs.md). Phase 2's exit criterion is that every
 survivor in `ltx` and `core` is killed by a test or listed here with a reason. `ltx` meets that; `core` is part way
 (see its section).
 
@@ -85,6 +85,9 @@ also caught by a core test) and missed `actor.rs:573:13`. The second run execute
 | Where | Mutation | Why |
 | --- | --- | --- |
 | `layout.rs` `FileKey::from_str` | `(raw << 4) \| digit` becomes `^` | The shift leaves the low nibble zero and `digit` is below 16, so the operands never overlap. |
+| `plan.rs` `extend` | `>` becomes `>=` in the preference and reach comparisons | `preference` ends in the file's own range, so two distinct files never tie; a file ending at the reach can win only when nothing passes it, and `push` then refuses it as the original's `None` does. |
+| `plan.rs` `Sweep::next` | `<` becomes `<=` | `sweep_order` ends in the key, unique per file, so two heads never compare equal. |
+| `witness.rs` `decode` | the guard `verified.header().txids() == key.range()` becomes `true` | Every staged file the boot pass reads (from the replica's newest on) has already passed `sweep_staged`, which drops one whose header names another range than its key, and a tail read from the replica has passed the listing's read-back (`remote_decodes`, `same_bytes`), which requires the same. No file that reaches `decode` can fail the guard. |
 
 ### In the store conformance harness (caught since)
 

@@ -389,10 +389,17 @@ mod lazy {
         assert_eq!(run.created_at_read, 0);
     }
 
+    /// The later snapshot is written at 300, so transaction 2 may have
+    /// committed before the instant 101: the older snapshot is the newest
+    /// certain state, and the instant is inside the later one.
     #[test]
-    fn an_older_snapshot_with_a_later_one_beyond_plans() {
+    fn an_older_snapshot_with_a_later_one_beyond_is_inside_it() {
         let files = [f(9, 1, 1, 100), f(9, 1, 2, 300)];
-        assert_eq!(check(&files, 101).outcome, O::Plan(vec![key(&files[0])]));
+        assert_eq!(
+            check(&files, 101).outcome,
+            O::Inside(vec![key(&files[0])], key(&files[1]))
+        );
+        assert_eq!(check(&files, 301).outcome, O::Plan(vec![key(&files[1])]));
     }
 
     #[test]
@@ -404,14 +411,17 @@ mod lazy {
     }
 
     /// A snapshot ending one past the chain is recorded as created when written, not when
-    /// that transaction committed, so it does not lift the straddle: the lazy
-    /// planner names the compacted file, as it does without the snapshot.
+    /// that transaction committed, so it does not lift the straddle: it is
+    /// the nearest-ending straddler itself.
     #[test]
     fn a_later_snapshot_ending_right_after_the_chain_does_not_hide_a_straddle() {
         let files = [f(0, 1, 1, 100), f(9, 1, 2, 1000), f(1, 2, 5, 500)];
         let run = check(&files, 300);
-        assert_eq!(run.outcome, O::Inside(vec![key(&files[0])], key(&files[2])));
-        assert_eq!(check(&[files[0], files[2]], 300).outcome, run.outcome);
+        assert_eq!(run.outcome, O::Inside(vec![key(&files[0])], key(&files[1])));
+        assert_eq!(
+            check(&[files[0], files[2]], 300).outcome,
+            O::Inside(vec![key(&files[0])], key(&files[2]))
+        );
     }
 
     /// An eligible file past the end that does not connect is a
@@ -522,6 +532,38 @@ mod lazy {
         assert!(
             planner.comparisons() > sorted,
             "the heap steps added nothing to {sorted}"
+        );
+    }
+
+    /// A level 1-8 file whose store lost its created-at time reads back as
+    /// its upload time, which does not date its newest commit: the lazy
+    /// planner must not take it as proof that the next transaction came
+    /// after the instant (a plan to 2 would silently drop transaction 3).
+    #[test]
+    fn a_fallback_created_at_does_not_date_the_next_transaction() {
+        let files = [f(9, 1, 1, 100), f(0, 2, 2, 200), f(1, 2, 3, 300)];
+        let store = store(&files, true);
+        let compacted = key(&files[2]);
+        store.drop_created_at(&compacted);
+        store.set_last_modified(&compacted, at(900));
+        let run = run_on(&store, 350);
+        assert_eq!(
+            run.outcome,
+            O::Inside(vec![key(&files[0]), key(&files[1])], compacted)
+        );
+        // The exact planner over the same created-at times agrees.
+        let inv = block_on(Inventory::load(&store)).unwrap();
+        let exact = Inventory::from_files(inv.files().iter().map(|info| {
+            let created_at = block_on(store.created_at(info)).unwrap();
+            FileInfo {
+                listed: ListedTime::Created(created_at),
+                ..*info
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            reduce(&plan_reference(&exact, RestoreTarget::AsOf(at(350)))),
+            run.outcome
         );
     }
 

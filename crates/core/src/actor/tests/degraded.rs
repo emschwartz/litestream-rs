@@ -438,7 +438,8 @@ fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
     rig.commit(2);
     rig.tick(&mut actor, T0 + 1);
     tear(&rig, 2, truncated);
-    let lost = rig.tick(&mut actor, T0 + 1);
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 1);
+    let lost = rig.tick(&mut actor, again);
     let was = actor.pending_snapshot();
     assert_eq!(
         was,
@@ -541,4 +542,42 @@ fn booted_follows_the_engines_own_rebuild() {
     assert!(!actor.booted());
     boot_again(&mut rig, &mut actor, T0 + 10);
     assert!(actor.booted());
+}
+
+/// The bucket rolls back past transaction 2, which the engine had
+/// acknowledged, and the staged copy of 2 is gone too. The relist must not
+/// forget that 2 was acknowledged: the replacement snapshot takes 3, never
+/// 2 again with a later state, so a restore to 2 refuses rather than
+/// returning pages 2 never held.
+#[test]
+fn a_relist_never_takes_an_acknowledged_transaction_again() {
+    let (mut rig, mut actor) = caught_up_go_like();
+    rig.commit(2);
+    rig.settle(&mut actor, T0 + 10);
+    assert_eq!(newest_replica_file(&rig), Some(2));
+    let gone: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
+        .unwrap()
+        .files()
+        .iter()
+        .map(|f| f.key)
+        .filter(|key| key.range().max().get() == 2)
+        .collect();
+    block_on(rig.remote.inner.delete(&gone)).unwrap();
+    let staged: Vec<FileKey> = Rig::files(&rig.staging, Level::ZERO)
+        .iter()
+        .map(|f| f.key)
+        .filter(|key| key.range().max().get() == 2)
+        .collect();
+    block_on(rig.staging.inner.delete(&staged)).unwrap();
+    actor.fault(Task::Upload, Fault::RemoteRegressed, ts(T0 + 20));
+    rig.follow(&mut actor, T0 + 20, 50);
+    let reput: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
+        .unwrap()
+        .files()
+        .iter()
+        .map(|f| f.key)
+        .filter(|key| key.range().max().get() == 2)
+        .collect();
+    assert!(reput.is_empty(), "{reput:?}");
+    assert_eq!(newest_replica_file(&rig), Some(3));
 }

@@ -5,13 +5,17 @@
 //! bytes is deleted at once, and remembered as distrusted when that delete
 //! fails (`state`). Neither survives the process: a crash between the publish
 //! and the delete leaves an object the listing shows as cover, that no restore
-//! can decode. Level 0 has its own read-back in the uploader (`tail_is_sound`);
+//! can decode. Level 0 has its own read-back in the uploader (`judge_tail`);
 //! this is the same check for every level above it.
 //!
 //! Only the newest file of a level is read. An older one was either written by
 //! a commit this engine saw succeed, or was the newest at an earlier boot and
 //! read then. The newest file per level is also all the window can hold: one
 //! job runs at a time, and a level's next job starts above its newest file.
+//!
+//! One read that fails verification is evidence about the read, not the
+//! object: the actor reads the file again on a later maintenance tick and acts
+//! only when that read fails too.
 //!
 //! A file that does not verify is deleted only when [`restores_without`] says
 //! the replica loses nothing by it: a restore to the file's last transaction
@@ -27,7 +31,7 @@
 use crate::fault::Fault;
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::plan::{KeyTarget, PlanOutcome, plan};
+use crate::plan::{KeyTarget, PlanOutcome, plan_without};
 use crate::store::ObjectStore;
 use crate::upload::remote_verifies;
 
@@ -57,11 +61,11 @@ pub(crate) fn newest_per_level(inventory: &Inventory) -> impl Iterator<Item = &F
 /// listing's other files, so deleting `key` shortens no history.
 #[must_use]
 pub(crate) fn restores_without(inventory: &Inventory, key: &FileKey) -> bool {
-    let others = inventory.files().iter().filter(|file| file.key != *key);
-    let Ok(rest) = Inventory::from_files(others.copied()) else {
-        return false;
-    };
-    match plan(&rest, KeyTarget::Txid(key.range().max())) {
+    match plan_without(
+        inventory,
+        std::slice::from_ref(key),
+        KeyTarget::Txid(key.range().max()),
+    ) {
         PlanOutcome::Plan(_) => true,
         PlanOutcome::EmptyReplica
         | PlanOutcome::NoSnapshot { .. }

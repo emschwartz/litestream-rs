@@ -106,6 +106,23 @@ impl PageImage {
         )
     }
 
+    /// Whether `bytes`, a database file, holds exactly this image. `skip_header`
+    /// leaves page 1's first 100 bytes out (a probe's own header there).
+    #[must_use]
+    pub fn same_as(&self, bytes: &[u8], skip_header: bool) -> bool {
+        let size = self.page_size.bytes();
+        let pages = usize::try_from(self.db_size).unwrap_or(usize::MAX);
+        bytes.len() == size.saturating_mul(pages)
+            && bytes.chunks_exact(size).enumerate().all(|(i, got)| {
+                let skip = if i == 0 && skip_header { 100 } else { 0 };
+                u32::try_from(i)
+                    .ok()
+                    .and_then(|i| i.checked_add(1))
+                    .and_then(|pgno| self.page(pgno))
+                    .is_some_and(|want| want.get(skip..) == got.get(skip..))
+            })
+    }
+
     /// The image after the pages in `writes` are written and the database is
     /// `db_size` pages long. Pages past the new length are dropped, and a
     /// shrink flattens, so growing again never brings an old page back.
@@ -159,6 +176,9 @@ pub struct CommitRec {
     pub at: usize,
 }
 
+/// Where a staged file's WAL range ends: its generation and the byte offset.
+pub type WalEnd = (Salts, u64);
+
 /// A snapshot file's cover, noted from the actor's events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SnapshotNote {
@@ -191,6 +211,17 @@ pub struct StageNote {
     pub at: usize,
     /// Its place among every snapshot and stage note.
     pub seq: u64,
+}
+
+/// What SQLite's recovery after a power loss was to the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// The local branch's newest commit.
+    Expected,
+    /// An earlier commit, now copied as the branch's newest.
+    Resurrected(CommitId),
+    /// No commit the model knows.
+    Unknown,
 }
 
 /// Every commit, the local branch they sit on, and the snapshot notes.
@@ -307,6 +338,35 @@ impl Model {
         self.branch = self.branch.saturating_add(1);
     }
 
+    /// After [`Model::on_power_loss`]: SQLite recovered the database `image`
+    /// (`skip_header` as in [`PageImage::same_as`]). When the local branch's
+    /// newest commit holds it, nothing changes. When an earlier commit does, a
+    /// commit SQLite brought back (a later write of the same bytes completed a
+    /// frame a loss had torn, and the frames after it chain again), the branch
+    /// continues from a durable copy of it at `app`'s place in the WAL, so the
+    /// copy is the one found there. Otherwise the model does not change.
+    pub fn adopt_recovered(
+        &mut self,
+        image: &[u8],
+        skip_header: bool,
+        app: AppCommit,
+        at: usize,
+    ) -> Recovery {
+        if self.newest_image().same_as(image, skip_header) {
+            return Recovery::Expected;
+        }
+        let found = self
+            .commits
+            .iter()
+            .rev()
+            .find(|rec| rec.image.same_as(image, skip_header))
+            .map(|rec| Rc::clone(&rec.image));
+        match found {
+            Some(image) => Recovery::Resurrected(self.push(image, app, at, true)),
+            None => Recovery::Unknown,
+        }
+    }
+
     /// Whether a power loss has rewound the local branch.
     #[must_use]
     pub const fn rewound(&self) -> bool {
@@ -382,6 +442,49 @@ impl Model {
             .find(|n| n.txid == txid && n.at <= at)
             .map(|n| (n.seq, n.commit));
         stage.max(snapshot).map(|(_, commit)| commit)
+    }
+
+    /// The commit a staged file for `txid` holds now, as the oracle would map
+    /// it: by its WAL range (`origin`, generation and end) when it names one,
+    /// otherwise the newest note for `txid`. Taken when a backup copies the file.
+    #[must_use]
+    pub fn staged_commit(&self, txid: Txid, origin: Option<WalEnd>) -> Option<CommitId> {
+        match origin {
+            Some((salts, end)) => self
+                .staged_from(txid, salts, end, usize::MAX)
+                .or_else(|| self.find(salts, end, usize::MAX)),
+            None => self.staged_as(txid, usize::MAX),
+        }
+    }
+
+    /// Notes again that the staged file for `txid` holds `commit`: a backup put
+    /// it back over whatever was staged for that id since, so the newest note
+    /// for the id is this one again.
+    pub fn note_restored(
+        &mut self,
+        txid: Txid,
+        origin: Option<WalEnd>,
+        commit: CommitId,
+        at: usize,
+    ) {
+        self.seq = self.seq.saturating_add(1);
+        match origin {
+            Some((salts, end)) => self.stages.push(StageNote {
+                seq: self.seq,
+                txid,
+                salts,
+                end,
+                commit,
+                at,
+            }),
+            None => self.notes.push(SnapshotNote {
+                seq: self.seq,
+                txid,
+                commit,
+                rewound: false,
+                at,
+            }),
+        }
     }
 
     /// Notes that a snapshot ending at `txid` was built from `commit`.

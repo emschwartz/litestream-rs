@@ -1,8 +1,8 @@
 //! The built `lsr` against S3 replicas: what needs no server (credentials,
 //! an unreachable endpoint, a server that refuses) runs in `just check`; the
-//! restore through a real MinIO skips unless `LSR_MINIO_ENDPOINT` is set
-//! (`just test-s3`); with `LSR_REQUIRE_MINIO` set (the recipe does under CI) it fails instead
-//! when the server is missing or unreachable.
+//! restore through a real MinIO is `#[ignore]`d out of it and run by `just test-s3`, where a
+//! missing or unreachable server fails it (`lsr_core::needs`) unless the runner opted out with
+//! `LSR_SKIP=minio`.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -267,6 +267,7 @@ fn upload(store: &S3Store, info: &FileInfo, body: &[u8]) {
     });
 }
 
+/// The MinIO of `lsr_core::needs::minio`; `None` only under `LSR_SKIP=minio`.
 struct Minio {
     endpoint: String,
     access: String,
@@ -275,36 +276,12 @@ struct Minio {
 
 impl Minio {
     fn from_env() -> Option<Self> {
-        let endpoint = std::env::var("LSR_MINIO_ENDPOINT").ok()?;
+        let minio = lsr_core::needs::minio()?;
         Some(Self {
-            endpoint,
-            access: std::env::var("LSR_MINIO_ACCESS_KEY").unwrap_or_else(|_| "lsrtestroot".into()),
-            secret: std::env::var("LSR_MINIO_SECRET_KEY")
-                .unwrap_or_else(|_| "lsrtest-throwaway-0000".into()),
+            endpoint: minio.endpoint,
+            access: minio.access,
+            secret: minio.secret,
         })
-    }
-
-    /// Panics unless the endpoint accepts a TCP connection, so no step below can pass on an
-    /// absent server.
-    fn require_reachable(&self) {
-        let authority = self
-            .endpoint
-            .split_once("://")
-            .map_or(self.endpoint.as_str(), |(_, rest)| rest)
-            .split('/')
-            .next()
-            .unwrap_or_default();
-        let addr = std::net::ToSocketAddrs::to_socket_addrs(authority)
-            .ok()
-            .and_then(|mut addrs| addrs.next());
-        let reached = addr.is_some_and(|addr| {
-            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5)).is_ok()
-        });
-        assert!(
-            reached,
-            "LSR_REQUIRE_MINIO is set but MinIO is unreachable at {}; refusing to pass without running",
-            self.endpoint
-        );
     }
 
     /// Puts every file of a directory replica under `prefix`.
@@ -351,19 +328,11 @@ impl Minio {
 }
 
 #[test]
+#[ignore = "needs MinIO; just test-s3"]
 fn restore_from_minio_matches_dir() {
-    let required = std::env::var_os("LSR_REQUIRE_MINIO").is_some_and(|v| !v.is_empty());
     let Some(minio) = Minio::from_env() else {
-        assert!(
-            !required,
-            "LSR_REQUIRE_MINIO is set but LSR_MINIO_ENDPOINT is not; refusing to skip (just minio-up)"
-        );
-        eprintln!("skipped: set LSR_MINIO_ENDPOINT (just minio-up)");
         return;
     };
-    if required {
-        minio.require_reachable();
-    }
     for fixture in all_fixtures().expect("fixtures") {
         let manifest = Manifest::load(&fixture).expect("manifest");
         let staged = stage(&fixture, &manifest).expect("stage");

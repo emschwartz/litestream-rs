@@ -1,43 +1,8 @@
 //! Source guards for the created-at time types (no reader decides on a last-modified time): who may make a
 //! [`CreatedAt`] and who may look at a bare last-modified time. A walk of
-//! `crates/` with std only.
+//! `crates/` with std only (`walk.rs`, which fails on an empty walk).
 
-use std::fs;
-use std::path::{Path, PathBuf};
-
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n != "target") {
-                rust_files(&path, out);
-            }
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
-
-fn workspace_files() -> Vec<(String, String)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let mut paths = Vec::new();
-    rust_files(&root, &mut paths);
-    paths
-        .into_iter()
-        .filter_map(|path| {
-            let text = fs::read_to_string(&path).ok()?;
-            let rel = path
-                .strip_prefix(&root)
-                .ok()?
-                .to_string_lossy()
-                .replace('\\', "/");
-            Some((format!("crates/{rel}"), text))
-        })
-        .collect()
-}
+use crate::walk::workspace_files;
 
 /// Test code is exempt: a file under `tests/`, a `tests.rs`, or the part of a
 /// source file after its `#[cfg(test)]` line.
@@ -48,10 +13,23 @@ fn production_part<'a>(rel: &str, text: &'a str) -> Option<&'a str> {
     Some(text.split("#[cfg(test)]").next().unwrap_or(text))
 }
 
+/// The files outside `allowed` whose production code holds a needle. Also asserts that each
+/// needle does occur in an allowed file: a guard whose needle matches nothing anywhere (a
+/// renamed type, a moved root) would pass for good.
 fn offenders(needles: &[&str], allowed: &[&str]) -> Vec<String> {
-    workspace_files()
+    let files = workspace_files();
+    let is_allowed = |rel: &str| allowed.iter().any(|ok| rel.starts_with(ok) || rel == *ok);
+    for needle in needles {
+        assert!(
+            files
+                .iter()
+                .any(|(rel, text)| is_allowed(rel) && text.contains(needle)),
+            "{needle:?} occurs in no allowed site {allowed:?}: the guard checks nothing"
+        );
+    }
+    files
         .into_iter()
-        .filter(|(rel, _)| !allowed.iter().any(|ok| rel.starts_with(ok) || rel == ok))
+        .filter(|(rel, _)| !is_allowed(rel))
         .filter(|(rel, _)| !rel.ends_with("created_at_sources.rs"))
         .filter_map(|(rel, text)| {
             let code = production_part(&rel, &text)?;
@@ -117,5 +95,35 @@ fn plan_reference_only_in_oracles() {
     assert!(
         found.is_empty(),
         "the exact as-of planner called from production code: {found:?}"
+    );
+}
+
+/// A bare created-at instant (`.at()`) means a commit, a snapshot's write or
+/// an upload depending on level and origin; a decision about when a
+/// transaction committed reads it through `Stamp`. Each allowed site reads
+/// the instant for something else: stores write and report it, the CLI
+/// prints it, retention and the snapshot interval age files by it (write
+/// time, as Go does with `LastModified`; neither needs it to date a commit),
+/// verify measures skew, and the oracles restate the contract on their own.
+#[test]
+fn bare_created_at_instants_only_in_allowed_sites() {
+    let found = offenders(
+        &[".at()"],
+        &[
+            "crates/core/src/layout.rs",
+            "crates/store-",
+            "crates/cli/src/render.rs",
+            "crates/core/src/maintain/retain.rs",
+            "crates/core/src/maintain.rs",
+            "crates/core/src/verify.rs",
+            "crates/core/src/spec_view.rs",
+            "crates/sim/",
+            "crates/fuzzing/",
+            "crates/compat/",
+        ],
+    );
+    assert!(
+        found.is_empty(),
+        "a created-at instant read outside its sites: {found:?}"
     );
 }

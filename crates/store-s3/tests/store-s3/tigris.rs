@@ -10,6 +10,7 @@
 use std::time::Instant;
 
 use lsr_core::conformance::block_on;
+use lsr_core::needs::{Resource, must};
 use lsr_core::{Clock, PartNumber, ReadLen};
 use lsr_ltx::Timestamp;
 use lsr_store_s3::{
@@ -20,7 +21,9 @@ use crate::real::{self, CREATED_AT_HEADER, RealHarness, Server, WallClock, at, b
 
 fn server() -> Server {
     let var = |name: &str| {
-        std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set: run just test-tigris"))
+        must(Resource::Tigris, || {
+            std::env::var(name).map_err(|_unset| format!("{name} is not set"))
+        })
     };
     Server {
         name: "tigris",

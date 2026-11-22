@@ -7,7 +7,8 @@
 //! created-at times a point-in-time restore reads (Rust's and Go's `litestream-timestamp` metadata, or
 //! the object's `LastModified` for Go before v0.5.16).
 //!
-//! `just compat-s3` starts MinIO, sets `LSR_COMPAT_S3_*` and runs these; unset, they skip.
+//! `just compat-s3` starts MinIO, sets `LSR_COMPAT_S3_*` and runs these; without a server they
+//! fail, unless the runner opted out with `LSR_SKIP=minio` (`lsr_core::needs`).
 //! They never reach a real store: the endpoint must be loopback `http`, credentials come from
 //! those variables only, and every Go and `lsr` process runs without the machine's `AWS_*` and
 //! `LITESTREAM_*` variables (`crates/compat/src/s3.rs`).
@@ -22,12 +23,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lsr_compat::{
-    AppFixture, ENDPOINT_VAR, GoBuild, GoRestore, Kind, MinioEnv, PageEncoding, Remote, Replicator,
-    S3Replica, Schedule, Shape, Summary, Target, builds_in, builds_under_test, fresh, go_restore,
-    lsr_binary, pages_of, position, real_now_ms, restore_with_go, rust_restore, uploaded,
-    wait_boot_file, wait_staged_past, wait_until, wait_uploaded, write_config_for,
+    AppFixture, GoBuild, GoRestore, Kind, MinioEnv, PageEncoding, Remote, Replicator, S3Replica,
+    Schedule, Shape, Summary, Target, builds_in, builds_under_test, fresh, go_restore, lsr_binary,
+    pages_of, position, real_now_ms, restore_with_go, rust_restore, uploaded, wait_boot_file,
+    wait_staged_past, wait_until, wait_uploaded, write_config_for,
 };
 use lsr_core::RestoreTarget;
+use lsr_core::needs::{Resource, need, reachable};
+use lsr_core::{AsOfInside, PlanOutcome, RestoreError, RestoreOptions};
 use lsr_ltx::{Timestamp, Txid};
 
 const UP: Duration = Duration::from_secs(30);
@@ -38,15 +41,14 @@ const PART: u64 = 5 * 1024 * 1024;
 /// Commits per handover turn, each staged before the next.
 const COMMITS: u32 = 8;
 
+/// The MinIO of `just compat-s3`, reachable; fails without it. `None` only when the runner
+/// opted out with `LSR_SKIP=minio`.
 fn minio() -> Option<MinioEnv> {
-    match MinioEnv::from_env() {
-        Ok(Some(env)) => Some(env),
-        Ok(None) => {
-            println!("skipped: {ENDPOINT_VAR} is unset (just compat-s3)");
-            None
-        }
-        Err(e) => panic!("{e}"),
-    }
+    need(Resource::Minio, || {
+        let env = MinioEnv::from_env().map_err(|e| e.to_string())?;
+        reachable(env.endpoint())?;
+        Ok(env)
+    })
 }
 
 /// A prefix unique to the run, holding characters a key must encode.
@@ -160,15 +162,42 @@ fn targets(marks: &[Mark]) -> [(&'static str, RestoreTarget, Target, &[String]);
     ]
 }
 
-fn rust_reads(fixture: &AppFixture, marks: &[Mark], label: &str) {
+/// Rust reads every target. With `commit_dated` false (a Go build that writes no
+/// `litestream-timestamp`), every created-at time is the store's `LastModified`, which can
+/// postdate the commit, so the instant between two uploads may honestly be refused as
+/// inside the file that straddles it. Then Rust must give Go's answer on request
+/// (`TakeEarlier`) and name that file. With `commit_dated` true the refusal is a failure.
+fn rust_reads(fixture: &AppFixture, marks: &[Mark], label: &str, commit_dated: bool) {
     for (name, target, _, want) in targets(marks) {
         let out = fresh(fixture, &format!("rs-{name}.db"));
         let restored = fixture.remote().restore(target, &out).expect("sink");
-        assert!(
-            restored.is_ok(),
-            "{label}: Rust cannot restore {name}: {restored:?}"
-        );
-        assert_eq!(pages_of(&out), want, "{label}: Rust at {name}");
+        match restored {
+            Ok(_) => assert_eq!(pages_of(&out), want, "{label}: Rust at {name}"),
+            Err(RestoreError::NoPlan(ref no))
+                if !commit_dated && matches!(no.outcome(), PlanOutcome::AsOfInsideFile { .. }) =>
+            {
+                assert_eq!(name, "timestamp", "{label}: only as-of is inside a file");
+                let out = fresh(fixture, &format!("rs-{name}-earlier.db"));
+                let options = RestoreOptions {
+                    as_of_inside: AsOfInside::TakeEarlier,
+                };
+                let earlier = fixture
+                    .remote()
+                    .restore_with(target, options, &out)
+                    .expect("sink")
+                    .unwrap_or_else(|e| panic!("{label}: TakeEarlier cannot restore {name}: {e}"));
+                assert!(
+                    earlier.inside_file().is_some(),
+                    "{label}: TakeEarlier names no straddling file"
+                );
+                assert_eq!(
+                    pages_of(&out),
+                    want,
+                    "{label}: Rust at {name}, taking earlier"
+                );
+            }
+            Err(e) => panic!("{label}: Rust cannot restore {name}: {e:?}"),
+        }
     }
 }
 
@@ -202,7 +231,7 @@ fn over_s3_rust_restores_go_replica() {
         let config = config(&fixture, "go.yml", Schedule::LEVEL_ZERO_ONLY);
         let go = start(Kind::Go, &bin, &config, &fixture.dir().join("go.log"));
         let marks = write_rounds(go, &mut fixture);
-        rust_reads(&fixture, &marks, &label);
+        rust_reads(&fixture, &marks, &label, build.writes_created_at_metadata());
         go_reads(&build, &config, &fixture, &marks, &label);
         s3_of(&fixture).delete_all().expect("clean up");
     }
@@ -221,7 +250,7 @@ fn over_s3_go_restores_rust_replica() {
     let config = config(&fixture, "lsr.yml", Schedule::LEVEL_ZERO_ONLY);
     let rust = start(Kind::Rust, &lsr, &config, &fixture.dir().join("lsr.log"));
     let marks = write_rounds(rust, &mut fixture);
-    rust_reads(&fixture, &marks, "lsr wrote");
+    rust_reads(&fixture, &marks, "lsr wrote", true);
     for build in builds_in(PageEncoding::Block) {
         go_reads(&build, &config, &fixture, &marks, "lsr wrote");
     }

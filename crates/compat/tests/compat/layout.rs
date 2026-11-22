@@ -10,9 +10,11 @@ use lsr_compat::workspace_root;
 /// The test targets Cargo discovers under one crate's `tests/`: each top-level `.rs`
 /// file, and each directory holding a `main.rs`.
 fn test_targets(tests: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(tests) else {
+    // A crate without tests/ has no targets; any other read failure must not look like one.
+    if !tests.exists() {
         return Vec::new();
-    };
+    }
+    let entries = fs::read_dir(tests).expect("read a tests/ directory");
     let mut targets: Vec<String> = entries
         .map(|entry| entry.expect("read a tests/ entry").path())
         .filter(|path| {
@@ -29,13 +31,20 @@ fn test_targets(tests: &Path) -> Vec<String> {
 fn every_crate_has_at_most_one_integration_test_binary() {
     let crates = fs::read_dir(workspace_root().join("crates")).expect("read crates/");
     let mut offenders = Vec::new();
+    let mut with_tests = 0;
     for entry in crates {
         let tests = entry.expect("read a crates/ entry").path().join("tests");
         let targets = test_targets(&tests);
+        with_tests += usize::from(!targets.is_empty());
         if targets.len() > 1 {
             offenders.push(targets);
         }
     }
+    // Ten crates have one today; a walk that found none checked nothing.
+    assert!(
+        with_tests >= 5,
+        "only {with_tests} crates have integration tests"
+    );
     assert!(
         offenders.is_empty(),
         "crates with more than one integration test binary (add a module to the crate's \

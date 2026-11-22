@@ -23,9 +23,11 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{SnapshotCause, StopCause};
+use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::upload::UploadState;
+use crate::witness::Witnesses;
 
 /// Whether the actor was asked to stop, which no rebuild forgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +107,11 @@ pub(super) struct Kept {
     pub(super) snapshot_asked: bool,
     /// What the application's checkpoints did between reads.
     pub(super) app: AppCheckpointObserver,
+    /// A staged file whose last read failed verification. One failed read
+    /// says nothing about the stored bytes, so the file and those after it
+    /// are deleted only when a read on a later tick fails too. Kept across
+    /// boots, since boot's sweep is one of the readers.
+    pub(super) suspect_staged: Option<FileKey>,
 }
 
 impl Kept {
@@ -120,6 +127,7 @@ impl Kept {
             live: Live::Idle,
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
+            suspect_staged: None,
         }
     }
 
@@ -139,6 +147,7 @@ impl Kept {
             live,
             snapshot_asked,
             app: _,
+            suspect_staged,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -151,6 +160,7 @@ impl Kept {
             live: live.rebuilt(),
             snapshot_asked: *snapshot_asked,
             app: observer,
+            suspect_staged: *suspect_staged,
         }
     }
 
@@ -300,6 +310,14 @@ pub(super) struct Engine {
     pub(super) maintain: Maintain,
     /// Staged level-0 files through this transaction were pruned (W3).
     pub(super) pruned: Option<Txid>,
+    /// The newest transaction any listing or commit of this engine
+    /// confirmed on the replica. Never lowered, not even by a relist after the
+    /// replica went backwards: an acknowledged id is never taken again for
+    /// other pages, so a snapshot always goes above it.
+    pub(super) acknowledged: Option<Txid>,
+    /// The uploader's tokens for the pending staged files (`crate::witness`):
+    /// held in memory only, so a new engine witnesses again at boot.
+    pub(super) witnesses: Witnesses,
 }
 
 impl Engine {
@@ -315,6 +333,8 @@ impl Engine {
             upload: UploadState::Unknown,
             maintain: Maintain::default(),
             pruned: None,
+            acknowledged: None,
+            witnesses: Witnesses::new(),
         }
     }
 }

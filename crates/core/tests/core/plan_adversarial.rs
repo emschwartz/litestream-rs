@@ -1,11 +1,13 @@
-//! Adversarial planner checks written by the blind review.
+//! Adversarial planner checks written by the blind review: ids near both ends
+//! of the range, refused snapshots, lost created-at times and instants that tie
+//! with them, each outcome held whole to the restore-plan spec (`lsr-spec`).
 
 #[cfg(test)]
 mod review {
 
     use lsr_core::{
         AsOfPlanner, CreatedAtStep, FileInfo, FileKey, Inventory, InventoryError, Level,
-        PlanOutcome, Resolve, ResolvedCreatedAt, RestoreTarget, plan_reference,
+        PlanOutcome, Resolve, ResolvedCreatedAt, RestoreTarget, plan_reference, spec_view,
     };
     use lsr_core::{CreatedAt, ListedTime};
     use lsr_ltx::{Timestamp, Txid, TxidRange};
@@ -17,14 +19,22 @@ mod review {
         min: u64,
         max: u64,
         created: i64,
+        /// The store lost the created-at time and reports the upload time.
+        uploaded: bool,
     }
 
     fn info(f: F) -> FileInfo {
         let r = TxidRange::new(Txid::new(f.min).unwrap(), Txid::new(f.max).unwrap()).unwrap();
+        let at = Timestamp::from_unix_millis(f.created);
+        let created_at = if f.uploaded {
+            CreatedAt::fallback(at)
+        } else {
+            CreatedAt::mtime(at)
+        };
         FileInfo {
             key: FileKey::new(Level::new(f.level).unwrap(), r),
             size: 1,
-            listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(f.created))),
+            listed: ListedTime::Created(created_at),
         }
     }
 
@@ -35,68 +45,6 @@ mod review {
         AsOf(i64),
     }
 
-    fn admits(g: G, f: &F) -> bool {
-        match g {
-            G::Latest => true,
-            G::Txid(n) => f.max <= n,
-            G::AsOf(t) => f.created < t,
-        }
-    }
-
-    /// Reachable-set fixpoint: every transaction a chain can end at.
-    fn reachable_ends(files: &[F], g: G) -> std::collections::BTreeSet<u64> {
-        let ok: Vec<F> = files.iter().copied().filter(|f| admits(g, f)).collect();
-        let mut ends: std::collections::BTreeSet<u64> =
-            ok.iter().filter(|f| f.min == 1).map(|f| f.max).collect();
-        loop {
-            let mut grew = false;
-            for f in ok.iter().filter(|f| f.level < 9) {
-                if ends
-                    .iter()
-                    .any(|&e| f.min <= e.saturating_add(1) && f.max > e)
-                    && ends.insert(f.max)
-                {
-                    grew = true;
-                }
-            }
-            if !grew {
-                return ends;
-            }
-        }
-    }
-
-    fn want_end(files: &[F], g: G) -> Option<u64> {
-        match g {
-            G::Txid(n) => Some(n),
-            G::Latest | G::AsOf(_) => files.iter().filter(|f| admits(g, f)).map(|f| f.max).max(),
-        }
-    }
-
-    /// Files later than the instant that cut through the state at `end`: usable,
-    /// linking, two or more transactions past it, and with no file dating the
-    /// transaction right after `end`. Only a level 0-8 file ending there dates
-    /// it: a snapshot is recorded as created when written, any time after its newest
-    /// transaction. Written from the reachability argument, not from the
-    /// planner.
-    fn straddlers(files: &[F], g: G, end: u64) -> Vec<F> {
-        let Some(one_past) = end.checked_add(1) else {
-            return Vec::new();
-        };
-        if files.iter().any(|f| f.level < 9 && f.max == one_past) {
-            return Vec::new();
-        }
-        files
-            .iter()
-            .copied()
-            .filter(|f| {
-                !admits(g, f)
-                    && (f.level < 9 || f.min == 1)
-                    && f.min <= one_past
-                    && f.max > one_past
-            })
-            .collect()
-    }
-
     fn spec(base: u64) -> impl Strategy<Value = F> {
         (
             0u8..=9,
@@ -104,8 +52,9 @@ mod review {
             0u64..12,
             0i64..12,
             prop::bool::weighted(0.6),
+            prop::bool::weighted(0.2),
         )
-            .prop_map(move |(level, a, b, created, start_at_one)| {
+            .prop_map(move |(level, a, b, created, start_at_one, uploaded)| {
                 let (lo, hi) = (a.min(b), a.max(b));
                 let min = if level == 9 && start_at_one {
                     1
@@ -118,6 +67,7 @@ mod review {
                     min,
                     max,
                     created,
+                    uploaded,
                 }
             })
     }
@@ -138,7 +88,7 @@ mod review {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(20_000))]
         #[test]
-        fn plan_matches_the_reachable_set((files, g) in case()) {
+        fn plan_is_what_the_contract_allows((files, g) in case()) {
             // The generator may repeat a key with another created-at time; a real listing
             // cannot, and the inventory refuses it, so keep the first of each.
             let mut seen = std::collections::HashSet::new();
@@ -158,72 +108,24 @@ mod review {
                 let lazy = AsOfPlanner::new(&inv, instant).advance(&ResolvedCreatedAt::default());
                 prop_assert_eq!(lazy, Resolve::Done(out.clone()));
             }
-            let ends = reachable_ends(&kept, g);
-            let want = match g {
-                G::AsOf(_) => ends.iter().max().copied(),
-                G::Latest | G::Txid(_) => want_end(&kept, g),
-            };
-            // An instant before a hole: files of any created-at time lie past the end and
-            // none of them starts at or before one past it.
-            let before_a_hole = |w: u64| {
-                matches!(g, G::AsOf(_))
-                    && kept.iter().any(|f| f.max > w)
-                    && !kept.iter().any(|f| {
-                        (f.level < 9 || f.min == 1) && f.min <= w.saturating_add(1) && f.max > w
-                    })
-            };
-            let exists = want.is_some_and(|w| ends.contains(&w) && !before_a_hole(w));
-            let straddlers: Vec<F> = match (exists, want, g) {
-                (true, Some(w), G::AsOf(_)) => straddlers(&kept, g, w),
-                _ => Vec::new(),
-            };
-            let inside = !straddlers.is_empty();
-            prop_assert_eq!(matches!(out, PlanOutcome::Plan(_)), exists && !inside, "{:?}", out);
-            prop_assert_eq!(
-                matches!(out, PlanOutcome::AsOfInsideFile { .. }),
-                inside,
-                "{:?}",
-                out
+            // The whole outcome, payloads included, against the contract.
+            let judgement = spec_view::judge(&inv, target).expect("the spec takes every inventory");
+            prop_assert!(
+                !judgement.allowed.is_empty(),
+                "the contract is silent ({:?}) on {:?} {:?}",
+                judgement.by,
+                kept,
+                g
             );
-            if let PlanOutcome::AsOfInsideFile { file, .. } = &out {
-                prop_assert!(
-                    straddlers.iter().any(|s| s.level == file.level().get()
-                        && s.min == file.range().min().get()
-                        && s.max == file.range().max().get()),
-                    "{:?} is not a straddler",
-                    file
-                );
-            }
-            if let PlanOutcome::BeyondNewest { requested, newest } = &out {
-                prop_assert_eq!(Some(newest.get()), kept.iter().map(|f| f.max).max());
-                prop_assert!(requested > newest);
-            }
-            if let PlanOutcome::InsideFile { requested, file } = &out {
-                prop_assert!(file.range().max() > *requested);
-                prop_assert!(inv.files().iter().any(|i| i.key == *file));
-                // Usable, and linking to the chain: it starts at most one past
-                // the furthest reach (transaction 1 when no chain starts).
-                prop_assert!(!file.level().is_snapshot() || file.range().min().get() == 1);
-                let reach = ends.iter().max().copied().unwrap_or(0);
-                prop_assert!(file.range().min().get() <= reach.saturating_add(1));
-            }
-            if let PlanOutcome::Plan(c) | PlanOutcome::AsOfInsideFile { chain: c, .. } = &out {
-                prop_assert_eq!(Some(c.reaches().get()), want);
-                prop_assert_eq!(c.files().last().map(|f| f.key.range().max()), Some(c.reaches()));
-                let mut reach = 0u64;
-                for (i, f) in c.files().iter().enumerate() {
-                    prop_assert!(inv.files().contains(f));
-                    let k = kept.iter().find(|k| k.level == f.key.level().get() && k.min == f.key.range().min().get() && k.max == f.key.range().max().get()).unwrap();
-                    prop_assert!(admits(g, k));
-                    if i == 0 { prop_assert!(k.min == 1); } else {
-                        prop_assert!(k.level < 9 && k.min <= reach.saturating_add(1) && k.max > reach);
-                    }
-                    reach = k.max;
-                }
-            }
-            if let PlanOutcome::Gap { have_through, .. } = &out {
-                prop_assert_eq!(ends.iter().max().copied(), Some(have_through.get()), "have_through is not the furthest reach");
-            }
+            prop_assert!(
+                judgement.admits(&spec_view::outcome(&out)),
+                "{:?} for {:?} {:?}: the contract allows {:?} ({:?})",
+                out,
+                kept,
+                g,
+                judgement.allowed,
+                judgement.by
+            );
         }
     }
 
@@ -233,6 +135,7 @@ mod review {
             min,
             max,
             created,
+            uploaded: false,
         })
     }
 

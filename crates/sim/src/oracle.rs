@@ -23,7 +23,10 @@
 //!   around each created-at time get the contract's answer and are never
 //!   newer than the instant (`as_of`);
 //! - with retention windows, no delete removed a file younger than its
-//!   window (`retention`).
+//!   window (`retention`);
+//! - after every tick, each level-0 file the replica took is one the engine
+//!   incarnation that put it staged itself, or holds exactly what the WAL it
+//!   booted on held for its range (`witness`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -132,6 +135,21 @@ pub enum Violation {
         /// The first page that differs, or one past the shorter database.
         first_diff: u32,
     },
+    /// The engine deleted a replica object as rotten whose stored bytes are
+    /// sound, after fewer than two reads that returned other bytes: one bad
+    /// read is evidence about the read, not the object.
+    #[error("{key} was deleted as rotten on one bad read of sound bytes")]
+    DeletedOnOneRead {
+        /// The object.
+        key: String,
+    },
+    /// A running engine listed the replica while another writer's file stood
+    /// past its own position, and did not stop.
+    #[error("the engine listed {key}, another writer's file past its position, and kept going")]
+    OtherWriterMissed {
+        /// The other writer's file.
+        key: String,
+    },
     /// A restore the replica should answer was refused.
     #[error("restoring {target:?} was refused: {outcome:?}")]
     RestoreRefused {
@@ -213,6 +231,20 @@ pub enum Violation {
         /// The latest time the engine had been told when it deleted it.
         latest: Timestamp,
     },
+    /// The history judge (`lsr-history`), which reads only restored content and the commit
+    /// log, does not accept a restore.
+    #[error("history judge: {0}")]
+    History(lsr_history::Anomaly),
+    /// A level-0 file reached the replica that the engine incarnation which
+    /// put it neither staged itself nor could have re-derived from the WAL
+    /// it booted on: a staged file put back or replaced, uploaded on trust.
+    #[error("{key} was put with bytes nothing witnessed: {why}")]
+    UnwitnessedPut {
+        /// The file.
+        key: String,
+        /// The first rule of the boot WAL's range it broke.
+        why: String,
+    },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {
@@ -275,6 +307,7 @@ impl Acked {
     pub fn on_did(&mut self, did: &Did) {
         match did {
             Did::Put(info) => self.record(info.key.range().max()),
+            Did::Diverged { confirmed, .. } => self.record(*confirmed),
             Did::Listed {
                 newest: Some(newest),
             } => self.record(*newest),
@@ -302,6 +335,9 @@ pub struct Checked {
     pub as_of_inside: u32,
     /// `AsOf` restores the contract refuses.
     pub as_of_refused: u32,
+    /// Files in `AsOf`-judged listings whose created-at time the store fell
+    /// back to (no stored metadata), counted once per judged listing.
+    pub as_of_fallback: u32,
     /// Replica files whose created-at time was judged against the staging
     /// recorder.
     pub stamps: u32,
@@ -326,6 +362,7 @@ impl Checked {
         reach.add("check.asof.planned", u64::from(self.as_of_planned));
         reach.add("check.asof.inside", u64::from(self.as_of_inside));
         reach.add("check.asof.refused", u64::from(self.as_of_refused));
+        reach.add("check.asof.fallback", u64::from(self.as_of_fallback));
         reach.add("check.stamps", u64::from(self.stamps));
         reach.add("check.deletes", u64::from(self.deletes));
         reach.add("check.lost", u64::from(self.lost));
@@ -348,6 +385,8 @@ fn covers(
         || model.rewound()
         || !ground.lost.is_empty();
     let mut cover: BTreeMap<Txid, CommitId> = BTreeMap::new();
+    // The last level-0 put of each id, by recorder position.
+    let mut replaced: BTreeMap<Txid, usize> = BTreeMap::new();
     for (at, event) in recorder.events().iter().enumerate() {
         let RecorderEvent::Put {
             key,
@@ -386,10 +425,15 @@ fn covers(
                 if key.level().get() == 0 {
                     noted.or(known)
                 } else {
-                    known.or(noted)
+                    foreign_cover(ground, &cover, &replaced, max, at)
+                        .or(known)
+                        .or(noted)
                 }
             }
         };
+        if key.level().get() == 0 {
+            replaced.insert(max, at);
+        }
         let Some(commit) = commit else { continue };
         match cover.get(&max) {
             // A put the store reported failed or wrong may be put again from
@@ -417,6 +461,37 @@ fn covers(
         increasing(&cover)?;
     }
     Ok(cover)
+}
+
+/// The commit a file compacted through `txid` at recorder position `at`
+/// holds when another writer's file stood at `txid` then. Another writer's
+/// put bypasses the recorder; the simulator puts one only above everything
+/// the replica holds, so a compacted file inside its window (from its newest
+/// put until the operator removed it or the engine put its own level-0 file
+/// there) was built from it, whatever a rolled-back file once held there.
+fn foreign_cover(
+    ground: Ground<'_>,
+    cover: &BTreeMap<Txid, CommitId>,
+    replaced: &BTreeMap<Txid, usize>,
+    txid: Txid,
+    at: usize,
+) -> Option<CommitId> {
+    let (index, ((_, copied), (_, put))) = ground
+        .foreign
+        .iter()
+        .zip(ground.foreign_put)
+        .enumerate()
+        .rfind(|(_, ((theirs, _), (_, when)))| *theirs == txid && *when <= at)?;
+    // Recorder lengths cannot order a removal against a later put of the same
+    // id when nothing was recorded between them; the put's index can.
+    let removed = ground
+        .foreign_removed
+        .iter()
+        .any(|(which, when)| *which == index && *when <= at);
+    if removed || replaced.get(&txid).is_some_and(|when| when >= put) {
+        return None;
+    }
+    cover.get(copied).copied()
 }
 
 /// A later transaction id never covers an earlier commit.
@@ -474,6 +549,12 @@ pub struct Ground<'a> {
     /// Objects the store damaged as it published them: a restore may stop on
     /// one with a typed error.
     pub damaged: &'a [FileKey],
+    /// Another writer's files the operator removed, by index in
+    /// [`Self::foreign`], with the replica recorder's length at the removal.
+    pub foreign_removed: &'a [(usize, usize)],
+    /// Another writer's files, with the replica recorder's length when each
+    /// was put.
+    pub foreign_put: &'a [(Txid, usize)],
 }
 
 /// Nothing lost.
@@ -489,6 +570,8 @@ impl Default for Ground<'_> {
             lost: &NONE_LOST,
             foreign: &[],
             damaged: &[],
+            foreign_removed: &[],
+            foreign_put: &[],
         }
     }
 }
@@ -575,8 +658,10 @@ pub fn check_with(
 
 mod as_of;
 mod retention;
+mod witness;
 
 pub use retention::Windows;
+pub use witness::{Incarnation, Judged, judge_put};
 
 #[cfg(test)]
 mod tests;

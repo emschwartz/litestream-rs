@@ -44,7 +44,8 @@ use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, Position, ReadLockHold, SyncedThrough};
 use crate::source::{CheckpointMode, CheckpointRun, Checkpointer, PageSource, WalSource};
 use crate::store::ObjectStore;
-use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
+use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
+use crate::witness::Witnessed;
 
 /// When to checkpoint. `None` turns a trigger off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,6 +352,7 @@ impl Reached {
 pub struct Staged {
     reached: Reached,
     files: Vec<FileInfo>,
+    witnesses: Vec<Witnessed>,
 }
 
 impl Staged {
@@ -385,6 +387,12 @@ impl Staged {
     #[must_use]
     pub fn files(&self) -> &[FileInfo] {
         &self.files
+    }
+
+    /// The uploader's tokens for [`Self::files`]: this process wrote them.
+    #[must_use]
+    pub fn witnesses(&self) -> &[Witnessed] {
+        &self.witnesses
     }
 }
 
@@ -431,6 +439,7 @@ struct Protocol<'a, W, P, C, L> {
     now: Timestamp,
     good: Reached,
     files: Vec<FileInfo>,
+    witnesses: Vec<Witnessed>,
     run: Option<CheckpointRun>,
 }
 
@@ -469,6 +478,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     async fn step(&mut self, step: Step) -> Result<(), Fault> {
         let mut reader = self.reader()?;
         let committed = self.wal.committed().map_err(Fault::from_source)?;
+        wal_barrier(&mut *self.wal, &committed)?;
         let cfg = SyncConfig {
             cap: None,
             ..self.cfg
@@ -496,10 +506,12 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             } => return Err(Fault::WalMoved),
             Synced::Wrote {
                 file,
+                witness,
                 end: StepEnd::Through(through),
                 ..
             } => {
                 self.files.push(file);
+                self.witnesses.push(witness);
                 through
             }
             Synced::Wrote {
@@ -629,6 +641,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         now,
         good: Reached::Through(proof),
         files: Vec::new(),
+        witnesses: Vec::new(),
         run: None,
     };
     let result = match mode {
@@ -638,6 +651,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
     let staged = Staged {
         reached: protocol.good,
         files: protocol.files,
+        witnesses: protocol.witnesses,
     };
     match result {
         Ok(outcome) => Ok(Checkpointed {

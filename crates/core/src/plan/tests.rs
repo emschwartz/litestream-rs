@@ -1,5 +1,6 @@
 use super::*;
 use crate::layout::{CreatedAt, ListedTime};
+use crate::spec_view;
 use lsr_ltx::TxidRange;
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -611,18 +612,88 @@ fn a_file_that_pins_the_next_transaction_removes_the_doubt() {
 fn a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction() {
     // L9 1-2 ends one past the chain, but a snapshot is recorded as created when it is
     // written, long after transaction 2 committed, so it says nothing about
-    // when 2 committed. L1 2-5 still straddles the instant: the answer is
-    // the one the listing gives without the snapshot, never a plan.
+    // when 2 committed. The instant stays inside a file, never a plan: the
+    // nearest-ending straddler is the snapshot itself.
     let files = [file(0, 1, 1, 100), file(9, 1, 2, 1000), file(1, 2, 5, 500)];
     let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(300));
-    let without = plan_reference(&inv(&[files[0], files[2]]), target);
     let outcome = plan_reference(&inv(&files), target);
-    assert_eq!(outcome, without);
     let PlanOutcome::AsOfInsideFile { chain, file } = outcome else {
         panic!("expected AsOfInsideFile, got {outcome:?}");
     };
     assert_eq!(chain.reaches(), txid(1));
+    assert_eq!(file, key(9, 1, 2));
+    let without = plan_reference(&inv(&[files[0], files[2]]), target);
+    let PlanOutcome::AsOfInsideFile { file, .. } = without else {
+        panic!("expected AsOfInsideFile, got {without:?}");
+    };
     assert_eq!(file, key(1, 2, 5));
+}
+
+/// A file whose store lost its created-at time, so the listing carries the
+/// object's last-modified time ([`CreatedAt::fallback`]): its upload, not
+/// its newest commit.
+fn fallback(level: u8, min: u64, max: u64, uploaded: i64) -> FileInfo {
+    FileInfo {
+        listed: ListedTime::Created(CreatedAt::fallback(Timestamp::from_unix_millis(uploaded))),
+        ..file(level, min, max, 0)
+    }
+}
+
+#[test]
+fn a_fallback_created_at_does_not_date_the_next_transaction() {
+    // Transaction 3 reached level 0 at 300; the level-1 file that holds it was
+    // uploaded at 900 by a writer that stored no created-at time. 900 is when
+    // the object was written, not when 3 committed, so the instant 350 may
+    // fall after 3: a plan to 2 would silently drop it.
+    let files = [
+        file(9, 1, 1, 100),
+        file(0, 2, 2, 200),
+        fallback(1, 2, 3, 900),
+    ];
+    let outcome = plan_reference(
+        &inv(&files),
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(350)),
+    );
+    let PlanOutcome::AsOfInsideFile { chain, file } = outcome else {
+        panic!("expected AsOfInsideFile, got {outcome:?}");
+    };
+    assert_eq!(chain.reaches(), txid(2));
+    assert_eq!(file, key(1, 2, 3));
+    // The same file with its created-at time stored dates transaction 3.
+    let stored = [files[0], files[1], at(1, 2, 3)];
+    let outcome = plan_reference(
+        &inv(&stored),
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(250)),
+    );
+    assert_eq!(keys(&outcome), vec![key(9, 1, 1), key(0, 2, 2)]);
+}
+
+#[test]
+fn a_fallback_created_at_before_the_instant_still_admits_the_file() {
+    // An upload time before the instant bounds the commit before it too.
+    let files = [file(9, 1, 1, 100), fallback(1, 2, 3, 300)];
+    let outcome = plan_reference(
+        &inv(&files),
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(350)),
+    );
+    assert_eq!(keys(&outcome), vec![key(9, 1, 1), key(1, 2, 3)]);
+}
+
+#[test]
+fn a_snapshot_ending_right_after_the_chain_is_the_straddler_alone() {
+    // L9 1-2 is written at 1000; transaction 2 may have committed before the
+    // instant 300 or after it. Nothing else dates 2, so the chain at 1 is
+    // not certified.
+    let files = [file(0, 1, 1, 100), file(9, 1, 2, 1000)];
+    let outcome = plan_reference(
+        &inv(&files),
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(300)),
+    );
+    let PlanOutcome::AsOfInsideFile { chain, file } = outcome else {
+        panic!("expected AsOfInsideFile, got {outcome:?}");
+    };
+    assert_eq!(chain.reaches(), txid(1));
+    assert_eq!(file, key(9, 1, 2));
 }
 
 #[test]
@@ -657,18 +728,18 @@ fn the_other_targets_never_say_inside_file_for_a_timestamp() {
     }
 }
 
-// The oracle. It shares no code with the planner: its own file model, its
-// own eligibility, and a search over every chain instead of a greedy sweep.
+// The generated histories. Their oracle is the restore-plan spec (`lsr-spec`,
+// through `crate::spec_view`), which cannot reach the planner's code.
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-struct Spec {
+struct Made {
     level: u8,
     min: u64,
     max: u64,
     created: i64,
 }
 
-impl Spec {
+impl Made {
     fn info(self) -> FileInfo {
         file(self.level, self.min, self.max, self.created)
     }
@@ -689,95 +760,6 @@ impl Goal {
             Self::AsOf(t) => RestoreTarget::AsOf(Timestamp::from_unix_millis(t)),
         }
     }
-
-    fn admits(self, spec: &Spec) -> bool {
-        match self {
-            Self::Latest => true,
-            Self::Txid(n) => spec.max <= n,
-            Self::AsOf(t) => spec.created < t,
-        }
-    }
-}
-
-/// The transaction a correct restore must end at, if any file qualifies.
-/// An instant ends at the furthest state some chain of admitted files
-/// reaches, whatever else is admitted.
-fn model_end(files: &[Spec], goal: Goal) -> Option<u64> {
-    match goal {
-        Goal::Txid(n) => Some(n),
-        Goal::Latest => files.iter().map(|s| s.max).max(),
-        Goal::AsOf(_) => {
-            let admitted: Vec<&Spec> = files.iter().filter(|s| goal.admits(s)).collect();
-            admitted
-                .iter()
-                .map(|s| s.max)
-                .filter(|end| {
-                    admitted
-                        .iter()
-                        .filter(|b| b.min == 1)
-                        .any(|b| some_chain_ends_at(&admitted, b.max, *end))
-                })
-                .max()
-        }
-    }
-}
-
-/// Every chain, depth first, without memoising: whether any ends at [`end`].
-fn some_chain_ends_at(files: &[&Spec], reach: u64, end: u64) -> bool {
-    if reach == end {
-        return true;
-    }
-    files
-        .iter()
-        .filter(|s| s.level < 9 && s.min <= reach.saturating_add(1) && s.max > reach)
-        .any(|s| some_chain_ends_at(files, s.max, end))
-}
-
-fn model_has_plan(files: &[Spec], goal: Goal) -> bool {
-    let Some(end) = model_end(files, goal) else {
-        return false;
-    };
-    let admitted: Vec<&Spec> = files.iter().filter(|s| goal.admits(s)).collect();
-    admitted
-        .iter()
-        .filter(|s| s.min == 1)
-        .any(|s| some_chain_ends_at(&admitted, s.max, end))
-        && !model_hole(files, goal, end)
-}
-
-/// An instant before a hole: some file, of any created-at time, lies past the end,
-/// and none of them starts at or before one past it.
-fn model_hole(files: &[Spec], goal: Goal, end: u64) -> bool {
-    let Goal::AsOf(_) = goal else {
-        return false;
-    };
-    files.iter().any(|s| s.max > end)
-        && !files
-            .iter()
-            .any(|s| (s.level < 9 || s.min == 1) && s.min <= end.saturating_add(1) && s.max > end)
-}
-
-/// Whether an instant cuts through a file: some usable file later than the
-/// instant links to the end and holds two or more transactions past it, no
-/// level 0-8 file ends right after the end (which would date that
-/// transaction; a snapshot is recorded as created when written, so it dates nothing).
-fn model_straddlers(files: &[Spec], goal: Goal, end: u64) -> Vec<Spec> {
-    let Goal::AsOf(_) = goal else {
-        return Vec::new();
-    };
-    let Some(one_past) = end.checked_add(1) else {
-        return Vec::new();
-    };
-    if files.iter().any(|s| s.level < 9 && s.max == one_past) {
-        return Vec::new();
-    }
-    files
-        .iter()
-        .filter(|s| {
-            !goal.admits(s) && (s.level < 9 || s.min == 1) && s.min <= one_past && s.max > one_past
-        })
-        .copied()
-        .collect()
 }
 
 /// One generated replica: [`n`] transactions, compactions, snapshots, then a
@@ -785,7 +767,7 @@ fn model_straddlers(files: &[Spec], goal: Goal, end: u64) -> Vec<Spec> {
 /// histories sit against `Txid::MAX`.
 #[derive(Clone, Debug)]
 struct History {
-    files: Vec<Spec>,
+    files: Vec<Made>,
     base: u64,
 }
 
@@ -805,7 +787,7 @@ fn history() -> impl Strategy<Value = History> {
             let id = |idx: u64| base.saturating_add(idx);
             let mut files = Vec::new();
             for txn in 1..=n {
-                files.push(Spec {
+                files.push(Made {
                     level: 0,
                     min: id(txn),
                     max: id(txn),
@@ -814,7 +796,7 @@ fn history() -> impl Strategy<Value = History> {
             }
             for (level, a, b, jitter) in compactions {
                 let (min, max) = (a.min(b).min(n), a.max(b).min(n));
-                files.push(Spec {
+                files.push(Made {
                     level,
                     min: id(min),
                     max: id(max),
@@ -824,7 +806,7 @@ fn history() -> impl Strategy<Value = History> {
             for (end, malformed, start, jitter) in snapshots {
                 let max = end.min(n);
                 let min = if malformed { id(start.min(max)) } else { 1 };
-                files.push(Spec {
+                files.push(Made {
                     level: 9,
                     min,
                     max: id(max),
@@ -852,36 +834,6 @@ fn case() -> impl Strategy<Value = (History, Goal)> {
         let base = history.base;
         (Just(history), goal(base))
     })
-}
-
-fn assert_chain_is_valid(chain: &ContiguousChain, files: &[Spec], goal: Goal) {
-    let listed: Vec<(u8, u64, u64)> = files.iter().map(|s| (s.level, s.min, s.max)).collect();
-    let infos = chain.files();
-    let mut reach = 0u64;
-    for (i, info) in infos.iter().enumerate() {
-        let (level, min, max) = (
-            info.key.level().get(),
-            info.key.range().min().get(),
-            info.key.range().max().get(),
-        );
-        assert!(listed.contains(&(level, min, max)), "not in the inventory");
-        if i == 0 {
-            assert!(min == 1, "first file must begin at the first transaction");
-        } else {
-            assert!(
-                level < 9 && min <= reach.saturating_add(1) && max > reach,
-                "chain invariant"
-            );
-        }
-        let spec = files
-            .iter()
-            .find(|s| (s.level, s.min, s.max) == (level, min, max))
-            .unwrap();
-        assert!(goal.admits(spec), "ineligible file in the chain");
-        reach = max;
-    }
-    assert_eq!(Some(reach), model_end(files, goal));
-    assert_eq!(chain.reaches().get(), reach);
 }
 
 proptest! {
@@ -949,10 +901,8 @@ proptest! {
         let (PlanOutcome::Plan(chain) | PlanOutcome::AsOfInsideFile { chain, .. }) = &outcome else {
             return Ok(());
         };
-        let reach = chain.reaches();
-        let continues = infos.iter().any(|i| {
-            is_usable_beyond(i) && touches(i.key.range().min(), reach) && i.key.range().max() > reach
-        });
+        let reach = chain.reaches().get();
+        let continues = infos.iter().any(|i| spec_view::key(i.key).passes(reach));
         if !continues {
             return Ok(());
         }
@@ -960,9 +910,10 @@ proptest! {
         let kept: Vec<FileInfo> = infos
             .into_iter()
             .filter(|i| {
+                let key = spec_view::key(i.key);
                 let stray = i.created_at().expect("an exact created-at time").at() < instant
-                    && !touches(i.key.range().min(), reach)
-                    && i.key.range().max() > reach;
+                    && !key.links(reach)
+                    && key.max > reach;
                 !stray
             })
             .collect();
@@ -971,60 +922,22 @@ proptest! {
     }
 
     #[test]
-    fn plan_agrees_with_the_exhaustive_model(
+    fn plan_is_what_the_contract_allows(
         (history, goal) in case(),
         order in prop::collection::vec(any::<u32>(), 40),
     ) {
         let infos: Vec<FileInfo> = history.files.iter().map(|s| s.info()).collect();
         let inventory = Inventory::from_files(infos.clone()).unwrap();
         let outcome = plan_reference(&inventory, goal.target());
-        let has_plan = model_has_plan(&history.files, goal);
-        let straddlers = match model_end(&history.files, goal) {
-            Some(end) if has_plan => model_straddlers(&history.files, goal, end),
-            Some(_) | None => Vec::new(),
-        };
-        let inside = !straddlers.is_empty();
-        prop_assert_eq!(
-            matches!(outcome, PlanOutcome::Plan(_)),
-            has_plan && !inside,
-            "{:?}",
-            outcome
+        let judgement = spec_view::judge(&inventory, goal.target()).expect("the spec takes every inventory");
+        prop_assert!(!judgement.allowed.is_empty(), "the contract is silent: {:?}", judgement.by);
+        prop_assert!(
+            judgement.admits(&spec_view::outcome(&outcome)),
+            "{:?}: the contract allows {:?} ({:?})",
+            outcome,
+            judgement.allowed,
+            judgement.by
         );
-        prop_assert_eq!(
-            matches!(outcome, PlanOutcome::AsOfInsideFile { .. }),
-            inside,
-            "{:?}",
-            outcome
-        );
-        match &outcome {
-            PlanOutcome::Plan(chain) => assert_chain_is_valid(chain, &history.files, goal),
-            PlanOutcome::AsOfInsideFile { chain, file } => {
-                assert_chain_is_valid(chain, &history.files, goal);
-                let named = straddlers.iter().find(|s| {
-                    (s.level, s.min, s.max)
-                        == (file.level().get(), file.range().min().get(), file.range().max().get())
-                });
-                prop_assert!(named.is_some(), "{:?} is not a straddler", file);
-            }
-            PlanOutcome::Gap { have_through, next_starts } => {
-                prop_assert!(next_starts.get() > have_through.get().saturating_add(1));
-            }
-            PlanOutcome::BeyondNewest { requested, newest } => {
-                let top = history.files.iter().map(|s| s.max).max();
-                prop_assert_eq!(Some(newest.get()), top);
-                prop_assert!(requested > newest);
-            }
-            PlanOutcome::InsideFile { requested, file } => {
-                prop_assert!(file.range().max() > *requested);
-                let listed = history.files.iter().any(|s| {
-                    (s.level, s.min, s.max)
-                        == (file.level().get(), file.range().min().get(), file.range().max().get())
-                });
-                prop_assert!(listed);
-            }
-            PlanOutcome::EmptyReplica => prop_assert!(history.files.is_empty()),
-            PlanOutcome::NoSnapshot { .. } | PlanOutcome::MalformedSnapshot { .. } => {}
-        }
         // A real permutation of the input (keys are random sort keys): the
         // inventory is the same value and so is the plan.
         let mut shuffled: Vec<(u32, FileInfo)> = order
@@ -1053,4 +966,19 @@ fn verify_recheck_rejects_a_chain_with_a_gap() {
     broken.files.push(at(0, 9, 12));
     broken.reaches = txid(12);
     assert!(!broken.is_contiguous(&listing));
+}
+
+/// The re-check also refuses a chain that is contiguous but names a file the
+/// listing does not hold: each half of the check must be able to fail alone.
+#[test]
+fn verify_recheck_rejects_a_contiguous_chain_with_an_unlisted_file() {
+    let listing = inv(&[at(9, 1, 3), at(0, 4, 6)]);
+    let PlanOutcome::Plan(chain) = plan(&listing, KeyTarget::Latest) else {
+        panic!("expected a plan");
+    };
+    let mut extended = chain.clone();
+    extended.files.push(at(0, 7, 9));
+    extended.reaches = txid(9);
+    assert!(!extended.is_contiguous(&listing));
+    assert!(extended.is_contiguous(&inv(&[at(9, 1, 3), at(0, 4, 6), at(0, 7, 9)])));
 }

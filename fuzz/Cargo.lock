@@ -89,6 +89,7 @@ name = "lsr-core"
 version = "0.0.0"
 dependencies = [
  "lsr-ltx",
+ "lsr-spec",
  "lsr-wal",
  "thiserror",
 ]
@@ -105,8 +106,10 @@ dependencies = [
 name = "lsr-fuzzing"
 version = "0.0.0"
 dependencies = [
+ "arbitrary",
  "lsr-core",
  "lsr-ltx",
+ "lsr-spec",
  "lsr-wal",
 ]
 
@@ -118,6 +121,10 @@ dependencies = [
  "lz4_flex",
  "thiserror",
 ]
+
+[[package]]
+name = "lsr-spec"
+version = "0.0.0"
 
 [[package]]
 name = "lsr-wal"

@@ -136,6 +136,8 @@ struct FaultState {
     rng: SeededEntropy,
     damaged: Vec<FileKey>,
     rejected: Vec<FileKey>,
+    // Objects a flipped byte reached on a read, once per such read.
+    flipped: Vec<FileKey>,
     // Reads, listings and created-at times one batch may hold.
     widths: [NonZeroUsize; 3],
     // Batch calls that held more than one item.
@@ -271,6 +273,13 @@ impl FaultHandle {
         lock(&self.state).rejected.clone()
     }
 
+    /// The objects a [`FaultShape::FlipByteOnRead`] reached, once per read it
+    /// changed: a read that returned other bytes than the store holds.
+    #[must_use]
+    pub fn flipped(&self) -> Vec<FileKey> {
+        lock(&self.state).flipped.clone()
+    }
+
     /// Lets a batch of `kind` hold `width` items. Callers then take their
     /// batched paths; the batch still runs one item at a time, last item
     /// first (see [`Faults`]), so the run stays deterministic.
@@ -338,6 +347,7 @@ impl<S> Faults<S> {
             schedule,
             rng: SeededEntropy::new(seed),
             damaged: Vec::new(),
+            flipped: Vec::new(),
             rejected: Vec::new(),
             widths: [NonZeroUsize::MIN; 3],
             batched: 0,
@@ -394,10 +404,16 @@ const fn width_slot(kind: BatchKind) -> usize {
     }
 }
 
-fn flip(bytes: &mut [u8], offset: u64, at: u64) {
+/// Flips the byte at object offset `at` when `bytes`, read from `offset`,
+/// holds it; whether it did.
+fn flip(bytes: &mut [u8], offset: u64, at: u64) -> bool {
     let index = at.checked_sub(offset).and_then(|i| usize::try_from(i).ok());
-    if let Some(byte) = index.and_then(|i| bytes.get_mut(i)) {
-        *byte ^= 1;
+    match index.and_then(|i| bytes.get_mut(i)) {
+        Some(byte) => {
+            *byte ^= 1;
+            true
+        }
+        None => false,
     }
 }
 
@@ -422,8 +438,10 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             return Err(err.clone());
         }
         let mut bytes = self.inner.read(key, offset, len).await?;
-        if let Verdict::Flip(at) = verdict {
-            flip(&mut bytes, offset, at);
+        if let Verdict::Flip(at) = verdict
+            && flip(&mut bytes, offset, at)
+        {
+            lock(&self.state).flipped.push(*key);
         }
         Ok(bytes)
     }
@@ -445,8 +463,10 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             return Err(err.clone());
         }
         let (mut bytes, created_at) = self.inner.read_with_created_at(file, len).await?;
-        if let Verdict::Flip(at) = verdict {
-            flip(&mut bytes, 0, at);
+        if let Verdict::Flip(at) = verdict
+            && flip(&mut bytes, 0, at)
+        {
+            lock(&self.state).flipped.push(file.key);
         }
         Ok((bytes, created_at))
     }
@@ -737,6 +757,9 @@ pub enum RecorderEvent {
         created_at: Timestamp,
         /// The bytes written.
         size: u64,
+        /// [`content_digest`] of the bytes written: what tells a file the
+        /// engine staged from one put in its place with the same name.
+        digest: u64,
         /// The simulator's clock when the store took it, read below the code
         /// under test: what the oracle judges created-at times against.
         at: Timestamp,
@@ -936,6 +959,7 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
             created_at,
             head: Vec::new(),
             wrote: 0,
+            digest: DIGEST_SEED,
             log: self.log.clone(),
         })
     }
@@ -964,7 +988,36 @@ pub struct TapUpload<S: ObjectStore> {
     created_at: Timestamp,
     head: Vec<u8>,
     wrote: u64,
+    digest: u64,
     log: RecorderLog,
+}
+
+const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+
+fn digest_more(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// FNV-1a over an object's bytes, as [`RecorderEvent::Put`] records it.
+#[must_use]
+pub fn content_digest(bytes: &[u8]) -> u64 {
+    digest_more(DIGEST_SEED, bytes)
+}
+
+/// The WAL generation and end offset an LTX file's header names, when it
+/// names a range with frames: what the oracle maps a file to a commit by.
+pub(crate) fn wal_end(bytes: &[u8]) -> Option<crate::model::WalEnd> {
+    let origin = parse_header(bytes.get(..HEADER_LEN)?)?.fields().wal?;
+    if origin.size() == 0 {
+        return None;
+    }
+    let (salt1, salt2) = origin.salts();
+    Some((
+        lsr_wal::Salts { salt1, salt2 },
+        origin.offset().saturating_add(origin.size()),
+    ))
 }
 
 fn parse_header(head: &[u8]) -> Option<Header> {
@@ -975,6 +1028,7 @@ fn parse_header(head: &[u8]) -> Option<Header> {
 impl<S: ObjectStore> Upload for TapUpload<S> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
         self.inner.write(chunk).await?;
+        self.digest = digest_more(self.digest, chunk);
         let room = HEADER_LEN.saturating_sub(self.head.len());
         self.head
             .extend_from_slice(chunk.get(..room.min(chunk.len())).unwrap_or_default());
@@ -999,6 +1053,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             created_at,
             head,
             wrote,
+            digest,
             log,
         } = self;
         let header = parse_header(&head);
@@ -1015,6 +1070,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
                     origin: header.and_then(|h| h.fields().wal),
                     created_at,
                     size: wrote,
+                    digest,
                     at,
                     high,
                 });

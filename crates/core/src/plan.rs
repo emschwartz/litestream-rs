@@ -53,7 +53,8 @@
 //! smallest first transaction over every usable file past `r` that does not
 //! link, whatever the target and eligibility (where history resumes is a fact
 //! about the replica, not the request); `MalformedSnapshot` names the lowest
-//! key.
+//! key; `AsOfInsideFile` names, among the straddlers below, the
+//! nearest-ending file, then the higher level, then the lower key.
 //!
 //! How a plan is chosen within the contract:
 //! - The base is the eligible file that begins at transaction 1 (any level;
@@ -84,15 +85,23 @@
 //!   the file. That is [`PlanOutcome::AsOfInsideFile`], never a plain
 //!   [`PlanOutcome::Plan`]: the chain is the newest state restorable at or
 //!   before the instant, and [`crate::AsOfInside::TakeEarlier`] on the restore
-//!   (the CLI's `--allow-earlier`) accepts it. A level 0-8 file that ends
-//!   right after the chain removes the doubt (`dates_next`): it is ineligible (else the chain would have taken it), and its created-at time is
-//!   the created-at time of the level-0 file that first carried its newest transaction,
-//!   because a level-0 file is that carrier and compaction gives its output
-//!   its newest input's created-at time (here and in Go). So that transaction was
+//!   (the CLI's `--allow-earlier`) accepts it. A file that ends right after
+//!   the chain removes the doubt (`dates_next`) only when its time dates
+//!   that transaction's commit ([`crate::Dating::Commit`]): a level 0-8 file
+//!   with its stored created-at time. It is ineligible (else the chain would
+//!   have taken it), and its created-at time is the created-at time of the
+//!   level-0 file that first carried its newest transaction, because a
+//!   level-0 file is that carrier and compaction gives its output its newest
+//!   input's created-at time (here and in Go). So that transaction was
 //!   created at or after the instant, and so was everything after it. A
-//!   snapshot proves nothing of the kind: it is recorded as created when it is written,
-//!   which can be long after its newest transaction committed, so a later
-//!   snapshot that ends right after the chain leaves the straddle standing.
+//!   snapshot proves nothing of the kind: it is recorded as created when it
+//!   is written, which can be long after its newest transaction committed.
+//!   Nor does a time the store fell back to for want of stored metadata (a
+//!   writer before Go v0.5.1, a bucket copy that dropped it): that is the
+//!   object's upload. Such a file that ends right after the chain is a
+//!   straddler itself, since its one transaction may have committed before
+//!   the instant. Times are read only through [`crate::Stamp`], which carries
+//!   this table.
 //!
 //! An `AsOf` restore learns eligibility lazily. A listing may carry only a
 //! last-modified time, so [`AsOfPlanner`] is a [`Step`] that asks for one exact
@@ -109,7 +118,8 @@
 //! nothing once an earlier one is eligible. [`plan`] is the planner
 //! for [`KeyTarget`] (`Latest` and `Txid`), which read no created-at time; `plan_reference`
 //! is the exact `AsOf` planner over a listing whose created-at times are all exact, kept
-//! as the test oracle.
+//! as the eager twin the lazy one is checked against. The contract above is the oracle:
+//! `crates/spec` restates it, clause by clause, in a crate that cannot reach this one.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
@@ -117,8 +127,8 @@ use std::collections::BinaryHeap;
 use lsr_ltx::{Timestamp, Txid};
 
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt, Step};
-use crate::inventory::{Inventory, is_snapshot_start};
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::inventory::{Inventory, Listed, is_snapshot_start};
+use crate::layout::{CreatedAt, FileInfo, FileKey, Level, Stamp};
 /// The state of the database to rebuild.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RestoreTarget {
@@ -170,7 +180,7 @@ impl ContiguousChain {
     /// file is in the listing: the greedy cover in `extend` is the only thing
     /// that built it, so nothing else would notice a gap. Expensive, so only
     /// under [`crate::VERIFY`].
-    fn is_contiguous(&self, inventory: &Inventory) -> bool {
+    fn is_contiguous_in(&self, listed: Listed<'_>) -> bool {
         let mut reaches = None;
         for info in &self.files {
             let range = info.key.range();
@@ -182,12 +192,18 @@ impl ContiguousChain {
                         && range.max() > end
                 }
             };
-            if !fits || !inventory.files().contains(info) {
+            if !fits || !listed.files().any(|file| file == info) {
                 return false;
             }
             reaches = Some(range.max());
         }
         reaches == Some(self.reaches) && self.files.first() == Some(&self.snapshot)
+    }
+
+    /// [`Self::is_contiguous_in`] over a whole inventory.
+    #[cfg(test)]
+    fn is_contiguous(&self, inventory: &Inventory) -> bool {
+        self.is_contiguous_in(Listed::all(inventory))
     }
 
     /// The files to apply, oldest state first: the base, then each extension.
@@ -238,11 +254,12 @@ pub enum PlanOutcome {
     },
     /// An instant falls inside a file that is later than it. `chain` is the
     /// newest state restorable at or before the instant; `file` links to the
-    /// chain and holds at least two transactions past it, but was created at or
-    /// after the instant, so the transactions in it up to the instant cannot be
-    /// separated from the rest. Only `AsOf` produces it, and only when
-    /// the chain otherwise ends where the eligible history that connects to it
-    /// ends: a [`Self::Gap`] wins. Accepting it can leave out transactions that
+    /// chain and passes it, but was created at or after the instant, so the
+    /// transactions in it up to the instant cannot be separated from the
+    /// rest. It holds at least two transactions past the chain, or one whose
+    /// time does not date its commit (a snapshot's write, an upload). Only
+    /// `AsOf` produces it, and only when the chain otherwise ends where the
+    /// eligible history that connects to it ends: a [`Self::Gap`] wins. Accepting it can leave out transactions that
     /// did commit before the instant.
     AsOfInsideFile {
         /// The newest state restorable at or before the instant.
@@ -286,10 +303,15 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
     match target {
         RestoreTarget::Latest => true,
         RestoreTarget::Txid(wanted) => info.key.range().max() <= wanted,
-        RestoreTarget::AsOf(instant) => info
-            .created_at()
-            .is_some_and(|created_at| created_at.at() < instant),
+        RestoreTarget::AsOf(instant) => {
+            stamp_of(info, info.created_at()).is_some_and(|stamp| stamp.before(instant))
+        }
     }
+}
+
+/// A file's created-at time, when known, with what it dates for its level.
+fn stamp_of(info: &FileInfo, created_at: Option<CreatedAt>) -> Option<Stamp> {
+    created_at.map(|created_at| Stamp::of(info.key.level(), created_at))
 }
 
 /// The targets that need no created-at time: the only ones [`plan`] accepts.
@@ -317,7 +339,18 @@ impl From<KeyTarget> for RestoreTarget {
 /// Plans a restore of [`target`] from [`inventory`], by keys alone.
 #[must_use]
 pub fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome {
-    plan_exact(inventory, target.into())
+    plan_exact(Listed::all(inventory), target.into())
+}
+
+/// [`plan`] over the inventory without the keys in `gone` (ascending): what a
+/// restore would do if those files were deleted, answered without copying the
+/// inventory.
+pub(crate) fn plan_without(
+    inventory: &Inventory,
+    gone: &[FileKey],
+    target: KeyTarget,
+) -> PlanOutcome {
+    plan_exact(Listed::without(inventory, gone), target.into())
 }
 
 /// The exact planner for any [`RestoreTarget`], the oracle for [`AsOfPlanner`]
@@ -332,24 +365,24 @@ pub fn plan(inventory: &Inventory, target: KeyTarget) -> PlanOutcome {
 #[doc(hidden)]
 #[must_use]
 pub fn plan_reference(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
-    plan_exact(inventory, target)
+    plan_exact(Listed::all(inventory), target)
 }
 
-fn plan_exact(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
-    let outcome = plan_unchecked(inventory, target);
+fn plan_exact(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
+    let outcome = plan_unchecked(listed, target);
     if crate::VERIFY
         && let PlanOutcome::Plan(chain) | PlanOutcome::AsOfInsideFile { chain, .. } = &outcome
     {
         debug_assert!(
-            chain.is_contiguous(inventory),
+            chain.is_contiguous_in(listed),
             "the planner returned a chain that is not contiguous: {chain:?}"
         );
     }
     outcome
 }
 
-fn plan_unchecked(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
-    let Some(newest) = inventory.newest() else {
+fn plan_unchecked(listed: Listed<'_>, target: RestoreTarget) -> PlanOutcome {
+    let Some(newest) = listed.newest() else {
         return PlanOutcome::EmptyReplica;
     };
     if let RestoreTarget::Txid(requested) = target
@@ -357,34 +390,30 @@ fn plan_unchecked(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
     {
         return PlanOutcome::BeyondNewest { requested, newest };
     }
-    let pool: Vec<FileInfo> = inventory
-        .files()
-        .iter()
-        .filter(|info| eligible(info, target))
-        .copied()
-        .collect();
-    let base = pool
-        .iter()
+    // The eligible files are read in place, never copied: a million-file
+    // inventory is planned in the memory it already holds.
+    let pool = || listed.files().filter(|info| eligible(info, target));
+    let base = pool()
         .filter(|info| is_snapshot_start(info))
         .max_by_key(|info| base_order(info))
         .and_then(|info| ContiguousChain::start(*info));
     let Some(mut chain) = base else {
-        return inside_the_base(inventory, target).unwrap_or_else(|| no_snapshot(inventory));
+        return inside_the_base(listed, target).unwrap_or_else(|| no_snapshot(listed));
     };
-    extend(&mut chain, &pool);
+    extend(&mut chain, Sweep::new(listed, target));
     if let RestoreTarget::AsOf(_) = target {
-        return as_of_outcome(inventory, chain, target);
+        return as_of_outcome(listed, chain, target);
     }
     let want = match target {
         RestoreTarget::Txid(requested) => Some(requested),
         RestoreTarget::Latest | RestoreTarget::AsOf(_) => {
-            pool.iter().map(|info| info.key.range().max()).max()
+            pool().map(|info| info.key.range().max()).max()
         }
     };
     if want == Some(chain.reaches()) {
         return PlanOutcome::Plan(chain);
     }
-    explain_shortfall(inventory, &pool, target, chain.reaches())
+    explain_shortfall(listed, target, chain.reaches())
 }
 
 /// The outcome for an `AsOf` chain, which ends where the eligible files take
@@ -393,16 +422,12 @@ fn plan_unchecked(inventory: &Inventory, target: RestoreTarget) -> PlanOutcome {
 /// the whole inventory ([`bridges_nothing_past`]); a chain that passes is
 /// [`PlanOutcome::AsOfInsideFile`] when a later file straddles, else a plan. A
 /// stray never changes which.
-fn as_of_outcome(
-    inventory: &Inventory,
-    chain: ContiguousChain,
-    target: RestoreTarget,
-) -> PlanOutcome {
+fn as_of_outcome(listed: Listed<'_>, chain: ContiguousChain, target: RestoreTarget) -> PlanOutcome {
     let reach = chain.reaches();
-    if bridges_nothing_past(inventory, reach) {
-        return explain_shortfall(inventory, inventory.files(), RestoreTarget::Latest, reach);
+    if bridges_nothing_past(listed, reach) {
+        return explain_shortfall(listed, RestoreTarget::Latest, reach);
     }
-    match straddling_file(inventory, target, reach) {
+    match straddling_file(listed, target, reach) {
         Some(file) => PlanOutcome::AsOfInsideFile { chain, file },
         None => PlanOutcome::Plan(chain),
     }
@@ -416,54 +441,65 @@ fn as_of_outcome(
 /// reports for the same listing. A refused level-9 file cannot link: it cannot
 /// be applied. A usable file that does link means the replica continues, even
 /// when it is recorded as created at or after the instant.
-fn bridges_nothing_past(inventory: &Inventory, reach: Txid) -> bool {
-    let files = inventory.files();
-    let links = |info: &FileInfo| {
-        is_usable_beyond(info)
-            && touches(info.key.range().min(), reach)
-            && info.key.range().max() > reach
-    };
-    files.iter().any(|info| info.key.range().max() > reach) && !files.iter().any(links)
+fn bridges_nothing_past(listed: Listed<'_>, reach: Txid) -> bool {
+    listed.files().any(|info| info.key.range().max() > reach)
+        && !listed.files().any(|info| passes(info, reach))
 }
 
-/// The file that makes an `AsOf` chain ambiguous, if any: usable, created at
-/// or after the instant, linking to the chain and holding at least two
-/// transactions past it. Nothing is ambiguous when a file dates the next
-/// transaction ([`dates_next`]).
-fn straddling_file(inventory: &Inventory, target: RestoreTarget, reach: Txid) -> Option<FileKey> {
-    let RestoreTarget::AsOf(_) = target else {
+/// Whether a usable file links to a chain that ends at [`reach`] and passes it.
+fn passes(info: &FileInfo, reach: Txid) -> bool {
+    is_usable_beyond(info)
+        && touches(info.key.range().min(), reach)
+        && info.key.range().max() > reach
+}
+
+/// The file that makes an `AsOf` chain ambiguous, if any ([`straddler`]),
+/// over the listed created-at times.
+fn straddling_file(listed: Listed<'_>, target: RestoreTarget, reach: Txid) -> Option<FileKey> {
+    let RestoreTarget::AsOf(instant) = target else {
         return None;
     };
+    straddler(listed.files(), reach, instant, |info| {
+        stamp_of(info, info.created_at())
+    })
+}
+
+/// The straddle rule, given each file's [`Stamp`] (`None`: not known). Every
+/// file that passes the chain's end and is not recorded as created before
+/// the instant leaves the transactions past the end undated, unless one of
+/// them dates the next transaction ([`dates_next`]); then nothing is
+/// ambiguous. Otherwise the nearest-ending one is named. A file holding one
+/// transaction past the end straddles too when its time is a snapshot's
+/// write or an upload: that transaction may have committed before the
+/// instant.
+fn straddler<'a>(
+    files: impl Iterator<Item = &'a FileInfo> + Clone,
+    reach: Txid,
+    instant: Timestamp,
+    stamp: impl Fn(&FileInfo) -> Option<Stamp>,
+) -> Option<FileKey> {
     let one_past = reach.next()?;
-    let files = inventory.files();
-    if files.iter().any(|info| dates_next(info, one_past)) {
+    let passing = || files.clone().filter(|info| passes(info, reach));
+    if passing().any(|info| dates_next(info, one_past, instant, stamp(info))) {
         return None;
     }
-    files
-        .iter()
-        .filter(|info| !eligible(info, target) && straddles(info, one_past))
+    passing()
+        .filter(|info| !stamp(info).is_some_and(|known| known.before(instant)))
         .min_by_key(|info| straddler_order(info))
         .map(|info| info.key)
 }
 
-/// Whether a file proves that transaction [`one_past`] was created at or after
-/// an `AsOf` instant, by keys alone. It must end at [`one_past`] and be
-/// ineligible, which it is whenever it touches the chain: an eligible one
-/// would have extended it. Its created-at time then bounds the created-at time of the level-0 file
-/// that first carried [`one_past`] only on levels 0 to 8: a level-0 file is
-/// that carrier, and a compacted file takes its newest input's created-at time, which
-/// recurses down to it. A level-9 file is recorded as created when the snapshot is
-/// written (`snapshot.rs`), any time after [`one_past`] committed, and a
-/// refused one is level 9 too, so neither dates anything.
-fn dates_next(info: &FileInfo, one_past: Txid) -> bool {
-    !info.key.level().is_snapshot() && info.key.range().max() == one_past
-}
-
-/// Whether a usable file links to a chain whose next transaction is
-/// [`one_past`] and holds at least two transactions past the chain.
-fn straddles(info: &FileInfo, one_past: Txid) -> bool {
-    let range = info.key.range();
-    is_usable_beyond(info) && range.min() <= one_past && range.max() > one_past
+/// Whether a file proves that transaction [`one_past`] committed at or after
+/// an `AsOf` instant: it ends at [`one_past`] and its time dates that commit
+/// ([`Stamp::commit_at_or_after`]). Only a level 0-8 file with its stored
+/// created-at time can: a level-0 file is stamped at the sync that first
+/// carried the transaction, and a compacted file takes its newest input's
+/// time, which recurses down to it. A snapshot is stamped when it is written
+/// (`snapshot.rs`), and a time a store fell back to is the object's upload,
+/// both any time after the commit, so neither dates anything.
+fn dates_next(info: &FileInfo, one_past: Txid, instant: Timestamp, stamp: Option<Stamp>) -> bool {
+    info.key.range().max() == one_past
+        && stamp.and_then(|known| known.commit_at_or_after(instant)) == Some(true)
 }
 
 /// Smaller is named first: the nearest end, then the higher level, then the key.
@@ -475,15 +511,12 @@ fn straddler_order(info: &FileInfo) -> (Txid, Reverse<Level>, FileKey) {
 /// 0 and a file links when it begins at transaction 1. Such a file ends past
 /// the target (else it would be the base), so the transaction exists only
 /// inside it: the same cause as with an older base, and the same answer.
-fn inside_the_base(inventory: &Inventory, target: RestoreTarget) -> Option<PlanOutcome> {
+fn inside_the_base(listed: Listed<'_>, target: RestoreTarget) -> Option<PlanOutcome> {
     let RestoreTarget::Txid(requested) = target else {
         return None;
     };
     inside_file(
-        inventory
-            .files()
-            .iter()
-            .filter(|i| i.key.range().min().get() == 1),
+        listed.files().filter(|i| i.key.range().min().get() == 1),
         requested,
     )
 }
@@ -505,40 +538,89 @@ fn inside_file<'a>(
         })
 }
 
-fn no_snapshot(inventory: &Inventory) -> PlanOutcome {
+fn no_snapshot(listed: Listed<'_>) -> PlanOutcome {
     PlanOutcome::NoSnapshot {
-        oldest_snapshot: inventory
+        oldest_snapshot: listed
             .files()
-            .iter()
             .filter(|info| is_snapshot_start(info))
             .map(|info| info.key.range().max())
             .min(),
-        malformed_snapshots: inventory.malformed_snapshots(),
+        malformed_snapshots: listed.malformed_snapshots(),
     }
 }
 
 /// Greedy interval cover over the eligible files of levels 0 to 8, one sweep
 /// in order of first transaction.
-fn extend(chain: &mut ContiguousChain, pool: &[FileInfo]) {
-    let mut sweep: Vec<FileInfo> = pool
-        .iter()
-        .filter(|info| !info.key.level().is_snapshot())
-        .copied()
-        .collect();
-    sweep.sort_by_key(sweep_order);
-    let mut sweep = sweep.into_iter().peekable();
+fn extend<'a>(chain: &mut ContiguousChain, sweep: impl Iterator<Item = &'a FileInfo>) {
+    let mut sweep = sweep.peekable();
     loop {
         let mut best: Option<FileInfo> = None;
         while let Some(info) = sweep.next_if(|i| touches(i.key.range().min(), chain.reaches())) {
-            let beats = best.is_none_or(|held| preference(&info) > preference(&held));
+            let beats = best.is_none_or(|held| preference(info) > preference(&held));
             if info.key.range().max() > chain.reaches() && beats {
-                best = Some(info);
+                best = Some(*info);
             }
         }
         match best {
             Some(info) if chain.push(info) => {}
             Some(_) | None => break,
         }
+    }
+}
+
+/// The eligible files of levels 0 to 8 in [`sweep_order`], merged from the
+/// inventory's own per-level runs (each already ascending in that order, since
+/// a key sorts by first transaction within a level), so nothing is copied or
+/// sorted and the sweep holds nine slices however many files there are.
+struct Sweep<'a> {
+    listed: Listed<'a>,
+    target: RestoreTarget,
+    /// What is left of each level; the snapshot level stays empty.
+    runs: [&'a [FileInfo]; Level::ALL.len()],
+}
+
+impl<'a> Sweep<'a> {
+    fn new(listed: Listed<'a>, target: RestoreTarget) -> Self {
+        let runs = Level::ALL.map(|level| {
+            if level.is_snapshot() {
+                &[]
+            } else {
+                listed.level_slice(level)
+            }
+        });
+        Self {
+            listed,
+            target,
+            runs,
+        }
+    }
+}
+
+impl<'a> Iterator for Sweep<'a> {
+    type Item = &'a FileInfo;
+
+    fn next(&mut self) -> Option<&'a FileInfo> {
+        let mut best: Option<&mut &'a [FileInfo]> = None;
+        for run in &mut self.runs {
+            while let Some((head, rest)) = run.split_first() {
+                if self.listed.keeps(head) && eligible(head, self.target) {
+                    break;
+                }
+                *run = rest;
+            }
+            let Some(head) = run.first() else { continue };
+            let earlier = best
+                .as_ref()
+                .and_then(|held| held.first())
+                .is_none_or(|held| sweep_order(head) < sweep_order(held));
+            if earlier {
+                best = Some(run);
+            }
+        }
+        let run = best?;
+        let (head, rest) = run.split_first()?;
+        *run = rest;
+        Some(head)
     }
 }
 
@@ -552,17 +634,14 @@ fn preference(info: &FileInfo) -> (Txid, Level, Reverse<Txid>) {
 ///
 /// A [`Txid`] target looks at every file, not just eligible ones: the file
 /// that covers it is by definition ineligible.
-fn explain_shortfall(
-    inventory: &Inventory,
-    pool: &[FileInfo],
-    target: RestoreTarget,
-    reach: Txid,
-) -> PlanOutcome {
-    let candidates = match target {
-        RestoreTarget::Txid(_) => inventory.files(),
-        RestoreTarget::Latest | RestoreTarget::AsOf(_) => pool,
+fn explain_shortfall(listed: Listed<'_>, target: RestoreTarget, reach: Txid) -> PlanOutcome {
+    let candidates = || {
+        listed.files().filter(move |info| match target {
+            RestoreTarget::Txid(_) => true,
+            RestoreTarget::Latest | RestoreTarget::AsOf(_) => eligible(info, target),
+        })
     };
-    let ahead = || candidates.iter().filter(|i| i.key.range().max() > reach);
+    let ahead = || candidates().filter(|i| i.key.range().max() > reach);
     if let RestoreTarget::Txid(requested) = target
         && let Some(outcome) = inside_file(
             ahead().filter(|i| touches(i.key.range().min(), reach)),
@@ -632,11 +711,12 @@ enum Pass {
 pub struct AsOfPlanner<'a> {
     inventory: &'a Inventory,
     instant: Timestamp,
-    /// Transaction-1 files, most preferred base first.
-    starts: Vec<FileInfo>,
+    /// Transaction-1 files, most preferred base first. Borrowed from the
+    /// inventory: a pointer a file, not a second copy of it.
+    starts: Vec<&'a FileInfo>,
     next_start: usize,
-    /// Level 0-8 files by first transaction, then key.
-    sweep: Vec<FileInfo>,
+    /// Level 0-8 files by first transaction, then key; pointers, as `starts`.
+    sweep: Vec<&'a FileInfo>,
     /// How many of `sweep` have touched the chain's end so far.
     entered: usize,
     /// Indexes into `sweep` that touched the end and were not yet settled.
@@ -656,20 +736,18 @@ impl<'a> AsOfPlanner<'a> {
             comparisons = comparisons.saturating_add(1);
             order
         };
-        let mut starts: Vec<FileInfo> = inventory
+        let mut starts: Vec<&FileInfo> = inventory
             .files()
             .iter()
             .filter(|info| is_snapshot_start(info))
-            .copied()
             .collect();
-        starts.sort_by(|a, b| counted(base_order(b).cmp(&base_order(a))));
-        let mut sweep: Vec<FileInfo> = inventory
+        starts.sort_unstable_by(|a, b| counted(base_order(b).cmp(&base_order(a))));
+        let mut sweep: Vec<&FileInfo> = inventory
             .files()
             .iter()
             .filter(|info| !info.key.level().is_snapshot())
-            .copied()
             .collect();
-        sweep.sort_by(|a, b| counted(sweep_order(a).cmp(&sweep_order(b))));
+        sweep.sort_unstable_by(|a, b| counted(sweep_order(a).cmp(&sweep_order(b))));
         let pass = if inventory.is_empty() {
             Pass::Done(PlanOutcome::EmptyReplica)
         } else {
@@ -700,7 +778,7 @@ impl<'a> AsOfPlanner<'a> {
     /// Pass 1: the first eligible transaction-1 file in base order is the
     /// base, which is the one [`plan`] picks.
     fn find_base(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<()> {
-        while let Some(info) = self.starts.get(self.next_start).copied() {
+        while let Some(info) = self.starts.get(self.next_start).map(|info| **info) {
             match eligible_at(&info, self.instant, resolved) {
                 None => {
                     // The bases after it, in the order they would be tried:
@@ -708,21 +786,21 @@ impl<'a> AsOfPlanner<'a> {
                     let rest = self.starts.iter().skip(self.next_start.saturating_add(1));
                     let ahead = rest
                         .filter(|later| resolved.exact(later).is_none())
-                        .copied();
+                        .map(|later| **later);
                     return Resolve::Need(Need::with_ahead(info, ahead));
                 }
                 Some(true) => {
                     self.chain = ContiguousChain::start(info);
                     self.pass = match self.chain {
                         Some(_) => Pass::Extend,
-                        None => Pass::Done(no_snapshot(self.inventory)),
+                        None => Pass::Done(no_snapshot(Listed::all(self.inventory))),
                     };
                     return Resolve::Done(());
                 }
                 Some(false) => self.next_start = self.next_start.saturating_add(1),
             }
         }
-        self.pass = Pass::Done(no_snapshot(self.inventory));
+        self.pass = Pass::Done(no_snapshot(Listed::all(self.inventory)));
         Resolve::Done(())
     }
 
@@ -733,7 +811,7 @@ impl<'a> AsOfPlanner<'a> {
     /// stays ineligible, and a file at or below the end stays there.
     fn extend(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<()> {
         let Some(chain) = self.chain.as_mut() else {
-            self.pass = Pass::Done(no_snapshot(self.inventory));
+            self.pass = Pass::Done(no_snapshot(Listed::all(self.inventory)));
             return Resolve::Done(());
         };
         loop {
@@ -753,7 +831,7 @@ impl<'a> AsOfPlanner<'a> {
                 .touching
                 .peek()
                 .and_then(|(_, at)| self.sweep.get(*at))
-                .copied()
+                .map(|info| **info)
             else {
                 break;
             };
@@ -781,17 +859,13 @@ impl<'a> AsOfPlanner<'a> {
     /// and so were read by the last step.
     fn judge_past(&mut self, resolved: &ResolvedCreatedAt) -> Resolve<()> {
         let Some(chain) = self.chain.as_ref() else {
-            self.pass = Pass::Done(no_snapshot(self.inventory));
+            self.pass = Pass::Done(no_snapshot(Listed::all(self.inventory)));
             return Resolve::Done(());
         };
         let reach = chain.reaches();
-        let outcome = if bridges_nothing_past(self.inventory, reach) {
-            explain_shortfall(
-                self.inventory,
-                self.inventory.files(),
-                RestoreTarget::Latest,
-                reach,
-            )
+        let listed = Listed::all(self.inventory);
+        let outcome = if bridges_nothing_past(listed, reach) {
+            explain_shortfall(listed, RestoreTarget::Latest, reach)
         } else {
             match lazy_straddler(self.inventory, self.instant, reach, resolved) {
                 Resolve::Need(info) => return Resolve::Need(info),
@@ -828,45 +902,29 @@ impl Step for AsOfPlanner<'_> {
 /// Whether a file is created strictly before [`instant`], once its exact
 /// created-at time is known.
 fn eligible_at(info: &FileInfo, instant: Timestamp, resolved: &ResolvedCreatedAt) -> Option<bool> {
-    resolved
-        .exact(info)
-        .map(|created_at| created_at.at() < instant)
+    stamp_of(info, resolved.exact(info)).map(|stamp| stamp.before(instant))
 }
 
-/// [`straddling_file`] with created-at times asked for as needed.
+/// [`straddling_file`] with created-at times asked for as needed: every file
+/// that passes the reach is judged, so every missing time among them is
+/// needed. The last extension step already read them all, so in practice
+/// this asks for nothing.
 fn lazy_straddler(
     inventory: &Inventory,
     instant: Timestamp,
     reach: Txid,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Option<FileKey>> {
-    let Some(one_past) = reach.next() else {
-        return Resolve::Done(None);
-    };
-    let files = inventory.files();
-    if files.iter().any(|info| dates_next(info, one_past)) {
-        return Resolve::Done(None);
+    let files = inventory.files().iter();
+    let mut missing = files
+        .clone()
+        .filter(|info| passes(info, reach) && resolved.exact(info).is_none());
+    if let Some(first) = missing.next() {
+        return Resolve::Need(Need::with_ahead(*first, missing.copied()));
     }
-    let mut best: Option<&FileInfo> = None;
-    for info in files.iter().filter(|info| straddles(info, one_past)) {
-        match eligible_at(info, instant, resolved) {
-            None => {
-                // Every straddler is judged, so every missing created-at time is needed.
-                let ahead = files
-                    .iter()
-                    .filter(|other| straddles(other, one_past) && resolved.exact(other).is_none())
-                    .copied();
-                return Resolve::Need(Need::with_ahead(*info, ahead));
-            }
-            Some(true) => {}
-            Some(false) => {
-                if best.is_none_or(|held| straddler_order(info) < straddler_order(held)) {
-                    best = Some(info);
-                }
-            }
-        }
-    }
-    Resolve::Done(best.map(|info| info.key))
+    Resolve::Done(straddler(files, reach, instant, |info| {
+        stamp_of(info, resolved.exact(info))
+    }))
 }
 
 /// Larger is the better base: furthest reach, then higher level, then the

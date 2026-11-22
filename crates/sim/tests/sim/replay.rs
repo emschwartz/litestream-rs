@@ -2,10 +2,11 @@
 //!
 //! `just sim-replay 0x<seed> [steps]` sets `LSR_SIM_SEED` and `LSR_SIM_STEPS`
 //! and runs this test with output shown, under the seed's mix
-//! (`Weights::mixed`), as the fixed and rotating sets run it. Without `LSR_SIM_SEED` the test does
+//! (`Weights::mixed`), as the fixed and rotating sets run it, with the overrides of
+//! `unaided::weights` (`LSR_SIM_BLOCK_LAW`, `LSR_SIM_AFTER_RESTART`). Without `LSR_SIM_SEED` the test does
 //! nothing, so `just test` stays quiet.
 
-use lsr_sim::{Opts, Seed, Weights, run_with};
+use lsr_sim::{Opts, Seed, run_with};
 
 const DEFAULT_STEPS: u32 = 300;
 
@@ -24,7 +25,7 @@ fn replay_the_named_run() {
         trace: true,
         ..Opts::default()
     };
-    match run_with(seed, steps, &Weights::mixed(seed), &opts) {
+    match run_with(seed, steps, &crate::unaided::weights(seed), &opts) {
         Ok(report) => {
             for line in &report.trace {
                 println!("{line}");

@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use lsr_core::needs::{Resource, need};
+
 use crate::error::CompatError;
 
 /// The Go versions of the compatibility matrix.
@@ -73,6 +75,10 @@ pub enum PageEncoding {
 /// The last release tag on the frame encoding.
 const LAST_FRAMES_PATCH: u32 = 15;
 
+/// The first release tag that writes a `litestream-timestamp` metadata value on upload; earlier
+/// builds leave a reader only the object's `LastModified`.
+const FIRST_TIMESTAMP_METADATA_PATCH: u32 = 16;
+
 /// The first release tag whose VFS takes `LITESTREAM_REPLICA_URL`, so reads a file replica.
 const FIRST_FILE_VFS_PATCH: u32 = 3;
 
@@ -134,6 +140,14 @@ impl GoBuild {
     /// script does not build it.
     pub fn vfs_reads_files(&self) -> bool {
         release_patch(&self.name).is_none_or(|n| n >= FIRST_FILE_VFS_PATCH)
+    }
+
+    /// Whether the created-at times of this build's replica are commit-dated: it writes
+    /// `litestream-timestamp` metadata (v0.5.16 and later, any commit, `main`). Earlier builds
+    /// leave a reader the store's `LastModified`, which can postdate the commit, so an as-of
+    /// instant between two uploads cannot be proven to precede the later one's commit.
+    pub fn writes_created_at_metadata(&self) -> bool {
+        release_patch(&self.name).is_none_or(|n| n >= FIRST_TIMESTAMP_METADATA_PATCH)
     }
 
     /// Whether this build writes its first snapshot soon after it starts. Every 0.5 release
@@ -248,7 +262,7 @@ fn in_module(path: &str, module: &str) -> bool {
 
 /// The builds the live tests run against: the names in `LSR_COMPAT_VERSIONS` when set
 /// (`releases` stands for [`KNOWN_RELEASES`]; minus any the quirk table lists as unbuildable),
-/// else the pinned five.
+/// else the pinned five. Fails when that set is empty (`lsr_core::needs`).
 ///
 /// Only a test in a [`LIVE_MODULE`] may ask (the test harness names the thread after the
 /// test). A live test moved or renamed out of one would drop out of `just compat-live`
@@ -264,7 +278,7 @@ pub fn builds_under_test() -> Vec<GoBuild> {
             "{caller:?} runs the Go builds under test but is not in a `mod {LIVE_MODULE}` (or `mod {S3_MODULE}` for MinIO), so `just compat-live` would skip it"
         );
     }
-    match std::env::var(VERSIONS_ENV) {
+    let selected: Vec<GoBuild> = match std::env::var(VERSIONS_ENV) {
         Ok(names) if !names.trim().is_empty() => names
             .split_whitespace()
             .flat_map(|n| {
@@ -278,7 +292,17 @@ pub fn builds_under_test() -> Vec<GoBuild> {
             .filter(|b| b.quirk().is_none_or(|q| q.quirk != Quirk::Unbuildable))
             .collect(),
         Ok(_) | Err(_) => GoVersion::ALL.into_iter().map(GoBuild::from).collect(),
-    }
+    };
+    // An empty set would pass every `for build in builds_under_test()` test with no iteration
+    // (names that are all unbuildable, say); only `LSR_SKIP=go` may return it.
+    need(Resource::GoBuilds, || {
+        if selected.is_empty() {
+            Err(format!("{VERSIONS_ENV} selects no buildable Go version"))
+        } else {
+            Ok(selected)
+        }
+    })
+    .unwrap_or_default()
 }
 
 /// The builds of `builds_under_test` in `page_encoding`, with its guard.
@@ -383,6 +407,24 @@ mod tests {
             ("v0.5.3-beta3", PageEncoding::Block),
         ] {
             assert_eq!(GoBuild::new(name).page_encoding(), page_encoding, "{name}");
+        }
+    }
+
+    #[test]
+    fn created_at_metadata_starts_at_v0_5_16() {
+        for (name, written) in [
+            ("v0.5.0", false),
+            ("v0.5.15", false),
+            ("v0.5.16", true),
+            ("v0.5.18", true),
+            ("041a8c3", true),
+            ("main", true),
+        ] {
+            assert_eq!(
+                GoBuild::new(name).writes_created_at_metadata(),
+                written,
+                "{name}"
+            );
         }
     }
 

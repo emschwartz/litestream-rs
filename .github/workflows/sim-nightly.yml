@@ -18,6 +18,9 @@ on:
 permissions:
   contents: read
 
+env:
+  NEXTEST_PROFILE: ci
+
 jobs:
   soak:
     runs-on: ubuntu-latest

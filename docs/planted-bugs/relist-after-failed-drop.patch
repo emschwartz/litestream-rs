@@ -1,0 +1,20 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 1588fc9..64323b7 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1401,7 +1401,6 @@ impl Actor {
+         from: Txid,
+         now: Timestamp,
+     ) -> Tick {
+-        self.engine.witnesses.drop_from(from);
+         if let Err(fault) = drop_staged_from(env.staging, from).await {
+             // The staged files from `from` on are still there, and the next
+             // upload would take the one after the confirmed transaction as
+@@ -1409,7 +1408,6 @@ impl Actor {
+             // judges the divergence again and this runs again before anything
+             // is uploaded; the acknowledged mark is kept apart.
+             let confirmed = self.engine.upload.confirmed().min(from.prev());
+-            self.set_upload(UploadState::ListFirst { confirmed });
+             return self.fault(Task::Upload, fault, now);
+         }
+         // Acknowledged ids from `from` on that the replica lost (a rollback)

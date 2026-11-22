@@ -52,6 +52,9 @@ struct Counting {
     /// as the next upload begins: a commit that lands after a sync step read
     /// the committed end.
     commits_on_upload: Arc<std::sync::Mutex<Option<(FakeWal, u8)>>>,
+    /// Keys whose next read returns its bytes with the middle one flipped,
+    /// the stored bytes untouched: one bad read.
+    flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
 }
 
 impl Counting {
@@ -71,6 +74,11 @@ impl Counting {
     fn reads_of(&self, key: &FileKey) -> usize {
         let reads = self.reads.lock().unwrap();
         reads.iter().filter(|read| *read == key).count()
+    }
+
+    /// The next read of `key` returns one byte flipped.
+    fn flip_next_read(&self, key: FileKey) {
+        self.flip_next_read.lock().unwrap().push(key);
     }
 
     /// Every key a delete was asked for, in order.
@@ -109,7 +117,20 @@ impl ObjectStore for Counting {
         if offset == 0 {
             self.reads.lock().unwrap().push(*key);
         }
-        self.inner.read(key, offset, len)
+        let flip = {
+            let mut pending = self.flip_next_read.lock().unwrap();
+            let at = pending.iter().position(|k| k == key);
+            at.map(|at| pending.remove(at)).is_some()
+        };
+        let read = self.inner.read(key, offset, len);
+        async move {
+            let mut bytes = read.await?;
+            let middle = bytes.len() / 2;
+            if flip && let Some(byte) = bytes.get_mut(middle) {
+                *byte ^= 0x01;
+            }
+            Ok(bytes)
+        }
     }
 
     fn created_at(
@@ -591,6 +612,77 @@ fn with_staging_gone_the_replica_names_the_page_size() {
     let mut actor = Actor::new(cfg());
     assert_eq!(rig.tick(&mut actor, T0 + 10), page_size_changed());
     assert_eq!(everything(&rig), before);
+}
+
+/// Staging holds an older file at the new page size (a staging backup put
+/// back) while the replica's newest transaction is later and at the old one.
+/// The boot judged the page size by the staged file alone and snapshotted the
+/// new size onto the replica's prefix: restores then stopped on the change
+/// (seed 0xdc8).
+#[test]
+fn a_replica_ahead_of_staging_names_the_page_size() {
+    let mut other = Rig::new();
+    resize(&mut other, big());
+    other.settle(&mut Actor::new(cfg()), T0);
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    rig.commit(3);
+    rig.follow(&mut actor, T0 + 10, 50);
+    rig.staging = other.staging;
+    let before = everything(&rig);
+    resize(&mut rig, big());
+    let mut actor = Actor::new(cfg());
+    let ticks = rig.follow(&mut actor, T0 + 20, 50);
+    assert_eq!(ticks.last(), Some(&page_size_changed()), "{ticks:?}");
+    assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
+}
+
+/// An upload's commit is ambiguous, and before the listing that follows,
+/// another writer's verifying object replaces transaction 2 on the replica.
+/// The listing finds it unlike the staged file: the staged files from 2 on
+/// must go and the next file is a snapshot above 2. When that delete failed,
+/// the uploader had already taken 2 as confirmed and uploaded the staged 3,
+/// built on the staged 2, onto the other object (seed 0xd79).
+#[test]
+fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
+    let (mut other, mut writer) = caught_up();
+    other.commit(9);
+    other.follow(&mut writer, T0 + 10, 20);
+    let two = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
+    let theirs = block_on(other.remote.inner.read(&two, 0, ReadLen::CHUNK)).unwrap();
+    let (mut rig, mut actor) = caught_up();
+    rig.remote
+        .inner
+        .inject_failure_after_publish(transient(StoreOp::Upload));
+    rig.commit(2);
+    let mut now = T0 + 10;
+    for _ in 0..20 {
+        let tick = rig.tick(&mut actor, now);
+        if let Some(Event::Retrying { until, .. }) = event(&tick) {
+            now = until.unix_millis();
+            break;
+        }
+    }
+    block_on(async {
+        let mut up = rig.remote.inner.begin_upload(&two, ts(T0)).await.unwrap();
+        up.write(&theirs).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    rig.staging
+        .inner
+        .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+    rig.commit(3);
+    let ticks = rig.follow(&mut actor, now, 60);
+    let put_three = ticks.iter().position(|tick| {
+        matches!(event(tick), Some(Event::Uploaded(Did::Put(info))) if info.key.range().max() == Txid::new(3).unwrap())
+    });
+    let resnapshot = ticks
+        .iter()
+        .position(|tick| matches!(event(tick), Some(Event::Resnapshot(_))));
+    let (Some(put_three), Some(resnapshot)) = (put_three, resnapshot) else {
+        panic!("{ticks:?}");
+    };
+    assert!(resnapshot < put_three, "{ticks:?}");
 }
 
 #[test]
@@ -1495,7 +1587,9 @@ fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
         );
         tear(&rig, 3, torn);
         let mut actor = Actor::new(cfg());
-        let boot = rig.tick(&mut actor, T0 + 2);
+        let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+        assert_eq!(staged(&rig), vec![2, 3, 4]);
+        let boot = rig.tick(&mut actor, again);
         assert_eq!(
             event(&boot),
             Some(&Event::Booted {
@@ -1503,7 +1597,7 @@ fn a_torn_staged_file_the_replica_lacks_is_dropped_with_all_after_it() {
             })
         );
         assert_eq!(staged(&rig), vec![2]);
-        let seen = rig.settle(&mut actor, T0 + 2);
+        let seen = rig.settle(&mut actor, again);
         no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
         assert_eq!(snapshots(&rig), vec![1, 3]);
@@ -1524,7 +1618,9 @@ fn a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_ne
         );
         tear(&rig, 3, torn);
         let mut actor = Actor::new(cfg());
-        let boot = rig.tick(&mut actor, T0 + 2);
+        let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+        assert_eq!(staged(&rig), vec![2, 3, 4]);
+        let boot = rig.tick(&mut actor, again);
         assert_eq!(
             event(&boot),
             Some(&Event::Booted {
@@ -1532,7 +1628,7 @@ fn a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_ne
             })
         );
         assert_eq!(staged(&rig), vec![2]);
-        let seen = rig.settle(&mut actor, T0 + 2);
+        let seen = rig.settle(&mut actor, again);
         no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3), (4, 4)]);
         assert_eq!(snapshots(&rig), vec![1, 4]);
@@ -1550,7 +1646,8 @@ fn the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
             Some(Event::Synced { .. })
         ));
         tear(&rig, 2, torn);
-        let lost = rig.tick(&mut actor, T0 + 1);
+        let again = first_bad_read(&mut rig, &mut actor, T0 + 1);
+        let lost = rig.tick(&mut actor, again);
         assert_eq!(
             event(&lost),
             Some(&Event::Resnapshot(
@@ -1558,7 +1655,7 @@ fn the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots() {
             ))
         );
         assert_eq!(staged(&rig), vec![1]);
-        let seen = rig.settle(&mut actor, T0 + 1);
+        let seen = rig.settle(&mut actor, again);
         no_stop(&seen);
         assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
         assert_eq!(snapshots(&rig), vec![1, 2]);
@@ -1572,7 +1669,8 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     rig.commit(2);
     rig.tick(&mut actor, T0 + 1);
     tear(&rig, 2, truncated);
-    let lost = rig.tick(&mut actor, T0 + 1);
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 1);
+    let lost = rig.tick(&mut actor, again);
     assert_eq!(
         event(&lost),
         Some(&Event::Resnapshot(
@@ -1580,10 +1678,10 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
         ))
     );
     let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
+    let boot = rig.tick(&mut actor, again + 1);
     // Nothing staged was lost this time: the WAL carries on from staged 1.
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
-    let seen = rig.settle(&mut actor, T0 + 2);
+    let seen = rig.settle(&mut actor, again + 1);
     no_stop(&seen);
     assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
     assert_eq!(restored(&rig), 2);
@@ -1599,3 +1697,66 @@ mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
 mod tasks;
+mod wal_barrier;
+mod witness;
+
+/// Ticks at `now` onto a staged file that fails verification for the first
+/// time: one failed read deletes nothing and the task retries. Returns when
+/// the retry is due, the tick whose read can drop it.
+fn first_bad_read(rig: &mut Rig, actor: &mut Actor, now: i64) -> i64 {
+    let tick = rig.tick(actor, now);
+    match event(&tick) {
+        Some(Event::Retrying {
+            fault: Fault::StagedLost,
+            until,
+        }) => until.unix_millis(),
+        _ => panic!("{tick:?}"),
+    }
+}
+
+/// Whether any tick dropped staged files as unreadable.
+fn lost_staged(seen: &[Tick]) -> bool {
+    let lost = SnapshotCause::NewestStagedFileUnreadable;
+    seen.iter().any(|tick| match event(tick) {
+        Some(Event::Resnapshot(cause) | Event::Booted { cause: Some(cause) }) => *cause == lost,
+        Some(_) | None => false,
+    })
+}
+
+fn l0(n: u64) -> FileKey {
+    FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()))
+}
+
+/// One read of a sound staged file returns a flipped byte during boot's
+/// sweep. A read that fails verification is evidence about the read: boot
+/// deletes nothing on it, and the file is uploaded as it is.
+#[test]
+fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
+    rig.staging.flip_next_read(l0(3));
+    let mut actor = Actor::new(cfg());
+    let seen = rig.follow(&mut actor, T0 + 2, 50);
+    no_stop(&seen);
+    assert!(!lost_staged(&seen), "{seen:?}");
+    assert_eq!(restored(&rig), 4);
+}
+
+/// One read of a sound staged file returns a flipped byte while the upload
+/// task copies it: nothing is dropped, and a later tick uploads it.
+#[test]
+fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(2);
+    assert!(matches!(
+        event(&rig.tick(&mut actor, T0 + 1)),
+        Some(Event::Synced { .. })
+    ));
+    rig.staging.flip_next_read(l0(2));
+    let seen = rig.follow(&mut actor, T0 + 1, 50);
+    no_stop(&seen);
+    assert!(!lost_staged(&seen), "{seen:?}");
+    assert!(ranges(&rig.remote).contains(&(2, 2)));
+    assert!(!snapshots(&rig).contains(&2));
+    assert_eq!(restored(&rig), 2);
+}

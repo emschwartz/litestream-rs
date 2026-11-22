@@ -117,10 +117,29 @@ proptest! {
         let db = sim();
         let (images, floor) = history(&db, steps);
         db.crash(CrashKind::Power);
+        prop_assert_eq!(db.recovery_disagreements(), Vec::<String>::new());
         let after = db.image();
         let kept = images.iter().rposition(|image| *image == after);
         prop_assert!(kept.is_some_and(|at| at >= floor), "kept {kept:?}, floor {floor}");
         prop_assert_eq!(db.mx_frame(), scan_committed(&mut db.source()));
+    }
+
+    /// Under the block law a power loss can keep a WAL block after one it loses; SQLite's own
+    /// recovery of the bytes, the engine's parser and the rules' image agree on every draw, and
+    /// the image is still one the history committed.
+    #[test]
+    fn a_block_law_power_crash_is_recovered_as_sqlite_does(
+        steps in prop::collection::vec(step(), 0..40),
+        law in any::<u64>(),
+    ) {
+        let db = sim();
+        db.crash_by_law(crate::crash_law::CrashLaw::drawn(law));
+        let (images, floor) = history(&db, steps);
+        db.crash(CrashKind::Power);
+        prop_assert_eq!(db.recovery_disagreements(), Vec::<String>::new());
+        let after = db.image();
+        let kept = images.iter().rposition(|image| *image == after);
+        prop_assert!(kept.is_some_and(|at| at >= floor), "kept {kept:?}, floor {floor}");
     }
 
     #[test]

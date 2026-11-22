@@ -80,11 +80,12 @@ pub enum Fault {
     /// The replica's newest transaction went backwards mid-run.
     RemoteRegressed,
     /// A staged level-0 file is missing or fails verification. Staged files
-    /// are derived state: the engine deletes that file and every staged file
-    /// after it, and the next file is a snapshot taking the first transaction
-    /// the replica lacks, so the chain has no hole (`upload::sweep_staged` at
-    /// boot, the upload task mid-run; elsewhere the task retries and the next
-    /// boot sweeps).
+    /// are derived state: when a read on a later tick fails on the same file
+    /// too (one failed read says nothing about the stored bytes), the engine
+    /// deletes that file and every staged file after it, and the next file is
+    /// a snapshot taking the first transaction the replica lacks, so the chain
+    /// has no hole (`upload::sweep_staged` at boot, the upload task mid-run;
+    /// elsewhere the task retries and the next boot sweeps).
     ///
     /// A file that tears this way was never acknowledged as staged: its
     /// commit had not returned. The filesystem store syncs a file before its
@@ -97,7 +98,9 @@ pub enum Fault {
     LocalDiskFull,
     /// A local read or write failed.
     LocalIo,
-    /// An fsync of a staged file failed; encode and write it again.
+    /// An fsync failed. Of a staged file: encode and write it again. Of the
+    /// WAL, before staging (`WalSource::sync`): nothing is staged, and the
+    /// source keeps refusing, so the retries end degraded.
     LocalFsyncFailed,
     /// SQLite is busy, or the wal-index is mid-update.
     SqliteBusy,
@@ -269,6 +272,15 @@ pub enum SnapshotCause {
     CheckpointBoundary,
     /// An operator asked.
     OperatorRequested,
+    /// At boot, staged files the replica did not have yet were not vouched
+    /// for by the live WAL (a staging backup put back, a file replaced, or a
+    /// chain from a WAL generation that is gone), and the WAL could not
+    /// regenerate them: they were deleted unpublished, and the snapshot
+    /// holds their end state. Their restore points are given up.
+    StagedUnverified {
+        /// The first transaction deleted.
+        from: Txid,
+    },
 }
 
 /// Why the engine stopped and waits for a person: a [`PersistentCause`]

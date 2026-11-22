@@ -22,8 +22,8 @@ use std::process::Command;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    FileInfo, FileKey, Level, ObjectStore, PageLimit, ReadLen, RestoreError, RestoreTarget,
-    Restored, StoreError, cmp_range, restore,
+    FileInfo, FileKey, Level, ObjectStore, PageLimit, ReadLen, RestoreError, RestoreOptions,
+    RestoreTarget, Restored, StoreError, cmp_range, restore, restore_with,
 };
 use lsr_local::FileSink;
 use lsr_ltx::Txid;
@@ -32,7 +32,7 @@ use lsr_store_s3::{BucketName, Endpoint, Prefix, S3Config, S3Credentials, S3Stor
 use crate::error::CompatError;
 use crate::replica::{Summary, rel_of, summarize_bytes};
 
-/// The variable that names the MinIO endpoint; unset, the S3 checks skip.
+/// The variable that names the MinIO endpoint; unset, the S3 checks fail (`LSR_SKIP=minio` opts out).
 pub const ENDPOINT_VAR: &str = "LSR_COMPAT_S3_ENDPOINT";
 /// The bucket, which must exist.
 pub const BUCKET_VAR: &str = "LSR_COMPAT_S3_BUCKET";
@@ -96,15 +96,14 @@ impl std::fmt::Debug for MinioEnv {
 }
 
 impl MinioEnv {
-    /// Reads the `LSR_COMPAT_S3_*` variables; `None` when the endpoint is unset (no MinIO).
+    /// Reads the `LSR_COMPAT_S3_*` variables.
     ///
     /// # Errors
-    /// [`CompatError::Fixture`] when the endpoint is not loopback `http`, or the bucket or a
-    /// credential is missing.
-    pub fn from_env() -> Result<Option<Self>, CompatError> {
-        let Some(endpoint) = std::env::var_os(ENDPOINT_VAR) else {
-            return Ok(None);
-        };
+    /// [`CompatError::Fixture`] when the endpoint is unset or not loopback `http`, or the
+    /// bucket or a credential is missing.
+    pub fn from_env() -> Result<Self, CompatError> {
+        let endpoint = std::env::var_os(ENDPOINT_VAR)
+            .ok_or_else(|| CompatError::Fixture(format!("{ENDPOINT_VAR} is unset")))?;
         let endpoint = loopback_endpoint(&endpoint.to_string_lossy())?;
         let var = |name: &str| {
             std::env::var(name)
@@ -114,12 +113,12 @@ impl MinioEnv {
                     CompatError::Fixture(format!("{name} is unset ({ENDPOINT_VAR} is set)"))
                 })
         };
-        Ok(Some(Self {
+        Ok(Self {
             endpoint,
             bucket: var(BUCKET_VAR)?,
             access_key: var(ACCESS_KEY_VAR)?,
             secret_key: var(SECRET_KEY_VAR)?,
-        }))
+        })
     }
 
     /// The normalised loopback endpoint.
@@ -300,6 +299,21 @@ impl S3Replica {
         let sink = FileSink::create(out)
             .map_err(|e| CompatError::Fixture(format!("creating the restore sink: {e}")))?;
         Ok(block_on(restore(&self.store, target, sink)))
+    }
+
+    /// [`S3Replica::restore`] with `options` for the cases the executor can either refuse or accept.
+    ///
+    /// # Errors
+    /// [`CompatError`] when the sink cannot be created; the executor's refusal is the inner `Err`.
+    pub fn restore_with(
+        &self,
+        target: RestoreTarget,
+        options: RestoreOptions,
+        out: &Path,
+    ) -> Result<Result<Restored, RestoreError>, CompatError> {
+        let sink = FileSink::create(out)
+            .map_err(|e| CompatError::Fixture(format!("creating the restore sink: {e}")))?;
+        Ok(block_on(restore_with(&self.store, target, options, sink)))
     }
 
     /// Deletes every file under the prefix, so a run leaves the bucket as it found it.

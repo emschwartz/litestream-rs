@@ -105,7 +105,7 @@ use super::{DeleteJob, L0Retention, MAX_DELETE, MaintainState, Maintenance, Rete
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, NonZeroCreatedAt};
-use crate::plan::{KeyTarget, PlanOutcome, plan};
+use crate::plan::{KeyTarget, PlanOutcome, plan, plan_without};
 
 #[cfg(test)]
 #[expect(
@@ -204,7 +204,7 @@ fn decide(
     }
     let mut keys = found.keys;
     if let Some(restore_point) = state.kept_restore_point() {
-        match pinned_chain(inventory, restore_point) {
+        match pinned_chain(inventory, &[], restore_point) {
             Ok(chain) => keys.retain(|key| !chain.contains(key)),
             Err(hold) => return Ok(Retention::Held(hold)),
         }
@@ -491,12 +491,13 @@ fn candidates(
     Ok(Ok(found))
 }
 
-/// Queues each level's deletable prefix; returns the files that stay.
-fn levels_one_to_eight(
-    inventory: &Inventory,
+/// Queues each level's deletable prefix; returns, as slices of the inventory,
+/// the files that stay.
+fn levels_one_to_eight<'a>(
+    inventory: &'a Inventory,
     floor: Option<Txid>,
     out: &mut Vec<FileKey>,
-) -> Vec<FileInfo> {
+) -> Vec<&'a [FileInfo]> {
     let mut kept = Vec::new();
     for level in Level::ALL.iter().skip(1).take(8) {
         let files = inventory.level(*level);
@@ -508,7 +509,7 @@ fn levels_one_to_eight(
                 .count()
         });
         out.extend(files.iter().take(deletable).map(|info| info.key));
-        kept.extend(files.iter().skip(deletable).copied());
+        kept.extend(files.get(deletable..));
     }
     kept
 }
@@ -527,7 +528,7 @@ struct LevelZero {
 fn level_zero(
     inventory: &Inventory,
     scan: &LevelZero,
-    kept: &[FileInfo],
+    kept: &[&[FileInfo]],
     resolved: &ResolvedCreatedAt,
     found: &mut Found,
 ) -> Needs<Option<RetentionHold>> {
@@ -591,22 +592,36 @@ fn level_zero_need(
 }
 
 /// The union of the files' ranges as sorted, disjoint, non-adjacent spans.
-fn merged_ranges(files: &[FileInfo]) -> Vec<(Txid, Txid)> {
-    let mut spans: Vec<(Txid, Txid)> = files
-        .iter()
-        .map(|info| (info.key.range().min(), info.key.range().max()))
-        .collect();
-    spans.sort();
-    let mut merged: Vec<(Txid, Txid)> = Vec::new();
-    for (min, max) in spans {
-        match merged.last_mut() {
-            Some((_, end)) if end.next().is_none_or(|one_past| min <= one_past) => {
-                *end = (*end).max(max);
-            }
-            _ => merged.push((min, max)),
+///
+/// Each run is one level's files, ascending by first transaction, so it folds
+/// into spans in one pass without a list of every file; the few spans each run
+/// leaves are then folded together.
+fn merged_ranges(runs: &[&[FileInfo]]) -> Vec<(Txid, Txid)> {
+    let mut spans: Vec<(Txid, Txid)> = Vec::new();
+    for run in runs {
+        let mut folded = Vec::new();
+        for info in *run {
+            add_span(&mut folded, info.key.range().min(), info.key.range().max());
         }
+        spans.extend(folded);
+    }
+    spans.sort();
+    let mut merged = Vec::new();
+    for (min, max) in spans {
+        add_span(&mut merged, min, max);
     }
     merged
+}
+
+/// Folds `min..=max` into the last span when they touch or overlap; `min` must not
+/// precede the last span's start.
+fn add_span(spans: &mut Vec<(Txid, Txid)>, min: Txid, max: Txid) {
+    match spans.last_mut() {
+        Some((_, end)) if end.next().is_none_or(|one_past| min <= one_past) => {
+            *end = (*end).max(max);
+        }
+        _ => spans.push((min, max)),
+    }
 }
 
 fn covered(cover: &[(Txid, Txid)], info: &FileInfo) -> bool {
@@ -621,9 +636,14 @@ fn covered(cover: &[(Txid, Txid)], info: &FileInfo) -> bool {
         .is_some_and(|(start, end)| *start <= range.min() && range.max() <= *end)
 }
 
-/// The keys of the pinned restore point's chain, or the hold when it does not plan.
-fn pinned_chain(inventory: &Inventory, restore_point: Txid) -> Result<Vec<FileKey>, RetentionHold> {
-    match plan(inventory, KeyTarget::Txid(restore_point)) {
+/// The keys of the pinned restore point's chain over the inventory without
+/// `gone` (ascending), or the hold when it does not plan.
+fn pinned_chain(
+    inventory: &Inventory,
+    gone: &[FileKey],
+    restore_point: Txid,
+) -> Result<Vec<FileKey>, RetentionHold> {
+    match plan_without(inventory, gone, KeyTarget::Txid(restore_point)) {
         PlanOutcome::Plan(chain) if chain.reaches() == restore_point => {
             Ok(chain.files().iter().map(|info| info.key).collect())
         }
@@ -652,25 +672,14 @@ fn self_check(
     job: &DeleteJob,
     restore_point: Option<Txid>,
 ) -> Option<RetentionHold> {
-    let rest = Inventory::from_files(
-        inventory
-            .files()
-            .iter()
-            .filter(|info| job.keys().binary_search(&info.key).is_err())
-            .copied(),
-    );
-    let Ok(rest) = rest else {
-        // A subset of a valid listing cannot conflict; hold if it somehow does.
-        return Some(RetentionHold::SelfCheck {
-            outcome: PlanOutcome::EmptyReplica,
-        });
-    };
+    // The inventory minus the job's keys, read in place: a copy of it here
+    // would double the peak of every retention pass.
     if let Some(restore_point) = restore_point
-        && let Err(hold) = pinned_chain(&rest, restore_point)
+        && let Err(hold) = pinned_chain(inventory, job.keys(), restore_point)
     {
         return Some(hold);
     }
-    match plan(&rest, KeyTarget::Latest) {
+    match plan_without(inventory, job.keys(), KeyTarget::Latest) {
         PlanOutcome::Plan(chain) if Some(chain.reaches()) == inventory.newest() => None,
         // A plan that stops short of the newest transaction.
         PlanOutcome::Plan(chain) => Some(RetentionHold::SelfCheck {

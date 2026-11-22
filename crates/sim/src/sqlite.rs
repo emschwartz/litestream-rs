@@ -46,8 +46,15 @@
 //!
 //! Durability follows `synchronous=NORMAL`: a commit is not fsynced; the WAL is
 //! fsynced when a header is written (frame 1 of a generation) and before a
-//! checkpoint copies frames, and a checkpoint's database writes are durable. A
-//! power crash keeps the WAL as of its last fsync and runs SQLite's recovery.
+//! checkpoint copies frames, and a checkpoint's database writes are durable. Our
+//! own `WalSource::sync` (the engine's barrier before staging) makes the whole
+//! WAL durable too. A power crash keeps the WAL as of its last fsync, or a drawn prefix of the
+//! later writes ([`SimSqlite::tear_on_power_loss`]), or the block law's draw
+//! over them ([`SimSqlite::crash_by_law`], [`crate::crash_law`]), and then
+//! SQLite's recovery runs. The recovery is real SQLite's ([`crate::recovery`]): the
+//! database and WAL bytes go to a temporary directory and SQLite recovers them;
+//! the engine's WAL parser, run on the same bytes, and the rules' image are
+//! checked against it.
 //!
 //! Every method is total: an operation that is impossible in the current state
 //! returns `false` or `None` and changes nothing. Nothing reads a clock; the
@@ -65,6 +72,9 @@ use lsr_core::{
 };
 use lsr_ltx::{DbPages, PageNo, PageSize};
 use lsr_wal::testing::{WalBuilder, page};
+
+use crate::crash_law::{self, BlockSize, CrashLaw, Rng};
+use crate::recovery;
 use lsr_wal::{
     ByteOrder, CommittedEnd, FRAME_HEADER_LEN, HEADER_LEN, Salts, ScanLimit, TxOutcome,
     WalChecksum, WalHeader, WalOffset, WalReader,
@@ -234,6 +244,8 @@ struct State {
     wal: Vec<u8>,
     // The WAL as of its last fsync.
     durable: Vec<u8>,
+    // Our sync of the WAL returns success and makes nothing durable: a disk that lies.
+    our_sync_lies: bool,
     present: bool,
     unlinked: bool,
     index: Index,
@@ -261,6 +273,17 @@ struct State {
     // Power losses that kept unsynced WAL bytes, and those that kept a frame
     // cut inside.
     torn_kept: (u32, u32),
+    // With a law, a power loss keeps the block law's draw over the unsynced
+    // WAL writes instead (it wins over `torn`).
+    blocks: Option<(BlockSize, Rng)>,
+    // What the WAL held before its last truncate: the stale bytes a block may
+    // show past the data written.
+    ghost: Vec<u8>,
+    // Power losses under the block law that kept some unsynced block, and those
+    // that lost a block before one they kept (a hole).
+    block_kept: (u32, u32),
+    // Where the engine's WAL parser and SQLite's own recovery disagreed.
+    recovery_disagreements: Vec<String>,
 }
 
 /// Where the harness's logs stood: its own created-at times, opaque to the rules.
@@ -638,8 +661,7 @@ impl State {
                 // (`walCheckpoint`): when the truncate fails, the file keeps
                 // its old header and frames under a reset index.
                 if !mem::take(&mut self.faults.truncate_fails) {
-                    self.wal.clear();
-                    self.durable.clear();
+                    self.forget_wal();
                 }
             }
         }
@@ -691,17 +713,49 @@ impl State {
         }
     }
 
-    /// SQLite's `walIndexRecover` over the file, by the app's connection.
+    /// SQLite's `walIndexRecover` over the file, by the app's connection. Real
+    /// SQLite recovering the same bytes is the ground truth ([`crate::recovery`]):
+    /// its `mxFrame`, size, salts and checksum make the wal-index, and the
+    /// frames up to `mxFrame` give the page of each. The engine's WAL parser
+    /// runs on the same bytes as a cross-check, and the rules' image of the
+    /// recovered database is checked against the database SQLite recovered;
+    /// any disagreement is kept ([`SimSqlite::recovery_disagreements`]).
     fn recover(&mut self) {
-        let mut index = Index::empty(self.index.salts, self.db_pages());
-        self.app_checkpoints = 0;
+        let (parsed, seq) = self.parse_recovery();
+        let wal = self.present.then_some(self.wal.as_slice());
+        let index = match recovery::recover(self.page_size, &self.db, wal, recovery::Header::Fake) {
+            Ok(truth) => {
+                let index = self.index_from(&truth);
+                self.cross_check(&parsed, &index);
+                self.index = index;
+                self.check_image(&truth.image);
+                return self.adopt_seq(seq);
+            }
+            Err(err) => {
+                self.recovery_disagreements
+                    .push(format!("SQLite's recovery could not run: {err}"));
+                parsed
+            }
+        };
+        self.index = index;
+        self.adopt_seq(seq);
+    }
+
+    fn adopt_seq(&mut self, seq: u32) {
+        self.app_checkpoints = seq;
         self.pool_checkpoints = 0;
-        let bytes = mem::take(&mut self.wal);
-        if let Ok(mut reader) = WalReader::open(Cursor::new(bytes.as_slice()))
+    }
+
+    /// The engine's parser's reading of the file: the index it would recover
+    /// and the header's checkpoint sequence.
+    fn parse_recovery(&self) -> (Index, u32) {
+        let mut index = Index::empty(self.index.salts, self.db_pages());
+        let mut seq = 0;
+        if let Ok(mut reader) = WalReader::open(Cursor::new(self.wal.as_slice()))
             && reader.header().page_size() == self.page_size
         {
             index.salts = reader.header().salts();
-            self.app_checkpoints = reader.header().checkpoint_seq();
+            seq = reader.header().checkpoint_seq();
             let mut cursor = reader.cursor_at_start();
             while let Ok(TxOutcome::Tx(tx)) = reader.next_tx(&cursor, ScanLimit::FirstInvalidFrame)
             {
@@ -717,8 +771,70 @@ impl State {
             index.running = cursor.checksum();
             index.committed = cursor.checksum();
         }
-        self.wal = bytes;
-        self.index = index;
+        (index, seq)
+    }
+
+    /// The wal-index SQLite recovered, with each frame's page number and the
+    /// commits read from the frames it kept.
+    fn index_from(&self, truth: &recovery::Recovered) -> Index {
+        let mut index = Index::empty(truth.salts, self.db_pages());
+        for frame in 0..truth.mx_frame {
+            let at = self.frame_at(frame);
+            let field = |off: usize| {
+                let from = at.saturating_add(off);
+                self.wal
+                    .get(from..from.saturating_add(4))
+                    .and_then(|b| b.try_into().ok())
+                    .map_or(0, u32::from_be_bytes)
+            };
+            index.pgnos.push(field(0));
+            if field(4) != 0 {
+                index.tx_ends.push(frame.saturating_add(1));
+            }
+        }
+        if truth.mx_frame > 0 {
+            index.db_size = truth.db_pages;
+        }
+        index.mx_frame = truth.mx_frame;
+        index.written = truth.mx_frame;
+        index.running = truth.checksum;
+        index.committed = truth.checksum;
+        index
+    }
+
+    fn cross_check(&mut self, parsed: &Index, truth: &Index) {
+        let same = parsed.mx_frame == truth.mx_frame
+            && parsed.pgnos == truth.pgnos
+            && parsed.tx_ends == truth.tx_ends
+            && parsed.db_size == truth.db_size
+            && (truth.mx_frame == 0
+                || (parsed.salts == truth.salts && parsed.committed == truth.committed));
+        if !same {
+            self.recovery_disagreements.push(format!(
+                "the engine's parser recovered mxFrame {} (size {}), SQLite {} (size {})",
+                parsed.mx_frame, parsed.db_size, truth.mx_frame, truth.db_size
+            ));
+        }
+    }
+
+    /// The rules' recovered image, page for page, against the database SQLite
+    /// recovered. Page 1's first 100 bytes are the probe's own header unless a
+    /// recovered frame wrote page 1.
+    fn check_image(&mut self, image: &[u8]) {
+        let page_1_in_wal = self.index.pgnos.contains(&1);
+        let pages = self.index.db_size;
+        let bad = (1..=pages).find(|pgno| {
+            let at = self.page_at(*pgno);
+            let skip = if *pgno == 1 && !page_1_in_wal { 100 } else { 0 };
+            let want = self.image_page(*pgno);
+            let got = image.get(at.saturating_add(skip)..at.saturating_add(self.page_size.bytes()));
+            got != want.get(skip..)
+        });
+        if let Some(pgno) = bad {
+            self.recovery_disagreements.push(format!(
+                "page {pgno} of the rules' recovered image is not SQLite's"
+            ));
+        }
     }
 
     /// A full backfill and a fresh, empty WAL with every connection closed.
@@ -730,8 +846,7 @@ impl State {
         if self.index.backfilled < mx_frame {
             self.copy_frames(mx_frame);
         }
-        self.wal.clear();
-        self.durable.clear();
+        self.forget_wal();
         self.index = Index::empty(self.index.salts, self.index.db_size);
         self.app_checkpoints = 0;
         self.pool_checkpoints = 0;
@@ -785,6 +900,38 @@ impl State {
         self.recover();
     }
 
+    /// Truncates the WAL to nothing, durably, keeping its bytes as the stale
+    /// bytes a later crash may show.
+    fn forget_wal(&mut self) {
+        let wal = mem::take(&mut self.wal);
+        if !wal.is_empty() {
+            self.ghost = wal;
+        }
+        self.durable.clear();
+    }
+
+    /// What of the WAL a power loss leaves under the block law
+    /// ([`crate::crash_law`]): the dirty blocks are the ones where the WAL
+    /// differs from its bytes at the last fsync. The database file has no
+    /// unsynced write at any point a crash falls on: every write of it is a
+    /// checkpoint's, which SQLite syncs before the checkpoint returns, and a
+    /// crash falls between calls.
+    fn surviving_blocks(&mut self) -> Option<Vec<u8>> {
+        let (block, rng) = self.blocks.as_mut()?;
+        let dirty = crash_law::differing_blocks(&self.durable, &self.wal, *block);
+        let out =
+            crash_law::crash_image(&self.durable, &self.wal, &dirty, &self.ghost, *block, rng);
+        let (kept, hole) = crash_law::kept_and_holes(&self.durable, &self.wal, &out, *block);
+        if kept {
+            self.block_kept.0 = self.block_kept.0.saturating_add(1);
+        }
+        if hole {
+            self.block_kept.1 = self.block_kept.1.saturating_add(1);
+        }
+        self.durable.clone_from(&out);
+        Some(out)
+    }
+
     /// What of the WAL a power loss leaves: the bytes of the last fsync, or,
     /// with a torn seed, those with a drawn prefix of the later writes on
     /// top. Writes past the last fsync reach the disk in order, any number
@@ -792,6 +939,9 @@ impl State {
     /// then keeps the frames whose checksum chain still holds
     /// (`synchronous=NORMAL`).
     fn surviving_wal(&mut self) -> Vec<u8> {
+        if let Some(out) = self.surviving_blocks() {
+            return out;
+        }
         let Some(seed) = self.torn.as_mut() else {
             return self.durable.clone();
         };
@@ -903,11 +1053,16 @@ impl SimSqlite {
             write_lock: None,
             faults: Faults::default(),
             app_autocheckpoint: None,
+            our_sync_lies: false,
             app_auto: AutoTally::default(),
             in_tick: None,
             in_tick_done: None,
             torn: None,
             torn_kept: (0, 0),
+            blocks: None,
+            ghost: Vec::new(),
+            block_kept: (0, 0),
+            recovery_disagreements: Vec::new(),
         };
         Self {
             state: Arc::new(Mutex::new(state)),
@@ -1013,6 +1168,12 @@ impl SimSqlite {
             state.in_tick = None;
             state.in_tick_done.take()
         })
+    }
+
+    /// From now on our sync of the WAL (the engine's barrier before staging) succeeds and makes
+    /// nothing durable, as on a disk that lies about fsync; SQLite's own syncs still hold.
+    pub fn lie_on_our_sync(&self) {
+        self.with(|state| state.our_sync_lies = true);
     }
 
     /// The app's `wal_autocheckpoint` in frames; `None`, the model's default, is 0.
@@ -1330,6 +1491,31 @@ impl SimSqlite {
         self.with(|state| state.torn = Some(seed));
     }
 
+    /// From now on a power loss keeps what `law` draws over the unsynced WAL
+    /// writes ([`crate::crash_law`]); [`CrashLaw::AllOrNothing`] keeps none.
+    pub fn crash_by_law(&self, law: CrashLaw) {
+        self.with(|state| {
+            state.blocks = match law {
+                CrashLaw::AllOrNothing => None,
+                CrashLaw::Blocks { block, seed } => Some((block, Rng(seed))),
+            };
+        });
+    }
+
+    /// Power losses under the block law that kept some unsynced WAL block, and
+    /// those among them that lost a block before one they kept.
+    #[must_use]
+    pub fn block_losses(&self) -> (u32, u32) {
+        self.with(|state| state.block_kept)
+    }
+
+    /// Every recovery at which the engine's WAL parser and SQLite's own
+    /// recovery, run on the same bytes, disagreed.
+    #[must_use]
+    pub fn recovery_disagreements(&self) -> Vec<String> {
+        self.with(|state| state.recovery_disagreements.clone())
+    }
+
     /// Power losses that kept some unsynced WAL bytes, and those among them
     /// that kept a frame cut inside.
     #[must_use]
@@ -1489,6 +1675,19 @@ impl WalSource for SimSource {
 
     fn epoch(&self) -> ReadLockHold {
         lock(&self.state).epoch
+    }
+
+    fn sync(&mut self) -> Result<(), SourceError> {
+        let mut state = lock(&self.state);
+        state.faults.take(SourceOp::Sync)?;
+        if state.unlinked {
+            return Err(SourceError::Unlinked);
+        }
+        let state = &mut *state;
+        if !state.our_sync_lies {
+            state.durable.clone_from(&state.wal);
+        }
+        Ok(())
     }
 }
 

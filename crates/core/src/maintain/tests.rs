@@ -1108,6 +1108,11 @@ proptest! {
 const PAGE: u32 = 4096;
 
 fn ltx(min: u64, max: u64, created: i64) -> Vec<u8> {
+    ltx_filled(min, max, created, u8::try_from(max % 251).unwrap())
+}
+
+/// [`ltx`] with page 1 filled with `fill`.
+fn ltx_filled(min: u64, max: u64, created: i64, fill: u8) -> Vec<u8> {
     let page_size = PageSize::new(PAGE).unwrap();
     let header = Header::new(HeaderFields {
         tracked: false,
@@ -1121,7 +1126,7 @@ fn ltx(min: u64, max: u64, created: i64) -> Vec<u8> {
     })
     .unwrap();
     let mut encoder = Encoder::new(Vec::new(), header).unwrap();
-    let data = vec![u8::try_from(max % 251).unwrap(); page_size.bytes()];
+    let data = vec![fill; page_size.bytes()];
     encoder
         .write_page(PageNo::new(1, page_size).unwrap(), &data)
         .unwrap();
@@ -1185,25 +1190,30 @@ fn a_compact_job_publishes_its_output_key_and_is_not_planned_again() {
     no_level_one_job(&replica);
 }
 
+/// The replica's objects keep their trailers but have a page byte flipped,
+/// so they do not decode: the compaction succeeds only if it read the local
+/// copies, after comparing the trailers.
 #[test]
 fn level_one_reads_the_local_copy_first() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &MemStore::new());
     for n in 1..=3 {
-        // The replica's listing names the files; its bytes are never read.
-        put(&replica, 0, n, T0 - 100_000);
+        let created = T0 - 100_000 + i64::try_from(n).unwrap();
+        let mut bytes = ltx(n, n, created);
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        block_on(async {
+            let mut up = replica
+                .begin_upload(&key(0, n, n), at(created))
+                .await
+                .unwrap();
+            up.write(&bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
     }
     let job = l1_job(&replica);
-    block_on(async {
-        replica
-            .delete(&[key(0, 1, 1), key(0, 2, 2), key(0, 3, 3)])
-            .await
-            .unwrap();
-    });
-    assert!(matches!(
-        block_on(run_compact(&job, &local, &replica)),
-        Outcome::Compacted { .. }
-    ));
+    let out = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
 }
 
 #[test]
@@ -1214,6 +1224,51 @@ fn level_one_falls_back_to_the_replica_when_the_local_copy_is_gone() {
     let out = block_on(run_compact(&job, &local, &replica));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_eq!(listed(&replica, 1), vec![key(1, 1, 3)]);
+}
+
+fn whole(store: &MemStore, k: &FileKey) -> Vec<u8> {
+    block_on(store.read(
+        k,
+        0,
+        crate::store::ReadLen::new(crate::store::ReadLen::MAX_RAW).unwrap(),
+    ))
+    .unwrap()
+}
+
+/// A staged level-0 file that verifies but is not the replica's object under
+/// the same key (a staging backup put back, say) is not compaction input:
+/// level 1 would hold one content for a transaction while level 0 holds
+/// another. Level 1 is built from the replica's copy (seed 0xcf8).
+#[test]
+fn level_one_is_built_from_the_replica_when_the_local_copy_differs() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let created = T0 - 100_000 + 3;
+    let stale = ltx_filled(3, 3, created, 0xee);
+    block_on(async {
+        let mut up = local
+            .begin_upload(&key(0, 3, 3), at(created))
+            .await
+            .unwrap();
+        up.write(&stale).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    assert_eq!(
+        stale.len(),
+        whole(&replica, &key(0, 3, 3)).len(),
+        "same size, other bytes"
+    );
+    let job = l1_job(&replica);
+    let out = block_on(run_compact(&job, &local, &replica));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    let want = MemStore::new();
+    three_l0(&MemStore::new(), &want);
+    let built = block_on(run_compact(&job, &MemStore::new(), &want));
+    assert!(matches!(built, Outcome::Compacted { .. }), "{built:?}");
+    assert_eq!(
+        whole(&replica, &job.output_key()),
+        whole(&want, &job.output_key())
+    );
 }
 
 #[test]

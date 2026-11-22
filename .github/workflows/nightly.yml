@@ -1,7 +1,7 @@
 name: nightly
-# What is too slow or too platform-specific for every push: the land gate on macOS, and a short
-# fuzz run of the decoders. Nightly and on demand, never on push: a failure here is a finding to
-# file, not a reason to block an unrelated change.
+# What is too slow or too platform-specific for every push: the land gate on macOS, a short fuzz
+# run of the decoders, the sanitizers, Miri and schedule exploration. Nightly and on demand,
+# never on push: a failure here is a finding to file, not a reason to block an unrelated change.
 on:
   schedule:
     - cron: "29 4 * * *"
@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  NEXTEST_PROFILE: ci
 
 jobs:
   # Development runs on macOS too (AGENTS.md); `just check` skips upstream-test-map-fresh there, since the
@@ -24,16 +27,22 @@ jobs:
           tool: cargo-nextest,just
       - run: just check
 
-  # About ten minutes per LTX and WAL decoder target from the committed corpus (docs/fuzzing.md);
-  # the 24-hour run stays a manual one. A crash, leak, timeout or out-of-memory input is
-  # uploaded; replay it with `cargo +nightly fuzz run <target> --fuzz-dir fuzz <file>`.
+  # From the committed corpus (docs/fuzzing.md): about ten minutes per LTX and WAL decoder
+  # target, five per restore-planner target judged by the contract spec; the 24-hour run stays a
+  # manual one. A crash, leak, timeout or out-of-memory input is uploaded; replay it with
+  # `cargo +nightly fuzz run <target> --fuzz-dir fuzz <file>`.
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        target: [decode, index, wal]
+        include:
+          - { target: decode, seconds: 600 }
+          - { target: index, seconds: 600 }
+          - { target: wal, seconds: 600 }
+          - { target: plan_contract, seconds: 300 }
+          - { target: plan_lazy, seconds: 300 }
     steps:
       - uses: actions/checkout@v5
       # cargo-fuzz needs nightly; the workspace's pinned toolchain is left as it is.
@@ -41,12 +50,117 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz,just
-      - run: just fuzz "$TARGET" 600
+      - run: just fuzz "$TARGET" "$DURATION"
         env:
           TARGET: ${{ matrix.target }}
+          DURATION: ${{ matrix.seconds }}
       - if: failure()
         uses: actions/upload-artifact@v5
         with:
           name: fuzz-${{ matrix.target }}-${{ github.run_id }}
           path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+
+  # The memory gates at scale (`just mem-big`): restore peak heap flat from a 1 GiB to a 4 GiB
+  # database, the snapshot's bytes a page, planning and retention over a million files. Needs
+  # 5 GiB of temporary disk, which a hosted runner has.
+  mem-big:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just mem-big
+
+  # AddressSanitizer and ThreadSanitizer over the crate with `unsafe` FFI (sqlite) and the replica
+  # thread tests (`just asan`, `just tsan`). Nightly only: -Zsanitizer and -Zbuild-std, which
+  # needs rust-src. Any report is a defect to fix, with a regression test.
+  sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, tsan]
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install nightly --profile minimal --component rust-src
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just "$SANITIZER"
+        env:
+          SANITIZER: ${{ matrix.sanitizer }}
+
+  # Miri over the pure crates and the core's decision code (`just miri`): undefined behaviour
+  # and leaks in code that does no I/O. Tests that need files or FFI are skipped under cfg(miri).
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install nightly --profile minimal --component miri,rust-src
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just miri
+
+  # Shuttle explores thousands of random thread schedules of the replicator's command handshake
+  # and the S3 batch's scoped threads (`just shuttle`); pull requests that touch store-s3 or
+  # replica run the short version in ci.yml. A failure prints the schedule that replays it.
+  shuttle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just shuttle 500000
+
+  # Every defect fixed on main is planted again in a scratch tree and the tests that caught it must
+  # fail (docs/planted-bugs.md). A survivor means a test no longer guards its fix; a patch that stops
+  # applying means the entry needs re-expressing against the current tree. About 25 minutes cold on
+  # a hosted runner (two test builds, eight entries).
+  planted-bugs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just planted-bugs
+
+  # NIGHTLY ONLY, never in the PR gate. The real `lsr replicate` on LazyFS (`just lazyfs`): power
+  # loss by dropped unsynced data and torn WAL writes, judged by restores against the workload's
+  # commit log. Hosted Ubuntu runners mount FUSE: LazyFS's own CI mounts it on ubuntu-latest at the
+  # commit scripts/lazyfs.py pins. 300 cycles is about 15 minutes; the hard timeout bounds a hang.
+  # A failure keeps the evidence (restores that failed, the commit log, engine and LazyFS logs).
+  lazyfs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: sudo apt-get install -y cmake g++ libfuse3-dev fuse3
+      - run: just lazyfs 300
+      - if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: lazyfs-${{ github.run_id }}
+          path: |
+            target/lazyfs/restores
+            target/lazyfs/*.log
+            target/lazyfs/*.stderr
           if-no-files-found: ignore
