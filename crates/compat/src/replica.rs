@@ -64,12 +64,17 @@ fn mtime_ms(meta: &fs::Metadata, path: &Path) -> Result<i64, CompatError> {
         .map_err(|e| CompatError::Fixture(format!("time overflow: {e}")))
 }
 
-/// Lists `<replica>/ltx/<level>/*`; a missing `ltx` directory is an empty replica.
+/// Lists `<replica>/ltx/<level>/*`; a missing `ltx` directory is an empty replica, an unreadable
+/// one is an error.
 pub fn list(replica: &Path) -> Result<Listing, CompatError> {
     let root = replica.join("ltx");
     let mut out = Listing::default();
-    let Ok(levels) = fs::read_dir(&root) else {
-        return Ok(out);
+    // Only a missing directory is an empty replica; any other failure (a file where `ltx` should
+    // be, no permission) must not read as "nothing replicated yet".
+    let levels = match fs::read_dir(&root) {
+        Ok(levels) => levels,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(CompatError::io(&root)(e)),
     };
     for level in levels {
         let level_path = level.map_err(CompatError::io(&root))?.path();
@@ -249,5 +254,14 @@ mod tests {
         ] {
             assert!(parse_rel(&rel).is_none(), "{rel}");
         }
+    }
+
+    #[test]
+    fn a_missing_ltx_dir_is_empty_but_an_unreadable_one_is_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(list(dir.path()).expect("missing is empty").files.is_empty());
+        // A file where the directory should be: not "nothing replicated yet".
+        fs::write(dir.path().join("ltx"), b"x").expect("write");
+        list(dir.path()).unwrap_err();
     }
 }
