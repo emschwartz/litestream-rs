@@ -31,6 +31,11 @@ const STEPS: u32 = 300;
 /// A written history: the app commits and the engine uploads, then `hold` lasts six ticks with
 /// commits under it, then the run heals and settles.
 fn under(hold: Hold) -> Vec<Op> {
+    under_for(hold, 6)
+}
+
+/// [`under`], with the hold lasting `ticks` ticks.
+fn under_for(hold: Hold, ticks: u8) -> Vec<Op> {
     let mut ops = Vec::new();
     for _ in 0..6 {
         ops.push(Op::Commit {
@@ -40,7 +45,7 @@ fn under(hold: Hold) -> Vec<Op> {
         ops.push(Op::Tick);
         ops.push(Op::Tick);
     }
-    ops.push(Op::Hold { hold, ticks: 6 });
+    ops.push(Op::Hold { hold, ticks });
     for _ in 0..6 {
         ops.push(Op::Commit {
             pages: 1,
@@ -190,6 +195,29 @@ fn a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13() {
     }
 }
 
+/// Health tells the truth about a halt: an outage that keeps every upload from landing, held
+/// long enough for the engine to retry past its stall threshold, leaves a task degraded at
+/// its end (oracle `HealthBlind` otherwise), for the replica store refusing uploads and for a
+/// full staging disk.
+#[test]
+fn a_halt_long_enough_to_stall_is_reported_degraded() {
+    for hold in [
+        Hold::StoreDown(lsr_core::StoreOp::Upload),
+        Hold::DiskFull,
+        Hold::CredentialsRevoked,
+    ] {
+        let report = match run_ops(Seed::new(7), &under_for(hold, 40), &Opts::default()) {
+            Ok(report) => report,
+            Err(failure) => panic!("{hold:?}: {failure}"),
+        };
+        assert_eq!(
+            report.reach.get(&format!("{}.halted", key(hold))),
+            1,
+            "{hold:?}: the hold never halted replication long enough to judge health"
+        );
+    }
+}
+
 #[test]
 fn readers_holding_the_wal_leave_the_replica_restorable_while_they_hold() {
     let report = held(Hold::ReadersHeld);
@@ -318,4 +346,66 @@ fn survival_campaign_swarm() {
         },
     );
     assert_eq!(failed, 0);
+}
+
+/// Swarm seed 0xb9 from the survival campaign, shrunk to 13 operations, every one needed (on
+/// `claude/survival-followup`, with the app doing nothing after a restart; it fails as well
+/// with redone or new work, and under either crash law). Two second writers, each removed by
+/// the operator and followed by a restart, a corrupt publish and a checksum-mismatch upload:
+/// a restore of the latest state goes back from a later node of the history to an earlier one
+/// on the same branch with no rewind recorded, while the oracle passes. The second hold is a
+/// lagging listing only for its commits, ticks and judgments; the engine never sees it. The
+/// same class as D9 in `docs/BEHAVIOR.md`: a boot snapshots after another writer's files.
+#[test]
+#[ignore = "known wrong, G2 with a second writer: latest goes back with no rewind recorded (D9 class); for the second-writer work"]
+fn latest_never_goes_back_after_two_second_writers_seed_0xb9() {
+    use lsr_core::{StoreError, StoreOp};
+    use lsr_sim::{CrashKind, FaultShape, Target};
+    let throttled = StoreError::Throttled {
+        op: StoreOp::Delete,
+        retry_after: None,
+    };
+    let reset = StoreError::Transient {
+        op: StoreOp::List,
+        kind: std::io::ErrorKind::ConnectionReset,
+    };
+    let remote = |op, ahead, shape| Op::StoreFault {
+        target: Target::Remote,
+        op,
+        ahead,
+        shape,
+    };
+    let ops = [
+        remote(StoreOp::Delete, 1, FaultShape::Error(throttled)),
+        Op::Hold {
+            hold: Hold::ReadersHeld,
+            ticks: 4,
+        },
+        Op::Tick,
+        Op::Tick,
+        Op::Crash(CrashKind::Process),
+        remote(StoreOp::Upload, 0, FaultShape::CorruptPublish),
+        Op::SecondWriter { ticks: 5 },
+        Op::SecondWriter { ticks: 6 },
+        remote(StoreOp::Upload, 1, FaultShape::CorruptPublish),
+        remote(StoreOp::Upload, 0, FaultShape::ChecksumMismatch),
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::List,
+            ahead: 1,
+            shape: FaultShape::Error(reset),
+        },
+        Op::Tick,
+        Op::Hold {
+            hold: Hold::LaggingListing,
+            ticks: 7,
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0xb9), &ops, &opts) {
+        panic!("{failure}");
+    }
 }
