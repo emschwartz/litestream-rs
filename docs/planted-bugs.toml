@@ -688,3 +688,78 @@ tests = [
     "failstop::tests::the_gate_follows_the_table",
     "failstop::tests::the_release_latches",
 ]
+
+[[bug]]
+name = "failstop-boot-forgets-deleted-stamps"
+fix = "83cef31"
+package = "lsr-core"
+tests = ["lag::a_boot_that_deletes_pending_files_keeps_their_stamps"]
+
+# The same plants against the simulator: the judge of every run catches the early trips unaided
+# (random histories), the named runs catch the late ones.
+
+[[bug]]
+name = "failstop-trip-on-first-failure-sim"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "fixed_seeds::fixed::seeds_49_to_56",
+    "faults::store_flaky_5pct",
+]
+
+[[bug]]
+name = "failstop-never-trips-sim"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_store_down_past_the_bound_trips_in_time_and_clears_after",
+    "failstop::a_crash_loop_trips_for_age",
+]
+
+[[bug]]
+name = "failstop-no-probe-sim"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_store_down_past_the_bound_trips_in_time_and_clears_after",
+]
+
+[[bug]]
+name = "failstop-clock-from-process-start-sim"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_crash_loop_trips_for_age",
+]
+
+[[bug]]
+name = "failstop-trip-on-degraded-sim"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::permission_revoked_mid_run",
+    "faults::bucket_rolled_back",
+]
+
+[[bug]]
+name = "failstop-no-clear-sim"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_store_down_past_the_bound_trips_in_time_and_clears_after",
+]
+
+[[bug]]
+name = "failstop-holds-after-listing-sim"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_refusal_at_boot_holds_until_it_heals",
+]

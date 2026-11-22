@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/failstop.rs b/crates/core/src/failstop.rs
+index 1e67da2..4f6454c 100644
+--- a/crates/core/src/failstop.rs
++++ b/crates/core/src/failstop.rs
+@@ -245,7 +245,8 @@ impl Lag {
+             (stamp, floor) => stamp.or(floor),
+         };
+         // A stamp ahead of now (a clock that stepped back) says nothing older than now.
+-        let since = oldest.map_or(seen, |stamp| stamp.min(seen)).min(now);
++        let _ = oldest;
++        let since = seen.min(now);
+         self.since = Some(since);
+         let at = since.saturating_add(bound.get());
+         if now >= at && self.failed.is_some_and(|failed| failed >= at) {

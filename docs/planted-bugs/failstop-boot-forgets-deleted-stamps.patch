@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index c039128..045e201 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -866,7 +866,7 @@ impl Actor {
+                 Ok(listed) => listed,
+                 Err(fault) => return self.fault(Task::Sync, fault, now),
+             };
+-        self.kept.lag.floor(pending_stamp);
++        let _ = pending_stamp;
+         let Judged {
+             pending: Pending { tokens, refused },
+             upload,
