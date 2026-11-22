@@ -12,6 +12,11 @@ publish = false
 # `tests/history/manifest.rs` holds this file and the sources to it. The dev-dependencies are the
 # engine the standalone tests drive, never the judge.
 
+# The judge as a command for drivers outside Rust (scripts/lazyfs.py): `lsr-history judge LOG`.
+[[bin]]
+name = "lsr-history"
+required-features = ["sqlite"]
+
 [features]
 # Reading a restored SQLite file: integrity check and the self-certifying chain table.
 sqlite = ["dep:rusqlite"]

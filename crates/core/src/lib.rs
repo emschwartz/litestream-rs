@@ -54,6 +54,7 @@ mod stuck;
 mod sync;
 mod upload;
 mod verify;
+mod witness;
 
 pub use actor::{
     Actor, ActorConfig, Degraded, Env, Event, MaintainedEvent, Phase, Task, Tick, Unfinished,
@@ -104,8 +105,8 @@ pub use position::{
     WalFileLen,
 };
 pub use recover::{
-    FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent,
-    Recovered, Verdict, WalView, recover, recover_traced,
+    BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
+    RecoverEvent, Recovered, Verdict, WalView, recover, recover_traced,
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
@@ -133,3 +134,4 @@ pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,
 };
+pub use witness::{Witnessed, Witnesses};

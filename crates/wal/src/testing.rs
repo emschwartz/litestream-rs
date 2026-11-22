@@ -139,3 +139,10 @@ pub fn page(seed: u64, pgno: PageNo, size: PageSize) -> Vec<u8> {
     }
     out
 }
+
+/// A committed end past any frame of generation `salts`: for a test of what a
+/// resume reads in a whole file, where no wal-index read bounds it.
+#[must_use]
+pub fn unbounded(salts: Salts) -> crate::CommittedEnd {
+    crate::CommittedEnd::new(u32::MAX, salts, PageSize::MIN)
+}

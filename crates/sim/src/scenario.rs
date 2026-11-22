@@ -48,6 +48,8 @@ pub enum CauseKind {
     CheckpointBoundary,
     /// [`SnapshotCause::OperatorRequested`].
     OperatorRequested,
+    /// [`SnapshotCause::StagedUnverified`].
+    StagedUnverified,
 }
 
 impl From<&SnapshotCause> for CauseKind {
@@ -63,6 +65,7 @@ impl From<&SnapshotCause> for CauseKind {
             SnapshotCause::LocalRewound { .. } => Self::LocalRewound,
             SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
             SnapshotCause::OperatorRequested => Self::OperatorRequested,
+            SnapshotCause::StagedUnverified { .. } => Self::StagedUnverified,
         }
     }
 }
@@ -269,6 +272,7 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::LocalRewound { .. } => &[power_loss_wal_rewind],
         SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
+        SnapshotCause::StagedUnverified { .. } => &[pending_from_a_gone_generation],
     }
 }
 
@@ -660,6 +664,40 @@ pub fn app_checkpoint_while_down() -> Scenario {
     )
 }
 
+/// A file is staged and its upload fails; the process dies, and while it is
+/// down the app checkpoints, the WAL restarts and the app commits. Neither
+/// the replica's tail nor the pending file is in the live WAL any more, so
+/// nothing vouches for the pending file: it is deleted unpublished, and the
+/// boot names it as what the snapshot replaces.
+#[must_use]
+pub fn pending_from_a_gone_generation() -> Scenario {
+    let failed_upload = Op::StoreFault {
+        target: crate::generate::Target::Remote,
+        op: lsr_core::StoreOp::Upload,
+        ahead: 0,
+        shape: crate::store::FaultShape::Error(lsr_core::StoreError::Transient {
+            op: lsr_core::StoreOp::Upload,
+            kind: std::io::ErrorKind::ConnectionReset,
+        }),
+    };
+    build(
+        "pending_from_a_gone_generation",
+        vec![
+            synced(),
+            vec![Op::Tick, failed_upload, commit(2, false), Op::Tick],
+            vec![
+                Op::Restart,
+                Op::OurReader { begin: false },
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        snapshot_after_boot(CauseKind::StagedUnverified),
+    )
+}
+
 /// The engine's read lock lapses, an outside RESTART runs, and the process
 /// dies before it notices.
 #[must_use]
@@ -708,9 +746,11 @@ pub fn pinned_on_zero_single_restart() -> Scenario {
 
 /// An outside TRUNCATE resets the wal-index and then fails to truncate the
 /// file, which keeps its old header (#26). With nothing committed past the
-/// position the idle engine settles, a drain finishes and the next boot
-/// continues; the commit that writes a new header is a restart the lapsed read
-/// transaction cannot prove, so a snapshot.
+/// position the idle engine settles and a drain finishes. The next boot reads
+/// the WAL no further than the wal-index commits, which names no frame of the
+/// header's generation, so it can prove nothing there and snapshots; the
+/// commit that writes a new header is a restart the lapsed read transaction
+/// cannot prove, so another snapshot.
 #[must_use]
 pub fn truncate_failed_after_the_index_reset() -> Scenario {
     let mut s = build(
@@ -732,7 +772,7 @@ pub fn truncate_failed_after_the_index_reset() -> Scenario {
             vec![Op::Restore],
         ],
         vec![
-            Expect::Event(EventMatch::Booted(None)),
+            Expect::Event(EventMatch::Booted(Some(CauseKind::GenerationChanged))),
             Expect::Event(EventMatch::Resnapshot(CauseKind::GenerationChanged)),
             Expect::Oracle,
         ],

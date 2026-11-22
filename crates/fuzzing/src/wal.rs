@@ -427,13 +427,13 @@ fn check_committed(wal: &Wal, reader: &mut WalReader<Probe>, whole: &Scan, param
 /// scanned region is a boundary; scanning on from it gives the rest of the scan.
 fn check_resume(wal: &Wal, reader: &mut WalReader<Probe>, whole: &Scan, params: &Params) {
     for (at, bound) in wal.bounds.iter().enumerate() {
-        let resumed = reader.resume(bound.next(), wal.salts());
+        let resumed = reader.resume(bound.next(), wal.salts(), unbounded(wal.salts()));
         if resumed.as_ref().ok() != Some(bound) {
             violation(&format!("resume at a boundary gave {resumed:?}"));
         }
         let before = at.checked_sub(1).and_then(|tx| whole.txs.get(tx));
         if let Some(last) = before.and_then(|tx| tx.frames().last()) {
-            let found = reader.frame_before(bound.next(), wal.salts());
+            let found = reader.frame_before(bound.next(), wal.salts(), unbounded(wal.salts()));
             if found.as_ref().ok() != Some(last) {
                 violation(&format!("frame_before a boundary gave {found:?}"));
             }
@@ -443,7 +443,7 @@ fn check_resume(wal: &Wal, reader: &mut WalReader<Probe>, whole: &Scan, params: 
         salt1: wal.salts().salt1,
         salt2: wal.salts().salt2 ^ 1,
     };
-    let restarted = reader.resume(WalOffset::start(wal.page_size()), other);
+    let restarted = reader.resume(WalOffset::start(wal.page_size()), other, unbounded(other));
     if !matches!(restarted, Err(ResumeError::Restarted { .. })) {
         violation(&format!("resume in another generation gave {restarted:?}"));
     }
@@ -454,6 +454,7 @@ fn check_resume(wal: &Wal, reader: &mut WalReader<Probe>, whole: &Scan, params: 
     let resumed = reader.resume(
         WalOffset::from_frame_index(frame, wal.page_size()),
         wal.salts(),
+        unbounded(wal.salts()),
     );
     match (wal.bound_at(frame), resumed) {
         (Some(at), Ok(cursor)) => check_rest(wal, reader, whole, at, cursor),
@@ -713,3 +714,9 @@ pub fn wal(data: &[u8]) {
 
 #[cfg(test)]
 mod tests;
+
+/// A committed end past any frame of generation `salts`: the oracle here compares a
+/// resume with a scan of the whole file, which no wal-index read bounds.
+fn unbounded(salts: Salts) -> lsr_wal::CommittedEnd {
+    lsr_wal::CommittedEnd::new(u32::MAX, salts, lsr_ltx::PageSize::MIN)
+}
