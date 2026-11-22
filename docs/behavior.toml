@@ -1225,13 +1225,13 @@ detected_by = "core::`a_failing_read_is_an_error_not_a_finding`, core::`a_failin
 [[row]]
 table = "Verify"
 id = "VERIFY-3"
-mark = "none: scheduling and the failing state are in lsr-replica"
+mark = "site"
 circumstance = "Scheduled verify in the library (`verify_interval`, off by default as in Go): a restore of the transaction the replica holds is compared page by page with the live database at that transaction. A difference, or a restore that fails"
 response = "Replication goes on. The last good restore point is kept from retention"
 signal = "`Health.verification.failing`, `lsr_verify_failing`, with the first differing page and the transaction"
 at_risk = "The replica is wrong from some point after the last good run"
 recovery = "The next passing run clears it. An operator requests a snapshot"
-detected_by = "replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`"
+detected_by = "replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14`; plant::`verify-no-plan-called-merged`"
 
 [[row]]
 table = "Verify"

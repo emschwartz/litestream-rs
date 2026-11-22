@@ -728,3 +728,13 @@ fix = "50b9040"
 package = "lsr-replica"
 test_bin = "replica"
 tests = ["a_clock_step_back_does_not_put_off_the_scheduled_verify"]
+
+[[bug]]
+# The scheduled verify calls every transaction without an exact plan "merged by compaction,
+# nothing to compare", so a replica that lost the live transaction passes. The simulator's
+# verify judge (crates/sim/src/run/verify.rs) catches it unaided at its 20th swarm seed.
+name = "verify-no-plan-called-merged"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]

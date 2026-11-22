@@ -462,7 +462,7 @@ fn range_str(range: TxidRange) -> String {
 }
 
 /// Which commit each transaction id covers, from the recorder and the model.
-fn covers(
+pub(crate) fn covers(
     model: &Model,
     recorder: &RecorderLog,
     ground: Ground<'_>,
@@ -660,7 +660,7 @@ fn increasing(
 }
 
 /// The first page where the restored database differs from `image`.
-fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
+pub(crate) fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
     let want = image.db_size();
     let have = got.page_count();
     if want != have {

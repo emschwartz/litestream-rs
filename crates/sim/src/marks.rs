@@ -149,6 +149,7 @@ classes! {
     RequestSnapshot = "RequestSnapshot", Input;
     Restore = "Restore", Input;
     Heal = "Heal", Input;
+    Verify = "Verify", Input;
     // Undrawn: the generator draws Crash instead; Restart, PowerLoss, LyingWalSync (a
     // per-run setting in the mixes instead), OurReader and AppAutocheckpoint are scenario steps.
     Restart = "Restart", Undrawn;
@@ -264,8 +265,16 @@ pub const EXEMPT: &[(&str, &str)] = &[
         "row.REST-5",
         "no replica file's header disagrees with its key; nothing draws one",
     ),
-    ("row.VERIFY-1", "the simulator never runs verify"),
-    ("row.VERIFY-4", "the simulator never runs verify"),
+    (
+        "row.VERIFY-1",
+        "lsr verify runs, but no latest state plans and then fails to restore: no damage in the \
+         latest chain survives to a verify",
+    ),
+    (
+        "row.VERIFY-4",
+        "the scheduled verify reads the transaction it just confirmed; no compaction merges it \
+         away before the restore",
+    ),
     (
         "row.WORLD-13",
         "a clock step back across a restart never reaches the snapshot created-at hold",
@@ -319,6 +328,7 @@ impl Class {
             Op::RequestSnapshot => Self::RequestSnapshot,
             Op::Restore => Self::Restore,
             Op::Heal => Self::Heal,
+            Op::Verify => Self::Verify,
             Op::Restart => Self::Restart,
             Op::PowerLoss => Self::PowerLoss,
             Op::LyingWalSync => Self::LyingWalSync,

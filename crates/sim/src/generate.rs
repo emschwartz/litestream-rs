@@ -191,6 +191,11 @@ pub enum Op {
         /// Ticks the engine runs under it.
         ticks: u8,
     },
+    /// The scheduled verify runs once: the engine reads the live pages in a
+    /// sync tick, the replica is checked at names depth and the live
+    /// transaction restored and compared with them, and the verdict is judged
+    /// against what the database really was.
+    Verify,
 }
 
 /// A fault that lasts across ticks, for [`Op::Hold`]. A restore judged while
@@ -372,6 +377,8 @@ pub struct Weights {
     /// the committed end or right before a checkpoint's barrier. Not an
     /// operation, for the same reason as `block_crash_law`.
     pub clock_law: ClockLaw,
+    /// [`Op::Verify`].
+    pub verify: u32,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -454,6 +461,9 @@ impl Default for Weights {
             // One reading per tick in the default mix, so its recorded runs
             // keep their shape; swarm mixes draw the law.
             clock_law: ClockLaw::PerTick,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            verify: 0,
         }
     }
 }
@@ -483,10 +493,11 @@ enum Kind {
     StagingDamage,
     Heal,
     StagingReplaceRunning,
+    Verify,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 23] {
+    fn table(&self) -> [(Kind, u32); 24] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -511,6 +522,7 @@ impl Weights {
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
             (Kind::StagingReplaceRunning, self.staging_replace_running),
+            (Kind::Verify, self.verify),
         ]
     }
 
@@ -581,6 +593,7 @@ impl Weights {
             lying_wal_sync: false,
             after_restart: AfterRestart::Nothing,
             clock_law: ClockLaw::PerTick,
+            verify: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -615,6 +628,8 @@ impl Weights {
         } else {
             ClockLaw::EachRead
         };
+        // Drawn after that, for the same reason.
+        mix.verify = weight(false);
         mix
     }
 
@@ -885,6 +900,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
         Kind::StagingReplaceRunning => staging_replace_running(entropy),
+        Kind::Verify => Op::Verify,
     }
 }
 

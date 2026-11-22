@@ -150,6 +150,9 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
         // Holds came after the second generator, from a stream of their own: with none drawn,
         // every step is the step it was.
         weights.hold = 0;
+        // The scheduled verify came after it too, drawn last: with its weight at 0, the table
+        // the other kinds are picked from is the one the second generator had.
+        weights.verify = 0;
         let live = history(seed(n), 300, &weights);
         assert_eq!(
             frozen_history(seed(n), 300, Generator::V2),
