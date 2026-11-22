@@ -41,6 +41,40 @@ fn tally() {
     assert!(failed.is_empty(), "failing seeds:\n{}", failed.join("\n"));
 }
 
+/// Seeds to the first failing run, for the planted-bug ledger's unaided mode
+/// (`scripts/planted-bugs.py --unaided`): runs `LSR_SIM_TALLY_SEEDS` seeds from
+/// `LSR_SIM_BASE_SEED` under their swarm mixes and prints
+/// `first-failure: <k> <seed>`, the count of seeds run up to and including the
+/// first that fails, or `first-failure: none <seeds>`. A panic counts as a
+/// failure. It passes either way: the line is the result.
+#[test]
+#[ignore = "runs LSR_SIM_TALLY_SEEDS seeds; use `just planted-bugs --unaided`"]
+fn first_failure() {
+    let seeds: u64 = std::env::var("LSR_SIM_TALLY_SEEDS")
+        .expect("LSR_SIM_TALLY_SEEDS")
+        .parse()
+        .expect("LSR_SIM_TALLY_SEEDS is a number");
+    let base: u64 = std::env::var("LSR_SIM_BASE_SEED")
+        .expect("LSR_SIM_BASE_SEED")
+        .parse()
+        .expect("LSR_SIM_BASE_SEED is a number");
+    for (k, n) in (base..base.saturating_add(seeds)).enumerate() {
+        let seed = Seed::new(n);
+        let outcome = std::panic::catch_unwind(|| {
+            run(seed, STEPS, &Weights::mixed(seed)).map_err(|failure| failure.to_string())
+        });
+        let failed = match outcome {
+            Ok(Ok(_)) => continue,
+            Ok(Err(failure)) => failure,
+            Err(_) => "the run panicked".to_owned(),
+        };
+        println!("first-failure: {} {n:#x}", k.saturating_add(1));
+        println!("{failed}");
+        return;
+    }
+    println!("first-failure: none {seeds}");
+}
+
 /// The fixed seed set, seeds 1 to 64 under their swarm mixes, reaches every
 /// state in [`lsr_sim::reach::REQUIRED`]. A generator change that stops
 /// reaching one fails here, with every required and watched count printed.

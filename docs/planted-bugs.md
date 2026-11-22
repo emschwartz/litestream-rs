@@ -17,6 +17,9 @@ that caught it must fail.
   comment added) must report `SURVIVED` and `canary-fatal` (the wrong CRC table) must report
   `killed`. Before every verdict the runner also checks that the scratch tree is at this checkout's
   HEAD. A canary that misreports, or a tree at another commit, fails the run.
+- `just planted-bugs-unaided [seeds]` asks a different question: with no named test run, how many
+  swarm seeds does the simulator need to fail on each plant? It prints a table (seeds to first
+  failure, or `none`); a plant no seed finds is a listed generator gap, not a failure.
 - A new fix adds an entry and a patch in the same commit as the fix. A `STALE` patch is re-expressed
   against the current tree, or the entry is retired with a reason in the ledger's header.
 
