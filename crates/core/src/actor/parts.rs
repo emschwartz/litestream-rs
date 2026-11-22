@@ -309,6 +309,11 @@ pub(super) struct Engine {
     pub(super) maintain: Maintain,
     /// Staged level-0 files through this transaction were pruned (W3).
     pub(super) pruned: Option<Txid>,
+    /// The newest transaction any listing or commit of this engine
+    /// confirmed on the replica. Never lowered, not even by a relist after the
+    /// replica went backwards: an acknowledged id is never taken again for
+    /// other pages, so a snapshot always goes above it.
+    pub(super) acknowledged: Option<Txid>,
 }
 
 impl Engine {
@@ -324,6 +329,7 @@ impl Engine {
             upload: UploadState::Unknown,
             maintain: Maintain::default(),
             pruned: None,
+            acknowledged: None,
         }
     }
 }
