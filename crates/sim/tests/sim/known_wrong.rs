@@ -46,23 +46,32 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
 }
 
 /// A failed WAL sync, then a restart before the TRUNCATE: the new process stages frames the
-/// failed sync covered (D2). Seed 0x21 is the first of the mixed set to reach it.
+/// failed sync covered (D2). Seed 0xf is the first of the mixed set to reach it.
 #[test]
-fn a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0x21() {
+fn a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0xf() {
     still_fails(
-        0x21,
-        0x4c29_c385_a0f0_e711,
+        0xf,
+        0xe00e_589f_5b37_5395,
         KnownWrong::WalSyncForgottenAtRestart,
     );
 }
 
-/// A staging read refused for permission during level-1 compaction degrades maintenance as the
-/// replica's `StoreDenied(Permission)`.
+/// Fixed: a staging read refused for permission during level-1 compaction degraded maintenance
+/// as the replica's `StoreDenied(Permission)` until #145 routed compaction's local reads through
+/// `Fault::from_staging`. Seed 0xb9e, the one that reached it, must pass now; its cell is drawn.
 #[test]
-fn compaction_still_reports_a_staging_denial_as_the_replicas_seed_0xb9e() {
-    still_fails(
-        0xb9e,
-        0xd841_a3dd_c4ce_83dc,
-        KnownWrong::CompactionClassifiesLocalAsReplica,
+fn compaction_takes_a_staging_denial_as_staging_seed_0xb9e() {
+    let seed = Seed::new(0xb9e);
+    let mut weights = Weights::mixed(seed);
+    weights.known_wrong = true;
+    let ops = history(seed, STEPS, &weights);
+    assert_eq!(
+        digest(&format!("{ops:?}")),
+        0x0f14_5395_bc1a_570e,
+        "the live generator changed seed 0xb9e's run; find another seed whose history draws a \
+         staging read denied for permission"
     );
+    if let Err(failure) = run(seed, STEPS, &weights) {
+        panic!("{failure}");
+    }
 }

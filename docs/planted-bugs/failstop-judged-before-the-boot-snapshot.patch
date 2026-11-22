@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+index 2cd32fb..8bf7df8 100644
+--- a/crates/core/src/actor/lag.rs
++++ b/crates/core/src/actor/lag.rs
+@@ -210,7 +210,7 @@ impl Actor {
+     /// (a store that times out at boot does not hold the application).
+     #[must_use]
+     pub fn boot_judged(&self) -> bool {
+-        let settled = self.pending().is_none() || self.kept.sync_failed_after_listing;
++        let settled = true;
+         (self.kept.listed && settled)
+             || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
+     }
