@@ -54,6 +54,9 @@ pub fn wait_until(
     }
 }
 
+/// How many log lines [`Replicator::explain`] adds to a timeout.
+pub const TIMEOUT_LOG_LINES: usize = 40;
+
 /// Which program a [`Replicator`] runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -205,6 +208,35 @@ impl Replicator {
         lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
     }
 
+    /// `err` with this process's last [`TIMEOUT_LOG_LINES`] log lines added when it is a
+    /// timeout: a wait that runs out while the process still runs is a stall or a slow machine,
+    /// and only the process's own log tells the two apart.
+    #[must_use]
+    pub fn explain(&self, err: CompatError) -> CompatError {
+        match err {
+            CompatError::Timeout(what) => {
+                let text = fs::read_to_string(&self.log).unwrap_or_default();
+                let lines: Vec<&str> = text.lines().collect();
+                let from = lines.len().saturating_sub(TIMEOUT_LOG_LINES);
+                let tail = lines.get(from..).unwrap_or_default().join("\n    ");
+                CompatError::Timeout(format!(
+                    "{what}; the {} log ends:\n    {tail}",
+                    self.kind.command()
+                ))
+            }
+            other @ (CompatError::Io { .. }
+            | CompatError::Sqlite(_)
+            | CompatError::Open(_)
+            | CompatError::Json { .. }
+            | CompatError::BadKey(_)
+            | CompatError::MissingBinary { .. }
+            | CompatError::Process { .. }
+            | CompatError::Fixture(_)
+            | CompatError::Integrity { .. }
+            | CompatError::NotPages { .. }) => other,
+        }
+    }
+
     /// Fails with the log tail when the process has exited.
     ///
     /// # Errors
@@ -298,5 +330,45 @@ impl Drop for Replicator {
             drop(self.child.kill());
             drop(self.child.wait());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A timeout gains the process's last log lines, enough to tell a stall from a slow
+    /// machine; any other error is left as it was.
+    #[test]
+    fn a_timeout_carries_the_end_of_the_process_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("lsr.log");
+        let text: Vec<String> = (1..=50).map(|n| format!("line {n}")).collect();
+        fs::write(&log, text.join("\n")).unwrap();
+        let child = Command::new("true").spawn().unwrap();
+        let process = Replicator {
+            child,
+            log,
+            kind: Kind::Rust,
+        };
+        let CompatError::Timeout(said) =
+            process.explain(CompatError::Timeout("a staged file".into()))
+        else {
+            panic!("a timeout stays a timeout");
+        };
+        assert!(
+            said.starts_with("a staged file; the lsr replicate log ends:"),
+            "{said}"
+        );
+        assert!(
+            said.contains("line 11\n") && said.ends_with("line 50"),
+            "{said}"
+        );
+        assert!(!said.contains("line 10\n"), "{said}");
+        let other = process.explain(CompatError::Fixture("x".into()));
+        assert!(
+            matches!(other, CompatError::Fixture(ref x) if x == "x"),
+            "{other:?}"
+        );
     }
 }
