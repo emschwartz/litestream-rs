@@ -1,0 +1,40 @@
+# A test that hangs fails; it never holds a job for hours. nextest marks a test SLOW after one
+# `period` and kills it after `terminate-after` periods, so a test may run for
+# period * terminate-after in all.
+#
+# The default: 60 s * 3 = 180 s. Measured on a 4-core box with other builds running, the slowest
+# test in `just check` takes 38 s (lsr-sqlite faults::a_read_error_at_each_step_of_a_cycle...) and
+# the next 37 s (lsr-core plan_exhaustive::exhaustive::every_small_inventory...), so the limit
+# is about five times the slowest. It is also above the 60 s `PATIENCE` of the cli and replica
+# tests (their own bounded wait fails first, with its own message) and far below every CI job's
+# `timeout-minutes`. The overrides below are for the tests that only run from a recipe, each
+# below the timeout of the job that runs it.
+
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 3, grace-period = "10s" }
+
+# CI: the default's limits and overrides, and every failure reported rather than the first.
+# ci.yml, compat-releases.yml
+# and nightly.yml select it with NEXTEST_PROFILE.
+[profile.ci]
+inherits = "default"
+fail-fast = false
+
+# The live Go checks (`just compat`, `just compat-s3`, `just compat-live`): Go builds, 300-commit
+# chains, killed-and-resumed alternation. Not measured here (no Go toolchain in this
+# environment); 120 s * 10 = 20 minutes sits under the 45-minute job limit.
+[[profile.default.overrides]]
+filter = "binary_id(lsr-compat::compat)"
+slow-timeout = { period = "120s", terminate-after = 10, grace-period = "10s" }
+
+# Recipe-only cases that run for minutes by design: `just sqlite-big`, `just plan-exhaustive`,
+# `just sim-soak`, `just sim-nightly` (900 s by default, 45-minute job), `just test-tigris`,
+# `just tigris-restore`. 300 s * 6 = 30 minutes.
+[[profile.default.overrides]]
+filter = "test(/^(big|soak|tigris)::/) | test(/^plan_exhaustive::exhaustive::every_larger/) | test(/^plan_lazy::/) | test(/^tally::/)"
+slow-timeout = { period = "300s", terminate-after = 6, grace-period = "10s" }
+
+# `just soak-tigris <hours>`: hours by design, a manual run, never in CI. 1 h * 48.
+[[profile.default.overrides]]
+filter = "test(/^soak_tigris::/)"
+slow-timeout = { period = "3600s", terminate-after = 48, grace-period = "10s" }
