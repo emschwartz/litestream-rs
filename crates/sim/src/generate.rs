@@ -372,6 +372,11 @@ pub struct Weights {
     /// the committed end or right before a checkpoint's barrier. Not an
     /// operation, for the same reason as `block_crash_law`.
     pub clock_law: ClockLaw,
+    /// Whether staging is the real directory store (`lsr-store-fs`) on the in-memory
+    /// filesystem ([`crate::staging`]) instead of `MemStore`, so a power loss acts on the
+    /// store's own syncs and renames. Not an operation, for the same reason as
+    /// `block_crash_law`.
+    pub staging_fs: bool,
     /// Store and SQLite-side faults draw their error from the whole error domain
     /// ([`crate::domain`]): every operation, every error an implementation can return from
     /// it. When unset they draw from the older subset (two store errors, two SQLite errors on
@@ -464,6 +469,7 @@ impl Default for Weights {
             // One reading per tick in the default mix, so its recorded runs
             // keep their shape; swarm mixes draw the law.
             clock_law: ClockLaw::PerTick,
+            staging_fs: false,
             error_domain: false,
             known_wrong: false,
         }
@@ -593,6 +599,7 @@ impl Weights {
             lying_wal_sync: false,
             after_restart: AfterRestart::Nothing,
             clock_law: ClockLaw::PerTick,
+            staging_fs: false,
             error_domain: false,
             known_wrong: false,
         };
@@ -629,6 +636,9 @@ impl Weights {
         } else {
             ClockLaw::EachRead
         };
+        // And after that, for the same reason: staging on the real directory store in half the
+        // swarm.
+        mix.staging_fs = below(&entropy, 2) == 0;
         // Drawn after that, for the same reason: half each.
         mix.error_domain = below(&entropy, 2) == 0;
         mix

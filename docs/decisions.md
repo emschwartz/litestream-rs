@@ -41,7 +41,9 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
+| D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
 | D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
+| D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 
@@ -371,8 +373,26 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** another implementation of a seam ships; its errors join the table.
 - **Links:** issue #127 item D; BEHAVIOR CHK-8 and C9.
 
+## D130. The real directory store in the simulator (delegated)
+
+- **Options:** keep `MemStore` with its power-loss bookkeeping as the only staging double; run `FsStore` on a temporary directory of the host (no crash law, no determinism); a filesystem trait in `lsr-store-fs` with an in-memory filesystem in `lsr-sim`.
+- **Choice:** the trait (`Fs`, `FsFile`, `RealFs`; `FsStore<F: Fs = RealFs>`, so every existing user is unchanged) and `MemFs`. A file keeps its synced and current images under the block law the WAL uses; a directory entry changed since its directory's last sync follows the one directory-entry rule of `crash_law.rs` (`entry_kept`): under the block law each such entry keeps its change or goes back to what it durably held, on its own coin; under all-or-nothing a deletion stays done and any other change is undone. Half of the swarm mixes (drawn last, off in the default mix) put staging on `FsStore<MemFs>`. A judge in the runner fails a run when a staged file whose commit or delete returned success changed across a power loss (`Violation::StagedReverted`).
+- **Why:** `MemStore`'s power loss assumes the store syncs what it should; the three durability plants in `store-fs` could only be killed by their named crash-replay tests. With the store itself under the crash law the swarm finds all three unaided.
+- **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
+- **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
+- **Links:** #127 item I.
+
 ## Unverified, not recorded
 
 - Who decided D1 to D5 and when: `docs/PLAN.md` says "Decided" with no name or date. Listed as owner, by 2026-11-20.
 - D8's exact wording: the owner approved adding the journal; the wording of the D6 amendment is Fable's.
 - `snapshot-necessity` owner decisions D1 to D5 there (the price of an adopted journal, the catch-up file's failure class, download-and-diff, whether a handover heals, new cause names) and savings S2, S3, S5, S6, S7: no decision found.
+
+## D34. A restore that a writer keeps outpacing
+
+- **Options:** fail with `ListingBehind` after 64 listings; take the next listing as it stands and publish its newest state.
+- **Choice:** publish it, flagged as `Restored::writer_outpaced`, with a warning line on stderr and `writer_outpaced` in the command line's JSON.
+- **Why:** after each of the 64 listings a read found the next file, and the listing after it showed that file, so none of them lagged; what kept the restore going is a writer. Restoring the latest state while a writer runs may answer any committed state, and this one is at least as new as every file a read found during the restore. Failing would mean no restore ever finishes against a busy writer. Lagging listings are still counted on their own, and three of them still fail.
+- **Cost accepted:** the answer can be behind the writer by the time it is published, which is true of every restore of a live replica. A listing whose lag grows by exactly one file per listing for 64 listings would also end here; no store is known to do that.
+- **Revisit if:** a store shows listings that lag but always show the previously read file.
+- **Links:** #126, `crates/core/src/restore.rs` (`Retries`).

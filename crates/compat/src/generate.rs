@@ -185,21 +185,7 @@ fn without(files: &[ReplicaFile], txid: u64) -> Vec<ReplicaFile> {
 }
 
 fn with_log(err: CompatError, rep: &Replicator) -> CompatError {
-    match err {
-        CompatError::Timeout(what) => {
-            CompatError::Timeout(format!("{what} (go log: {})", rep.log_tail()))
-        }
-        other @ (CompatError::Io { .. }
-        | CompatError::Sqlite(_)
-        | CompatError::Open(_)
-        | CompatError::Json { .. }
-        | CompatError::BadKey(_)
-        | CompatError::MissingBinary { .. }
-        | CompatError::Process { .. }
-        | CompatError::Fixture(_)
-        | CompatError::Integrity { .. }
-        | CompatError::NotPages { .. }) => other,
-    }
+    rep.explain(err)
 }
 
 /// Two snapshots at distinct TXIDs, files on levels 1 and 2, and with `targets` the

@@ -25,6 +25,7 @@ use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
+use crate::journal::JournalSignal;
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
@@ -119,6 +120,9 @@ pub(super) struct Kept {
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
+    /// What the last boot's read of the journal reported. A report, not engine state: nothing
+    /// decides on it.
+    pub(super) journal: Option<JournalSignal>,
 }
 
 impl Kept {
@@ -136,6 +140,7 @@ impl Kept {
             suspect_staged: None,
             snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
+            journal: None,
         }
     }
 
@@ -157,6 +162,7 @@ impl Kept {
             suspect_staged,
             snapshots,
             unproven,
+            journal,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -171,6 +177,7 @@ impl Kept {
             suspect_staged: *suspect_staged,
             snapshots: *snapshots,
             unproven: *unproven,
+            journal: *journal,
         }
     }
 
