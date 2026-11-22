@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+mod ahead;
 mod app;
 mod checkpoint;
 mod compact;

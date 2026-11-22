@@ -1977,6 +1977,7 @@ impl Runner {
             | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
+            | PersistentCause::DatabaseAheadOfWal { .. }
             | PersistentCause::Bug => true,
         }
     }
@@ -2336,7 +2337,8 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
-        | PersistentCause::WalSyncFailed => true,
+        | PersistentCause::WalSyncFailed
+        | PersistentCause::DatabaseAheadOfWal { .. } => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
@@ -2356,7 +2358,8 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::WalCorrupt
         | StopCause::WalTruncated
         | StopCause::WalUnlinked
-        | StopCause::WalSyncFailed => true,
+        | StopCause::WalSyncFailed
+        | StopCause::DatabaseAheadOfWal { .. } => true,
         StopCause::StoreDenied(_)
         | StopCause::StoreRefused
         | StopCause::RemoteCorrupt

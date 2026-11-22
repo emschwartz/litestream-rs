@@ -469,3 +469,163 @@ fn an_unwritable_journal_stops_lagging_once_the_debt_is_paid() {
     assert_eq!(truncates(&rig), 1, "{seen:?}");
     assert_eq!(actor.journal(), None, "nothing is owed, so nothing lags");
 }
+
+/// What a page holds in the commit after the failed sync.
+fn page_after_failure() -> Vec<u8> {
+    vec![9; PS.bytes()]
+}
+
+/// A caught-up engine with `journal`; its WAL sync fails on a commit that writes page 2;
+/// `backfill` copies that page into the database file, as a checkpoint copies a frame the
+/// failed sync covered; a power loss then cuts the WAL back to the frames before it. Returns
+/// the rig and the frame count the WAL kept.
+fn lost_after_backfill(journal: &mut MemJournal, config: &ActorConfig, backfill: bool) -> Rig {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(config.clone());
+    settle(&mut rig, &mut actor, T0, Some(journal));
+    let kept = rig.wal.committed_end().frame_count();
+    rig.wal.inject(SourceOp::Sync, SourceError::FsyncFailed);
+    rig.wal.append_tx(&[(pg(2), page_after_failure())], nz(3));
+    let failed = tick(&mut rig, &mut actor, T0 + 1, Some(journal));
+    assert!(
+        matches!(event(&failed), Some(Event::Degraded { .. })),
+        "{failed:?}"
+    );
+    assert_eq!(recorded(journal), Some(lsr_journal::Unproven::Truncate));
+    if backfill {
+        rig.db.write_page(pg(2), &page_after_failure());
+    }
+    rig.wal.lose_frames_from(kept);
+    rig
+}
+
+/// The verdict the journal holds.
+fn ahead_recorded(journal: &mut MemJournal) -> Option<lsr_journal::Ahead> {
+    match JournalWriter::open(journal).1.verdict {
+        lsr_journal::Verdict::Read { journal, .. } => journal.ahead,
+        lsr_journal::Verdict::Newer { .. }
+        | lsr_journal::Verdict::Missing
+        | lsr_journal::Verdict::Unreadable(_) => None,
+    }
+}
+
+/// Simulator seed 0x725's shape: a failed WAL sync, a checkpoint that copies the page the failed
+/// sync covered, a power loss that cuts the WAL short of it. The restart finds the database file
+/// ahead of its WAL before it runs the TRUNCATE, records the verdict, degrades with its own cause,
+/// and then cures the debt as before, keeping the state before the damage restorable.
+#[test]
+fn a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost() {
+    let mut journal = MemJournal::default();
+    let mut rig = lost_after_backfill(&mut journal, &go_like(), true);
+    let mut restarted = Actor::new(go_like());
+    let first = tick(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
+    assert!(
+        matches!(event(&first), Some(Event::Booted { .. })),
+        "{first:?}"
+    );
+    let checked = tick(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
+    let ahead = StopCause::DatabaseAheadOfWal {
+        pages: nz(1),
+        first: nz(2),
+    };
+    assert!(
+        matches!(event(&checked), Some(Event::Degraded { cause, .. })
+            if PersistentCause::stop(*cause) == Some(ahead)),
+        "{checked:?}"
+    );
+    assert_eq!(truncates(&rig), 0, "the check comes before the TRUNCATE");
+    let verdict = ahead_recorded(&mut journal).expect("the verdict is journalled");
+    assert_eq!((verdict.pages, verdict.first), (nz(1), nz(2)));
+    assert_eq!(restarted.ahead(), Some(verdict));
+    // An owed TRUNCATE waits for the WAL to move, as it does with no verdict.
+    rig.commit(5);
+    let seen = settle(&mut rig, &mut restarted, T0 + 20_000, Some(&mut journal));
+    assert_eq!(truncates(&rig), 1, "{seen:?}");
+    assert_eq!(restarted.degraded(Task::Sync), None, "{seen:?}");
+    assert_eq!(
+        restarted.ahead(),
+        Some(verdict),
+        "the notice outlasts the degrade"
+    );
+    assert_eq!(
+        restarted.kept.kept_restore_point(),
+        Some(verdict.restore_point)
+    );
+}
+
+/// The same restart without the backfill: every page the WAL no longer covers is its image at
+/// the newest staged transaction, so the boot cures the debt and reports nothing.
+#[test]
+fn a_boot_with_a_debt_whose_file_kept_its_pages_comes_up_clean() {
+    let mut journal = MemJournal::default();
+    let mut rig = lost_after_backfill(&mut journal, &go_like(), false);
+    let mut restarted = Actor::new(go_like());
+    rig.commit(5);
+    let seen = settle(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
+    assert!(
+        !seen
+            .iter()
+            .any(|t| matches!(event(t), Some(Event::Degraded { .. }))),
+        "{seen:?}"
+    );
+    assert_eq!(truncates(&rig), 1, "{seen:?}");
+    assert_eq!(
+        (restarted.ahead(), ahead_recorded(&mut journal)),
+        (None, None)
+    );
+}
+
+/// Under `STRICT` the verdict stops the engine once; the next boot finds it recorded, does not
+/// raise it again, and cures the debt with the notice standing.
+#[test]
+fn a_recorded_verdict_stops_once_under_strict_responses() {
+    let strict = ActorConfig {
+        responses: Responses::STRICT,
+        ..go_like()
+    };
+    let mut journal = MemJournal::default();
+    let mut rig = lost_after_backfill(&mut journal, &go_like(), true);
+    let mut stopped = Actor::new(strict.clone());
+    let seen = settle(&mut rig, &mut stopped, T0 + 10_000, Some(&mut journal));
+    assert!(
+        matches!(
+            seen.last(),
+            Some(Tick::Stopped(StopCause::DatabaseAheadOfWal { .. }))
+        ),
+        "{seen:?}"
+    );
+    let verdict = ahead_recorded(&mut journal).expect("journalled before the stop");
+    let mut again = Actor::new(strict);
+    rig.commit(5);
+    let seen = settle(&mut rig, &mut again, T0 + 20_000, Some(&mut journal));
+    assert!(
+        !seen.iter().any(|t| matches!(t, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(truncates(&rig), 1, "{seen:?}");
+    assert_eq!(again.ahead(), Some(verdict));
+}
+
+/// The restore point is kept for the window from the verdict, across a restart, and then goes
+/// back to normal retention with the notice gone and the journal's fact cleared.
+#[test]
+fn the_restore_point_is_kept_for_the_window_across_a_restart() {
+    let mut journal = MemJournal::default();
+    let mut rig = lost_after_backfill(&mut journal, &go_like(), true);
+    let mut restarted = Actor::new(go_like());
+    settle(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
+    let verdict = restarted.ahead().expect("a verdict");
+    let until = ahead::kept_until(verdict).unix_millis();
+    let mut later = Actor::new(go_like());
+    settle(&mut rig, &mut later, until - 1, Some(&mut journal));
+    assert_eq!(
+        later.ahead(),
+        Some(verdict),
+        "the window survives the restart"
+    );
+    assert_eq!(later.kept.kept_restore_point(), Some(verdict.restore_point));
+    tick(&mut rig, &mut later, until, Some(&mut journal));
+    assert_eq!(later.ahead(), None);
+    assert_eq!(later.kept.kept_restore_point(), None);
+    assert_eq!(ahead_recorded(&mut journal), None);
+}

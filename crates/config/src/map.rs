@@ -630,6 +630,8 @@ fn responses(settings: ResponseSettings) -> Responses {
         wal_sync_failed: one(settings.wal_sync_failed, base.wal_sync_failed),
         page_size_changed: one(settings.page_size_changed, base.page_size_changed),
         database_page_mismatch: base.database_page_mismatch,
+        // Not a config key: the library's `Responses` sets it (docs/decisions.md D103).
+        database_ahead_of_wal: base.database_ahead_of_wal,
         bug: one(settings.bug, base.bug),
         other_writer: match settings.other_writer {
             None => base.other_writer,
