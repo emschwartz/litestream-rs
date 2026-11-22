@@ -35,7 +35,7 @@ use crate::config::Config;
 use crate::error::StartError;
 use crate::events::EventSink;
 use crate::health::{Booted, Gone, Health, Phase, Stopped};
-use crate::meta::{MetaLock, read_stop};
+use crate::meta::{MetaLock, read_stop, read_takeover};
 use crate::readers::ReaderGuard;
 use crate::runtime::{CALLER_SLICE, Park, Runtime, later};
 use crate::store::{DynStore, Meters};
@@ -382,6 +382,7 @@ impl Replicator {
         std::fs::create_dir_all(meta).map_err(|err| StartError::MetaDir { kind: err.kind() })?;
         let meta_lock = MetaLock::take(meta)?;
         let record = read_stop(meta)?;
+        let takeover = read_takeover(meta)?;
         let sqlite = Sqlite::open(database)?;
         let worker = Worker::new(
             Arc::clone(shared),
@@ -393,7 +394,7 @@ impl Replicator {
             runtime,
         )
         .with_sink(events)
-        .with_meta(meta_lock, record);
+        .with_meta(meta_lock, record, takeover);
         let handle = crate::stack::spawn("lsr-replica", crate::stack::ENGINE_STACK, move || {
             worker.run()
         })

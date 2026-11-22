@@ -60,7 +60,7 @@ mod store;
 mod thread;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
-pub use error::{RestoreError, StartError};
+pub use error::{RestoreError, StartError, TakeOverError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink};
 pub use exec::block_on;
 pub use health::{
@@ -69,7 +69,7 @@ pub use health::{
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
-pub use restore::{restore, restore_if_missing, restore_with, verify};
+pub use restore::{record_takeover, restore, restore_if_missing, restore_with, take_over, verify};
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
 pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};
@@ -79,7 +79,7 @@ pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Depth, Entropy,
     L0Retention, Maintenance, OtherWriter, PersistentCause as DegradedCause, Report, Response,
     Responses, RestoreOptions, RestoreTarget, Restored, Severity, SnapshotCause, Stall, StopCause,
-    Task,
+    TakeoverRecord, Task,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

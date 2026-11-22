@@ -54,6 +54,15 @@ pub enum StartError {
     /// disk. Remove it once the other writer is dealt with.
     #[error("the stop record is damaged: {0}")]
     StopRecordInvalid(#[source] lsr_core::StopRecordError),
+    /// The takeover record a take-over or a restore left (`lsr-takeover`) cannot be read.
+    #[error("the takeover record cannot be read: {kind:?}")]
+    TakeoverRecordUnreadable {
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
+    /// The takeover record does not decode. Run `lsr take-over` again to write a sound one.
+    #[error("the takeover record is damaged: {0}")]
+    TakeoverRecordInvalid(#[source] lsr_core::TakeoverRecordError),
     /// SQLite refused to open the database or to set it up.
     #[error("SQLite refused the database (result code {code})")]
     Sqlite {
@@ -104,4 +113,30 @@ pub enum RestoreError {
     /// The restore itself failed.
     #[error("{0}")]
     Restore(#[from] lsr_core::RestoreError),
+    /// The database was restored and published, and the takeover record that lets
+    /// replication build on the replica it came from (`lsr-takeover`) could not be written
+    /// in its meta directory. Replication will refuse to start over that replica until
+    /// `lsr take-over` writes one.
+    #[error("the database was restored but its takeover record could not be written: {kind:?}")]
+    TakeoverRecord {
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
+}
+
+/// Why [`crate::take_over`] recorded nothing.
+#[derive(Debug, thiserror::Error)]
+pub enum TakeOverError {
+    /// The path names no file, so it has no meta directory.
+    #[error("the database path names no file")]
+    NoMetaDir,
+    /// The replica could not be listed.
+    #[error("the replica cannot be listed: {0}")]
+    List(#[from] lsr_core::InventoryError),
+    /// The record could not be written.
+    #[error("the takeover record cannot be written: {kind:?}")]
+    Write {
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
 }

@@ -242,3 +242,97 @@ fn a_stop_for_another_writer_survives_a_restart() {
     assert!(matches!(stopped(&third), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
+
+/// Restore then start: the restore leaves a takeover record through what it restored, so
+/// the replicator started on the restored database builds on the replica it came from and
+/// never refuses it.
+#[test]
+fn a_restored_database_replicates_without_a_refusal() {
+    let site = Site::new();
+    site.commit(3);
+    let (runtime, _clock) = fake();
+    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    wait(&first, caught_up);
+    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
+    let restored = site.path("restored");
+    let reached = lsr_replica::restore(
+        &*site.store(),
+        lsr_replica::RestoreTarget::Latest,
+        &restored,
+    )
+    .unwrap()
+    .reached();
+    let meta = restored.with_file_name(format!(
+        ".{}-litestream",
+        restored.file_name().unwrap().to_str().unwrap()
+    ));
+    let record = std::fs::read(meta.join("lsr-takeover")).unwrap();
+    assert_eq!(
+        lsr_replica::TakeoverRecord::decode(&record).unwrap().txid(),
+        reached
+    );
+    let app = rusqlite::Connection::open(&restored).unwrap();
+    app.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
+        .unwrap();
+    lsr_sqlite::app_connection(&app).unwrap();
+    let (runtime, clock) = fake();
+    let next = Replicator::start_with(&restored, site.store(), config(), runtime).unwrap();
+    app.execute("INSERT INTO t(v) VALUES (randomblob(3000))", [])
+        .unwrap();
+    clock.advance(Duration::from_secs(1));
+    let health = wait(&next, |h| {
+        caught_up(h) || matches!(h.phase, Phase::Stopped(_))
+    });
+    assert_eq!(health.phase, Phase::Running, "{health:?}");
+    assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+}
+
+/// Another writer's file appeared while the replicator was down: the boot refuses it,
+/// naming the replica's newest transaction in `Event::Refused`, and writes nothing. A
+/// take-over through that transaction lets the next start snapshot above it.
+#[test]
+fn a_refused_boot_names_the_tip_and_a_take_over_clears_it() {
+    let site = Site::new();
+    site.commit(2);
+    let (runtime, _clock) = fake();
+    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let ours = wait(&first, caught_up)
+        .replicated
+        .map(|(txid, _)| txid)
+        .unwrap();
+    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
+    let foreign = put_foreign(&site, ours.next().unwrap());
+
+    let (sink, events) = lsr_replica::ChannelSink::new(std::num::NonZeroUsize::new(64).unwrap());
+    let (runtime, _clock) = fake();
+    let second =
+        Replicator::start_with_events(&site.db, site.store(), config(), runtime, Box::new(sink))
+            .unwrap();
+    wait(&second, stopped_for_other_writer);
+    assert_eq!(stopped(&second), Stopped::Stopped(StopCause::OtherWriter));
+    let mut refused = None;
+    while let Some(event) = events.try_recv() {
+        if let lsr_replica::Event::Refused { through } = event {
+            refused = Some(through);
+        }
+    }
+    assert_eq!(refused, Some(foreign.range().max()));
+    assert_eq!(
+        newest_l0(&site),
+        Some(foreign.range().max()),
+        "nothing was written"
+    );
+
+    let taken = lsr_replica::take_over(&*site.store(), &meta_of(&site)).unwrap();
+    assert_eq!(taken, Some(foreign.range().max()));
+    let (runtime, clock) = fake();
+    let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    site.commit(1);
+    clock.advance(Duration::from_secs(1));
+    let health = wait(&third, |h| {
+        caught_up(h) || matches!(h.phase, Phase::Stopped(_))
+    });
+    assert_eq!(health.phase, Phase::Running, "{health:?}");
+    assert!(newest_l0(&site) > Some(foreign.range().max()));
+    assert!(matches!(stopped(&third), Stopped::Drained { .. }));
+}

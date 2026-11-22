@@ -300,6 +300,12 @@ impl EventSink for DbEvents {
                 "replication stopped",
                 vec![("cause", debug(cause))],
             ),
+            Event::Refused { through } => {
+                let msg = refused_message(*through);
+                let through = ("through", Value::from(through.get()));
+                self.log.log(LogLevel::Error, &msg, &[db, through]);
+                return;
+            }
             Event::StopNotRecorded { kind } => (
                 LogLevel::Error,
                 "the stop for another writer could not be recorded; a restart may not keep it",
@@ -311,6 +317,14 @@ impl EventSink for DbEvents {
         all.extend(fields);
         self.log.log(level, msg, &all);
     }
+}
+
+/// The approved text for a boot that refused the replica's newest transactions: nothing
+/// local vouched for them (`lsr_replica::Event::Refused`).
+fn refused_message(through: Txid) -> String {
+    format!(
+        "replicate refused: the replica holds transactions up to {through} that this database has no record of writing. Another replicator may be using this prefix. To replicate this database over them: `lsr take-over <db>`. To get them instead: `lsr restore`."
+    )
 }
 
 type Line = (LogLevel, &'static str, Vec<(&'static str, Value)>);

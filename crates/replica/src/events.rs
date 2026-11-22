@@ -33,6 +33,14 @@ pub enum Event {
         /// Whether the engine was rebuilt (else it stopped).
         rebuilt: bool,
     },
+    /// The boot refused to replicate: the replica holds transactions through `through` that
+    /// this database has no record of writing, which neither the live WAL nor a takeover
+    /// record vouches for (`lsr_core::TakeoverRecord`). `Stopped(OtherWriter)` follows.
+    /// `lsr take-over` writes a takeover record; `lsr restore` gets those transactions.
+    Refused {
+        /// The replica's newest transaction.
+        through: Txid,
+    },
     /// The engine stopped by a cause and waits for a person.
     Stopped(StopCause),
     /// The engine stopped for another writer and the stop could not be recorded in the meta

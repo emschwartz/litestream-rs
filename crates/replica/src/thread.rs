@@ -41,8 +41,8 @@ use std::sync::Arc;
 
 use lsr_core::{
     Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, Level, ObjectStore, PageLimit,
-    PersistentCause, Phase as EnginePhase, Response, StopCause, StopRecord, Task, Tick, Unfinished,
-    WalSource, retry_wait,
+    PersistentCause, Phase as EnginePhase, Response, StopCause, StopRecord, TakeoverRecord, Task,
+    Tick, Unfinished, WalSource, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
@@ -243,13 +243,21 @@ impl Worker {
         }
     }
 
-    /// The meta directory's lock to hold, and the stop record an earlier run left there,
-    /// which the engine judges at its boot.
-    pub(crate) fn with_meta(mut self, lock: MetaLock, record: Option<StopRecord>) -> Self {
+    /// The meta directory's lock to hold, and the stop and takeover records an earlier run,
+    /// a take-over or a restore left there, which the engine judges at its boot.
+    pub(crate) fn with_meta(
+        mut self,
+        lock: MetaLock,
+        record: Option<StopRecord>,
+        takeover: Option<TakeoverRecord>,
+    ) -> Self {
         self._meta_lock = Some(lock);
         self.recorded = record;
         if let Some(record) = record {
             self.actor.remember_stop(record);
+        }
+        if let Some(takeover) = takeover {
+            self.actor.remember_takeover(takeover);
         }
         self
     }
@@ -478,6 +486,9 @@ impl Worker {
     /// A stopped engine waits for the stop, which then reports its cause.
     fn stopped(&mut self, cause: StopCause) -> Turn {
         if !std::mem::replace(&mut self.seen.stopped_reported, true) {
+            if let Some(through) = self.actor.refused_through() {
+                self.emit(&Event::Refused { through });
+            }
             self.emit(&Event::Stopped(cause));
         }
         if self.stop.is_some() {

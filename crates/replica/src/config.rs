@@ -135,8 +135,10 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The meta directory for `database`; `None` when the path names no file.
-    pub(crate) fn meta_dir_for(&self, database: &Path) -> Option<PathBuf> {
+    /// The meta directory for `database`: [`Config::meta_dir`] when set, else Go's
+    /// `.<name>-litestream` beside it. `None` when the path names no file.
+    #[must_use]
+    pub fn meta_dir_for(&self, database: &Path) -> Option<PathBuf> {
         if let Some(dir) = &self.meta_dir {
             return Some(dir.clone());
         }

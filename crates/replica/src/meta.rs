@@ -11,6 +11,11 @@
 //! - `lsr-stop`: a stop for another writer that must outlive the process
 //!   ([`lsr_core::StopRecord`]), read at start and written whenever the
 //!   engine's record changes; `lsr-stop.new` is its scratch name.
+//! - `lsr-takeover`: an operator's word that this database may replicate over
+//!   what the replica holds, through one transaction
+//!   ([`lsr_core::TakeoverRecord`]). Read at start; written by
+//!   [`crate::take_over`] (`lsr take-over`) and by every restore, through the
+//!   restored transaction; `lsr-takeover.new` is its scratch name.
 //!
 //! The lock is an open file description lock (`flock(2)`, which is what
 //! `std::fs::File::try_lock` takes on Linux and macOS), on a file of its own.
@@ -39,7 +44,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::Path;
 
-use lsr_core::StopRecord;
+use lsr_core::{StopRecord, TakeoverRecord};
 
 use crate::error::StartError;
 
@@ -49,6 +54,10 @@ pub(crate) const LOCK_FILE: &str = "lsr-lock";
 pub(crate) const STOP_FILE: &str = "lsr-stop";
 /// The stop record's scratch name, renamed over it.
 const STOP_SCRATCH: &str = "lsr-stop.new";
+/// The takeover record.
+pub(crate) const TAKEOVER_FILE: &str = "lsr-takeover";
+/// The takeover record's scratch name, renamed over it.
+const TAKEOVER_SCRATCH: &str = "lsr-takeover.new";
 
 /// The exclusive lock on a meta directory, held while this value lives.
 #[derive(Debug)]
@@ -101,22 +110,58 @@ pub(crate) fn read_stop(meta: &Path) -> Result<Option<StopRecord>, StartError> {
 /// # Errors
 /// The first failed file operation.
 pub(crate) fn write_stop(meta: &Path, record: Option<StopRecord>) -> io::Result<()> {
-    let path = meta.join(STOP_FILE);
     match record {
-        Some(record) => {
-            let scratch = meta.join(STOP_SCRATCH);
-            let mut file = File::create(&scratch)?;
-            file.write_all(record.encode().as_bytes())?;
-            file.sync_all()?;
-            fs::rename(&scratch, &path)?;
-        }
-        None => match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err),
-        },
+        Some(record) => replace(meta, STOP_FILE, STOP_SCRATCH, &record.encode()),
+        None => remove(meta, STOP_FILE),
     }
+}
+
+/// The takeover record a take-over or a restore left, if any.
+///
+/// # Errors
+/// [`StartError::TakeoverRecordUnreadable`] or
+/// [`StartError::TakeoverRecordInvalid`] when the file exists and cannot be read
+/// or does not decode.
+pub(crate) fn read_takeover(meta: &Path) -> Result<Option<TakeoverRecord>, StartError> {
+    match fs::read(meta.join(TAKEOVER_FILE)) {
+        Ok(bytes) => TakeoverRecord::decode(&bytes)
+            .map(Some)
+            .map_err(StartError::TakeoverRecordInvalid),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(StartError::TakeoverRecordUnreadable { kind: err.kind() }),
+    }
+}
+
+/// Records a takeover through `record`'s transaction in `meta` (created if
+/// missing), and removes a stop record there: the operator chose to replicate
+/// over what the replica holds.
+///
+/// # Errors
+/// The first failed file operation.
+pub(crate) fn write_takeover(meta: &Path, record: TakeoverRecord) -> io::Result<()> {
+    fs::create_dir_all(meta)?;
+    replace(meta, TAKEOVER_FILE, TAKEOVER_SCRATCH, &record.encode())?;
+    remove(meta, STOP_FILE)
+}
+
+/// Writes `text` to `meta/name` through `scratch`: synced, renamed, and the
+/// directory synced.
+fn replace(meta: &Path, name: &str, scratch: &str, text: &str) -> io::Result<()> {
+    let scratch = meta.join(scratch);
+    let mut file = File::create(&scratch)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&scratch, meta.join(name))?;
     File::open(meta)?.sync_all()
+}
+
+/// Removes `meta/name` if it is there, and syncs the directory.
+fn remove(meta: &Path, name: &str) -> io::Result<()> {
+    match fs::remove_file(meta.join(name)) {
+        Ok(()) => File::open(meta)?.sync_all(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +205,38 @@ mod tests {
         write_stop(dir.path(), None).unwrap();
         assert_eq!(read_stop(dir.path()).unwrap(), None);
         write_stop(dir.path(), None).unwrap();
+    }
+
+    #[test]
+    fn a_takeover_round_trips_and_clears_a_stop_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = dir.path().join("meta");
+        assert_eq!(read_takeover(&meta).unwrap(), None);
+        fs::create_dir(&meta).unwrap();
+        write_stop(&meta, Some(StopRecord::other_writer(Txid::new(3)))).unwrap();
+        let record = TakeoverRecord::through(Txid::new(9).unwrap());
+        write_takeover(&meta, record).unwrap();
+        assert_eq!(read_takeover(&meta).unwrap(), Some(record));
+        assert_eq!(read_stop(&meta).unwrap(), None);
+        assert!(!meta.join(TAKEOVER_SCRATCH).exists());
+    }
+
+    #[test]
+    fn a_takeover_record_that_does_not_decode_or_read_fails_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(TAKEOVER_FILE), b"lsr-takeover 1 0").unwrap();
+        assert!(matches!(
+            read_takeover(dir.path()),
+            Err(StartError::TakeoverRecordInvalid(
+                lsr_core::TakeoverRecordError::Unterminated
+            ))
+        ));
+        fs::remove_file(dir.path().join(TAKEOVER_FILE)).unwrap();
+        fs::create_dir(dir.path().join(TAKEOVER_FILE)).unwrap();
+        assert!(matches!(
+            read_takeover(dir.path()),
+            Err(StartError::TakeoverRecordUnreadable { .. })
+        ));
     }
 
     #[test]
