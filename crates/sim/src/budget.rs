@@ -21,7 +21,9 @@
 //!   counted file one level up was merged from it (level-1 `2-5` from level-0 `2`
 //!   to `5` before a rollback took `2` to `4`): that file's bytes came from it.
 //! - A compaction reads each input once, in chunks larger than any file the
-//!   simulator writes; a boot reads back the newest file of each level and
+//!   simulator writes (a level-1 compaction first reads each input's trailer
+//!   from the replica to compare it with the staged copy, then the whole
+//!   input from one of the two); a boot reads back the newest file of each level and
 //!   the replica's newest level-0 file, a header first then the file. So
 //!   replica reads are at most two per compaction input, plus
 //!   [`READS_PER_BOOT`] per boot, plus one per fault that failed a call
