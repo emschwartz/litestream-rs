@@ -75,6 +75,20 @@ jobs:
           tool: cargo-nextest,just
       - run: just mem-big
 
+  # The large exhaustive planner sweeps (`just plan-exhaustive`): every inventory of up to five
+  # files over five transactions, four files over six, and the as-of sweeps over wider ranges. A
+  # superset of the small sweeps `just check` runs; minutes in debug, so not on every push.
+  plan-exhaustive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just plan-exhaustive
+
   # AddressSanitizer and ThreadSanitizer over the crate with `unsafe` FFI (sqlite) and the replica
   # thread tests (`just asan`, `just tsan`). Nightly only: -Zsanitizer and -Zbuild-std, which
   # needs rust-src. Any report is a defect to fix, with a regression test.

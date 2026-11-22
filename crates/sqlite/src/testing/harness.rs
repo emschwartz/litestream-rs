@@ -715,6 +715,7 @@ impl<B: Backend> Rig<B> {
             ck: &mut ck,
             staging: &self.staging,
             remote: &self.remote,
+            clock: &self.clock,
         };
         let tick = block_on(self.actor.tick(env, now));
         self.vfs.set_window(self.everywhere);

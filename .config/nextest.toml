@@ -4,7 +4,7 @@
 #
 # The default: 60 s * 3 = 180 s. Measured on a 4-core box with other builds running, the slowest
 # test in `just check` takes 38 s (lsr-sqlite faults::a_read_error_at_each_step_of_a_cycle...) and
-# the next 37 s (lsr-core plan_exhaustive::exhaustive::every_small_inventory...), so the limit
+# the next 37 s (lsr-sim fixed_seeds batches; the planner sweeps in lsr-core plan_exhaustive take about 11 CPU-seconds since they were split), so the limit
 # is about five times the slowest. It is also above the 60 s `PATIENCE` of the cli and replica
 # tests (their own bounded wait fails first, with its own message) and far below every CI job's
 # `timeout-minutes`. The overrides below are for the tests that only run from a recipe, each

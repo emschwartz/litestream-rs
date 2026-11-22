@@ -71,15 +71,15 @@ pub enum Anomaly {
         /// A node this one restored.
         to: u32,
     },
-    /// An `AsOf` restore reached a state first committed at or after the instant.
-    #[error("restoring as of {instant} gave node {node}, committed at {committed}")]
+    /// An `AsOf` restore reached a state whose commit began at or after the instant.
+    #[error("restoring as of {instant} gave node {node}, begun at {begun}")]
     AsOfTooNew {
         /// The instant.
         instant: i64,
         /// The node reached.
         node: u32,
-        /// When it was committed.
-        committed: i64,
+        /// When its commit began.
+        begun: i64,
     },
     /// An `AsOf` restore reached a state that was not live within the bound before the instant.
     #[error("restoring as of {instant} gave node {node}, not live within {bound} ms before it")]
@@ -294,8 +294,10 @@ impl Judge {
         Ok(())
     }
 
-    /// An `AsOf(instant)` restore whose content is `digest`. With `bound`, the node must also
-    /// have been the local head within `bound` ms before the instant.
+    /// An `AsOf(instant)` restore whose content is `digest`: a node whose commit began before
+    /// the instant ([`Log::commit_between`]: a commit still in flight at the instant may be
+    /// there, one begun after it may not). With `bound`, the node must also have been the local
+    /// head within `bound` ms before the instant.
     ///
     /// # Errors
     /// [`Anomaly::NotInHistory`], [`Anomaly::AsOfTooNew`], [`Anomaly::AsOfTooOld`], or
@@ -318,13 +320,13 @@ impl Judge {
         let before: Vec<NodeId> = nodes
             .iter()
             .copied()
-            .filter(|n| log.committed_at(*n).is_some_and(|at| at < instant))
+            .filter(|n| log.begun_at(*n).is_some_and(|at| at < instant))
             .collect();
         let Some(&chosen) = before.last() else {
             return Err(Anomaly::AsOfTooNew {
                 instant,
                 node: newest.get(),
-                committed: log.committed_at(newest).unwrap_or(i64::MAX),
+                begun: log.begun_at(newest).unwrap_or(i64::MAX),
             });
         };
         if let Some(bound) = bound {
@@ -339,7 +341,14 @@ impl Judge {
             }
         }
         let then = log.head_at(instant.saturating_sub(1));
-        if !before.iter().any(|n| log.is_ancestor(*n, then)) {
+        // In flight at the instant: begun before it, acknowledged after, on the head's branch.
+        let in_flight = |n: NodeId| {
+            log.is_ancestor(then, n) && log.committed_at(n).is_some_and(|at| at >= instant)
+        };
+        if !before
+            .iter()
+            .any(|n| log.is_ancestor(*n, then) || in_flight(*n))
+        {
             self.ahead(target, chosen)?;
         }
         Ok(chosen)

@@ -8,6 +8,7 @@ use lsr_wal::Salts;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::env::FakeClock;
 use crate::layout::CreatedAt;
 use crate::layout::{FileKey, Level};
 use crate::mem::MemStore;
@@ -246,6 +247,7 @@ impl Rig {
             ck: &mut self.ck,
             staging: &self.staging,
             remote: &self.remote,
+            clock: &FakeClock::new(ts(now)),
         };
         block_on(actor.tick(env, ts(now)))
     }
@@ -1738,6 +1740,7 @@ mod newest_replica_file;
 mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
+mod stamp;
 mod tasks;
 mod wal_barrier;
 mod witness;

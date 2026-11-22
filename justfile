@@ -320,7 +320,8 @@ upstream-test-map:
     ./scripts/upstream-tests.sh > docs/upstream-test-map/upstream-tests.txt
 
 # The large exhaustive planner sweeps (crates/core/tests/core/plan_exhaustive.rs): every inventory of
-# up to five files, and of four files over a wider range. Minutes; not part of check.
+# up to five files, and of four files over a wider range, plus the wider as-of sweeps. A superset of
+# the small sweeps in `check`. Minutes; run by the nightly workflow's `plan-exhaustive` job.
 plan-exhaustive:
     cargo nextest run -p lsr-core --test core --run-ignored only --no-capture --locked -E 'test(/^plan_exhaustive::/)'
 

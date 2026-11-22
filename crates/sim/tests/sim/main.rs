@@ -16,6 +16,8 @@ mod fixed_seeds;
 #[cfg(test)]
 mod replay;
 #[cfg(test)]
+mod restored_staging;
+#[cfg(test)]
 mod retention;
 #[cfg(test)]
 mod snapshot_causes;
