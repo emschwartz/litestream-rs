@@ -10,10 +10,15 @@
 //! A file is confirmed in exactly two ways: its commit returned the key with
 //! the size that was written, or a listing found the key and the listed object,
 //! read back, is the staged file byte for byte. A size alone confirms nothing:
-//! a store that acknowledged wrong bytes of the right size would pass it. Any
-//! difference (a short object, other bytes, a leftover of a crashed run)
-//! confirms nothing and the key is uploaded again over the same name, which
-//! replaces it. A key with no staged counterpart (staging is dropped once a
+//! a store that acknowledged wrong bytes of the right size would pass it. A
+//! listed object that is not a whole LTX file naming its key (a short object,
+//! a torn write) confirms nothing and the key is uploaded again over the same
+//! name, which replaces it. A listed object that verifies but differs from the
+//! staged file (a run before a power loss uploaded another commit under the
+//! id, or a staging backup was put back) is never written over: it may
+//! already be compacted into higher levels, so it stands, and the listing
+//! reports [`Did::Diverged`] for the actor to drop the staged files from it on
+//! and snapshot above it. A key with no staged counterpart (staging is dropped once a
 //! file is confirmed) must decode and verify as LTX naming that key, else the
 //! replica is corrupt. The read-back runs at boot and after an ambiguous commit
 //! only, so steady state makes no list and no read call. A listing is also
@@ -106,6 +111,16 @@ pub enum Did {
     },
     /// One file was committed.
     Put(FileInfo),
+    /// The replica was listed, and its newest level-0 object verifies and
+    /// differs from the staged file under the same key. It stands, and is now
+    /// confirmed: it may already be compacted into higher levels, so writing
+    /// over it would give one transaction two contents. The staged files from
+    /// `at` on describe another history and must go, and new content takes a
+    /// transaction above `at`.
+    Diverged {
+        /// The transaction both copies name.
+        at: Txid,
+    },
 }
 
 /// A step that went through.
@@ -206,13 +221,18 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     }
     let known = match newest {
         Some(tail) if newest > confirmed => {
-            let sound = tail_is_sound(&inventory, staging, remote, tail)
+            let verdict = judge_tail(&inventory, staging, remote, tail)
                 .await
                 .map_err(|fault| fail(state, fault))?;
-            if sound {
-                newest
-            } else {
-                tail.prev().max(confirmed)
+            match verdict {
+                TailVerdict::Sound => newest,
+                TailVerdict::Replace => tail.prev().max(confirmed),
+                TailVerdict::Diverged => {
+                    return Ok(Uploaded {
+                        state: UploadState::At(newest),
+                        did: Did::Diverged { at: tail },
+                    });
+                }
             }
         }
         _ => newest,
@@ -223,24 +243,36 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     })
 }
 
-/// Whether the replica's newest level-0 file is sound: equal to the staged file
-/// under the same key, or, with no staged file, a verified LTX file naming it.
-/// Only the newest key is read back: an older one was confirmed by its own
-/// commit in an earlier run, and reading every key at boot would be a whole
-/// replica scan.
-async fn tail_is_sound<L: ObjectStore, S: ObjectStore>(
+/// What a listing's read-back found at the replica's newest level-0 key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TailVerdict {
+    /// Equal to the staged file, or with no usable staged file, a verified
+    /// LTX file naming the key: confirmed.
+    Sound,
+    /// Not a whole LTX file naming the key, beside a staged file that is: the
+    /// staged file is uploaded over it (nothing could have compacted it).
+    Replace,
+    /// Both copies verify and differ: the replica's object stands.
+    Diverged,
+}
+
+/// Judges the replica's newest level-0 file against the staged file under
+/// the same key. Only the newest key is read back: an older one was confirmed
+/// by its own commit in an earlier run, and reading every key at boot would be
+/// a whole replica scan.
+async fn judge_tail<L: ObjectStore, S: ObjectStore>(
     inventory: &Inventory,
     staging: &L,
     remote: &S,
     tail: Txid,
-) -> Result<bool, Fault> {
+) -> Result<TailVerdict, Fault> {
     let key = staged_key(tail);
     let Some(listed) = inventory
         .level(Level::ZERO)
         .iter()
         .find(|info| info.key == key)
     else {
-        return Ok(true);
+        return Ok(TailVerdict::Sound);
     };
     let after = tail.prev().map(TxidRange::single);
     let limit = PageLimit::ONE;
@@ -250,14 +282,24 @@ async fn tail_is_sound<L: ObjectStore, S: ObjectStore>(
         .map_err(|err| Fault::from_staging(&err))?;
     match page.files.first() {
         Some(staged) if staged.key == key => {
-            let same = staged.size == listed.size && same_bytes(staging, remote, &key).await?;
-            if same || staged_verifies(staging, &key).await? {
-                return Ok(same);
+            if staged.size == listed.size && same_bytes(staging, remote, &key).await? {
+                return Ok(TailVerdict::Sound);
+            }
+            if staged_verifies(staging, &key).await? {
+                return Ok(if remote_verifies(remote, &key).await? {
+                    TailVerdict::Diverged
+                } else {
+                    TailVerdict::Replace
+                });
             }
             // A torn staged copy says nothing about the replica's object.
-            remote_decodes(remote, &key).await.map(|()| true)
+            remote_decodes(remote, &key)
+                .await
+                .map(|()| TailVerdict::Sound)
         }
-        _ => remote_decodes(remote, &key).await.map(|()| true),
+        _ => remote_decodes(remote, &key)
+            .await
+            .map(|()| TailVerdict::Sound),
     }
 }
 

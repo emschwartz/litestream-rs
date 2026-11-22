@@ -62,7 +62,7 @@ async fn upload_tick<L: ObjectStore, S: ObjectStore>(
                     next: Next::OnWalChange,
                 });
             }
-            Did::Listed { .. } => {}
+            Did::Listed { .. } | Did::Diverged { .. } => {}
             Did::Put(_) => put = put.saturating_add(1),
         }
     }
@@ -983,6 +983,7 @@ fn a_verifying_listed_key_unlike_the_staged_file_is_never_written_over() {
     put_bytes(&remote.inner, key(2), &theirs);
     let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(2))));
+    assert_eq!(listed.did, Did::Diverged { at: txid(2) });
     next(listed.state, &staging, &remote, 2).unwrap();
     assert!(remote.log().begins.is_empty());
     assert_eq!(read_all(&remote.inner, &key(2)), theirs);
