@@ -621,14 +621,28 @@ fn the_restore_point_is_kept_for_the_window_across_a_restart() {
     // Seven days, stated here rather than read from the code under test.
     let until = verdict.made.unix_millis() + 7 * 24 * 60 * 60 * 1000;
     let mut later = Actor::new(go_like());
-    settle(&mut rig, &mut later, until - 1, Some(&mut journal));
+    let seen = settle(&mut rig, &mut later, until - 1, Some(&mut journal));
+    let reminded = Event::AheadOfWal(AheadNotice::Kept {
+        restore_point: verdict.restore_point,
+        until: ts(until),
+    });
+    assert!(
+        seen.iter().any(|t| event(t) == Some(&reminded)),
+        "a boot inside the window says how long the restore point is kept: {seen:?}"
+    );
     assert_eq!(
         later.ahead(),
         Some(verdict),
         "the window survives the restart"
     );
     assert_eq!(later.kept.kept_restore_point(), Some(verdict.restore_point));
-    tick(&mut rig, &mut later, until, Some(&mut journal));
+    let ended = tick(&mut rig, &mut later, until, Some(&mut journal));
+    assert_eq!(
+        event(&ended),
+        Some(&Event::AheadOfWal(AheadNotice::Released {
+            restore_point: verdict.restore_point
+        }))
+    );
     assert_eq!(later.ahead(), None);
     assert_eq!(later.kept.kept_restore_point(), None);
     assert_eq!(ahead_recorded(&mut journal), None);

@@ -283,6 +283,25 @@ pub enum Event {
     Resnapshot(SnapshotCause),
     /// The clock read earlier than its last reading; nothing else ran.
     Clamped(Clamped),
+    /// Where a standing ahead-of-WAL verdict is (`docs/decisions.md` D103); nothing else ran.
+    AheadOfWal(AheadNotice),
+}
+
+/// What an operator is told about a standing ahead-of-WAL verdict besides its first report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AheadNotice {
+    /// A boot found the verdict recorded: the state before the damage is kept until `until`.
+    Kept {
+        /// The kept restore point.
+        restore_point: Txid,
+        /// When it goes back to normal retention.
+        until: Timestamp,
+    },
+    /// The window passed: the restore point is back under normal retention.
+    Released {
+        /// The restore point no longer kept.
+        restore_point: Txid,
+    },
 }
 
 /// How a tick ended.
@@ -652,9 +671,18 @@ impl Actor {
         R: ObjectStore,
     {
         self.expire(now);
-        if self.expire_ahead(now) {
+        if let Some(released) = self.expire_ahead(now) {
             // The verdict's restore point goes back to retention, which may now delete its chain.
             self.engine.maintain.stale = true;
+            self.kept.ahead_notice = Some(AheadNotice::Released {
+                restore_point: released,
+            });
+        }
+        if let Some(notice) = self.kept.ahead_notice.take() {
+            return Tick::Ran {
+                event: Event::AheadOfWal(notice),
+                next: Next::Now,
+            };
         }
         self.probe_at_bound(now);
         if self.engine.pages.mismatch().is_none() {

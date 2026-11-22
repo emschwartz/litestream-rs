@@ -23,7 +23,7 @@
 use std::time::Duration;
 
 use lsr_journal::Ahead;
-use lsr_ltx::Timestamp;
+use lsr_ltx::{Timestamp, Txid};
 
 use super::parts::Course;
 use super::{Actor, Env, Stepped};
@@ -119,30 +119,38 @@ impl Actor {
         }))
     }
 
-    /// Restores a verdict a journal recorded, keeping the older restore point of two.
+    /// Restores a verdict a journal recorded, keeping the older restore point of two, and tells
+    /// the operator at the next tick how long its restore point is still kept.
     pub(super) fn adopt_ahead(&mut self, recorded: Option<Ahead>) {
         self.kept.ahead = match (self.kept.ahead, recorded) {
             (Some(held), Some(read)) if read.restore_point < held.restore_point => Some(read),
             (Some(held), _) => Some(held),
             (None, read) => read,
         };
+        if recorded.is_some()
+            && let Some(ahead) = self.kept.ahead
+        {
+            self.kept.ahead_notice = Some(super::AheadNotice::Kept {
+                restore_point: ahead.restore_point,
+                until: kept_until(ahead),
+            });
+        }
     }
 
     /// Ends a verdict whose window has passed; re-dates one made after `now` (a clock that ran
-    /// ahead), once. Returns whether the verdict ended, so retention may release its chain.
-    pub(super) fn expire_ahead(&mut self, now: Timestamp) -> bool {
-        let Some(ahead) = self.kept.ahead else {
-            return false;
-        };
+    /// ahead), once. Returns the restore point a verdict that ended kept, so retention may
+    /// release its chain and the operator hears of it.
+    pub(super) fn expire_ahead(&mut self, now: Timestamp) -> Option<Txid> {
+        let ahead = self.kept.ahead?;
         if ahead.made > now {
             self.kept.ahead = Some(Ahead { made: now, ..ahead });
-            return false;
+            return None;
         }
         if now < kept_until(ahead) {
-            return false;
+            return None;
         }
         self.kept.ahead = None;
-        true
+        Some(ahead.restore_point)
     }
 
     /// The standing verdict that the database file was found ahead of its WAL, while the state

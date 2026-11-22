@@ -158,6 +158,8 @@ pub(super) struct Kept {
     pub(super) ahead_check: AheadCheck,
     /// The standing ahead-of-WAL verdict, journalled, while its restore point is kept.
     pub(super) ahead: Option<lsr_journal::Ahead>,
+    /// What the next tick tells the operator about the verdict, before anything else runs.
+    pub(super) ahead_notice: Option<super::AheadNotice>,
 }
 
 impl Kept {
@@ -187,6 +189,7 @@ impl Kept {
             journal_write: Ok(()),
             ahead_check: AheadCheck::No,
             ahead: None,
+            ahead_notice: None,
         }
     }
 
@@ -220,6 +223,7 @@ impl Kept {
             journal_write,
             ahead_check,
             ahead,
+            ahead_notice,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -247,6 +251,7 @@ impl Kept {
             journal_write: *journal_write,
             ahead_check: *ahead_check,
             ahead: *ahead,
+            ahead_notice: *ahead_notice,
         }
     }
 

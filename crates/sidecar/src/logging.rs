@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
+use lsr_core::AheadNotice;
 use lsr_core::{Clock, Event as EngineEvent};
 use lsr_replica::{DegradedCause, Event, EventSink, Txid, VerifyOutcome};
 
@@ -334,6 +335,28 @@ fn verified_line(txid: Txid, outcome: VerifyOutcome) -> Line {
     }
 }
 
+/// What an operator is told about a standing ahead-of-WAL verdict after its first report.
+fn ahead_line(notice: AheadNotice) -> Line {
+    match notice {
+        AheadNotice::Kept {
+            restore_point,
+            until,
+        } => (
+            LogLevel::Warn,
+            "the state before pages ran ahead of the WAL stays restorable",
+            vec![
+                ("restore_point", restore_point.to_string().into()),
+                ("until", until.to_string().into()),
+            ],
+        ),
+        AheadNotice::Released { restore_point } => (
+            LogLevel::Info,
+            "restore point released to normal retention",
+            vec![("restore_point", restore_point.to_string().into())],
+        ),
+    }
+}
+
 fn engine_line(event: &EngineEvent) -> Option<Line> {
     Some(match event {
         EngineEvent::Idle => return None,
@@ -403,6 +426,7 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             "clock went backwards",
             vec![("clamped", debug(clamped))],
         ),
+        EngineEvent::AheadOfWal(notice) => ahead_line(*notice),
     })
 }
 

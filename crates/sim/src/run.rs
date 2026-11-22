@@ -852,7 +852,8 @@ impl Runner {
             | Event::Idle
             | Event::Retrying { .. }
             | Event::Resnapshot(_)
-            | Event::Clamped(_) => Ok(Step::Ran),
+            | Event::Clamped(_)
+            | Event::AheadOfWal(_) => Ok(Step::Ran),
         }
     }
 
@@ -880,7 +881,8 @@ impl Runner {
             | Event::Uploaded(_)
             | Event::Maintained { .. }
             | Event::Idle
-            | Event::Clamped(_) => return Ok(()),
+            | Event::Clamped(_)
+            | Event::AheadOfWal(_) => return Ok(()),
         };
         self.liveness
             .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
@@ -923,7 +925,8 @@ impl Runner {
             | Event::Uploaded(_)
             | Event::Maintained { .. }
             | Event::Idle
-            | Event::Clamped(_) => {}
+            | Event::Clamped(_)
+            | Event::AheadOfWal(_) => {}
         }
     }
 
@@ -2224,7 +2227,8 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Maintained { .. }
         | Event::Idle
         | Event::Resnapshot(_)
-        | Event::Clamped(_) => return Ok(()),
+        | Event::Clamped(_)
+        | Event::AheadOfWal(_) => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
     let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);

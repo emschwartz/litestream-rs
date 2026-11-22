@@ -463,7 +463,8 @@ impl Worker {
             | EngineEvent::Idle
             | EngineEvent::Degraded { .. }
             | EngineEvent::Retrying { .. }
-            | EngineEvent::Clamped(_) => false,
+            | EngineEvent::Clamped(_)
+            | EngineEvent::AheadOfWal(_) => false,
         };
         if !idle {
             self.emit(&Event::Engine(event));
@@ -514,7 +515,8 @@ impl Worker {
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
             | EngineEvent::Resnapshot(_)
-            | EngineEvent::Clamped(_) => {}
+            | EngineEvent::Clamped(_)
+            | EngineEvent::AheadOfWal(_) => {}
         }
     }
 
