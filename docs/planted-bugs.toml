@@ -1776,3 +1776,22 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]
+
+# Boot confirms a torn-looking replica key whose staged copy the witness refused by a listing,
+# not a read: a listing that lags leaves the key out and new content takes the replica's
+# transaction.
+[[bug]]
+name = "witness-refused-key-listed"
+fix = "b7d2a645"
+package = "lsr-core"
+tests = [
+    "a_refused_copy_of_a_torn_tail_behind_a_lagging_listing_leaves_the_key_to_the_replica",
+]
+
+[[bug]]
+name = "witness-refused-key-listed-sim"
+patch = "witness-refused-key-listed"
+fix = "b7d2a645"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_refused_staged_copy_does_not_reopen_a_key_the_replica_holds_seed_0x3d5"]
