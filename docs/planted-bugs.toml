@@ -554,3 +554,10 @@ package = "lsr-core"
 tests = [
     "journal_model::the_writer_matches_the_model_under_the_block_law",
 ]
+
+[[bug]]
+name = "dry-run-gap-not-relisted"
+fix = "3e344e6"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["a_dry_run_whose_listing_missed_a_file_once_plans_the_restore"]
