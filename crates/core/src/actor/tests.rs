@@ -1835,6 +1835,10 @@ fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
     stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
     rig.staging.flip_next_read(l0(3));
     let mut actor = Actor::new(cfg());
+    let first = rig.tick(&mut actor, T0 + 2);
+    // The bad read deletes nothing: when the WAL could stage the files again,
+    // a deletion would not show as a snapshot, only as files gone.
+    assert_eq!(staged(&rig), vec![2, 3, 4], "{first:?}");
     let seen = rig.follow(&mut actor, T0 + 2, 50);
     no_stop(&seen);
     assert!(!lost_staged(&seen), "{seen:?}");
