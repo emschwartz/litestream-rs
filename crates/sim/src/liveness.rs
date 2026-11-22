@@ -65,8 +65,9 @@ pub enum Justifier {
     StagingEdited,
     /// A scheduled staging fault hit a call.
     StagingFault,
-    /// A fault failed a step, so the position it left proves no continuity
-    /// until the next step stages a file.
+    /// A fault failed a step, or a boot continued under a wal-index reset
+    /// ahead of the WAL header, so the position proves no continuity until
+    /// the next step stages a file.
     PositionUnproven,
     /// The engine deleted staged files the replica never took.
     StagedDropped,
@@ -81,11 +82,11 @@ pub enum Justifier {
     WalRestarted,
     /// The WAL file is gone or holds no whole header.
     WalEmptied,
-    /// The WAL restarted while our read transaction did not pin it (it was
-    /// not held, or sat on read mark zero, which lets one restart through).
-    /// Whether the engine should follow the one restart a mark-zero hold
-    /// allows is an open question; until it is settled, such a restart
-    /// justifies the snapshot.
+    /// The WAL changed generation while our read transaction was not held.
+    /// A change under a hold on read mark zero is no reason: the hold blocks
+    /// every backfill, so no commit can go with the old generation and the
+    /// engine follows it (`lsr_core::recover`, rule 6; seeds 0xe and
+    /// 0xf4846 snapshotted there before).
     ReadLockLapsed,
     /// The operator asked for a snapshot.
     SnapshotRequested,

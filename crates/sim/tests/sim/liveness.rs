@@ -55,3 +55,24 @@ fn a_staged_snapshot_of_a_rewound_database_survives_a_restart() {
         panic!("{failure}");
     }
 }
+
+/// A power loss takes the only commit, the boot snapshots the database with
+/// an empty WAL, and the next commit writes a new WAL header whose salts
+/// SQLite draws at random. The running engine, pinned on read mark 0 at the
+/// first frame, follows it: nothing committed can have gone with a
+/// generation that held no frame (seed 0xf4846, shrunk).
+#[test]
+fn a_new_wal_header_over_an_empty_pinned_generation_is_followed() {
+    let commit = || Op::Commit {
+        pages: 4,
+        grow: false,
+    };
+    let mut ops = vec![commit(), Op::Crash(CrashKind::Power)];
+    ops.extend(std::iter::repeat_n(Op::Tick, 3));
+    ops.push(commit());
+    ops.extend(std::iter::repeat_n(Op::Tick, 4));
+    ops.push(Op::Restore);
+    if let Err(failure) = run_ops(Seed::new(0xf4846), &ops, &Opts::default()) {
+        panic!("{failure}");
+    }
+}
