@@ -35,6 +35,13 @@ pub enum Event {
     },
     /// The engine stopped by a cause and waits for a person.
     Stopped(StopCause),
+    /// The engine stopped for another writer and the stop could not be recorded in the meta
+    /// directory (`lsr-stop`), or a record it no longer needs could not be removed. The stop
+    /// holds in this process; a restart may not keep it, or may stop again for nothing.
+    StopNotRecorded {
+        /// What the file system said.
+        kind: std::io::ErrorKind,
+    },
     /// A scheduled verify ended: the restore of `txid` compared with the live database at
     /// `txid`. A failure is a degraded state (`Health::verification`) that names what differed.
     Verified {

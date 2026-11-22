@@ -32,10 +32,15 @@
 //! `Arc<dyn DynStore>`, never methods on the replicator: restoring over a live database must
 //! not look easy.
 //!
-//! What a second Go process on the same meta directory or bucket prefix does is not refused
-//! at start (Go leaves no reliable local sign, and `start` makes no store call); it is caught
-//! when the replica shows files above the local newest staged file, which stops the replicator by default
-//! (`Responses::GO_LIKE`, `other_writer: Stop`).
+//! One engine per meta directory: `start` takes an exclusive lock on `<meta>/lsr-lock` and
+//! refuses with [`StartError::MetaLocked`] while another replicator, in this process or another
+//! on the same host, holds it (the `meta` module says on which filesystems the lock excludes).
+//! Go takes no lock, so a Go process on the same meta directory is not refused; nor is a
+//! second writer on the bucket prefix (`start` makes no store call). Either is caught when the
+//! replica shows files above everything this engine staged, which stops the replicator by
+//! default (`Responses::GO_LIKE`, `other_writer: Stop`). That stop is recorded in
+//! `<meta>/lsr-stop`, so a restart stops again while the other writer's files are on the
+//! replica, and replicates once an operator has removed them ([`lsr_core::StopRecord`]).
 
 #![forbid(unsafe_code)]
 
@@ -44,6 +49,7 @@ mod error;
 mod events;
 mod exec;
 mod health;
+mod meta;
 mod readers;
 mod replicator;
 mod restore;

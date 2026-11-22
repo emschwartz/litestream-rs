@@ -41,8 +41,8 @@ use std::sync::Arc;
 
 use lsr_core::{
     Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, Level, ObjectStore, PageLimit,
-    PersistentCause, Phase as EnginePhase, Response, StopCause, Task, Tick, Unfinished, WalSource,
-    retry_wait,
+    PersistentCause, Phase as EnginePhase, Response, StopCause, StopRecord, Task, Tick, Unfinished,
+    WalSource, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
@@ -52,6 +52,7 @@ use crate::config::Config;
 use crate::events::{Event, EventSink};
 use crate::exec::block_on;
 use crate::health::{Counters, Gone, Phase, Stopped};
+use crate::meta::{MetaLock, write_stop};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -169,6 +170,12 @@ pub(crate) struct Worker {
     seen: Seen,
     /// The scheduled verify, when `Config::verify_interval` is set.
     scheduled: Option<Scheduled>,
+    /// The meta directory, where the stop record is kept (`crate::meta`).
+    meta: PathBuf,
+    /// The meta directory's lock, held for the thread's life.
+    _meta_lock: Option<MetaLock>,
+    /// The stop record as the meta directory holds it.
+    recorded: Option<StopRecord>,
 }
 
 /// Owns the worker for the thread's life, so that however the thread ends, the worker and
@@ -230,6 +237,34 @@ impl Worker {
             progress: Progress::default(),
             seen: Seen::default(),
             scheduled,
+            meta: meta.to_owned(),
+            _meta_lock: None,
+            recorded: None,
+        }
+    }
+
+    /// The meta directory's lock to hold, and the stop record an earlier run left there,
+    /// which the engine judges at its boot.
+    pub(crate) fn with_meta(mut self, lock: MetaLock, record: Option<StopRecord>) -> Self {
+        self._meta_lock = Some(lock);
+        self.recorded = record;
+        if let Some(record) = record {
+            self.actor.remember_stop(record);
+        }
+        self
+    }
+
+    /// Writes the engine's stop record to the meta directory, or removes it, when it changed.
+    /// A failed write is reported once per change: the stop holds in this process, and a
+    /// restart may not keep it.
+    fn keep_stop_record(&mut self) {
+        let record = self.actor.stop_record();
+        if record == self.recorded {
+            return;
+        }
+        self.recorded = record;
+        if let Err(err) = write_stop(&self.meta, record) {
+            self.emit(&Event::StopNotRecorded { kind: err.kind() });
         }
     }
 
@@ -386,6 +421,7 @@ impl Worker {
             .as_ref()
             .and_then(Scheduled::kept_restore_point);
         self.actor.keep_restore_point_for_verify(verify);
+        self.keep_stop_record();
         // The snapshot is written before the event goes out, so a sink that reads health on an
         // event sees the state after it.
         self.observe(now);

@@ -300,6 +300,11 @@ impl EventSink for DbEvents {
                 "replication stopped",
                 vec![("cause", debug(cause))],
             ),
+            Event::StopNotRecorded { kind } => (
+                LogLevel::Error,
+                "the stop for another writer could not be recorded; a restart may not keep it",
+                vec![("kind", debug(kind))],
+            ),
             Event::Verified { txid, outcome } => verified_line(*txid, *outcome),
         };
         let mut all = vec![db];

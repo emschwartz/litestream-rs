@@ -30,6 +30,30 @@ pub enum StartError {
         /// What the file system said.
         kind: io::ErrorKind,
     },
+    /// Another engine holds the meta directory's lock (`lsr-lock`): a replicator in this or
+    /// another process on this host uses the same staging directory. Stop it, or give this
+    /// database a meta directory of its own.
+    #[error("another replicator holds the meta directory's lock")]
+    MetaLocked,
+    /// The meta directory's lock cannot be taken: its file cannot be opened, or the filesystem
+    /// refuses file locks (some network and FUSE filesystems). The replicator does not run
+    /// without it; put the meta directory on a local filesystem.
+    #[error("the meta directory's lock cannot be taken: {kind:?}")]
+    MetaLock {
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
+    /// The stop record an earlier run left (`lsr-stop`: it stopped for another writer on the
+    /// replica) cannot be read. A stop is never taken as absent.
+    #[error("the stop record cannot be read: {kind:?}")]
+    StopRecordUnreadable {
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
+    /// The stop record an earlier run left does not decode, as after an edit or a damaged
+    /// disk. Remove it once the other writer is dealt with.
+    #[error("the stop record is damaged: {0}")]
+    StopRecordInvalid(#[source] lsr_core::StopRecordError),
     /// SQLite refused to open the database or to set it up.
     #[error("SQLite refused the database (result code {code})")]
     Sqlite {
