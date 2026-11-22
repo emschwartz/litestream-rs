@@ -1776,3 +1776,10 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_that_no_longer_restores_seed_0x14"]
+
+[[bug]]
+name = "hold-as-of-demands-the-raw-answer-sim"
+fix = "53c6bb7"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e"]
