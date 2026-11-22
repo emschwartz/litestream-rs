@@ -1,8 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git push -u origin claude/:*)",
-      "Bash(git push origin claude/:*)"
+      "Bash(scripts/push-claude-branch.sh)",
+      "Bash(./scripts/push-claude-branch.sh)"
     ]
   }
 }
