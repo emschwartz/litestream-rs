@@ -15,8 +15,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::{
-    PATIENCE, Site, assert_same, booted, config, fake, stopped, stopped_moving, truncate_is_busy,
-    wait,
+    PATIENCE, Site, assert_same, booted, config, fake, moved_until, stopped, stopped_moving,
+    truncate_is_busy, wait,
 };
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
@@ -794,8 +794,11 @@ fn a_drain_that_waits_out_a_retry_ends_once_the_clock_reaches_it() {
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     site.commit(4);
-    wait(&replicator, |h| {
-        h.synced.is_some() && h.counters.retries > 0
+    // The first sync can meet a busy database (a commit mid-way through the wal-index header)
+    // and wait out a backoff before it stages, so the clock moves while the test waits for the
+    // failed upload.
+    moved_until(&replicator, &clock, (POLL, 240), |h| {
+        h.synced.is_some() && h.counters.store.begin_upload.errors > 0
     });
     faulty.fail_uploads.store(false, Ordering::SeqCst);
     let stopped = stopped_moving(&replicator, &clock, POLL);
