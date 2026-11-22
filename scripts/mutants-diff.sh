@@ -5,6 +5,7 @@
 # limit in .config/nextest.toml already turns into a failing test (docs/mutants.md, "Detected by
 # non-termination"). Documented equivalent mutants live in docs/mutants-escapes.txt.
 #   scripts/mutants-diff.sh [base-ref]   (default origin/main)
+# MUTANTS_SHARD=k/n runs the k-th of n disjoint slices of the mutants (CI runs four in parallel).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 base="${1:-origin/main}"
@@ -26,7 +27,8 @@ status=0
 timeout "${MUTANTS_DIFF_BUDGET:-2400}" cargo mutants \
     --in-diff "$out/changes.diff" -p lsr-core -p lsr-ltx \
     --test-tool nextest --jobs "${MUTANTS_JOBS:-2}" --copy-vcs true \
-    --minimum-test-timeout 60 --output "$out" "${escapes[@]}" || status=$?
+    --minimum-test-timeout 60 --output "$out" \
+    ${MUTANTS_SHARD:+--shard "$MUTANTS_SHARD"} "${escapes[@]}" || status=$?
 case "$status" in
     0) echo "mutants-diff: every mutant in the changed lines is caught" ;;
     3) echo "mutants-diff: some mutants timed out (a spinning loop); see $out/mutants.out/timeout.txt" ;;
