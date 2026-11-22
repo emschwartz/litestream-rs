@@ -122,11 +122,7 @@ impl Actor {
     /// Restores a verdict a journal recorded, keeping the older restore point of two, and tells
     /// the operator at the next tick how long its restore point is still kept.
     pub(super) fn adopt_ahead(&mut self, recorded: Option<Ahead>) {
-        self.kept.ahead = match (self.kept.ahead, recorded) {
-            (Some(held), Some(read)) if read.restore_point < held.restore_point => Some(read),
-            (Some(held), _) => Some(held),
-            (None, read) => read,
-        };
+        self.kept.ahead = merged(self.kept.ahead, recorded);
         if recorded.is_some()
             && let Some(ahead) = self.kept.ahead
         {
@@ -141,16 +137,16 @@ impl Actor {
     /// ahead), once. Returns the restore point a verdict that ended kept, so retention may
     /// release its chain and the operator hears of it.
     pub(super) fn expire_ahead(&mut self, now: Timestamp) -> Option<Txid> {
-        let ahead = self.kept.ahead?;
-        if ahead.made > now {
-            self.kept.ahead = Some(Ahead { made: now, ..ahead });
-            return None;
+        match expired(self.kept.ahead?, now) {
+            Ok(kept) => {
+                self.kept.ahead = Some(kept);
+                None
+            }
+            Err(released) => {
+                self.kept.ahead = None;
+                Some(released)
+            }
         }
-        if now < kept_until(ahead) {
-            return None;
-        }
-        self.kept.ahead = None;
-        Some(ahead.restore_point)
     }
 
     /// The standing verdict that the database file was found ahead of its WAL, while the state
@@ -161,8 +157,83 @@ impl Actor {
     }
 }
 
+/// The verdict a process holds after reading `read` beside `held`: of two, the one with the older
+/// restore point, the state before any damage; the one held when they name the same point.
+fn merged(held: Option<Ahead>, read: Option<Ahead>) -> Option<Ahead> {
+    match (held, read) {
+        (Some(held), Some(read)) if read.restore_point < held.restore_point => Some(read),
+        (Some(held), _) => Some(held),
+        (None, read) => read,
+    }
+}
+
+/// The verdict at `now`: still kept (re-dated to `now` if it was made later, by a clock that ran
+/// ahead), or ended, with the restore point it kept.
+fn expired(ahead: Ahead, now: Timestamp) -> Result<Ahead, Txid> {
+    let ahead = Ahead {
+        made: ahead.made.min(now),
+        ..ahead
+    };
+    if now >= kept_until(ahead) {
+        Err(ahead.restore_point)
+    } else {
+        Ok(ahead)
+    }
+}
+
 /// When a verdict's restore point goes back to normal retention.
 #[must_use]
 pub fn kept_until(ahead: Ahead) -> Timestamp {
     ahead.made.saturating_add(AHEAD_KEPT_FOR)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use super::*;
+
+    fn at(millis: i64) -> Timestamp {
+        Timestamp::from_unix_millis(millis)
+    }
+
+    fn verdict(restore_point: u64, made: i64) -> Ahead {
+        Ahead {
+            restore_point: Txid::new(restore_point).unwrap(),
+            pages: NonZeroU32::MIN,
+            first: NonZeroU32::MIN,
+            made: at(made),
+        }
+    }
+
+    /// Of two verdicts, the older restore point wins; on the same point, the one held stays.
+    #[test]
+    fn the_older_restore_point_wins() {
+        let (held, older, newer) = (verdict(5, 1), verdict(3, 2), verdict(7, 3));
+        assert_eq!(merged(Some(held), Some(older)), Some(older));
+        assert_eq!(merged(Some(held), Some(newer)), Some(held));
+        assert_eq!(merged(Some(held), Some(verdict(5, 9))), Some(held));
+        assert_eq!(merged(Some(held), None), Some(held));
+        assert_eq!(merged(None, Some(newer)), Some(newer));
+        assert_eq!(merged(None, None), None);
+    }
+
+    /// Kept one millisecond before the window's end, released at it and after it.
+    #[test]
+    fn the_window_ends_exactly_seven_days_after_the_verdict() {
+        let ahead = verdict(5, 1_000);
+        let end = 1_000 + 7 * 24 * 60 * 60 * 1_000;
+        assert_eq!(expired(ahead, at(end - 1)), Ok(ahead));
+        assert_eq!(expired(ahead, at(end)), Err(ahead.restore_point));
+        assert_eq!(expired(ahead, at(end + 1)), Err(ahead.restore_point));
+    }
+
+    /// A verdict dated after `now` (a journal from a clock that ran ahead) is re-dated to `now`,
+    /// so its window runs from now, never from the future.
+    #[test]
+    fn a_verdict_from_the_future_is_re_dated() {
+        let ahead = verdict(5, 50_000);
+        assert_eq!(expired(ahead, at(1_000)), Ok(verdict(5, 1_000)));
+        assert_eq!(expired(ahead, at(50_000)), Ok(ahead));
+    }
 }

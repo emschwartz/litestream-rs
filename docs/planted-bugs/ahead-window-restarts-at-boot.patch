@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor/ahead.rs b/crates/core/src/actor/ahead.rs
-index c5a74780..dc898c80 100644
+index 13acfa6f..69c4d566 100644
 --- a/crates/core/src/actor/ahead.rs
 +++ b/crates/core/src/actor/ahead.rs
-@@ -125,7 +125,7 @@ impl Actor {
-         self.kept.ahead = match (self.kept.ahead, recorded) {
-             (Some(held), Some(read)) if read.restore_point < held.restore_point => Some(read),
-             (Some(held), _) => Some(held),
--            (None, read) => read,
-+            (None, read) => read.map(|read| Ahead { made: Timestamp::from_unix_millis(i64::MAX), ..read }),
-         };
-         if recorded.is_some()
-             && let Some(ahead) = self.kept.ahead
+@@ -163,7 +163,7 @@ fn merged(held: Option<Ahead>, read: Option<Ahead>) -> Option<Ahead> {
+     match (held, read) {
+         (Some(held), Some(read)) if read.restore_point < held.restore_point => Some(read),
+         (Some(held), _) => Some(held),
+-        (None, read) => read,
++        (None, read) => read.map(|read| Ahead { made: Timestamp::from_unix_millis(i64::MAX), ..read }),
+     }
+ }
+ 

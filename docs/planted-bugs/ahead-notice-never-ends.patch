@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor/ahead.rs b/crates/core/src/actor/ahead.rs
-index c5a74780..7b5902c1 100644
+index 13acfa6f..8609a437 100644
 --- a/crates/core/src/actor/ahead.rs
 +++ b/crates/core/src/actor/ahead.rs
-@@ -146,7 +146,7 @@ impl Actor {
-             self.kept.ahead = Some(Ahead { made: now, ..ahead });
-             return None;
-         }
--        if now < kept_until(ahead) {
-+        if now < kept_until(ahead) || true {
-             return None;
-         }
-         self.kept.ahead = None;
+@@ -174,7 +174,7 @@ fn expired(ahead: Ahead, now: Timestamp) -> Result<Ahead, Txid> {
+         made: ahead.made.min(now),
+         ..ahead
+     };
+-    if now >= kept_until(ahead) {
++    if false && now >= kept_until(ahead) {
+         Err(ahead.restore_point)
+     } else {
+         Ok(ahead)

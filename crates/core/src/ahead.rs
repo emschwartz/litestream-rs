@@ -15,25 +15,25 @@
 //! above the size at T has no image and is not checked.
 //!
 //! The scan and the reads run under one committed read of the wal-index: a checkpoint that
-//! copies a frame below its end copies a page the scan saw covered, so it is skipped. The epoch
-//! and the WAL header are checked again after the reads, and a WAL that moved under them is
-//! `WalMoved`, retried as any sync step is.
+//! copies a frame below its end copies a page the scan saw covered, so it is skipped. The
+//! wal-index is read again after the reads, and a read transaction lost or a WAL restarted under
+//! them is `WalMoved`, retried as any sync step is.
 
 use std::collections::BTreeMap;
-use std::io;
 use std::num::NonZeroU32;
 
-use lsr_ltx::{DbChecksum, DbPages, PageChecksum, PageNo, PageRef, PageSize, Txid};
+use lsr_ltx::{PageChecksum, PageNo, Txid};
 use lsr_wal::{OpenError, WalReader};
 
 use crate::fault::Fault;
 use crate::pages::PageChecksumTable;
 use crate::plan::RestoreTarget;
 use crate::position::Position;
-use crate::restore::{DatabaseSink, RestoreError, RestoreOptions, restore_from};
+use crate::restore::{RestoreError, RestoreOptions, restore_from};
 use crate::source::{PageSource, WalSource};
 use crate::store::ObjectStore;
 use crate::sync::scan_whole;
+use crate::verify::DigestSink;
 
 /// Database-file pages that are not their images at the newest staged transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,11 +104,11 @@ pub(crate) async fn check<W: WalSource, P: PageSource, R: ObjectStore>(
             differ = Some(tally(differ, pgno));
         }
     }
+    // A lost read transaction may have let a checkpoint copy frames the scan never saw; a WAL
+    // restarted in place (another connection's TRUNCATE over a read mark of 0) names new salts
+    // in the wal-index while the hold stands.
     let after = wal.committed().map_err(Fault::from_source)?;
-    let unchanged = reader
-        .generation_unchanged()
-        .map_err(|_err| Fault::LocalIo)?;
-    if after.epoch() != committed.epoch() || !unchanged {
+    if after.epoch() != committed.epoch() || after.end().salts() != salts {
         return Err(Fault::WalMoved);
     }
     Ok(differ)
@@ -174,47 +174,5 @@ fn restore_fault(err: &RestoreError) -> Fault {
     }
 }
 
-/// A [`DatabaseSink`] that keeps each page's checksum and nothing else.
-struct DigestSink<'a> {
-    pages: &'a mut BTreeMap<u32, PageChecksum>,
-}
-
-impl DatabaseSink for DigestSink<'_> {
-    fn write_page(&mut self, page: PageRef<'_>) -> io::Result<()> {
-        self.pages.insert(page.pgno().get(), page.checksum());
-        Ok(())
-    }
-
-    fn truncate(&mut self, pages: DbPages, _page_size: PageSize) -> io::Result<()> {
-        drop(self.pages.split_off(&pages.get().saturating_add(1)));
-        Ok(())
-    }
-
-    fn reset(&mut self) -> io::Result<()> {
-        self.pages.clear();
-        Ok(())
-    }
-
-    fn checksum(&mut self, pages: DbPages, page_size: PageSize) -> io::Result<DbChecksum> {
-        let zero = vec![0; page_size.bytes()];
-        let mut total = DbChecksum::EMPTY;
-        for n in 1..=pages.get() {
-            let Some(pgno) = PageNo::new(n, page_size) else {
-                continue;
-            };
-            let page = self
-                .pages
-                .get(&n)
-                .copied()
-                .unwrap_or_else(|| PageChecksum::of(pgno, &zero));
-            total = total.toggle(page);
-        }
-        Ok(total)
-    }
-
-    type PublishError = std::convert::Infallible;
-
-    fn publish(self) -> Result<(), Self::PublishError> {
-        Ok(())
-    }
-}
+#[cfg(test)]
+mod tests;
