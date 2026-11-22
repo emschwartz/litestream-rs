@@ -134,6 +134,12 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    # Four disjoint slices in parallel: a large diff (the witness touched ~1000 lines of boot
+    # code) needs more than one job's 40 minutes, and raising the ceiling would only hide that.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -146,3 +152,4 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           MUTANTS_JOBS: "4"
+          MUTANTS_SHARD: "${{ matrix.shard }}/4"
