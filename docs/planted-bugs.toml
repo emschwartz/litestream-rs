@@ -262,3 +262,12 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
+
+[[bug]]
+name = "skip-boot-scratch-cleanup"
+fix = "284d1fb"
+package = "lsr-cli"
+test_bin = "cli"
+tests = [
+    "a_crash_loop_of_short_boots_with_no_change_leaves_nothing_growing",
+]

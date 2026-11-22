@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index bc6ff7a..7c3d618 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1957,7 +1957,6 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
+     remote: &R,
+     suspect: &mut Option<FileKey>,
+ ) -> Result<(UploadState, Option<Txid>), Fault> {
+-    remove_scratch(staging, remote).await?;
+     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
+     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
+     let start = UploadState::ListFirst { confirmed: None };
