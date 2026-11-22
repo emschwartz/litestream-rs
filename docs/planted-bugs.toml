@@ -391,6 +391,15 @@ tests = [
     "a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one",
 ]
 
+# The boundary snapshot after a TRUNCATE checked the database file against the page table, so a
+# commit that landed between the last step and the TRUNCATE read as damage.
+[[bug]]
+name = "boundary-snapshot-keeps-page-table"
+fix = "claude/boundary-snapshot-pages"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = ["a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage"]
+
 [[bug]]
 name = "stamp-before-committed-read"
 fix = "847521a"
