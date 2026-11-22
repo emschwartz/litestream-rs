@@ -190,7 +190,11 @@ fn barrier_and_write_lock_hold_the_writer() {
     let db = sim();
     let mut ck = db.checkpointer();
     let barrier = ck.begin_barrier().unwrap();
-    assert_eq!(ck.begin_write_lock(), Err(SourceError::Busy));
+    assert_eq!(
+        ck.begin_write_lock(),
+        Err(SourceError::Io(std::io::ErrorKind::InvalidInput)),
+        "one lock at a time on the writer connection"
+    );
     assert_eq!(db.commit(&tx(&[2], 1), 4), None);
     assert_eq!(ck.bump_seq(), Err(SourceError::Busy));
     let run = ck.checkpoint(CheckpointMode::Truncate).unwrap();
@@ -214,10 +218,10 @@ fn spill_rollback_and_total_methods() {
     assert!(!db.our_reader_end());
     assert_eq!(db.commit(&[], 4), None);
     assert!(db.spill(&tx(&[2], 1)));
-    assert_eq!(
-        db.other_process_checkpoint(OtherProcessMode::Passive),
-        None,
-        "the app is in a transaction"
+    assert!(
+        db.other_process_checkpoint(OtherProcessMode::Passive)
+            .is_some(),
+        "another process is not stopped by the app's transaction"
     );
     assert!(db.rollback());
     assert_eq!(db.mx_frame(), 0);
@@ -372,15 +376,16 @@ fn forced_salts_replace_every_random_draw_but_not_the_increment() {
         salt1: 0xaaaa_0001,
         salt2: 0xbbbb_0002,
     };
+    let fresh = Salts {
+        salt1: 0,
+        salt2: 0xcccc_0003,
+    };
     db.force_random_salts(Some(named));
     db.commit(&tx(&[1], 1), 4).unwrap();
     assert_eq!(db.salts(), named, "a header written at count 0 takes both");
-    db.force_random_salts(Some(Salts {
-        salt1: 0,
-        salt2: 0xcccc_0003,
-    }));
+    db.force_random_salts(Some(fresh));
     assert!(
-        !db.other_process_checkpoint(OtherProcessMode::Truncate)
+        !db.other_process_checkpoint(OtherProcessMode::Passive)
             .unwrap()
             .busy
     );
@@ -389,10 +394,35 @@ fn forced_salts_replace_every_random_draw_but_not_the_increment() {
         db.salts(),
         Salts {
             salt1: named.salt1.wrapping_add(1),
-            salt2: 0xcccc_0003
+            salt2: fresh.salt2
         },
-        "a restart keeps salt1 + 1 and takes salt2"
+        "the app's own restart keeps salt1 + 1 and takes salt2"
     );
+}
+
+/// Another process's TRUNCATE leaves the restart counted on its own connection, which closes:
+/// an app that never restarted the log writes the next header at count 0, with both salts new.
+#[test]
+fn after_another_process_truncates_a_first_write_at_count_0_takes_both_salts() {
+    let db = sim();
+    let named = Salts {
+        salt1: 0xaaaa_0001,
+        salt2: 0xbbbb_0002,
+    };
+    let fresh = Salts {
+        salt1: 0,
+        salt2: 0xcccc_0003,
+    };
+    db.force_random_salts(Some(named));
+    db.commit(&tx(&[1], 1), 4).unwrap();
+    db.force_random_salts(Some(fresh));
+    assert!(
+        !db.other_process_checkpoint(OtherProcessMode::Truncate)
+            .unwrap()
+            .busy
+    );
+    db.commit(&tx(&[1], 2), 4).unwrap();
+    assert_eq!(db.salts(), fresh);
 }
 
 #[test]

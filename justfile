@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features upstream-test-map-fresh evidence-fresh
+check: fmt-check clippy test doctest features upstream-test-map-fresh evidence-fresh planted-bugs-apply
 
 fmt-check:
     cargo fmt --all -- --check
@@ -128,6 +128,28 @@ shuttle iterations="200":
 journal-model:
     cargo nextest run -p lsr-spec -E 'test(/^journal::deep$/)' --run-ignored only --no-capture --locked
 
+# Every planted-bug patch still applies to the tree, so a change that makes one stale fails its
+# own gate instead of the nightly run. Seconds; whether the planted defect is caught is
+# `planted-bugs`'s question.
+planted-bugs-apply:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    stale=()
+    found=0
+    for patch in docs/planted-bugs/*.patch; do
+        found=$((found + 1))
+        git apply --check "$patch" 2>/dev/null || stale+=("$patch")
+    done
+    if [ "$found" -eq 0 ]; then
+        echo "planted-bugs-apply: no patches found under docs/planted-bugs" >&2
+        exit 1
+    fi
+    if [ "${#stale[@]}" -gt 0 ]; then
+        printf 'planted-bugs-apply: no longer applies (re-express it, see docs/planted-bugs.md): %s\n' "${stale[@]}" >&2
+        exit 1
+    fi
+    echo "planted-bugs-apply: all $found patches apply"
+
 # Every fixed defect is re-planted in a scratch tree and its named tests must fail
 # (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
 # Nightly in CI; about 20 minutes cold. `just planted-bugs --only listing-cursor` runs one entry.
@@ -196,15 +218,24 @@ compat-regen *args:
     ./scripts/build-go-litestream.sh
     cargo run --locked -p lsr-compat --bin compat-regen -- {{args}}
 
+# The triple cargo-fuzz builds for: the nightly toolchain's own host. Left to itself cargo-fuzz
+# picks the triple it was compiled for, so a musl build of it (what cargo-binstall fetches) asks
+# for x86_64-unknown-linux-musl, where the address sanitizer cannot link and nightly has no std.
+fuzz_triple := "$(rustc +nightly -vV | sed -n 's/^host: //p')"
+
 # Run one fuzz target (decode, flip, index, plan, plan_contract, plan_lazy, key, wal) for N seconds;
 # new inputs join fuzz/corpus.
 fuzz target seconds:
-    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1
+    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" -- -max_total_time={{seconds}} -max_len=32768 -rss_limit_mb=2048 -print_final_stats=1
+
+# Replay one input (a finding under fuzz/artifacts, or a corpus file) against its target.
+fuzz-replay target file:
+    cargo +nightly fuzz run {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" "{{file}}"
 
 # Minimise one target's corpus (keeps what reaches distinct coverage); extra
 # arguments go to libFuzzer: just fuzz-cmin wal -max_len=16384.
 fuzz-cmin target *args:
-    cargo +nightly fuzz cmin {{target}} --fuzz-dir fuzz -- {{args}}
+    cargo +nightly fuzz cmin {{target}} --fuzz-dir fuzz --target "{{fuzz_triple}}" -- {{args}}
 
 # Rebuild the seed corpus from the Go-written fixtures, and the wal seeds from built and SQLite WALs.
 fuzz-seed:

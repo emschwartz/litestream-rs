@@ -385,3 +385,77 @@ fn h_path_tail(key: &FileKey) -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// A killed upload's scratch file goes, at every level; Go's scratch name, a stranger's
+/// `.tmp`, an object and a name that only looks like ours stay.
+#[test]
+fn remove_scratch_removes_only_this_store_s_own_scratch_files() {
+    let h = FsHarness::new();
+    let target = key(0, 1, 1);
+    let snapshot = key(9, 1, 1);
+    block_on(async {
+        for k in [target, snapshot] {
+            let mut up = h
+                .store
+                .begin_upload(&k, Timestamp::from_unix_millis(1))
+                .await
+                .unwrap();
+            up.write(b"partial").await.unwrap();
+            // Dropped without commit or abort, as a kill leaves it.
+        }
+    });
+    let level0 = h.store.level_dir(Level::ZERO);
+    let name = target.file_name();
+    let stay = [
+        format!("{name}.tmp"),
+        format!("{name}.x-1.tmp"),
+        format!("{name}.12-.tmp"),
+        "notes.tmp".to_owned(),
+        "0000000000000001-000000000000000z.ltx.1-1.tmp".to_owned(),
+    ];
+    for other in &stay {
+        fs::write(level0.join(other), b"not ours").unwrap();
+    }
+    let scratch = |dir: &Path| -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| is_own_scratch(n))
+            .collect()
+    };
+    assert_eq!(scratch(&level0).len(), 1);
+    assert_eq!(block_on(h.store.remove_scratch()), Ok(2));
+    assert!(scratch(&level0).is_empty());
+    assert!(scratch(&h.store.level_dir(Level::SNAPSHOT)).is_empty());
+    for other in &stay {
+        assert!(level0.join(other).exists(), "{other} was removed");
+    }
+    assert_eq!(block_on(h.store.remove_scratch()), Ok(0));
+    // An upload that commits after its scratch file went fails, and publishes nothing.
+    block_on(async {
+        let mut up = h
+            .store
+            .begin_upload(&target, Timestamp::from_unix_millis(1))
+            .await
+            .unwrap();
+        up.write(b"bytes").await.unwrap();
+        assert_eq!(h.store.remove_scratch().await, Ok(1));
+        up.commit().await.unwrap_err();
+    });
+    assert_eq!(all(&h.store, 0).files, Vec::new());
+}
+
+/// One call removes at most [`MAX_SCRATCH_REMOVED`]; the next call takes the rest.
+#[test]
+fn remove_scratch_bounds_one_call() {
+    let h = FsHarness::new();
+    let level0 = h.store.level_dir(Level::ZERO);
+    fs::create_dir_all(&level0).unwrap();
+    let name = key(0, 1, 1).file_name();
+    let extra = 3;
+    for n in 0..MAX_SCRATCH_REMOVED + extra {
+        fs::write(level0.join(format!("{name}.1-{n}.tmp")), b"").unwrap();
+    }
+    assert_eq!(block_on(h.store.remove_scratch()), Ok(MAX_SCRATCH_REMOVED));
+    assert_eq!(block_on(h.store.remove_scratch()), Ok(extra));
+}
