@@ -238,6 +238,7 @@ fn stage_power_loss_drops_or_tears_only_volatile() {
                 assert_eq!(u64::try_from(left.len()).unwrap(), kept);
                 assert!(left.len() < fresh.len());
             }
+            Lost::Restored => panic!("nothing was unlinked"),
         }
     }
     assert!(dropped > 0 && torn > 0, "{dropped} dropped, {torn} torn");
@@ -290,4 +291,109 @@ fn a_lagging_listing_hides_writes_and_deletes_for_a_bounded_while() {
     // The lag hid two writes; the third shows at once.
     block_on(upload(&store, 3)).unwrap();
     assert_eq!(listed(&store), 2);
+}
+
+/// A staged file the engine unlinked, with no commit (a directory sync) after it.
+fn unlinked_with_no_sync(revert: bool) -> (MemStore, VolatileHandle, Vec<u8>) {
+    let raw = MemStore::new();
+    let volatile = Volatile::new(raw.clone()).unsynced_deletes();
+    let handle = volatile.handle();
+    if revert {
+        handle.revert_unsynced_entries();
+    }
+    let bytes = ltx(1, 1, 1, 1, None);
+    block_on(async {
+        let mut up = volatile
+            .begin_upload(
+                &fkey(0, 1, 1),
+                Timestamp::from_unix_millis(5),
+                lsr_core::WriteMode::Replace,
+            )
+            .await
+            .unwrap();
+        up.write(&bytes).await.unwrap();
+        up.commit().await.unwrap();
+        volatile.delete(&[fkey(0, 1, 1)]).await.unwrap();
+    });
+    assert_eq!(handle.unsynced_unlinks(), vec![fkey(0, 1, 1)]);
+    (raw, handle, bytes)
+}
+
+/// Under the block law an unlink the directory never synced is undone or kept, on a coin per
+/// entry: undone, the file is back with its bytes and created-at time.
+#[test]
+fn an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law() {
+    let (mut back, mut gone) = (0, 0);
+    for seed in 0..32 {
+        let (raw, handle, bytes) = unlinked_with_no_sync(true);
+        let lost = block_on(handle.power_loss(&raw, &SeededEntropy::new(seed))).unwrap();
+        assert!(
+            handle.unsynced_unlinks().is_empty(),
+            "the loss settles every entry"
+        );
+        if lost == vec![(fkey(0, 1, 1), Lost::Restored)] {
+            back += 1;
+            let len = ReadLen::new(1 << 16).unwrap();
+            assert_eq!(block_on(raw.read(&fkey(0, 1, 1), 0, len)).unwrap(), bytes);
+            let info = block_on(raw.list(Level::new(0).unwrap(), None, PageLimit::MAX))
+                .unwrap()
+                .files[0];
+            assert_eq!(
+                block_on(raw.created_at(&info)).unwrap().at(),
+                Timestamp::from_unix_millis(5)
+            );
+        } else {
+            assert!(lost.is_empty(), "{lost:?}");
+            gone += 1;
+            assert_eq!(listed(&raw), 0);
+        }
+    }
+    assert!(back > 0 && gone > 0, "{back} back, {gone} gone");
+}
+
+/// Without the block law, as under the all-or-nothing law, an unlink stays done.
+#[test]
+fn an_unsynced_unlink_stays_done_without_the_block_law() {
+    for seed in 0..8 {
+        let (raw, handle, _) = unlinked_with_no_sync(false);
+        let lost = block_on(handle.power_loss(&raw, &SeededEntropy::new(seed))).unwrap();
+        assert!(lost.is_empty());
+        assert_eq!(listed(&raw), 0);
+    }
+}
+
+/// A later commit syncs the directory: the unlink before it is durable.
+#[test]
+fn a_commit_after_an_unlink_makes_it_durable() {
+    for seed in 0..8 {
+        let raw = MemStore::new();
+        let volatile = Volatile::new(raw.clone()).unsynced_deletes();
+        let handle = volatile.handle();
+        handle.revert_unsynced_entries();
+        block_on(upload(&volatile, 1)).unwrap();
+        block_on(volatile.delete(&[fkey(0, 1, 1)])).unwrap();
+        block_on(upload(&volatile, 2)).unwrap();
+        assert!(handle.unsynced_unlinks().is_empty());
+        let lost = block_on(handle.power_loss(&raw, &SeededEntropy::new(seed))).unwrap();
+        assert!(lost.is_empty());
+        assert_eq!(listed(&raw), 1, "only the second file");
+    }
+}
+
+/// The directory store syncs each directory it deleted from, so a delete it returned from is
+/// durable: no power loss brings the file back.
+#[test]
+fn a_delete_syncs_the_directory_as_the_directory_store_does() {
+    for seed in 0..16 {
+        let raw = MemStore::new();
+        let volatile = Volatile::new(raw.clone());
+        let handle = volatile.handle();
+        handle.revert_unsynced_entries();
+        block_on(upload(&volatile, 1)).unwrap();
+        block_on(volatile.delete(&[fkey(0, 1, 1)])).unwrap();
+        assert!(handle.unsynced_unlinks().is_empty());
+        let lost = block_on(handle.power_loss(&raw, &SeededEntropy::new(seed))).unwrap();
+        assert!(lost.is_empty(), "{lost:?}");
+        assert_eq!(listed(&raw), 0);
+    }
 }

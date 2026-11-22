@@ -177,6 +177,8 @@ pub(crate) struct Worker {
     seen: Seen,
     /// The scheduled verify, when `Config::verify_interval` is set.
     scheduled: Option<Scheduled>,
+    /// The clock's last reading, to notice it stepping back.
+    last_reading: Option<Timestamp>,
 }
 
 /// Owns the worker for the thread's life, so that however the thread ends, the worker and
@@ -238,6 +240,7 @@ impl Worker {
             progress: Progress::default(),
             seen: Seen::default(),
             scheduled,
+            last_reading: None,
         }
     }
 
@@ -270,7 +273,7 @@ impl Worker {
             let now = self.runtime.clock.now();
             match self.turn(now) {
                 Turn::Again => {}
-                Turn::Wait(until) => self.runtime.park.park(self.verify_wake(until)),
+                Turn::Wait(until) => self.runtime.park.park_from(self.verify_wake(until), now),
                 Turn::Done(outcome) => return outcome,
             }
         }
@@ -303,7 +306,30 @@ impl Worker {
         })
     }
 
+    /// Moves this thread's own wall-clock waits (the rebuild's, the next poll, the next
+    /// scheduled verify) back by a step the clock took back, so each keeps what was left of it
+    /// instead of adding the step; the engine's timers follow the clock themselves
+    /// (`lsr_core`'s actor clock). A stop's deadline is the caller's instant and stays.
+    fn follow_clock(&mut self, now: Timestamp) {
+        if let Some(step) = self
+            .last_reading
+            .map(|last| last.saturating_duration_since(now))
+            .filter(|step| !step.is_zero())
+        {
+            let back = |at: Timestamp| at.checked_sub(step).unwrap_or(now);
+            if let Some(rebuilt) = self.rebuilt.as_mut() {
+                rebuilt.until = back(rebuilt.until);
+            }
+            self.next_poll = back(self.next_poll);
+            if let Some(scheduled) = self.scheduled.as_mut() {
+                scheduled.step_back(back);
+            }
+        }
+        self.last_reading = Some(now);
+    }
+
     fn turn(&mut self, now: Timestamp) -> Turn {
+        self.follow_clock(now);
         if let Some(cause) = self.stopped {
             return self.stopped(cause);
         }

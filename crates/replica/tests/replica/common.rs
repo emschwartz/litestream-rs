@@ -191,6 +191,28 @@ pub fn stopped_moving(replicator: &Replicator, clock: &FakeClockHandle, step: Du
     panic_with(&replicator.health())
 }
 
+/// Moves the fake clock `step` at a time, at most `steps` times, until `done` holds; fails the
+/// test if it never does. Bounds how much clock a wait may take, where [`wait`] bounds looks.
+pub fn moved_until(
+    replicator: &Replicator,
+    clock: &FakeClockHandle,
+    (step, steps): (Duration, u32),
+    done: impl Fn(&Health) -> bool,
+) -> Health {
+    for _ in 0..steps {
+        let looks = Cell::new(0_u32);
+        let seen = replicator.wait_until(PATIENCE, |health| {
+            looks.set(looks.get().saturating_add(1));
+            done(health) || looks.get() >= 2
+        });
+        if let Some(health) = seen.filter(|health| done(health)) {
+            return health;
+        }
+        clock.advance(step);
+    }
+    panic_with(&replicator.health())
+}
+
 fn panic_with(health: &Health) -> ! {
     panic!("the replicator never got there: {health:?}")
 }

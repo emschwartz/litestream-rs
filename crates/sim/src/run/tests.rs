@@ -100,3 +100,16 @@ fn idle_resource_property() {
     let report = run(Seed::new(1), 120, &Weights::default()).unwrap_or_else(|f| panic!("{f}"));
     assert!(report.checks > 0);
 }
+
+/// A first sync over a replica that already holds files is the engine starting history over
+/// with nothing to prove continuity, so it reports a loss; over an empty replica it does not.
+#[test]
+fn a_first_sync_over_files_reports_a_loss() {
+    use lsr_core::SnapshotCause;
+    assert!(snapshot_reports_loss(&SnapshotCause::FirstSync, true));
+    assert!(!snapshot_reports_loss(&SnapshotCause::FirstSync, false));
+    assert!(!snapshot_reports_loss(
+        &SnapshotCause::OperatorRequested,
+        true
+    ));
+}

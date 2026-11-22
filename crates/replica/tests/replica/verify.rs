@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use common::{PATIENCE, Site, config, fake, wait};
+use common::{PATIENCE, Site, config, fake, moved_until, wait};
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
@@ -183,6 +183,21 @@ fn the_scheduled_verify_is_off_by_default() {
     let health = replicator.health();
     assert_eq!(health.verification, Verification::default());
     assert!(!any_verified(&events));
+}
+
+/// A wall clock that steps back before the first run does not add the step to the wait: the
+/// run comes within a few intervals of clock, never the hour of the step.
+#[test]
+fn a_clock_step_back_does_not_put_off_the_scheduled_verify() {
+    let site = Site::new();
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, site.store(), verifying(), runtime).unwrap();
+    site.commit(3);
+    advance(&replicator, &clock, POLL);
+    wait(&replicator, caught_up);
+    clock.step_back(Duration::from_secs(3600));
+    let health = moved_until(&replicator, &clock, (POLL, 240), |h| runs(h) >= 1);
+    assert_eq!(health.verification.runs.passed, 1, "{health:?}");
 }
 
 /// The first run is one interval after the start and the next one interval after it; each

@@ -45,8 +45,11 @@ use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, replay_line, run_with};
 
 const STEPS: u32 = 300;
 
-/// What the app's after-restart behaviours reached, summed over the passing runs.
-const REACHED: [&str; 7] = [
+/// What the app's after-restart behaviours reached, and how often the history judge let a
+/// regression through (by a rewind the engine reported, by the driver's excuse, and excused
+/// steps the engine never reported), and how many staged files an undone unlink brought back,
+/// summed over the passing runs.
+const REACHED: [&str; 11] = [
     "app.redo",
     "app.redo_after_loss",
     "app.redo_past_lost_end",
@@ -54,6 +57,10 @@ const REACHED: [&str; 7] = [
     "app.retry_restamped",
     "app.busy",
     "app.busy_past_end",
+    "history.rewound",
+    "history.excused",
+    "history.excused.unreported",
+    "staged.Restored",
 ];
 
 fn env(name: &str, default: u64) -> u64 {
