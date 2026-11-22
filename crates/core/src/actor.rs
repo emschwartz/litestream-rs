@@ -103,7 +103,7 @@ use crate::fault::{
     SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
 };
 use crate::inventory::Inventory;
-use crate::journal::{JournalFile, JournalSignal, JournalWriter, judge};
+use crate::journal::{JournalFile, JournalSignal, JournalWriteError, JournalWriter, judge};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
     Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due, listing_after_upload,
@@ -440,7 +440,10 @@ impl Actor {
     /// a readable one, or none on a first run.
     #[must_use]
     pub const fn journal(&self) -> Option<JournalSignal> {
-        self.kept.journal
+        match self.kept.journal_write {
+            Err(kind) => Some(JournalSignal::Unwritable(kind)),
+            Ok(()) => self.kept.journal,
+        }
     }
 
     /// The task's degraded state, if a persistent failure left it in one.
@@ -628,6 +631,7 @@ impl Actor {
             }
         };
         let tick = self.tick_at(&mut env, now).await;
+        let tick = self.reconcile_journal(env.journal.as_deref_mut(), tick, now);
         self.observe_lag(env.wal, now);
         let tick = self.wake_for_probe(tick);
         self.wake_on_wall(tick)
@@ -923,8 +927,8 @@ impl Actor {
             Recovered::Snapshot { cause, .. } => Err(cause),
             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
         };
-        // A report only, and one a boot that fails later reads again.
-        self.kept.journal = journal_signal(journal, newest_staged.as_ref(), &upload);
+        // A boot that fails later reads the journal again.
+        self.adopt_journal(journal, newest_staged.as_ref(), &upload);
         let cause = boot_cause(dropped, refused, from.err());
         let pending = pending_at_boot(self.kept.asked(), cause);
         let course = match (from, pending) {
@@ -1216,6 +1220,9 @@ impl Actor {
         match stepped {
             Ok(Stepped::Synced { files, proof }) => {
                 self.kept.tasks.get_mut(Task::Sync).succeed();
+                if files > 0 {
+                    self.staged_after_truncate();
+                }
                 Ok((files, proof))
             }
             Ok(Stepped::Resnapshot(cause)) => {
@@ -2167,20 +2174,74 @@ enum Dropped {
 /// when it is `suspect`, the file a read on an earlier tick failed on;
 /// otherwise it becomes the suspect and the boot fails with `StagedLost`, to
 /// read it again on the next try.
-/// The journal as boot reads it, or `None` with no journal lent.
-fn read_journal(file: Option<&mut (dyn JournalFile + Send + '_)>) -> Option<lsr_journal::Parsed> {
-    file.map(|file| JournalWriter::open(file).1)
+/// The journal as boot reads it, with the writer that continues from it, or `None` with no
+/// journal lent.
+fn read_journal(
+    file: Option<&mut (dyn JournalFile + Send + '_)>,
+) -> Option<(JournalWriter, lsr_journal::Parsed)> {
+    file.map(JournalWriter::open)
 }
 
-/// What boot reports of the journal it read: a missing one is a first run, and reports
-/// nothing, only while staging and the replica are both empty.
-fn journal_signal(
-    journal: Option<lsr_journal::Parsed>,
-    newest_staged: Option<&NewestStagedFile>,
-    upload: &UploadState,
-) -> Option<JournalSignal> {
-    let fresh = newest_staged.is_none() && upload.confirmed().is_none();
-    journal.and_then(|parsed| judge(&parsed, fresh))
+impl Actor {
+    /// Takes what boot read of the journal: the report (a missing journal is a first run, and
+    /// reports nothing, only while staging and the replica are both empty), the writer, and a
+    /// recorded unproven-WAL debt, which a restart never forgives (`unproven`).
+    fn adopt_journal(
+        &mut self,
+        journal: Option<(JournalWriter, lsr_journal::Parsed)>,
+        newest_staged: Option<&NewestStagedFile>,
+        upload: &UploadState,
+    ) {
+        let fresh = newest_staged.is_none() && upload.confirmed().is_none();
+        let Some((writer, parsed)) = journal else {
+            self.kept.journal = None;
+            self.kept.writer = None;
+            self.kept.journal_read = None;
+            return;
+        };
+        self.kept.journal = judge(&parsed, fresh);
+        self.kept.journal_read = match parsed.verdict {
+            lsr_journal::Verdict::Read { journal, .. } => Some(journal),
+            lsr_journal::Verdict::Newer { .. }
+            | lsr_journal::Verdict::Missing
+            | lsr_journal::Verdict::Unreadable(_) => None,
+        };
+        if let Some(read) = self.kept.journal_read {
+            self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
+        }
+        self.kept.writer = Some(writer);
+    }
+
+    /// Writes the journal when what it holds differs from what the engine holds, at the end of
+    /// every tick: the facts are a function of the engine's state, never a step to remember.
+    /// A failed write is tried again next tick; the engine proceeds as with no journal.
+    fn reconcile_journal(
+        &mut self,
+        file: Option<&mut (dyn JournalFile + Send + '_)>,
+        tick: Tick,
+        now: Timestamp,
+    ) -> Tick {
+        let (Some(file), Some(writer)) = (file, self.kept.writer.as_mut()) else {
+            return tick;
+        };
+        let held = writer.durable().copied().or(self.kept.journal_read);
+        let wanted = self.kept.unproven.recorded();
+        if held.map_or(lsr_journal::Unproven::No, |held| held.unproven) == wanted {
+            // Nothing the engine holds is missing from the journal: nothing lags it.
+            self.kept.journal_write = Ok(());
+            return tick;
+        }
+        let record = lsr_journal::Journal {
+            unproven: wanted,
+            ..held.unwrap_or(lsr_journal::Journal::ABSENT)
+        };
+        match writer.write(file, &record) {
+            Ok(()) => self.kept.journal_write = Ok(()),
+            Err(JournalWriteError::Unwritable(kind)) => self.kept.journal_write = Err(kind),
+            Err(JournalWriteError::Bug(fault)) => return self.fault(Task::Sync, fault, now),
+        }
+        tick
+    }
 }
 
 async fn boot_listing<L: ObjectStore, R: ObjectStore>(

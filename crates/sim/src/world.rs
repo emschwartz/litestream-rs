@@ -265,6 +265,8 @@ pub struct World {
     pub remote_faults: FaultHandle,
     /// Staging's power-loss bookkeeping.
     pub volatile: VolatileHandle,
+    /// The engine journal, on the same disk as staging.
+    pub journal: crate::journal::SimJournal,
     /// What the database really was.
     pub model: Model,
     /// What the engine has acknowledged.
@@ -359,6 +361,7 @@ impl World {
             staging_recorder: staging_recorder_log,
             remote_recorder: remote_recorder_log,
             volatile: volatile_handle,
+            journal: crate::journal::SimJournal::default(),
             model,
             acked: Acked::new(),
             history,
@@ -613,6 +616,7 @@ impl World {
         match kind {
             CrashKind::Process => Vec::new(),
             CrashKind::Power => {
+                self.journal.power_loss();
                 let lost = block_on(
                     self.staging_raw
                         .power_loss(&self.volatile, &self.crash_entropy),
@@ -696,7 +700,8 @@ impl World {
     /// What the boot's witness cannot prove among the staged level-0 files
     /// the replica does not hold yet: a snapshot (a file with every page) or a
     /// hop (a file read from a WAL generation's first frame without every
-    /// page). `None` when there is neither.
+    /// page). `None` when there is neither. A file the replica holds other
+    /// bytes under (a short write the store acknowledged) is not held.
     #[must_use]
     pub fn pending_unprovable(&self) -> Option<Unprovable> {
         use lsr_core::{Level, ObjectStore, PageLimit};
@@ -706,7 +711,10 @@ impl World {
         listing
             .files
             .iter()
-            .filter(|file| newest.is_none_or(|newest| file.key.range().max().get() > newest))
+            .filter(|file| {
+                newest.is_none_or(|newest| file.key.range().max().get() > newest)
+                    || self.replica_differs(&file.key)
+            })
             .find_map(|file| {
                 // Only a file read from a generation's first frame (or from no
                 // WAL range) can be either: the header says so, the pages
@@ -726,6 +734,15 @@ impl World {
                     Unprovable::Hop
                 })
             })
+    }
+
+    /// Whether the replica holds other bytes than staging under `key`; false
+    /// when either does not hold it or cannot be read.
+    fn replica_differs(&self, key: &FileKey) -> bool {
+        match (read_all(&self.remote_raw, key), self.read_staged(key)) {
+            (Ok(theirs), Ok(ours)) => theirs != ours,
+            (Ok(_) | Err(_), Ok(_) | Err(_)) => false,
+        }
     }
 
     /// The newest transaction any replica file holds, at any level, read

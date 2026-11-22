@@ -372,6 +372,11 @@ pub fn within(what: Bound, seen: u64, limit: u64) -> Result<(), Violation> {
     Ok(())
 }
 
+/// The context of the `BugFault` raised when the model's newest image is no longer the database
+/// SQLite's rules hold: a check of the harness against itself, which a failed WAL sync followed
+/// by a power loss can trip before the world adopts the result as damage.
+pub const MODEL_DIVERGED: &str = "the model no longer matches SQLite's rules";
+
 /// A `BugFault` naming `context`.
 #[must_use]
 pub fn bug_fault(context: impl Into<String>) -> Violation {

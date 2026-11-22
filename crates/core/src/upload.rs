@@ -49,6 +49,7 @@ use std::num::NonZeroU32;
 
 use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 
+use crate::checked::Checked;
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
@@ -583,21 +584,18 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
 ) -> Result<FileInfo, PutError> {
     let key = &token.key();
     let mut upload = None;
-    let wrote = match copy_verified(staging, remote, token, &mut upload).await {
-        Ok(wrote) => wrote,
-        Err(err) => {
-            if let Some(open) = upload {
-                // Abort only releases scratch; a failure leaves nothing visible either way.
-                drop(open.abort().await);
-            }
-            return Err(err);
+    if let Err(err) = copy_verified(staging, remote, token, &mut upload).await {
+        if let Some(open) = upload {
+            // Abort only releases scratch; a failure leaves nothing visible either way.
+            drop(open.abort().await);
         }
-    };
+        return Err(err);
+    }
     let Some(open) = upload else {
         return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
     };
     match open.commit().await {
-        Ok(info) if info.key == *key && info.size == wrote => Ok(info),
+        Ok(info) if info.key == *key => Ok(info),
         Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
         Err(err) => Err(commit_failed(Fault::from_remote(&err))),
     }
@@ -634,16 +632,17 @@ fn names_key(header: &Header, key: &FileKey) -> Result<(), PutError> {
 }
 
 /// Reads the staged file in chunks, decodes each, and forwards it to an upload
-/// begun as soon as the header is known. Returns the bytes written once the
-/// decoder has verified the whole file and its length and trailer checksum,
-/// on this read, are the ones `token` was minted for: a file replaced after
-/// it was witnessed is refused before the commit.
-async fn copy_verified<L: ObjectStore, S: ObjectStore>(
+/// begun as soon as the header is known. Returns once the decoder has
+/// verified the whole file and its length and trailer checksum, on this read,
+/// are the ones `token` was minted for: a file replaced after it was
+/// witnessed is refused before the commit. The upload counts the bytes it
+/// writes; its commit checks the store holds them ([`Checked`]).
+async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
     staging: &L,
-    remote: &S,
+    remote: &'s S,
     token: &Witnessed,
-    upload: &mut Option<S::Upload>,
-) -> Result<u64, PutError> {
+    upload: &mut Option<Checked<'s, S>>,
+) -> Result<(), PutError> {
     let key = &token.key();
     let len = CHUNK;
     let mut decoder = Decoder::new();
@@ -685,16 +684,15 @@ async fn copy_verified<L: ObjectStore, S: ObjectStore>(
     if !token.matches(bytes, verified.trailer().file_checksum()) {
         return Err(PutError::Before(Fault::StagedLost));
     }
-    Ok(offset)
+    Ok(())
 }
 
-async fn begin<S: ObjectStore>(
-    remote: &S,
+async fn begin<'s, S: ObjectStore>(
+    remote: &'s S,
     key: &FileKey,
     header: &Header,
-) -> Result<S::Upload, PutError> {
-    remote
-        .begin_upload(key, header.fields().timestamp)
+) -> Result<Checked<'s, S>, PutError> {
+    Checked::begin(remote, key, header.fields().timestamp)
         .await
         .map_err(|err| PutError::Before(Fault::from_remote(&err)))
 }

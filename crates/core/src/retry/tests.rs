@@ -8,7 +8,8 @@ use crate::conformance::{self, Harness};
 use crate::env::{RecordingSleeper, SeededEntropy};
 use crate::layout::CreatedAt;
 use crate::mem::MemStore;
-use crate::store::{PartNumber, StoreOp};
+use crate::mem::short::{LyingUpload, SizeLiar};
+use crate::store::{CorruptCause, PartNumber, StoreOp};
 
 fn key() -> FileKey {
     let id = Txid::new(1).unwrap();
@@ -345,74 +346,6 @@ fn a_commit_that_failed_after_publishing_is_not_repeated() {
         assert_eq!(listing.files.len(), 1);
     });
     assert!(sleeper.waits().is_empty());
-}
-
-/// A store whose commits report a size other than the one written.
-#[derive(Debug)]
-struct SizeLiar(MemStore);
-
-struct LyingUpload(<MemStore as ObjectStore>::Upload);
-
-impl ObjectStore for SizeLiar {
-    type Upload = LyingUpload;
-
-    /// Leaves no scratch.
-    async fn remove_scratch(&self) -> Result<u64, StoreError> {
-        Ok(0)
-    }
-
-    async fn list(
-        &self,
-        level: Level,
-        after: Option<TxidRange>,
-        limit: PageLimit,
-    ) -> Result<Listing, StoreError> {
-        self.0.list(level, after, limit).await
-    }
-
-    async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
-        self.0.read(key, offset, len).await
-    }
-
-    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
-        self.0.created_at(file).await
-    }
-
-    async fn read_with_created_at(
-        &self,
-        file: &FileInfo,
-        len: ReadLen,
-    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
-        self.0.read_with_created_at(file, len).await
-    }
-
-    async fn begin_upload(
-        &self,
-        key: &FileKey,
-        created_at: Timestamp,
-    ) -> Result<LyingUpload, StoreError> {
-        Ok(LyingUpload(self.0.begin_upload(key, created_at).await?))
-    }
-
-    async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
-        self.0.delete(keys).await
-    }
-}
-
-impl Upload for LyingUpload {
-    async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        self.0.write(chunk).await
-    }
-
-    async fn commit(self) -> Result<FileInfo, StoreError> {
-        let mut info = self.0.commit().await?;
-        info.size = info.size.saturating_sub(1);
-        Ok(info)
-    }
-
-    async fn abort(self) -> Result<(), StoreError> {
-        self.0.abort().await
-    }
 }
 
 #[test]
