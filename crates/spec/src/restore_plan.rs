@@ -234,8 +234,8 @@ pub enum Clause {
     AsOfHole,
     /// "An instant can fall inside a file ... That is `AsOfInsideFile`":
     /// a usable file links and passes the end and is not recorded as created
-    /// before the instant. Named: "the nearest-ending file that straddles the
-    /// instant" (the text does not break ties among equal ends).
+    /// before the instant. Named, as a design choice: "the nearest-ending
+    /// file, then the higher level, then the lower key".
     AsOfStraddle,
     /// "A file that ends right after the chain removes the doubt (`dates_next`)
     /// only when its time dates that transaction's commit": a level 0-8 file
@@ -571,19 +571,15 @@ fn straddle(timed: &[(Key, CreatedAt)], chain: Vec<Key>, reach: u64, instant: i6
         .filter(|(_, created_at)| created_at.at_ms >= instant)
         .map(|(key, _)| *key)
         .collect();
-    let Some(nearest) = straddlers.iter().map(|key| key.max).min() else {
-        return Judgement::one(Outcome::Plan { chain }, Clause::AsOfChainEnd);
-    };
-    let allowed = straddlers
+    // Design tier: "the nearest-ending file, then the higher level, then the lower key".
+    match straddlers
         .into_iter()
-        .filter(|key| key.max == nearest)
-        .map(|file| Outcome::AsOfInsideFile {
-            chain: chain.clone(),
-            file,
-        })
-        .collect();
-    Judgement {
-        allowed,
-        by: Clause::AsOfStraddle,
+        .min_by_key(|key| (key.max, Reverse(key.level), *key))
+    {
+        Some(file) => Judgement::one(
+            Outcome::AsOfInsideFile { chain, file },
+            Clause::AsOfStraddle,
+        ),
+        None => Judgement::one(Outcome::Plan { chain }, Clause::AsOfChainEnd),
     }
 }

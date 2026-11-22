@@ -53,7 +53,8 @@
 //! smallest first transaction over every usable file past `r` that does not
 //! link, whatever the target and eligibility (where history resumes is a fact
 //! about the replica, not the request); `MalformedSnapshot` names the lowest
-//! key.
+//! key; `AsOfInsideFile` names, among the straddlers below, the
+//! nearest-ending file, then the higher level, then the lower key.
 //!
 //! How a plan is chosen within the contract:
 //! - The base is the eligible file that begins at transaction 1 (any level;

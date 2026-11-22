@@ -113,17 +113,25 @@ fn only_a_commit_time_dates_the_next_transaction() {
     );
 }
 
-/// The text names "the nearest-ending file that straddles the instant" and
-/// breaks no tie, so every nearest-ending straddler is allowed.
+/// Straddlers ending together: the design-tier tie-break names the higher
+/// level, then the lower key.
 #[test]
-fn straddlers_ending_together_are_all_allowed() {
+fn straddlers_ending_together_go_to_the_higher_level_then_the_lower_key() {
     let files = listing(&[
         stored(9, 1, 3, 300),
         stored(1, 4, 10, 1000),
         stored(2, 2, 10, 1000),
+        stored(2, 3, 10, 1000),
     ]);
     let judgement = judge(&files, Target::AsOf(950));
-    assert_eq!(judgement.allowed.len(), 2, "{judgement:?}");
+    assert_eq!(judgement.by, Clause::AsOfStraddle);
+    assert_eq!(
+        only(&judgement),
+        &Outcome::AsOfInsideFile {
+            chain: vec![key(9, 1, 3)],
+            file: key(2, 2, 10)
+        }
+    );
 }
 
 #[test]
