@@ -4,7 +4,8 @@
 //! (`history`, `oracle` or `both`); with `LSR_SIM_BLOCK_LAW` set, every seed's power losses
 //! follow the block crash law instead of half of them; with `LSR_SIM_AFTER_RESTART` set (`redo`,
 //! `busy` or `nothing`), every seed's app does that after a restart instead of what its mix drew;
-//! with `LSR_SIM_NO_WAL_DAMAGE` set, no seed draws WAL damage.
+//! with `LSR_SIM_NO_WAL_DAMAGE` set, no seed draws WAL damage; with `LSR_SIM_LYING_SYNC` set,
+//! every seed's disk lies about the engine's WAL fsync instead of what its mix drew.
 //! Prints every failing seed and the number of seeds run to
 //! the first. The generator, weights and step count are the soak's, fixed here so a count of
 //! seeds to first failure compares across trees.
@@ -20,16 +21,34 @@
 //! | main | as drawn, both judges; redo on every seed and the block law, both judges; busy on every seed and the block law, both judges; every failure listed |
 //! | main + the planted bug "the boot anchor accepts any tail in the live generation" | redo and the block law, the history judge alone; the same, the oracle alone; as drawn, the history judge alone; to the first failure |
 //! | main without the WAL barrier (a scratch revert) | redo and the block law, the history judge alone; busy and the block law, the history judge alone; redo and the block law, the oracle alone; to the first failure |
+//!
+//! The retry campaign's budget, fixed after `AfterRestart::Retry` (one draw apiece per replayed
+//! commit, verbatim or restamped, from its own stream; drawn last in the swarm as half of the
+//! redoing apps) and `Weights::lying_wal_sync` (drawn after it, a quarter of swarm seeds) were
+//! frozen, and before their first campaign together: seeds 1..=3000 of 300 steps. (One run of
+//! the retry law alone, without a lying disk, went first: the plant below survived it.)
+//!
+//! | tree | simulator configurations |
+//! |---|---|
+//! | main | retry, the block law and a lying disk on every seed, both judges; every failure listed |
+//! | main + the planted bug "the boot witness anchors on any tail it decodes" (`docs/planted-bugs/witness-anchor-held.patch`) | retry, the block law and a lying disk, the history judge alone; the same, the oracle alone; as drawn, both judges; to the first failure |
+//!
+//! Results: main failed none of 3000. The plant survived all three configurations (3000 seeds
+//! each), and the retry law without a lying disk before them. With the plant, 1 seed in 3000
+//! (126, under the history configuration) had the boot witness accept a pending file on the
+//! anchor alone; a staging fault four steps later forced a snapshot over it.
 
 use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, replay_line, run_with};
 
 const STEPS: u32 = 300;
 
 /// What the app's after-restart behaviours reached, summed over the passing runs.
-const REACHED: [&str; 5] = [
+const REACHED: [&str; 7] = [
     "app.redo",
     "app.redo_after_loss",
     "app.redo_past_lost_end",
+    "app.retry",
+    "app.retry_restamped",
     "app.busy",
     "app.busy_past_end",
 ];
@@ -46,15 +65,17 @@ fn env(name: &str, default: u64) -> u64 {
 pub fn weights(seed: Seed) -> Weights {
     let mut weights = Weights::mixed(seed);
     weights.block_crash_law |= std::env::var("LSR_SIM_BLOCK_LAW").is_ok();
+    weights.lying_wal_sync |= std::env::var("LSR_SIM_LYING_SYNC").is_ok();
     if std::env::var("LSR_SIM_NO_WAL_DAMAGE").is_ok() {
         weights.wal_damage = 0;
     }
     match std::env::var("LSR_SIM_AFTER_RESTART").as_deref() {
         Err(_) => {}
         Ok("redo") => weights.after_restart = AfterRestart::Redo,
+        Ok("retry") => weights.after_restart = AfterRestart::Retry,
         Ok("busy") => weights.after_restart = AfterRestart::Busy,
         Ok("nothing") => weights.after_restart = AfterRestart::Nothing,
-        Ok(other) => panic!("LSR_SIM_AFTER_RESTART is redo, busy or nothing, not {other}"),
+        Ok(other) => panic!("LSR_SIM_AFTER_RESTART is redo, retry, busy or nothing, not {other}"),
     }
     weights
 }

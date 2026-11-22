@@ -499,3 +499,61 @@ fn a_full_file_that_neither_follows_nor_starts_the_generation_is_refused() {
     assert!(!replica_holds(&rig, 3, &full));
     assert_eq!(restored(&rig), 4);
 }
+
+/// The first byte of page `pgno` in the replica's newest state.
+fn restored_page(rig: &Rig, pgno: u32) -> u8 {
+    let sink = MemSink::new();
+    block_on(restore(
+        &rig.remote.inner,
+        RestoreTarget::Latest,
+        sink.clone(),
+    ))
+    .unwrap();
+    sink.published().unwrap().page(pgno).unwrap()[0]
+}
+
+/// A power loss on a disk that lies about the engine's WAL barrier drops the
+/// frames of the replica's newest file and of the pending file after it. The
+/// application comes back and retries both jobs: the first is not idempotent
+/// (it stamps the time) and writes its page with other bytes into the same
+/// frames, the second writes its page again verbatim. The live WAL now holds
+/// the pending file's range page for page, at the offset and commit size it
+/// names, after a range that is not the replica's newest file. Only the
+/// anchor sees it (an honest barrier keeps those frames, so nothing else
+/// needs to): the pending file is never uploaded on that file, and the
+/// replica restores what the database holds.
+#[test]
+fn a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one() {
+    let (mut rig, mut actor) = caught_up();
+    let kept = rig.wal.committed_end().frame_count();
+    rig.wal.append_tx(&[(pg(2), vec![0xA0; PS.bytes()])], nz(3));
+    rig.settle(&mut actor, T0 + 1);
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+    let job = [(pg(1), vec![0xC0; PS.bytes()])];
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.wal.append_tx(&job, nz(3));
+    rig.settle(&mut actor, T0 + 1);
+    assert_eq!(staged(&rig).last(), Some(&3));
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+    rig.wal.lose_frames_from(kept);
+    rig.wal.append_tx(&[(pg(2), vec![0xB0; PS.bytes()])], nz(3));
+    rig.wal.append_tx(&job, nz(3));
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::StagedUnverified {
+                from: Txid::new(3).unwrap()
+            })
+        })
+    );
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert_eq!(
+        (restored_page(&rig, 1), restored_page(&rig, 2)),
+        (0xC0, 0xB0)
+    );
+}
