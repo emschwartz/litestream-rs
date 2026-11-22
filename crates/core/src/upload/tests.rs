@@ -86,6 +86,11 @@ fn created_at(n: u64) -> Timestamp {
 
 /// A level-0 file for one transaction. Bytes differ per transaction.
 fn encode(n: u64) -> Vec<u8> {
+    encode_pages(n, u8::try_from(n % 251).unwrap())
+}
+
+/// A level-0 file for transaction `n` whose pages are filled with `seed`.
+fn encode_pages(n: u64, seed: u8) -> Vec<u8> {
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size: ps(),
@@ -98,7 +103,6 @@ fn encode(n: u64) -> Vec<u8> {
     })
     .unwrap();
     let mut encoder = Encoder::new(Vec::new(), header).unwrap();
-    let seed = u8::try_from(n % 251).unwrap();
     for pgno in 1..=2_u32 {
         encoder
             .write_page(PageNo::new(pgno, ps()).unwrap(), &vec![seed; ps().bytes()])
@@ -963,6 +967,25 @@ fn a_listing_confirms_by_content_not_size() {
     assert_eq!(listed.state, UploadState::At(None));
     next(listed.state, &staging, &remote, 1).unwrap();
     assert_eq!(read_all(&remote, &key(1)), bytes);
+}
+
+/// The replica's newest object verifies and holds another transaction than
+/// the staged file under the same key (a run before a power loss uploaded it,
+/// or a staging backup was put back). It may already be compacted into level
+/// 1 and above, so writing the staged file over it would give one id two
+/// contents: the object stands and the listing reports the divergence.
+#[test]
+fn a_verifying_listed_key_unlike_the_staged_file_is_never_written_over() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 2);
+    put_bytes(&remote.inner, key(1), &encode(1));
+    let theirs = encode_pages(2, 200);
+    put_bytes(&remote.inner, key(2), &theirs);
+    let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(2))));
+    next(listed.state, &staging, &remote, 2).unwrap();
+    assert!(remote.log().begins.is_empty());
+    assert_eq!(read_all(&remote.inner, &key(2)), theirs);
 }
 
 #[test]
