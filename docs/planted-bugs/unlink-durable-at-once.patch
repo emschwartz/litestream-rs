@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/store.rs b/crates/sim/src/store.rs
+index c381fed..1062b50 100644
+--- a/crates/sim/src/store.rs
++++ b/crates/sim/src/store.rs
+@@ -1396,7 +1396,7 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
+         self.inner.delete(keys).await?;
+         {
+             let mut state = lock(&self.handle.state);
+-            state.unlinked.extend(before);
++            drop(before);
+             for key in keys {
+                 state.volatile.remove(key);
+                 state.resolved.remove(key);

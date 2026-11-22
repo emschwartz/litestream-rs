@@ -1,0 +1,14 @@
+diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
+index 26fab1d..a29b64a 100644
+--- a/crates/replica/src/thread.rs
++++ b/crates/replica/src/thread.rs
+@@ -317,9 +317,6 @@ impl Worker {
+             .filter(|step| !step.is_zero())
+         {
+             let back = |at: Timestamp| at.checked_sub(step).unwrap_or(now);
+-            if let Some(rebuilt) = self.rebuilt.as_mut() {
+-                rebuilt.until = back(rebuilt.until);
+-            }
+             self.next_poll = back(self.next_poll);
+             if let Some(scheduled) = self.scheduled.as_mut() {
+                 scheduled.step_back(back);

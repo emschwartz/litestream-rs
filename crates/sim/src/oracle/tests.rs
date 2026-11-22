@@ -104,9 +104,17 @@ fn oracle_catches_lost_ack() {
             latest: Some(3)
         })
     );
-    let mut rewound = acked;
-    rewound.note_rewound();
-    run(&f, &rewound).unwrap();
+    // Forgetting from 5 keeps the acknowledgement of 4; from 4 voids it.
+    let mut above = acked;
+    above.forget_from(txid(5));
+    assert!(
+        run(&f, &above).is_err(),
+        "an ack below the loss still binds"
+    );
+    let mut lost = acked;
+    lost.forget_from(txid(4));
+    assert_eq!(lost.highest(), Some(txid(3)));
+    run(&f, &lost).unwrap();
 }
 
 #[test]
@@ -138,6 +146,63 @@ fn oracle_catches_a_reused_transaction_id() {
         matches!(got, Violation::TxidReused { txid: 2, .. }),
         "{got:?}"
     );
+}
+
+/// A power loss that cut no commit a file covers does not license reusing an id: the run-wide
+/// exemption the oracle used to grant after any power loss hid exactly this.
+#[test]
+fn a_power_loss_that_cut_nothing_covered_does_not_excuse_a_reused_id() {
+    let mut f = fixture();
+    // Every commit survives: the WAL kept all three frames.
+    f.model.on_power_loss(SALTS, 3, f.recorder.len());
+    put(&f.store, 0, 2, 2, &ltx(2, 2, 1, 12, Some(origin(3, 3))));
+    let got = run(&f, &Acked::new()).unwrap_err();
+    assert!(
+        matches!(got, Violation::TxidReused { txid: 2, .. }),
+        "{got:?}"
+    );
+}
+
+/// An id whose commit a power loss cut may cover the commit the database made in its place:
+/// nothing holds what the id first named any more.
+#[test]
+fn an_id_whose_commit_a_power_loss_cut_may_cover_its_replacement() {
+    let mut f = fixture();
+    // The loss keeps two frames: the third commit is gone, and the app commits again there.
+    f.model.on_power_loss(SALTS, 2, f.recorder.len());
+    f.model.commit(
+        &[(pgno(1), page(13))],
+        1,
+        AppCommit {
+            salts: SALTS,
+            end: wal_end(3),
+        },
+        f.recorder.len(),
+    );
+    put(&f.store, 0, 3, 3, &ltx(3, 3, 1, 13, Some(origin(3, 3))));
+    let done = run(&f, &Acked::new()).unwrap();
+    assert_eq!(done.latest, Some(txid(3)));
+}
+
+/// A compacted key put again with other pages: no transaction id changes commit, so only the
+/// write-once rule on keys sees it.
+#[test]
+fn a_key_put_again_with_other_bytes_is_a_rewrite() {
+    let f = fixture();
+    put(&f.store, 1, 1, 3, &ltx(1, 3, 1, 12, None));
+    run(&f, &Acked::new()).unwrap();
+    put(&f.store, 1, 1, 3, &ltx(1, 3, 1, 99, None));
+    let got = run(&f, &Acked::new()).unwrap_err();
+    assert!(matches!(got, Violation::KeyRewritten { .. }), "{got:?}");
+}
+
+/// The same bytes put again (an upload retried after an ambiguous commit) are no rewrite.
+#[test]
+fn a_key_put_again_with_the_same_bytes_is_not_a_rewrite() {
+    let f = fixture();
+    put(&f.store, 1, 1, 3, &ltx(1, 3, 1, 12, None));
+    put(&f.store, 1, 1, 3, &ltx(1, 3, 1, 12, None));
+    run(&f, &Acked::new()).unwrap();
 }
 
 /// A snapshot staged for transaction 1 was lost before it reached the replica
