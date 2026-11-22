@@ -10,8 +10,8 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, PersistentCause, Severity, SnapshotCause, StopCause,
-    Task,
+    AppCheckpoint, AppCheckpoints, Degraded, PersistentCause, Severity, SnapshotCause,
+    SnapshotCounts, StopCause, Task,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -134,6 +134,9 @@ pub struct Counters {
     pub sink_panics: u64,
     /// The replica's store, operation by operation.
     pub store: StoreCounters,
+    /// Snapshots staged, per cause: each one uploads the whole database, so
+    /// a cause that keeps counting up is a cost to look into.
+    pub snapshots: SnapshotCounts,
 }
 
 /// One copy of the replicator's state, written by its thread after every tick.
@@ -286,6 +289,7 @@ impl Health {
                     delete: OpCounters::ZERO,
                     bytes_uploaded: 0,
                 },
+                snapshots: SnapshotCounts::ZERO,
             },
             verification: Verification {
                 last_run: None,

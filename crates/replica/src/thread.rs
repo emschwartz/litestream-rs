@@ -600,6 +600,7 @@ impl Worker {
 
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
+        let snapshots = self.actor.snapshots();
         let ran = self.app_ran_total();
         let app = self.app_total();
         let verification = self
@@ -621,7 +622,10 @@ impl Worker {
             health.resnapshot = resnapshot;
             health.app_checkpoints_ran = ran;
             health.app_checkpoints = app;
-            health.counters = seen.counters;
+            health.counters = Counters {
+                snapshots,
+                ..seen.counters
+            };
             health.verification = verification;
             state.left = parts.left;
         });

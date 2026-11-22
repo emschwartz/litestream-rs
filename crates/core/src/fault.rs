@@ -274,6 +274,111 @@ pub enum SnapshotCause {
     OperatorRequested,
 }
 
+/// A [`SnapshotCause`] without its payload: what a counter or a label names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SnapshotCauseKind {
+    /// [`SnapshotCause::FirstSync`].
+    FirstSync,
+    /// [`SnapshotCause::BehindRemote`].
+    BehindRemote,
+    /// [`SnapshotCause::NewestStagedFileUnreadable`].
+    NewestStagedFileUnreadable,
+    /// [`SnapshotCause::WalMissing`].
+    WalMissing,
+    /// [`SnapshotCause::GenerationChanged`].
+    GenerationChanged,
+    /// [`SnapshotCause::PrevFrameMismatch`].
+    PrevFrameMismatch,
+    /// [`SnapshotCause::LastPageMismatch`].
+    LastPageMismatch,
+    /// [`SnapshotCause::LocalRewound`].
+    LocalRewound,
+    /// [`SnapshotCause::CheckpointBoundary`].
+    CheckpointBoundary,
+    /// [`SnapshotCause::OperatorRequested`].
+    OperatorRequested,
+}
+
+impl SnapshotCauseKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 10] = [
+        Self::FirstSync,
+        Self::BehindRemote,
+        Self::NewestStagedFileUnreadable,
+        Self::WalMissing,
+        Self::GenerationChanged,
+        Self::PrevFrameMismatch,
+        Self::LastPageMismatch,
+        Self::LocalRewound,
+        Self::CheckpointBoundary,
+        Self::OperatorRequested,
+    ];
+}
+
+impl From<&SnapshotCause> for SnapshotCauseKind {
+    fn from(cause: &SnapshotCause) -> Self {
+        match cause {
+            SnapshotCause::FirstSync => Self::FirstSync,
+            SnapshotCause::BehindRemote { .. } => Self::BehindRemote,
+            SnapshotCause::NewestStagedFileUnreadable => Self::NewestStagedFileUnreadable,
+            SnapshotCause::WalMissing => Self::WalMissing,
+            SnapshotCause::GenerationChanged => Self::GenerationChanged,
+            SnapshotCause::PrevFrameMismatch => Self::PrevFrameMismatch,
+            SnapshotCause::LastPageMismatch => Self::LastPageMismatch,
+            SnapshotCause::LocalRewound { .. } => Self::LocalRewound,
+            SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
+            SnapshotCause::OperatorRequested => Self::OperatorRequested,
+        }
+    }
+}
+
+/// Snapshots staged since the actor began, per cause. A snapshot uploads the
+/// whole database and keeps it for the retention window, so a cause that
+/// keeps counting up is a cost to alert on, and one with no fault behind it is
+/// a defect.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotCounts {
+    counts: [u64; SnapshotCauseKind::ALL.len()],
+}
+
+impl SnapshotCounts {
+    /// No snapshot staged yet.
+    pub const ZERO: Self = Self {
+        counts: [0; SnapshotCauseKind::ALL.len()],
+    };
+
+    /// Snapshots staged for `kind`.
+    #[must_use]
+    pub fn get(&self, kind: SnapshotCauseKind) -> u64 {
+        self.iter()
+            .find_map(|(k, n)| (k == kind).then_some(n))
+            .unwrap_or(0)
+    }
+
+    /// Every kind with its count, zeros included, in [`SnapshotCauseKind::ALL`] order.
+    pub fn iter(&self) -> impl Iterator<Item = (SnapshotCauseKind, u64)> + '_ {
+        SnapshotCauseKind::ALL.into_iter().zip(self.counts)
+    }
+
+    /// The sum over every cause.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.counts.iter().fold(0, |sum, n| sum.saturating_add(*n))
+    }
+
+    /// Counts one snapshot staged for `cause`.
+    pub(crate) fn count(&mut self, cause: &SnapshotCause) {
+        let kind = SnapshotCauseKind::from(cause);
+        if let Some((_, n)) = SnapshotCauseKind::ALL
+            .iter()
+            .zip(self.counts.iter_mut())
+            .find(|(k, _)| **k == kind)
+        {
+            *n = n.saturating_add(1);
+        }
+    }
+}
+
 /// Why the engine stopped and waits for a person: a [`PersistentCause`]
 /// whose configured response is to stop, or a drain whose deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

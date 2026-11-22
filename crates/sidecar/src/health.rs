@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_replica::{
-    AppNotice, DegradedCause, Gone, Health, Phase, Replicator, SnapshotCause, StopCause, Task,
-    Timestamp,
+    AppNotice, DegradedCause, Gone, Health, Phase, Replicator, SnapshotCause, SnapshotCauseKind,
+    StopCause, Task, Timestamp,
 };
 
 use crate::json::string as json_string;
@@ -188,18 +188,24 @@ pub(crate) const fn stop_name(cause: StopCause) -> &'static str {
 
 /// A snapshot cause's name.
 #[must_use]
-pub(crate) const fn snapshot_name(cause: SnapshotCause) -> &'static str {
-    match cause {
-        SnapshotCause::FirstSync => "first_sync",
-        SnapshotCause::BehindRemote { .. } => "behind_remote",
-        SnapshotCause::NewestStagedFileUnreadable => "newest_staged_file_unreadable",
-        SnapshotCause::WalMissing => "wal_missing",
-        SnapshotCause::GenerationChanged => "generation_changed",
-        SnapshotCause::PrevFrameMismatch => "prev_frame_mismatch",
-        SnapshotCause::LastPageMismatch => "last_page_mismatch",
-        SnapshotCause::LocalRewound { .. } => "local_rewound",
-        SnapshotCause::CheckpointBoundary => "checkpoint_boundary",
-        SnapshotCause::OperatorRequested => "operator_requested",
+pub(crate) fn snapshot_name(cause: SnapshotCause) -> &'static str {
+    snapshot_kind_name(SnapshotCauseKind::from(&cause))
+}
+
+/// A snapshot cause's name, without its payload.
+#[must_use]
+pub(crate) const fn snapshot_kind_name(kind: SnapshotCauseKind) -> &'static str {
+    match kind {
+        SnapshotCauseKind::FirstSync => "first_sync",
+        SnapshotCauseKind::BehindRemote => "behind_remote",
+        SnapshotCauseKind::NewestStagedFileUnreadable => "newest_staged_file_unreadable",
+        SnapshotCauseKind::WalMissing => "wal_missing",
+        SnapshotCauseKind::GenerationChanged => "generation_changed",
+        SnapshotCauseKind::PrevFrameMismatch => "prev_frame_mismatch",
+        SnapshotCauseKind::LastPageMismatch => "last_page_mismatch",
+        SnapshotCauseKind::LocalRewound => "local_rewound",
+        SnapshotCauseKind::CheckpointBoundary => "checkpoint_boundary",
+        SnapshotCauseKind::OperatorRequested => "operator_requested",
     }
 }
 
