@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index e247971..e9553f7 100644
+index c9906d0..ae51060 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1335,7 +1335,7 @@ impl Actor {
+@@ -1530,7 +1530,7 @@ impl Actor {
                      // One failed read says nothing about the staged bytes: the
                      // file is dropped only when a read on a later tick fails too.
                      if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan)
@@ -10,4 +10,4 @@ index e247971..e9553f7 100644
 +                        && (self.kept.suspect_staged.replace(key) == Some(key) || true)
                      {
                          self.kept.suspect_staged = None;
-                         return Some(self.lose_staged(env, key.range().min(), now).await);
+                         mark!(Run16);

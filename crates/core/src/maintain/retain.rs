@@ -212,6 +212,7 @@ fn decide(
             return Ok(Retention::Wait { until });
         }
     }
+    mark!(Maint7);
     keys.sort();
     keys.truncate(MAX_DELETE);
     let Ok(job) = DeleteJob::new(keys) else {
@@ -317,6 +318,8 @@ fn hole(inventory: &Inventory) -> Option<RetentionHold> {
     for info in files {
         let range = info.key.range();
         if reach.next().is_some_and(|one_past| range.min() > one_past) {
+            mark!(Maint8);
+            mark!(Maint11);
             return Some(RetentionHold::Hole {
                 after: reach,
                 next: Some(range.min()),
@@ -347,6 +350,7 @@ fn latest_unplannable(inventory: &Inventory) -> Option<RetentionHold> {
         | PlanOutcome::Gap { .. }
         | PlanOutcome::InsideFile { .. }
         | PlanOutcome::MalformedSnapshot { .. }) => {
+            mark!(Maint8);
             Some(RetentionHold::LatestUnplannable { outcome })
         }
     }
@@ -387,6 +391,8 @@ fn created_at_backwards(
         if let [earlier, later] = pair
             && created_at_of(resolved, earlier)? > created_at_of(resolved, later)?
         {
+            mark!(Maint8);
+            mark!(World13);
             return Ok(Some(RetentionHold::SnapshotCreatedAtBackwards {
                 earlier: earlier.key,
                 later: later.key,
@@ -677,6 +683,7 @@ fn self_check(
     if let Some(restore_point) = restore_point
         && let Err(hold) = pinned_chain(inventory, job.keys(), restore_point)
     {
+        mark!(Maint8);
         return Some(hold);
     }
     match plan_without(inventory, job.keys(), KeyTarget::Latest) {

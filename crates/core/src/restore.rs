@@ -495,6 +495,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                     left: err.left(),
                     source: Box::new(err),
                 })?;
+                mark!(Rest1);
                 return Ok(Restored {
                     reached: chain.reaches(),
                     page_size: last.header().page_size(),
@@ -509,18 +510,22 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
             }
             Err(Abort::Fatal(err)) => return Err(err),
             Err(Abort::Vanished(missing)) if attempt >= MAX_ATTEMPTS => {
+                mark!(Rest4);
+                mark!(World28);
                 return Err(RestoreError::Unstable {
                     attempts: attempt,
                     missing,
                 });
             }
             Err(Abort::Behind(found)) if attempt >= MAX_ATTEMPTS => {
+                mark!(World4);
                 return Err(RestoreError::ListingBehind {
                     attempts: attempt,
                     found,
                 });
             }
             Err(Abort::Vanished(_) | Abort::Behind(_)) => {
+                mark!(Rest4);
                 sink.reset().map_err(sink_fault(SinkOp::Reset))?;
                 attempt = attempt.saturating_add(1);
             }
@@ -579,6 +584,7 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         | PlanOutcome::Gap { .. }
         | PlanOutcome::InsideFile { .. }
         | PlanOutcome::MalformedSnapshot { .. }) => {
+            mark!(Rest3);
             return Err(RestoreError::NoPlan(NoPlan(other)).into());
         }
     };
@@ -727,6 +733,7 @@ fn check_header(key: FileKey, header: &Header, previous: Previous<'_>) -> Result
         return Err(FileFault::NotASnapshot);
     }
     if header.txids() != key.range() {
+        mark!(Rest5);
         return Err(FileFault::RangeMismatch {
             header: header.txids(),
         });

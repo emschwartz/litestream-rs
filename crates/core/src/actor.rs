@@ -552,6 +552,7 @@ impl Actor {
     /// Makes the next sync a snapshot (an operator asked). A cause already
     /// pending is kept.
     pub fn request_snapshot(&mut self) {
+        mark!(Run23);
         self.kept.snapshot_asked = true;
         self.engine
             .course
@@ -631,6 +632,7 @@ impl Actor {
         match self.kept.stop {
             Stop::No => self.run(env, now).await,
             Stop::Draining { deadline } => {
+                mark!(Run24);
                 let deadline = self.on_engine_clock(deadline);
                 self.drain(env, now, deadline).await
             }
@@ -648,6 +650,7 @@ impl Actor {
             .map_or((EngineClock::start(now), false), |clock| clock.read(now));
         self.kept.clock = Some(clock);
         if stepped {
+            mark!(Run19);
             return Err(Clamped {
                 prev: clock.now(),
                 now,
@@ -850,6 +853,12 @@ impl Actor {
     /// Lists the replica, witnesses the pending staged files against the
     /// live WAL (`crate::witness`), reads the newest staged file left and
     /// recovers (in that order). A failure anywhere boots again from the start.
+    /// A boot step failed: the boot ends and is retried.
+    fn boot_failed(&mut self, fault: Fault, now: Timestamp) -> Tick {
+        mark!(Boot23);
+        self.fault(Task::Sync, fault, now)
+    }
+
     async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
@@ -861,7 +870,7 @@ impl Actor {
         let suspect = &mut self.kept.suspect_staged;
         let (upload, dropped) = match boot_listing(env.staging, env.remote, suspect).await {
             Ok(listed) => listed,
-            Err(fault) => return self.fault(Task::Sync, fault, now),
+            Err(fault) => return self.boot_failed(fault, now),
         };
         let Judged {
             pending: Pending { tokens, refused },
@@ -874,10 +883,12 @@ impl Actor {
                 },
         } = match boot_judge(env, upload).await {
             Ok(found) => found,
-            Err(fault) => return self.fault(Task::Sync, fault, now),
+            Err(fault) => return self.boot_failed(fault, now),
         };
         let from = match recovered {
-            Recovered::Continue(position) | Recovered::WalRestarted(position) => Ok(position),
+            Recovered::Continue(position) | Recovered::WalRestarted(position) => {
+                boot_continues(position)
+            }
             Recovered::Snapshot { cause, .. } => Err(cause),
             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
         };
@@ -903,7 +914,7 @@ impl Actor {
                 ..
             } => match seeded(env.staging, upload.confirmed(), position.commit()).await {
                 Ok(pages) => pages,
-                Err(fault) => return self.fault(Task::Sync, fault, now),
+                Err(fault) => return self.boot_failed(fault, now),
             },
             Course::At {
                 snapshot: Some(_), ..
@@ -1198,6 +1209,7 @@ impl Actor {
         if !self.staging_has_room() {
             // Marked as a step cut short, so the sync runs again when room
             // frees up: no new WAL change may come to wake it.
+            mark!(Run18);
             self.engine.course.set_tail(Tail::More);
             return Ok(Stepped::Held);
         }
@@ -1209,6 +1221,7 @@ impl Actor {
         let stamp = env.clock.now().max(self.stamp_floor(now));
         let size = reader.header().page_size();
         if let Some(was) = self.engine.page_size.filter(|was| *was != size) {
+            mark!(Run11);
             return Err(Fault::PageSizeChanged { was, now: size });
         }
         self.engine.page_size = Some(size);
@@ -1321,6 +1334,7 @@ impl Actor {
         let (None, Some(position)) = (self.pending(), self.position()) else {
             return Err(Fault::WalMoved);
         };
+        mark!(Run9);
         let view = wal_view::<W, W::Wal>(wal, None, committed)?;
         // With no header, recovery decides before it looks at the probes.
         let probes = Probes {
@@ -1352,6 +1366,7 @@ impl Actor {
         let (files, txs, end) = match synced {
             Synced::Idle(through) => (0, 0, StepEnd::Through(through)),
             Synced::IndexReset => {
+                mark!(Run10);
                 self.engine.course.set_tail(Tail::Reset(committed));
                 return Stepped::Synced {
                     files: 0,
@@ -1361,6 +1376,7 @@ impl Actor {
             Synced::Wrote {
                 end, txs, witness, ..
             } => {
+                mark!(Run1);
                 self.engine.witnesses.insert(witness);
                 // With a cause pending, the step that wrote was the snapshot.
                 if let Some(cause) = self.pending() {
@@ -1428,6 +1444,7 @@ impl Actor {
         let done = match done {
             Ok(done) => done,
             Err(CheckpointFailed { fault, staged, .. }) => {
+                mark!(Ckpt5);
                 self.took(staged);
                 return self.fault(Task::Checkpoint, fault, now);
             }
@@ -1516,6 +1533,7 @@ impl Actor {
                         && self.kept.suspect_staged.replace(key) == Some(key)
                     {
                         self.kept.suspect_staged = None;
+                        mark!(Run16);
                         return Some(self.lose_staged(env, key.range().min(), now).await);
                     }
                     return Some(self.fault(Task::Upload, failed.fault, now));
@@ -1528,6 +1546,7 @@ impl Actor {
                 Did::Nothing | Did::Diverged { .. } => break,
                 Did::Listed { .. } => self.engine.maintain.stale = true,
                 Did::Put(_) => {
+                    mark!(Up1);
                     let at = listing_after_upload(now, &self.kept.cfg.maintenance);
                     self.engine.maintain.list_by(at);
                 }
@@ -1566,6 +1585,7 @@ impl Actor {
             // following it. List first, from below `from`, so the listing
             // judges the divergence again and this runs again before anything
             // is uploaded; the acknowledged mark is kept apart.
+            mark!(Up9);
             let confirmed = self.engine.upload.confirmed().min(from.prev());
             self.set_upload(UploadState::ListFirst { confirmed });
             return self.fault(Task::Upload, fault, now);
@@ -1628,6 +1648,7 @@ impl Actor {
             return Some(self.fault(Task::Prune, Fault::from_staging(&err), now));
         }
         self.kept.tasks.get_mut(Task::Prune).succeed();
+        mark!(Up16);
         self.engine.pruned = Some(through);
         if keys.is_empty() {
             return None;
@@ -1681,6 +1702,8 @@ impl Actor {
         // this listing is the first to see one, and nothing may be planned
         // from it (no compaction, snapshot or delete takes it as input).
         if inventory.newest() > self.snapshot_after() {
+            mark!(Up10);
+            mark!(Maint10);
             return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
         }
         if self.engine.maintain.read_back_owed
@@ -1764,8 +1787,10 @@ impl Actor {
         }
         self.engine.maintain.suspect = None;
         if !covered {
+            mark!(Maint4);
             return Some(self.fault(Task::Maintenance, Fault::RemoteCorrupt, now));
         }
+        mark!(Maint4);
         if let Err(err) = remote.delete(&[key]).await {
             return Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now));
         }
@@ -2080,6 +2105,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     // The staged files from `from` on cannot continue the replica: they go,
     // and recovery snapshots above what the replica holds.
     if let Some(from) = diverged {
+        mark!(Boot13);
         drop_staged_from(staging, from).await?;
     }
     let lost = match sweep_staged(staging, upload.confirmed(), *suspect).await? {
@@ -2121,8 +2147,10 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectS
     };
     let second = witness_once(env, reader, committed, confirmed).await?;
     if second.refused != Some(from) {
+        mark!(Boot12);
         return Err(Fault::LocalIo);
     }
+    mark!(Boot11);
     drop_staged_from(env.staging, from).await?;
     let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
     let key = FileKey::new(Level::ZERO, TxidRange::single(from));
@@ -2204,6 +2232,7 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
     ) {
         // Nothing staged: the replica's newest level-0 file is the newest staged file.
         (None, Some(newest)) => {
+            mark!(Boot2);
             NewestStagedFile::load_remote(remote, boot_wal_of(reader.as_deref_mut(), end), newest)
                 .await?
         }
@@ -2213,7 +2242,10 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
     let page_size = prefix_page_size(newest_staged.as_ref(), confirmed, remote).await?;
     let now = view.header.map(|header| header.page_size());
     let recovered = match page_size.zip(now).filter(|(was, now)| was != now) {
-        Some((was, now)) => Recovered::Stop(StopCause::PageSizeChanged { was, now }),
+        Some((was, now)) => {
+            mark!(Boot15);
+            Recovered::Stop(StopCause::PageSizeChanged { was, now })
+        }
         None => recover(
             newest_staged.as_ref().map(PositionSource::Boot),
             &view,
@@ -2273,6 +2305,7 @@ async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize
             return Ok(Some(header.page_size()));
         }
     }
+    mark!(Boot14);
     Err(Fault::RemoteCorrupt)
 }
 
@@ -2288,6 +2321,12 @@ async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize
 /// recovery answers with a snapshot (`BehindRemote`), so continuing never
 /// stages new content under a transaction the replica shows. When recovery
 /// cannot continue, the snapshot is named for what it replaces.
+/// The boot's recovery proved the staged position: the engine continues from it.
+fn boot_continues(position: Position) -> Result<Position, SnapshotCause> {
+    mark!(Boot3);
+    Ok(position)
+}
+
 const fn boot_cause(
     dropped: Dropped,
     refused: Option<Txid>,

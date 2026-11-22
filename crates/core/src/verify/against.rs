@@ -159,6 +159,7 @@ pub async fn verify_against<S: ObjectStore>(
         Err(RestoreError::Inventory(err)) => return Err(VerifyError::Inventory(err)),
         Err(RestoreError::Store(err)) => return Err(VerifyError::Store(err)),
         Err(RestoreError::NoPlan(no)) if inside_file(no.outcome()) => {
+            mark!(Verify4);
             Compared::Merged { txid: live.txid }
         }
         Err(error) => Compared::RestoreFails {

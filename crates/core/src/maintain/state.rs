@@ -129,6 +129,8 @@ impl MaintainState {
     /// its delete is planned before the next snapshot, and retention holds
     /// until it is gone.
     pub fn distrust_snapshot(&mut self, key: FileKey) {
+        // Its one caller is the rejected snapshot whose delete failed.
+        mark!(Maint5);
         self.distrusted.insert(Level::SNAPSHOT, key);
     }
 
