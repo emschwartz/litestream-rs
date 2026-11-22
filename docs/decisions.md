@@ -39,6 +39,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D29 | Where do the behaviour table's rows live? | `docs/behavior.toml`, rendered into `docs/BEHAVIOR.md` | parent session's request; layout by Claude (checker-holes) | 2026-11-22 | decided |
 | D30 | How is Toxiproxy provided to the tests? | Built from source with `go install` at a pinned version | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
 | D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
+| D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
 
 ## D1. Own repository or a crate in the application's workspace
@@ -322,6 +323,16 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** with six or more branches open, each merge cost every other branch a merge and a 20 minute CI run, for hours of serial waiting. The one real catch in that period (renamed causes) would have shown as a red main within one run.
 - **Revisit if:** before any release, or when main goes red more than once a day.
 - **Links:** the merge protocol in the session notes; AGENTS.md.
+
+## D32. An unusable KMS key is a permission refusal
+
+- **Question:** S3 answers a request whose KMS key is disabled, missing, in the wrong state or of the wrong kind with a 400 and a `KMS.*` code (`KMS.DisabledException`, `KMS.InvalidKeyUsageException`, `KMS.KMSInvalidStateException`, `KMS.NotFoundException`, from S3's published error list). How is it reported?
+- **Choice:** `Denied::Permission`, health name `permission_denied`, the same kind as a KMS key policy that refuses (403 `AccessDenied`).
+- **Options considered:** a refused request (`store_refused`, what the status alone gave); a kind of its own (`kms_key`), which needs a new user-visible name.
+- **Why:** an operator fixes it where they fix a permission: the key's state or policy, not the request. No new name is needed.
+- **Cost accepted:** the health name does not say "KMS"; the log's error text and the store's message do.
+- **Revisit if:** operators need to tell a KMS key from a bucket policy at a glance.
+- **Links:** `S3Code::KmsKeyUnusable` in `crates/store-s3/src/classify.rs`.
 
 ## D33. Full drop-in replacement for Go
 
