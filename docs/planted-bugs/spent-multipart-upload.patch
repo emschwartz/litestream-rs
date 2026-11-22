@@ -1,0 +1,14 @@
+diff --git a/crates/store-s3/src/multipart.rs b/crates/store-s3/src/multipart.rs
+index 2c9e5a9..e84f477 100644
+--- a/crates/store-s3/src/multipart.rs
++++ b/crates/store-s3/src/multipart.rs
+@@ -164,9 +164,6 @@ impl<T: Transport> Inner<T> {
+             self.conditional_unsupported();
+             response = self.send_complete(key, id, etags, self.precondition(mode))?;
+         }
+-        if S3Code::from_body(response.body()) == Some(S3Code::NoSuchUpload) {
+-            return self.settle_spent_upload(key, sent);
+-        }
+         classify(op, Some(key), None, &response)?;
+         if let Some(err) = error_in_ok_body(op, key, &response) {
+             return Err(err);

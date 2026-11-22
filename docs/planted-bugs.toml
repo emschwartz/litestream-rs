@@ -212,3 +212,49 @@ package = "lsr-core"
 tests = [
     "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
 ]
+
+# The uploader asks the bucket to refuse a taken level-0 key (If-None-Match: *); the store stops
+# sending the header.
+[[bug]]
+name = "drop-if-none-match"
+fix = "f9de310"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "a_create_only_put_into_a_taken_key_is_refused_and_changes_nothing",
+    "a_create_only_multipart_into_a_taken_key_is_refused_at_the_complete",
+    "store::cases::conformance_cases::a_new_upload_never_replaces",
+]
+
+# A refused upload is taken as the engine's own earlier commit without reading the object back.
+[[bug]]
+name = "refusal-without-read-back"
+fix = "f9de310"
+package = "lsr-core"
+tests = [
+    "a_refused_upload_of_other_verifying_bytes_is_never_written_over",
+    "a_refusal_overrules_a_listing_too_stale_to_show_the_key",
+    "a_refused_upload_with_the_replica_ahead_is_another_writer",
+    "a_refused_upload_over_an_object_that_does_not_verify_replaces_it",
+]
+
+[[bug]]
+name = "refusal-judged-from-one-read"
+fix = "08b920e"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["one_bad_staged_read_after_a_refusal_confirms_no_other_object_seed_0x4ef"]
+
+[[bug]]
+name = "spent-multipart-upload"
+fix = "707e9b0"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_retried_complete_finding_its_upload_spent_is_settled_by_a_head"]
+
+[[bug]]
+name = "completed-etag-form"
+fix = "707e9b0"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_completed_etag_in_another_form_is_not_taken_for_damage"]
