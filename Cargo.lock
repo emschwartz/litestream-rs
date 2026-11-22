@@ -1036,6 +1036,7 @@ name = "lsr-sqlite"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
+ "lsr-history",
  "lsr-local",
  "lsr-ltx",
  "lsr-sim",
