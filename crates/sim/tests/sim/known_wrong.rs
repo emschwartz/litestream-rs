@@ -56,13 +56,22 @@ fn a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0xf() {
     );
 }
 
-/// A staging read refused for permission during level-1 compaction degrades maintenance as the
-/// replica's `StoreDenied(Permission)`.
+/// Fixed: a staging read refused for permission during level-1 compaction degraded maintenance
+/// as the replica's `StoreDenied(Permission)` until #145 routed compaction's local reads through
+/// `Fault::from_staging`. Seed 0xb9e, the one that reached it, must pass now; its cell is drawn.
 #[test]
-fn compaction_still_reports_a_staging_denial_as_the_replicas_seed_0xb9e() {
-    still_fails(
-        0xb9e,
+fn compaction_takes_a_staging_denial_as_staging_seed_0xb9e() {
+    let seed = Seed::new(0xb9e);
+    let mut weights = Weights::mixed(seed);
+    weights.known_wrong = true;
+    let ops = history(seed, STEPS, &weights);
+    assert_eq!(
+        digest(&format!("{ops:?}")),
         0x0f14_5395_bc1a_570e,
-        KnownWrong::CompactionClassifiesLocalAsReplica,
+        "the live generator changed seed 0xb9e's run; find another seed whose history draws a \
+         staging read denied for permission"
     );
+    if let Err(failure) = run(seed, STEPS, &weights) {
+        panic!("{failure}");
+    }
 }
