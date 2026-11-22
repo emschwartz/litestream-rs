@@ -7,6 +7,7 @@
     reason = "not every helper has a caller in every build of the tests"
 )]
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -18,8 +19,8 @@ use lsr_core::{
 };
 use lsr_ltx::TxidRange;
 use lsr_replica::{
-    Config, DynStore, FakeClockHandle, Health, Replicator, RestoreTarget, Runtime, Timestamp,
-    restore,
+    Booted, Config, DynStore, FakeClockHandle, Health, Phase, Replicator, RestoreTarget, Runtime,
+    Stopped, Task, Timestamp, restore,
 };
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
@@ -28,7 +29,9 @@ use tempfile::TempDir;
 /// The fake clock's start: 2023-11-14, any fixed instant would do.
 pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
 
-/// Long enough that a test never sees it run out unless it is stuck.
+/// Long enough that a test never sees it run out unless it is stuck. On the fake clock it
+/// never runs out at all, since the clock moves only when a test moves it: [`LOOKS`] is what
+/// ends a stuck wait there.
 pub const PATIENCE: Duration = Duration::from_secs(600);
 
 /// A database in a directory of its own, with the application's connection and a replica beside it.
@@ -126,12 +129,44 @@ pub fn config() -> Config {
     Config::default()
 }
 
-/// Waits until `done` holds, failing the test if it never does.
+/// How many times a wait looks at the health before it gives up. The replicator wakes a
+/// waiter on every change and at least every [`lsr_replica::CALLER_SLICE`], so a wait that sees nothing
+/// change fails after about a minute, where a deadline on the fake clock would never pass.
+pub const LOOKS: u32 = 1_200;
+
+/// Waits until `done` holds, failing the test if it never does: within [`PATIENCE`] on
+/// the replicator's clock, and within [`LOOKS`] looks whatever the clock does.
 pub fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
-    match replicator.wait_until(PATIENCE, done) {
-        Some(health) => health,
+    let (looks, met) = (Cell::new(0_u32), Cell::new(false));
+    let seen = replicator.wait_until(PATIENCE, |health| {
+        looks.set(looks.get().saturating_add(1));
+        met.set(done(health));
+        met.get() || looks.get() >= LOOKS
+    });
+    match seen {
+        Some(health) if met.get() => health,
+        Some(health) => panic_with(&health),
         None => panic_with(&replicator.health()),
     }
+}
+
+/// [`Replicator::wait_booted`], failing the test instead of hanging if the first boot never
+/// ends (its deadline is on the replicator's clock).
+pub fn booted(replicator: &Replicator) -> Booted {
+    wait(replicator, |health| {
+        health.phase != Phase::Booting || health.task(Task::Sync).is_some()
+    });
+    replicator.wait_booted(PATIENCE)
+}
+
+/// `stop(PATIENCE).wait()`, failing the test instead of hanging if the thread never stops
+/// (the deadline is on the replicator's clock).
+pub fn stopped(replicator: &Replicator) -> Stopped {
+    let stop = replicator.stop(PATIENCE);
+    wait(replicator, |health| {
+        matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_))
+    });
+    stop.wait()
 }
 
 fn panic_with(health: &Health) -> ! {

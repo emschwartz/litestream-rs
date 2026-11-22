@@ -4,6 +4,7 @@
 
 use crate::common;
 
+use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -97,14 +98,22 @@ fn any_verified(events: &EventReceiver) -> bool {
         .any(|event| matches!(event, Event::Verified { .. }))
 }
 
-/// The next scheduled verify event, waiting for it: the thread writes the health snapshot
-/// before it sends the event.
-fn next_verified(events: &EventReceiver) -> (Txid, VerifyOutcome) {
-    loop {
-        if let Event::Verified { txid, outcome } = events.recv().unwrap() {
-            return (txid, outcome);
+/// The next scheduled verify event, waiting for it (the thread writes the health snapshot
+/// before it sends the event). It looks at the queue each time the health changes, so the
+/// bound of [`wait`] ends a wait for an event that never comes.
+fn next_verified(replicator: &Replicator, events: &EventReceiver) -> (Txid, VerifyOutcome) {
+    let found = Cell::new(None);
+    wait(replicator, |_| {
+        while found.get().is_none()
+            && let Some(event) = events.try_recv()
+        {
+            if let Event::Verified { txid, outcome } = event {
+                found.set(Some((txid, outcome)));
+            }
         }
-    }
+        found.get().is_some()
+    });
+    found.get().unwrap()
 }
 
 /// Moves the clock and waits for the thread to have turned at the new time.
@@ -198,7 +207,7 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     assert_eq!(check.kept_restore_point, None);
     assert_eq!(check.worst_finding, None);
     assert!(!first.is_degraded());
-    let seen = next_verified(&events);
+    let seen = next_verified(&replicator, &events);
     assert!(
         matches!(seen, (txid, VerifyOutcome::Passed { pages }) if Some(txid) == replicated(&health) && pages > 0),
         "{seen:?}"
@@ -247,7 +256,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     let (txid, page) = rewrite_newest_page(&site);
     assert_eq!(Some(txid), replicated(&health));
     assert!(matches!(
-        next_verified(&events).1,
+        next_verified(&replicator, &events).1,
         VerifyOutcome::Passed { .. }
     ));
     clock.advance(EVERY);
@@ -261,7 +270,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     assert_eq!(failed.verification.kept_restore_point, Some(good));
     assert!(failed.is_degraded());
     assert_eq!(failed.phase, Phase::Running, "a degraded state, not a stop");
-    let seen = next_verified(&events);
+    let seen = next_verified(&replicator, &events);
     assert!(
         matches!(seen, (at, VerifyOutcome::Failed(Mismatch::Pages { first, .. })) if at == txid && first == page),
         "{seen:?}"

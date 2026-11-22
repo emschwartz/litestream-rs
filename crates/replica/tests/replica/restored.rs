@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{PATIENCE, Site, assert_same, config, fake, wait};
+use common::{Site, assert_same, config, fake, stopped, wait};
 use lsr_replica::{Replicator, RestoreTarget, Stopped, restore};
 use rusqlite::Connection;
 
@@ -28,7 +28,7 @@ fn restored(site: &Site) -> PathBuf {
     let store = site.store();
     let replicator = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
     site.commit(3);
-    let stopped = replicator.stop(PATIENCE).wait();
+    let stopped = stopped(&replicator);
     assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
     drop(replicator);
     assert!(!site.replica.join("ltx").join("9").exists());
