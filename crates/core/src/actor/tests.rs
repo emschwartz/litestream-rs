@@ -789,7 +789,12 @@ fn a_restart_after_an_other_writer_stop_stops_again() {
     let theirs = block_on(other.remote.inner.read(&three, 0, ReadLen::CHUNK)).unwrap();
     let (mut rig, mut actor) = caught_up();
     block_on(async {
-        let mut up = rig.remote.inner.begin_upload(&three, ts(T0), WriteMode::Replace).await.unwrap();
+        let mut up = rig
+            .remote
+            .inner
+            .begin_upload(&three, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&theirs).await.unwrap();
         up.commit().await.unwrap();
     });
