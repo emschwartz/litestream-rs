@@ -153,7 +153,7 @@ impl Expect {
             ) => key.level() == *want,
             (Self::Stopped(want), Seen::Stop(got)) => stops(responses, *want) && want == got,
             (Self::Stopped(want), Seen::Event(Event::Degraded { cause, .. })) => {
-                !stops(responses, *want) && *want == StopCause::from(*cause)
+                !stops(responses, *want) && Some(*want) == cause.stop()
             }
             (Self::Recovered, Seen::Recovered(_)) | (Self::Oracle, Seen::Oracle) => true,
             (Self::Event(_) | Self::Stopped(_) | Self::Recovered | Self::Oracle, _) => false,

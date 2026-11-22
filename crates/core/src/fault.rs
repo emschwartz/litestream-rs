@@ -30,6 +30,13 @@
 //! state they left: a bug rebuilds the engine and boots again, and a replica
 //! that went backwards is listed again and taken as it now is.
 //!
+//! A [`Policy::Retry`] fault that keeps failing one task is a degraded state too: at the
+//! [`STALLED_AFTER`]th failure in a row the task is degraded as [`PersistentCause::Stalled`],
+//! naming the fault, and it keeps retrying on the same wait. A stall is not configurable and
+//! never stops the engine; it exists so that health never says healthy while a full disk,
+//! a refusing store or the application's readers keep replication from moving. A wait that
+//! a maintenance level keeps does not stall: maintenance blocks no write's way to the replica.
+//!
 //! Two things are deliberately not faults. A clock that steps backwards is
 //! clamped and reported as [`Clamped`]. A power-loss WAL rewind is a snapshot
 //! with cause [`SnapshotCause::LocalRewound`]: it is expected under
@@ -372,6 +379,94 @@ pub enum PersistentCause {
     },
     /// A bug in this program.
     Bug,
+    /// A fault whose policy is to retry failed [`STALLED_AFTER`] times in a row on one task:
+    /// waiting was expected to fix it and has not. Never configurable and never a stop (the
+    /// fault is the kind that passes); the task keeps retrying, and health says why.
+    Stalled(Stall),
+}
+
+/// How many failures in a row of a retried fault, on one task, make the task degraded
+/// ([`PersistentCause::Stalled`]). With the doubling wait from Go's one-second interval the
+/// eighth failure comes about two minutes after the first.
+pub const STALLED_AFTER: NonZeroU32 = match NonZeroU32::new(8) {
+    Some(n) => n,
+    None => NonZeroU32::MIN,
+};
+
+/// A fault whose policy is to retry, as the cause of a stalled task: one variant per such
+/// [`Fault`], so a new retried fault does not build until it is named here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stall {
+    /// [`Fault::StoreTransient`].
+    StoreTransient,
+    /// [`Fault::StoreThrottled`].
+    StoreThrottled,
+    /// [`Fault::RemoteObjectMissing`].
+    RemoteObjectMissing,
+    /// [`Fault::UploadAmbiguous`].
+    UploadAmbiguous,
+    /// [`Fault::UploadChecksumMismatch`].
+    UploadChecksumMismatch,
+    /// [`Fault::StagedLost`].
+    StagedLost,
+    /// [`Fault::LocalDiskFull`].
+    LocalDiskFull,
+    /// [`Fault::LocalIo`].
+    LocalIo,
+    /// [`Fault::LocalFsyncFailed`].
+    LocalFsyncFailed,
+    /// [`Fault::SqliteBusy`].
+    SqliteBusy,
+    /// [`Fault::ReadersHeld`].
+    ReadersHeld,
+    /// [`Fault::WalMoved`].
+    WalMoved,
+    /// [`Fault::WalIndexInconsistent`].
+    WalIndexInconsistent,
+    /// [`Fault::WalChangedUnderRead`].
+    WalChangedUnderRead,
+    /// [`Fault::NothingToSnapshot`].
+    NothingToSnapshot,
+    /// [`Fault::ReadTxLost`].
+    ReadTxLost,
+}
+
+impl Stall {
+    /// The stall a retried fault becomes; `None` for a fault whose policy is not to retry.
+    #[must_use]
+    pub const fn of(fault: &Fault) -> Option<Self> {
+        match fault {
+            Fault::StoreTransient => Some(Self::StoreTransient),
+            Fault::StoreThrottled { .. } => Some(Self::StoreThrottled),
+            Fault::RemoteObjectMissing => Some(Self::RemoteObjectMissing),
+            Fault::UploadAmbiguous => Some(Self::UploadAmbiguous),
+            Fault::UploadChecksumMismatch => Some(Self::UploadChecksumMismatch),
+            Fault::StagedLost => Some(Self::StagedLost),
+            Fault::LocalDiskFull => Some(Self::LocalDiskFull),
+            Fault::LocalIo => Some(Self::LocalIo),
+            Fault::LocalFsyncFailed => Some(Self::LocalFsyncFailed),
+            Fault::SqliteBusy => Some(Self::SqliteBusy),
+            Fault::ReadersHeld => Some(Self::ReadersHeld),
+            Fault::WalMoved => Some(Self::WalMoved),
+            Fault::WalIndexInconsistent => Some(Self::WalIndexInconsistent),
+            Fault::WalChangedUnderRead => Some(Self::WalChangedUnderRead),
+            Fault::NothingToSnapshot => Some(Self::NothingToSnapshot),
+            Fault::ReadTxLost => Some(Self::ReadTxLost),
+            Fault::StoreAuth
+            | Fault::StoreRefused
+            | Fault::RemoteCorrupt
+            | Fault::RemoteAheadOfLocal
+            | Fault::RemoteRegressed
+            | Fault::PageSizeChanged { .. }
+            | Fault::WalCorruptBelowCommitted
+            | Fault::WalTruncatedBelowCommitted
+            | Fault::WalUnlinked
+            | Fault::WalSyncFailed
+            | Fault::DatabasePageMismatch { .. }
+            | Fault::ShutdownDeadline
+            | Fault::Bug(_) => None,
+        }
+    }
 }
 
 impl PersistentCause {
@@ -397,22 +492,26 @@ impl PersistentCause {
     }
 }
 
-impl From<PersistentCause> for StopCause {
-    fn from(cause: PersistentCause) -> Self {
-        match cause {
-            PersistentCause::Credentials => Self::Credentials,
-            PersistentCause::StoreRefused => Self::StoreRefused,
-            PersistentCause::RemoteCorrupt => Self::RemoteCorrupt,
-            PersistentCause::OtherWriter => Self::OtherWriter,
-            PersistentCause::RemoteRegressed => Self::RemoteRegressed,
-            PersistentCause::WalCorrupt => Self::WalCorrupt,
-            PersistentCause::WalTruncated => Self::WalTruncated,
-            PersistentCause::WalUnlinked => Self::WalUnlinked,
-            PersistentCause::WalSyncFailed => Self::WalSyncFailed,
-            PersistentCause::PageSizeChanged { was, now } => Self::PageSizeChanged { was, now },
-            PersistentCause::DatabasePageMismatch { pgno } => Self::DatabasePageMismatch { pgno },
-            PersistentCause::Bug => Self::Bug,
-        }
+impl PersistentCause {
+    /// The stop this cause makes when its response is to stop; `None` for a stall, which
+    /// never stops the engine.
+    #[must_use]
+    pub const fn stop(self) -> Option<StopCause> {
+        Some(match self {
+            Self::Credentials => StopCause::Credentials,
+            Self::StoreRefused => StopCause::StoreRefused,
+            Self::RemoteCorrupt => StopCause::RemoteCorrupt,
+            Self::OtherWriter => StopCause::OtherWriter,
+            Self::RemoteRegressed => StopCause::RemoteRegressed,
+            Self::WalCorrupt => StopCause::WalCorrupt,
+            Self::WalTruncated => StopCause::WalTruncated,
+            Self::WalUnlinked => StopCause::WalUnlinked,
+            Self::WalSyncFailed => StopCause::WalSyncFailed,
+            Self::PageSizeChanged { was, now } => StopCause::PageSizeChanged { was, now },
+            Self::DatabasePageMismatch { pgno } => StopCause::DatabasePageMismatch { pgno },
+            Self::Bug => StopCause::Bug,
+            Self::Stalled(_) => return None,
+        })
     }
 }
 
@@ -514,7 +613,7 @@ impl Responses {
         other_writer: OtherWriter::Stop,
     };
 
-    /// Whether `cause` stops the engine.
+    /// Whether `cause` stops the engine. A stall never does.
     #[must_use]
     pub const fn stops(&self, cause: PersistentCause) -> bool {
         match self.action(cause) {
@@ -535,6 +634,7 @@ impl Responses {
             PersistentCause::WalSyncFailed => self.wal_sync_failed,
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
             PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
+            PersistentCause::Stalled(_) => return Action::Retry,
             PersistentCause::RemoteRegressed => {
                 return match self.remote_regressed {
                     Response::KeepTrying => Action::Relist,

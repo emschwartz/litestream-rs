@@ -742,9 +742,12 @@ impl Runner {
     }
 
     /// A task degraded by a persistent fault the run does not expect is a
-    /// bug, as a stop for it would be. `Bug` is never expected.
+    /// bug, as a stop for it would be. `Bug` is never expected. A stall is a
+    /// retried fault that kept failing: as expected as the retries were before
+    /// they were reported as a stall.
     fn degraded_expected(&self, cause: PersistentCause) -> Result<(), Violation> {
-        if cause != PersistentCause::Bug && self.stop_expected(StopCause::from(cause)) {
+        let expected = cause.stop().is_none_or(|stop| self.stop_expected(stop));
+        if cause != PersistentCause::Bug && expected {
             Ok(())
         } else {
             Err(bug_fault(format!("a task is degraded: {cause:?}")))
