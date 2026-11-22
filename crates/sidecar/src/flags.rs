@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use lsr_config::LogLevel;
 
+use crate::goflag::{self, Def, FlagError, Scan};
+
 /// Why the command line is not a run.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum UsageError {
@@ -109,28 +111,25 @@ pub enum Parsed {
     Help,
 }
 
-/// The flags `replicate` defines: name and whether it takes a value.
-const DEFINED: [(&str, bool); 9] = [
-    ("config", true),
-    ("no-expand-env", false),
-    ("exec", true),
-    ("log-level", true),
-    ("restore-if-db-not-exists", false),
-    ("once", false),
-    ("force-snapshot", false),
-    ("enforce-retention", false),
-    ("help", false),
+/// The flags `replicate` defines.
+const DEFINED: [Def; 8] = [
+    goflag::value("config"),
+    goflag::boolean("no-expand-env"),
+    goflag::value("exec"),
+    goflag::value("log-level"),
+    goflag::boolean("restore-if-db-not-exists"),
+    goflag::boolean("once"),
+    goflag::boolean("force-snapshot"),
+    goflag::boolean("enforce-retention"),
 ];
 
-/// Go's `strconv.ParseBool`.
-fn parse_bool(name: &'static str, value: &str) -> Result<bool, UsageError> {
-    match value {
-        "1" | "t" | "T" | "TRUE" | "true" | "True" => Ok(true),
-        "0" | "f" | "F" | "FALSE" | "false" | "False" => Ok(false),
-        _ => Err(UsageError::BadBool {
-            name,
-            value: value.to_owned(),
-        }),
+impl From<FlagError> for UsageError {
+    fn from(error: FlagError) -> Self {
+        match error {
+            FlagError::UnknownFlag { name } => Self::UnknownFlag { name },
+            FlagError::MissingValue { name } => Self::MissingValue { name },
+            FlagError::BadBool { name, value } => Self::BadBool { name, value },
+        }
     }
 }
 
@@ -146,80 +145,20 @@ pub(crate) fn parse_level(value: &str) -> Option<LogLevel> {
     }
 }
 
-/// The flags as Go's `FlagSet.Parse` leaves them, and the positional arguments.
-type Scanned = (Vec<(&'static str, String)>, Vec<String>);
-
-fn scan(args: &[String]) -> Result<Option<Scanned>, UsageError> {
-    let mut set = Vec::new();
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        let Some(body) = arg.strip_prefix('-').filter(|b| !b.is_empty()) else {
-            let mut positional = vec![arg.clone()];
-            positional.extend(rest.cloned());
-            return Ok(Some((set, positional)));
-        };
-        let body = body.strip_prefix('-').unwrap_or(body);
-        if body.is_empty() {
-            return Ok(Some((set, rest.cloned().collect())));
-        }
-        let (name, inline) = match body.split_once('=') {
-            Some((name, value)) => (name, Some(value.to_owned())),
-            None => (body, None),
-        };
-        let Some(&(name, takes_value)) = DEFINED.iter().find(|(n, _)| *n == name) else {
-            if name == "h" {
-                return Ok(None);
-            }
-            return Err(UsageError::UnknownFlag {
-                name: name.to_owned(),
-            });
-        };
-        if name == "help" {
-            return Ok(None);
-        }
-        let value = match (takes_value, inline) {
-            // Go's `flag` sets a boolean as it reads it, so a bad value stops the scan here.
-            (false, Some(value)) => {
-                parse_bool(name, &value)?;
-                value
-            }
-            (true, Some(value)) => value,
-            (true, None) => rest
-                .next()
-                .cloned()
-                .ok_or(UsageError::MissingValue { name })?,
-            (false, None) => "true".to_owned(),
-        };
-        set.push((name, value));
-    }
-    Ok(Some((set, Vec::new())))
-}
-
 /// Parses the arguments after `replicate`.
 ///
 /// # Errors
 /// [`UsageError`], the first Go would report.
 pub(crate) fn parse(args: &[String]) -> Result<Parsed, UsageError> {
-    let Some((set, positional)) = scan(args)? else {
-        // Go's `main` exits 0 for help only when an argument is literally one of these.
-        let literal = args
-            .iter()
-            .any(|a| matches!(a.as_str(), "-h" | "-help" | "--help"));
-        return if literal {
-            Ok(Parsed::Help)
-        } else {
-            Err(UsageError::HelpNotLiteral)
-        };
+    let set = match goflag::scan(&DEFINED, args)? {
+        Scan::Set(set) => set,
+        Scan::Help if goflag::literal_help(args) => return Ok(Parsed::Help),
+        Scan::Help => return Err(UsageError::HelpNotLiteral),
     };
-    let value = |name: &str| {
-        set.iter()
-            .rev()
-            .find(|(n, _)| *n == name)
-            .map(|(_, v)| v.clone())
-    };
-    let boolean = |name: &'static str| value(name).map_or(Ok(false), |v| parse_bool(name, &v));
+    let value = |name: &str| set.value(name);
+    let boolean = |name: &'static str| set.boolean(name);
     let config = value("config").filter(|c| !c.is_empty());
-    let source = match positional.as_slice() {
+    let source = match set.positional() {
         [] => Source::Config(config),
         [database] => {
             return Err(UsageError::OnlyDatabase {

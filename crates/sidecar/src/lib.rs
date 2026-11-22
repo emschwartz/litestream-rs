@@ -35,6 +35,7 @@ mod error;
 mod exec;
 mod failstop;
 mod flags;
+pub mod goflag;
 mod health;
 mod http;
 mod json;
