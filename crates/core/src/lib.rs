@@ -82,8 +82,8 @@ pub use fault::{
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
 pub use layout::{
-    CreatedAt, CreatedAtSource, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
-    ParseKeyError, RangeSide, cmp_range, file_name, is_scratch_name, parse_file_name,
+    CreatedAt, CreatedAtSource, Dating, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
+    ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,

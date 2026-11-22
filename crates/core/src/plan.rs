@@ -84,15 +84,23 @@
 //!   the file. That is [`PlanOutcome::AsOfInsideFile`], never a plain
 //!   [`PlanOutcome::Plan`]: the chain is the newest state restorable at or
 //!   before the instant, and [`crate::AsOfInside::TakeEarlier`] on the restore
-//!   (the CLI's `--allow-earlier`) accepts it. A level 0-8 file that ends
-//!   right after the chain removes the doubt (`dates_next`): it is ineligible (else the chain would have taken it), and its created-at time is
-//!   the created-at time of the level-0 file that first carried its newest transaction,
-//!   because a level-0 file is that carrier and compaction gives its output
-//!   its newest input's created-at time (here and in Go). So that transaction was
+//!   (the CLI's `--allow-earlier`) accepts it. A file that ends right after
+//!   the chain removes the doubt (`dates_next`) only when its time dates
+//!   that transaction's commit ([`crate::Dating::Commit`]): a level 0-8 file
+//!   with its stored created-at time. It is ineligible (else the chain would
+//!   have taken it), and its created-at time is the created-at time of the
+//!   level-0 file that first carried its newest transaction, because a
+//!   level-0 file is that carrier and compaction gives its output its newest
+//!   input's created-at time (here and in Go). So that transaction was
 //!   created at or after the instant, and so was everything after it. A
-//!   snapshot proves nothing of the kind: it is recorded as created when it is written,
-//!   which can be long after its newest transaction committed, so a later
-//!   snapshot that ends right after the chain leaves the straddle standing.
+//!   snapshot proves nothing of the kind: it is recorded as created when it
+//!   is written, which can be long after its newest transaction committed.
+//!   Nor does a time the store fell back to for want of stored metadata (a
+//!   writer before Go v0.5.1, a bucket copy that dropped it): that is the
+//!   object's upload. Such a file that ends right after the chain is a
+//!   straddler itself, since its one transaction may have committed before
+//!   the instant. Times are read only through [`crate::Stamp`], which carries
+//!   this table.
 //!
 //! An `AsOf` restore learns eligibility lazily. A listing may carry only a
 //! last-modified time, so [`AsOfPlanner`] is a [`Step`] that asks for one exact
@@ -118,7 +126,7 @@ use lsr_ltx::{Timestamp, Txid};
 
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt, Step};
 use crate::inventory::{Inventory, is_snapshot_start};
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{CreatedAt, FileInfo, FileKey, Level, Stamp};
 /// The state of the database to rebuild.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RestoreTarget {
@@ -238,11 +246,12 @@ pub enum PlanOutcome {
     },
     /// An instant falls inside a file that is later than it. `chain` is the
     /// newest state restorable at or before the instant; `file` links to the
-    /// chain and holds at least two transactions past it, but was created at or
-    /// after the instant, so the transactions in it up to the instant cannot be
-    /// separated from the rest. Only `AsOf` produces it, and only when
-    /// the chain otherwise ends where the eligible history that connects to it
-    /// ends: a [`Self::Gap`] wins. Accepting it can leave out transactions that
+    /// chain and passes it, but was created at or after the instant, so the
+    /// transactions in it up to the instant cannot be separated from the
+    /// rest. It holds at least two transactions past the chain, or one whose
+    /// time does not date its commit (a snapshot's write, an upload). Only
+    /// `AsOf` produces it, and only when the chain otherwise ends where the
+    /// eligible history that connects to it ends: a [`Self::Gap`] wins. Accepting it can leave out transactions that
     /// did commit before the instant.
     AsOfInsideFile {
         /// The newest state restorable at or before the instant.
@@ -286,10 +295,15 @@ fn eligible(info: &FileInfo, target: RestoreTarget) -> bool {
     match target {
         RestoreTarget::Latest => true,
         RestoreTarget::Txid(wanted) => info.key.range().max() <= wanted,
-        RestoreTarget::AsOf(instant) => info
-            .created_at()
-            .is_some_and(|created_at| created_at.at() < instant),
+        RestoreTarget::AsOf(instant) => {
+            stamp_of(info, info.created_at()).is_some_and(|stamp| stamp.before(instant))
+        }
     }
+}
+
+/// A file's created-at time, when known, with what it dates for its level.
+fn stamp_of(info: &FileInfo, created_at: Option<CreatedAt>) -> Option<Stamp> {
+    created_at.map(|created_at| Stamp::of(info.key.level(), created_at))
 }
 
 /// The targets that need no created-at time: the only ones [`plan`] accepts.
@@ -418,52 +432,64 @@ fn as_of_outcome(
 /// when it is recorded as created at or after the instant.
 fn bridges_nothing_past(inventory: &Inventory, reach: Txid) -> bool {
     let files = inventory.files();
-    let links = |info: &FileInfo| {
-        is_usable_beyond(info)
-            && touches(info.key.range().min(), reach)
-            && info.key.range().max() > reach
-    };
-    files.iter().any(|info| info.key.range().max() > reach) && !files.iter().any(links)
+    files.iter().any(|info| info.key.range().max() > reach)
+        && !files.iter().any(|info| passes(info, reach))
 }
 
-/// The file that makes an `AsOf` chain ambiguous, if any: usable, created at
-/// or after the instant, linking to the chain and holding at least two
-/// transactions past it. Nothing is ambiguous when a file dates the next
-/// transaction ([`dates_next`]).
+/// Whether a usable file links to a chain that ends at [`reach`] and passes it.
+fn passes(info: &FileInfo, reach: Txid) -> bool {
+    is_usable_beyond(info)
+        && touches(info.key.range().min(), reach)
+        && info.key.range().max() > reach
+}
+
+/// The file that makes an `AsOf` chain ambiguous, if any ([`straddler`]),
+/// over the listed created-at times.
 fn straddling_file(inventory: &Inventory, target: RestoreTarget, reach: Txid) -> Option<FileKey> {
-    let RestoreTarget::AsOf(_) = target else {
+    let RestoreTarget::AsOf(instant) = target else {
         return None;
     };
+    straddler(inventory.files(), reach, instant, |info| {
+        stamp_of(info, info.created_at())
+    })
+}
+
+/// The straddle rule, given each file's [`Stamp`] (`None`: not known). Every
+/// file that passes the chain's end and is not recorded as created before
+/// the instant leaves the transactions past the end undated, unless one of
+/// them dates the next transaction ([`dates_next`]); then nothing is
+/// ambiguous. Otherwise the nearest-ending one is named. A file holding one
+/// transaction past the end straddles too when its time is a snapshot's
+/// write or an upload: that transaction may have committed before the
+/// instant.
+fn straddler(
+    files: &[FileInfo],
+    reach: Txid,
+    instant: Timestamp,
+    stamp: impl Fn(&FileInfo) -> Option<Stamp>,
+) -> Option<FileKey> {
     let one_past = reach.next()?;
-    let files = inventory.files();
-    if files.iter().any(|info| dates_next(info, one_past)) {
+    let passing = || files.iter().filter(|info| passes(info, reach));
+    if passing().any(|info| dates_next(info, one_past, instant, stamp(info))) {
         return None;
     }
-    files
-        .iter()
-        .filter(|info| !eligible(info, target) && straddles(info, one_past))
+    passing()
+        .filter(|info| !stamp(info).is_some_and(|known| known.before(instant)))
         .min_by_key(|info| straddler_order(info))
         .map(|info| info.key)
 }
 
-/// Whether a file proves that transaction [`one_past`] was created at or after
-/// an `AsOf` instant, by keys alone. It must end at [`one_past`] and be
-/// ineligible, which it is whenever it touches the chain: an eligible one
-/// would have extended it. Its created-at time then bounds the created-at time of the level-0 file
-/// that first carried [`one_past`] only on levels 0 to 8: a level-0 file is
-/// that carrier, and a compacted file takes its newest input's created-at time, which
-/// recurses down to it. A level-9 file is recorded as created when the snapshot is
-/// written (`snapshot.rs`), any time after [`one_past`] committed, and a
-/// refused one is level 9 too, so neither dates anything.
-fn dates_next(info: &FileInfo, one_past: Txid) -> bool {
-    !info.key.level().is_snapshot() && info.key.range().max() == one_past
-}
-
-/// Whether a usable file links to a chain whose next transaction is
-/// [`one_past`] and holds at least two transactions past the chain.
-fn straddles(info: &FileInfo, one_past: Txid) -> bool {
-    let range = info.key.range();
-    is_usable_beyond(info) && range.min() <= one_past && range.max() > one_past
+/// Whether a file proves that transaction [`one_past`] committed at or after
+/// an `AsOf` instant: it ends at [`one_past`] and its time dates that commit
+/// ([`Stamp::commit_at_or_after`]). Only a level 0-8 file with its stored
+/// created-at time can: a level-0 file is stamped at the sync that first
+/// carried the transaction, and a compacted file takes its newest input's
+/// time, which recurses down to it. A snapshot is stamped when it is written
+/// (`snapshot.rs`), and a time a store fell back to is the object's upload,
+/// both any time after the commit, so neither dates anything.
+fn dates_next(info: &FileInfo, one_past: Txid, instant: Timestamp, stamp: Option<Stamp>) -> bool {
+    info.key.range().max() == one_past
+        && stamp.and_then(|known| known.commit_at_or_after(instant)) == Some(true)
 }
 
 /// Smaller is named first: the nearest end, then the higher level, then the key.
@@ -828,45 +854,29 @@ impl Step for AsOfPlanner<'_> {
 /// Whether a file is created strictly before [`instant`], once its exact
 /// created-at time is known.
 fn eligible_at(info: &FileInfo, instant: Timestamp, resolved: &ResolvedCreatedAt) -> Option<bool> {
-    resolved
-        .exact(info)
-        .map(|created_at| created_at.at() < instant)
+    stamp_of(info, resolved.exact(info)).map(|stamp| stamp.before(instant))
 }
 
-/// [`straddling_file`] with created-at times asked for as needed.
+/// [`straddling_file`] with created-at times asked for as needed: every file
+/// that passes the reach is judged, so every missing time among them is
+/// needed. The last extension step already read them all, so in practice
+/// this asks for nothing.
 fn lazy_straddler(
     inventory: &Inventory,
     instant: Timestamp,
     reach: Txid,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Option<FileKey>> {
-    let Some(one_past) = reach.next() else {
-        return Resolve::Done(None);
-    };
     let files = inventory.files();
-    if files.iter().any(|info| dates_next(info, one_past)) {
-        return Resolve::Done(None);
+    let mut missing = files
+        .iter()
+        .filter(|info| passes(info, reach) && resolved.exact(info).is_none());
+    if let Some(first) = missing.next() {
+        return Resolve::Need(Need::with_ahead(*first, missing.copied()));
     }
-    let mut best: Option<&FileInfo> = None;
-    for info in files.iter().filter(|info| straddles(info, one_past)) {
-        match eligible_at(info, instant, resolved) {
-            None => {
-                // Every straddler is judged, so every missing created-at time is needed.
-                let ahead = files
-                    .iter()
-                    .filter(|other| straddles(other, one_past) && resolved.exact(other).is_none())
-                    .copied();
-                return Resolve::Need(Need::with_ahead(*info, ahead));
-            }
-            Some(true) => {}
-            Some(false) => {
-                if best.is_none_or(|held| straddler_order(info) < straddler_order(held)) {
-                    best = Some(info);
-                }
-            }
-        }
-    }
-    Resolve::Done(best.map(|info| info.key))
+    Resolve::Done(straddler(files, reach, instant, |info| {
+        stamp_of(info, resolved.exact(info))
+    }))
 }
 
 /// Larger is the better base: furthest reach, then higher level, then the
