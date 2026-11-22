@@ -20,4 +20,8 @@ if ! [[ "$url" =~ ^(https://github\.com/|http://(127\.0\.0\.1|localhost):[0-9]+/
   echo "push-claude-branch: origin does not push to emschwartz/litestream-rs" >&2
   exit 2
 fi
-exec git -c core.hooksPath=/dev/null push --no-verify "$url" "refs/heads/$branch:refs/heads/$branch"
+git -c core.hooksPath=/dev/null push --no-verify "$url" "refs/heads/$branch:refs/heads/$branch"
+# A push to a URL leaves origin/<branch> stale; record what was pushed.
+git update-ref "refs/remotes/origin/$branch" "refs/heads/$branch"
+git config "branch.$branch.remote" origin
+git config "branch.$branch.merge" "refs/heads/$branch"
