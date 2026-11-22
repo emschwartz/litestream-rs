@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use lsr_core::needs::{Resource, need};
+
 use crate::error::CompatError;
 
 /// The Go versions of the compatibility matrix.
@@ -248,7 +250,7 @@ fn in_module(path: &str, module: &str) -> bool {
 
 /// The builds the live tests run against: the names in `LSR_COMPAT_VERSIONS` when set
 /// (`releases` stands for [`KNOWN_RELEASES`]; minus any the quirk table lists as unbuildable),
-/// else the pinned five.
+/// else the pinned five. Fails when that set is empty (`lsr_core::needs`).
 ///
 /// Only a test in a [`LIVE_MODULE`] may ask (the test harness names the thread after the
 /// test). A live test moved or renamed out of one would drop out of `just compat-live`
@@ -264,7 +266,7 @@ pub fn builds_under_test() -> Vec<GoBuild> {
             "{caller:?} runs the Go builds under test but is not in a `mod {LIVE_MODULE}` (or `mod {S3_MODULE}` for MinIO), so `just compat-live` would skip it"
         );
     }
-    match std::env::var(VERSIONS_ENV) {
+    let selected: Vec<GoBuild> = match std::env::var(VERSIONS_ENV) {
         Ok(names) if !names.trim().is_empty() => names
             .split_whitespace()
             .flat_map(|n| {
@@ -278,7 +280,17 @@ pub fn builds_under_test() -> Vec<GoBuild> {
             .filter(|b| b.quirk().is_none_or(|q| q.quirk != Quirk::Unbuildable))
             .collect(),
         Ok(_) | Err(_) => GoVersion::ALL.into_iter().map(GoBuild::from).collect(),
-    }
+    };
+    // An empty set would pass every `for build in builds_under_test()` test with no iteration
+    // (names that are all unbuildable, say); only `LSR_SKIP=go` may return it.
+    need(Resource::GoBuilds, || {
+        if selected.is_empty() {
+            Err(format!("{VERSIONS_ENV} selects no buildable Go version"))
+        } else {
+            Ok(selected)
+        }
+    })
+    .unwrap_or_default()
 }
 
 /// The builds of `builds_under_test` in `page_encoding`, with its guard.

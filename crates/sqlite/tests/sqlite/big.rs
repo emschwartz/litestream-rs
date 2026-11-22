@@ -17,6 +17,7 @@ use std::path::Path;
 use std::process::Command;
 
 use lsr_core::conformance::block_on;
+use lsr_core::needs::{Resource, need};
 use lsr_core::{Event, RestoreTarget, SyncConfig, Tick};
 use lsr_sqlite::Sqlite;
 use lsr_sqlite::testing::{Rig, RigConfig, rig_actor_config};
@@ -122,14 +123,21 @@ fn a_16k_page_database_past_1_gib_crosses_the_lock_page() {
 }
 
 /// Byte offsets past 4 GiB: the database file, the WAL reads and the restore all address
-/// beyond `u32::MAX` bytes. Needs about 9 GiB of disk; skipped below 20 GB free.
+/// beyond `u32::MAX` bytes. Needs about 9 GiB of disk; fails below 20 GB free.
 #[test]
 #[ignore = "large; just sqlite-big"]
 fn a_database_past_4_gib_replicates_and_restores() {
     let dir = TempDir::new().unwrap();
-    let free = free_bytes(dir.path());
-    if free < 20_000_000_000 {
-        println!("skipped: {free} bytes free, the case needs 20 GB");
+    // Fails below 20 GB free; `LSR_SKIP=disk` opts out.
+    let enough = need(Resource::Disk, || {
+        let free = free_bytes(dir.path());
+        if free < 20_000_000_000 {
+            Err(format!("{free} bytes free, the case needs 20 GB"))
+        } else {
+            Ok(())
+        }
+    });
+    if enough.is_none() {
         return;
     }
     let mut rig = Rig::<Sqlite>::new(dir.path(), big_config(4096)).unwrap();

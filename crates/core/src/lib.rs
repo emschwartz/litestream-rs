@@ -36,6 +36,8 @@ mod ltx_read;
 mod maintain;
 #[cfg(any(test, feature = "testing"))]
 mod mem;
+#[cfg(any(test, feature = "testing"))]
+pub mod needs;
 mod pages;
 mod plan;
 mod position;
