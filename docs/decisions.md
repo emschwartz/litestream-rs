@@ -38,7 +38,9 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D28 | How does the simulator's clock move inside a tick? | A frozen law per run, drawn last in the swarm mix; the default mix keeps one reading per tick | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
 | D29 | Where do the behaviour table's rows live? | `docs/behavior.toml`, rendered into `docs/BEHAVIOR.md` | parent session's request; layout by Claude (checker-holes) | 2026-11-22 | decided |
 | D30 | How is Toxiproxy provided to the tests? | Built from source with `go install` at a pinned version | Claude (checker-holes), **delegated** | 2026-11-22 | open to owner review |
+| D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
+| D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -313,6 +315,14 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a first run builds it (about a minute) and CI's `test-s3` job needs Go.
 - **Revisit if:** the build breaks on a Go release.
 - **Links:** #111.
+## D31. Merging while many branches are in flight
+
+- **Options:** every PR merges the latest main and re-runs CI before it lands; or a PR lands on its own green CI when it has no textual conflict, and main's CI checks the combination.
+- **Choice:** land on the PR's own green. Main's CI on each merge commit is the integration test. A red main stops new merges until it is fixed forward by the session that owns the breaking merge. A PR that renames shared APIs still re-tests against main first.
+- **Cost accepted:** main can be red for about one CI run after a bad combination, and not every commit on main passed CI as a whole.
+- **Why:** with six or more branches open, each merge cost every other branch a merge and a 20 minute CI run, for hours of serial waiting. The one real catch in that period (renamed causes) would have shown as a red main within one run.
+- **Revisit if:** before any release, or when main goes red more than once a day.
+- **Links:** the merge protocol in the session notes; AGENTS.md.
 
 ## D32. An unusable KMS key is a permission refusal
 
@@ -323,6 +333,14 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the health name does not say "KMS"; the log's error text and the store's message do.
 - **Revisit if:** operators need to tell a KMS key from a bucket policy at a glance.
 - **Links:** `S3Code::KmsKeyUnusable` in `crates/store-s3/src/classify.rs`.
+
+## D33. Full drop-in replacement for Go
+
+- **Options:** narrow the drop-in surface (refuse `dir:` scanning, AWS shared credential files and yaml.v2 quirks) to remove about 900 lines of code no behaviour row covers; or keep full drop-in and bring that code under evidence.
+- **Choice:** full drop-in. The config, CLI and sidecar surface gets behaviour rows and generated differential tests against Go Litestream, with `dir:` scanning and credential resolution first, since they decide what is replicated and with which credentials.
+- **Cost accepted:** about 9,200 production lines stay, and need differential harnesses against Go.
+- **Revisit if:** a Go behaviour on this surface would lose data. Then ours differs, with its own entry here.
+- **Links:** #121 (cuts 2, 4 and 5 withdrawn), docs/release-bar.md.
 
 ## Unverified, not recorded
 
