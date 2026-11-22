@@ -170,8 +170,29 @@ package = "lsr-sqlite"
 test_bin = "sqlite"
 tests = [
     "a_power_cut_after_a_settle_leaves_the_database_at_least_as_far_as_the_replica",
-    "a_failed_wal_sync_stages_nothing_and_a_later_sync_does_not_clear_it",
+    "a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate",
 ]
+
+# A failed sync of the WAL taken as a success: the frames it covered are staged, though the
+# kernel may never write them. The simulator's lost writeback and its staged-durability check
+# see it too (`wal_fsync_fails`), as does the actor's unit test.
+[[bug]]
+name = "wal-sync-error-as-success"
+fix = "claude/wal-sync-failed"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = ["a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate"]
+
+# After a failed sync of the WAL, the retry syncs again and trusts the success: the generation's
+# frames the failure covered are staged. Only the simulator models the lost writeback (the real
+# kernel's pages stay readable from the page cache), so it is the one that sees bytes a power
+# loss would take.
+[[bug]]
+name = "wal-trusted-after-failed-sync"
+fix = "claude/wal-sync-failed"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::wal_fsync_fails"]
 
 [[bug]]
 name = "witness-trailer-compare"
