@@ -4,16 +4,18 @@
 //! state ended its idle judgment, and a stale one raised no event at all.
 //!
 //! With the defect "a success keeps a stall" planted
-//! (`docs/planted-bugs/success-keeps-a-stall.patch`), 2 of seeds 1 to 3000 fail on it unaided
-//! (0xa2 first, then 0x31c) and the fixed tree fails none on it. This test runs that seed under its own mix,
+//! (`docs/planted-bugs/success-keeps-a-stall.patch`), 2 of seeds 1 to 3000 failed on it unaided
+//! (0xa2 first, then 0x31c). The engine's takeover handshake changed 0xa2's run so it no longer
+//! stalls; the unaided search from seed 1000001 then found 0xf434c first (268 seeds in). This test
+//! runs that seed under its own mix,
 //! and the digest guards its operations: a change to the live generator fails here loudly
 //! instead of silently losing the kill.
 
 use lsr_sim::{Seed, Weights, history, run};
 
-const SEED: u64 = 0xa2;
+const SEED: u64 = 0xf434c;
 const STEPS: u32 = 300;
-const DIGEST: u64 = 0xce16_22db_48b0_ade6;
+const DIGEST: u64 = 0x0289_d3b6_9c76_c85f;
 
 fn digest(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
@@ -22,14 +24,14 @@ fn digest(text: &str) -> u64 {
 }
 
 #[test]
-fn a_stall_ends_with_the_fault_that_caused_it_seed_0xa2() {
+fn a_stall_ends_with_the_fault_that_caused_it_seed_0xf434c() {
     let seed = Seed::new(SEED);
     let weights = Weights::mixed(seed);
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?} {weights:?}")),
         DIGEST,
-        "the live generator changed seed 0xa2's run; find a seed the plant still fails on"
+        "the live generator changed seed 0xf434c's run; find a seed the plant still fails on"
     );
     if let Err(failure) = run(seed, STEPS, &weights) {
         panic!("{failure}");
