@@ -142,7 +142,8 @@ impl ObjectStore for Counting {
         let listed = self.inner.list(level, after, limit);
         async move {
             let mut page = listed.await?;
-            page.files.retain(|info| !hidden.contains(&info.key) && !unlisted.contains(&info.key));
+            page.files
+                .retain(|info| !hidden.contains(&info.key) && !unlisted.contains(&info.key));
             if page.next.is_none() {
                 page.files.extend(ghosts);
                 page.files.sort_by_key(|info| info.key);
@@ -936,7 +937,10 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
         (&rig.staging.inner, &restored),
     ] {
         block_on(async {
-            let mut up = store.begin_upload(&two, ts(T0), WriteMode::Replace).await.unwrap();
+            let mut up = store
+                .begin_upload(&two, ts(T0), WriteMode::Replace)
+                .await
+                .unwrap();
             up.write(bytes).await.unwrap();
             up.commit().await.unwrap();
         });

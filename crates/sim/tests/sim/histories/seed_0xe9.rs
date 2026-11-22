@@ -3,10 +3,10 @@
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
-use std::io::ErrorKind;
 use lsr_core::{StoreError, StoreOp};
 use lsr_sim::generate::{Hold, MetaOp, Op, Target, WalOp};
 use lsr_sim::{FaultShape, OtherProcessMode};
+use std::io::ErrorKind;
 
 pub const OPS: &[Op] = &[
     Op::ClockJump(31230),
@@ -16,7 +16,12 @@ pub const OPS: &[Op] = &[
     Op::RequestSnapshot,
     Op::CommitInTick { pages: 4 },
     Op::Spill,
-    Op::StoreFault { target: Target::Staging, op: StoreOp::Upload, ahead: 1, shape: FaultShape::CorruptPublish },
+    Op::StoreFault {
+        target: Target::Staging,
+        op: StoreOp::Upload,
+        ahead: 1,
+        shape: FaultShape::CorruptPublish,
+    },
     Op::StagingDamage(MetaOp::StripNewestOrigin),
     Op::RequestSnapshot,
     Op::Meta(MetaOp::Save),
@@ -42,7 +47,10 @@ pub const OPS: &[Op] = &[
     Op::Restore,
     Op::Meta(MetaOp::FlipNewestByte),
     Op::RequestSnapshot,
-    Op::Hold { hold: Hold::StoreDownAll, ticks: 199 },
+    Op::Hold {
+        hold: Hold::StoreDownAll,
+        ticks: 199,
+    },
     Op::StagingDamage(MetaOp::StripNewestOrigin),
     Op::Restore,
     Op::RequestSnapshot,
@@ -59,7 +67,10 @@ pub const OPS: &[Op] = &[
     Op::SecondWriter { ticks: 6 },
     Op::SecondWriter { ticks: 7 },
     Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
-    Op::Hold { hold: Hold::SecondWriter, ticks: 9 },
+    Op::Hold {
+        hold: Hold::SecondWriter,
+        ticks: 9,
+    },
     Op::Spill,
     Op::RequestSnapshot,
     Op::RequestSnapshot,
@@ -67,7 +78,10 @@ pub const OPS: &[Op] = &[
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::Meta(MetaOp::DeleteAll),
     Op::Spill,
-    Op::Hold { hold: Hold::ReadersHeld, ticks: 164 },
+    Op::Hold {
+        hold: Hold::ReadersHeld,
+        ticks: 164,
+    },
     Op::Spill,
     Op::Spill,
     Op::Meta(MetaOp::Save),
@@ -75,7 +89,15 @@ pub const OPS: &[Op] = &[
     Op::ClockJump(45373),
     Op::StagingDamage(MetaOp::StripNewestOrigin),
     Op::Vacuum { page_size: None },
-    Op::StoreFault { target: Target::Remote, op: StoreOp::Upload, ahead: 0, shape: FaultShape::Error(StoreError::Transient { op: StoreOp::Upload, kind: ErrorKind::ConnectionReset }) },
+    Op::StoreFault {
+        target: Target::Remote,
+        op: StoreOp::Upload,
+        ahead: 0,
+        shape: FaultShape::Error(StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: ErrorKind::ConnectionReset,
+        }),
+    },
     Op::Meta(MetaOp::FlipNewestByte),
     Op::Tick,
     Op::RequestSnapshot,
@@ -92,15 +114,26 @@ pub const OPS: &[Op] = &[
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::RequestSnapshot,
     Op::ClockJump(20239),
-    Op::Commit { pages: 3, grow: true },
+    Op::Commit {
+        pages: 3,
+        grow: true,
+    },
     Op::StagingDamage(MetaOp::TruncateNewest),
     Op::ClockJump(93600000),
     Op::Restore,
     Op::OtherProcessReader { begin: true },
-    Op::StoreFault { target: Target::Remote, op: StoreOp::Upload, ahead: 3, shape: FaultShape::CorruptPublish },
+    Op::StoreFault {
+        target: Target::Remote,
+        op: StoreOp::Upload,
+        ahead: 3,
+        shape: FaultShape::CorruptPublish,
+    },
     Op::CommitInTick { pages: 1 },
     Op::ClockJump(116040),
-    Op::Hold { hold: Hold::Wal(WalOp::RegrowWithoutCommitMarks(16452607896523821019)), ticks: 90 },
+    Op::Hold {
+        hold: Hold::Wal(WalOp::RegrowWithoutCommitMarks(16452607896523821019)),
+        ticks: 90,
+    },
     Op::Tick,
     Op::ClockJump(103192),
     Op::Meta(MetaOp::FlipNewestByte),
@@ -108,11 +141,27 @@ pub const OPS: &[Op] = &[
     Op::ClockJump(47727),
     Op::ClockJump(84440),
     Op::Tick,
-    Op::StoreFault { target: Target::Staging, op: StoreOp::List, ahead: 1, shape: FaultShape::Error(StoreError::Transient { op: StoreOp::List, kind: ErrorKind::ConnectionReset }) },
+    Op::StoreFault {
+        target: Target::Staging,
+        op: StoreOp::List,
+        ahead: 1,
+        shape: FaultShape::Error(StoreError::Transient {
+            op: StoreOp::List,
+            kind: ErrorKind::ConnectionReset,
+        }),
+    },
     Op::Heal,
     Op::Spill,
     Op::ClockJump(-20060),
-    Op::StoreFault { target: Target::Remote, op: StoreOp::List, ahead: 2, shape: FaultShape::Error(StoreError::Transient { op: StoreOp::List, kind: ErrorKind::ConnectionReset }) },
+    Op::StoreFault {
+        target: Target::Remote,
+        op: StoreOp::List,
+        ahead: 2,
+        shape: FaultShape::Error(StoreError::Transient {
+            op: StoreOp::List,
+            kind: ErrorKind::ConnectionReset,
+        }),
+    },
     Op::SecondWriter { ticks: 7 },
     Op::Meta(MetaOp::FlipNewestByte),
     Op::CommitInTick { pages: 4 },
@@ -124,7 +173,15 @@ pub const OPS: &[Op] = &[
     Op::ClockJump(110390),
     Op::ClockJump(102582),
     Op::StagingDamage(MetaOp::Restore),
-    Op::StoreFault { target: Target::Staging, op: StoreOp::Upload, ahead: 1, shape: FaultShape::Error(StoreError::Throttled { op: StoreOp::Upload, retry_after: None }) },
+    Op::StoreFault {
+        target: Target::Staging,
+        op: StoreOp::Upload,
+        ahead: 1,
+        shape: FaultShape::Error(StoreError::Throttled {
+            op: StoreOp::Upload,
+            retry_after: None,
+        }),
+    },
     Op::ClockJump(96999),
     Op::RequestSnapshot,
     Op::CommitInTick { pages: 2 },
@@ -136,13 +193,22 @@ pub const OPS: &[Op] = &[
     Op::Restore,
     Op::ClockJump(111310),
     Op::Restore,
-    Op::Commit { pages: 4, grow: false },
-    Op::Hold { hold: Hold::SecondWriter, ticks: 118 },
+    Op::Commit {
+        pages: 4,
+        grow: false,
+    },
+    Op::Hold {
+        hold: Hold::SecondWriter,
+        ticks: 118,
+    },
     Op::Spill,
     Op::SecondWriter { ticks: 0 },
     Op::Spill,
     Op::Spill,
-    Op::Hold { hold: Hold::Wal(WalOp::TruncateAtFrame(0)), ticks: 199 },
+    Op::Hold {
+        hold: Hold::Wal(WalOp::TruncateAtFrame(0)),
+        ticks: 199,
+    },
     Op::CommitInTick { pages: 1 },
     Op::RequestSnapshot,
     Op::Tick,
@@ -204,7 +270,10 @@ pub const OPS: &[Op] = &[
     Op::RequestSnapshot,
     Op::RequestSnapshot,
     Op::Tick,
-    Op::Hold { hold: Hold::DiskFull, ticks: 128 },
+    Op::Hold {
+        hold: Hold::DiskFull,
+        ticks: 128,
+    },
     Op::StagingDamage(MetaOp::DeleteNewest),
     Op::Spill,
     Op::Spill,
@@ -245,7 +314,12 @@ pub const OPS: &[Op] = &[
     Op::Meta(MetaOp::Save),
     Op::Spill,
     Op::StagingDamage(MetaOp::Restore),
-    Op::StoreFault { target: Target::Remote, op: StoreOp::Upload, ahead: 3, shape: FaultShape::CorruptPublish },
+    Op::StoreFault {
+        target: Target::Remote,
+        op: StoreOp::Upload,
+        ahead: 3,
+        shape: FaultShape::CorruptPublish,
+    },
     Op::ClockJump(116843),
     Op::SecondWriter { ticks: 4 },
     Op::RequestSnapshot,
@@ -255,7 +329,10 @@ pub const OPS: &[Op] = &[
     Op::Meta(MetaOp::Save),
     Op::SecondWriter { ticks: 0 },
     Op::ClockJump(118840),
-    Op::Commit { pages: 4, grow: true },
+    Op::Commit {
+        pages: 4,
+        grow: true,
+    },
     Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
     Op::CommitInTick { pages: 2 },
     Op::ClockJump(16726),
@@ -273,8 +350,19 @@ pub const OPS: &[Op] = &[
     Op::RequestSnapshot,
     Op::ClockJump(40255),
     Op::Restore,
-    Op::Hold { hold: Hold::CredentialsRevoked, ticks: 147 },
-    Op::StoreFault { target: Target::Staging, op: StoreOp::List, ahead: 0, shape: FaultShape::Error(StoreError::Transient { op: StoreOp::List, kind: ErrorKind::ConnectionReset }) },
+    Op::Hold {
+        hold: Hold::CredentialsRevoked,
+        ticks: 147,
+    },
+    Op::StoreFault {
+        target: Target::Staging,
+        op: StoreOp::List,
+        ahead: 0,
+        shape: FaultShape::Error(StoreError::Transient {
+            op: StoreOp::List,
+            kind: ErrorKind::ConnectionReset,
+        }),
+    },
     Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Vacuum { page_size: None },
     Op::Heal,

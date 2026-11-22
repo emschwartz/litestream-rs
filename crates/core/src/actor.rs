@@ -1055,22 +1055,8 @@ impl Actor {
         // A boot that fails later reads the journal again.
         self.adopt_journal(journal, newest_staged.as_ref(), &upload);
         let cause = boot_cause(dropped, refused, from.err());
-        // A snapshot the boot needs answers an operator's request made before
-        // it: every cause a boot finds clears the table of page checksums
-        // (`snapshot_clears`), which a requested snapshot alone would trust.
-        debug_assert!(cause.as_ref().is_none_or(snapshot_clears), "{cause:?}");
-        let pending = cause.or(self.kept.asked());
-        let course = match (from, pending) {
-            (Ok(position), snapshot) => Course::At {
-                position,
-                tail: Tail::Synced,
-                snapshot,
-            },
-            (Err(found), pending) => Course::Snapshot {
-                staged: newest_staged.map(|newest_staged| newest_staged.txid()),
-                cause: pending.unwrap_or(found),
-            },
-        };
+        let staged = newest_staged.map(|newest_staged| newest_staged.txid());
+        let course = boot_course(from, cause, self.kept.asked(), staged);
         let (pages, quiet) = match boot_seed(env.staging, &course, upload.confirmed()).await {
             Ok(seeded) => seeded,
             Err(fault) => return self.boot_failed(fault, now),
@@ -2936,6 +2922,32 @@ async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize
 /// stages new content under a transaction the replica shows. When recovery
 /// cannot continue, the snapshot is named for what it replaces.
 /// The boot's recovery proved the staged position: the engine continues from it.
+/// The course a boot takes from where recovery left it, the snapshot cause the
+/// boot found, and an operator's request made before it.
+fn boot_course(
+    from: Result<Position, SnapshotCause>,
+    cause: Option<SnapshotCause>,
+    asked: Option<SnapshotCause>,
+    staged: Option<Txid>,
+) -> Course {
+    // A snapshot the boot needs answers an operator's request made before
+    // it: every cause a boot finds clears the table of page checksums
+    // (`snapshot_clears`), which a requested snapshot alone would trust.
+    debug_assert!(cause.as_ref().is_none_or(snapshot_clears), "{cause:?}");
+    let pending = cause.or(asked);
+    match (from, pending) {
+        (Ok(position), snapshot) => Course::At {
+            position,
+            tail: Tail::Synced,
+            snapshot,
+        },
+        (Err(found), pending) => Course::Snapshot {
+            staged,
+            cause: pending.unwrap_or(found),
+        },
+    }
+}
+
 fn boot_continues(position: Position) -> Result<Position, SnapshotCause> {
     mark!(Boot3);
     Ok(position)

@@ -219,7 +219,11 @@ fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
         staging_fs: true,
         ..Opts::default()
     };
-    if let Err(failure) = run_ops(Seed::new(0xf488c), crate::histories::seed_0xf488c::OPS, &opts) {
+    if let Err(failure) = run_ops(
+        Seed::new(0xf488c),
+        crate::histories::seed_0xf488c::OPS,
+        &opts,
+    ) {
         panic!("{failure}");
     }
 }

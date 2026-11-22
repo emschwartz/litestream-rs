@@ -32,8 +32,8 @@ use crate::env::{Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError,
-    Upload, WriteMode,
+    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, Upload,
+    WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.

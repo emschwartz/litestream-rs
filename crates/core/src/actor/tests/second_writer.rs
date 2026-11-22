@@ -29,7 +29,12 @@ pub(super) fn put_foreign(rig: &Rig, n: u64) -> FileKey {
     let bytes = encoder.finish(None).unwrap().0;
     let key = FileKey::new(Level::ZERO, TxidRange::single(txid));
     block_on(async {
-        let mut up = rig.remote.inner.begin_upload(&key, ts(T0), WriteMode::Replace).await.unwrap();
+        let mut up = rig
+            .remote
+            .inner
+            .begin_upload(&key, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap()
     });
@@ -42,7 +47,10 @@ fn read_whole(store: &MemStore, key: &FileKey) -> Vec<u8> {
 
 fn put_whole(store: &MemStore, key: &FileKey, bytes: &[u8]) {
     block_on(async {
-        let mut up = store.begin_upload(key, ts(T0), WriteMode::Replace).await.unwrap();
+        let mut up = store
+            .begin_upload(key, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(bytes).await.unwrap();
         up.commit().await.unwrap()
     });

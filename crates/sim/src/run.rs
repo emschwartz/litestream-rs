@@ -1526,10 +1526,25 @@ impl Runner {
     }
 
     fn second_writer_with(&mut self, ticks: u8, judged: bool) -> Result<(), Violation> {
-        // A file at or below what this engine has staged collides with one of
-        // its own transactions (after a bucket rollback, say): telling the two
-        // writers apart needs writer identity on the replica, which the engine
-        // does not have, so the step puts nothing then.
+        if !self.second_writer_has_room()? {
+            return Ok(());
+        }
+        let put = self
+            .w
+            .remote_put_foreign()
+            .map_err(|err| bug_fault(format!("the second writer's put failed: {err}")))?;
+        let Some((key, bytes)) = put else {
+            return Ok(());
+        };
+        self.second_writer_stands(key, bytes, ticks, judged)
+    }
+
+    /// Whether another writer's file can stand past everything this engine
+    /// and the replica hold. A file at or below what this engine has staged
+    /// collides with one of its own transactions (after a bucket rollback,
+    /// say): telling the two writers apart needs writer identity on the
+    /// replica, which the engine does not have, so the step puts nothing then.
+    fn second_writer_has_room(&self) -> Result<bool, Violation> {
         let ours = self
             .w
             .newest_staged()
@@ -1546,16 +1561,18 @@ impl Runner {
         let held = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
             .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
             .newest();
-        if theirs.is_none_or(|theirs| Some(theirs) <= ours.max(held)) {
-            return Ok(());
-        }
-        let put = self
-            .w
-            .remote_put_foreign()
-            .map_err(|err| bug_fault(format!("the second writer's put failed: {err}")))?;
-        let Some((key, bytes)) = put else {
-            return Ok(());
-        };
+        Ok(theirs.is_some_and(|theirs| Some(theirs) > ours.max(held)))
+    }
+
+    /// Runs `ticks` ticks while the other writer's file `key` stands, then
+    /// removes it.
+    fn second_writer_stands(
+        &mut self,
+        key: lsr_core::FileKey,
+        bytes: Vec<u8>,
+        ticks: u8,
+        judged: bool,
+    ) -> Result<(), Violation> {
         self.report.reach.bump("remote.second_writer");
         self.expect(StopCause::OtherWriter);
         // Only an engine that was running when the file appeared, and has not
@@ -2149,6 +2166,13 @@ impl Runner {
         Ok(())
     }
 
+    /// Every scheduled store fault heals.
+    fn heal_faults(&mut self) {
+        self.rate_active = false;
+        self.w.remote_faults.heal();
+        self.w.staging_faults.heal();
+    }
+
     fn apply_op(&mut self, op: &Op) -> Result<(), Violation> {
         match op {
             Op::Commit { pages, grow } => self.commit(*pages, *grow),
@@ -2205,11 +2229,7 @@ impl Runner {
             Op::WalDamage { op, ticks } => self.wal_damage_healed(*op, *ticks)?,
             Op::Hold { hold, ticks } => self.hold(*hold, *ticks)?,
             Op::Verify => self.verify()?,
-            Op::Heal => {
-                self.rate_active = false;
-                self.w.remote_faults.heal();
-                self.w.staging_faults.heal();
-            }
+            Op::Heal => self.heal_faults(),
             Op::LaggingListings { writes, window } => self.lag_listings(*writes, *window),
             Op::OurReader { begin } => {
                 let done = if *begin {

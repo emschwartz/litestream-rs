@@ -52,7 +52,9 @@ impl ObjectStore for SizeLiar {
         created_at: Timestamp,
         mode: WriteMode,
     ) -> Result<LyingUpload, StoreError> {
-        Ok(LyingUpload(self.0.begin_upload(key, created_at, mode).await?))
+        Ok(LyingUpload(
+            self.0.begin_upload(key, created_at, mode).await?,
+        ))
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

@@ -1,13 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 7cdd376..ad0d7b3 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -921,7 +921,7 @@ impl Actor {
-         // it: every cause a boot finds clears the table of page checksums
-         // (`snapshot_clears`), which a requested snapshot alone would trust.
-         debug_assert!(cause.as_ref().is_none_or(snapshot_clears), "{cause:?}");
--        let pending = cause.or(self.kept.asked());
-+        let pending = self.kept.asked().or(cause);
-         let course = match (from, pending) {
-             (Ok(position), snapshot) => Course::At {
-                 position,
+@@ -2934,7 +2934,7 @@
+     // it: every cause a boot finds clears the table of page checksums
+     // (`snapshot_clears`), which a requested snapshot alone would trust.
+     debug_assert!(cause.as_ref().is_none_or(snapshot_clears), "{cause:?}");
+-    let pending = cause.or(asked);
++    let pending = asked.or(cause);
+     match (from, pending) {
+         (Ok(position), snapshot) => Course::At {
+             position,

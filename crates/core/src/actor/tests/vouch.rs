@@ -61,7 +61,12 @@ fn staging_behind_a_replica_the_wal_vouches_for_continues() {
         let bytes = block_on(rig.remote.inner.read(&one, 0, ReadLen::CHUNK));
         if let Ok(bytes) = bytes {
             block_on(async {
-                let mut up = rig.staging.inner.begin_upload(&one, ts(T0), WriteMode::Replace).await.unwrap();
+                let mut up = rig
+                    .staging
+                    .inner
+                    .begin_upload(&one, ts(T0), WriteMode::Replace)
+                    .await
+                    .unwrap();
                 up.write(&bytes).await.unwrap();
                 up.commit().await.unwrap()
             });
@@ -105,7 +110,11 @@ fn a_vm_restore_stops_until_a_takeover_covers_the_replica() {
     let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
     let bytes = block_on(rig.remote.inner.read(&one, 0, ReadLen::CHUNK)).unwrap();
     block_on(async {
-        let mut up = old_staging.inner.begin_upload(&one, ts(T0), WriteMode::Replace).await.unwrap();
+        let mut up = old_staging
+            .inner
+            .begin_upload(&one, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap()
     });
