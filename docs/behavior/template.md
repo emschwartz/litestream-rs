@@ -567,6 +567,7 @@ These are defects in the evidence, not in the engine. Each weakens a guarantee's
 | C6 | The real-engine history runs in the gate are one seed with no faults, and one seed of four power-loss cycles; the larger runs are `#[ignore]` | G1's outside-the-engine evidence is thin except nightly LazyFS | None |
 | C8 | After WAL or page damage the simulator's model adopts whatever SQLite now reads (`adopt_local_state` in `sim/src/world.rs`) | The oracle could not fail on shipped damage | Fixed: oracle `CorruptionRestored` refuses the adopted state (CHK-6) |
 | C7 | The simulator has one clock read once per tick | It could not produce the stamp-order defect #98 fixed | Fixed: a per-read clock law, drawn last in the mix (RUN-25, RUN-26) |
+| C9 | The simulator's model cannot follow an unlinked WAL through a later power loss, a checkpoint whose read-transaction retake is lost, or WAL damage while a failed sync's writeback is lost | Those error-domain cells are unmodelled and never drawn (CHK-8); the damage is skipped and counted. Making a failed checkpoint retake the read transaction, as lsr-sqlite does, made seeds 0x240, 0x90c, 0x36b and 0x4f fail in ways still being triaged | Issue #127 item D |
 
 ### Unknowns
 

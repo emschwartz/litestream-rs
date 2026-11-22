@@ -41,6 +41,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
+| D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
+| D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -341,6 +343,24 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** about 9,200 production lines stay, and need differential harnesses against Go.
 - **Revisit if:** a Go behaviour on this surface would lose data. Then ours differs, with its own entry here.
 - **Links:** #121 (cuts 2, 4 and 5 withdrawn), docs/release-bar.md.
+
+## D70. Known-wrong cells
+
+- **Options:** let the per-push seeds go red until each defect is fixed; leave the fault out of every draw; draw it where failures are classified.
+- **Choice:** a cell of the simulator's error domain that reaches an open engine defect is `Cell::KnownWrong`. The per-push fixed seeds leave it out. The nightly soak and the campaigns draw it and count a failure matching the defect's signature as known (printed, not failing the run), so every other failure in those seeds stays visible. Each defect names its tracking item and has a pinned seed in `tests/sim/known_wrong.rs` that must still fail: when the fix lands that test fails, and the cell becomes drawn.
+- **Why:** the defect stays exercised every night and cannot stay known-wrong after its fix, while a push stays green.
+- **Cost accepted:** a second failure with the same signature in a run that drew the cell is counted as known too; the per-push seeds do not reach the defect's code paths through these cells.
+- **Revisit if:** a known-wrong cell stays open for long, or a signature turns out to match an unrelated failure.
+- **Links:** issue #127 item D; `crates/sim/src/domain.rs`.
+
+## D71. What the error domain may inject
+
+- **Options:** inject any error into any call; inject only what an implementation returns.
+- **Choice:** a cell is drawn only when lsr-sqlite (SQLite seam), store-fs (staging) or store-s3 (replica) returns that error from that call with the world unchanged. An error that reports a world fact (the WAL file replaced) is drawn as that change, and the call then reports it. A cell the simulator's model cannot follow yet is unmodelled: listed and counted, never drawn. Every other cell is impossible, with the reason in the table.
+- **Why:** an injected lie (a NotFound for an object the store holds, a corrupt read of a sound object) tests a world that cannot happen, and its failures would be the simulator's, not the engine's.
+- **Cost accepted:** the unmodelled cells (an unlinked WAL, a lost checkpoint retake) stay untested by the swarm until the model follows them.
+- **Revisit if:** another implementation of a seam ships; its errors join the table.
+- **Links:** issue #127 item D; BEHAVIOR CHK-8 and C9.
 
 ## Unverified, not recorded
 
