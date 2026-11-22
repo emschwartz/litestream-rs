@@ -629,13 +629,6 @@ impl World {
                     self.remote_recorder.len(),
                 );
                 self.adopt_recovered();
-                // A failed sync's lost writeback and a checkpoint SQLite ran after it can leave
-                // the database file a mix of pages no commit made: the checkpoint backfilled the
-                // real pages, and the power loss cut the WAL at the first page the kernel never
-                // wrote. The world adopts that as damage (decision D73): no restore may give it.
-                if self.sqlite.writeback_lost() {
-                    self.adopt_corrupt_state();
-                }
                 let now = lsr_core::Clock::now(self.clock.as_ref());
                 self.history.power_loss(&self.model, now);
                 lost

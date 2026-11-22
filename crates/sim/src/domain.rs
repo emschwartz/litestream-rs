@@ -64,8 +64,8 @@ pub enum KnownWrong {
     /// the debt) copies frames the failed sync covered into the database file, and a power loss
     /// then cuts the WAL short of them: SQLite recovers a database file no commit made. The
     /// engine replicates it as a clean state until its boot check lands (`docs/decisions.md`
-    /// D103). The simulator adopts that state as damage (decision D73), so a run that replicates
-    /// it fails as `CorruptionRestored`.
+    /// D103). The simulator does not adopt that state (decision D73): its model check fails
+    /// the run where it appears, which this defect counts as known.
     DatabaseAheadOfWal,
     /// Retry counts and degraded states reset at a restart, so a halt that outlasts restarts
     /// is never reported degraded (BEHAVIOR's D9). Reached by a restart inside an overlapping

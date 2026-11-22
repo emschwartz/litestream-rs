@@ -103,5 +103,3 @@ fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
         KnownWrong::HaltForgottenAtRestart,
     );
 }
-
-
