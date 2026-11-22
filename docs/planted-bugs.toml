@@ -8,6 +8,8 @@
 #   package  the cargo package whose tests are run
 #   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#   patch    optional: the patch's name when it is not `name`, so one defect can be planted
+#            against the tests of a second package
 #
 # Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
@@ -307,12 +309,35 @@ tests = [
     "a_commit_after_the_tick_began_is_not_stamped_before_it_landed",
 ]
 
+# The same defect against the simulator: under the each-read clock law the swarm kills it with
+# nothing written for it (crates/sim/tests/sim/clock_reads.rs records the shortest such seed).
+[[bug]]
+name = "stamp-before-committed-read-sim"
+patch = "stamp-before-committed-read"
+fix = "847521a"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681",
+]
+
 [[bug]]
 name = "seal-stamped-at-checkpoint-start"
 fix = "847521a"
 package = "lsr-core"
 tests = [
     "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
+]
+
+# The same defect against the simulator, killed by the swarm unaided under the each-read clock law.
+[[bug]]
+name = "seal-stamped-at-checkpoint-start-sim"
+patch = "seal-stamped-at-checkpoint-start"
+fix = "847521a"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552",
 ]
 
 # The simulator's own judges. A checker that cannot see a class of bug reads as green, so their

@@ -10,7 +10,10 @@
 //! - at every oracle check and at random moments (one step in [`ONE_IN`], from a seed stream
 //!   nothing else draws from, so a seed's history is unchanged): `Latest`, and `AsOf` at
 //!   [`INSTANTS`] random instants;
-//! - at every oracle check, every restore point from 1 to the newest, in order (the sweep);
+//! - at every oracle check, every restore point from 1 to the newest, in order (the sweep), and
+//!   `AsOf` one millisecond after each of the [`BOUNDARIES`] newest created-at times the replica
+//!   holds: the instant at which a file stamped before a commit it carries restores that commit
+//!   too early, which a random instant almost never lands on;
 //! - after a drain that finished, `Latest` is the local head (lag bound 0).
 //!
 //! What it may not judge: a restore that stops on an object the store damaged, or that the
@@ -22,8 +25,8 @@
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfInside, Database, Entropy, FileKey, Inventory, MemSink, MemStore, RestoreError,
-    RestoreOptions, RestoreTarget, SeededEntropy, restore_with,
+    AsOfInside, CreatedAtSource, Database, Entropy, FileKey, Inventory, MemSink, MemStore,
+    RestoreError, RestoreOptions, RestoreTarget, SeededEntropy, restore_with,
 };
 use lsr_history::{AheadMode, Counts, Digest, Judge, Log, NodeId, Signals};
 use lsr_ltx::{Timestamp, Txid};
@@ -36,6 +39,8 @@ use crate::reach::Reach;
 pub const ONE_IN: u64 = 8;
 /// `AsOf` instants per judgment.
 pub const INSTANTS: u32 = 3;
+/// Created-at times, newest first, whose next millisecond is judged at every oracle check.
+pub const BOUNDARIES: usize = 8;
 
 /// The digest of a model image.
 fn image_digest(image: &PageImage) -> Digest {
@@ -181,14 +186,14 @@ impl History {
         ask: Ask,
     ) -> Result<(), Violation> {
         self.log.note_time(now.unix_millis());
-        let newest = block_on(Inventory::load(remote))
-            .map_err(|err| bug_fault(format!("listing the replica: {err}")))?
-            .newest();
-        let Some(newest) = newest else {
+        let inventory = block_on(Inventory::load(remote))
+            .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
+        let Some(newest) = inventory.newest() else {
             return Ok(());
         };
         if ask.sweep {
             self.sweep(remote, newest, damaged)?;
+            self.boundaries(remote, inventory.files(), damaged)?;
         }
         if let Restored::Content(digest) = self.restored(remote, RestoreTarget::Latest, damaged)? {
             self.judge
@@ -205,6 +210,33 @@ impl History {
             let span = u64::try_from(now.unix_millis().saturating_sub(self.first)).unwrap_or(0);
             let offset = i64::try_from(self.rng.below(span.saturating_add(2))).unwrap_or(0);
             let instant = self.first.saturating_add(offset);
+            let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(instant));
+            if let Restored::Content(digest) = self.restored(remote, target, damaged)? {
+                self.judge
+                    .as_of(&self.log, instant, digest, None)
+                    .map_err(Violation::History)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `AsOf` one millisecond after each of the newest created-at times the store recorded.
+    fn boundaries(
+        &mut self,
+        remote: &MemStore,
+        files: &[lsr_core::FileInfo],
+        damaged: &[FileKey],
+    ) -> Result<(), Violation> {
+        let mut stamps: Vec<i64> = files
+            .iter()
+            .filter_map(lsr_core::FileInfo::created_at)
+            .filter(|c| c.origin() != CreatedAtSource::Fallback)
+            .map(|c| c.at().unix_millis())
+            .collect();
+        stamps.sort_unstable_by(|a, b| b.cmp(a));
+        stamps.dedup();
+        for instant in stamps.into_iter().take(BOUNDARIES) {
+            let instant = instant.saturating_add(1);
             let target = RestoreTarget::AsOf(Timestamp::from_unix_millis(instant));
             if let Restored::Content(digest) = self.restored(remote, target, damaged)? {
                 self.judge

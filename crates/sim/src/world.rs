@@ -11,7 +11,7 @@
 //! oracle and for power loss, so neither a fault nor a yield touches a check.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
@@ -20,12 +20,13 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
+use crate::clock::{ClockLaw, SimClock};
 use crate::exec::{Polls, RunEnd, run_until};
 use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
-use crate::sqlite::{AppCommit, CrashKind, OtherProcessMode, SimSqlite};
+use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode, SimSqlite};
 use crate::store::{
     FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
     YieldEachCall,
@@ -231,8 +232,11 @@ pub struct World {
     pub seed: Seed,
     /// SQLite's rules.
     pub sqlite: SimSqlite,
-    /// The clock the actor reads; the recorders read it too.
+    /// The driver's clock: it moves between ticks, and the recorders read it.
     pub clock: Arc<FakeClock>,
+    /// The clock the actor and the app read inside a tick, over [`Self::clock`]
+    /// under the run's [`ClockLaw`].
+    pub sim_clock: Arc<SimClock>,
     /// The latest time the actor has been told: the run loop notes each
     /// tick's, and the recorders read it.
     pub high: HighWater,
@@ -286,6 +290,8 @@ pub struct World {
     pub repaired: Vec<FileKey>,
     crash_entropy: SeededEntropy,
     in_tick: Option<CommittedInTick>,
+    // When the app's armed in-tick commit landed, by the app's own clock read.
+    in_tick_time: Arc<Mutex<Option<Timestamp>>>,
 }
 
 /// The first instant of a run's clock.
@@ -327,10 +333,17 @@ impl World {
             seed.stream(40),
             lsr_history::AheadMode::Count,
         );
+        let sim_clock = Arc::new(SimClock::new(
+            Arc::clone(&clock),
+            high.clone(),
+            ClockLaw::PerTick,
+            seed.stream(16),
+        ));
         Self {
             seed,
             sqlite,
             clock,
+            sim_clock,
             high,
             sleeper: RecordingSleeper::new(),
             entropy: SeededEntropy::new(seed.stream(4)),
@@ -355,6 +368,7 @@ impl World {
             repaired: Vec::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
+            in_tick_time: Arc::default(),
         }
     }
 
@@ -385,14 +399,36 @@ impl World {
         self.history.log_commits(&self.model, now);
     }
 
+    /// From now on the actor and the app read the clock under `law`.
+    pub fn set_clock_law(&mut self, law: ClockLaw) {
+        self.sim_clock = Arc::new(SimClock::new(
+            Arc::clone(&self.clock),
+            self.high.clone(),
+            law,
+            self.seed.stream(16),
+        ));
+    }
+
     /// Arms a commit of `pages`, leaving `db_size` pages, that the app makes
-    /// inside the next tick, right before a checkpoint takes its barrier. It
-    /// must not grow the database: the pages a growth re-adds are read from the
-    /// rules after the tick, when the engine may have changed them.
-    pub fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32) {
+    /// inside the next tick at `site`. It must not grow the database: the
+    /// pages a growth re-adds are read from the rules after the tick, when
+    /// the engine may have changed them. The app reads its clock as it
+    /// commits, and the history logs the commit at that time.
+    pub fn arm_commit_in_tick(
+        &self,
+        pages: Vec<(PageNo, Vec<u8>)>,
+        db_size: u32,
+        site: InTickSite,
+    ) {
         let (remote, staging) = (self.remote_recorder.clone(), self.staging_recorder.clone());
-        let created_at = Box::new(move || (remote.len(), staging.len()));
-        self.sqlite.arm_commit_in_tick(pages, db_size, created_at);
+        let (clock, time) = (Arc::clone(&self.sim_clock), Arc::clone(&self.in_tick_time));
+        let created_at = Box::new(move || {
+            let now = lsr_core::Clock::now(clock.as_ref());
+            *time.lock().unwrap_or_else(PoisonError::into_inner) = Some(now);
+            (remote.len(), staging.len())
+        });
+        self.sqlite
+            .arm_commit_in_tick(pages, db_size, site, created_at);
     }
 
     /// The app's commit inside the last tick, once: see [`World::arm_commit_in_tick`].
@@ -409,7 +445,15 @@ impl World {
         let id = self
             .model
             .commit(&done.pages, done.db_size, done.app, remote_at);
-        self.log_history();
+        let landed = self
+            .in_tick_time
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match landed {
+            Some(at) => self.history.log_commits(&self.model, at),
+            None => self.log_history(),
+        }
         Some(CommittedInTick {
             id,
             staged_from,

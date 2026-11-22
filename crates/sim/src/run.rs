@@ -20,6 +20,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
+use crate::clock::ClockLaw;
 use crate::crash_law::CrashLaw;
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
@@ -31,7 +32,7 @@ use crate::resources::{
 };
 use crate::scenario::{CauseKind, FaultKind};
 use crate::seed::{Seed, replay_line};
-use crate::sqlite::{AutoTally, CrashKind, ReaderId};
+use crate::sqlite::{AutoTally, CrashKind, InTickSite, ReaderId};
 use crate::world::{CrashPlan, StagedCopy, StagedEditError, TickEnd, World};
 
 /// Ticks a drain may take before it counts as stuck.
@@ -202,6 +203,9 @@ pub struct Opts {
     /// What the app does after each restart ([`Weights::after_restart`]).
     /// [`run_with`] sets it.
     pub after_restart: AfterRestart,
+    /// How the clock moves between reads inside a tick
+    /// ([`Weights::clock_law`]). [`run_with`] sets it.
+    pub clock_law: ClockLaw,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
 }
@@ -272,6 +276,8 @@ struct Runner {
     w: World,
     actor: Actor,
     rng: SeededEntropy,
+    // Where an in-tick commit lands under the each-read clock law.
+    sites: SeededEntropy,
     spilled: Vec<(PageNo, Vec<u8>)>,
     /// A freshly started driver has not seen the WAL yet, so it ticks once more
     /// before it believes a wait on a WAL change.
@@ -338,6 +344,26 @@ fn small(rng: &SeededEntropy, upper: u64) -> u32 {
 }
 
 impl Runner {
+    /// A runner for `seed` set up as `opts` says, booted.
+    fn configured(seed: Seed, opts: &Opts) -> Self {
+        let mut runner = Self::new(seed);
+        runner.lenient = opts.drawn;
+        if opts.drawn {
+            runner.draw_power_law(seed, opts);
+            runner.draw_batch_widths(seed);
+        }
+        runner.trace = opts.trace;
+        runner.record = opts.record;
+        runner.allow_stop = opts.allow_stop;
+        runner.responses = opts.responses;
+        runner.retention = opts.retention;
+        runner.judges = opts.judges;
+        runner.app.set(opts.after_restart);
+        runner.w.set_clock_law(opts.clock_law);
+        runner.reboot();
+        runner
+    }
+
     fn new(seed: Seed) -> Self {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
         let mut w = World::new(seed, page_size, FIRST_DB_PAGES);
@@ -346,6 +372,7 @@ impl Runner {
             w,
             actor: Actor::new(actor_config()),
             rng: SeededEntropy::new(seed.stream(11)),
+            sites: SeededEntropy::new(seed.stream(19)),
             spilled: Vec::new(),
             unwatched: true,
             readers: Vec::new(),
@@ -421,8 +448,9 @@ impl Runner {
         let mut ck = CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone());
         let staging = self.w.staging.clone();
         let remote = self.w.remote.clone();
-        let clock = std::sync::Arc::clone(&self.w.clock);
-        let now = self.now();
+        let clock = std::sync::Arc::clone(&self.w.sim_clock);
+        // The tick's own reading is the first of its clock reads.
+        let now = clock.now();
         self.w.high.note(now);
         let actor = &mut self.actor;
         let fut = async {
@@ -436,7 +464,9 @@ impl Runner {
             };
             actor.tick(env, now).await
         };
-        self.w.run_tick(fut, plan)
+        let ended = self.w.run_tick(fut, plan);
+        self.w.sim_clock.settle();
+        ended
     }
 
     /// Tells the model about each snapshot the tick staged: the database it was
@@ -668,7 +698,9 @@ impl Runner {
         self.note_event(event);
         let began = self.latest.map_or(began, |latest| latest.max(began));
         self.latest = Some(began);
-        capped(event, began)?;
+        // A wait runs from the engine's own last reading, which under
+        // `ClockLaw::EachRead` is later than the tick's first.
+        capped(event, self.w.high.at_least(began))?;
         self.note_recovered();
         if let Event::Uploaded(did) = event {
             self.w.acked.on_did(did);
@@ -876,12 +908,21 @@ impl Runner {
     }
 
     /// One tick in which the app commits `count` pages right before a
-    /// checkpoint takes its barrier, if the tick takes one.
+    /// checkpoint takes its barrier, if the tick takes one; under
+    /// [`ClockLaw::EachRead`], half the time right before the sync reads the
+    /// committed end instead, drawn from a stream of its own.
     fn commit_in_tick(&mut self, count: u8) -> Result<(), Violation> {
         let size = self.w.sqlite.db_size();
         let mut all = self.spilled.clone();
         all.extend(self.pick_pages(u32::from(count), size));
-        self.w.arm_commit_in_tick(all, size);
+        let site = match self.w.sim_clock.law() {
+            ClockLaw::EachRead if self.sites.below(2) == 0 => InTickSite::BeforeCommittedRead,
+            ClockLaw::EachRead | ClockLaw::PerTick => InTickSite::BeforeBarrier,
+        };
+        self.report
+            .reach
+            .bump(format!("in_tick.{}", variant(&site)));
+        self.w.arm_commit_in_tick(all, size, site);
         self.tick()
     }
 
@@ -1821,6 +1862,7 @@ pub fn run_with(
         block_crash_law: weights.block_crash_law,
         lying_wal_sync: weights.lying_wal_sync,
         after_restart: weights.after_restart,
+        clock_law: weights.clock_law,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -1836,20 +1878,7 @@ pub fn run_with(
 )]
 pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure> {
     let steps = u32::try_from(ops.len()).unwrap_or(u32::MAX);
-    let mut runner = Runner::new(seed);
-    runner.lenient = opts.drawn;
-    if opts.drawn {
-        runner.draw_power_law(seed, opts);
-        runner.draw_batch_widths(seed);
-    }
-    runner.trace = opts.trace;
-    runner.record = opts.record;
-    runner.allow_stop = opts.allow_stop;
-    runner.responses = opts.responses;
-    runner.retention = opts.retention;
-    runner.judges = opts.judges;
-    runner.app.set(opts.after_restart);
-    runner.reboot();
+    let mut runner = Runner::configured(seed, opts);
     for (index, op) in ops.iter().enumerate() {
         let step = u32::try_from(index).unwrap_or(u32::MAX);
         let fail = |violation| Failure {

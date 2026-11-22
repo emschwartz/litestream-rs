@@ -321,10 +321,22 @@ struct State {
 /// Where the harness's logs stood: its own created-at times, opaque to the rules.
 pub type CreatedAt = Box<dyn Fn() -> (usize, usize) + Send>;
 
+/// Where inside a tick the application's armed commit lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InTickSite {
+    /// Right before the engine reads the committed end: after the tick read its clock, so a
+    /// file stamped with that reading would claim a time before the commit it carries.
+    BeforeCommittedRead,
+    /// After the tick's sync read the committed end, right before a checkpoint takes its write
+    /// barrier: the commit the checkpoint's seal must stage.
+    BeforeBarrier,
+}
+
 /// A commit armed by [`SimSqlite::arm_commit_in_tick`].
 struct InTick {
     pages: Vec<(PageNo, Vec<u8>)>,
     db_size: u32,
+    site: InTickSite,
     created_at: CreatedAt,
 }
 
@@ -333,6 +345,7 @@ impl std::fmt::Debug for InTick {
         f.debug_struct("InTick")
             .field("pages", &self.pages.len())
             .field("db_size", &self.db_size)
+            .field("site", &self.site)
             .finish_non_exhaustive()
     }
 }
@@ -396,8 +409,11 @@ impl State {
         Some(commit)
     }
 
-    /// Makes the armed in-tick commit, if any, and keeps what it made.
-    fn commit_in_tick(&mut self) {
+    /// Makes the armed in-tick commit if it is armed for `site`, and keeps what it made.
+    fn commit_in_tick(&mut self, site: InTickSite) {
+        if self.in_tick.as_ref().is_none_or(|armed| armed.site != site) {
+            return;
+        }
         let Some(armed) = self.in_tick.take() else {
             return;
         };
@@ -1192,21 +1208,22 @@ impl SimSqlite {
         self.with(|state| state.app_commit(pages, db_size))
     }
 
-    /// Arms a commit the app makes inside the engine's next tick: right before
-    /// a checkpoint takes its write barrier, after the tick's sync read the
-    /// committed end. `created_at` is read at that moment, so the harness can tell
-    /// what happened before the commit and what after. It replaces any armed
+    /// Arms a commit the app makes inside the engine's next tick, at `site`.
+    /// `created_at` is read at that moment, so the harness can tell what
+    /// happened before the commit and what after. It replaces any armed
     /// commit; [`SimSqlite::take_commit_in_tick`] disarms it.
     pub fn arm_commit_in_tick(
         &self,
         pages: Vec<(PageNo, Vec<u8>)>,
         db_size: u32,
+        site: InTickSite,
         created_at: CreatedAt,
     ) {
         self.with(|state| {
             state.in_tick = Some(InTick {
                 pages,
                 db_size,
+                site,
                 created_at,
             });
         });
@@ -1724,6 +1741,9 @@ impl WalSource for SimSource {
 
     fn committed(&mut self) -> Result<CommittedRead, SourceError> {
         let mut state = lock(&self.state);
+        // The application commits after the tick read its clock and before the engine reads
+        // the committed end: the stamp of the file that carries it must come after it.
+        state.commit_in_tick(InTickSite::BeforeCommittedRead);
         state.faults.take(SourceOp::Committed)?;
         // The real source retakes a lapsed read transaction before it reads
         // (`ensure_read_lock_held`), so every answer belongs to a hold that is
@@ -1876,7 +1896,7 @@ impl Checkpointer for SimCheckpointer {
         let mut state = lock(&self.state);
         // The application commits after the tick's sync read the committed end and before the
         // barrier keeps writers out: the commit the checkpoint's seal must stage.
-        state.commit_in_tick();
+        state.commit_in_tick(InTickSite::BeforeBarrier);
         state.faults.take(SourceOp::BeginBarrier)?;
         let id = state.take_writer(Conn::Barrier)?;
         state.barrier = Some(id);

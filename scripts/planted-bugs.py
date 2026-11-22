@@ -143,7 +143,7 @@ def main() -> int:
             continue
         git("checkout", "--force", "--detach", "HEAD", cwd=TREE)
         git("clean", "-fdxq", "-e", "target", cwd=TREE)
-        patch = PATCHES / f"{name}.patch"
+        patch = PATCHES / f"{bug.get('patch', name)}.patch"
         applied = git("apply", "--whitespace=nowarn", str(patch), cwd=TREE, check=False)
         if applied.returncode != 0:
             rows.append((name, fix, "STALE", f"{patch.name} no longer applies; re-express it against the "
