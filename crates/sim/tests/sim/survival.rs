@@ -425,3 +425,16 @@ fn an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd() {
         panic!("{failure}");
     }
 }
+
+/// Seed 0x3ed of the fixed set's mix, 279 operations. Under lying replica reads a boot judges
+/// the replica's newest level-0 file (the engine's own upload) torn, and drops the staged
+/// copy that a crash left unverifiable. With the takeover capped at the confirmed transaction
+/// the record stopped one short of that file, and once reads were honest the next boot
+/// refused it. The record is now capped at the replica's newest listed level-0 key.
+#[test]
+fn a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed() {
+    let seed = lsr_sim::Seed::new(0x3ed);
+    if let Err(failure) = lsr_sim::run(seed, 279, &lsr_sim::Weights::mixed(seed)) {
+        panic!("{failure}");
+    }
+}
