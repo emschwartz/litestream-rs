@@ -144,7 +144,7 @@ response = "At boot: **stop**, `OtherWriter`, before anything is written, unless
 signal = "`other_writer` and the refusal log line; or `newest_staged_file_unreadable`"
 at_risk = "None at a refusal. Otherwise the local commits those staged files held are in the snapshot; their restore points are lost"
 recovery = "Operator (`lsr take-over`, or remove the other writer's file); automatic otherwise"
-detected_by = "core::`a_verifying_listed_key_unlike_the_staged_file_is_never_written_over`, sim::`a_verifying_replica_object_is_not_written_over_seed_0xc6b2`; core::`second_writer::a_running_engine_stops_when_another_writer_took_its_next_id`; plant::`verifying-object-written-over`, plant::`boot-divergence-snapshots-above-another-writer`"
+detected_by = "core::`a_verifying_listed_key_unlike_the_staged_file_is_never_written_over`, sim::`a_verifying_replica_object_is_not_written_over_seed_0xc6b2`; core::`second_writer::a_running_engine_stops_when_another_writer_took_its_next_id`; plant::`verifying-object-written-over`, plant::`boot-divergence-snapshots-above-another-writer`, sim::`survival::a_refusal_over_a_forged_staged_copy_is_expected_after_a_rollback_seed_0xf43e5`"
 recovered_by = "sim::`a_verifying_replica_object_is_not_written_over_seed_0xc6b2`"
 
 [[row]]
