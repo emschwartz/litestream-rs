@@ -1108,5 +1108,11 @@ fn a_hole_every_listing_shows_is_reported() {
     l0(&inner, 3);
     let store = Wrapped::new(inner);
     let report = names(&store);
-    assert!(matches!(only(&report), Finding::Gap { at_newest: true, .. }));
+    assert!(matches!(
+        only(&report),
+        Finding::Gap {
+            at_newest: true,
+            ..
+        }
+    ));
 }
