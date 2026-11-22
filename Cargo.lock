@@ -1056,6 +1056,7 @@ dependencies = [
  "lsr-sqlite",
  "lsr-store-fs",
  "lsr-wal",
+ "proptest",
  "rusqlite",
  "tempfile",
  "thiserror",

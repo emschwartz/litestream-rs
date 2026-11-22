@@ -22,6 +22,8 @@ that caught it must fail.
   failure, or `none`); a plant no seed finds is a listed generator gap, not a failure.
 - A new fix adds an entry and a patch in the same commit as the fix. A `STALE` patch is re-expressed
   against the current tree, or the entry is retired with a reason in the ledger's header.
+- `just planted-bugs-apply`, part of `just check`, runs `git apply --check` on every patch, so a change
+  that makes a patch stale fails its own gate in seconds instead of the nightly run.
 
 Mutation testing covers the lines a pull request changes: `just mutants-diff` (CI job `mutants-diff`)
 runs `cargo mutants --in-diff` over `lsr-core` and `lsr-ltx`. A missed mutant fails the job unless

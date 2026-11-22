@@ -584,6 +584,39 @@ mod cases {
         assert_eq!(h.store.pending_orphans(), 0);
     }
 
+    /// A process killed mid-upload takes its ids with it: the next process's boot finds the
+    /// upload in the bucket's listing and aborts it. An upload under another key stays.
+    #[test]
+    fn a_killed_process_s_multipart_upload_is_aborted_at_the_next_boot() {
+        let h = FakeHarness::new();
+        block_on(async {
+            let mut up = h
+                .store
+                .begin_upload(&key(0, 1, 1), Timestamp::from_unix_millis(5))
+                .await
+                .unwrap();
+            up.write(&body(PART)).await.unwrap();
+        });
+        let builder = lsr_store_s3::RequestBuilder::new(&config(), &credentials()).unwrap();
+        let clock = lsr_core::FakeClock::new(now());
+        let foreign = format!("{}/notes.ltx", config().prefix().as_str());
+        lsr_store_s3::abandon_upload(&*h.wire, &builder, &clock, &foreign, body(PART)).unwrap();
+        assert_eq!(h.wire.inner().open_uploads(), 2);
+        // The next process over the same bucket knows no ids.
+        let next = S3Store::with_transport(
+            config(),
+            credentials(),
+            Shared(Arc::clone(&h.wire)),
+            lsr_core::FakeClock::new(now()),
+        )
+        .unwrap();
+        assert_eq!(next.pending_orphans(), 0);
+        assert_eq!(block_on(next.remove_scratch()), Ok(1));
+        assert_eq!(h.wire.inner().open_uploads(), 1, "the foreign upload stays");
+        assert_eq!(count(&h.wire, Shape::ListUploads), 1);
+        assert_eq!(block_on(next.remove_scratch()), Ok(0));
+    }
+
     #[test]
     fn abort_removes_the_upload() {
         let h = FakeHarness::new();

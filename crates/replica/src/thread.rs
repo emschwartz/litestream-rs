@@ -273,7 +273,7 @@ impl Worker {
             let now = self.runtime.clock.now();
             match self.turn(now) {
                 Turn::Again => {}
-                Turn::Wait(until) => self.runtime.park.park(self.verify_wake(until)),
+                Turn::Wait(until) => self.runtime.park.park_from(self.verify_wake(until), now),
                 Turn::Done(outcome) => return outcome,
             }
         }
