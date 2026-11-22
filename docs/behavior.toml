@@ -278,6 +278,61 @@ detected_by = "sim::`store::tests::an_unsynced_unlink_comes_back_or_stays_done_u
 notes = "Under the block crash law the simulator undoes each unsynced unlink by coin on power loss, as `crash_law.rs` does for directory entries. With the store's sync after each delete on (the default), the swarm resurrects none; with it off, it brings such files back and judges every restore after them (unaided campaign, `crates/sim/tests/sim/unaided.rs`); no seed is pinned as a named test"
 
 [[row]]
+table = "Boot"
+id = "BOOT-25"
+circumstance = "The engine journal (`<meta>/lsr-journal`, `docs/journal.md`) is missing while staging or the replica holds files: an upgrade, a meta directory inherited from Go or not kept, or a deleted journal (`core/src/journal.rs`, `judge`)"
+response = "continue: the boot is the one it would be with no journal"
+signal = "`JournalMissing` (`Actor::journal`)"
+at_risk = "None"
+recovery = "Automatic"
+detected_by = "core::`boot_reports_what_it_read_of_the_journal`, core::`a_missing_journal_beside_staged_files_and_an_empty_replica_is_reported`, core::`a_missing_journal_beside_a_replica_with_files_is_reported`, core::`no_journal_a_boot_can_find_changes_what_the_engine_does`; plant::`journal-verdict-costs-a-snapshot`"
+notes = "Step 2 of the journal's migration: boot reads and reports, and nothing decides on it yet. The signal is on `Actor::journal`; health, `/healthz` and metrics carry it in the next step"
+
+[[row]]
+table = "Boot"
+id = "BOOT-26"
+circumstance = "The journal is missing and staging and the replica are both empty: a first run"
+response = "continue"
+signal = "none"
+at_risk = "None"
+recovery = "Automatic"
+detected_by = "core::`a_missing_journal_on_a_first_run_reports_nothing`; plant::`journal-first-run-reported`"
+notes = "Step 2 of the journal's migration: boot reads and reports, and nothing decides on it yet. The signal is on `Actor::journal`; health, `/healthz` and metrics carry it in the next step"
+
+[[row]]
+table = "Boot"
+id = "BOOT-27"
+circumstance = "The journal exists and holds no record this binary reads: every slot short, zeroed or failing its checksum, an open that fails, or two slots with one sequence number (`lsr-journal` `parse`)"
+response = "continue, as BOOT-25"
+signal = "`JournalUnreadable`"
+at_risk = "None"
+recovery = "Automatic"
+detected_by = "core::`boot_reports_what_it_read_of_the_journal`, core::`no_journal_a_boot_can_find_changes_what_the_engine_does`"
+notes = "Step 2 of the journal's migration: boot reads and reports, and nothing decides on it yet. The signal is on `Actor::journal`; health, `/healthz` and metrics carry it in the next step"
+
+[[row]]
+table = "Boot"
+id = "BOOT-28"
+circumstance = "The journal's newest record is from a newer version"
+response = "continue, as BOOT-25"
+signal = "`JournalNewer`"
+at_risk = "None"
+recovery = "Automatic"
+detected_by = "core::`boot_reports_what_it_read_of_the_journal`"
+notes = "Step 2 of the journal's migration: boot reads and reports, and nothing decides on it yet. The signal is on `Actor::journal`; health, `/healthz` and metrics carry it in the next step"
+
+[[row]]
+table = "Boot"
+id = "BOOT-29"
+circumstance = "One journal slot fails to read with an I/O error; the other holds a record"
+response = "continue, as BOOT-25. The record read may be older than the newest written"
+signal = "`JournalSlotUnreadable`"
+at_risk = "None"
+recovery = "Automatic"
+detected_by = "core::`boot_reports_what_it_read_of_the_journal`; plant::`journal-slot-error-unreported`"
+notes = "Step 2 of the journal's migration: boot reads and reports, and nothing decides on it yet. The signal is on `Actor::journal`; health, `/healthz` and metrics carry it in the next step"
+
+[[row]]
 table = "Running"
 id = "RUN-1"
 circumstance = "New commits. Every poll (1 s) the engine reads the wal-index's committed end, fsyncs the WAL, scans the new frames checking the checksum chain, and stages one level-0 file of at most 64 MiB of WAL (`actor.rs`, `sync.rs`)"
