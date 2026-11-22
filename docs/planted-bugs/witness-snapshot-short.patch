@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
+index d7850f9..ff08fdc 100644
+--- a/crates/core/src/witness.rs
++++ b/crates/core/src/witness.rs
+@@ -448,7 +448,7 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
+         (Some(link), _) => link.commit.get(),
+         // A snapshot that stops short of a file before it in its generation
+         // describes an earlier state of that WAL.
+-        (None, Some(link)) if link.salts == salts && end.get() < link.end => {
++        (None, Some(link)) if link.salts == salts && end.get() < link.end && false => {
+             return Ok(Err(Refused::Contradicted));
+         }
+         (None, _) if start == first_frame => 0,
