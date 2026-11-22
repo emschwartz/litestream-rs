@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/unproven.rs b/crates/core/src/actor/unproven.rs
+index 4b37495..12ae57f 100644
+--- a/crates/core/src/actor/unproven.rs
++++ b/crates/core/src/actor/unproven.rs
+@@ -125,7 +125,7 @@ impl Actor {
+ 
+     /// Step 3 is done: a file was staged after the TRUNCATE, and the first one is the snapshot.
+     pub(super) fn staged_after_truncate(&mut self) {
+-        if matches!(self.kept.unproven, Unproven::Snapshot) {
++        if matches!(self.kept.unproven, Unproven::Snapshot) && false {
+             self.kept.unproven = Unproven::No;
+         }
+     }

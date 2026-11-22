@@ -65,12 +65,12 @@ Each guarantee is stated as something an outside observer can check, the conditi
 
 | Guarantee | Open on main | Counted against it |
 |---|---|---|
-| G0 a restore of the latest state succeeds and is not older than what health reported | Yes | UP-11 (unseen case), MAINT-11, D2 |
+| G0 a restore of the latest state succeeds and is not older than what health reported | Yes | UP-11 (unseen case), MAINT-11, D2 (narrowed to the journal's residue) |
 | G1 a successful restore is a committed state | Hazards, none with a test that fails on main in the gate | BOOT-19 (expected-fail test, ignored), BOOT-18 (shown on #96's tree only), RUN-12 under the default response |
 | G2 latest does not go backwards unreported | None shown on main | The exceptions' signals can be missing after a bucket rollback (D17, CHK-4) |
 | G3 as-of returns nothing begun after the instant | None since #98 | Checked by the simulator's per-read clock since C7 was fixed (RUN-25, RUN-26) |
 | G4 lag | No tested bound | N1 |
-| G7 health is not clean while replication is halted | Yes | N1, D2 |
+| G7 health is not clean while replication is halted | Yes | N1 |
 
 Version 0.0.0: these are what the code is built to deliver.
 
@@ -178,7 +178,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 
 **Counted against G0.**
 - UP-11, unseen case, and MAINT-11: after files are removed from the replica while the engine runs, a restore of the latest state refuses with `Gap` until the next scheduled snapshot, up to 24 hours, behind `/healthz` 200. No expected-fail test.
-- D2: after a failed WAL fsync and a restart before the engine's TRUNCATE, frames that never reached disk can be uploaded, so `replicated_txid` can name commits the database then loses. Expected-fail tests (ignored): sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`. Within one process the failure is handled (RUN-3).
+- D2, narrowed: the engine journal (`docs/journal.md`) records a failed WAL fsync in the tick that met it, and a restart before the TRUNCATE still owes it (RUN-3; sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`, both now passing). What remains: a kill inside that one tick, after the failed fsync and before the journal's write; a journal that cannot be written (`JournalUnwritable`), where the debt lives in the process only; and a journal deleted or damaged between the failure and the restart. In those cases frames that never reached disk can still be uploaded.
 
 **Evidence.** Oracle `LatestLostAck` (the latest restore is not older than the newest transaction the engine acknowledged) and oracle `RestoreRefused` on the simulator runs listed under G1. Acknowledgements survive power loss (CHK-2, which fixed C2).
 
@@ -188,7 +188,6 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 
 **Counted against G7.**
 - N1: the age gauge restarts from the process's start at every restart, so a crash loop shorter than the alert threshold keeps it low. Before its first boot a process counts lag from its start, so a process that starts with the store unreachable no longer shows a clean age gauge; since #104 its boot task (the sync task) is also degraded as a stall from its 8th failed boot.
-- D2: the WAL fsync failure itself is forgotten by a restart before the TRUNCATE.
 
 D12 is closed by #104: every fault whose policy is to retry degrades its task as `Stalled(<fault>)` at the 8th failure in a row (`STALLED_AFTER` in `core/src/fault.rs`). From a 1 s interval the waits before the 8th failure sum to 127 s, inside the statement's 5 minutes. A failed WAL fsync is degraded at once (`wal_sync_failed`). A wait a maintenance level keeps never stalls; maintenance blocks no commit's way to the replica.
 
@@ -217,8 +216,8 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 |---|---|---|---|---|
 | Power loss, honest disk. Each block written since the last fsync of its file keeps its old or new bytes independently; the file length is drawn separately | In | Rows BOOT-3 to BOOT-11 | Block crash law at 512 and 4096 bytes: `sqlite/src/testing/vfs.rs`, sim `block_law_campaign`, sqlite `crash_cycle_campaign`. The crash-cycle rig also judges restores while the loss holds: during the segment with the loss armed, with the power off before SQLite recovers, and after the reboot before the engine settles (sqlite `crash_cycles_under_the_block_law_restore_committed_states`; the campaign of 100 seeds of 12 cycles judged 1971, 568 and 568 such restores, 0 anomalies) | The law is taken from the ALICE model (Pillai et al., OSDI 2014). **assumed**: it has not been observed on real disks |
 | Power loss on the real binary | In | Same | LazyFS (`scripts/lazyfs.py`): clear-cache after kill, torn-seq and torn-op on the WAL. It also restores while the loss holds, with the power off and nothing restarted (300 cycles from seed 1000: 166 such restores, 0 anomalies) | LazyFS passes metadata operations straight to the backing filesystem. A missing directory fsync cannot be seen |
-| A lost directory entry: a rename or unlink not followed by a directory fsync | In | Commit of a staged file fsyncs the file, renames, fsyncs the directory; a delete removes its files and fsyncs each level directory it named, once per call (`store-fs/src/lib.rs`) | store-fs `a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn` and `a_crash_after_a_delete_never_brings_the_file_back` replay the steps and crash at every one (plants `staging-fsync-before-rename`, `staging-dir-fsync`, `delete-without-dir-sync`). In half the swarm's seeds the simulator's staging is this store itself on an in-memory filesystem under the same crash law (`crates/sim/src/staging.rs`, `memfs.rs`), judged by the staging contract after every power loss; the swarm finds all three plants with no named test (13 seeds of 600 from 1000001, each). With that judge off, the engine's liveness judge still finds the two commit plants (43 and 77 seeds of 1000 from 2000001) and not the delete plant (BEHAVIOR D11: moot) | A directory the store did not create, made by an earlier crashed process and never synced, is the one window left (`store-fs` module doc) |
-| fsync of the WAL fails | In, within one process | RUN-3 | sqlite `a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`; sim `wal_fsync_fails` with the simulator's lost writeback | Forgotten by a restart before the TRUNCATE. **known wrong** (D2), expected-fail tests ignored |
+| A lost directory entry: a rename or unlink not followed by a directory fsync | In | Commit of a staged file fsyncs the file, renames, fsyncs the directory; a delete removes its files and fsyncs each level directory it named, once per call (`store-fs/src/lib.rs`) | store-fs `a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn` and `a_crash_after_a_delete_never_brings_the_file_back` replay the steps and crash at every one (plants `staging-fsync-before-rename`, `staging-dir-fsync`, `delete-without-dir-sync`). The simulator treats a delete as durable at once, which the store now makes true | A directory the store did not create, made by an earlier crashed process and never synced, is the one window left (`store-fs` module doc) |
+| fsync of the WAL fails | In, across restarts while the engine journal is writable | RUN-3 | sqlite `a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`, `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`; sim `wal_fsync_fails`, `wal_fsync_fails_then_restart` with the simulator's lost writeback | Forgotten only by a kill inside the failing tick, or while the journal is unwritable or was deleted (D2, narrowed) |
 | fsync of a staged file fails | In | RUN-15 | sim `fsync_fails_once` | |
 | fsync of the database file fails inside a checkpoint | Unclear | Retried as local I/O (CKPT-8) | None | **unknown** whether SQLite's next checkpoint copies the pages again (D8) |
 | Disk full | In | RUN-14 | sim `disk_full_on_staging` | Never escalates past "retrying" |
@@ -330,7 +329,7 @@ There is no per-cause count of snapshots taken on main. It is on #86 (`lsr_snaps
 
 <!-- enum: Fault -->
 
-Every `Fault` variant (`core/src/fault.rs`), its policy (`policy`, `fault.rs`, one exhaustive match), and the rows that describe it. sim `every_fault_has_a_scenario_or_a_reason` asserts each variant has a scenario or a stated reason for none. Two variants are covered by a reason only: `Bug`, on the ground that oracle `BugFault` fails every run that meets it, and `WalSyncFailed`, whose scenario (sim `wal_fsync_fails`) holds under the default responses only, since under responses that stop the run's final restart meets D2 (`fault_reason` in `sim/src/scenario/faults.rs`). Having a scenario means D at most; see the marks.
+Every `Fault` variant (`core/src/fault.rs`), its policy (`policy`, `fault.rs`, one exhaustive match), and the rows that describe it. sim `every_fault_has_a_scenario_or_a_reason` asserts each variant has a scenario or a stated reason for none. One variant is covered by a reason only: `Bug`, on the ground that oracle `BugFault` fails every run that meets it (`fault_reason` in `sim/src/scenario/faults.rs`). `WalSyncFailed` has scenarios under every response set since the engine journal holds the debt across the stop's restart. Having a scenario means D at most; see the marks.
 
 Every policy written "retry" below also stalls: from the 8th failure in a row on one task the task is degraded `Stalled(<fault>)`, keeps the fault's own wait, and never stops (`Actor::stalled` in `core/src/actor.rs`). core `every_retried_fault_stalls_and_no_stall_stops` checks every variant.
 
@@ -501,7 +500,7 @@ Under the default responses only two causes stop the engine: `OtherWriter` and `
 | `WalCorrupt` | No | Nothing past the bad frame can be trusted | Run `PRAGMA integrity_check`; checkpoint from the application so the WAL restarts; restart. A snapshot follows |
 | `WalTruncated` | No | Same | Same |
 | `WalUnlinked` | No | The file the engine reads is no longer the database's WAL | Restart the application's connections and the replicator |
-| `WalSyncFailed` | No | The frames the failed sync covered may never reach the disk | Run `PRAGMA wal_checkpoint(TRUNCATE)` from the application before restarting: a restart alone trusts the WAL again (D2) |
+| `WalSyncFailed` | No | The frames the failed sync covered may never reach the disk | Restart: the engine journal holds the debt, and the restarted engine runs the TRUNCATE before it stages anything. If `JournalUnwritable` is also reported, run `PRAGMA wal_checkpoint(TRUNCATE)` from the application before restarting |
 | `PageSizeChanged` | No | A replica prefix holds one page size, in this port and in Go | Point the replicator at a new prefix. The old prefix keeps every state up to the change |
 | `DatabasePageMismatch` | No | The database file holds bytes no WAL frame wrote. Shipping them replicates possible corruption | Inspect the page named in `/healthz`. Then either repair the database, or accept it (`accept_database_pages`) |
 | `Bug` | No | The engine's own state contradicted itself | Report it with the `BugSite` from the log. A restart boots from disk and bucket |
@@ -523,7 +522,7 @@ Three other ways replication ends that are not a `StopCause`:
 | # | Defect | Rows | Tracking |
 |---|---|---|---|
 | D1 | A crash loop takes one full snapshot per boot with no ceiling; maintenance and retention never run while processes die young; scratch files and open multipart uploads accumulate | BOOT-20, UP-15, MAINT-13 | #97 fixes scratch files and maintenance starvation. The snapshot per boot has no branch |
-| D2 | A failed WAL fsync is forgotten by a restart before the engine's TRUNCATE, and the WAL is trusted again. Within one process it is handled since #104. Expected-fail tests (ignored): sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame` | RUN-3, BOOT-21 | Waits on the engine journal decision. Issue #99 |
+| D2 | Narrowed by the engine journal: a failed WAL fsync is recorded in the tick that met it and survives a restart (sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`, now passing). Still forgotten by a kill inside that tick before the journal's write, while the journal is unwritable (`JournalUnwritable`), or when the journal is deleted or damaged before the restart | RUN-3, BOOT-21 | The residue is the journal design's "Does not fix" (`docs/journal.md`). Issue #99 |
 | D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Expected-fail test: sim `a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed_0x484` (ignored) | BOOT-19, G1 | None open. Issue #99 |
 | D4 | **Closed by #98.** A restore as of an instant could return a state committed up to one tick's read after the instant | G3 | Merged |
 | D5 | A boot or relist listing that lags the bucket is trusted | BOOT-18, MAINT-12 | #96 |
@@ -598,7 +597,7 @@ These are defects in the evidence, not in the engine. Each weakens a guarantee's
 |---|---|---|
 | L1 | No file certifies its predecessor. Every file is written without a running page checksum, as Go's default is, so a chain of individually valid files with wrong content restores without error (REST-9) | Decision D2 in `docs/PLAN.md`: Go's compactor rejects tracked checksums, and Go must stay a fallback |
 | L2 | The LTX file checksum covers decompressed pages, not the compressed bytes. Two different byte strings can decode to the same pages and both verify | Go's format. The upload token carries a digest of the raw bytes for the engine's own files |
-| L3 | The engine keeps no state of its own across restarts (no file Go does not read, decision D6) | The root of D1, D2, D3, D9 and of `StagedUnverified` after a plain crash |
+| L3 | The engine keeps one file of its own across restarts, the engine journal (decision D8 amends D6), and so far records one fact in it: a failed WAL fsync | The root of D1, D3, D9 and of `StagedUnverified` after a plain crash; of D2's residue |
 | L4 | A lying disk makes the replica run ahead of the database | No software fix. Detected only while the regrown WAL differs (BOOT-9) |
 | L5 | The simulator and the engine can share a wrong belief about SQLite or the disk | Reduced by the history judge, real-SQLite crash cycles and LazyFS; not removed |
 
