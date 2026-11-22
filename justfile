@@ -317,8 +317,14 @@ upstream-test-map-fresh:
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$list"
     LSR_UPSTREAM_TEST_MAP_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=upstream_test_map::every_counterpart_exists)'
 
+# Renders docs/BEHAVIOR.md from docs/behavior.toml (the behaviour table's rows) and
+# docs/behavior/template.md (the prose); `check` fails when the committed file differs.
+behavior-doc:
+    LSR_BEHAVIOR_WRITE=1 cargo nextest run -p lsr-compat --test compat --locked -E 'test(=behavior::the_behavior_doc_is_rendered_from_its_rows)'
+
 # Every test docs/evidence.toml cites exists, a row citing an ignored test names the recipe that
-# runs it, and no planted bug's killing test is ignored (crates/compat/tests/compat/evidence.rs).
+# runs it, and no planted bug's killing test is ignored (crates/compat/tests/compat/evidence.rs);
+# every test docs/behavior.toml cites is a test or a simulator scenario (behavior.rs).
 # The listings are generated into target/ and never committed, as for the upstream test map.
 evidence-fresh:
     #!/usr/bin/env bash
@@ -328,7 +334,7 @@ evidence-fresh:
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$dir/all.txt"
     cargo nextest list --workspace --all-features --locked --run-ignored only --message-format oneline --color never > "$dir/ignored.txt"
     LSR_EVIDENCE_ALL_TESTS="$dir/all.txt" LSR_EVIDENCE_IGNORED_TESTS="$dir/ignored.txt" \
-        cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=evidence::every_cited_test_exists_and_runs_where_it_says)'
+        cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=evidence::every_cited_test_exists_and_runs_where_it_says) | test(=behavior::every_behavior_citation_resolves)'
 
 # Regenerate the upstream test names in docs/upstream-test-map/upstream-tests.txt from the pinned clones
 # (`just upstream` first). The test map test in `check` reads this file, never the clone.

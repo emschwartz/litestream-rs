@@ -8,6 +8,8 @@ mod alternate;
 #[cfg(test)]
 mod alternation;
 #[cfg(test)]
+mod behavior;
+#[cfg(test)]
 mod compaction;
 #[cfg(test)]
 mod evidence;
