@@ -636,6 +636,54 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// What the boot's witness cannot prove among the staged level-0 files
+    /// the replica does not hold yet: a snapshot (a file with every page) or a
+    /// hop (a file read from a WAL generation's first frame without every
+    /// page). `None` when there is neither.
+    #[must_use]
+    pub fn pending_unprovable(&self) -> Option<Unprovable> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let newest = self.remote_newest();
+        let listing = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX)).ok()?;
+        let first_frame = u64::try_from(lsr_wal::HEADER_LEN).unwrap_or(u64::MAX);
+        listing
+            .files
+            .iter()
+            .filter(|file| newest.is_none_or(|newest| file.key.range().max().get() > newest))
+            .find_map(|file| {
+                // Only a file read from a generation's first frame (or from no
+                // WAL range) can be either: the header says so, the pages
+                // whether it is whole.
+                let len =
+                    lsr_core::ReadLen::new(u32::try_from(lsr_ltx::HEADER_LEN).unwrap_or(u32::MAX))?;
+                let head = block_on(self.staging_raw.read(&file.key, 0, len)).ok()?;
+                let raw = head.first_chunk::<{ lsr_ltx::HEADER_LEN }>()?;
+                let origin = lsr_ltx::Header::decode(raw).ok()?.fields().wal;
+                if origin.is_some_and(|origin| origin.offset() != first_frame) {
+                    return None;
+                }
+                let bytes = self.read_staged(&file.key).ok()?;
+                Some(if is_full_image(&bytes) {
+                    Unprovable::Snapshot
+                } else {
+                    Unprovable::Hop
+                })
+            })
+    }
+
+    /// The newest transaction any replica file holds, at any level, read
+    /// around the wrappers; `None` when the replica is empty or cannot list.
+    #[must_use]
+    pub fn remote_newest(&self) -> Option<u64> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        Level::ALL
+            .into_iter()
+            .filter_map(|level| block_on(self.remote_raw.list(level, None, PageLimit::MAX)).ok())
+            .flat_map(|listing| listing.files)
+            .map(|file| file.key.range().max().get())
+            .max()
+    }
+
     /// Every level-0 file on the replica, oldest first, read around the
     /// wrappers.
     ///
@@ -1039,3 +1087,12 @@ impl World {
 
 #[cfg(test)]
 mod tests;
+
+/// A pending staged file the boot's witness cannot prove from the live WAL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unprovable {
+    /// A file with every page.
+    Snapshot,
+    /// A file that starts a WAL generation without every page.
+    Hop,
+}

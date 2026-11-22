@@ -24,6 +24,7 @@ use crate::crash_law::CrashLaw;
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
+use crate::liveness::Justifier;
 use crate::oracle::{Bound, Incarnation, Violation, Windows, bug_fault, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
@@ -329,6 +330,8 @@ struct Runner {
     /// engine a probe past a listing that ends before what it confirmed, and
     /// a relist once it learns of the loss.
     regressions: u32,
+    /// The snapshot liveness oracle.
+    liveness: crate::liveness::Liveness,
     judges: Judges,
     /// What the app does after a restart, and its own log of commits.
     app: after_restart::App,
@@ -382,6 +385,7 @@ impl Runner {
             rate_active: false,
             failed_boots: 0,
             regressions: 0,
+            liveness: crate::liveness::Liveness::new(),
             judges: Judges::default(),
             app: after_restart::App::new(seed),
             op_began_at: 0,
@@ -409,6 +413,7 @@ impl Runner {
         self.unwatched = true;
         self.degraded = [false; 5];
         self.latest = None;
+        self.liveness.rebooted();
     }
 
     fn app_seen(&self) -> AppCheckpoints {
@@ -524,6 +529,9 @@ impl Runner {
     }
 
     fn crashed(&mut self, kind: CrashKind) {
+        if kind == CrashKind::Power {
+            self.liveness.note(Justifier::PowerLoss);
+        }
         self.reboot();
         self.app.restarted(self.op_began_at);
         self.report.reach.bump(format!("crash.{}", variant(&kind)));
@@ -614,7 +622,9 @@ impl Runner {
         let passive0 = self.tally.count(lsr_core::CheckpointMode::Passive);
         let total0 = self.tally.total();
         let began = self.now();
+        let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
+        self.liveness_before_tick(booting);
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
         let ended = self.run_one(plan);
@@ -623,8 +633,9 @@ impl Runner {
             self.life.boot_salts = Some(salts);
             self.life.boot_commits = commits;
         }
-        self.judge_puts()?;
-        self.judge_staged_durable()?;
+        self.judge_stores()?;
+        let crashed = matches!(ended, TickEnd::Crashed { .. });
+        self.liveness_mid_tick(hits0, crashed)?;
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
@@ -661,6 +672,7 @@ impl Runner {
                 (Step::Crashed, None)
             }
         };
+        self.liveness_after_tick(self.actor.snapshots(), true, !crashed)?;
         let stats = TickStats {
             event,
             remote: delta(remote0, self.w.remote_recorder.counts()),
@@ -676,6 +688,27 @@ impl Runner {
         Ok((step, stats))
     }
 
+    /// Judges what the tick put on the replica and left staged.
+    fn judge_stores(&mut self) -> Result<(), Violation> {
+        self.judge_puts()?;
+        self.judge_staged_durable()
+    }
+
+    /// Shows the liveness oracle the WAL before a tick, and, before a boot,
+    /// what the boot's witness will find unprovable.
+    fn liveness_before_tick(&mut self, booting: bool) {
+        self.liveness.see_wal(
+            self.w.sqlite.wal_header_salts(),
+            self.w.sqlite.our_reader_pins_wal(),
+        );
+        if booting && let Some(what) = self.w.pending_unprovable() {
+            self.liveness.note(Justifier::PendingUnprovable);
+            self.report
+                .reach
+                .bump(format!("liveness.pending_unprovable.{}", variant(&what)));
+        }
+    }
+
     /// Takes in a tick that ran: records it, checks its retry wait, and
     /// moves the clock as a driver would.
     fn ran(&mut self, event: &Event, next: Next, began: Timestamp) -> Result<Step, Violation> {
@@ -683,6 +716,7 @@ impl Runner {
             self.report.seen.push(Seen::Event(event.clone()));
         }
         self.note_event(event);
+        self.judge_snapshot(event)?;
         let began = self.latest.map_or(began, |latest| latest.max(began));
         self.latest = Some(began);
         capped(event, began)?;
@@ -719,6 +753,36 @@ impl Runner {
         }
     }
 
+    /// Hands a snapshot the event announces to the liveness oracle, and
+    /// tells it when a fault failed a step.
+    fn judge_snapshot(&mut self, event: &Event) -> Result<(), Violation> {
+        // A boot or a step under a wal-index reset ahead of the WAL header
+        // leaves a position in the header's generation that proves nothing:
+        // the header the next commit writes is a change it cannot follow.
+        if matches!(event, Event::Booted { .. } | Event::Synced { .. })
+            && self.w.sqlite.index_reset_ahead()
+        {
+            self.liveness.note_in_tick(Justifier::PositionUnproven);
+        }
+        let (cause, at_boot) = match event {
+            Event::Booted { cause: Some(cause) } => (cause, true),
+            Event::Resnapshot(cause) => (cause, false),
+            Event::Degraded { .. } | Event::Retrying { .. } => {
+                self.liveness.note_in_tick(Justifier::PositionUnproven);
+                return Ok(());
+            }
+            Event::Booted { cause: None }
+            | Event::Synced { .. }
+            | Event::Checkpointed { .. }
+            | Event::Uploaded(_)
+            | Event::Maintained { .. }
+            | Event::Idle
+            | Event::Clamped(_) => return Ok(()),
+        };
+        self.liveness
+            .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)
+    }
+
     /// Counts what an event shows: its kind, and the fault, cause or
     /// snapshot it names.
     fn note_event(&mut self, event: &Event) {
@@ -746,7 +810,78 @@ impl Runner {
         }
     }
 
+    /// Tells the liveness oracle what the tick that just ran did, before its
+    /// end is taken in. A crashed tick has no event to judge, and ends with
+    /// a new engine whose counter starts again: its stores are taken in
+    /// first, then what the crash did to the WAL, which came after anything
+    /// the tick staged.
+    fn liveness_mid_tick(&mut self, hits0: (u64, u64), crashed: bool) -> Result<(), Violation> {
+        self.note_tick_faults(hits0);
+        self.liveness_after_tick(self.actor.snapshots(), !crashed, crashed)?;
+        let (wal, pinned) = (
+            self.w.sqlite.wal_header_salts(),
+            self.w.sqlite.our_reader_pins_wal(),
+        );
+        if crashed {
+            self.liveness.see_wal(wal, pinned);
+        } else {
+            self.liveness.see_wal_after_tick(wal, pinned);
+        }
+        Ok(())
+    }
+
+    /// Hands the liveness oracle what the tick staged and uploaded, with the
+    /// engine's snapshot counter as the tick left it, when `now`; `ended` is
+    /// false for a tick that crashed.
+    fn liveness_after_tick(
+        &mut self,
+        snapshots: lsr_core::SnapshotCounts,
+        ended: bool,
+        now: bool,
+    ) -> Result<(), Violation> {
+        if !now {
+            return Ok(());
+        }
+        let staging = self.w.staging_recorder.events();
+        let remote = self.w.remote_recorder.events();
+        let world = crate::liveness::WithEngine {
+            world: &self.w,
+            staged: self.actor.staged().map(lsr_ltx::Txid::get),
+        };
+        self.liveness.after_tick(
+            (&staging, &remote),
+            &world,
+            snapshots,
+            ended,
+            &mut self.report.reach,
+        )
+    }
+
+    /// Scheduled faults that hit a call on either store, summed.
+    fn fault_hits(&self) -> (u64, u64) {
+        let sum = |faults: &crate::FaultHandle| {
+            faults.hits().iter().fold(0_u64, |sum, (_, _, hits)| {
+                sum.saturating_add(u64::from(*hits))
+            })
+        };
+        (sum(&self.w.staging_faults), sum(&self.w.remote_faults))
+    }
+
+    /// Notes for the liveness oracle the faults that hit in the tick that just ran.
+    fn note_tick_faults(&mut self, (staging0, remote0): (u64, u64)) {
+        let (staging, remote) = self.fault_hits();
+        if staging > staging0 {
+            self.liveness.note_in_tick(Justifier::StagingFault);
+        }
+        if remote > remote0 {
+            self.liveness.note_in_tick(Justifier::RemoteFault);
+        }
+    }
+
     fn note_lost(&mut self, lost: &[(lsr_core::FileKey, crate::store::Lost)]) {
+        if !lost.is_empty() {
+            self.liveness.note(Justifier::StagedLost);
+        }
         for (_, how) in lost {
             self.report.reach.bump(format!("staged.{}", variant(how)));
         }
@@ -1540,7 +1675,26 @@ impl Runner {
         Ok(())
     }
 
+    /// Applies `op`, telling the liveness oracle what it did by itself and
+    /// how it left the WAL's header.
     fn apply(&mut self, op: &Op) -> Result<(), Violation> {
+        self.liveness.note_op(op);
+        self.liveness.see_wal(
+            self.w.sqlite.wal_header_salts(),
+            self.w.sqlite.our_reader_pins_wal(),
+        );
+        self.apply_op(op)?;
+        // An operation that runs ticks between its edits (another writer's
+        // file put, then removed after the engine ran) edits again after them.
+        self.liveness.note_op(op);
+        self.liveness.see_wal(
+            self.w.sqlite.wal_header_salts(),
+            self.w.sqlite.our_reader_pins_wal(),
+        );
+        Ok(())
+    }
+
+    fn apply_op(&mut self, op: &Op) -> Result<(), Violation> {
         match op {
             Op::Commit { pages, grow } => self.commit(*pages, *grow),
             Op::CommitInTick { pages } => self.commit_in_tick(*pages)?,

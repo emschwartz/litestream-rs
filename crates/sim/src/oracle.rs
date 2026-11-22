@@ -143,6 +143,26 @@ pub enum Violation {
         /// The object.
         key: String,
     },
+    /// The engine announced or staged a snapshot that no fault, damage or
+    /// request since the evidence it overturns justifies (see
+    /// `crate::liveness`).
+    #[error("a snapshot for {cause:?} with nothing to justify it; in the window: {window:?}")]
+    UnjustifiedSnapshot {
+        /// The cause.
+        cause: lsr_core::SnapshotCauseKind,
+        /// What the window held.
+        window: Vec<crate::liveness::Justifier>,
+    },
+    /// The engine deleted staged files no replica file holds, giving up
+    /// their restore points, with no fault in the window that could force
+    /// it (see `crate::liveness`).
+    #[error("{lost} staged files given up with nothing to justify it; in the window: {window:?}")]
+    UnjustifiedGiveUp {
+        /// How many.
+        lost: u64,
+        /// What the window held.
+        window: Vec<crate::liveness::Justifier>,
+    },
     /// A running engine listed the replica while another writer's file stood
     /// past its own position, and did not stop.
     #[error("the engine listed {key}, another writer's file past its position, and kept going")]

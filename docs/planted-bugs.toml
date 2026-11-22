@@ -8,6 +8,11 @@
 #   package  the cargo package whose tests are run
 #   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
 #   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+#   (an entry whose `fix` is "plant" is no fixed defect: it proves a checker catches a bug class
+#   it was built for, with the checker's own test named)
+#   canary   optional, on the two canary entries only: the verdict the runner must report,
+#            `survived` (the no-op patch) or `killed` (the patch that breaks a test for certain).
+#            Any other verdict on a canary fails the run: the runner itself is broken.
 #   bin      optional: run the unit tests of one binary target (cargo `--bin`), for a package
 #            with no library, such as lsr-cli
 #
@@ -19,6 +24,20 @@
 # rules they guarded are planted below as the witness-* entries. page-size-after-vacuum (b352aba): its
 # arm (an unusable newest staged file still names its page size) decides only with an empty replica,
 # where every staged file is pending and the boot witness now deletes an unusable one first.
+
+[[bug]]
+name = "canary-no-op"
+fix = "none"
+package = "lsr-ltx"
+canary = "survived"
+tests = ["checksum::tests::the_crc_is_go_iso_on_its_check_string"]
+
+[[bug]]
+name = "canary-fatal"
+fix = "none"
+package = "lsr-ltx"
+canary = "killed"
+tests = ["checksum::tests::the_crc_is_go_iso_on_its_check_string"]
 
 [[bug]]
 name = "asof-straddle"
@@ -175,6 +194,16 @@ tests = [
     "a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate",
 ]
 
+# The snapshot liveness oracle (crates/sim/src/liveness.rs): every boot snapshots. Every restore
+# still matches, so only an oracle that asks why a snapshot was taken can see it. lsr-core's
+# actor::tests::nothing_is_pruned_before_the_first_listing and
+# actor::tests::pages::a_boot_that_continues_checks_pages_the_last_run_recorded fail on it too.
+[[bug]]
+name = "always-snapshot-at-boot"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["liveness::restarts_with_nothing_damaged_never_snapshot"]
 # A failed sync of the WAL taken as a success: the frames it covered are staged, though the
 # kernel may never write them. The simulator's lost writeback and its staged-durability check
 # see it too (`wal_fsync_fails`), as does the actor's unit test.
@@ -388,6 +417,15 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
 
+# The bounded WAL resume (witness, 18cf304) took a wal-index reset ahead of the header as a
+# restart even at the header's first frame: every boot from a file with an empty WAL range
+# snapshotted again. Found by the liveness oracle (seed 0xf85 among others).
+[[bug]]
+name = "resume-index-reset-ahead"
+fix = "claude/checker-hygiene"
+package = "lsr-wal"
+test_bin = "wal"
+tests = ["synthetic::resume_at_the_first_frame_under_an_index_reset_ahead_starts_there"]
 # The boot witness's anchor held for any tail it decodes. The page proof of each pending file does
 # not cover for it: only the anchor sees a tail range regrown with other bytes before a pending range
 # regrown verbatim. The engine's WAL barrier keeps a staged range from regrowing at all, so the
