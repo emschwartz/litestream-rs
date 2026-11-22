@@ -229,6 +229,15 @@ pub fn reachable(endpoint: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// `PATH` is set and not empty under any runner.
+    #[test]
+    fn env_text_reads_a_set_variable_and_none_for_an_unset_one() {
+        let path = std::env::var("PATH").unwrap();
+        assert!(!path.is_empty());
+        assert_eq!(env_text("PATH"), Some(path));
+        assert_eq!(env_text("LSR_NOT_A_VARIABLE_ANYONE_SETS"), None);
+    }
+
     #[test]
     fn nothing_is_skipped_by_default() {
         for r in Resource::ALL {
@@ -266,8 +275,29 @@ mod tests {
         );
     }
 
+    /// Fail closed: a resource is `None` only when the runner named it in [`SKIP_VAR`];
+    /// otherwise it is found or the test panics. Holds whatever this runner's environment.
     #[test]
-    #[should_panic(expected = "this test needs cc")]
+    fn a_resource_is_none_only_when_the_runner_skips_it() {
+        let skips = |r: Resource| {
+            env_text(SKIP_VAR).is_some_and(|s| s.split(',').any(|w| w.trim() == r.name()))
+        };
+        for r in Resource::ALL {
+            let got = std::panic::catch_unwind(|| need(r, || Ok(7)));
+            assert!(
+                skips(r) || matches!(got, Ok(Some(7)) | Err(_)),
+                "{r:?}: {got:?}"
+            );
+        }
+        let got = std::panic::catch_unwind(minio);
+        assert!(
+            skips(Resource::Minio) || !matches!(got, Ok(None)),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "this test needs cc: no cc. To fix: install a C compiler")]
     fn a_missing_resource_panics() {
         must(Resource::CCompiler, || Err::<(), _>("no cc".to_owned()));
     }

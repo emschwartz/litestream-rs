@@ -11,6 +11,7 @@ use crate::conformance::block_on;
 use crate::env::FakeClock;
 use crate::layout::CreatedAt;
 use crate::layout::{FileKey, Level};
+use crate::maintain::RetentionMode;
 use crate::mem::MemStore;
 use crate::plan::RestoreTarget;
 use crate::restore::{MemSink, restore};
@@ -43,7 +44,7 @@ fn ts(n: i64) -> Timestamp {
 }
 
 /// A store that counts every call it is asked to make.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct Counting {
     inner: MemStore,
     calls: Arc<AtomicU32>,
@@ -349,6 +350,21 @@ fn caught_up() -> (Rig, Actor) {
     let mut actor = Actor::new(cfg());
     rig.settle(&mut actor, T0);
     (rig, actor)
+}
+
+/// A restart whose staged copy of the replica's newest file matches it reads
+/// the replica's copy once: equal sizes go straight to the byte compare, with
+/// no separate verification read.
+#[test]
+fn a_restart_reads_a_matching_tail_once_from_each_side() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    let tail = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
+    let before = rig.remote.reads_of(&tail);
+    let mut restarted = Actor::new(cfg());
+    let boot = rig.tick(&mut restarted, T0 + 2);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    assert_eq!(rig.remote.reads_of(&tail) - before, 1);
 }
 
 #[test]
@@ -1115,6 +1131,28 @@ fn a_zero_deadline_reports_unsynced_bytes_and_does_no_work() {
     assert_eq!(rig.remote.calls(), calls);
 }
 
+/// The same after the WAL restarted under the actor: every committed byte of
+/// the new generation is unsynced, however far the old one was synced.
+#[test]
+fn a_zero_deadline_after_a_restart_counts_the_whole_new_generation() {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=3 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    rig.wal.force_restart();
+    rig.commit(4);
+    let committed = rig.wal.committed_end().offset().get();
+    actor.begin_shutdown(ts(T0 + 10));
+    let tick = rig.tick(&mut actor, T0 + 10);
+    assert_eq!(
+        tick,
+        Tick::DeadlineReached(Unfinished {
+            unsynced_wal_bytes: committed,
+            staged_not_uploaded: 0,
+        })
+    );
+}
+
 /// A second shutdown can shorten a drain and never lengthen it.
 #[test]
 fn a_second_shutdown_keeps_the_earlier_deadline() {
@@ -1698,6 +1736,34 @@ fn a_throttled_retention_delete_waits_the_later_of_both() {
     assert_eq!(second, Some(ts(until.unix_millis() + 2_000)));
 }
 
+/// Retention switched on in a running actor deletes at once: the run with it
+/// off reached the day's snapshot and deleted nothing, and the switch lists
+/// the replica again on the next tick at the same instant.
+#[test]
+fn switching_retention_on_deletes_at_the_same_instant() {
+    let mut config = cfg();
+    config.maintenance = config.maintenance.with_retention(RetentionMode::Off);
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(config);
+    rig.settle(&mut actor, T0);
+    for n in 2..=4 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    let mut now = T0 + 60_000;
+    for _ in 0..200 {
+        match next_of(&rig.tick(&mut actor, now)) {
+            Some(Next::Now) => {}
+            Some(Next::At(at)) if at.unix_millis() < T0 + 86_400_000 => now = at.unix_millis(),
+            Some(Next::At(_) | Next::OnWalChange) | None => break,
+        }
+    }
+    assert_eq!(rig.remote.deleted(), [], "retention is off");
+    actor.set_retention(RetentionMode::Enforce);
+    assert_eq!(actor.retention(), RetentionMode::Enforce);
+    rig.settle(&mut actor, now);
+    assert!(!rig.remote.deleted().is_empty(), "nothing deleted at {now}");
+}
+
 impl Rig {
     /// A rig whose replica lists last-modified times, so every created-at time a
     /// decision needs is a request.
@@ -2143,4 +2209,31 @@ fn a_passive_checkpoint_counts_no_boundary_snapshot() {
             .get(crate::fault::SnapshotCauseKind::CheckpointBoundary),
         0
     );
+}
+
+/// An engine's Env prints its sources and stores, and whether a journal is lent, not the journal.
+#[test]
+fn an_env_prints_its_parts_and_whether_it_has_a_journal() {
+    let mut rig = Rig::new();
+    let clock = FakeClock::new(ts(T0));
+    let env = Env {
+        wal: &mut rig.wal,
+        db: &mut rig.db,
+        ck: &mut rig.ck,
+        staging: &rig.staging,
+        remote: &rig.remote,
+        clock: &clock,
+        journal: None,
+    };
+    let text = format!("{env:?}");
+    assert!(text.starts_with("Env { wal: "), "{text}");
+    for part in [
+        "db: ",
+        "ck: ",
+        "staging: ",
+        "remote: ",
+        "journal: false, .. }",
+    ] {
+        assert!(text.contains(part), "{part} in {text}");
+    }
 }

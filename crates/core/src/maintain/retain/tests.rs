@@ -631,6 +631,26 @@ fn a_rule_that_breaks_the_newest_restore_is_caught_by_the_self_check() {
     );
 }
 
+/// A job that deletes the newest file leaves a replica that still plans, but
+/// not to the newest transaction: the self-check holds it rather than take the
+/// shorter plan for a whole one.
+#[test]
+fn the_self_check_holds_a_job_that_takes_the_newest_file() {
+    let mut files = vec![file(9, 1, 10, created_at_of(10))];
+    files.extend((11..=14).map(|n| file(0, n, n, created_at_of(n))));
+    let inventory = inv(files);
+    let job = DeleteJob::new(vec![key(0, 14, 14)]).unwrap();
+    assert_eq!(
+        self_check(&inventory, &job, None),
+        Some(RetentionHold::SelfCheck {
+            outcome: PlanOutcome::BeyondNewest {
+                requested: txid(14),
+                newest: txid(13),
+            },
+        })
+    );
+}
+
 #[test]
 fn the_gate_reports_the_first_failure_in_its_order() {
     let mut files = ladder();

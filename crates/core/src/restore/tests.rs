@@ -294,6 +294,11 @@ fn a_sink_failing_its_checksum_read_never_publishes() {
             ..
         })
     ));
+    let message = result.unwrap_err().to_string();
+    assert!(
+        message.starts_with("sink failed to checksum: "),
+        "{message}"
+    );
     assert_eq!(sink.published(), None);
 }
 
@@ -986,11 +991,25 @@ fn a_sink_failing_at_each_operation_never_publishes() {
 /// but not durable, and the restore error carries that answer.
 #[test]
 fn a_failed_publish_says_what_it_left_at_the_target() {
-    for left in [PublishLeft::Nothing, PublishLeft::VisibleNotDurable] {
+    let outcomes = [
+        (PublishLeft::Nothing, "nothing was published"),
+        (
+            PublishLeft::VisibleNotDurable,
+            "the database is visible but may not survive a crash",
+        ),
+    ];
+    for (left, says) in outcomes {
         let store = four_file_replica();
         let sink = MemSink::new();
         sink.fail_publish(left);
         let result = block_on(restore(&store, RestoreTarget::Latest, sink.clone()));
+        let message = result.as_ref().err().map(ToString::to_string);
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|m| m.starts_with(&format!("publish failed, {says}: "))),
+            "{message:?}"
+        );
         let Err(RestoreError::Publish { left: got, source }) = result else {
             panic!("{left:?}: {result:?}");
         };
