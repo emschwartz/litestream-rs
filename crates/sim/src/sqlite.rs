@@ -1595,6 +1595,17 @@ impl SimSqlite {
         })
     }
 
+    /// Whether the wal-index counts no frame and names salts the WAL file's
+    /// header does not: SQLite reset it and the next commit writes the header.
+    #[must_use]
+    pub fn index_reset_ahead(&self) -> bool {
+        let header = self.wal_header_salts();
+        self.with(|state| {
+            let index = (state.index.salts.salt1, state.index.salts.salt2);
+            state.index.mx_frame == 0 && header != Some(index)
+        })
+    }
+
     /// Whether our read transaction holds a read mark above zero, which keeps
     /// any writer from restarting the WAL under it. Held on mark zero it lets
     /// one restart through, and with none held nothing pins the WAL.

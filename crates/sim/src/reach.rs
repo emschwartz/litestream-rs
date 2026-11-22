@@ -37,7 +37,6 @@ pub const REQUIRED: &[&str] = &[
     "crash.Power",
     "power.kept_unsynced_wal",
     "power.kept_cut_frame",
-    "staged.Torn", // a torn newest staged file at boot (ledger: boot-page-size-stale-staged)
     // Every snapshot cause the liveness oracle maps to its justifying faults; a cause no run
     // reaches is a row of that map nothing tests. CheckpointBoundary and OperatorRequested have
     // no event of their own and are counted when staged (`snapshot.staged.*`).
@@ -97,6 +96,9 @@ pub const WATCHED: &[&str] = &[
     // only a disk that lies about that sync can, and only scenarios draw one.
     "snapshot.LocalRewound",
     "staged.Dropped", // a staged file gone whole after a power loss
+    // A torn newest staged file at boot (ledger: boot-page-size-stale-staged, killed by its named
+    // test). Since main's block crash law, seeds 1..64 never tear one: 3 of seeds 1..400 do.
+    "staged.Torn",
 ];
 
 /// Counts of the states one run, or many summed, reached.
