@@ -49,7 +49,7 @@ fn rotating_seeds() {
         }
         let seed = Seed::new(n);
         println!("{}", replay_line(seed, Some(STEPS)));
-        if let Err(failure) = run(seed, STEPS, &Weights::default()) {
+        if let Err(failure) = run(seed, STEPS, &Weights::mixed(seed)) {
             println!("{failure}");
             failed.push(failure);
         }

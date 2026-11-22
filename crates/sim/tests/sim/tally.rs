@@ -24,7 +24,7 @@ fn tally() {
     let mut failed = Vec::new();
     for n in base..base.saturating_add(seeds) {
         let seed = Seed::new(n);
-        match run(seed, STEPS, &Weights::default()) {
+        match run(seed, STEPS, &Weights::mixed(seed)) {
             Ok(report) => sum.merge(&report.reach),
             Err(failure) => {
                 println!("FAILED {failure}");
