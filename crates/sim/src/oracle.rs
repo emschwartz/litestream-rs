@@ -61,6 +61,12 @@ pub enum Bound {
     DrainTicks,
     /// Milliseconds a retry waits.
     RetryWait,
+    /// Bytes of the distinct keys put at one compaction level.
+    LevelBytes,
+    /// Read calls to the replica over the run.
+    ReadCalls,
+    /// Commit calls to the replica over the run.
+    CommitCalls,
 }
 
 impl fmt::Display for Bound {
@@ -76,6 +82,9 @@ impl fmt::Display for Bound {
             Self::UploadBuffer => "upload buffer",
             Self::DrainTicks => "ticks to drain",
             Self::RetryWait => "retry wait in milliseconds",
+            Self::LevelBytes => "bytes put at a compaction level",
+            Self::ReadCalls => "replica reads",
+            Self::CommitCalls => "replica commits",
         };
         f.write_str(name)
     }

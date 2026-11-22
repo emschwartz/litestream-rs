@@ -1353,12 +1353,52 @@ impl Runner {
             self.w.remote_recorder.counts(),
             self.w.staging_recorder.counts(),
         )?;
+        let hits = |faults: &crate::store::FaultHandle| {
+            faults
+                .hits()
+                .iter()
+                .fold(0_u64, |sum, (_, _, n)| sum.saturating_add(u64::from(*n)))
+        };
+        let spent = crate::budget::Spent {
+            boots: u64::from(self.report.crashes)
+                .saturating_add(u64::from(self.report.shutdowns))
+                .saturating_add(u64::from(self.report.checks)),
+            fault_hits: hits(&self.w.remote_faults),
+        };
+        crate::budget::check(
+            &self.w.remote_recorder.events(),
+            self.w.remote_recorder.counts(),
+            spent,
+        )?;
         self.idle()?;
         self.replica_page_size().map(drop)
     }
 }
 
 impl Runner {
+    /// Half the drawn runs let each kind of batch hold 2 to 8 items on both
+    /// stores, from the seed's own stream, so callers take their batched
+    /// paths.
+    fn draw_batch_widths(&mut self, seed: Seed) {
+        let rng = SeededEntropy::new(seed.stream(15));
+        if rng.below(2) == 0 {
+            return;
+        }
+        for kind in [
+            lsr_core::BatchKind::Reads,
+            lsr_core::BatchKind::Lists,
+            lsr_core::BatchKind::ResolvedCreatedAt,
+        ] {
+            for faults in [&self.w.remote_faults, &self.w.staging_faults] {
+                let width = usize::try_from(rng.below(7).saturating_add(2)).unwrap_or(2);
+                if let Some(width) = std::num::NonZeroUsize::new(width) {
+                    faults.set_batch_width(kind, width);
+                }
+            }
+        }
+        self.report.reach.bump("batch.wide");
+    }
+
     /// Counts, at the end of a run, what the stores really did: puts per
     /// level, deletes, and every scheduled fault that hit a call.
     fn tally_stores(&mut self) {
@@ -1366,6 +1406,14 @@ impl Runner {
         let (kept, cut) = self.w.sqlite.torn_losses();
         reach.add("power.kept_unsynced_wal", u64::from(kept));
         reach.add("power.kept_cut_frame", u64::from(cut));
+        reach.add(
+            "batch.remote_calls",
+            u64::from(self.w.remote_faults.batched()),
+        );
+        reach.add(
+            "batch.staging_calls",
+            u64::from(self.w.staging_faults.batched()),
+        );
         for event in self.w.remote_recorder.events() {
             match event {
                 crate::RecorderEvent::Put { key, .. } => {
@@ -1465,6 +1513,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
     runner.lenient = opts.drawn;
     if opts.drawn {
         runner.w.sqlite.tear_on_power_loss(seed.stream(14));
+        runner.draw_batch_widths(seed);
     }
     runner.trace = opts.trace;
     runner.record = opts.record;

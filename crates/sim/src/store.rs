@@ -7,7 +7,10 @@
 //! no fault or yield ever touches a check.
 //!
 //! - [`Faults`] fails calls on a schedule. Faults live here so the raw store
-//!   stays clean.
+//!   stays clean. It also says how wide a batch may be, so callers take
+//!   their batched paths, and runs each batch one item at a time, last item
+//!   first, results in order: out of order as a concurrent store would be,
+//!   and the same order every run.
 //! - [`YieldEachCall`] returns `Pending` once before every call, which is what makes
 //!   each store call a crash point for the executor.
 //! - [`Recorder`] records what the store really did, below the faults, so a commit
@@ -17,15 +20,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 
-use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_core::{
-    CorruptCause, Entropy, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit,
-    ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
+    BatchKind, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt, Listing, MemStore,
+    ObjectStore, PageLimit, ReadAt, ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
 };
+use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_ltx::{HEADER_LEN, Header, Timestamp, TxidRange, WalOrigin};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -132,6 +136,10 @@ struct FaultState {
     rng: SeededEntropy,
     damaged: Vec<FileKey>,
     rejected: Vec<FileKey>,
+    // Reads, listings and created-at times one batch may hold.
+    widths: [NonZeroUsize; 3],
+    // Batch calls that held more than one item.
+    batched: u32,
 }
 
 impl FaultState {
@@ -263,6 +271,21 @@ impl FaultHandle {
         lock(&self.state).rejected.clone()
     }
 
+    /// Lets a batch of `kind` hold `width` items. Callers then take their
+    /// batched paths; the batch still runs one item at a time, last item
+    /// first (see [`Faults`]), so the run stays deterministic.
+    pub fn set_batch_width(&self, kind: BatchKind, width: NonZeroUsize) {
+        if let Some(slot) = lock(&self.state).widths.get_mut(width_slot(kind)) {
+            *slot = width;
+        }
+    }
+
+    /// Batch calls that held more than one item.
+    #[must_use]
+    pub fn batched(&self) -> u32 {
+        lock(&self.state).batched
+    }
+
     /// Stops every fault that fails at a rate.
     pub fn heal(&self) {
         for entry in &mut lock(&self.state).schedule {
@@ -316,6 +339,8 @@ impl<S> Faults<S> {
             rng: SeededEntropy::new(seed),
             damaged: Vec::new(),
             rejected: Vec::new(),
+            widths: [NonZeroUsize::MIN; 3],
+            batched: 0,
         };
         Self {
             inner,
@@ -349,8 +374,23 @@ impl<S> Faults<S> {
         }
     }
 
+    fn note_batch(&self, items: usize) {
+        if items > 1 {
+            let mut state = lock(&self.state);
+            state.batched = state.batched.saturating_add(1);
+        }
+    }
+
     fn verdict(&self, call: Call) -> Verdict {
         lock(&self.state).decide(call)
+    }
+}
+
+const fn width_slot(kind: BatchKind) -> usize {
+    match kind {
+        BatchKind::Reads => 0,
+        BatchKind::Lists => 1,
+        BatchKind::ResolvedCreatedAt => 2,
     }
 }
 
@@ -435,6 +475,52 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             return Err(err);
         }
         self.inner.delete(keys).await
+    }
+
+    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
+        lock(&self.state)
+            .widths
+            .get(width_slot(kind))
+            .copied()
+            .unwrap_or(NonZeroUsize::MIN)
+    }
+
+    // The batch methods run last item first and return results in order: a
+    // real store sends a batch side by side and it finishes in some other
+    // order; this one is fixed, so a run replays.
+
+    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
+        self.note_batch(reads.len());
+        let mut out = Vec::with_capacity(reads.len());
+        for at in reads.iter().rev() {
+            out.push(self.read(&at.key, at.offset, at.len).await);
+        }
+        out.reverse();
+        out
+    }
+
+    async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
+        self.note_batch(files.len());
+        let mut out = Vec::with_capacity(files.len());
+        for file in files.iter().rev() {
+            out.push(self.created_at(file).await);
+        }
+        out.reverse();
+        out
+    }
+
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        self.note_batch(pages.len());
+        let mut out = Vec::with_capacity(pages.len());
+        for at in pages.iter().rev() {
+            out.push(self.list(at.level, at.after, limit).await);
+        }
+        out.reverse();
+        out
     }
 }
 
@@ -649,6 +735,8 @@ pub enum RecorderEvent {
         origin: Option<WalOrigin>,
         /// The created-at time the code under test gave the upload.
         created_at: Timestamp,
+        /// The bytes written.
+        size: u64,
         /// The simulator's clock when the store took it, read below the code
         /// under test: what the oracle judges created-at times against.
         at: Timestamp,
@@ -910,8 +998,8 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             key,
             created_at,
             head,
+            wrote,
             log,
-            ..
         } = self;
         let header = parse_header(&head);
         let outcome = inner.commit().await;
@@ -926,6 +1014,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
                     header,
                     origin: header.and_then(|h| h.fields().wal),
                     created_at,
+                    size: wrote,
                     at,
                     high,
                 });
