@@ -921,17 +921,11 @@ impl State {
         let dirty = crash_law::differing_blocks(&self.durable, &self.wal, *block);
         let out =
             crash_law::crash_image(&self.durable, &self.wal, &dirty, &self.ghost, *block, rng);
-        let kept = |(a, b): &(u64, u64)| {
-            let range = byte_pos(*a)..byte_pos(*b);
-            out.get(range.clone())
-                .is_some_and(|got| Some(got) == self.wal.get(range.clone()))
-                && out.get(range.clone()) != self.durable.get(range)
-        };
-        let first_lost = dirty.iter().position(|r| !kept(r));
-        if dirty.iter().any(kept) {
+        let (kept, hole) = crash_law::kept_and_holes(&self.durable, &self.wal, &out, *block);
+        if kept {
             self.block_kept.0 = self.block_kept.0.saturating_add(1);
         }
-        if first_lost.is_some_and(|at| dirty.iter().skip(at).any(kept)) {
+        if hole {
             self.block_kept.1 = self.block_kept.1.saturating_add(1);
         }
         self.durable.clone_from(&out);
