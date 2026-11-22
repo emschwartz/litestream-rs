@@ -185,3 +185,89 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
         ranges(&rig.remote)
     );
 }
+
+/// Every staged file's bytes, by transaction.
+fn staged_bytes(rig: &Rig) -> Vec<(u64, Vec<u8>)> {
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    Rig::files(&rig.staging, Level::ZERO)
+        .iter()
+        .map(|info| {
+            let bytes = block_on(rig.staging.inner.read(&info.key, 0, all)).unwrap();
+            (info.key.range().max().get(), bytes)
+        })
+        .collect()
+}
+
+/// A crash with the first snapshot staged and not yet uploaded: the boot
+/// checks it whole against the live WAL and database file and uploads it
+/// as staged, with no snapshot of its own.
+#[test]
+fn a_pending_snapshot_the_wal_proves_is_uploaded_as_staged() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.settle(&mut actor, T0);
+    assert_eq!(ranges(&rig.remote), vec![]);
+    let before = staged_bytes(&rig);
+    assert_eq!(before.len(), 1);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 1);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    let seen = rig.settle(&mut actor, T0 + 1);
+    no_stop(&seen);
+    assert_eq!(ranges(&rig.remote), vec![(1, 1)]);
+    assert!(replica_holds(&rig, 1, &before[0].1));
+    assert_eq!(restored(&rig), 1);
+}
+
+/// The same crash, but the application then commits a page the snapshot
+/// took from the database file: the file's copy can no longer be told from
+/// the database's, so the snapshot is taken again, and the replica still
+/// gets exactly one.
+#[test]
+fn a_pending_snapshot_the_wal_cannot_prove_is_taken_again() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.settle(&mut actor, T0);
+    let before = staged_bytes(&rig);
+    rig.wal.append_tx(&[(pg(2), vec![9; PS.bytes()])], nz(3));
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 1);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::StagedUnverified {
+                from: Txid::new(1).unwrap()
+            })
+        })
+    );
+    let seen = rig.settle(&mut actor, T0 + 1);
+    no_stop(&seen);
+    assert_eq!(ranges(&rig.remote), vec![(1, 1)]);
+    assert!(!replica_holds(&rig, 1, &before[0].1));
+    assert_eq!(snapshots(&rig), vec![1]);
+}
+
+/// A pending snapshot whose page from the database file was replaced by
+/// other bytes is refused and taken again.
+#[test]
+fn a_replaced_pending_snapshot_is_taken_again() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.settle(&mut actor, T0);
+    let forged = forge_page(&rig, 1, 3, 0xEE);
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0 + 1);
+    let seen = rig.settle(&mut actor, T0 + 1);
+    no_stop(&seen);
+    assert!(!replica_holds(&rig, 1, &forged));
+    assert_eq!(snapshots(&rig), vec![1]);
+}
