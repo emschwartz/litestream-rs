@@ -667,16 +667,7 @@ impl Runner {
                 let step = self.ran(&event, next, began)?;
                 (step, Some(event))
             }
-            TickEnd::Done(Tick::Stopped(cause)) => {
-                self.report.reach.bump(format!("stop.{}", variant(&cause)));
-                if stop_reports_loss(cause) {
-                    self.w.history.signal();
-                }
-                if self.record {
-                    self.report.seen.push(Seen::Stop(cause));
-                }
-                (Step::Stopped(cause), None)
-            }
+            TickEnd::Done(Tick::Stopped(cause)) => (self.stopped(cause), None),
             TickEnd::Done(Tick::Drained { txid }) => (Step::Drained(txid), None),
             TickEnd::Done(Tick::DeadlineReached(_)) => {
                 let cause = StopCause::Shutdown;
@@ -708,6 +699,19 @@ impl Runner {
         per_tick(&stats, self.limits())?;
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
         Ok((step, stats))
+    }
+
+    /// Notes a stop the engine chose: a stop that reports a loss is the engine's signal the
+    /// history judge requires before a rewind explains going back.
+    fn stopped(&mut self, cause: StopCause) -> Step {
+        self.report.reach.bump(format!("stop.{}", variant(&cause)));
+        if stop_reports_loss(cause) {
+            self.w.history.signal();
+        }
+        if self.record {
+            self.report.seen.push(Seen::Stop(cause));
+        }
+        Step::Stopped(cause)
     }
 
     /// Judges what the tick put on the replica and left staged.
