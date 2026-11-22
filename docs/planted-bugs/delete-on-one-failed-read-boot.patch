@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 4252581..cb23992 100644
+index 318bef8..780a515 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -536,7 +536,7 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
- ) -> Result<Swept, Fault> {
-     for info in staged_from(staging, confirmed).await? {
-         if !staged_verifies(staging, &info.key).await? {
--            if suspect != Some(info.key) {
-+            if false {
-                 return Ok(Swept::Suspect(info.key));
-             }
-             let from = info.key.range().min();
+@@ -748,7 +748,7 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
+     while let Some(page) = pages.next(staging).await? {
+         for info in page {
+             if !staged_verifies(staging, &info.key).await? {
+-                if suspect != Some(info.key) {
++                if false {
+                     return Ok(Swept::Suspect(info.key));
+                 }
+                 let from = info.key.range().min();

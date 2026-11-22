@@ -1,21 +1,22 @@
 diff --git a/crates/store-s3/src/classify.rs b/crates/store-s3/src/classify.rs
-index 8bc4b1e..ed7b931 100644
+index 10eb0a0..55445a1 100644
 --- a/crates/store-s3/src/classify.rs
 +++ b/crates/store-s3/src/classify.rs
-@@ -131,9 +131,9 @@ impl S3Code {
-             | Self::ExpiredToken
+@@ -140,10 +140,10 @@ impl S3Code {
              | Self::InvalidToken
              | Self::TokenRefreshRequired => Some(Denied::Credentials),
--            Self::AccessDenied | Self::AllAccessDisabled => Some(Denied::Permission),
+             Self::AccessDenied | Self::AllAccessDisabled | Self::KmsKeyUnusable => {
+-                Some(Denied::Permission)
++                Some(Denied::Credentials)
+             }
 -            Self::RequestTimeTooSkewed => Some(Denied::ClockSkew),
 -            Self::NoSuchBucket => Some(Denied::BucketMissing),
-+            Self::AccessDenied | Self::AllAccessDisabled => Some(Denied::Credentials),
 +            Self::RequestTimeTooSkewed => Some(Denied::Credentials),
 +            Self::NoSuchBucket => Some(Denied::Credentials),
              Self::NoSuchKey
              | Self::NoSuchUpload
              | Self::SlowDown
-@@ -205,7 +205,7 @@ pub fn classify(
+@@ -215,7 +215,7 @@ pub fn classify(
          // shows its own code on the next request that carries a body.
          403 => Err(StoreError::Denied {
              op,
@@ -24,7 +25,7 @@ index 8bc4b1e..ed7b931 100644
          }),
          404 => Err(not_found(op, key, code, status)),
          412 => Err(match key {
-@@ -337,7 +337,7 @@ pub fn classify_transport(op: StoreOp, err: &TransportError) -> StoreError {
+@@ -348,7 +348,7 @@ pub fn classify_transport(op: StoreOp, err: &TransportError) -> StoreError {
          },
          TransportError::Tls => StoreError::Denied {
              op,
