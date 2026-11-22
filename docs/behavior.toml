@@ -422,7 +422,7 @@ response = "snapshot, `GenerationChanged`. Abandoned frames under a pinned posit
 signal = "`generation_changed`"
 at_risk = "Commits that were checkpointed and overwritten between the position and the restart are in the snapshot only"
 recovery = "Automatic"
-detected_by = "core::`an_unpinned_position_snapshots_on_a_restart`, core::`the_abandoned_frames_check_catches_frames_abandoned_after_the_read_lock`, sim::`restart_during_read_lock_lapse`, sim::`pinned_on_zero_single_restart`"
+detected_by = "core::`an_unpinned_position_snapshots_on_a_restart`, core::`the_abandoned_frames_check_catches_frames_abandoned_after_the_read_lock`, core::`an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught`, plant::`restart-abandoned-at-synced-end`, sim::`restart_during_read_lock_lapse`, sim::`pinned_on_zero_single_restart`"
 recovered_by = "sim::`restart_during_read_lock_lapse`, sim::`pinned_on_zero_single_restart`"
 
 [[row]]

@@ -1158,3 +1158,9 @@ tests = [
     "checkpoint::tests::a_bump_after_a_release_that_failed_is_committed",
     "checkpoint::tests::a_bump_under_a_lock_is_refused",
 ]
+
+[[bug]]
+name = "restart-abandoned-at-synced-end"
+fix = "9b4a029"
+package = "lsr-core"
+tests = ["recover::tests::an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught"]
