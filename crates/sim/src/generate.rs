@@ -314,11 +314,7 @@ impl Default for Weights {
             request_snapshot: 1,
             restore: 2,
             shrink: 2,
-            // Off until an owner decides what a second writer may do to the
-            // replica: maintenance compacts its file before the engine meets
-            // it, then the engine's own upload replaces it, so the replica
-            // holds two histories for one transaction.
-            second_writer: 0,
+            second_writer: 1,
             roll_back: 1,
             // Off in the shared mixes so their recorded histories keep their
             // shape; `tests/sim/dropped_created_at.rs` turns it on.
@@ -422,7 +418,7 @@ impl Weights {
             let drawn = u32::try_from(below(&entropy, 100).saturating_add(1)).unwrap_or(1);
             if left_out { 0 } else { drawn }
         };
-        Self {
+        let mut mix = Self {
             tick: weight(true),
             commit: weight(true),
             commit_in_tick: weight(false),
@@ -446,7 +442,11 @@ impl Weights {
             staging_damage: weight(false),
             heal: weight(false),
             vacuum_resizes: below(&entropy, 2) == 0,
-        }
+        };
+        // Drawn last, so every other kind keeps the weight it had before
+        // second writers were drawn.
+        mix.second_writer = weight(false);
+        mix
     }
 
     /// What the rotating seed sets run: the default mix for half the seeds

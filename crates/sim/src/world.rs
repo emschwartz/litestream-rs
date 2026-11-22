@@ -238,6 +238,12 @@ pub struct World {
     pub lost: BTreeSet<Txid>,
     /// Files another writer put: its transaction, and the one it copied.
     pub foreign: Vec<(Txid, Txid)>,
+    /// Another writer's file the operator removed, with the replica
+    /// recorder's length then: a file compacted after it cannot hold its pages.
+    pub foreign_removed: Vec<(Txid, usize)>,
+    /// Another writer's files, with the replica recorder's length when each
+    /// was put.
+    pub foreign_put: Vec<(Txid, usize)>,
     /// Files the engine deleted as a repair, after they failed to verify.
     pub repaired: Vec<FileKey>,
     crash_entropy: SeededEntropy,
@@ -296,6 +302,8 @@ impl World {
             acked: Acked::new(),
             lost: BTreeSet::new(),
             foreign: Vec::new(),
+            foreign_removed: Vec::new(),
+            foreign_put: Vec::new(),
             repaired: Vec::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
@@ -683,6 +691,7 @@ impl World {
         block_on(lsr_core::Upload::write(&mut up, &bytes))?;
         block_on(lsr_core::Upload::commit(up))?;
         self.foreign.push((next, newest.range().max()));
+        self.foreign_put.push((next, self.remote_recorder.len()));
         Ok(Some((key, bytes)))
     }
 
@@ -878,6 +887,8 @@ impl World {
             exempt: &exempt,
             lost: &self.lost,
             foreign: &self.foreign,
+            foreign_removed: &self.foreign_removed,
+            foreign_put: &self.foreign_put,
             damaged: &damaged,
         };
         check_with(

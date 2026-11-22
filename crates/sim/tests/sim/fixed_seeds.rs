@@ -437,6 +437,33 @@ mod restored_backup {
             panic!("{}", failure.violation);
         }
     }
+
+    /// The same mistake, shrunk from seed 5's history on another branch
+    /// (restoring transaction 4 differed from commit 6 there).
+    #[test]
+    fn a_restored_backup_holds_the_commits_it_copied_seed_0x5() {
+        let ops = [
+            Op::Tick,
+            Op::Tick,
+            Op::StagingDamage(MetaOp::StripNewestOrigin),
+            Op::Commit {
+                pages: 4,
+                grow: true,
+            },
+            Op::Meta(MetaOp::Save),
+            Op::StagingDamage(MetaOp::DeleteNewest),
+            Op::Tick,
+            Op::Tick,
+            Op::StagingDamage(MetaOp::Restore),
+        ];
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0x5), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -569,5 +596,52 @@ mod second_writer {
         if let Err(failure) = run_ops(Seed::new(0x50c), &ops, &opts) {
             panic!("{}", failure.violation);
         }
+    }
+
+    fn drawn(seed: u64, ops: &[Op]) {
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(seed), ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+
+    /// The other writer's file appears while the engine is down; the boot
+    /// takes it as history and snapshots after it, then the operator removes
+    /// it. The removal takes that transaction for good, which the oracle
+    /// counted as a gap the engine left (seed 0xf85, shrunk).
+    #[test]
+    fn removing_a_file_a_boot_built_on_loses_its_transaction_seed_0xf85() {
+        use lsr_core::{SourceError, SourceOp};
+        use lsr_sim::generate::WalOp;
+        use lsr_sim::{CrashKind, EnvFault};
+        let ops = [
+            Op::WalDamage {
+                op: WalOp::TruncateAtFrame(15),
+                ticks: 3,
+            },
+            Op::Crash(CrashKind::Power),
+            Op::EnvFault(EnvFault::Source(SourceOp::Len, SourceError::Busy)),
+            Op::SecondWriter { ticks: 5 },
+        ];
+        drawn(0xf85, &ops);
+    }
+
+    /// The engine's own upload of the same transaction replaces the other
+    /// writer's file before any listing, and level 1 is built from it: the
+    /// oracle mapped that level-1 file to the other writer's pages (seed
+    /// 0x433, shrunk).
+    #[test]
+    fn a_level_built_after_the_engine_replaced_the_file_holds_its_pages_seed_0x433() {
+        let ops = [
+            Op::Tick,
+            Op::Tick,
+            Op::CommitInTick { pages: 1 },
+            Op::Shrink { pages: 3 },
+            Op::SecondWriter { ticks: 5 },
+        ];
+        drawn(0x433, &ops);
     }
 }

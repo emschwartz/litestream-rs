@@ -13,7 +13,11 @@
 //!   A key put twice counts once, at its largest: a retry after a crash
 //!   rewrites the same output (the cost of a crash, not amplification), and
 //!   a rewind or a rollback puts a key again over a history the levels below
-//!   were rewritten with too, from inputs no larger than their largest.
+//!   were rewritten with too, from inputs no larger than their largest. A
+//!   key ending at a transaction a bucket rollback took is left out at every
+//!   level: the history rebuilt past the loss re-merges what the lost files
+//!   held under other keys (`1-1` after `1-2` was rolled back), which is the
+//!   cost of the loss, not amplification.
 //! - A compaction reads each input once, in chunks larger than any file the
 //!   simulator writes; a boot reads back the newest file of each level and
 //!   the replica's newest level-0 file, a header first then the file. So
@@ -24,9 +28,10 @@
 //!   replica commits are at most two per distinct key put plus one per
 //!   fault hit and crash.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lsr_core::FileKey;
+use lsr_ltx::Txid;
 
 use crate::oracle::{Bound, Violation, within};
 use crate::store::{RecorderCounts, RecorderEvent};
@@ -56,6 +61,7 @@ pub fn check(
     events: &[RecorderEvent],
     counts: RecorderCounts,
     spent: Spent,
+    lost: &BTreeSet<Txid>,
 ) -> Result<(), Violation> {
     let mut last: BTreeMap<FileKey, u64> = BTreeMap::new();
     for event in events {
@@ -66,7 +72,10 @@ pub fn check(
     }
     let mut bytes = [0_u64; 10];
     let mut files = [0_u64; 10];
-    for (key, size) in &last {
+    for (key, size) in last
+        .iter()
+        .filter(|(key, _)| !lost.contains(&key.range().max()))
+    {
         let level = usize::from(key.level().get());
         if let (Some(b), Some(f)) = (bytes.get_mut(level), files.get_mut(level)) {
             *b = b.saturating_add(*size);
