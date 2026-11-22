@@ -43,7 +43,14 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
 | D34 | A restore of the latest state that a writer keeps outpacing: fail or answer? | Answer the last listing, flagged | parent session (#126) | 2026-11-22 | open to owner review |
 | D35 | When may the simulator accept a task still stalled at the end of a run? | Only while the world still imposes the stall's fault; the excuse table is empty today | Claude (stall-liveness), **delegated** | 2026-11-22 | open to owner review |
+| D80 | Where can the fail-stop clock not survive a restart? | Pending staged files keep it; a boot that deletes them, unstaged WAL frames, and a process not yet booted do not | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D81 | What counts as lag for fail-stop? | Commits of the application only; engine writes and doubt snapshots taken while caught up do not | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D82 | When is the boot judged, and how does the library refuse writes? | After the first listing and the boot's snapshot; a commit hook set through the C API | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D83 | What may trip early, and what the probe needs | A forward clock step with a failing store; a trip needs a failure at or after the bound | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D84 | Fail-stop's user-visible names | As approved, with `refused_at_start`, `held_by` and `allowed` | owner, after a Fable review | 2026-11-22 | decided |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
+| D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
+| D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -353,6 +360,43 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a fault the world keeps imposing after the heal (none today) needs a table entry, or its runs fail.
 - **Revisit if:** a fault is added that the end of the run cannot heal.
 - **Links:** the stall-liveness PR; #104.
+## D70. Known-wrong cells
+
+- **Options:** let the per-push seeds go red until each defect is fixed; leave the fault out of every draw; draw it where failures are classified.
+- **Choice:** a cell of the simulator's error domain that reaches an open engine defect is `Cell::KnownWrong`. The per-push fixed seeds leave it out. The nightly soak and the campaigns draw it and count a failure matching the defect's signature as known (printed, not failing the run), so every other failure in those seeds stays visible. Each defect names its tracking item and has a pinned seed in `tests/sim/known_wrong.rs` that must still fail: when the fix lands that test fails, and the cell becomes drawn.
+- **Why:** the defect stays exercised every night and cannot stay known-wrong after its fix, while a push stays green.
+- **Cost accepted:** a second failure with the same signature in a run that drew the cell is counted as known too; the per-push seeds do not reach the defect's code paths through these cells.
+- **Revisit if:** a known-wrong cell stays open for long, or a signature turns out to match an unrelated failure.
+- **Links:** issue #127 item D; `crates/sim/src/domain.rs`.
+
+## D71. What the error domain may inject
+
+- **Options:** inject any error into any call; inject only what an implementation returns.
+- **Choice:** a cell is drawn only when lsr-sqlite (SQLite seam), store-fs (staging) or store-s3 (replica) returns that error from that call with the world unchanged. An error that reports a world fact (the WAL file replaced) is drawn as that change, and the call then reports it. A cell the simulator's model cannot follow yet is unmodelled: listed and counted, never drawn. Every other cell is impossible, with the reason in the table.
+- **Why:** an injected lie (a NotFound for an object the store holds, a corrupt read of a sound object) tests a world that cannot happen, and its failures would be the simulator's, not the engine's.
+- **Cost accepted:** the unmodelled cells (an unlinked WAL, a lost checkpoint retake) stay untested by the swarm until the model follows them.
+- **Revisit if:** another implementation of a seam ships; its errors join the table.
+- **Links:** issue #127 item D; BEHAVIOR CHK-8 and C9.
+
+## D121. The checkpoint-boundary snapshot trusts the database file (delegated)
+
+- **Options:** keep checking the boundary snapshot's database pages against the page table; check only pages whose newest frame is at or below the proof; take the write lock before the TRUNCATE; stop checking at the boundary.
+- **Choice:** stop checking at the boundary. The snapshot empties the page table first, as every snapshot that follows a changed WAL does, and the table then holds what the snapshot read.
+- **Why:** the TRUNCATE ends the engine's read transaction, so a commit that lands after the last step is backfilled and truncated with the rest, and the boundary snapshot read its pages as damage (`DatabasePageMismatch`), a false corruption alarm under ordinary writes that stops the engine under strict responses. The per-page check needs the frames past the proof, and the completed TRUNCATE has removed them; SQLite reports a completed TRUNCATE with a log of 0. Holding the write lock across the TRUNCATE makes the TRUNCATE itself busy.
+- **Cost accepted:** a page damaged between its last check and a checkpoint boundary is shipped in that snapshot, and recorded as found. Checkpoint boundaries come every 121,359 synced frames by default (CKPT-3).
+- **Revisit if:** SQLite or the backend can report which frames a TRUNCATE backfilled.
+- **Links:** found by the simulator's app operations inside a tick (#127 item H, seed 0xf49a2); sqlite `a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage`; plant `boundary-snapshot-keeps-page-table`.
+
+## D120. No crash points inside the SQLite seam (delegated)
+
+- **Options:** crash the engine between two of its calls into SQLite too (the simulator audit's item C, #127): before its committed read, WAL sync, barrier, checkpoint, sequence bump or write lock, and as a power loss inside its checkpoint with the database file torn by the block crash law; keep crash points at store calls only.
+- **Choice:** store calls only. The seam crash points were built and measured, then dropped.
+- **Measured:** 1000 swarm seeds per plant (seeds 1000001 to 1001000, the mixed weights), with and without them. A plant counted as found when a seed failed with it and not on the clean tree. `sim-read-lock-retake` was found (seed 6) either way; `wal-barrier` at seed 1 either way, by the direct check that a staged file's WAL frames are durable, with no crash needed. Neither tree found the issue's two plants, the sequence bumped before the TRUNCATE and the barrier released before the seal, nor `stamp-before-committed-read`.
+- **Why:** the engine persists only at store calls. Every SQLite state a crash between two seam calls leaves (the barrier dropped, a checkpoint done and the bump not, a truncated WAL with no header) is one another process can also produce while the engine is down, and the simulator already draws those. A torn database file inside a checkpoint is masked by the WAL, which SQLite synced before it copied.
+- **Cost accepted:** a defect that only a crash between two seam calls exposes would go unseen. None is known.
+- **What it found:** a gap in the liveness oracle: a bucket rolled back past its only transaction justifies a first sync (sim `a_rollback_that_empties_the_replica_justifies_a_first_sync`).
+- **Revisit if:** the engine persists anything outside a store call, or a defect turns up between two calls into SQLite.
+- **Links:** #127 (item C).
 
 ## D130. The real directory store in the simulator (delegated)
 
@@ -362,6 +406,53 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
 - **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
 - **Links:** #127 item I.
+
+## D80. Where the fail-stop clock cannot survive a restart (delegated)
+
+- **Question:** the clock of the oldest unreplicated commit must not restart with the process (#115), or a crash loop runs the application forever in slices shorter than the bound. What does it rest on?
+- **Choice:** the stamp of the oldest pending staged file (the witness token keeps it), or the first time this process saw lag, the older. Three cases are not covered: (1) a boot that cannot vouch for its pending staged files deletes them and stages a snapshot stamped at that boot, so the clock moves once, there; (2) WAL frames no life managed to stage carry no time and count from the life that sees them; (3) before the first boot of a process nothing says which staged files the replica lacks, so the clock covers nothing and only a stop or a refusal can trip.
+- **Options considered:** a floor taken from the deleted files' created-at times, built and then removed: after a bucket rollback it dated a deleted file that changed nothing as old content, a false trip the simulator's judge found, and a new process cannot read a deleted file. WAL mtime (understates) and the replica's newest file time (overstates and trips falsely).
+- **Cost accepted:** a crash loop whose every boot deletes its pending files, or whose every life fails to stage, never trips for age.
+- **Revisit if:** the journal can carry a mark ("unreplicated since") that the engine writes when lag starts and clears at zero; that closes all three.
+- **Links:** #115, #140 (the journal mark), `crates/core/src/failstop.rs`, `crates/core/src/actor/lag.rs`, `sim::a_crash_loop_trips_for_age`.
+
+## D81. What counts as lag for fail-stop (delegated)
+
+- **Question:** the false-trip judge, run over random simulator histories, found the clock running with nothing of the application's off the replica. Which staged files are lag?
+- **Choice:** every staged file the replica lacks, except: a file that changes no page against the page checksum table at the same size (the driver's start and the frame after each checkpoint rewrite page 1 unchanged; a boot finds such files among the pending ones while it seeds the table); and a snapshot staged for a doubt alone (an operator's request, a WAL whose continuity cannot be proven) while nothing was off the replica. A snapshot owed for a doubt alone no longer keeps earlier lag running; one owed because commits went past staging (a TRUNCATE after a failed WAL sync, a checkpoint past the synced end) does.
+- **Cost accepted:** a commit made and checkpointed away by another process between two ticks while nothing was off the replica is missed until the next commit starts the clock: a late trip, never a false one.
+- **Revisit if:** the doubt causes change, or a fault appears that puts commits only in a doubt snapshot.
+- **Links:** #115, `actor/lag.rs` (`doubt_only`, `note_quiet_file`), `sync.rs` (`changes_pages`), `pages.rs` (`Seeded`).
+
+## D82. When the boot is judged, and how the library refuses writes (delegated)
+
+- **Question:** under `hold-start` the application is held only before it is released. When may it be released, and how does the library refuse a write?
+- **Choice:** the boot is judged once the replica was listed and the snapshot the boot asked for, if any, was staged or its step failed (a stop that snapshot finds is a stop at boot); or once a boot attempt failed for anything but a refusal (a store that times out does not hold the start). Until then the gate is `Pending`: an `-exec` child waits, library writes are not refused, nothing is released. The library refuses through a commit hook `app_connection` installs with the C API in `lsr-sqlite` (rusqlite's own needs a mutable connection, and `app_connection` takes a shared one); the hook's flag is one `Arc` count per connection, never freed. An application on another binding reads the gate from health.
+- **Cost accepted:** the hook replaces any commit hook the application set. A library application that writes before the first boot is judged is not refused even if the boot then stops; `wait_booted` is there for one that must not.
+- **Revisit if:** applications need their own commit hook, or ask for writes refused while pending.
+- **Links:** #115, `crates/sqlite/src/gate.rs`, `crates/replica/src/thread.rs` (`Worker::fail_stop`).
+
+## D83. What may trip early, and what the probe needs (delegated)
+
+- **Question:** the design trips when the age passes the bound and the probe at the bound fails. Which failures count, and on what clock?
+- **Choice:** only a failure of the sync or upload task at or after the bound's instant trips; an earlier failure followed by a quiet backoff does not. Age is measured on the wall clock the engine reads, so a step forward is time passing: with a failing store it may trip early. With a healthy store the probe succeeds and nothing trips. The simulator's judge measures age on both clocks and takes the larger.
+- **Cost accepted:** a forward clock step during a store outage can trip `stop-app` before the bound has truly passed.
+- **Revisit if:** the environment gives the engine a monotonic clock that survives restarts.
+- **Links:** #115, `crates/sim/src/failstop.rs`.
+
+## D84. Fail-stop's user-visible names
+
+- **Choice (owner, after a Fable review of the proposals in `docs/proposals/fail-stop.md` section 4):**
+  - config: `if-replication-stops` (`report`, `hold-start`, `stop-app`) and `max-unreplicated-age` (10m, at least 5m), under `litestream-rs:`;
+  - cause names: `unreplicated_too_long` and `refused_at_start` (proposed `not_yet_reachable`);
+  - `/healthz`: the field `held_by` (proposed `fail_stop`) names the cause, and `app` is `pending`, `allowed` or `held` (proposed `open` for `allowed`);
+  - log lines: "start refused" and "app stopped", each with the cause name as `why`;
+  - `-exec` exit code 4, help line "replicate -exec: replication stopped, so the application was stopped or never started (if-replication-stops)";
+  - config-check refusal: "if-replication-stops: stop-app refused: stopping the application needs -exec (or the exec key); use hold-start or report";
+  - library: `Health::held_by`, `Gate::{Pending, Allowed, Held}`, `Trip::{Stopped, UnreplicatedTooLong, RefusedAtStart}`.
+- **Dropped before review:** `Replicator::writes_refused` and the `lsr_app_held` metric; health and `/healthz` carry the same state.
+- **Revisit if:** operators misread any of them in practice.
+- **Links:** #115, #149, `crates/sidecar/src/failstop.rs`, `crates/cli/src/run.rs` (the exit table).
 
 ## D111. What the soak must reach (delegated)
 

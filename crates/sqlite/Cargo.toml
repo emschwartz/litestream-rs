@@ -28,7 +28,7 @@ thiserror.workspace = true
 # The descriptor test drives a full sync and checkpoint cycle through core's in-memory store.
 lsr-core = { workspace = true, features = ["testing"] }
 # `set_limit`, so a setup pragma can be made to fail in its error's test.
-rusqlite = { workspace = true, features = ["limits"] }
+rusqlite = { workspace = true, features = ["limits", "hooks"] }
 # The fault suite in tests/ runs on the testing feature.
 lsr-sqlite = { workspace = true, features = ["testing"] }
 # The big cases restore into a file and compare it with the database.

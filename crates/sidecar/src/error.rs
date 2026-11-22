@@ -30,6 +30,14 @@ pub enum SidecarError {
         /// What to do instead.
         instead: &'static str,
     },
+    /// `if-replication-stops: stop-app` with no `-exec` and no `exec` key: the daemon could
+    /// not stop the application, so the setting would only report (decision D20).
+    #[error(
+        "{}: {}",
+        crate::failstop::STOP_APP_NEEDS_EXEC,
+        crate::failstop::STOP_APP_INSTEAD
+    )]
+    StopAppWithoutExec,
     /// The `-exec` command line (or the `exec` key) cannot run as Go would read it.
     #[error("{0}")]
     Exec(#[from] ExecError),

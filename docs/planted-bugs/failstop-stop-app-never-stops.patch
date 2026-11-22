@@ -1,0 +1,13 @@
+diff --git a/crates/sidecar/src/supervise.rs b/crates/sidecar/src/supervise.rs
+index bad4a77..d8b53c7 100644
+--- a/crates/sidecar/src/supervise.rs
++++ b/crates/sidecar/src/supervise.rs
+@@ -235,7 +235,7 @@ fn watch(daemon: &Daemon, wake: &Receiver<Wake>) -> Watched {
+             Err(RecvTimeoutError::Disconnected) => return Watched::Wake(None),
+             Err(RecvTimeoutError::Timeout) => {}
+         }
+-        if daemon.stop_app()
++        if false
+             && let Some((path, trip)) = first_held(daemon)
+         {
+             return Watched::Held(path, trip);
