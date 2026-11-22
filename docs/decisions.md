@@ -48,6 +48,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D82 | When is the boot judged, and how does the library refuse writes? | After the first listing and the boot's snapshot; a commit hook set through the C API | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D83 | What may trip early, and what the probe needs | A forward clock step with a failing store; a trip needs a failure at or after the bound | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D84 | Fail-stop's user-visible names | As approved, with `refused_at_start`, `held_by` and `allowed` | owner, after a Fable review | 2026-11-22 | decided |
+| D85 | How does the fail-stop clock date lag? | Each kind on its own date, never the start of an unbroken run; a date that cannot be kept exactly moves later | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D86 | When does a trip for age clear? | Once the commits it tripped on reach the replica, not at zero age | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
@@ -410,7 +412,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 ## D80. Where the fail-stop clock cannot survive a restart (delegated)
 
 - **Question:** the clock of the oldest unreplicated commit must not restart with the process (#115), or a crash loop runs the application forever in slices shorter than the bound. What does it rest on?
-- **Choice:** the stamp of the oldest pending staged file (the witness token keeps it), or the first time this process saw lag, the older. Three cases are not covered: (1) a boot that cannot vouch for its pending staged files deletes them and stages a snapshot stamped at that boot, so the clock moves once, there; (2) WAL frames no life managed to stage carry no time and count from the life that sees them; (3) before the first boot of a process nothing says which staged files the replica lacks, so the clock covers nothing and only a stop or a refusal can trip.
+- **Choice:** the stamp of the oldest pending staged file (the witness token keeps it); unstaged WAL frames date from this process's first sighting of them (D85). Three cases are not covered: (1) a boot that cannot vouch for its pending staged files deletes them and stages a snapshot stamped at that boot, so the clock moves once, there; (2) WAL frames no life managed to stage carry no time and count from the life that sees them; (3) before the first boot of a process nothing says which staged files the replica lacks, so the clock covers nothing and only a stop or a refusal can trip.
 - **Options considered:** a floor taken from the deleted files' created-at times, built and then removed: after a bucket rollback it dated a deleted file that changed nothing as old content, a false trip the simulator's judge found, and a new process cannot read a deleted file. WAL mtime (understates) and the replica's newest file time (overstates and trips falsely).
 - **Cost accepted:** a crash loop whose every boot deletes its pending files, or whose every life fails to stage, never trips for age.
 - **Revisit if:** the journal can carry a mark ("unreplicated since") that the engine writes when lag starts and clears at zero; that closes all three.
@@ -421,8 +423,9 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Question:** the false-trip judge, run over random simulator histories, found the clock running with nothing of the application's off the replica. Which staged files are lag?
 - **Choice:** every staged file the replica lacks, except: a file that changes no page against the page checksum table at the same size (the driver's start and the frame after each checkpoint rewrite page 1 unchanged; a boot finds such files among the pending ones while it seeds the table); and a snapshot staged for a doubt alone (an operator's request, a WAL whose continuity cannot be proven) while nothing was off the replica. A snapshot owed for a doubt alone no longer keeps earlier lag running; one owed because commits went past staging (a TRUNCATE after a failed WAL sync, a checkpoint past the synced end) does.
 - **Cost accepted:** a commit made and checkpointed away by another process between two ticks while nothing was off the replica is missed until the next commit starts the clock: a late trip, never a false one.
+- **Amended (false trips found by the simulator on main):** the rule that a file changing no page is not lag also covers the files a checkpoint stages (the seal, the frame that moves the WAL past a restart), which had skipped it. And while a snapshot is owed for a doubt alone with no synced position and every staged file on the replica, the WAL end when the doubt is first observed is a baseline: frames up to it, and a snapshot that ends at it, are not lag. A commit that lands between the boot and that observation is missed until the snapshot stages it, again late, never false.
 - **Revisit if:** the doubt causes change, or a fault appears that puts commits only in a doubt snapshot.
-- **Links:** #115, `actor/lag.rs` (`doubt_only`, `note_quiet_file`), `sync.rs` (`changes_pages`), `pages.rs` (`Seeded`).
+- **Links:** #115, `actor/lag.rs` (`doubt_only`, `note_quiet_file`, `note_doubt_baseline`), `sync.rs` (`changes_pages`), `pages.rs` (`Seeded`), `checkpoint.rs` (`Staged::quiet`).
 
 ## D82. When the boot is judged, and how the library refuses writes (delegated)
 
@@ -453,6 +456,23 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Dropped before review:** `Replicator::writes_refused` and the `lsr_app_held` metric; health and `/healthz` carry the same state.
 - **Revisit if:** operators misread any of them in practice.
 - **Links:** #115, #149, `crates/sidecar/src/failstop.rs`, `crates/cli/src/run.rs` (the exit table).
+
+## D85. How the fail-stop clock dates lag (delegated)
+
+- **Question:** the clock took the first time this process saw lag, kept while lag never fell to zero. A writer whose uploads trail by a tick always has lag, so the clock grew without bound though each commit landed in seconds, and one failed upload after the bound tripped (seeds 0x330, 0x9f9, 0x56a). What date does lag carry?
+- **Choice:** each kind of lag carries its own date, and the clock is the oldest: a pending file with a commit, its stamp; unstaged WAL frames, the observation that first saw the WAL end where it did; frames once staged, that date, carried to the first file staged after they were seen and dropped when the replica holds that file; lag with no date of its own, its first sighting while it lasts.
+- **Options considered:** a date per staged file, kept in a map bounded by the pending files: exact, but more state for a gain of at most a tick. Carrying the date to the newest pending file: found by the simulator to date a newer commit's file with an older run's time.
+- **Cost accepted:** every rule errs late. A run of frames that spans several files loses its date to their stamps after the first one lands; a second run staged while the first still carries its date loses its own; both can trip later than the bound by up to the time between seeing frames and staging them.
+- **Revisit if:** a trip is found late by more than a tick, or the journal mark (#140) gives frames a durable date.
+- **Links:** `crates/core/src/failstop.rs` (`Lag`, `WalMark`, `Observed`), `actor/lag.rs`, core::`a_steady_writer_whose_uploads_trail_by_a_tick_never_trips`.
+
+## D86. When a trip for age clears (delegated)
+
+- **Question:** a trip for age cleared only at zero age, so it would not flap at the bound. A busy database may never reach zero: seed 0xa4d held a trip whose commits had all landed because one later frame stayed unstaged.
+- **Choice:** the trip clears once the clock's start has moved past the start it tripped on: every commit that old is on the replica. A new trip needs a new bound and a failure at or after it, so writes still do not flap at the edge.
+- **Cost accepted:** after a long outage heals, a new trip can follow as soon as newer lag reaches the bound and fails again, without the age touching zero in between.
+- **Revisit if:** operators see a trip clear and come back within one bound.
+- **Links:** `crates/core/src/failstop.rs` (`Lag::observe`), core::`failstop::tests::a_trip_for_age_clears_once_its_commits_land`.
 
 ## Unverified, not recorded
 
