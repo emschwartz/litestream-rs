@@ -63,6 +63,8 @@ fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf() {
     let seed = Seed::new(0xf);
     let mut weights = Weights::mixed(seed);
     weights.known_wrong = true;
+    // The run as it was found: the scheduled verify, drawn last, came after it.
+    weights.verify = 0;
     let ops = history(seed, STEPS, &weights);
     assert_eq!(
         digest(&format!("{ops:?}")),
