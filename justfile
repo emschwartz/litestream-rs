@@ -122,6 +122,11 @@ shuttle iterations="200":
     SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
         cargo test --locked -p lsr-replica --test replica shuttle::
 
+# The journal model's deep walk (docs/journal.md): every state within larger budgets than the
+# default suite's, at each block size, on the atomic and the tearing device. Minutes; not part of check.
+journal-model:
+    cargo nextest run -p lsr-spec -E 'test(/^journal::deep$/)' --run-ignored only --no-capture --locked
+
 # Every fixed defect is re-planted in a scratch tree and its named tests must fail
 # (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
 # Nightly in CI; about 20 minutes cold. `just planted-bugs --only listing-cursor` runs one entry.

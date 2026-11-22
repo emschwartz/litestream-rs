@@ -170,6 +170,27 @@ pub fn stopped(replicator: &Replicator) -> Stopped {
     stop.wait()
 }
 
+/// [`stopped`] for a replicator on a fake clock: the clock moves `step` at a time while the
+/// stop is pending, so a drain that waits out a retry's backoff (a busy database or a failed
+/// call during the drain) ends instead of waiting on a clock nobody moves. Fails the test
+/// after [`LOOKS`] steps.
+pub fn stopped_moving(replicator: &Replicator, clock: &FakeClockHandle, step: Duration) -> Stopped {
+    let stop = replicator.stop(PATIENCE);
+    let gone = |health: &Health| matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_));
+    for _ in 0..LOOKS {
+        let looks = Cell::new(0_u32);
+        let seen = replicator.wait_until(PATIENCE, |health| {
+            looks.set(looks.get().saturating_add(1));
+            gone(health) || looks.get() >= 2
+        });
+        if seen.as_ref().is_some_and(gone) {
+            return stop.wait();
+        }
+        clock.advance(step);
+    }
+    panic_with(&replicator.health())
+}
+
 fn panic_with(health: &Health) -> ! {
     panic!("the replicator never got there: {health:?}")
 }

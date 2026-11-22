@@ -148,6 +148,10 @@ opt-level = 3
 [profile.dev.package.lsr-ltx]
 opt-level = 3
 
+# The journal model's exhaustive walks expand a million states in the default test run.
+[profile.dev.package.lsr-spec]
+opt-level = 3
+
 [profile.dev]
 debug = 0
 strip = "none"

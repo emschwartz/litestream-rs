@@ -21,9 +21,12 @@ const POLL: Duration = Duration::from_secs(1);
 /// while doing nothing passes it within the first polls.
 const BOUND: u64 = 200;
 
-/// The site replicated and stopped, then restored into a new file. A drain runs no
-/// maintenance, so the replica holds no level-9 snapshot yet: one is due as soon as the next
-/// replicator lists it.
+/// The site replicated and stopped, then restored into a new file, with no level-9 snapshot on
+/// the replica: one is due as soon as the next replicator lists it. A drain runs no
+/// maintenance, but the replicator runs on the real clock until the stop reaches it, and a
+/// maintenance tick in that window snapshots (the replica held none). Whether it got there is
+/// a race with the stop, so the snapshot it may have written is removed: the replica's
+/// level-0 chain starts at transaction 1 and restores on its own.
 fn restored(site: &Site) -> PathBuf {
     let store = site.store();
     let replicator = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
@@ -31,7 +34,10 @@ fn restored(site: &Site) -> PathBuf {
     let stopped = stopped(&replicator);
     assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
     drop(replicator);
-    assert!(!site.replica.join("ltx").join("9").exists());
+    let snapshots = site.replica.join("ltx").join("9");
+    if snapshots.exists() {
+        std::fs::remove_dir_all(&snapshots).unwrap();
+    }
     let to = site.path("restored");
     restore(&*store, RestoreTarget::Latest, &to).unwrap();
     to
