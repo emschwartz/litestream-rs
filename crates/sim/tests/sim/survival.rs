@@ -500,3 +500,15 @@ fn a_refusal_over_a_forged_staged_copy_is_expected_after_a_rollback_seed_0xf43e5
         panic!("{failure}");
     }
 }
+
+/// Mixed seed 0x171: maintenance wrote the level-9 snapshot through transaction 0x77 while the
+/// replica's listings lagged, the next listing did not show it, and maintenance wrote it again
+/// under the same key with other bytes. The snapshot it wrote is now watched like the engine's
+/// uploads: a listing that hides it plans nothing and is taken again later.
+#[test]
+fn a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x171() {
+    let seed = Seed::new(0x171);
+    if let Err(failure) = run(seed, 300, &Weights::mixed(seed)) {
+        panic!("{failure}");
+    }
+}
