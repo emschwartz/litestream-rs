@@ -357,6 +357,11 @@ pub(super) struct Maintain {
     /// read says nothing about the stored bytes, so the read-back acts on the
     /// file only when a read on a later maintenance tick fails too.
     pub(super) suspect: Option<FileKey>,
+    /// A confirmed transaction whose keys reads found gone (the replica went
+    /// backwards): listings that end before it are the replica's, so they
+    /// are not read past again for it, which would cost every listing until
+    /// the upload lane lists.
+    pub(super) gone: Option<Txid>,
 }
 
 impl Default for Maintain {
@@ -368,6 +373,7 @@ impl Default for Maintain {
             level_one: None,
             read_back_owed: true,
             suspect: None,
+            gone: None,
         }
     }
 }

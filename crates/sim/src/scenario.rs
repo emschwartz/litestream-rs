@@ -379,8 +379,9 @@ pub fn meta_wiped_remote_kept() -> Scenario {
 
 /// The boot after the wipe (the last before the oracle judged) took no
 /// snapshot and staged none before the oracle, and asked the replica for one
-/// listing per level (the upload task's), the upload task's read-back of the
-/// newest file, and one read of that file as the newest staged file.
+/// listing per level (the upload task's), the probe's reads past it, the
+/// upload task's read-back of the newest file, and one read of that file as
+/// the newest staged file.
 fn last_boot_continues(report: &RunReport) -> Result<(), String> {
     use lsr_core::Event;
     let judged = report
@@ -409,7 +410,12 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
             remote_calls,
             remote_lists,
             ..
-        }) if *remote_lists == levels && remote_calls.checked_sub(levels) == Some(2) => Ok(()),
+        }) if *remote_lists == levels
+            && remote_calls.checked_sub(levels)
+                == Some(2_u64.saturating_add(crate::budget::PROBE_READS)) =>
+        {
+            Ok(())
+        }
         other => Err(format!("the boot's replica calls were {other:?}")),
     }
 }

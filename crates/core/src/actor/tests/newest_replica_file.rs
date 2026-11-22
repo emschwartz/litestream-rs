@@ -25,13 +25,19 @@ fn with_staging_gone_boot_continues_from_the_replicas_newest_staged_file() {
     let size = Rig::files(&rig.remote, Level::ZERO)[1].size;
     assert!(size < 1 << 20, "{size}");
     let before = rig.remote.calls();
+    let reads_before = rig.remote.reads_of(&newest_staged_file_key());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
-    // The upload task's listing (one page per level) and its read-back of the
-    // newest file, then one read of that file as the newest staged file, from byte 0.
+    // The upload task's listing (one page per level), the probe's reads past
+    // it (two per transaction) and its read-back of the newest file, then one
+    // read of that file as the newest staged file, from byte 0.
     let levels = u32::try_from(Level::ALL.len()).unwrap();
-    assert_eq!(rig.remote.calls() - before, levels + 2);
-    assert_eq!(rig.remote.reads_of(&newest_staged_file_key()), 2);
+    let probe = 2 * (crate::upload::PROBE_GAP + 1);
+    assert_eq!(rig.remote.calls() - before, levels + probe + 2);
+    assert_eq!(
+        rig.remote.reads_of(&newest_staged_file_key()) - reads_before,
+        2
+    );
     rig.commit(3);
     let seen = rig.settle(&mut actor, T0 + 2);
     no_stop(&seen);

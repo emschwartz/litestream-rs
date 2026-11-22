@@ -129,7 +129,10 @@ pub use store::{
     ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
-pub use upload::{Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, upload_next};
+pub use upload::{
+    Did, PROBE_CAP, PROBE_GAP, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
+    upload_next,
+};
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,

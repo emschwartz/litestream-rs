@@ -589,24 +589,18 @@ fn a_listing_never_moves_confirmed_backwards_through_a_size_check() {
 }
 
 /// A tail that equals what is already confirmed was confirmed by its own
-/// commit, so the listing does not read it back: a read that would fail
-/// changes nothing.
+/// commit, so the listing does not read it back: its one read is the probe's
+/// miss past the tail.
 #[test]
 fn a_listing_does_not_read_back_a_tail_already_confirmed() {
-    let (staging, remote) = (MemStore::new(), MemStore::new());
-    put_bytes(&remote, key(1), &encode(1));
-    remote.inject_failure(
-        StoreOp::Read,
-        StoreError::Transient {
-            op: StoreOp::Read,
-            kind: ErrorKind::TimedOut,
-        },
-    );
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&remote.inner, key(1), b"never read back");
     let state = UploadState::ListFirst {
         confirmed: Some(txid(1)),
     };
     let listed = next(state, &staging, &remote, 1).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+    assert_eq!(remote.log().reads, 2 * (1 + PROBE_GAP));
 }
 
 #[test]
@@ -1149,6 +1143,8 @@ fn steady_state_makes_no_read_call() {
     let mut state = next(UploadState::Unknown, &staging, &remote, 0)
         .unwrap()
         .state;
+    // The boot listing's own reads (the probe past its newest) are not steady state.
+    remote.log().reads = 0;
     for n in 1..=20 {
         stage(&staging, n);
         state = block_on(upload_tick(
@@ -1286,18 +1282,16 @@ fn a_refused_upload_of_other_verifying_bytes_is_never_written_over() {
 }
 
 /// The same, behind a listing that does not show the other object yet: the
-/// refusal overrules the listing, so the stale listing cannot send the
-/// uploader back to write the same key again.
+/// relist after the refusal reads the refused key, so the stale listing
+/// cannot send the uploader back to write the same key again.
 #[test]
-fn a_refusal_overrules_a_listing_too_stale_to_show_the_key() {
+fn a_refusal_behind_a_listing_too_stale_to_show_the_key_is_judged_by_reads() {
     let (staging, remote) = (MemStore::new(), Probe::default());
     stage(&staging, 1);
     let theirs = encode_pages(1, 200);
     put_bytes(&remote.inner, key(1), &theirs);
     remote.log().unlisted.push(key(1));
-    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
-    assert_eq!(listed.state, UploadState::At(None), "the listing is stale");
-    let step = next(listed.state, &staging, &remote, 1).unwrap();
+    let step = next(UploadState::At(None), &staging, &remote, 1).unwrap();
     assert_eq!(
         step.did,
         Did::Diverged {
@@ -1334,6 +1328,83 @@ fn a_refused_upload_over_an_object_that_does_not_verify_replaces_it() {
     assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
 }
 
+/// A listing that lags behind the bucket leaves out the newest uploads, so
+/// its newest is not the replica's. Reads are exact: the level-0 keys past it
+/// are read until one is missing, and what they find is the replica's newest
+/// (on an empty listing too). Without the reads, a boot with nothing staged
+/// takes the replica as ending earlier and later stops on its own files as
+/// another writer's.
+#[test]
+fn a_listing_that_hides_the_newest_uploads_is_corrected_by_reads() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    for n in 1..=3 {
+        put_bytes(&remote.inner, key(n), &encode(n));
+    }
+    remote.log().unlisted.extend([key(2), key(3)]);
+    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
+    assert_eq!(
+        listed.did,
+        Did::Listed {
+            newest: Some(txid(3))
+        }
+    );
+    remote.log().unlisted.push(key(1));
+    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(3))));
+}
+
+/// A relist after an ambiguous commit whose listing does not show the
+/// confirmed uploads yet is no regression: a read finds the confirmed key.
+#[test]
+fn a_relist_that_hides_confirmed_uploads_is_no_regression() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    for n in 1..=2 {
+        put_bytes(&remote.inner, key(n), &stage(&staging, n));
+    }
+    remote.log().unlisted.push(key(2));
+    let state = UploadState::ListFirst {
+        confirmed: Some(txid(2)),
+    };
+    let listed = next(state, &staging, &remote, 2).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(2))));
+}
+
+/// The probe costs 2 * ([`PROBE_GAP`] + 1) reads past a fresh listing (the
+/// missing keys that end it), reads past a gap of up to [`PROBE_GAP`] free
+/// keys (another writer's file an operator removed), and reads at most
+/// [`PROBE_CAP`] keys however far the listing lags: past that the bucket's
+/// refusal of a taken key is what stops a second upload.
+#[test]
+fn the_probe_past_a_listing_reads_past_short_gaps_and_stops_at_its_cap() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&remote.inner, key(1), &encode(1));
+    let _ = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    // The listed tail's read-back (one chunk) and the probe's misses, two
+    // keys for each transaction.
+    assert_eq!(remote.log().reads, 1 + 2 * (1 + PROBE_GAP));
+    let past_gap = 2 + u64::from(PROBE_GAP);
+    put_bytes(&remote.inner, key(past_gap), &encode(past_gap));
+    remote.log().unlisted.push(key(past_gap));
+    let listed = next(UploadState::Unknown, &staging, &remote, past_gap).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(past_gap))));
+    let too_far = past_gap + 2 + u64::from(PROBE_GAP);
+    put_bytes(&remote.inner, key(too_far), &encode(too_far));
+    remote.log().unlisted.push(key(too_far));
+    let listed = next(UploadState::Unknown, &staging, &remote, too_far).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(past_gap))));
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let far = u64::from(PROBE_CAP) + 5;
+    for n in 1..=far {
+        put_bytes(&remote.inner, key(n), &encode(n));
+        remote.log().unlisted.push(key(n));
+    }
+    let listed = next(UploadState::Unknown, &staging, &remote, far).unwrap();
+    assert_eq!(
+        listed.state,
+        UploadState::At(Some(txid(u64::from(PROBE_CAP))))
+    );
+}
+
 /// The replica's object verifies and differs from the staged file, and the
 /// first whole read of the staged copy comes back torn. One read never
 /// condemns a file: a second read decides, and the replica's object is not
@@ -1354,6 +1425,38 @@ fn one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object() {
             from: txid(1)
         }
     );
+}
+
+/// A snapshot a lagging listing hides is found by a read too: its key is
+/// known from the transaction it ends at, since a snapshot starts at 1. The
+/// replica then ends there even when no level-0 file does (an operator
+/// removed another writer's newest file after a snapshot merged it), so the
+/// key past it is the next to upload, not the freed one.
+#[test]
+fn a_snapshot_a_listing_hides_is_found_by_a_read() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    put_bytes(&remote.inner, key(1), &encode(1));
+    let snapshot = FileKey::new(Level::SNAPSHOT, TxidRange::new(txid(1), txid(2)).unwrap());
+    put_bytes(&remote.inner, snapshot, b"a snapshot through 2");
+    remote.log().unlisted.push(snapshot);
+    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(2))));
+}
+
+/// A gap wider than [`PROBE_GAP`] below this engine's own upload (a bucket
+/// rollback took everything under it) does not end the probe while staged
+/// files reach past it: this engine may have uploaded any of them.
+#[test]
+fn the_probe_reads_through_the_newest_staged_transaction() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let far = 3 + u64::from(PROBE_GAP);
+    for n in 1..=far {
+        stage(&staging, n);
+    }
+    put_bytes(&remote.inner, key(far), &encode(far));
+    remote.log().unlisted.push(key(far));
+    let listed = next(UploadState::Unknown, &staging, &remote, far).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(far))));
 }
 
 /// The same with the replica's copy: its first verifying read comes back

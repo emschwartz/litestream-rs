@@ -25,6 +25,27 @@
 //! never trusted to move the position backwards or past the local position: either
 //! is a persistent fault for the actor's configured response, not a guess.
 //!
+//! A listing's end is not trusted on its own either. A store may list behind
+//! its writes (a cache in front of a listing, an eventually consistent
+//! index) while its reads are exact, so a key a listing leaves out may still
+//! be there. Every listing here is followed by reads of the keys past its
+//! newest that a reader can name without a listing, each transaction's
+//! level-0 file and else the snapshot ending at it, in order until
+//! [`PROBE_GAP`] transactions in a row are missing ([`probe_past`], at most
+//! [`PROBE_CAP`] transactions, `2 * (PROBE_GAP + 1)` reads on a fresh
+//! listing; through the newest staged transaction at least): what they find
+//! is the replica's newest. When a confirmed transaction is past the listing,
+//! the reads start at its key, so a regression is reported only when a read,
+//! not a listing, finds the confirmed key gone. A file a listing shows past
+//! the local position is another writer's only when a read finds it, since a
+//! listing that lags a delete shows a file that is gone. The reads find the
+//! tail because nothing this engine runs deletes the replica's newest level-0 file
+//! (retention keeps each level's last file, see `maintain::retain`). What
+//! they cannot find is a level 1 to 8 file whose level-0 inputs were all
+//! deleted by someone else (an operator removing another writer's newest
+//! file after maintenance merged it): its start is not knowable without a
+//! listing, so a lagging listing that hides it is taken as the replica's end.
+//!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
 //! bytes are written to an upload that no listing can see, and the upload is
 //! committed only after the decoder verified the whole file, its header names
@@ -52,9 +73,9 @@
 //! - a verifying object with other bytes, on a second compare too, is another
 //!   writer's or an earlier run's: the replica is listed at once and judged by
 //!   the listing's rules above ([`Did::Diverged`], or
-//!   `Fault::RemoteAheadOfLocal` when the replica is ahead), and a listing too
-//!   stale to show the object is overruled by the refusal, which is the
-//!   divergence the listing would have reported.
+//!   `Fault::RemoteAheadOfLocal` when the replica is ahead); the relist's
+//!   probe reads the refused key, so a listing too stale to show the object
+//!   cannot hide it.
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
@@ -76,6 +97,21 @@ use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
+
+/// The most transactions past a listing's newest that one probe looks for
+/// ([`probe_past`]). A listing that hides more uploads than this is far
+/// outside what an S3-compatible store does; past it, the bucket's refusal of
+/// a taken key ([`taken`]) still stops a second upload under the same key.
+pub const PROBE_CAP: u32 = 64;
+
+/// The most missing transactions in a row a probe reads past before it
+/// stops. Keys past a replica's newest are never taken, but one below it can
+/// be free: another writer's file an operator removed leaves a gap under the
+/// files uploaded after it.
+pub const PROBE_GAP: u32 = 3;
+
+/// A probe asks only whether an object exists, so it reads one byte.
+const PROBE_LEN: ReadLen = ReadLen::or_chunk(1);
 
 /// What this engine knows about the replica's newest transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,8 +286,15 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     let inventory = Inventory::load(remote)
         .await
         .map_err(|err| fail(state, inventory_fault(&err)))?;
-    let newest = inventory.newest();
     let confirmed = state.confirmed();
+    let probed = look_past(&inventory, staging, remote, confirmed, newest_staged)
+        .await
+        .map_err(|fault| fail(state, fault))?;
+    let seen = Seen {
+        inventory: &inventory,
+        probed,
+    };
+    let newest = seen.newest();
     if newest > newest_staged {
         return Err(fail(state, Fault::RemoteAheadOfLocal));
     }
@@ -260,9 +303,14 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     }
     let known = match newest {
         Some(tail) if newest > confirmed => {
-            let verdict = judge_tail(&inventory, staging, remote, tail)
-                .await
-                .map_err(|fault| fail(state, fault))?;
+            let verdict = match seen.level_zero(tail) {
+                Some(size) => judge_tail(staging, remote, tail, size)
+                    .await
+                    .map_err(|fault| fail(state, fault))?,
+                // The newest transaction is in a higher level only: nothing
+                // at level 0 to read back.
+                None => TailVerdict::Sound,
+            };
             match verdict {
                 TailVerdict::Sound => newest,
                 TailVerdict::Replace => tail.prev().max(confirmed),
@@ -277,6 +325,159 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
         state: UploadState::At(known),
         did: Did::Listed { newest: known },
     })
+}
+
+/// What a listing showed, with the keys reads found past it.
+struct Seen<'a> {
+    inventory: &'a Inventory,
+    /// The keys found by reads, ascending by transaction.
+    probed: Vec<FileKey>,
+}
+
+impl Seen<'_> {
+    fn newest(&self) -> Option<Txid> {
+        let probed = self.probed.last().map(|key| key.range().max());
+        self.inventory.newest().max(probed)
+    }
+
+    /// Whether the level-0 key of `txid` holds an object, and its listed
+    /// size when a listing showed it (a probe learns no size).
+    fn level_zero(&self, txid: Txid) -> Option<Option<u64>> {
+        let key = staged_key(txid);
+        if self.probed.contains(&key) {
+            return Some(None);
+        }
+        self.inventory
+            .level(Level::ZERO)
+            .iter()
+            .find(|info| info.key == key)
+            .map(|info| Some(info.size))
+    }
+}
+
+/// Reads what a listing cannot prove. A file it shows past the local
+/// position is another writer's only when a read finds it (a listing that
+/// lags a delete shows a file that is gone: list again); otherwise the
+/// keys past it are probed ([`probe_past`]), through at least the newest
+/// staged transaction, which this engine may have uploaded already.
+async fn look_past<L: ObjectStore, S: ObjectStore>(
+    inventory: &Inventory,
+    staging: &L,
+    remote: &S,
+    confirmed: Option<Txid>,
+    newest_staged: Option<Txid>,
+) -> Result<Vec<FileKey>, Fault> {
+    if inventory.newest() > newest_staged {
+        return Err(if past_known(remote, inventory, newest_staged).await? {
+            Fault::RemoteAheadOfLocal
+        } else {
+            Fault::RemoteObjectMissing
+        });
+    }
+    let staged = staged_from(staging, inventory.newest()).await?;
+    let through = staged.last().map(|info| info.key.range().max());
+    probe_past(remote, inventory.newest(), confirmed, through).await
+}
+
+/// Whether a read finds any of the listed files that reach past `known`,
+/// newest first, at most [`PROBE_CAP`] of them. A listing that lags a delete
+/// shows a file that is gone; only a file that is there proves another
+/// writer.
+///
+/// # Errors
+/// The replica's fault when a read fails other than by a missing key.
+pub(crate) async fn past_known<S: ObjectStore>(
+    remote: &S,
+    inventory: &Inventory,
+    known: Option<Txid>,
+) -> Result<bool, Fault> {
+    let mut past: Vec<&FileInfo> = inventory
+        .files()
+        .iter()
+        .filter(|info| Some(info.key.range().max()) > known)
+        .collect();
+    past.sort_by_key(|info| std::cmp::Reverse(info.key.range().max()));
+    let cap = usize::try_from(PROBE_CAP).unwrap_or(usize::MAX);
+    for info in past.into_iter().take(cap) {
+        if exists(remote, &info.key).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The keys past a listing that reads find, ascending. S3 and its peers
+/// read their own writes at once while a listing may lag behind them, so a
+/// listing's absence of a key is not evidence; a read's is.
+///
+/// Each transaction from the one after `listed` (from `confirmed`, when that
+/// is later, so that a relist proves what was confirmed is still there
+/// before a regression is reported) is looked for under the two keys a
+/// reader can name without a listing: its level-0 file, and else a snapshot
+/// that ends at it (a snapshot always starts at transaction 1). A
+/// higher-level file has a start no read can guess. The reads go on through
+/// `through` (the newest staged transaction: a gap below it does not end
+/// them, since this engine may have uploaded anything it staged), then stop
+/// once [`PROBE_GAP`] transactions in a row past the last one found are
+/// missing, and never look at more than [`PROBE_CAP`] transactions. A fresh
+/// listing with nothing staged past it costs `2 * (PROBE_GAP + 1)` reads, of
+/// keys that are not there.
+///
+/// # Errors
+/// The replica's fault when a read fails other than by a missing key.
+pub(crate) async fn probe_past<S: ObjectStore>(
+    remote: &S,
+    listed: Option<Txid>,
+    confirmed: Option<Txid>,
+    through: Option<Txid>,
+) -> Result<Vec<FileKey>, Fault> {
+    let first = match (listed, confirmed) {
+        (listed, Some(confirmed)) if listed < Some(confirmed) => Some(confirmed),
+        (listed, _) => listed.map_or(Some(Txid::MIN), Txid::next),
+    };
+    let mut found = Vec::new();
+    let (mut at, mut missed) = (first, 0_u32);
+    for _ in 0..PROBE_CAP {
+        let Some(txid) = at.filter(|txid| missed <= PROBE_GAP || Some(*txid) <= through) else {
+            break;
+        };
+        match holder(remote, txid).await? {
+            Some(key) => {
+                found.push(key);
+                missed = 0;
+            }
+            None => missed = missed.saturating_add(1),
+        }
+        at = txid.next();
+    }
+    Ok(found)
+}
+
+/// The level-0 file of `txid`, or else the snapshot that ends at it, when a
+/// read finds one.
+async fn holder<S: ObjectStore>(remote: &S, txid: Txid) -> Result<Option<FileKey>, Fault> {
+    let level_zero = staged_key(txid);
+    if exists(remote, &level_zero).await? {
+        return Ok(Some(level_zero));
+    }
+    let Some(range) = TxidRange::new(Txid::MIN, txid) else {
+        return Ok(None);
+    };
+    let snapshot = FileKey::new(Level::SNAPSHOT, range);
+    Ok(exists(remote, &snapshot).await?.then_some(snapshot))
+}
+
+/// Whether the replica holds an object under `key`, by a read: a listing may
+/// show a key that is gone or leave out one that is there, a read does not.
+///
+/// # Errors
+/// The replica's fault when the read fails other than by a missing key.
+pub(crate) async fn exists<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
+    match remote.read(key, 0, PROBE_LEN).await {
+        Ok(_) => Ok(true),
+        Err(StoreError::NotFound { .. }) => Ok(false),
+        Err(err) => Err(Fault::from_remote(&err)),
+    }
 }
 
 fn diverged(confirmed: Txid, from: Txid) -> Uploaded {
@@ -300,58 +501,50 @@ enum TailVerdict {
 }
 
 /// Judges the replica's newest level-0 file against the staged file under
-/// the same key. Only the newest key is read back: an older one was confirmed
+/// the same key; `size` is the replica object's listed size, when a listing
+/// showed it. Only the newest key is read back: an older one was confirmed
 /// by its own commit in an earlier run, and reading every key at boot would be
 /// a whole replica scan.
 async fn judge_tail<L: ObjectStore, S: ObjectStore>(
-    inventory: &Inventory,
     staging: &L,
     remote: &S,
     tail: Txid,
+    size: Option<u64>,
 ) -> Result<TailVerdict, Fault> {
     let key = staged_key(tail);
-    let Some(listed) = inventory
-        .level(Level::ZERO)
-        .iter()
-        .find(|info| info.key == key)
-    else {
-        return Ok(TailVerdict::Sound);
-    };
     let after = tail.prev().map(TxidRange::single);
     let limit = PageLimit::ONE;
     let page = staging
         .list(Level::ZERO, after, limit)
         .await
         .map_err(|err| Fault::from_staging(&err))?;
-    match page.files.first() {
-        Some(staged) if staged.key == key => {
-            if staged.size == listed.size && same_bytes(staging, remote, &key).await? {
-                return Ok(TailVerdict::Sound);
-            }
-            // One read never condemns a file: a staged copy that fails to
-            // verify is read again before it is taken as torn.
-            if staged_verifies(staging, &key).await? || staged_verifies(staging, &key).await? {
-                if remote_torn(remote, &key).await? {
-                    return Ok(TailVerdict::Replace);
-                }
-                // Both copies verify on their own reads, so the first compare
-                // read something wrong or they differ: a second compare
-                // decides, as one read never condemns a file.
-                return Ok(if same_bytes(staging, remote, &key).await? {
-                    TailVerdict::Sound
-                } else {
-                    TailVerdict::Diverged
-                });
-            }
-            // Torn on two reads: it says nothing about the replica's object.
-            remote_decodes(remote, &key)
-                .await
-                .map(|()| TailVerdict::Sound)
-        }
-        _ => remote_decodes(remote, &key)
+    let Some(staged) = page.files.first().filter(|staged| staged.key == key) else {
+        return remote_decodes(remote, &key)
             .await
-            .map(|()| TailVerdict::Sound),
+            .map(|()| TailVerdict::Sound);
+    };
+    if size.is_none_or(|size| size == staged.size) && same_bytes(staging, remote, &key).await? {
+        return Ok(TailVerdict::Sound);
     }
+    // One read never condemns a file: a staged copy that fails to verify is
+    // read again before it is taken as torn.
+    if !staged_verifies(staging, &key).await? && !staged_verifies(staging, &key).await? {
+        // Torn on two reads: it says nothing about the replica's object.
+        return remote_decodes(remote, &key)
+            .await
+            .map(|()| TailVerdict::Sound);
+    }
+    if remote_torn(remote, &key).await? {
+        return Ok(TailVerdict::Replace);
+    }
+    // Both copies verify on their own reads, so the first compare read
+    // something wrong or they differ: a second compare decides, as one read
+    // never condemns a file.
+    Ok(if same_bytes(staging, remote, &key).await? {
+        TailVerdict::Sound
+    } else {
+        TailVerdict::Diverged
+    })
 }
 
 /// Streams both copies and compares them chunk by chunk.
@@ -600,12 +793,9 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
     if same_bytes(staging, remote, &key).await.map_err(relist)? {
         return Ok(already);
     }
-    let listed = list_step(list_first(state), staging, remote, newest_staged).await?;
-    let txid = key.range().max();
-    match plan_upload(&listed.state, newest_staged) {
-        UploadPlan::Upload(next) if next.range().max() <= txid => Ok(diverged(txid, txid)),
-        UploadPlan::Upload(_) | UploadPlan::List | UploadPlan::Idle => Ok(listed),
-    }
+    // The relist reads the refused key whatever its listing shows (the
+    // probe starts at the key after what was confirmed, which is this one).
+    list_step(list_first(state), staging, remote, newest_staged).await
 }
 
 async fn put_staged<L: ObjectStore, S: ObjectStore>(

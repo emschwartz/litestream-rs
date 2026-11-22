@@ -24,10 +24,13 @@
 //!   simulator writes (a level-1 compaction first reads each input's trailer
 //!   from the replica to compare it with the staged copy, then the whole
 //!   input from one of the two); a boot reads back the newest file of each level and
-//!   the replica's newest level-0 file, a header first then the file. So
-//!   replica reads are at most two per compaction input, plus
-//!   [`READS_PER_BOOT`] per boot, plus one per fault that failed a call
-//!   (each such failure is retried).
+//!   the replica's newest level-0 file, a header first then the file, and
+//!   its listing is followed by reads of the missing level-0 keys past it
+//!   ([`PROBE_READS`]). So replica reads are at most two per compaction
+//!   input, plus [`READS_PER_BOOT`] per boot, plus one per fault that failed
+//!   a call (each such failure is retried) and [`PROBE_READS`] more for the
+//!   listing that may follow it. A key a lag hid and a probe found is a
+//!   listing the lag changed, counted as a fault hit.
 //! - Each file needs one commit; a failed or ambiguous commit is retried. So
 //!   replica commits are at most two per distinct key put plus one per
 //!   fault hit and crash. A listing a lag changed counts as a fault hit: what
@@ -47,12 +50,23 @@ pub const PER_FILE: u64 = 1024;
 
 /// Reads one boot may make of the replica: a header and a body for the
 /// newest file of each of the ten levels, and the upload lane's read-back.
-pub const READS_PER_BOOT: u64 = 24;
+pub const READS_PER_BOOT: u64 = 24 + PROBE_READS;
+
+/// The reads that end a probe past a listing: two keys (the level-0 file and
+/// the snapshot) for each missing transaction it reads past before it stops.
+#[expect(
+    clippy::as_conversions,
+    reason = "a u32 widens to a u64 losslessly; `From` is not const"
+)]
+pub const PROBE_READS: u64 = 2 * (lsr_core::PROBE_GAP as u64 + 1);
 
 /// What a run did besides its recorder's events.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spent {
-    /// Boots and crashes (each crash is followed by a boot).
+    /// Boots and crashes (each crash is followed by a boot), boots that
+    /// listed the replica and failed (each is tried again), and changes that
+    /// took the replica's newest file away (each costs reads past a listing
+    /// and a relist, no more than a boot).
     pub boots: u64,
     /// Calls a scheduled fault failed or changed, and listings a lag changed.
     pub fault_hits: u64,
@@ -90,7 +104,7 @@ pub fn check(
     let reads = inputs
         .saturating_mul(2)
         .saturating_add(spent.boots.saturating_add(1).saturating_mul(READS_PER_BOOT))
-        .saturating_add(spent.fault_hits);
+        .saturating_add(spent.fault_hits.saturating_mul(1 + PROBE_READS));
     within(Bound::ReadCalls, counts.reads, reads)?;
     let keys = u64::try_from(last.len()).unwrap_or(u64::MAX);
     let commits = keys

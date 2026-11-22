@@ -56,6 +56,12 @@ struct Counting {
     /// Keys whose next read returns its bytes with the middle one flipped,
     /// the stored bytes untouched: one bad read.
     flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// Files every listing shows that the store does not hold, as a listing
+    /// that lags a delete does.
+    ghosts: Arc<std::sync::Mutex<Vec<FileInfo>>>,
+    /// Keys every listing leaves out though the store holds them, as a
+    /// listing that lags a write does.
+    hidden: Arc<std::sync::Mutex<Vec<FileKey>>>,
 }
 
 impl Counting {
@@ -105,7 +111,27 @@ impl ObjectStore for Counting {
             .and_then(PageLimit::new)
             .filter(|cap| cap.get() < limit.get())
             .unwrap_or(limit);
-        self.inner.list(level, after, limit)
+        let ghosts: Vec<FileInfo> = self
+            .ghosts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|info| {
+                info.key.level() == level && after.is_none_or(|a| info.key.range().min() > a.max())
+            })
+            .copied()
+            .collect();
+        let hidden = self.hidden.lock().unwrap().clone();
+        let listed = self.inner.list(level, after, limit);
+        async move {
+            let mut page = listed.await?;
+            page.files.retain(|info| !hidden.contains(&info.key));
+            if page.next.is_none() {
+                page.files.extend(ghosts);
+                page.files.sort_by_key(|info| info.key);
+            }
+            Ok(page)
+        }
     }
 
     fn read(
@@ -363,13 +389,19 @@ fn boot_lists_then_recovers_then_uploads() {
 }
 
 /// An empty replica names no page size, so boot asks it nothing more: one
-/// listing per level and no second pass.
+/// listing per level, no second pass, and the probe's reads of the keys a
+/// lagging listing could have left out (two per transaction).
 #[test]
 fn a_first_boot_lists_each_level_once() {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     rig.tick(&mut actor, T0);
-    assert_eq!(rig.remote.calls(), u32::try_from(Level::ALL.len()).unwrap());
+    let probe = 2 * (crate::upload::PROBE_GAP + 1);
+    assert_eq!(
+        rig.remote.calls(),
+        u32::try_from(Level::ALL.len()).unwrap() + probe
+    );
+    assert_eq!(rig.remote.lists(), u32::try_from(Level::ALL.len()).unwrap());
 }
 
 /// An operator's request makes the next sync a snapshot although the WAL
@@ -1769,4 +1801,86 @@ fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
     assert!(ranges(&rig.remote).contains(&(2, 2)));
     assert!(!snapshots(&rig).contains(&2));
     assert_eq!(restored(&rig), 2);
+}
+
+/// A listing that lags a delete shows a file that is gone. Past the
+/// engine's position it would mean another writer, but only a read proves
+/// that: maintenance plans nothing from the listing and lists again later.
+/// A file a read finds there still stops the engine.
+#[test]
+fn maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it() {
+    let (mut rig, mut actor) = caught_up();
+    rig.remote.ghosts.lock().unwrap().push(FileInfo {
+        key: l0(5),
+        size: 100,
+        listed: crate::layout::ListedTime::LastModified(ts(T0)),
+    });
+    rig.commit(2);
+    let seen = rig.follow(&mut actor, T0 + 10, 40);
+    assert!(
+        seen.iter().all(|tick| !matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter().any(|tick| matches!(
+            event(tick),
+            Some(Event::Maintained {
+                event: MaintainedEvent::Waiting { .. },
+                ..
+            })
+        )),
+        "{seen:?}"
+    );
+    rig.remote.ghosts.lock().unwrap().clear();
+    block_on(async {
+        let mut up = rig
+            .remote
+            .inner
+            .begin_upload(&l0(5), ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(b"another writer").await.unwrap();
+        up.commit().await.unwrap();
+    });
+    rig.commit(3);
+    let seen = rig.follow(&mut actor, T0 + 700_000, 40);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}
+
+/// A listing that lags the engine's own newest upload ends before what the
+/// engine confirmed. Planned from, it would snapshot or compact a shorter run
+/// and write the longer one again later; a read finds the confirmed key, so
+/// maintenance plans nothing and lists again. Once the listing shows the
+/// file, maintenance plans from it.
+#[test]
+fn maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    rig.remote.hidden.lock().unwrap().push(l0(2));
+    rig.commit(3);
+    rig.settle(&mut actor, T0 + 2);
+    rig.remote.hidden.lock().unwrap().push(l0(3));
+    let planned = |seen: &[Tick]| {
+        seen.iter().any(|tick| {
+            matches!(
+                event(tick),
+                Some(Event::Maintained {
+                    event: MaintainedEvent::Compacted(_)
+                        | MaintainedEvent::Snapshot(_)
+                        | MaintainedEvent::Deleted(_),
+                    ..
+                })
+            )
+        })
+    };
+    let seen = rig.follow(&mut actor, T0 + 40_000, 40);
+    assert!(!planned(&seen), "{seen:?}");
+    rig.remote.hidden.lock().unwrap().clear();
+    let seen = rig.follow(&mut actor, T0 + 100_000, 40);
+    no_stop(&seen);
+    assert!(planned(&seen), "{seen:?}");
 }
