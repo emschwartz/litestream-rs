@@ -57,8 +57,10 @@ def assert_tree_at(head: str) -> None:
 
 
 def reset_tree(head: str) -> None:
-    """The scratch tree back to a clean state, checked to be at `head`."""
-    git("checkout", "--force", "--detach", "HEAD", cwd=TREE)
+    """The scratch tree at `head`, with no change and no untracked file but the target dir.
+    `head` is resolved in this checkout: inside the scratch tree `HEAD` names the commit an
+    earlier run left it at."""
+    git("checkout", "--force", "--detach", head, cwd=TREE)
     git("clean", "-fdxq", "-e", "target", cwd=TREE)
     assert_tree_at(head)
 
@@ -69,7 +71,7 @@ def prepare_tree(head: str) -> None:
     git("worktree", "prune")
     if not (TREE / ".git").exists():
         shutil.rmtree(TREE, ignore_errors=True)
-        git("worktree", "add", "--detach", str(TREE), "HEAD")
+        git("worktree", "add", "--detach", str(TREE), head)
     reset_tree(head)
 
 
