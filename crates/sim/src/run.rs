@@ -604,12 +604,21 @@ impl Runner {
         });
     }
 
-    /// Counts a tick that began unbooted, listed the replica whole and ended
-    /// unbooted: a boot that failed after its listing.
-    fn note_failed_boot(&mut self, booting: bool, lists_before: u64) {
+    /// After a tick that began unbooted: what the boot that succeeded saw (the WAL's salts
+    /// and the commits so far), or, for a boot that listed the replica whole and failed, one
+    /// more failed boot for the budget.
+    fn note_boot(&mut self, booting: bool, lists_before: u64, salts: Salts, commits: usize) {
+        if !booting {
+            return;
+        }
+        if self.actor.booted() {
+            self.life.boot_salts = Some(salts);
+            self.life.boot_commits = commits;
+            return;
+        }
         let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
         let lists = self.w.remote_recorder.counts().lists;
-        if booting && lists.saturating_sub(lists_before) >= levels && !self.actor.booted() {
+        if lists.saturating_sub(lists_before) >= levels {
             self.failed_boots = self.failed_boots.saturating_add(1);
         }
     }
@@ -628,11 +637,7 @@ impl Runner {
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
         let ended = self.run_one(plan);
-        self.note_failed_boot(booting, remote0.lists);
-        if booting && self.actor.booted() {
-            self.life.boot_salts = Some(salts);
-            self.life.boot_commits = commits;
-        }
+        self.note_boot(booting, remote0.lists, salts, commits);
         self.judge_stores()?;
         let crashed = matches!(ended, TickEnd::Crashed { .. });
         self.liveness_mid_tick(hits0, crashed)?;
