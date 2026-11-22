@@ -170,6 +170,17 @@ pub enum Op {
     StagingDamage(MetaOp),
     /// Every store fault that fails at a rate stops failing.
     Heal,
+    /// The replica's listings start to lag behind the bucket: each of the
+    /// next `writes` commits and deletes on it stays out of listings (a
+    /// deleted key stays in, as it was) for 1 to `window` list calls. Reads
+    /// stay exact, as on S3 behind an eventually consistent listing or a
+    /// cache in front of one.
+    LaggingListings {
+        /// Writes and deletes the lag hides.
+        writes: u8,
+        /// The most list calls one stays hidden.
+        window: u8,
+    },
     /// The WAL is damaged, the engine runs this many ticks, and then the app
     /// heals it as an application would: its connections let go, another
     /// process truncates the WAL, and it commits again (a flipped bit is
@@ -298,6 +309,8 @@ pub struct Weights {
     /// [`MetaOp::ForgeNewest`]), and [`Op::StagingDamage`] with
     /// [`MetaOp::ForgeNewest`].
     pub staging_replace_running: u32,
+    /// [`Op::LaggingListings`].
+    pub lagging_listings: u32,
     /// Whether a vacuum may change the page size. A replica prefix holds one
     /// page size, so after a resize the engine's next boot stops, or keeps
     /// retrying in a degraded state, on `PageSizeChanged`, and the states
@@ -343,6 +356,7 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             staging_replace_running: 0,
+            lagging_listings: 0,
             vacuum_resizes: true,
             block_crash_law: false,
         }
@@ -374,10 +388,11 @@ enum Kind {
     StagingDamage,
     Heal,
     StagingReplaceRunning,
+    LaggingListings,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 23] {
+    fn table(&self) -> [(Kind, u32); 24] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -402,6 +417,7 @@ impl Weights {
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
             (Kind::StagingReplaceRunning, self.staging_replace_running),
+            (Kind::LaggingListings, self.lagging_listings),
         ]
     }
 
@@ -466,6 +482,7 @@ impl Weights {
             staging_damage: weight(false),
             heal: weight(false),
             staging_replace_running: 0,
+            lagging_listings: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
         };
@@ -476,6 +493,8 @@ impl Weights {
         mix.block_crash_law = below(&entropy, 2) == 0;
         // And after that, for the same reason.
         mix.staging_replace_running = weight(false);
+        // And lagging listings after that.
+        mix.lagging_listings = weight(false);
         mix
     }
 
@@ -711,6 +730,10 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
         Kind::StagingReplaceRunning => staging_replace_running(entropy),
+        Kind::LaggingListings => Op::LaggingListings {
+            writes: small(entropy, 8).saturating_add(1),
+            window: small(entropy, 40).saturating_add(1),
+        },
     }
 }
 

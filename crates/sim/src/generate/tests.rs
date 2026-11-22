@@ -144,7 +144,7 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
     let mut compared = 0;
     for n in 0..200 {
         let weights = Weights::mixed(seed(n));
-        if weights.staging_replace_running != 0 {
+        if weights.staging_replace_running != 0 || weights.lagging_listings != 0 {
             continue;
         }
         let live = history(seed(n), 300, &weights);
@@ -156,4 +156,29 @@ fn the_second_frozen_generator_draws_what_the_live_one_drew() {
         compared += 1;
     }
     assert!(compared > 100, "{compared}");
+}
+
+#[test]
+fn lagging_listings_are_drawn_by_swarm_mixes_only() {
+    assert_eq!(Weights::default().lagging_listings, 0);
+    let mixes: Vec<Weights> = (1..=40).map(|n| Weights::swarm(seed(n))).collect();
+    assert!(mixes.iter().any(|mix| mix.lagging_listings > 0));
+    assert!(mixes.iter().any(|mix| mix.lagging_listings == 0));
+    let mix = mixes
+        .iter()
+        .find(|mix| mix.lagging_listings > 20)
+        .expect("a mix that weighs lagging listings");
+    let drawn = history(seed(3), 2_000, mix)
+        .into_iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Op::LaggingListings {
+                    writes: 1..=8,
+                    window: 1..=40
+                }
+            )
+        })
+        .count();
+    assert!(drawn > 0);
 }

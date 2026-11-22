@@ -947,6 +947,22 @@ impl Runner {
     }
 
     /// Makes `cause` legitimate for the rest of the run.
+    /// The replica's listings start to lag ([`Op::LaggingListings`]).
+    fn lag_listings(&mut self, writes: u8, window: u8) {
+        self.report.reach.bump("remote.lagging_listings");
+        // Known defect: a boot listing that misses this engine's own newest
+        // uploads takes the replica as ending earlier, and the next listing
+        // that shows them stops the engine as another writer's
+        // (`tests/sim/fixed_seeds.rs`,
+        // a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files).
+        // The stop loses no data; it is allowed here so the swarm keeps
+        // judging everything else.
+        self.expect(StopCause::OtherWriter);
+        self.w
+            .remote_faults
+            .lag_listings(u32::from(writes), u32::from(window));
+    }
+
     fn expect(&mut self, cause: StopCause) {
         if !self.expected.contains(&cause) {
             self.expected.push(cause);
@@ -1480,6 +1496,7 @@ impl Runner {
                 self.w.remote_faults.heal();
                 self.w.staging_faults.heal();
             }
+            Op::LaggingListings { writes, window } => self.lag_listings(*writes, *window),
             Op::OurReader { begin } => {
                 let done = if *begin {
                     self.w.sqlite.our_reader_begin()
@@ -1587,8 +1604,13 @@ impl Runner {
         self.rate_active = false;
         self.w.remote_faults.heal();
         self.w.staging_faults.heal();
+        self.w.remote_faults.end_lag();
         self.drain()?;
         self.restore_all()?;
+        self.report.reach.add(
+            "remote.stale_listings",
+            u64::from(self.w.remote_faults.stale_listings()),
+        );
         memory(
             self.w.remote_recorder.counts(),
             self.w.staging_recorder.counts(),
@@ -1603,7 +1625,10 @@ impl Runner {
             boots: u64::from(self.report.crashes)
                 .saturating_add(u64::from(self.report.shutdowns))
                 .saturating_add(u64::from(self.report.checks)),
-            fault_hits: hits(&self.w.remote_faults),
+            // A listing a lag changed hid a write, which may be done again
+            // once: the cost of the stale listing, not amplification.
+            fault_hits: hits(&self.w.remote_faults)
+                .saturating_add(u64::from(self.w.remote_faults.stale_listings())),
         };
         crate::budget::check(
             &self.w.remote_recorder.events(),

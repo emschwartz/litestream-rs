@@ -30,7 +30,8 @@
 //!   (each such failure is retried).
 //! - Each file needs one commit; a failed or ambiguous commit is retried. So
 //!   replica commits are at most two per distinct key put plus one per
-//!   fault hit and crash.
+//!   fault hit and crash. A listing a lag changed counts as a fault hit: what
+//!   it hid (a compaction output, say) may be written again once.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,7 +54,7 @@ pub const READS_PER_BOOT: u64 = 24;
 pub struct Spent {
     /// Boots and crashes (each crash is followed by a boot).
     pub boots: u64,
-    /// Calls a scheduled fault failed or changed.
+    /// Calls a scheduled fault failed or changed, and listings a lag changed.
     pub fault_hits: u64,
 }
 

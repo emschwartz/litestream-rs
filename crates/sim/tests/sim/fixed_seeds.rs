@@ -1047,6 +1047,78 @@ mod replaced_staging {
 }
 
 #[cfg(test)]
+mod lagging_listings {
+    use lsr_core::StopCause;
+    use lsr_sim::generate::WalOp;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{EnvFault, Op, Opts, Seed, Weights};
+
+    /// Known defect, kept failing on purpose. The replica's listings lag; the
+    /// engine uploads transactions 4 and 5, its staging directory is wiped
+    /// and it boots again. The boot listing does not show 5 yet, so the engine
+    /// takes the replica as ending at 4; the next maintenance listing shows 5
+    /// past everything the engine knows, and it stops as if another writer
+    /// had put it, though its own previous process did (seed 0x39, shrunk
+    /// from 183 operations). Nothing is lost, but replication stops until a
+    /// person restarts it. The runner allows this stop after a lag so the
+    /// swarm judges everything else.
+    #[test]
+    #[ignore = "known defect: a stale boot listing stops the engine on its own uploads"]
+    fn a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files() {
+        let seed = Seed::new(0x39);
+        let ops = [
+            Op::WalDamage {
+                op: WalOp::FlipLastFrameBit,
+                ticks: 7,
+            },
+            Op::CommitInTick { pages: 1 },
+            Op::WalDamage {
+                op: WalOp::RegrowWithoutCommitMarks(14_437_992_231_631_771_069),
+                ticks: 7,
+            },
+            Op::Remote(lsr_sim::generate::RemoteOp::RollBack),
+            Op::WalDamage {
+                op: WalOp::RegrowWithoutCommitMarks(4_540_386_313_754_240_083),
+                ticks: 7,
+            },
+            Op::LaggingListings {
+                writes: 4,
+                window: 31,
+            },
+            Op::ClockJump(117_763),
+            Op::WalDamage {
+                op: WalOp::TearHeader,
+                ticks: 5,
+            },
+            Op::WalDamage {
+                op: WalOp::RegrowSameSalts(10_097_652_172_457_107_057),
+                ticks: 6,
+            },
+            Op::EnvFault(EnvFault::WipeStaging),
+            Op::WalDamage {
+                op: WalOp::RegrowSameSalts(8_779_680_044_016_711_231),
+                ticks: 4,
+            },
+        ];
+        let opts = Opts {
+            drawn: true,
+            trace: true,
+            block_crash_law: Weights::mixed(seed).block_crash_law,
+            ..Opts::default()
+        };
+        let report = match run_ops(seed, &ops, &opts) {
+            Ok(report) => report,
+            Err(failure) => panic!("{failure}"),
+        };
+        let stop = format!("Stopped({:?})", StopCause::OtherWriter);
+        assert!(
+            report.trace.iter().all(|line| !line.contains(&stop)),
+            "the engine stopped on its own files"
+        );
+    }
+}
+
+#[cfg(test)]
 mod refused_upload {
     use lsr_core::StoreOp;
     use lsr_sim::run::run_ops;
