@@ -1196,3 +1196,36 @@ fix = "claude/dropin-dir"
 package = "lsr-config"
 test_bin = "config"
 tests = ["odd_names_reach_a_url_replica_unchanged"]
+
+# S3 credentials made to resolve as Go's AWS SDK does (claude/dropin-creds): found by the Go
+# differential (compat `dropin_creds`), which needs the Go dumper and so is ignored; the
+# chain tests below are its Go-free counterparts.
+[[bug]]
+name = "creds-files-read-after-environment"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::a_partial_profile_stops_the_chain_even_with_environment_keys"]
+
+[[bug]]
+name = "creds-empty-aws-var-ignored"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::an_empty_aws_variable_blocks_the_litestream_copy"]
+
+[[bug]]
+name = "creds-merge-keeps-config-error"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::the_credentials_file_is_merged_over_the_config_file_as_the_sdk_merges"]
+
+[[bug]]
+name = "creds-continuation-dropped"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::an_indented_line_without_a_separator_continues_the_value"]
+
+[[bug]]
+name = "creds-unreadable-file-skipped"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::a_file_that_opens_but_cannot_be_read_stops_the_chain_as_in_go"]

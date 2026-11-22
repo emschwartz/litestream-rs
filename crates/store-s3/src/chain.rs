@@ -1,31 +1,34 @@
 //! Where S3 credentials come from when the caller does not hand them over:
 //! the parts of the AWS default credential chain that need no network and no
-//! subprocess, in the order Go litestream (with the AWS SDK for Go v2) tries
-//! them.
+//! subprocess, as Go Litestream (041a8c3, with the AWS SDK for Go v2, config
+//! v1.32.6) runs them.
 //!
-//! 1. Explicit values (a library caller's [`CredentialChain::with_explicit`]).
+//! 0. **The shared files, first, whatever source wins.** The SDK loads the shared
+//!    config file (`AWS_CONFIG_FILE`, else `~/.aws/config`) and credentials file
+//!    (`AWS_SHARED_CREDENTIALS_FILE`, else `~/.aws/credentials`), combines them
+//!    (`shared` module) and picks the profile `AWS_PROFILE`, else
+//!    `AWS_DEFAULT_PROFILE`, else `default`, before it looks at any credentials. So
+//!    these stop every resolution, explicit and environment keys included, as they
+//!    stop Go's start: a profile a non-empty `AWS_PROFILE` names that no file has
+//!    ([`CredentialError::ProfileNotFound`]); a chosen profile holding only one of
+//!    the key id and secret ([`CredentialError::PartialProfile`]); a file that opens
+//!    but cannot be read ([`CredentialError::ReadFailed`]). A file that cannot be
+//!    opened is skipped, as in Go.
+//! 1. Explicit values (a library caller's [`CredentialChain::with_explicit`], and
+//!    the daemon's `access-key-id` and `secret-access-key`).
 //! 2. The environment: the key id from `AWS_ACCESS_KEY_ID`, else
-//!    `LITESTREAM_ACCESS_KEY_ID`, else `AWS_ACCESS_KEY`; the secret from
-//!    `AWS_SECRET_ACCESS_KEY`, else `LITESTREAM_SECRET_ACCESS_KEY`, else
+//!    `AWS_ACCESS_KEY`; the secret from `AWS_SECRET_ACCESS_KEY`, else
 //!    `AWS_SECRET_KEY`; with both, `AWS_SESSION_TOKEN` if set. An empty
-//!    variable counts as unset. With only one of the two, Go moves on to the
-//!    files, and so does this.
-//! 3. The shared credentials file (`AWS_SHARED_CREDENTIALS_FILE`, else
-//!    `~/.aws/credentials`), then the shared config file (`AWS_CONFIG_FILE`,
-//!    else `~/.aws/config`), for the profile `AWS_PROFILE`, else
-//!    `AWS_DEFAULT_PROFILE`, else `default`. Static keys only. A session token
-//!    is taken from the same file as the keys. A file that is missing or
-//!    cannot be opened is skipped, as in Go.
+//!    variable counts as unset. `LITESTREAM_ACCESS_KEY_ID` and
+//!    `LITESTREAM_SECRET_ACCESS_KEY` stand in for their `AWS_*` names only when those
+//!    are unset, as Go copies them; an empty `AWS_*` variable blocks the copy.
+//! 3. The chosen profile's static keys, when it holds a non-empty key id and secret,
+//!    with its session token.
 //!
-//! The first source with both a key id and a secret wins. When none has them,
-//! [`CredentialError::Missing`] names every source and why it gave nothing, so
-//! an operator knows where the library looked; no error or `Debug` output holds
-//! a value. As in Go, a profile with one of the key id and secret but not the
-//! other is an error rather than a fall-through, and so is a profile that
-//! `AWS_PROFILE` names but neither file has (Go fails on that at load; here
-//! only once the files are consulted, so explicit or environment credentials
-//! still win). A line in a shared file that is not INI is refused, where Go
-//! skips it (see the `ini` module).
+//! When none has them, [`CredentialError::Missing`] names every source and why it
+//! gave nothing; no error or `Debug` output holds a value. A line in a shared file
+//! that is not INI is refused, where Go skips it (see the `ini` module and
+//! `docs/decisions.md` D153).
 //!
 //! Not built, because each needs a network service or a subprocess: the EC2
 //! instance metadata service (IMDS), ECS and EKS container credentials
@@ -40,6 +43,7 @@
 //! the process's and can run in parallel.
 
 mod ini;
+mod shared;
 #[cfg(test)]
 mod tests;
 
@@ -52,7 +56,8 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 use crate::credentials::{S3Credentials, SecretString};
-use ini::Flavor;
+use ini::Sections;
+use shared::Profile;
 
 /// The variables tried for the access key id, in order.
 pub(crate) const ACCESS_KEY_ID_VARS: [&str; 3] = [
@@ -136,53 +141,73 @@ impl CredentialChain {
     /// [`CredentialError::Missing`] when no source has both a key id and a
     /// secret; the other variants for a shared file that cannot be used.
     pub fn resolve(&self) -> Result<Resolved, CredentialError> {
+        let (profile, named) = self.profile();
+        let environment = self.env_keys();
+        let files = self.shared_files(&profile)?;
+        let gap = match &environment {
+            Ok(_) => EnvGap::Both,
+            Err(gap) => *gap,
+        };
+        let tried = Tried {
+            environment: gap,
+            profile: profile.clone(),
+            credentials_file: files.credentials_look,
+            config_file: files.config_look,
+        };
+        let section = match shared::choose(files.merged, &profile) {
+            Profile::Absent if named => return Err(CredentialError::ProfileNotFound(tried)),
+            Profile::Absent => None,
+            Profile::Partial(path) => {
+                return Err(CredentialError::PartialProfile { path, profile });
+            }
+            Profile::Present(section) => Some(section),
+        };
         if let Some(credentials) = &self.explicit {
             return Ok(Resolved {
                 credentials: credentials.clone(),
                 source: Source::Explicit,
             });
         }
-        let environment = match self.env_keys() {
-            Ok(credentials) => {
-                return Ok(Resolved {
-                    credentials,
-                    source: Source::Environment,
-                });
-            }
-            Err(gap) => gap,
-        };
-        let (profile, named) = self.profile();
-        let credentials_file = match self.file_keys(FileKind::Credentials, &profile)? {
-            Ok(resolved) => return Ok(resolved),
-            Err(look) => look,
-        };
-        let config_file = match self.file_keys(FileKind::Config, &profile)? {
-            Ok(resolved) => return Ok(resolved),
-            Err(look) => look,
-        };
-        let tried = Tried {
-            environment,
-            profile,
-            credentials_file,
-            config_file,
-        };
-        if named && !tried.profile_seen() {
-            return Err(CredentialError::ProfileNotFound(tried));
+        if let Ok(credentials) = environment {
+            return Ok(Resolved {
+                credentials,
+                source: Source::Environment,
+            });
         }
-        Err(CredentialError::Missing(tried))
+        match section.and_then(|section| profile_keys(&section, &files.credentials_path)) {
+            Some((credentials, from_credentials, path)) => Ok(Resolved {
+                credentials,
+                source: if from_credentials {
+                    Source::SharedCredentialsFile { path, profile }
+                } else {
+                    Source::SharedConfigFile { path, profile }
+                },
+            }),
+            None => Err(CredentialError::Missing(tried)),
+        }
     }
 
     fn var(&self, name: &str) -> Option<String> {
         (self.env)(name).filter(|value| !value.is_empty())
     }
 
-    fn first(&self, names: &[&str]) -> Option<String> {
-        names.iter().find_map(|name| self.var(name))
+    /// An `AWS_*` variable as the SDK sees it in Go Litestream, whose `Run` first
+    /// copies `LITESTREAM_*` into it only when it is unset (an empty `AWS_*` stays).
+    fn aws_var(&self, aws: &str, litestream: &str) -> Option<String> {
+        (self.env)(aws)
+            .or_else(|| (self.env)(litestream))
+            .filter(|value| !value.is_empty())
     }
 
     fn env_keys(&self) -> Result<S3Credentials, EnvGap> {
-        let id = self.first(&ACCESS_KEY_ID_VARS);
-        let secret = self.first(&SECRET_ACCESS_KEY_VARS);
+        let [id_var, litestream_id, short_id] = ACCESS_KEY_ID_VARS;
+        let [secret_var, litestream_secret, short_secret] = SECRET_ACCESS_KEY_VARS;
+        let id = self
+            .aws_var(id_var, litestream_id)
+            .or_else(|| self.var(short_id));
+        let secret = self
+            .aws_var(secret_var, litestream_secret)
+            .or_else(|| self.var(short_secret));
         let (id, secret) = match (id, secret) {
             (Some(id), Some(secret)) => (id, SecretString::new(secret)),
             (None, Some(_)) => return Err(EnvGap::KeyId),
@@ -208,64 +233,84 @@ impl CredentialChain {
         }
     }
 
-    /// The outer error stops the chain; the inner one is a source that gave
-    /// nothing.
-    fn file_keys(
+    fn path_of(&self, kind: FileKind) -> Option<PathBuf> {
+        match self.var(kind.override_var()) {
+            Some(path) => Some(PathBuf::from(path)),
+            None => self
+                .var(HOME_VAR)
+                .map(|home| Path::new(&home).join(".aws").join(kind.file_name())),
+        }
+    }
+
+    /// Both files, read and combined as the SDK does at load.
+    fn shared_files(&self, profile: &str) -> Result<Files, CredentialError> {
+        let (config, config_look) = self.one_file(FileKind::Config, profile)?;
+        let (credentials, credentials_look) = self.one_file(FileKind::Credentials, profile)?;
+        let credentials_path = match &credentials_look {
+            FileLook::At { path, .. } => Some(path.clone()),
+            FileLook::NoHome => None,
+        };
+        Ok(Files {
+            merged: shared::merge(config, credentials),
+            credentials_path,
+            credentials_look,
+            config_look,
+        })
+    }
+
+    fn one_file(
         &self,
         kind: FileKind,
         profile: &str,
-    ) -> Result<Result<Resolved, FileLook>, CredentialError> {
-        let path = match self.var(kind.override_var()) {
-            Some(path) => PathBuf::from(path),
-            None => match self.var(HOME_VAR) {
-                Some(home) => Path::new(&home).join(".aws").join(kind.file_name()),
-                None => return Ok(Err(FileLook::NoHome)),
-            },
+    ) -> Result<(Sections, FileLook), CredentialError> {
+        let Some(path) = self.path_of(kind) else {
+            return Ok((Sections::new(), FileLook::NoHome));
         };
         let text = match read_bounded(&path)? {
             Ok(text) => text,
-            Err(outcome) => return Ok(Err(FileLook::At { path, outcome })),
+            Err(outcome) => return Ok((Sections::new(), FileLook::At { path, outcome })),
         };
-        let keys = match ini::lookup(&text, kind.flavor(), profile) {
-            Ok(Some(keys)) => keys,
-            Ok(None) => {
-                return Ok(Err(FileLook::At {
-                    path,
-                    outcome: FileOutcome::NoProfile,
-                }));
-            }
-            Err(bad) => {
-                return Err(CredentialError::MalformedLine {
-                    path,
-                    line: bad.line,
-                });
-            }
+        let parsed = match kind {
+            FileKind::Config => shared::config_file(&text, &path),
+            FileKind::Credentials => shared::credentials_file(&text, &path),
         };
-        let (id, secret) = match (nonempty(keys.id), nonempty(keys.secret)) {
-            (Some(id), Some(secret)) => (id, secret),
-            (None, None) => {
-                return Ok(Err(FileLook::At {
-                    path,
-                    outcome: FileOutcome::NoKeys,
-                }));
-            }
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(CredentialError::PartialProfile {
-                    path,
-                    profile: profile.to_owned(),
-                });
-            }
+        let sections = parsed.map_err(|bad| CredentialError::MalformedLine {
+            path: path.clone(),
+            line: bad.line,
+        })?;
+        let outcome = if sections.contains_key(profile) {
+            FileOutcome::NoKeys
+        } else {
+            FileOutcome::NoProfile
         };
-        let credentials = S3Credentials::new(id.to_owned(), SecretString::new(secret.to_owned()));
-        let credentials = match nonempty(keys.token) {
-            Some(token) => credentials.with_session_token(SecretString::new(token.to_owned())),
-            None => credentials,
-        };
-        Ok(Ok(Resolved {
-            credentials,
-            source: kind.source(path, profile.to_owned()),
-        }))
+        Ok((sections, FileLook::At { path, outcome }))
     }
+}
+
+/// The two files, combined, and what each gave.
+struct Files {
+    merged: Sections,
+    credentials_path: Option<PathBuf>,
+    credentials_look: FileLook,
+    config_look: FileLook,
+}
+
+/// A profile's static keys when it holds both, with whether they came from the
+/// credentials file, and that file's path.
+fn profile_keys(
+    section: &ini::Section,
+    credentials_path: &Option<PathBuf>,
+) -> Option<(S3Credentials, bool, PathBuf)> {
+    let id = nonempty(Some(section.string(ini::ACCESS_KEY_ID)))?;
+    let secret = nonempty(Some(section.string(ini::SECRET_ACCESS_KEY)))?;
+    let credentials = S3Credentials::new(id.to_owned(), SecretString::new(secret.to_owned()));
+    let credentials = match nonempty(Some(section.string(ini::SESSION_TOKEN))) {
+        Some(token) => credentials.with_session_token(SecretString::new(token.to_owned())),
+        None => credentials,
+    };
+    let path = section.keys_from.clone().unwrap_or_default();
+    let from_credentials = credentials_path.as_ref() == Some(&path);
+    Some((credentials, from_credentials, path))
 }
 
 /// The file's text in a buffer zeroed on drop, or why there is none.
@@ -296,7 +341,12 @@ fn read_bounded(path: &Path) -> Result<Result<Zeroizing<String>, FileOutcome>, C
         Ok(_) => Ok(Ok(Zeroizing::new(
             String::from_utf8_lossy(&bytes).into_owned(),
         ))),
-        Err(err) => Ok(Err(FileOutcome::Unreadable(err.kind()))),
+        // Go skips a file it cannot open, but a read that fails after the open
+        // (a directory) fails its load.
+        Err(err) => Err(CredentialError::ReadFailed {
+            path: path.to_owned(),
+            kind: err.kind(),
+        }),
     }
 }
 
@@ -319,20 +369,6 @@ impl FileKind {
         match self {
             Self::Credentials => "credentials",
             Self::Config => "config",
-        }
-    }
-
-    fn flavor(self) -> Flavor {
-        match self {
-            Self::Credentials => Flavor::Credentials,
-            Self::Config => Flavor::Config,
-        }
-    }
-
-    fn source(self, path: PathBuf, profile: String) -> Source {
-        match self {
-            Self::Credentials => Source::SharedCredentialsFile { path, profile },
-            Self::Config => Source::SharedConfigFile { path, profile },
         }
     }
 }
@@ -459,20 +495,6 @@ impl Tried {
     pub fn config_file(&self) -> &FileLook {
         &self.config_file
     }
-
-    fn profile_seen(&self) -> bool {
-        [&self.credentials_file, &self.config_file]
-            .iter()
-            .any(|look| {
-                matches!(
-                    look,
-                    FileLook::At {
-                        outcome: FileOutcome::NoKeys,
-                        ..
-                    }
-                )
-            })
-    }
 }
 
 impl fmt::Display for Tried {
@@ -548,6 +570,15 @@ pub enum CredentialError {
         path: PathBuf,
         /// The line, counting from 1.
         line: usize,
+    },
+    /// A shared file opened but could not be read (it is a directory, say). Go
+    /// skips a file it cannot open but fails on one it cannot read.
+    #[error("{} could not be read: {kind}", path.display())]
+    ReadFailed {
+        /// The file.
+        path: PathBuf,
+        /// What the file system said.
+        kind: io::ErrorKind,
     },
     /// A shared file is larger than `MAX_SHARED_FILE_BYTES`.
     #[error("{} is larger than {limit} bytes", path.display())]
