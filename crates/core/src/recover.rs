@@ -144,11 +144,6 @@ pub enum NewestStagedFile {
     Unreadable {
         /// Its transaction id.
         txid: Txid,
-        /// The page size its header names, when the header decodes: unusable
-        /// as a position, the file may still be uploaded, so a database whose
-        /// page size has changed since must stop before staging a file of the
-        /// new size beside it.
-        page_size: Option<PageSize>,
     },
 }
 
@@ -177,10 +172,7 @@ impl NewestStagedFile {
         };
         let txid = newest.key.range().max();
         let header = read_header(staging, &newest.key, Fault::from_staging).await?;
-        let unreadable = Self::Unreadable {
-            txid,
-            page_size: header.map(|header| header.page_size()),
-        };
+        let unreadable = Self::Unreadable { txid };
         let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
             return Ok(Some(unreadable));
         };

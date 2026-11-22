@@ -2018,20 +2018,16 @@ async fn boot_recover<W: WalSource, L: ObjectStore, R: ObjectStore>(
 /// the replica holds a later transaction than that file (staging is behind
 /// it, or a staging backup was put back) or the staged file names none; then
 /// the replica's newest file's, since the next file goes on its prefix. The
-/// staged file's answers when the replica's header does not decode.
+/// staged file's answers when the replica's header does not decode. A newest
+/// staged file unusable as a position names nothing: it can never be
+/// uploaded (it gets no witness), so its page size constrains no file.
 async fn prefix_page_size<R: ObjectStore>(
     newest_staged: Option<&NewestStagedFile>,
     confirmed: Option<Txid>,
     remote: &R,
 ) -> Result<Option<PageSize>, Fault> {
     let staged = match newest_staged {
-        Some(
-            NewestStagedFile::Readable { page_size, .. }
-            | NewestStagedFile::Unreadable {
-                page_size: Some(page_size),
-                ..
-            },
-        ) => Some(*page_size),
+        Some(NewestStagedFile::Readable { page_size, .. }) => Some(*page_size),
         Some(NewestStagedFile::Unreadable { .. }) | None => None,
     };
     let behind = confirmed > newest_staged.map(NewestStagedFile::txid);
