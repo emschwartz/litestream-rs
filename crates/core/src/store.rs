@@ -506,6 +506,14 @@ pub trait ObjectStore: Send + Sync {
     /// retried delete converges.
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send;
 
+    /// Removes the scratch files of uploads a killed process left in this store, and says
+    /// how many it removed. The engine calls it when it boots, before it reads anything:
+    /// a crash loop otherwise leaves one per boot, each as large as the file it was writing.
+    /// A store removes only names of its own scratch form and bounds the work of one call; one
+    /// that leaves nothing behind (memory) answers 0. A wrapper forwards it. There is no
+    /// default, so a new store or wrapper cannot drop it by saying nothing.
+    fn remove_scratch(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
     /// How many items of a batch of `kind` this store runs at once. A caller
     /// asks for at most this many at a time, so its memory is this many
     /// responses. One, the default, means the batch methods are sequential.

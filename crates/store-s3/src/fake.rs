@@ -172,6 +172,7 @@ impl FakeS3 {
             Shape::Complete => self.complete(&mut state, request, &key),
             Shape::Abort => abort(&mut state, request),
             Shape::DeleteObjects => delete_objects(&mut state, request),
+            Shape::ListUploads => self.list_uploads(&state, request),
         }
     }
 
@@ -230,6 +231,47 @@ impl FakeS3 {
             joined.etag.replace('"', "&#34;"),
         );
         reply(200, vec![("etag", joined.etag)], xml.into_bytes())
+    }
+
+    /// ListMultipartUploads under `prefix`, keys then ids ascending, one page of at most
+    /// 1000 after the markers.
+    fn list_uploads(&self, state: &State, request: &HttpRequest) -> HttpResponse {
+        let prefix = query(request, "prefix").unwrap_or_default();
+        let after = query(request, "key-marker").zip(query(request, "upload-id-marker"));
+        let mut open: Vec<(&String, &String)> = state
+            .uploads
+            .iter()
+            .filter(|(_, up)| up.key.starts_with(&prefix))
+            .map(|(id, up)| (&up.key, id))
+            .filter(|(key, id)| {
+                after
+                    .as_ref()
+                    .is_none_or(|(k, i)| (key.as_str(), id.as_str()) > (k.as_str(), i.as_str()))
+            })
+            .collect();
+        open.sort();
+        let more = open.len() > MAX_KEYS;
+        open.truncate(MAX_KEYS);
+        let mut xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListMultipartUploadsResult xmlns=\"{NS}\"><Bucket>{}</Bucket><IsTruncated>{more}</IsTruncated>",
+            xml_escape(&self.bucket),
+        );
+        if let (true, Some((key, id))) = (more, open.last()) {
+            xml.push_str(&format!(
+                "<NextKeyMarker>{}</NextKeyMarker><NextUploadIdMarker>{}</NextUploadIdMarker>",
+                xml_escape(key),
+                xml_escape(id)
+            ));
+        }
+        for (key, id) in &open {
+            xml.push_str(&format!(
+                "<Upload><Key>{}</Key><UploadId>{}</UploadId></Upload>",
+                xml_escape(key),
+                xml_escape(id)
+            ));
+        }
+        xml.push_str("</ListMultipartUploadsResult>");
+        reply(200, Vec::new(), xml.into_bytes())
     }
 
     fn list(&self, state: &State, request: &HttpRequest) -> HttpResponse {
