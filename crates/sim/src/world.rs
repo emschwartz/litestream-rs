@@ -572,12 +572,14 @@ impl World {
                 )
                 .unwrap_or_default();
                 self.log_history();
-                self.model
-                    .on_power_loss(self.sqlite.salts(), self.sqlite.mx_frame());
+                self.model.on_power_loss(
+                    self.sqlite.salts(),
+                    self.sqlite.mx_frame(),
+                    self.remote_recorder.len(),
+                );
                 self.adopt_recovered();
                 let now = lsr_core::Clock::now(self.clock.as_ref());
                 self.history.power_loss(&self.model, now);
-                self.acked.note_rewound();
                 lost
             }
         }
@@ -647,24 +649,26 @@ impl World {
     }
 
     /// Deletes every replica file, at every level, that ends at the newest
-    /// transaction; false when the replica is empty.
+    /// transaction; `None` when the replica is empty, otherwise the lowest
+    /// transaction no kept file covers any more.
     ///
     /// # Errors
     /// The store's error when it cannot list or delete.
-    pub fn remote_roll_back(&mut self) -> Result<bool, StoreError> {
+    pub fn remote_roll_back(&mut self) -> Result<Option<Txid>, StoreError> {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let mut files = Vec::new();
         for level in Level::ALL {
             files.extend(block_on(self.remote_raw.list(level, None, PageLimit::MAX))?.files);
         }
         let Some(newest) = files.iter().map(|f| f.key.range().max()).max() else {
-            return Ok(false);
+            return Ok(None);
         };
         let (gone, kept): (Vec<FileInfo>, Vec<FileInfo>) =
             files.iter().partition(|f| f.key.range().max() == newest);
         let keys: Vec<FileKey> = gone.iter().map(|f| f.key).collect();
         self.remote_delete(&keys)?;
         // What no kept file covers is gone from the replica for good.
+        let mut lowest = newest;
         for key in &keys {
             let range = key.range();
             for raw in range.min().get()..=range.max().get() {
@@ -674,10 +678,11 @@ impl World {
                 });
                 if let (false, Some(txid)) = (covered, Txid::new(raw)) {
                     self.lost.insert(txid);
+                    lowest = lowest.min(txid);
                 }
             }
         }
-        Ok(true)
+        Ok(Some(lowest))
     }
 
     /// Makes the store forget the stored created-at time of the newest-ending

@@ -619,6 +619,9 @@ impl Runner {
             }
             TickEnd::Done(Tick::Stopped(cause)) => {
                 self.report.reach.bump(format!("stop.{}", variant(&cause)));
+                if stop_reports_loss(cause) {
+                    self.w.history.signal();
+                }
                 if self.record {
                     self.report.seen.push(Seen::Stop(cause));
                 }
@@ -708,9 +711,17 @@ impl Runner {
             Event::Retrying { fault, .. } => {
                 reach.bump(format!("retrying.{}", variant(&FaultKind::from(fault))));
             }
-            Event::Degraded { cause, .. } => reach.bump(format!("degraded.{}", variant(cause))),
+            Event::Degraded { cause, .. } => {
+                reach.bump(format!("degraded.{}", variant(cause)));
+                if persistent_reports_loss(*cause) {
+                    self.w.history.signal();
+                }
+            }
             Event::Booted { cause: Some(cause) } | Event::Resnapshot(cause) => {
                 reach.bump(format!("snapshot.{}", variant(&CauseKind::from(cause))));
+                if snapshot_reports_loss(cause) {
+                    self.w.history.signal();
+                }
             }
             Event::Maintained {
                 event: lsr_core::MaintainedEvent::Repaired(key),
@@ -1134,8 +1145,8 @@ impl Runner {
             self.w
                 .foreign_removed
                 .push((index, self.w.remote_recorder.len()));
+            self.w.acked.forget_from(key.range().max());
         }
-        self.w.acked.note_rewound();
         self.w.crash(CrashKind::Process);
         self.crashed(CrashKind::Process);
         Ok(())
@@ -1200,6 +1211,7 @@ impl Runner {
     }
 
     fn remote(&mut self, op: RemoteOp) -> Result<(), Violation> {
+        let mut rolled_from = None;
         let done = match op {
             RemoteOp::PutUnrecognized => self.w.remote_put_unrecognized(),
             RemoteOp::RemoveUnrecognized => {
@@ -1210,14 +1222,19 @@ impl Runner {
                     })
                 })
             }
-            RemoteOp::RollBack => self.w.remote_roll_back(),
+            RemoteOp::RollBack => self.w.remote_roll_back().map(|from| {
+                rolled_from = from;
+                from.is_some()
+            }),
             RemoteOp::DropCreatedAt => self.w.remote_drop_created_at(),
         };
         if matches!(op, RemoteOp::RollBack | RemoteOp::RemoveUnrecognized) {
             self.w.history.excuse_regression();
         }
         if matches!(op, RemoteOp::RollBack) {
-            self.w.acked.note_rewound();
+            if let Some(from) = rolled_from {
+                self.w.acked.forget_from(from);
+            }
             self.expect(StopCause::RemoteRegressed);
         }
         self.step_done(&format!("{op:?}"), done.map_err(StagedEditError::from))
@@ -1911,6 +1928,66 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
 }
 
 mod after_restart;
+
+/// Whether a snapshot with this cause is the engine saying the history it had replicated may
+/// not continue: the database, its WAL or the staging directory went back or cannot be
+/// followed. The history judge excuses a `Latest` that went back only after such a report.
+const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause) -> bool {
+    use lsr_core::SnapshotCause as C;
+    match cause {
+        C::BehindRemote { .. }
+        | C::NewestStagedFileUnreadable
+        | C::WalMissing
+        | C::GenerationChanged
+        | C::PrevFrameMismatch
+        | C::LastPageMismatch
+        | C::LocalRewound { .. }
+        | C::StagedUnverified { .. }
+        | C::WalSyncFailed => true,
+        C::FirstSync | C::CheckpointBoundary | C::OperatorRequested => false,
+    }
+}
+
+/// Whether a degraded state reports that the replica or the local history went back: as
+/// [`stop_reports_loss`] for the cause of the same name; a stall (a retried fault that kept
+/// failing) says nothing about history.
+const fn persistent_reports_loss(cause: PersistentCause) -> bool {
+    match cause {
+        PersistentCause::RemoteRegressed
+        | PersistentCause::OtherWriter
+        | PersistentCause::WalCorrupt
+        | PersistentCause::WalTruncated
+        | PersistentCause::WalUnlinked
+        | PersistentCause::WalSyncFailed => true,
+        PersistentCause::Credentials
+        | PersistentCause::StoreRefused
+        | PersistentCause::RemoteCorrupt
+        | PersistentCause::PageSizeChanged { .. }
+        | PersistentCause::DatabasePageMismatch { .. }
+        | PersistentCause::Bug
+        | PersistentCause::Stalled(_) => false,
+    }
+}
+
+/// Whether a stop (or the degraded state of the same cause) reports that the replica or the
+/// local history went back.
+const fn stop_reports_loss(cause: StopCause) -> bool {
+    match cause {
+        StopCause::RemoteRegressed
+        | StopCause::OtherWriter
+        | StopCause::WalCorrupt
+        | StopCause::WalTruncated
+        | StopCause::WalUnlinked
+        | StopCause::WalSyncFailed => true,
+        StopCause::Credentials
+        | StopCause::StoreRefused
+        | StopCause::RemoteCorrupt
+        | StopCause::PageSizeChanged { .. }
+        | StopCause::DatabasePageMismatch { .. }
+        | StopCause::Shutdown
+        | StopCause::Bug => false,
+    }
+}
 
 #[cfg(test)]
 mod tests;

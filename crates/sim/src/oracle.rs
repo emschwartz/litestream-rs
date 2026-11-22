@@ -299,15 +299,33 @@ impl Acked {
         self.highest
     }
 
+    /// What the acknowledgements still promise of `Latest`: the newest
+    /// acknowledged transaction, or below it the newest one the replica has
+    /// not lost from outside (`lost`), since an acknowledgement covers every
+    /// transaction up to it and the bucket may have taken some since.
+    #[must_use]
+    pub fn binding(&self, lost: &BTreeSet<Txid>) -> Option<Txid> {
+        let mut at = self.highest?;
+        while lost.contains(&at) {
+            at = Txid::new(at.get().saturating_sub(1))?;
+        }
+        Some(at)
+    }
+
     /// Notes an acknowledgement.
     pub fn record(&mut self, txid: Txid) {
         self.highest = self.highest.max(Some(txid));
     }
 
-    /// The local database was rewound: what was acknowledged before may
-    /// legitimately be gone from `Latest`.
-    pub fn note_rewound(&mut self) {
-        self.highest = None;
+    /// The replica lost every transaction from `txid` on from outside the
+    /// engine (a bucket rollback, an operator's delete): acknowledgements of
+    /// those are void, and every one below still binds `Latest`. A local power
+    /// loss voids nothing: it does not touch the replica, so a `Latest` older
+    /// than an acknowledgement after one is the engine's doing.
+    pub fn forget_from(&mut self, txid: Txid) {
+        if self.highest >= Some(txid) {
+            self.highest = Txid::new(txid.get().saturating_sub(1));
+        }
     }
 
     /// Reads an acknowledgement off one step's result: a commit or a listing
@@ -388,10 +406,6 @@ fn covers(
     recorder: &RecorderLog,
     ground: Ground<'_>,
 ) -> Result<BTreeMap<Txid, CommitId>, Violation> {
-    // A rewind, or a bucket rollback, lets the engine take an id again.
-    let rewound = model.snapshot_notes().iter().any(|n| n.rewound)
-        || model.rewound()
-        || !ground.lost.is_empty();
     let mut cover: BTreeMap<Txid, CommitId> = BTreeMap::new();
     // The last level-0 put of each id, by recorder position.
     let mut replaced: BTreeMap<Txid, usize> = BTreeMap::new();
@@ -446,7 +460,11 @@ fn covers(
         match cover.get(&max) {
             // A put the store reported failed or wrong may be put again from
             // another commit under the same id.
-            Some(first) if *first != commit && !rewound && !ground.exempt.contains(key) => {
+            Some(first)
+                if *first != commit
+                    && !reusable(model, ground, max, *first, at)
+                    && !ground.exempt.contains(key) =>
+            {
                 return Err(Violation::TxidReused {
                     txid: max.get(),
                     first: *first,
@@ -465,10 +483,20 @@ fn covers(
             cover.entry(*theirs).or_insert(commit);
         }
     }
-    if !rewound {
-        increasing(&cover)?;
-    }
+    // A commit a power loss cut, or an id the replica lost, no longer orders
+    // against the branch the database went on with; every other pair must.
+    increasing(&cover, |txid, commit| {
+        ground.lost.contains(&txid) || model.cut_by(commit, usize::MAX)
+    })?;
     Ok(cover)
+}
+
+/// Whether `txid` may cover a commit other than `first` from recorder position `at`: only when
+/// the replica lost it from outside (a bucket rollback, a removed file) or the database lost
+/// `first` to a power loss before then, so nothing still holds what the id first named. Any
+/// other reuse is the engine's.
+fn reusable(model: &Model, ground: Ground<'_>, txid: Txid, first: CommitId, at: usize) -> bool {
+    ground.lost.contains(&txid) || model.cut_by(first, at)
 }
 
 /// The commit a file compacted through `txid` at recorder position `at`
@@ -502,10 +530,14 @@ fn foreign_cover(
     cover.get(copied).copied()
 }
 
-/// A later transaction id never covers an earlier commit.
-fn increasing(cover: &BTreeMap<Txid, CommitId>) -> Result<(), Violation> {
+/// A later transaction id never covers an earlier commit, among the ids
+/// `off_branch` does not set aside.
+fn increasing(
+    cover: &BTreeMap<Txid, CommitId>,
+    off_branch: impl Fn(Txid, CommitId) -> bool,
+) -> Result<(), Violation> {
     let mut previous: Option<(Txid, CommitId)> = None;
-    for (txid, commit) in cover {
+    for (txid, commit) in cover.iter().filter(|(t, c)| !off_branch(**t, **c)) {
         if let Some((lower, low_commit)) = previous.filter(|(_, c)| c > commit) {
             return Err(Violation::CoversNotIncreasing {
                 lower: lower.get(),
@@ -636,7 +668,7 @@ pub fn check_with(
         judge.txid(txid, &reach, oldest, &mut out)?;
     }
     if files.is_empty() {
-        return match acked.highest() {
+        return match acked.binding(ground.lost) {
             Some(acked) => Err(Violation::LatestLostAck {
                 acked: acked.get(),
                 latest: None,
@@ -647,7 +679,7 @@ pub fn check_with(
     let Some(latest) = judge.latest(&reach, inventory.newest(), &mut out)? else {
         return Ok(out);
     };
-    if let Some(acked) = acked.highest().filter(|a| *a > latest) {
+    if let Some(acked) = acked.binding(ground.lost).filter(|a| *a > latest) {
         return Err(Violation::LatestLostAck {
             acked: acked.get(),
             latest: Some(latest.get()),

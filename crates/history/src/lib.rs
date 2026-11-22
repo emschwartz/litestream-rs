@@ -26,5 +26,5 @@ mod log;
 pub mod chain;
 
 pub use digest::Digest;
-pub use judge::{AheadMode, Anomaly, Counts, Judge, Target};
+pub use judge::{AheadMode, Anomaly, Counts, Judge, Signals, Target};
 pub use log::{Log, NodeId, Rewind};

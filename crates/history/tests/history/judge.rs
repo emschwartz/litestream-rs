@@ -1,6 +1,6 @@
 //! The judge over hand-built trees: each property fails where it should and nowhere else.
 
-use lsr_history::{AheadMode, Anomaly, Digest, Judge, Log, NodeId};
+use lsr_history::{AheadMode, Anomaly, Digest, Judge, Log, NodeId, Signals};
 
 fn d(n: u8) -> Digest {
     Digest::of_pages(512, [[n; 4].as_slice()])
@@ -52,6 +52,70 @@ fn an_excused_regression_passes_once() {
     judge.latest(&log, d(3)).unwrap();
     judge.latest(&log, d(2)).unwrap_err();
     assert_eq!(judge.counts().excused, 1);
+}
+
+/// Under `Signals::Required` a recorded rewind explains going back only when the engine
+/// reported a loss after it: before the report the same step is unsignaled.
+#[test]
+fn a_rewind_the_engine_did_not_report_does_not_excuse_going_back() {
+    let (log, [_, _, _, c, x]) = forked();
+    let mut quiet = Judge::new(AheadMode::Count).with_signals(Signals::Required);
+    quiet.latest(&log, d(3)).unwrap();
+    assert!(matches!(
+        quiet.latest(&log, d(7)),
+        Err(Anomaly::Unsignaled { from, to }) if from == c.get() && to == x.get()
+    ));
+    let mut told = Judge::new(AheadMode::Count).with_signals(Signals::Required);
+    told.latest(&log, d(3)).unwrap();
+    told.signal(&log);
+    assert_eq!(told.latest(&log, d(7)), Ok(x));
+    assert_eq!(told.counts().rewound, 1);
+}
+
+/// A rewind the engine has not reported yet does not block a step the driver also excused (a
+/// bucket rollback and a power loss between two looks): the excuse lets it through, owed.
+#[test]
+fn an_excuse_covers_a_step_a_rewind_not_yet_reported_would_explain() {
+    let (log, [_, _, _, _, x]) = forked();
+    let mut judge = Judge::new(AheadMode::Count).with_signals(Signals::Required);
+    judge.latest(&log, d(3)).unwrap();
+    judge.excuse_regression();
+    assert_eq!(judge.latest(&log, d(7)), Ok(x));
+    assert_eq!(judge.unreported(), 1);
+}
+
+/// A report that came before the rewind does not cover it.
+#[test]
+fn a_report_before_the_rewind_does_not_cover_it() {
+    let (mut log, [_, a, _, c]) = line();
+    let mut judge = Judge::new(AheadMode::Count).with_signals(Signals::Required);
+    judge.latest(&log, d(3)).unwrap();
+    judge.signal(&log);
+    log.recover(a, 40);
+    log.commit(d(7), 50);
+    assert!(matches!(
+        judge.latest(&log, d(7)),
+        Err(Anomaly::Unsignaled { from, .. }) if from == c.get()
+    ));
+}
+
+/// The driver's excuse lets the step through at once (the engine cannot have seen a replica
+/// changed under it yet) and is owed a report afterwards; `unreported` counts what stays owed.
+#[test]
+fn an_excused_regression_is_owed_a_report() {
+    let (log, _) = line();
+    let mut judge = Judge::new(AheadMode::Fatal).with_signals(Signals::Required);
+    judge.latest(&log, d(3)).unwrap();
+    judge.excuse_regression();
+    judge.latest(&log, d(1)).unwrap();
+    assert_eq!(judge.unreported(), 1);
+    judge.signal(&log);
+    assert_eq!(judge.unreported(), 0);
+    let mut ignored = Judge::new(AheadMode::Fatal);
+    ignored.latest(&log, d(3)).unwrap();
+    ignored.excuse_regression();
+    ignored.latest(&log, d(1)).unwrap();
+    assert_eq!(ignored.unreported(), 0, "without signals nothing is owed");
 }
 
 /// Root, a, b, c; a crash rewinds to a; the app commits x (time 50).

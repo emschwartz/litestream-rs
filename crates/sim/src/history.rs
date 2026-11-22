@@ -15,14 +15,17 @@
 //!
 //! What it may not judge: a restore that stops on an object the store damaged, or that the
 //! planner refuses, is counted and left to the oracle. A bucket rollback or an operator's
-//! delete of the newest file is a regression the run caused itself, so it is excused once.
+//! delete of the newest file is a regression the run caused itself, so it is excused once, and
+//! a power loss records a rewind; either excuse holds only if the engine reported a loss after
+//! it ([`History::signal`], under [`Signals::Required`]): the driver's record alone never
+//! explains a `Latest` that went back.
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
     AsOfInside, Database, Entropy, FileKey, Inventory, MemSink, MemStore, RestoreError,
     RestoreOptions, RestoreTarget, SeededEntropy, restore_with,
 };
-use lsr_history::{AheadMode, Counts, Digest, Judge, Log, NodeId};
+use lsr_history::{AheadMode, Counts, Digest, Judge, Log, NodeId, Signals};
 use lsr_ltx::{Timestamp, Txid};
 
 use crate::model::{Model, PageImage};
@@ -112,7 +115,7 @@ impl History {
             .map_or_else(Digest::genesis, |rec| image_digest(&rec.image));
         Self {
             log: Log::new(root, now.unix_millis()),
-            judge: Judge::new(mode),
+            judge: Judge::new(mode).with_signals(Signals::Required),
             nodes: vec![NodeId::ROOT],
             rng: SeededEntropy::new(seed),
             first: now.unix_millis(),
@@ -143,8 +146,14 @@ impl History {
         self.log.note_time(now.unix_millis());
     }
 
+    /// The engine reported a loss of history: a snapshot cause that says so, or a stop on a
+    /// regressed replica.
+    pub fn signal(&mut self) {
+        self.judge.signal(&self.log);
+    }
+
     /// The run took files from the replica itself.
-    pub const fn excuse_regression(&mut self) {
+    pub fn excuse_regression(&mut self) {
         self.judge.excuse_regression();
     }
 
@@ -256,6 +265,10 @@ impl History {
         reach.add("history.ahead.asof", u64::from(counts.ahead_as_of));
         reach.add("history.rewound", u64::from(counts.rewound));
         reach.add("history.excused", u64::from(counts.excused));
+        reach.add(
+            "history.excused.unreported",
+            u64::from(self.judge.unreported()),
+        );
         reach.add("history.unjudged", u64::from(self.unjudged));
         reach.add(
             "history.rewinds",
