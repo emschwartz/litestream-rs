@@ -1608,3 +1608,23 @@ fn a_rejected_write_over_an_object_that_was_there_deletes_nothing() {
         remote.log().deletes
     );
 }
+
+/// A relist whose listing ends well below what was confirmed (the files in
+/// between were merged and deleted, and the listing hides the confirmed one)
+/// reads the confirmed key first, not the keys after the listing's end: a gap
+/// wider than [`PROBE_GAP`] there would end the reads before they reached it
+/// and report the replica gone backwards.
+#[test]
+fn a_relist_reads_the_confirmed_key_first_past_a_wide_gap() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let confirmed = 3 + u64::from(PROBE_GAP);
+    put_bytes(&remote.inner, key(1), &encode(1));
+    // Nothing staged past the listing: the reads are bounded by the gap alone.
+    put_bytes(&remote.inner, key(confirmed), &encode(confirmed));
+    remote.log().unlisted.push(key(confirmed));
+    let state = UploadState::ListFirst {
+        confirmed: Some(txid(confirmed)),
+    };
+    let listed = next(state, &staging, &remote, confirmed).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(confirmed))));
+}
