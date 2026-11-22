@@ -31,7 +31,10 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
         ops_digest,
         "the live generator changed seed {seed}'s run; find another seed that reaches {defect:?}"
     );
-    assert!(known_in(&ops).contains(&defect), "{seed} draws no cell of {defect:?}");
+    assert!(
+        known_in(&ops).contains(&defect),
+        "{seed} draws no cell of {defect:?}"
+    );
     match run(seed, STEPS, &weights) {
         Err(failure) if defect.matches(&failure.violation) => {}
         Err(failure) => panic!("{seed} fails another way: {failure}"),
@@ -46,12 +49,20 @@ fn still_fails(seed: u64, ops_digest: u64, defect: KnownWrong) {
 /// failed sync covered (D2). Seed 0x12 fails it at the end-of-run reboot.
 #[test]
 fn a_restart_after_a_failed_wal_sync_still_stages_frames_it_covered_seed_0x12() {
-    still_fails(0x12, 0x47b6_aa2a_1682_5141, KnownWrong::WalSyncForgottenAtRestart);
+    still_fails(
+        0x12,
+        0x47b6_aa2a_1682_5141,
+        KnownWrong::WalSyncForgottenAtRestart,
+    );
 }
 
 /// A staging read refused for permission during level-1 compaction degrades maintenance as the
 /// replica's `StoreDenied(Permission)`.
 #[test]
 fn compaction_still_reports_a_staging_denial_as_the_replicas_seed_0xb9e() {
-    still_fails(0xb9e, 0xd841_a3dd_c4ce_83dc, KnownWrong::CompactionClassifiesLocalAsReplica);
+    still_fails(
+        0xb9e,
+        0xd841_a3dd_c4ce_83dc,
+        KnownWrong::CompactionClassifiesLocalAsReplica,
+    );
 }
