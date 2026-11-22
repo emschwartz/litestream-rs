@@ -241,7 +241,7 @@ at_risk = "A supervisor that restarts on `/healthz` 503 removes every backoff"
 recovery = "n/a"
 detected_by = "core::`second_writer::a_restart_keeps_the_stop_for_another_writer`, core::`a_restart_after_an_other_writer_stop_stops_again`, core::`second_writer::a_running_engine_stops_when_another_writer_took_its_next_id`, sim::`second_writer_survives_restart`, replica::`second_writer::a_stop_for_another_writer_survives_a_restart`, core::`vouch::a_foreign_file_put_while_the_engine_was_down_stops_the_boot`; plant::`boot-gate-refuses-nothing`, plant::`boot-divergence-snapshots-above-another-writer`"
 no_test = "the rest: known wrong (no failing test)"
-notes = "What is not kept is G3 in `docs/proposals/beyond-go.md` (D9). The stop record that once kept the stop is gone (D34 in `docs/decisions.md`): the boot's refusal covers it"
+notes = "What is not kept is G3 in `docs/proposals/beyond-go.md` (D9). The stop record that once kept the stop is gone (D50 in `docs/decisions.md`): the boot's refusal covers it"
 in_review = "WSF persists the fsync failure only"
 
 [[row]]
@@ -800,7 +800,7 @@ response = "degraded, `RemoteRegressed`: list again and continue from what the r
 signal = "`remote_regressed`"
 at_risk = "The files that vanished. The engine does not re-upload them. Until the next snapshot, restores of the latest state refuse with `Gap`. Detection waits for the next maintenance listing, which follows the engine's own upload by at most one compaction window once uploads are idle; uploads above the hole go on until then"
 recovery = "Automatic"
-detected_by = "sim::`bucket_rolled_back`, sim::`bucket_rolled_back_unseen`, core::`a_relist_never_takes_an_acknowledged_transaction_again`, core::`a_rollback_while_running_is_seen_by_the_next_maintenance_listing`, core::`a_lagging_listing_is_not_a_regression`, core::`watch::tests::missing_names_exactly_the_first_dropped_object`; plant::`relist-acknowledged-mark`, plant::`regression-unwatched`, plant::`regression-unwatched-sim`, plant::`regression-on-listing-alone`"
+detected_by = "sim::`bucket_rolled_back`, sim::`bucket_rolled_back_unseen`, core::`a_relist_never_takes_an_acknowledged_transaction_again`, core::`a_rollback_while_running_is_seen_by_the_next_maintenance_listing`, core::`a_lagging_listing_is_not_a_regression`, core::`regression_watch::tests::missing_names_exactly_the_first_dropped_object`; plant::`relist-acknowledged-mark`, plant::`regression-unwatched`, plant::`regression-unwatched-sim`, plant::`regression-on-listing-alone`"
 recovered_by = "sim::`bucket_rolled_back`, sim::`bucket_rolled_back_unseen`"
 no_test = "a loss between a boot and its first maintenance listing that removes only what the boot listed: untested"
 notes = "That window has no anchor; a loss while the engine is down is BOOT-19. The watch's anchor is the seam for the engine journal, which would let a boot run the same check"
@@ -1133,7 +1133,7 @@ response = "Lists the replica and records a takeover through its newest transact
 signal = "\"takeover recorded through {txid}\"; exit 3 when the listing or the write fails"
 at_risk = "None. It is the operator's word that this database's history replaces the replica's from the next snapshot on"
 recovery = "n/a"
-detected_by = "cli::`take_over_records_the_replicas_newest_transaction`, replica::`second_writer::a_refused_boot_names_the_tip_and_a_take_over_clears_it`, replica::`meta::tests::a_takeover_round_trips_and_clears_a_stop_record`"
+detected_by = "cli::`take_over_records_the_replicas_newest_transaction`, replica::`second_writer::a_refused_boot_names_the_tip_and_a_take_over_clears_it`, replica::`meta::tests::a_takeover_round_trips`"
 
 [[row]]
 table = "Restore"

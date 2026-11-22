@@ -41,7 +41,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D31 | Must a PR re-merge main and re-run CI before it lands? | No while churn is high: merge on the PR's own green; main's CI integrates; fix forward | owner | 2026-11-22 | decided |
 | D32 | How is an unusable KMS key reported? | As a permission refusal, `permission_denied` | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D33 | Narrow the Go drop-in surface to shrink unverified code? | No: full drop-in; bring config, CLI and sidecar under behaviour rows and Go differentials | owner | 2026-11-22 | decided |
-| D34 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
+| D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -343,7 +343,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a Go behaviour on this surface would lose data. Then ours differs, with its own entry here.
 - **Links:** #121 (cuts 2, 4 and 5 withdrawn), docs/release-bar.md.
 
-## D34. A boot divergence is a refusal, and the stop record goes (delegated)
+## D50. A boot divergence is a refusal, and the stop record goes (delegated)
 
 - **Question:** at boot the replica's newest level-0 file verifies and differs from the staged copy under the same key (BOOT-13). It used to stand while the staged files went and a snapshot followed above it. With rule (a) (D12), is that still right, and is the stop record (`lsr-stop`) still needed?
 - **Choice:** refuse it with `OtherWriter` unless a takeover record covers the replica's newest key, and delete the stop record, its codec and its file. An unusable takeover record is ignored as absent and reported, never refusing the start.
