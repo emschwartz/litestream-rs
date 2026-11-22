@@ -463,9 +463,16 @@ impl Liveness {
     ) -> Result<(), Violation> {
         let (staging, remote) = stores;
         let newest_staged = world.newest_staged();
-        let caught_up = self
-            .take_remote(remote)
-            .is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
+        let took = self.take_remote(remote);
+        // The replica holds everything staging does only once no staged file is one it never
+        // took: a file left behind it (a backup put back, a forged file) is still to be dropped,
+        // and the fault that left it must be in the window when it is (seed 0xf42e9).
+        let left_behind = world
+            .staged_level_zero()
+            .iter()
+            .any(|key| !self.uploaded.contains(key));
+        let caught_up = !left_behind
+            && took.is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
         let staged = self.take_staging(staging, world, reach)?;
         let grew = self.take_counts(counts, reach)?;
         // A file with no WAL range is a snapshot for certain; one with a range
@@ -607,6 +614,8 @@ pub trait TickWorld {
     fn newest_staged(&self) -> Option<u64>;
     /// The newest transaction the replica holds, at any level.
     fn replica_newest(&self) -> Option<u64>;
+    /// The level-0 files in staging.
+    fn staged_level_zero(&self) -> Vec<FileKey>;
 }
 
 impl TickWorld for crate::World {
@@ -623,6 +632,10 @@ impl TickWorld for crate::World {
 
     fn replica_newest(&self) -> Option<u64> {
         self.remote_newest()
+    }
+
+    fn staged_level_zero(&self) -> Vec<FileKey> {
+        crate::World::staged_level_zero(self)
     }
 }
 
@@ -650,6 +663,10 @@ impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
 
     fn replica_newest(&self) -> Option<u64> {
         self.world.replica_newest()
+    }
+
+    fn staged_level_zero(&self) -> Vec<FileKey> {
+        self.world.staged_level_zero()
     }
 }
 
@@ -681,6 +698,9 @@ mod tests {
         }
         fn replica_newest(&self) -> Option<u64> {
             Some(25)
+        }
+        fn staged_level_zero(&self) -> Vec<FileKey> {
+            Vec::new()
         }
     }
 
@@ -738,6 +758,64 @@ mod tests {
         )
         .unwrap();
         assert!(!live.window.contains(&Justifier::StagingEdited));
+    }
+
+    fn key(txid: u64) -> FileKey {
+        FileKey::new(
+            lsr_core::Level::ZERO,
+            lsr_ltx::TxidRange::single(lsr_ltx::Txid::new(txid).unwrap()),
+        )
+    }
+
+    /// Staging after an edit left an older file behind the replica: 37, which the replica
+    /// never took, beside 43, the newest, which it did.
+    struct LeftBehind {
+        staged: Vec<FileKey>,
+    }
+
+    impl TickWorld for LeftBehind {
+        fn full_image(&self, _: &FileKey) -> bool {
+            false
+        }
+        fn newest_staged(&self) -> Option<u64> {
+            Some(43)
+        }
+        fn replica_newest(&self) -> Option<u64> {
+            Some(43)
+        }
+        fn staged_level_zero(&self) -> Vec<FileKey> {
+            self.staged.clone()
+        }
+    }
+
+    /// An upload that reaches the newest staged file has not caught up while staging still
+    /// holds a file the replica never took: the edit that left it there stays in the window,
+    /// so the prune that later drops it is justified (seed 0xf42e9).
+    #[test]
+    fn an_upload_past_a_file_left_behind_keeps_the_staging_edit() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        live.window.clear();
+        live.note(Justifier::StagingEdited);
+        let world = LeftBehind {
+            staged: vec![key(37), key(43)],
+        };
+        let none = SnapshotCounts::default();
+        live.after_tick((&[], &[remote_put(43)]), &world, none, false, &mut reach)
+            .unwrap();
+        assert!(live.window.contains(&Justifier::StagingEdited));
+        let zero = lsr_ltx::Timestamp::from_unix_millis(0);
+        let prune = [RecorderEvent::Delete {
+            keys: vec![key(37)],
+            at: zero,
+            high: zero,
+        }];
+        let world = LeftBehind {
+            staged: vec![key(43)],
+        };
+        live.after_tick((&prune, &[remote_put(43)]), &world, none, false, &mut reach)
+            .unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 1);
     }
 
     #[test]
