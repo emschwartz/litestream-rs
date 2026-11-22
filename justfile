@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features upstream-test-map-fresh
+check: fmt-check clippy test doctest features shuttle upstream-test-map-fresh
 
 fmt-check:
     cargo fmt --all -- --check
@@ -110,6 +110,17 @@ miri:
         PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
         cargo +{{nightly}} miri test --locked -p lsr-core --lib -- \
         plan:: retry:: position:: layout:: checkpoint:: compact::
+
+# Schedule exploration with shuttle: the replica thread's command handshake and the S3 batch's
+# scoped threads, under many random interleavings. Shuttle is a dev-dependency behind
+# `--cfg shuttle`, so no other build sees it. Short by default (SHUTTLE_ITERATIONS), a long run nightly.
+shuttle iterations="200":
+    RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
+        cargo clippy -p lsr-store-s3 -p lsr-replica --all-targets --locked -- -D warnings
+    SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
+        cargo test --locked -p lsr-store-s3 --lib shuttle_tests
+    SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
+        cargo test --locked -p lsr-replica --test replica shuttle::
 
 # Mutation testing for one crate (just mutants ltx); results in target/mutants/mutants.out.
 # Survivors are killed by a test or recorded in docs/mutants.md. Not part of check.

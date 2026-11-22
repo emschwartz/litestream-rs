@@ -48,6 +48,9 @@ rusqlite = { version = "0.43", default-features = false, features = ["bundled"] 
 rustix = { version = "1.1.6", default-features = false, features = ["std", "process"] }
 rusty-s3 = { version = "0.12", default-features = false, features = ["rustcrypto", "full"] }
 saphyr-parser = { version = "0.3.4", default-features = false }
+# Randomized schedule exploration (Apache-2.0). Dev-dependency only, and only under
+# `--cfg shuttle` (`just shuttle`), so no other build compiles it.
+shuttle = { version = "0.9.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
 sha2 = { version = "0.11.1", default-features = false }
@@ -123,6 +126,8 @@ expect_used = "warn"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+# `shuttle` is the cfg of `just shuttle`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 

@@ -15,3 +15,7 @@ mod replicator;
 mod restored;
 #[cfg(test)]
 mod verify;
+// Schedule exploration, only under `--cfg shuttle` (`just shuttle`).
+#[cfg(test)]
+#[cfg(shuttle)]
+mod shuttle;
