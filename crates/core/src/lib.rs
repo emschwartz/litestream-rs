@@ -46,6 +46,8 @@ mod restore;
 mod retry;
 mod snapshot;
 mod source;
+#[cfg(feature = "testing")]
+pub mod spec_view;
 mod store;
 #[cfg(test)]
 mod stuck;

@@ -117,7 +117,8 @@
 //! nothing once an earlier one is eligible. [`plan`] is the planner
 //! for [`KeyTarget`] (`Latest` and `Txid`), which read no created-at time; `plan_reference`
 //! is the exact `AsOf` planner over a listing whose created-at times are all exact, kept
-//! as the test oracle.
+//! as the eager twin the lazy one is checked against. The contract above is the oracle:
+//! `crates/spec` restates it, clause by clause, in a crate that cannot reach this one.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
