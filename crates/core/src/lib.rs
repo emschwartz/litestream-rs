@@ -31,6 +31,7 @@ mod created_at;
 mod env;
 mod fault;
 mod inventory;
+mod journal;
 mod layout;
 mod ltx_read;
 mod maintain;
@@ -85,6 +86,7 @@ pub use fault::{
     policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
+pub use journal::{JournalFile, JournalWriteError, JournalWriter};
 pub use layout::{
     CreatedAt, CreatedAtSource, Dating, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
     ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
