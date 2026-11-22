@@ -27,6 +27,7 @@ use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::upload::UploadState;
+use crate::witness::Witnesses;
 
 /// Whether the actor was asked to stop, which no rebuild forgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,6 +320,9 @@ pub(super) struct Engine {
     /// replica went backwards: an acknowledged id is never taken again for
     /// other pages, so a snapshot always goes above it.
     pub(super) acknowledged: Option<Txid>,
+    /// The uploader's tokens for the pending staged files (`crate::witness`):
+    /// held in memory only, so a new engine witnesses again at boot.
+    pub(super) witnesses: Witnesses,
 }
 
 impl Engine {
@@ -335,6 +339,7 @@ impl Engine {
             maintain: Maintain::default(),
             pruned: None,
             acknowledged: None,
+            witnesses: Witnesses::new(),
         }
     }
 }

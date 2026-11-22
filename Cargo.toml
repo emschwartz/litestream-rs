@@ -17,6 +17,7 @@ lsr-compat = { path = "crates/compat" }
 lsr-config = { path = "crates/config" }
 lsr-core = { path = "crates/core" }
 lsr-heap = { path = "crates/heap" }
+lsr-history = { path = "crates/history" }
 lsr-local = { path = "crates/local" }
 lsr-replica = { path = "crates/replica" }
 lsr-sidecar = { path = "crates/sidecar" }

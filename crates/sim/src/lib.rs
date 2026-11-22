@@ -7,7 +7,8 @@
 //! real SQLite recovers what they leave. The harness around it: [`store`]
 //! wraps a store with faults, crash points, a ground-truth recorder and power-loss
 //! bookkeeping; [`exec`] crashes a future; [`model`] and [`oracle`] hold what
-//! the database really was and judge the replica against it; [`world`] builds
+//! the database really was and judge the replica against it, and [`history`]
+//! judges the same replica by content alone, sharing nothing with the engine; [`world`] builds
 //! all of it for one run; [`seed`] names a run. [`generate`] draws a history from
 //! a seed, [`resources`] holds the resource bounds, [`liveness`] judges each
 //! snapshot against the faults that could justify it, and [`run`] applies a
@@ -22,6 +23,7 @@ pub mod contract;
 pub mod crash_law;
 pub mod exec;
 pub mod generate;
+pub mod history;
 pub mod liveness;
 pub mod model;
 pub mod oracle;
@@ -38,13 +40,15 @@ mod testkit;
 pub mod world;
 
 pub use exec::{Polls, RunEnd, count_polls, run_until};
-pub use generate::{EnvFault, Generator, Op, Target, Weights, frozen_history, history};
+pub use generate::{
+    AfterRestart, EnvFault, Generator, Op, Target, Weights, frozen_history, history,
+};
 pub use model::{CommitId, CommitRec, Model, PageImage, Recovery};
 pub use oracle::{
     Acked, Bound, Checked, Ground, Violation, Windows, bug_fault, check, check_with, within,
 };
 pub use reach::Reach;
-pub use run::{Failure, Opts, RunReport, run, run_with, shrink};
+pub use run::{Failure, Judges, Opts, RunReport, run, run_with, shrink};
 pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
 pub use sqlite::{
     AppCommit, AutoTally, CheckpointNumbers, CrashKind, CreatedAt, InTickCommit, OtherProcessMode,

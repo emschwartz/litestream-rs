@@ -16,7 +16,12 @@
 #
 # Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
-# ab0021d (a feature: reverting it does not compile).
+# ab0021d (a feature: reverting it does not compile). Retired with the code they planted into:
+# staged-file-cannot-follow (bf78f6d) and staged-snapshot-of-earlier-wal (be104a7), the listing's header
+# link between a staged file and the replica's newest, which the boot witness replaced (2fb603f); the
+# rules they guarded are planted below as the witness-* entries. page-size-after-vacuum (b352aba): its
+# arm (an unusable newest staged file still names its page size) decides only with an empty replica,
+# where every staged file is pending and the boot witness now deletes an unusable one first.
 
 [[bug]]
 name = "canary-no-op"
@@ -55,13 +60,6 @@ tests = [
     "pages::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
     "recover::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
 ]
-
-[[bug]]
-name = "page-size-after-vacuum"
-fix = "b352aba"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["an_unusable_staged_file_still_names_its_page_size"]
 
 [[bug]]
 name = "recover-before-trusting-snapshot"
@@ -116,23 +114,6 @@ fix = "bb83d0c"
 package = "lsr-core"
 tests = [
     "upload::tests::a_verifying_listed_key_unlike_the_staged_file_is_never_written_over",
-]
-
-[[bug]]
-name = "staged-file-cannot-follow"
-fix = "bf78f6d"
-package = "lsr-core"
-tests = [
-    "upload::tests::a_staged_file_that_cannot_follow_the_replica_is_not_uploaded",
-]
-
-[[bug]]
-name = "staged-snapshot-of-earlier-wal"
-fix = "be104a7"
-package = "lsr-sim"
-test_bin = "sim"
-tests = [
-    "a_staged_file_from_an_earlier_state_of_the_wal_is_not_chained_seed_0x1919f",
 ]
 
 [[bug]]
@@ -221,16 +202,70 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["liveness::restarts_with_nothing_damaged_never_snapshot"]
 
-# A staged snapshot of a database that lost commits the replica holds, judged an earlier state of
-# the WAL at the next boot: deleted, its restore point given up, a second snapshot staged. The sim's
-# liveness::a_staged_snapshot_of_a_rewound_database_survives_a_restart fails on it too.
 [[bug]]
-name = "rewound-snapshot-dropped"
-fix = "claude/rewound-snapshot"
+name = "witness-trailer-compare"
+fix = "39ac68b"
 package = "lsr-core"
 tests = [
-    "actor::tests::rewound::a_staged_snapshot_of_a_rewound_database_is_uploaded_after_a_restart",
+    "a_staged_file_replaced_under_a_running_engine_is_never_uploaded",
+    "a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible",
 ]
+
+[[bug]]
+name = "witness-db-page-under-a-frame"
+fix = "beedd48"
+package = "lsr-core"
+tests = [
+    "a_pending_snapshot_the_wal_cannot_prove_is_taken_again",
+]
+
+[[bug]]
+name = "witness-snapshot-short"
+fix = "beedd48"
+package = "lsr-core"
+tests = [
+    "a_pending_snapshot_short_of_the_replicas_newest_is_refused",
+]
+
+[[bug]]
+name = "witness-wal-residue"
+fix = "1b5ac06"
+package = "lsr-core"
+tests = [
+    "frames_past_the_committed_end_prove_no_staged_file",
+]
+
+[[bug]]
+name = "witness-byte-digest"
+fix = "1b5ac06"
+package = "lsr-core"
+tests = [
+    "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
+]
+
+# Killed unaided: no test was written for this defect. The swarm's own history (seed 44's drawn
+# mix) fails under it. The same plant at the witness's own anchor (`held || true` in witness.rs)
+# survives 3000 seeds in each of three mixes: the witness's page-by-page check of each pending file
+# against the live WAL refuses what the anchor wrongly accepts. It re-expresses on main the plant the history
+# judge's work measured on the boot-witness branch: the boot accepts the newest staged file as
+# its position whenever the WAL holds a commit frame at its end in the same generation, without
+# comparing its last page or the range it covers.
+[[bug]]
+name = "anchor-any-tail"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
+
+# The bounded WAL resume (witness, 18cf304) took a wal-index reset ahead of the header as a
+# restart even at the header's first frame: every boot from a file with an empty WAL range
+# snapshotted again. Found by the liveness oracle (seed 0xf85 among others).
+[[bug]]
+name = "resume-index-reset-ahead"
+fix = "claude/checker-hygiene"
+package = "lsr-wal"
+test_bin = "wal"
+tests = ["synthetic::resume_at_the_first_frame_under_an_index_reset_ahead_starts_there"]
 
 # A running position pinned at the first frame of a generation with no frames does not follow the
 # new header SQLite writes with random salts (checkpoint sequence 0): a second whole snapshot. The

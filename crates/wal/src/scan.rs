@@ -204,7 +204,17 @@ impl<R: Read + Seek> WalReader<R> {
     }
 
     /// A cursor at `at`, the position and generation (`expected`) a caller
-    /// remembered from an earlier sync.
+    /// remembered from an earlier sync, at or below `within`.
+    ///
+    /// `within` is the committed end the caller read from the wal-index (SQLite's
+    /// own `mxFrame`, rebuilt from the chain rooted at the WAL header whenever the
+    /// index was not trusted). Frames past it may be residue of a dropped history
+    /// that still chains to itself: after a power loss under `synchronous=NORMAL`
+    /// the WAL regrows over a prefix of the old frames under the same salts, and
+    /// the old frames beyond verify as before. Checking only the frame before `at`
+    /// cannot tell them apart, so a resume past `within` is refused as
+    /// [`ResumeError::Truncated`], and one in another generation than `within`'s as
+    /// [`ResumeError::Restarted`].
     ///
     /// The WAL header's salts must be `expected`, also when `at` is the start:
     /// a restarted WAL may have regrown past `at`, and only the remembered
@@ -218,8 +228,13 @@ impl<R: Read + Seek> WalReader<R> {
     /// # Errors
     /// [`ResumeError`]: a wrong page size, a WAL too short, a restarted WAL,
     /// a frame before `at` that does not verify, or an `at` inside a transaction.
-    pub fn resume(&mut self, at: WalOffset, expected: Salts) -> Result<FrameCursor, ResumeError> {
-        Ok(match self.verified_before(at, expected)? {
+    pub fn resume(
+        &mut self,
+        at: WalOffset,
+        expected: Salts,
+        within: CommittedEnd,
+    ) -> Result<FrameCursor, ResumeError> {
+        Ok(match self.verified_before(at, expected, within)? {
             None => self.cursor_at_start(),
             Some((_, frame)) => FrameCursor {
                 next: at,
@@ -268,7 +283,8 @@ impl<R: Read + Seek> WalReader<R> {
         }
     }
 
-    /// The commit frame right before `at`, verified exactly as [`Self::resume`] does.
+    /// The commit frame right before `at`, verified and bounded by `within` exactly as
+    /// [`Self::resume`] does.
     ///
     /// It carries the page number and digest the frame was scanned with, for a
     /// caller that remembers the last page it covered. `at` at the start has no
@@ -280,8 +296,9 @@ impl<R: Read + Seek> WalReader<R> {
         &mut self,
         at: WalOffset,
         expected: Salts,
+        within: CommittedEnd,
     ) -> Result<FrameRef, ResumeError> {
-        match self.verified_before(at, expected)? {
+        match self.verified_before(at, expected, within)? {
             Some((offset, frame)) => Ok(FrameRef {
                 pgno: frame.pgno,
                 offset,
@@ -296,7 +313,21 @@ impl<R: Read + Seek> WalReader<R> {
         &mut self,
         at: WalOffset,
         expected: Salts,
+        within: CommittedEnd,
     ) -> Result<Option<(WalOffset, VerifiedFrame)>, ResumeError> {
+        // A wal-index reset ahead of the header counts no frame in any
+        // generation, so the header's first frame is within it: that resume
+        // claims no frame. Any other position needs the index's generation.
+        let reset_ahead = within.frame_count() == 0 && at.frame_index() == 0;
+        if within.salts() != expected && !reset_ahead {
+            return Err(ResumeError::Restarted {
+                expected,
+                found: within.salts(),
+            });
+        }
+        if at.frame_index() > within.frame_count() {
+            return Err(ResumeError::Truncated { at });
+        }
         let page_size = self.header.page_size();
         if at.page_size() != page_size {
             return Err(ResumeError::PageSizeMismatch {

@@ -231,6 +231,9 @@ struct Run {
     schedule: BTreeMap<&'static str, (Vec<KillAt>, usize)>,
     /// What the next boot must do, read after the last kill.
     expect: Expect,
+    /// The first unpublished staged file outside the WAL's generation, read after the last
+    /// kill (`generation::unpublished_across_restart`).
+    crossed: Option<Txid>,
     /// Application commits SQLite refused busy and the run tried again.
     busy: u32,
     /// The database file and wal-index, open for the whole run (`oracle.rs`).
@@ -301,6 +304,7 @@ impl Run {
             turns: Vec::new(),
             schedule,
             expect: Expect::First,
+            crossed: None,
             busy: 0,
             held,
             fixed: build.reads_wal_index_end(),
@@ -549,8 +553,14 @@ impl Run {
             self.first_boot(process, &at);
             return None;
         };
-        let boot = wait_boot_file(process, &self.fixture, prev)
-            .unwrap_or_else(|e| panic!("{at}: no file continues {prev}: {e}"));
+        // After a restart or truncate, Rust deletes unpublished staged files the live WAL
+        // cannot vouch for, and its snapshot takes the first of their transactions.
+        let after = self.unverified_from(process, &at).map_or(prev, |from| {
+            from.prev()
+                .unwrap_or_else(|| panic!("{at}: dropped staged files from {from}"))
+        });
+        let boot = wait_boot_file(process, &self.fixture, after)
+            .unwrap_or_else(|e| panic!("{at}: no file continues {after}: {e}"));
         let fields = boot.header.fields();
         let snapshotted = boot.header.is_snapshot() || boot.holds_every_page();
         let cause = self.boot_cause(process, prev, &at);
@@ -566,7 +576,7 @@ impl Run {
             return None;
         }
         assert!(
-            expect.may_snapshot(),
+            expect.may_snapshot() || self.unverified_crossing(process.kind(), cause.as_deref()),
             "{at}: the boot snapshotted after {prev} ({cause:?}): its first file {}-{} holds {} \
              of {} pages, and the position was in the WAL's generation",
             fields.txids.min(),
@@ -602,20 +612,12 @@ impl Run {
     fn boot_cause(&self, process: &mut Replicator, prev: Txid, at: &str) -> Option<String> {
         match (process.kind(), self.launch) {
             (Kind::Rust, Launch::Arguments | Launch::ConfigFile) => {
-                // The daemon's log sink is in place before its replicator's thread runs,
-                // so every boot logs this line.
-                let mut line = String::new();
-                wait_until("the boot's log line", BOOT_LINE, || {
-                    process.ensure_running()?;
-                    line = (process.log_text().lines())
-                        .find(|l| l.contains("replica position recovered"))
-                        .unwrap_or_default()
-                        .to_owned();
-                    Ok(!line.is_empty())
+                let line = self.rust_boot_line(process, at);
+                // A cause with fields is logged quoted: its variant name is the first word.
+                line.split_once("cause=").map(|(_, c)| {
+                    let word = c.split_whitespace().next().unwrap_or_default();
+                    word.trim_matches('"').to_owned()
                 })
-                .unwrap_or_else(|e| panic!("{at}: the daemon logged no boot line: {e}"));
-                line.split_once("cause=")
-                    .map(|(_, c)| c.split_whitespace().next().unwrap_or_default().to_owned())
             }
             (Kind::Go, _) => {
                 let txid = format!("txid={:016x}", prev.get() + 1);
@@ -625,6 +627,44 @@ impl Run {
                 rest.split_once('"').map(|(reason, _)| reason.to_owned())
             }
         }
+    }
+
+    /// The first transaction a Rust boot deleted unpublished because the live WAL could not
+    /// vouch for it (`SnapshotCause::StagedUnverified`), read from its boot line. Only a boot
+    /// after the WAL restarted or was truncated may do that; any other is left to fail on its
+    /// logged cause.
+    fn unverified_from(&self, process: &mut Replicator, at: &str) -> Option<Txid> {
+        if process.kind() != Kind::Rust || !(self.expect.may_snapshot() || self.crossed.is_some()) {
+            return None;
+        }
+        let line = self.rust_boot_line(process, at);
+        let (_, rest) = line.split_once("StagedUnverified")?;
+        let (_, hex) = rest.split_once("Txid(")?;
+        let hex = hex.split(')').next()?;
+        u64::from_str_radix(hex, 16).ok().and_then(Txid::new)
+    }
+
+    /// Whether a Rust boot's `StagedUnverified` snapshot is the one the previous kill called
+    /// for: it left unpublished staged files from before a WAL restart.
+    fn unverified_crossing(&self, kind: Kind, cause: Option<&str>) -> bool {
+        kind == Kind::Rust && self.crossed.is_some() && cause == Some("StagedUnverified")
+    }
+
+    /// The Rust daemon's boot line.
+    fn rust_boot_line(&self, process: &mut Replicator, at: &str) -> String {
+        // The daemon's log sink is in place before its replicator's thread runs,
+        // so every boot logs this line.
+        let mut line = String::new();
+        wait_until("the boot's log line", BOOT_LINE, || {
+            process.ensure_running()?;
+            line = (process.log_text().lines())
+                .find(|l| l.contains("replica position recovered"))
+                .unwrap_or_default()
+                .to_owned();
+            Ok(!line.is_empty())
+        })
+        .unwrap_or_else(|e| panic!("{at}: the daemon logged no boot line: {e}"));
+        line
     }
 
     /// Checks a boot snapshot's logged cause against the engines' rules for what the previous
@@ -639,6 +679,7 @@ impl Run {
                 format!("{:?} (rule 6 or 4; not logged)", self.expect)
             }
             (_, _, Some(cause)) if allowed.contains(&cause.as_str()) => cause,
+            (_, _, Some(cause)) if self.unverified_crossing(kind, Some(&cause)) => cause,
             (_, _, cause) => panic!(
                 "{at}: a boot snapshot after {:?} gave cause {cause:?}, not one of {allowed:?}",
                 self.expect
@@ -930,6 +971,7 @@ impl Run {
         let got_there = self.reach(&mut process, point, &at);
         process.kill().unwrap_or_else(|e| panic!("{at}: {e}"));
         self.expect = generation::expect(&self.fixture);
+        self.crossed = generation::unpublished_across_restart(&self.fixture);
         self.check_snapshots(&at);
         let checked = self.check_acknowledged(&at);
         let report = TurnReport {

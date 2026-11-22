@@ -65,9 +65,9 @@ pub enum Justifier {
     StagingEdited,
     /// A scheduled staging fault hit a call.
     StagingFault,
-    /// A fault failed a step, or a boot continued under a wal-index reset
-    /// ahead of the WAL header, so the position proves no continuity until
-    /// the next step stages a file.
+    /// A fault failed a step, or a boot ran under a wal-index reset ahead of
+    /// the WAL header, so the position proves no continuity until the next
+    /// step stages a file.
     PositionUnproven,
     /// The engine deleted staged files the replica never took.
     StagedDropped,
@@ -88,6 +88,17 @@ pub enum Justifier {
     /// engine follows it (`lsr_core::recover`, rule 6; seeds 0xe and
     /// 0xf4846 snapshotted there before).
     ReadLockLapsed,
+    /// The process stopped with a staged file the replica does not hold
+    /// that the boot's witness cannot prove from the live WAL: a snapshot
+    /// with a page taken from the database file that has a WAL frame since,
+    /// or a hop into a new WAL generation, which only the running position
+    /// that held the read lock across it could prove. The boot drops it and
+    /// snapshots (`StagedUnverified`), giving up its restore points. A known
+    /// cost of the witness, not a fault: the local engine journal is to record
+    /// these proofs at staging time and remove it. Counted on its own
+    /// (`liveness.pending_unprovable.*`, `liveness.pending_unprovable_*`) so
+    /// the number stays visible.
+    PendingUnprovable,
     /// The operator asked for a snapshot.
     SnapshotRequested,
     /// The disk lies about the engine's own fsync of the WAL: a power loss
@@ -118,7 +129,8 @@ impl Justifier {
             | Self::RemoteFault
             | Self::StagedLost
             | Self::StagingEdited
-            | Self::StagingFault => Forgotten::AtUpload,
+            | Self::StagingFault
+            | Self::PendingUnprovable => Forgotten::AtUpload,
             Self::SnapshotRequested => Forgotten::AtRequestedSnapshot,
             Self::LyingDisk => Forgotten::Never,
             Self::RunStart
@@ -134,13 +146,20 @@ impl Justifier {
 }
 
 /// What can force the engine to delete staged files the replica never took.
+/// The WAL's own changes are here because the boot's witness deletes every
+/// pending staged file the live WAL cannot vouch for (`StagedUnverified`): one
+/// staged before a restart, an emptied WAL or damage can no longer be proved.
 const GIVE_UP: &[Justifier] = &[
     Justifier::StagingEdited,
     Justifier::StagingFault,
     Justifier::StagedLost,
     Justifier::PowerLoss,
+    Justifier::LyingDisk,
     Justifier::RemoteEdited,
     Justifier::RemoteFault,
+    Justifier::WalRestarted,
+    Justifier::WalEmptied,
+    Justifier::WalDamaged,
 ];
 
 /// What can make a snapshot for `cause` necessary, announced at a boot
@@ -221,6 +240,21 @@ pub const fn justifies(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
         // power loss cannot take what was staged: only a disk that lies about
         // that sync, damage, or a staging backup put back can.
         SnapshotCauseKind::LocalRewound => &[LyingDisk, WalDamaged, StagingEdited],
+        // Staged files the live WAL could not vouch for were deleted at
+        // boot: staging edited or torn, the WAL they came from changed or
+        // lost what they hold, or the replica was rolled back so files it had
+        // taken are pending again against a WAL that has moved on (0x83).
+        SnapshotCauseKind::StagedUnverified => &[
+            RemoteEdited,
+            StagingEdited,
+            StagedLost,
+            StagingFault,
+            PowerLoss,
+            LyingDisk,
+            WalDamaged,
+            WalRestarted,
+            WalEmptied,
+        ],
         SnapshotCauseKind::CheckpointBoundary => return None,
         SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
     })
@@ -388,6 +422,14 @@ impl Liveness {
             reach.bump("liveness.owed");
             return Ok(());
         }
+        if cause == SnapshotCauseKind::StagedUnverified
+            && at_boot
+            && self.window.contains(&Justifier::PendingUnprovable)
+        {
+            reach.bump("liveness.pending_unprovable_snapshots");
+            self.owed = true;
+            return Ok(());
+        }
         Err(Violation::UnjustifiedSnapshot {
             cause,
             window: self.window.iter().copied().collect(),
@@ -540,7 +582,10 @@ impl Liveness {
             return Ok(());
         }
         reach.add("liveness.given_up", lost);
-        if !GIVE_UP.iter().any(|why| self.window.contains(why)) {
+        let witness_cost = self.window.contains(&Justifier::PendingUnprovable);
+        if witness_cost && !GIVE_UP.iter().any(|why| self.window.contains(why)) {
+            reach.add("liveness.pending_unprovable_given_up", lost);
+        } else if !GIVE_UP.iter().any(|why| self.window.contains(why)) {
             return Err(Violation::UnjustifiedGiveUp {
                 lost,
                 window: self.window.iter().copied().collect(),

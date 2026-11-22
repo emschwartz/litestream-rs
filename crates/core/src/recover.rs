@@ -42,8 +42,8 @@ use lsr_ltx::{
     Event, HEADER_LEN, Header, PageChecksum, PageNo, PageSize, Timestamp, Txid, WalOrigin,
 };
 use lsr_wal::{
-    FrameCursor, FrameRef, PageMap, ResumeError, Salts, ScanLimit, TxOutcome, WalError, WalHeader,
-    WalOffset, WalReader,
+    CommittedEnd, FrameCursor, FrameRef, PageMap, ResumeError, Salts, ScanLimit, TxOutcome,
+    WalError, WalHeader, WalOffset, WalReader,
 };
 
 use crate::fault::{Fault, SnapshotCause, StopCause};
@@ -144,11 +144,6 @@ pub enum NewestStagedFile {
     Unreadable {
         /// Its transaction id.
         txid: Txid,
-        /// The page size its header names, when the header decodes: unusable
-        /// as a position, the file may still be uploaded, so a database whose
-        /// page size has changed since must stop before staging a file of the
-        /// new size beside it.
-        page_size: Option<PageSize>,
     },
 }
 
@@ -161,7 +156,8 @@ impl NewestStagedFile {
         }
     }
 
-    /// Reads the newest level-0 file in `staging` and checks it against `wal`.
+    /// Reads the newest level-0 file in `staging` and checks it against `wal`, read no
+    /// further than its committed end (the wal-index read the boot took with it).
     ///
     /// The whole file is decoded and verified, as Go's `Decoder.Verify` does
     /// (`db.go:715`), in bounded reads. `None` when the directory holds no file.
@@ -170,17 +166,14 @@ impl NewestStagedFile {
     /// A [`Fault`] for a staging store error (`Fault::from_staging`) or a failed WAL read.
     pub async fn load<L: ObjectStore, R: Read + Seek>(
         staging: &L,
-        wal: Option<&mut WalReader<R>>,
+        wal: Option<BootWal<'_, R>>,
     ) -> Result<Option<Self>, Fault> {
         let Some(newest) = newest_level_zero(staging).await? else {
             return Ok(None);
         };
         let txid = newest.key.range().max();
         let header = read_header(staging, &newest.key, Fault::from_staging).await?;
-        let unreadable = Self::Unreadable {
-            txid,
-            page_size: header.map(|header| header.page_size()),
-        };
+        let unreadable = Self::Unreadable { txid };
         let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
             return Ok(Some(unreadable));
         };
@@ -205,7 +198,7 @@ impl NewestStagedFile {
         first: Option<Vec<u8>>,
         header: &Header,
         at: Origin,
-        wal: Option<&mut WalReader<R>>,
+        wal: Option<BootWal<'_, R>>,
     ) -> Result<Option<Self>, Fault> {
         let Origin {
             origin,
@@ -215,13 +208,13 @@ impl NewestStagedFile {
         let (salt1, salt2) = origin.salts();
         let salts = Salts { salt1, salt2 };
         let frame = match wal {
-            Some(wal) => {
+            Some(mut wal) => {
                 let check = if end.frame_index() > 0 {
-                    FrameCheck::of(wal.frame_before(end, salts))?
+                    FrameCheck::of(wal.reader.frame_before(end, salts, wal.committed))?
                 } else {
                     FrameCheck::Miss(Miss::NotACommit)
                 };
-                let range = newest_staged_file_range(wal, &origin, end, salts)?;
+                let range = wal_range(&mut wal, origin.offset(), end, salts)?;
                 Some((wal, check, range))
             }
             None => None,
@@ -240,8 +233,8 @@ impl NewestStagedFile {
         };
         let last_page = match frame {
             None => LastPageCheck::NoFrame(Miss::Truncated),
-            Some((wal, check, range)) => {
-                let checked = match_last_page(wal, check, end, salts, &pages)?;
+            Some((mut wal, check, range)) => {
+                let checked = match_last_page(&mut wal, check, end, salts, &pages)?;
                 let matched = match checked {
                     LastPageCheck::Match { .. } => true,
                     LastPageCheck::Mismatch
@@ -265,6 +258,34 @@ impl NewestStagedFile {
             timestamp: fields.timestamp,
             last_page,
         }))
+    }
+}
+
+/// The WAL a boot reads and the committed end its one wal-index read gave: every range a
+/// boot proves ends at or before it. Frames past the committed end may still verify (residue
+/// of a history a power loss dropped, the WAL regrown over a prefix of it under the same
+/// salts) and prove nothing.
+#[derive(Debug)]
+pub struct BootWal<'a, R> {
+    /// The WAL, opened once for the whole boot.
+    pub reader: &'a mut WalReader<R>,
+    /// The wal-index's committed end, read with it.
+    pub committed: CommittedEnd,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl<'a, R: Read + Seek> BootWal<'a, R> {
+    /// `reader` with the committed end SQLite's recovery rebuilds when it opens the
+    /// database: the last commit of the chain rooted at the WAL header. Tests only, for a
+    /// WAL with no wal-index beside it.
+    pub fn recovered(reader: &'a mut WalReader<R>) -> Self {
+        let mut cursor = reader.cursor_at_start();
+        while let Ok(TxOutcome::Tx(tx)) = reader.next_tx(&cursor, ScanLimit::FirstInvalidFrame) {
+            cursor = *tx.end();
+        }
+        let next = cursor.next();
+        let committed = CommittedEnd::new(next.frame_index(), cursor.salts(), next.page_size());
+        Self { reader, committed }
     }
 }
 
@@ -311,8 +332,8 @@ struct NewestStagedPages {
     holds_wal_pages: bool,
 }
 
-/// What the WAL holds in the newest staged file's range of frames.
-enum Range {
+/// What the WAL holds in a staged file's range of frames.
+pub(crate) enum Range {
     /// The newest version of each page, and the commit size of the range's last
     /// transaction (`None` for an empty range).
     Pages {
@@ -343,24 +364,31 @@ impl Range {
     }
 }
 
-/// Re-derives the newest staged file from the WAL frames in `[origin.offset, end)`.
+/// Re-derives a staged file from the WAL frames in `[start, end)`.
 ///
 /// Rule 9's last-page match cannot see an earlier page of the newest staged file that differs: a
 /// power loss with `synchronous=NORMAL` drops the tail, and the application commits
 /// another transaction over the same frames. Comparing the newest version of every
 /// page the range holds, and the commit size, closes that. It reads the range once,
-/// at boot, in the bounded memory of one file's page map.
-fn newest_staged_file_range<R: Read + Seek>(
-    wal: &mut WalReader<R>,
-    origin: &WalOrigin,
+/// at boot, in the bounded memory of one file's page map. The boot witness
+/// (`crate::witness`) runs the same compare over every pending file.
+pub(crate) fn wal_range<R: Read + Seek>(
+    boot: &mut BootWal<'_, R>,
+    start: u64,
     end: WalOffset,
     salts: Salts,
 ) -> Result<Range, Fault> {
     let page_size = end.page_size();
-    let Some(start) = WalOffset::new(origin.offset(), page_size) else {
+    let Some(start) = WalOffset::new(start, page_size) else {
         return Ok(Range::Rewritten);
     };
-    let mut cursor = match wal.resume(start, salts) {
+    let within = boot.committed;
+    if within.salts() == salts && end.frame_index() > within.frame_count() {
+        // Past what SQLite committed: residue, or frames not yet committed.
+        return Ok(Range::Rewritten);
+    }
+    let wal = &mut *boot.reader;
+    let mut cursor = match wal.resume(start, salts, within) {
         Ok(cursor) => cursor,
         Err(ResumeError::PrevFrame { .. } | ResumeError::NotAtCommit { .. }) => {
             return Ok(Range::Rewritten);
@@ -374,7 +402,7 @@ fn newest_staged_file_range<R: Read + Seek>(
     };
     let mut map = PageMap::new(page_size);
     while cursor.next().get() < end.get() {
-        match wal.next_tx(&cursor, ScanLimit::FirstInvalidFrame) {
+        match wal.next_tx(&cursor, ScanLimit::Committed(within)) {
             Ok(TxOutcome::Tx(tx)) => {
                 map.apply(&tx).map_err(Fault::from_page_map)?;
                 cursor = *tx.end();
@@ -418,7 +446,7 @@ fn unreached<R: Read + Seek>(wal: &mut WalReader<R>) -> Result<Range, Fault> {
 }
 
 fn match_last_page<R: Read + Seek>(
-    wal: &mut WalReader<R>,
+    boot: &mut BootWal<'_, R>,
     check: FrameCheck,
     end: WalOffset,
     salts: Salts,
@@ -433,7 +461,7 @@ fn match_last_page<R: Read + Seek>(
         (FrameCheck::Miss(Miss::NotACommit), Some(last)) if end.frame_index() == 0 => last,
         (FrameCheck::Miss(miss), _) => return Ok(LastPageCheck::NoFrame(miss)),
     };
-    match wal.resume(end, salts) {
+    match boot.reader.resume(end, salts, boot.committed) {
         Ok(cursor) => Ok(LastPageCheck::Match { last_page, cursor }),
         Err(err) => Ok(match FrameCheck::of(Err(err))? {
             FrameCheck::Miss(miss) => LastPageCheck::NoFrame(miss),
@@ -581,10 +609,17 @@ impl Probes {
         reset: bool,
     ) -> Result<Self, Fault> {
         let cursor = at.cursor();
+        // A running position was proven committed under the read lock when it was
+        // taken, so its own end bounds the read of the frame before it.
+        let proven = CommittedEnd::new(
+            cursor.next().frame_index(),
+            cursor.salts(),
+            cursor.next().page_size(),
+        );
         let prev = if cursor.next().frame_index() == 0 {
             FrameCheck::Miss(Miss::NotACommit)
         } else {
-            FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts()))?
+            FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts(), proven))?
         };
         let stale_next = (reset || wal.header().salts() != cursor.salts())
             && wal.commit_follows(&cursor).map_err(|_err| Fault::LocalIo)?;

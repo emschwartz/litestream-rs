@@ -118,6 +118,7 @@ fn each_wal_sync<B: Backend>(strict: bool) -> BTreeMap<u32, Outcome> {
                     SnapshotCause::FirstSync
                         | SnapshotCause::LocalRewound { .. }
                         | SnapshotCause::GenerationChanged
+                        | SnapshotCause::StagedUnverified { .. }
                 )
             ),
             "{at}: the boot continues or snapshots what the loss took, got {cause:?}"
@@ -138,7 +139,9 @@ fn each_wal_sync<B: Backend>(strict: bool) -> BTreeMap<u32, Outcome> {
 /// after writing a restarted log's header, so a loss can take committed transactions. The engine
 /// syncs the WAL itself before it stages, so a loss never takes one it shipped: the boot
 /// continues (nothing it synced was lost), snapshots a restart it cannot prove (the restarted
-/// header was synced, the frames after it were not: `GenerationChanged`), or snapshots from
+/// header was synced, the frames after it were not: `GenerationChanged`, or `StagedUnverified`
+/// when files staged in the old generation were still unpublished, which the boot then deletes
+/// rather than uploads, since nothing live vouches for them), or snapshots from
 /// scratch (the loss came before the first file was staged: `FirstSync`), and never finds the
 /// WAL rewound below what it synced (`LocalRewound`, which only a disk that lies about fsync can
 /// now produce). Every transaction on the replica still restores to what was committed.
@@ -148,7 +151,10 @@ fn power_loss_at_each_wal_sync_loses_no_acknowledged_transaction() {
     let seen = |want: fn(&Option<SnapshotCause>) -> bool| outcomes.values().any(|o| want(&o.cause));
     assert!(seen(Option::is_none), "{outcomes:?}");
     assert!(
-        seen(|c| matches!(c, Some(SnapshotCause::GenerationChanged))),
+        seen(|c| matches!(
+            c,
+            Some(SnapshotCause::GenerationChanged | SnapshotCause::StagedUnverified { .. })
+        )),
         "{outcomes:?}"
     );
     assert!(

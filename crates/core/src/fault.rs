@@ -272,6 +272,15 @@ pub enum SnapshotCause {
     CheckpointBoundary,
     /// An operator asked.
     OperatorRequested,
+    /// At boot, staged files the replica did not have yet were not vouched
+    /// for by the live WAL (a staging backup put back, a file replaced, or a
+    /// chain from a WAL generation that is gone), and the WAL could not
+    /// regenerate them: they were deleted unpublished, and the snapshot
+    /// holds their end state. Their restore points are given up.
+    StagedUnverified {
+        /// The first transaction deleted.
+        from: Txid,
+    },
 }
 
 /// A [`SnapshotCause`] without its payload: what a counter or a label names.
@@ -297,11 +306,13 @@ pub enum SnapshotCauseKind {
     CheckpointBoundary,
     /// [`SnapshotCause::OperatorRequested`].
     OperatorRequested,
+    /// [`SnapshotCause::StagedUnverified`].
+    StagedUnverified,
 }
 
 impl SnapshotCauseKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::FirstSync,
         Self::BehindRemote,
         Self::NewestStagedFileUnreadable,
@@ -312,6 +323,7 @@ impl SnapshotCauseKind {
         Self::LocalRewound,
         Self::CheckpointBoundary,
         Self::OperatorRequested,
+        Self::StagedUnverified,
     ];
 }
 
@@ -328,6 +340,7 @@ impl From<&SnapshotCause> for SnapshotCauseKind {
             SnapshotCause::LocalRewound { .. } => Self::LocalRewound,
             SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
             SnapshotCause::OperatorRequested => Self::OperatorRequested,
+            SnapshotCause::StagedUnverified { .. } => Self::StagedUnverified,
         }
     }
 }

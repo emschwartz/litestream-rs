@@ -21,6 +21,7 @@ use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::exec::{Polls, RunEnd, run_until};
+use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
@@ -81,6 +82,32 @@ fn without_origin(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// The same pages under a header `edit` changed.
 fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Option<Vec<u8>> {
+    reencoded(bytes, edit, |_| {})
+}
+
+/// The same file, header and all, with every byte of its first page
+/// inverted: a whole, valid file that holds what no commit held.
+fn forged(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut first = true;
+    reencoded(
+        bytes,
+        |_| {},
+        |data| {
+            if first {
+                data.iter_mut().for_each(|byte| *byte = !*byte);
+                first = false;
+            }
+        },
+    )
+}
+
+/// The file re-encoded, with its header through `edit` and each page's
+/// bytes, in order, through `page`.
+fn reencoded(
+    bytes: &[u8],
+    edit: impl FnOnce(&mut lsr_ltx::HeaderFields),
+    mut page: impl FnMut(&mut Vec<u8>),
+) -> Option<Vec<u8>> {
     use lsr_ltx::{Decoder, Encoder, Event, Header};
     let mut decoder = Decoder::new();
     let mut pages = Vec::new();
@@ -102,7 +129,8 @@ fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Opt
     let mut fields = header?.fields();
     edit(&mut fields);
     let mut encoder = Encoder::new(Vec::new(), Header::new(fields).ok()?).ok()?;
-    for (pgno, data) in &pages {
+    for (pgno, data) in &mut pages {
+        page(data);
         encoder.write_page(*pgno, data).ok()?;
     }
     let (out, _) = encoder.finish(verified.trailer().post_apply()).ok()?;
@@ -234,6 +262,8 @@ pub struct World {
     pub model: Model,
     /// What the engine has acknowledged.
     pub acked: Acked,
+    /// The commit log and the content judge (`lsr-history`).
+    pub history: History,
     /// Transactions a bucket rollback took from the replica for good.
     pub lost: BTreeSet<Txid>,
     /// Power losses whose recovery brought back a commit an earlier loss took.
@@ -249,6 +279,9 @@ pub struct World {
     /// Another writer's files, with the replica recorder's length when each
     /// was put.
     pub foreign_put: Vec<(Txid, usize)>,
+    /// Another writer's files and their sizes: no recorder saw them, but the
+    /// engine may compact them.
+    pub foreign_sizes: Vec<(FileKey, u64)>,
     /// Files the engine deleted as a repair, after they failed to verify.
     pub repaired: Vec<FileKey>,
     crash_entropy: SeededEntropy,
@@ -287,6 +320,13 @@ impl World {
         )
         .corrupting_through(remote_raw.clone());
         let initial = PageImage::from_bytes(page_size, &sqlite.image());
+        let model = Model::new(initial);
+        let history = History::new(
+            &model,
+            lsr_core::Clock::now(clock.as_ref()),
+            seed.stream(40),
+            lsr_history::AheadMode::Count,
+        );
         Self {
             seed,
             sqlite,
@@ -303,13 +343,15 @@ impl World {
             staging_recorder: staging_recorder_log,
             remote_recorder: remote_recorder_log,
             volatile: volatile_handle,
-            model: Model::new(initial),
+            model,
             acked: Acked::new(),
+            history,
             lost: BTreeSet::new(),
             resurrected: 0,
             foreign: Vec::new(),
             foreign_removed: Vec::new(),
             foreign_put: Vec::new(),
+            foreign_sizes: Vec::new(),
             repaired: Vec::new(),
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
@@ -330,10 +372,17 @@ impl World {
         if db_size > before {
             written.extend(self.re_added(pages, before, db_size));
         }
-        Some(
-            self.model
-                .commit(&written, db_size, app, self.remote_recorder.len()),
-        )
+        let id = self
+            .model
+            .commit(&written, db_size, app, self.remote_recorder.len());
+        self.log_history();
+        Some(id)
+    }
+
+    /// Logs the model's new commits in the history, at the clock's time.
+    fn log_history(&mut self) {
+        let now = lsr_core::Clock::now(self.clock.as_ref());
+        self.history.log_commits(&self.model, now);
     }
 
     /// Arms a commit of `pages`, leaving `db_size` pages, that the app makes
@@ -360,6 +409,7 @@ impl World {
         let id = self
             .model
             .commit(&done.pages, done.db_size, done.app, remote_at);
+        self.log_history();
         Some(CommittedInTick {
             id,
             staged_from,
@@ -412,10 +462,11 @@ impl World {
             .map(|one| (one, first))
             .into_iter()
             .collect();
-        Some(
-            self.model
-                .commit(&pages, db_size, app, self.remote_recorder.len()),
-        )
+        let id = self
+            .model
+            .commit(&pages, db_size, app, self.remote_recorder.len());
+        self.log_history();
+        Some(id)
     }
 
     /// VACUUM into pages of `new` with every connection closed: the whole
@@ -430,7 +481,9 @@ impl World {
             salts: self.sqlite.salts(),
             end: WalOffset::from_frame_index(0, new),
         };
-        Some(self.model.vacuum(image, app, self.remote_recorder.len()))
+        let id = self.model.vacuum(image, app, self.remote_recorder.len());
+        self.log_history();
+        Some(id)
     }
 
     /// Records a commit the engine made itself: a checkpoint's bump of page 1
@@ -455,6 +508,7 @@ impl World {
         if !known {
             self.model
                 .commit(&[], self.sqlite.db_size(), AppCommit { salts, end }, at);
+            self.log_history();
         }
     }
 
@@ -517,9 +571,12 @@ impl World {
                         .power_loss(&self.staging_raw, &self.crash_entropy),
                 )
                 .unwrap_or_default();
+                self.log_history();
                 self.model
                     .on_power_loss(self.sqlite.salts(), self.sqlite.mx_frame());
                 self.adopt_recovered();
+                let now = lsr_core::Clock::now(self.clock.as_ref());
+                self.history.power_loss(&self.model, now);
                 self.acked.note_rewound();
                 lost
             }
@@ -576,6 +633,31 @@ impl World {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let listing = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX))?;
         Ok(listing.files.last().copied())
+    }
+
+    /// What the boot's witness cannot prove among the staged level-0 files
+    /// the replica does not hold yet: a snapshot (a file with every page) or a
+    /// hop (a file read from a WAL generation's first frame without every
+    /// page). `None` when there is neither.
+    #[must_use]
+    pub fn pending_unprovable(&self) -> Option<Unprovable> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let newest = self.remote_newest();
+        let listing = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX)).ok()?;
+        let first_frame = u64::try_from(lsr_wal::HEADER_LEN).unwrap_or(u64::MAX);
+        listing
+            .files
+            .iter()
+            .filter(|file| newest.is_none_or(|newest| file.key.range().max().get() > newest))
+            .find_map(|file| {
+                let bytes = self.read_staged(&file.key).ok()?;
+                if is_full_image(&bytes) {
+                    return Some(Unprovable::Snapshot);
+                }
+                let raw = bytes.first_chunk::<{ lsr_ltx::HEADER_LEN }>()?;
+                let origin = lsr_ltx::Header::decode(raw).ok()?.fields().wal?;
+                (origin.offset() == first_frame).then_some(Unprovable::Hop)
+            })
     }
 
     /// The newest transaction any replica file holds, at any level, read
@@ -724,6 +806,8 @@ impl World {
         block_on(lsr_core::Upload::commit(up))?;
         self.foreign.push((next, newest.range().max()));
         self.foreign_put.push((next, self.remote_recorder.len()));
+        self.foreign_sizes
+            .push((key, u64::try_from(bytes.len()).unwrap_or(u64::MAX)));
         Ok(Some((key, bytes)))
     }
 
@@ -810,6 +894,23 @@ impl World {
         Ok(found && done)
     }
 
+    /// Rewrites the newest level-0 file as another whole, valid file under
+    /// the same key and header ([`forged`]); false when there is none or it
+    /// does not decode.
+    ///
+    /// # Errors
+    /// As [`Self::edit_newest_staged`].
+    pub fn forge_newest_staged(&self) -> Result<bool, StagedEditError> {
+        let mut done = false;
+        let found = self.edit_newest_staged(|bytes| {
+            if let Some(other) = forged(bytes) {
+                *bytes = other;
+                done = true;
+            }
+        })?;
+        Ok(found && done)
+    }
+
     fn staged_files(&self) -> Result<Vec<FileInfo>, StoreError> {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let mut files = Vec::new();
@@ -819,31 +920,61 @@ impl World {
         Ok(files)
     }
 
-    /// The page size each replica file's header names, and each staged
-    /// file's when `staged`, a file whose header does not decode left out.
+    /// The newest staged level-0 file the engine wrote since staging recorder
+    /// event `since`: its bytes are those of a put the recorder took then. A
+    /// file put back from a backup, or put in place of one, is not the
+    /// engine's to upload.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list or read.
+    pub fn newest_engine_staged(&self, since: usize) -> Result<Option<FileInfo>, StoreError> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        let puts = self.engine_puts(since);
+        let listing = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX))?;
+        for info in listing.files.iter().rev() {
+            let bytes = read_all(&self.staging_raw, &info.key)?;
+            if puts.contains(&(info.key, crate::store::content_digest(&bytes))) {
+                return Ok(Some(*info));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every (key, digest) the staging recorder took a put of since event `since`.
+    fn engine_puts(&self, since: usize) -> BTreeSet<(FileKey, u64)> {
+        self.staging_recorder
+            .events()
+            .iter()
+            .skip(since)
+            .filter_map(|event| match event {
+                crate::RecorderEvent::Put { key, digest, .. } => Some((*key, *digest)),
+                crate::RecorderEvent::Delete { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The page size each replica file's header names, and each staged file
+    /// the engine wrote since staging recorder event `since` (its bytes are
+    /// those of a put the recorder took then): a file put back from a backup
+    /// before that, or put in place of one, is not the engine's. A file whose
+    /// header does not decode is left out.
     ///
     /// # Errors
     /// What the store said when it could not list or read.
-    pub fn page_sizes(&self, staged: bool) -> Result<Vec<(FileKey, PageSize)>, String> {
-        use lsr_core::{Inventory, ObjectStore, ReadLen};
-        use lsr_ltx::{HEADER_LEN, Header};
-        let len = u32::try_from(HEADER_LEN).ok().and_then(ReadLen::new);
+    pub fn page_sizes(&self, since: usize) -> Result<Vec<(FileKey, PageSize)>, String> {
+        use lsr_core::Inventory;
+        let staged_puts = self.engine_puts(since);
         let mut out = Vec::new();
-        let stores = if staged {
-            vec![&self.staging_raw, &self.remote_raw]
-        } else {
-            vec![&self.remote_raw]
-        };
-        for store in stores {
+        for (store, all) in [(&self.staging_raw, false), (&self.remote_raw, true)] {
             let inventory = block_on(Inventory::load(store)).map_err(|err| err.to_string())?;
             for info in inventory.files() {
-                let Some(len) = len else { break };
-                let bytes =
-                    block_on(store.read(&info.key, 0, len)).map_err(|err| err.to_string())?;
-                let header = <[u8; HEADER_LEN]>::try_from(bytes)
-                    .ok()
-                    .and_then(|raw| Header::decode(&raw).ok());
-                if let Some(header) = header {
+                let bytes = read_all(store, &info.key).map_err(|err| err.to_string())?;
+                let engines =
+                    all || staged_puts.contains(&(info.key, crate::store::content_digest(&bytes)));
+                let header = bytes
+                    .first_chunk::<{ lsr_ltx::HEADER_LEN }>()
+                    .and_then(|raw| lsr_ltx::Header::decode(raw).ok());
+                if let Some(header) = header.filter(|_| engines) {
                     out.push((info.key, header.page_size()));
                 }
             }
@@ -877,6 +1008,7 @@ impl World {
             end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
         };
         self.model.vacuum(image, app, self.remote_recorder.len());
+        self.log_history();
     }
 
     /// The rules' database after a power loss is SQLite's own recovery of the
@@ -952,3 +1084,12 @@ impl World {
 
 #[cfg(test)]
 mod tests;
+
+/// A pending staged file the boot's witness cannot prove from the live WAL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unprovable {
+    /// A file with every page.
+    Snapshot,
+    /// A file that starts a WAL generation without every page.
+    Hop,
+}

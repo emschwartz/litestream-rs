@@ -23,7 +23,10 @@
 //!   around each created-at time get the contract's answer and are never
 //!   newer than the instant (`as_of`);
 //! - with retention windows, no delete removed a file younger than its
-//!   window (`retention`).
+//!   window (`retention`);
+//! - after every tick, each level-0 file the replica took is one the engine
+//!   incarnation that put it staged itself, or holds exactly what the WAL it
+//!   booted on held for its range (`witness`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -248,6 +251,20 @@ pub enum Violation {
         /// The latest time the engine had been told when it deleted it.
         latest: Timestamp,
     },
+    /// The history judge (`lsr-history`), which reads only restored content and the commit
+    /// log, does not accept a restore.
+    #[error("history judge: {0}")]
+    History(lsr_history::Anomaly),
+    /// A level-0 file reached the replica that the engine incarnation which
+    /// put it neither staged itself nor could have re-derived from the WAL
+    /// it booted on: a staged file put back or replaced, uploaded on trust.
+    #[error("{key} was put with bytes nothing witnessed: {why}")]
+    UnwitnessedPut {
+        /// The file.
+        key: String,
+        /// The first rule of the boot WAL's range it broke.
+        why: String,
+    },
     /// The engine reported its own bug, or the oracle could not decide.
     #[error("bug fault: {context}")]
     BugFault {
@@ -310,9 +327,7 @@ impl Acked {
     pub fn on_did(&mut self, did: &Did) {
         match did {
             Did::Put(info) => self.record(info.key.range().max()),
-            Did::Diverged { confirmed, .. } | Did::Rewound { confirmed, .. } => {
-                self.record(*confirmed);
-            }
+            Did::Diverged { confirmed, .. } => self.record(*confirmed),
             Did::Listed {
                 newest: Some(newest),
             } => self.record(*newest),
@@ -663,8 +678,10 @@ pub fn check_with(
 
 mod as_of;
 mod retention;
+mod witness;
 
 pub use retention::Windows;
+pub use witness::{Incarnation, Judged, judge_put};
 
 #[cfg(test)]
 mod tests;
