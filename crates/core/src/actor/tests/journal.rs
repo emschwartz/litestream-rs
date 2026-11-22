@@ -208,3 +208,54 @@ fn no_journal_a_boot_can_find_changes_what_the_engine_does() {
         );
     }
 }
+
+/// A meta directory wiped while the replica keeps its files: staging is empty, the replica is
+/// not, so a missing journal is not a first run and is reported.
+#[test]
+fn a_missing_journal_beside_a_replica_with_files_is_reported() {
+    let mut rig = Rig::new();
+    settle(&mut rig, &mut Actor::new(cfg()), T0, None);
+    rig.staging = Counting::default();
+    let mut actor = Actor::new(cfg());
+    settle(&mut rig, &mut actor, T0 + 10, Some(MemJournal::default()));
+    assert_eq!(actor.journal(), Some(JournalSignal::Missing));
+}
+
+/// Staging holds files and the replica is empty (a new or emptied bucket): not a first run, so
+/// a missing journal is reported. Either store holding files is enough.
+#[test]
+fn a_missing_journal_beside_staged_files_and_an_empty_replica_is_reported() {
+    let mut rig = Rig::new();
+    settle(&mut rig, &mut Actor::new(cfg()), T0, None);
+    rig.remote = Counting::default();
+    let mut actor = Actor::new(cfg());
+    settle(&mut rig, &mut actor, T0 + 10, Some(MemJournal::default()));
+    assert_eq!(actor.journal(), Some(JournalSignal::Missing));
+}
+
+/// How a tick's `Env` reads in a log line, with a journal lent or not.
+fn shown(rig: &mut Rig, lend: bool) -> String {
+    let (staging, remote) = (MemStore::default(), MemStore::default());
+    let clock = FakeClock::new(ts(T0));
+    let mut file = MemJournal::default();
+    let env = Env {
+        wal: &mut rig.wal,
+        db: &mut rig.db,
+        ck: &mut rig.ck,
+        staging: &staging,
+        remote: &remote,
+        clock: &clock,
+        journal: lend
+            .then_some(&mut file)
+            .map(|file| -> &mut (dyn JournalFile + Send) { file }),
+    };
+    format!("{env:?}")
+}
+
+/// A tick's `Env` in a log line says whether a journal was lent.
+#[test]
+fn an_env_shows_whether_a_journal_is_lent() {
+    let mut rig = Rig::new();
+    assert!(shown(&mut rig, false).contains("journal: false"));
+    assert!(shown(&mut rig, true).contains("journal: true"));
+}

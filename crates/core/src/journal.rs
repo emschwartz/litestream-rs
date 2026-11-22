@@ -325,3 +325,71 @@ impl<F: JournalFile> JournalWriter<F> {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::ErrorKind;
+
+    use lsr_journal::{Journal, SLOT, Slot};
+
+    use super::{JournalFile, JournalWriter};
+
+    /// A file that records each call and answers as an empty, writable one would.
+    #[derive(Debug, Default)]
+    struct Recording {
+        calls: Vec<&'static str>,
+    }
+
+    impl JournalFile for Recording {
+        fn open(&mut self) -> Result<(), ErrorKind> {
+            self.calls.push("open");
+            Err(ErrorKind::NotFound)
+        }
+
+        fn read_slot(&mut self, _: Slot) -> Result<Option<[u8; SLOT]>, ErrorKind> {
+            self.calls.push("read_slot");
+            Ok(None)
+        }
+
+        fn create(&mut self) -> Result<(), ErrorKind> {
+            self.calls.push("create");
+            Ok(())
+        }
+
+        fn write_at(&mut self, _: u64, _: &[u8]) -> Result<(), ErrorKind> {
+            self.calls.push("write_at");
+            Ok(())
+        }
+
+        fn sync(&mut self) -> Result<(), ErrorKind> {
+            self.calls.push("sync");
+            Ok(())
+        }
+
+        fn sync_dir(&mut self) -> Result<(), ErrorKind> {
+            self.calls.push("sync_dir");
+            Ok(())
+        }
+    }
+
+    /// The engine lends the file as `&mut dyn JournalFile`; every call made through the borrow
+    /// must reach the file, or a sync the writer counts on would be dropped silently.
+    #[test]
+    fn a_borrowed_file_receives_every_call() {
+        let mut file = Recording::default();
+        let borrowed: &mut (dyn JournalFile + Send) = &mut file;
+        let (mut writer, _) = JournalWriter::open(borrowed);
+        writer.write(&Journal::ABSENT).unwrap();
+        writer.write(&Journal::ABSENT).unwrap();
+        let mut slot_reads = Recording::default();
+        let borrowed: &mut (dyn JournalFile + Send) = &mut slot_reads;
+        assert_eq!(borrowed.read_slot(Slot::S0), Ok(None));
+        assert_eq!(slot_reads.calls, ["read_slot"]);
+        assert_eq!(
+            file.calls,
+            [
+                "open", "create", "write_at", "sync", "sync_dir", "write_at", "sync"
+            ]
+        );
+    }
+}
