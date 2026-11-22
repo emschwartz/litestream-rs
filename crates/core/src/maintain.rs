@@ -782,7 +782,7 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
         },
         StoreError::Transient { .. }
         | StoreError::Throttled { .. }
-        | StoreError::Auth { .. }
+        | StoreError::Denied { .. }
         | StoreError::NotFound { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::Refused { .. } => false,

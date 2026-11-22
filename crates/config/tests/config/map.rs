@@ -307,6 +307,35 @@ fn responses_override_go_s_one_by_one() {
     );
 }
 
+/// Each kind of access refusal has its own key, which sets its field and no other.
+#[test]
+fn each_kind_of_access_refusal_has_its_own_response() {
+    let keys = [
+        "credentials",
+        "permission-denied",
+        "clock-skew",
+        "bucket-missing",
+        "tls",
+    ];
+    for key in keys {
+        let db = one(&format!(
+            "litestream-rs:\n  responses:\n    {key}: stop\n{}",
+            db_with("")
+        ));
+        let r = db.config().responses;
+        let stops = [
+            r.credentials,
+            r.permission_denied,
+            r.clock_skew,
+            r.bucket_missing,
+            r.tls,
+        ]
+        .map(|response| response == Response::Stop);
+        let want = keys.map(|other| other == key);
+        assert_eq!(stops, want, "{key}");
+    }
+}
+
 /// A Rust-only setting: the application's `wal_autocheckpoint`, SQLite's 1000 unless stated.
 #[test]
 fn app_autocheckpoint_defaults_to_sqlite_s_and_can_be_off() {

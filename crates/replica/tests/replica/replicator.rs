@@ -181,11 +181,11 @@ fn a_refused_boot_is_degraded_and_recovers() {
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     assert_eq!(
         booted(&replicator),
-        Booted::Degraded(DegradedCause::Credentials)
+        Booted::Degraded(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         replicator.health().task(Task::Sync).map(|d| d.cause),
-        Some(DegradedCause::Credentials)
+        Some(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
@@ -196,6 +196,26 @@ fn a_refused_boot_is_degraded_and_recovers() {
     wait(&replicator, caught_up);
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
+}
+
+/// A replicator whose first boot the store refuses has replicated nothing: its lag counts
+/// from the start, never zero, so an alert on the lag fires while the store is unreachable.
+#[test]
+fn the_lag_counts_from_the_start_while_the_first_boot_fails() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.refuse.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let started = clock.now();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let refused = wait(&replicator, |h| h.task(Task::Sync).is_some());
+    assert_eq!(refused.phase, Phase::Booting, "{refused:?}");
+    assert_eq!(refused.unreplicated_since, Some(started), "{refused:?}");
+    faulty.refuse.store(false, Ordering::SeqCst);
+    clock.advance(POLL);
+    wait(&replicator, caught_up);
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
 
 /// Go's `SyncStatus`: what is staged locally and what the replica holds, before the replica
@@ -333,14 +353,17 @@ fn a_stopped_replicator_reports_its_cause() {
         ..config()
     };
     let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
-    assert_eq!(booted(&replicator), Booted::Stopped(StopCause::Credentials));
+    assert_eq!(
+        booted(&replicator),
+        Booted::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
+    );
     assert_eq!(
         replicator.health().phase,
-        Phase::Stopped(StopCause::Credentials)
+        Phase::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         stopped(&replicator),
-        Stopped::Stopped(StopCause::Credentials)
+        Stopped::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
 }
 

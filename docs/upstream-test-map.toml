@@ -1310,7 +1310,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestS3AccessPointLocalStack" = { reason = "@s3-access-points" }
 
 ["litestream/tests/integration/s3_restore_connection_drop_test.go"]
-"TestRestore_S3ConnectionDrop" = { counterpart = ["lsr-store-s3::store-s3::faults::cases::a_truncated_get_is_transient_never_a_short_read", "lsr-store-s3::store-s3::faults::cases::connection_reset_is_transient_and_tls_failure_is_auth"] }
+"TestRestore_S3ConnectionDrop" = { counterpart = ["lsr-store-s3::store-s3::faults::cases::a_truncated_get_is_transient_never_a_short_read", "lsr-store-s3::store-s3::faults::cases::connection_reset_is_transient_and_tls_failure_is_named_tls"] }
 
 ["litestream/tests/integration/scenario_test.go"]
 "TestDatabaseDeletion" = { counterpart = ["lsr-sqlite::sqlite::faults::a_deleted_database_stops_and_the_replica_keeps_its_history", "lsr-sqlite::sqlite::faults::a_wal_deleted_by_another_process_while_pinned_stops_the_engine"] }

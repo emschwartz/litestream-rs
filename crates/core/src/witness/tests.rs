@@ -103,20 +103,26 @@ fn confirmation_and_drops_let_tokens_go() {
 }
 
 #[test]
-fn past_the_cap_a_token_is_not_kept() {
+fn room_runs_out_at_the_cap() {
     let one = token(1, 1);
     let mut all = Witnesses::new();
-    for n in 1..=u64::try_from(MAX_WITNESSED).unwrap() {
+    let cap = u64::try_from(MAX_WITNESSED).unwrap();
+    for n in 1..cap {
         all.insert(Witnessed { key: key(n), ..one });
     }
-    let over = u64::try_from(MAX_WITNESSED).unwrap() + 1;
+    assert!(all.has_room(1));
+    assert!(!all.has_room(2));
     all.insert(Witnessed {
-        key: key(over),
+        key: key(cap),
         ..one
     });
     assert_eq!(all.len(), MAX_WITNESSED);
-    assert!(all.get(&key(over)).is_none());
+    assert!(!all.has_room(1));
+    assert!(all.has_room(0));
     // Replacing a held token is not growth.
     all.insert(token(1, 2));
     assert_eq!(all.get(&key(1)), Some(&token(1, 2)));
+    assert_eq!(all.len(), MAX_WITNESSED);
+    all.confirmed(Some(txid(1)));
+    assert!(all.has_room(1));
 }
