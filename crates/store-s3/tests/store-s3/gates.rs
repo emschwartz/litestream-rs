@@ -32,6 +32,7 @@ use crate::latency::Link;
 use crate::request_counts::cases::{
     EPOCH_MS, Rig, Shared, TXNS, instant_back, now_ms, retention_config, txid,
 };
+use lsr_core::WriteMode;
 
 /// Entries one listing page returns: the page limit minus the one-key look-ahead
 /// that proves the listing goes on (see `a_full_scan_sends_one_list_per_page`).
@@ -143,7 +144,11 @@ fn ltx_file(n: u64, commit: u32, pages: u32, stride: u32) -> Vec<u8> {
 fn put(store: &impl ObjectStore, key: &FileKey, bytes: &[u8]) {
     block_on(async {
         let mut up = store
-            .begin_upload(key, Timestamp::from_unix_millis(EPOCH_MS))
+            .begin_upload(
+                key,
+                Timestamp::from_unix_millis(EPOCH_MS),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         for chunk in bytes.chunks(1 << 20) {
@@ -183,8 +188,9 @@ fn restore_reads_chunks_side_by_side() {
     assert_eq!(restored.files(), 3);
     println!("restore {tally:?} chunks {chunks:?}");
     let total: usize = chunks.iter().sum();
-    // Two one-byte GETs past the listing, side by side, then one GET per chunk.
-    assert_eq!(tally.get, total + 2, "one GET per chunk");
+    // One-byte GETs of the three keys named past the listing, side by side, then one GET per
+    // chunk.
+    assert_eq!(tally.get, total + 3, "one GET per chunk");
     assert_eq!(tally.head, 0, "Latest reads no created-at time");
     let width = READ_WIDTH;
     let reads: usize = chunks.iter().map(|n| waves(*n, width)).sum();
@@ -221,7 +227,11 @@ fn multipart_upload_sends_parts_in_batches() {
     let (peak, tally) = link.measure(|| {
         block_on(async {
             let mut up = store
-                .begin_upload(&key, Timestamp::from_unix_millis(EPOCH_MS))
+                .begin_upload(
+                    &key,
+                    Timestamp::from_unix_millis(EPOCH_MS),
+                    WriteMode::Replace,
+                )
                 .await
                 .unwrap();
             let mut peak = 0;

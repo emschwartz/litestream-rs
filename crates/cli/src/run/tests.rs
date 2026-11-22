@@ -423,8 +423,9 @@ impl<S: ObjectStore> ObjectStore for Unlisting<S> {
         &self,
         key: &lsr_core::FileKey,
         created_at: Timestamp,
+        mode: lsr_core::WriteMode,
     ) -> Result<Self::Upload, lsr_core::StoreError> {
-        self.inner.begin_upload(key, created_at).await
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[lsr_core::FileKey]) -> Result<(), lsr_core::StoreError> {

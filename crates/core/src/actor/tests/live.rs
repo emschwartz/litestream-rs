@@ -55,6 +55,32 @@ fn live_pages_wait_for_the_upload_of_a_new_commit() {
     );
 }
 
+/// While an upload is behind, a quiet tick does not open the WAL for the
+/// live pages: they are read only at the transaction the replica holds, which
+/// no sync can prove until the upload lands.
+#[test]
+fn live_pages_behind_an_upload_do_not_open_a_quiet_wal() {
+    let (mut rig, mut actor) = caught_up();
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.commit(7);
+    let sync = rig.tick(&mut actor, T0 + 1);
+    assert_eq!(event(&sync), Some(&Event::Synced { files: 1 }));
+    let failed = rig.tick(&mut actor, T0 + 1);
+    assert!(
+        matches!(event(&failed), Some(Event::Retrying { .. })),
+        "{failed:?}"
+    );
+    rig.settle(&mut actor, T0 + 1);
+    actor.read_live_pages();
+    rig.wal
+        .inject(SourceOp::Open, SourceError::Io(ErrorKind::Other));
+    let tick = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(event(&tick), Some(&Event::Idle));
+    assert_eq!(actor.take_live_pages(), None);
+}
+
 /// A draining engine reads no live pages: a drain only syncs and uploads.
 #[test]
 fn a_drain_reads_no_live_pages() {
@@ -76,8 +102,15 @@ fn a_verify_restore_point_is_kept_beside_a_task_restore_point_and_the_older_wins
     rig.settle(&mut actor, T0 + 1);
     let second = newest_on_replica(&rig).unwrap();
     assert!(second > first);
-    actor.keep_restore_point_for_verify(Some(second));
-    assert_eq!(actor.kept_restore_point(), Some(second));
+    for kept in [first, second] {
+        actor.engine.maintain.stale = false;
+        actor.keep_restore_point_for_verify(Some(kept));
+        assert_eq!(actor.kept_restore_point(), Some(kept));
+        assert!(
+            !actor.engine.maintain.stale,
+            "keeping or moving a restore point only holds deletes back: nothing to list again"
+        );
+    }
     actor.kept.task_restore_point = TaskRestorePoint::Held(Some(first));
     assert_eq!(actor.kept_restore_point(), Some(first));
     actor.engine.maintain.stale = false;

@@ -42,17 +42,18 @@ use std::sync::atomic::Ordering;
 
 use lsr_core::{
     Actor, AppCheckpoints, AppGate, Degraded, Did, Env, Event as EngineEvent, Gate, Level,
-    ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, StopCause, Task, Tick,
-    Unfinished, WalSource, retry_wait,
+    ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, StopCause,
+    TakeoverRecord, Task, Tick, Unfinished, WalSource, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
 use lsr_store_fs::{FsJournalFile, FsStore};
 
 use crate::config::Config;
-use crate::events::{Event, EventSink};
+use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
 use crate::health::{Counters, FailStop, Gone, Phase, Stopped};
+use crate::meta::{MetaLock, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -180,6 +181,10 @@ pub(crate) struct Worker {
     seen: Seen,
     /// The scheduled verify, when `Config::verify_interval` is set.
     scheduled: Option<Scheduled>,
+    /// The meta directory, where the takeover record is kept (`crate::meta`).
+    meta: PathBuf,
+    /// The meta directory's lock, held for the thread's life.
+    _meta_lock: Option<MetaLock>,
     /// Whether fail-stop has let the application run yet (`lsr_core::AppGate`).
     app_gate: AppGate,
     /// The clock's last reading, to notice it stepping back.
@@ -246,8 +251,40 @@ impl Worker {
             progress: Progress::default(),
             seen: Seen::default(),
             scheduled,
+            meta: meta.to_owned(),
+            _meta_lock: None,
             last_reading: None,
             app_gate: AppGate::default(),
+        }
+    }
+
+    /// The meta directory's lock to hold, and the takeover record an earlier run, a
+    /// take-over or a restore left there, which the engine judges at its boot. One that
+    /// cannot be used is reported and ignored, as if there were none.
+    pub(crate) fn with_meta(
+        mut self,
+        lock: MetaLock,
+        takeover: Result<Option<TakeoverRecord>, TakeoverUnusable>,
+    ) -> Self {
+        self._meta_lock = Some(lock);
+        match takeover {
+            Ok(Some(takeover)) => self.actor.remember_takeover(takeover),
+            Ok(None) => {}
+            Err(unusable) => self.emit(&Event::TakeoverRecordUnusable(unusable)),
+        }
+        self
+    }
+
+    /// Writes the takeover the engine asked for before it deletes staged files, and hands
+    /// it back, so its next tick may delete them. A write that fails hands nothing back: the
+    /// engine's next tick fails `LocalIo` and waits, and deletes nothing unrecorded.
+    fn keep_takeover(&mut self) {
+        let Some(record) = self.actor.takeover_wanted() else {
+            return;
+        };
+        match write_takeover(&self.meta, record) {
+            Ok(()) => self.actor.remember_takeover(record),
+            Err(err) => self.emit(&Event::TakeoverNotRecorded { kind: err.kind() }),
         }
     }
 
@@ -428,6 +465,7 @@ impl Worker {
             .as_ref()
             .and_then(Scheduled::kept_restore_point);
         self.actor.keep_restore_point_for_verify(verify);
+        self.keep_takeover();
         // The snapshot is written before the event goes out, so a sink that reads health on an
         // event sees the state after it.
         self.observe(now);
@@ -457,7 +495,8 @@ impl Worker {
             EngineEvent::Booted { .. }
             | EngineEvent::Synced { .. }
             | EngineEvent::Uploaded(_)
-            | EngineEvent::Resnapshot(_) => true,
+            | EngineEvent::Resnapshot(_)
+            | EngineEvent::TakeoverWanted(_) => true,
             EngineEvent::Checkpointed { .. }
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
@@ -484,6 +523,9 @@ impl Worker {
     /// A stopped engine waits for the stop, which then reports its cause.
     fn stopped(&mut self, cause: StopCause) -> Turn {
         if !std::mem::replace(&mut self.seen.stopped_reported, true) {
+            if let Some(through) = self.actor.refused_through() {
+                self.emit(&Event::Refused { through });
+            }
             self.emit(&Event::Stopped(cause));
         }
         if self.stop.is_some() {
@@ -504,7 +546,7 @@ impl Worker {
                     bump(&mut counters.checkpoints_busy);
                 }
             }
-            EngineEvent::Uploaded(Did::Put(_)) => bump(&mut counters.uploads),
+            EngineEvent::Uploaded(Did::Put(_) | Did::AlreadyPut(_)) => bump(&mut counters.uploads),
             EngineEvent::Retrying { .. } | EngineEvent::Degraded { .. } => {
                 bump(&mut counters.retries);
             }
@@ -514,7 +556,8 @@ impl Worker {
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
             | EngineEvent::Resnapshot(_)
-            | EngineEvent::Clamped(_) => {}
+            | EngineEvent::Clamped(_)
+            | EngineEvent::TakeoverWanted(_) => {}
         }
     }
 

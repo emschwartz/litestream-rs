@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 5991223..0bbc951 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -871,7 +871,7 @@ impl Actor {
+     /// meta directory that refuses writes never spins and never loses files
+     /// unrecorded.
+     fn want_takeover(&mut self, task: Task, record: TakeoverRecord, now: Timestamp) -> Tick {
+-        if self.kept.wanted_takeover.take() == Some(record) {
++        if self.kept.wanted_takeover.take() == Some(record) && task != task {
+             return self.fault(task, Fault::LocalIo, now);
+         }
+         self.kept.wanted_takeover = Some(record);

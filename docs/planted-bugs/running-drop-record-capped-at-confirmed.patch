@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 5991223..2e30b0e 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1547,7 +1547,8 @@ impl Actor {
+                     if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan)
+                         && self.kept.suspect_staged.replace(key) == Some(key)
+                     {
+-                        if let Some(tick) = self.vouch_before_drop(Task::Upload, None, now) {
++                        let confirmed = self.engine.upload.confirmed();
++                        if let Some(tick) = self.vouch_before_drop(Task::Upload, confirmed, now) {
+                             return Some(tick);
+                         }
+                         self.kept.suspect_staged = None;

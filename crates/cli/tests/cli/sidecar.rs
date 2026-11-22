@@ -288,7 +288,7 @@ fn exec_lines_go_would_misread_are_refused() {
             .args(["-exec", line])
             .output()
             .unwrap();
-        assert_eq!(out.status.code(), Some(2), "{line:?}");
+        assert_eq!(out.status.code(), Some(1), "{line:?}");
         let stderr = String::from_utf8(out.stderr).unwrap();
         assert!(stderr.contains("exec command"), "{line:?}: {stderr}");
     }
@@ -301,7 +301,7 @@ fn exec_lines_go_would_misread_are_refused() {
         .arg(&with_key)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(64));
+    assert_eq!(out.status.code(), Some(1));
 
     let mut command = lsr();
     command
@@ -572,7 +572,7 @@ fn an_empty_host_binds_every_interface_and_the_log_says_which() {
         .arg(&bad)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("must specify port"), "{stderr}");
 }

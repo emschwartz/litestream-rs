@@ -25,6 +25,27 @@
 //! never trusted to move the position backwards or past the local position: either
 //! is a persistent fault for the actor's configured response, not a guess.
 //!
+//! A listing's end is not trusted on its own either. A store may list behind
+//! its writes (a cache in front of a listing, an eventually consistent
+//! index) while its reads are exact, so a key a listing leaves out may still
+//! be there. Every listing here is followed by reads of the keys past its
+//! newest that a reader can name without a listing (`crate::probe`, the same
+//! reads a restore of the newest state makes), in order until [`PROBE_GAP`]
+//! transactions in a row are missing ([`probe_past`], at most [`PROBE_CAP`]
+//! transactions, [`fresh_probe_reads`] on a fresh listing; through the newest
+//! staged transaction at least): what they find
+//! is the replica's newest. When a confirmed transaction is past the listing,
+//! the reads start at its key, so a regression is reported only when a read,
+//! not a listing, finds the confirmed key gone. A file a listing shows past
+//! the local position is another writer's only when a read finds it, since a
+//! listing that lags a delete shows a file that is gone. The reads find the
+//! tail because nothing this engine runs deletes the replica's newest level-0 file
+//! (retention keeps each level's last file, see `maintain::retain`). What
+//! they cannot find is a level 1 to 8 file whose level-0 inputs were all
+//! deleted by someone else (an operator removing another writer's newest
+//! file after maintenance merged it): its start is not knowable without a
+//! listing, so a lagging listing that hides it is taken as the replica's end.
+//!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
 //! bytes are written to an upload that no listing can see, and the upload is
 //! committed only after the decoder verified the whole file, its header names
@@ -37,6 +58,24 @@
 //! deletes the file and everything staged after it ([`drop_staged_from`]) and
 //! snapshots in its place. At boot, [`sweep_staged`] applies the same rule
 //! before anything is uploaded.
+//!
+//! Every upload here is of a key the engine takes to be free (the confirmed
+//! transaction plus one), so it is a [`WriteMode::New`] write: the bucket, not
+//! a listing, refuses a key that is taken, which a stale listing or another
+//! writer cannot hide. A refused commit reads the object back:
+//! - the same bytes are this engine's own earlier commit whose answer was
+//!   lost, or that a stale listing hid: confirmed, as [`Did::AlreadyPut`];
+//! - a staged copy that does not verify on a read of its own is
+//!   `Fault::StagedLost`, and nothing is judged from it (one read never
+//!   condemns a file; the next tick puts it again);
+//! - an object that is not a whole LTX file naming the key is replaced, as a
+//!   listing's read-back replaces one;
+//! - a verifying object with other bytes, on a second compare too, is another
+//!   writer's or an earlier run's: the replica is listed at once and judged by
+//!   the listing's rules above ([`Did::Diverged`], or
+//!   `Fault::RemoteAheadOfLocal` when the replica is ahead); the relist's
+//!   probe reads the refused key, so a listing too stale to show the object
+//!   cannot hide it.
 //!
 //! A failure before the commit leaves the state alone (nothing could have been
 //! published). A failure of the commit itself gives [`UploadState::ListFirst`],
@@ -54,11 +93,24 @@ use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
-use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, Upload};
+use crate::probe;
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode};
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
+
+/// The most transactions past a listing's newest that one probe looks for
+/// ([`probe_past`]). A listing that hides more uploads than this is far
+/// outside what an S3-compatible store does; past it, the bucket's refusal of
+/// a taken key ([`taken`]) still stops a second upload under the same key.
+pub const PROBE_CAP: u32 = 64;
+
+/// The most missing transactions in a row a probe reads past before it
+/// stops. Keys past a replica's newest are never taken, but one below it can
+/// be free: another writer's file an operator removed leaves a gap under the
+/// files uploaded after it.
+pub const PROBE_GAP: u32 = 3;
 
 /// What this engine knows about the replica's newest transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +169,10 @@ pub enum Did {
     },
     /// One file was committed.
     Put(FileInfo),
+    /// The bucket refused the upload of this key because it already held the
+    /// same bytes, read back: this engine's earlier commit, whose answer was
+    /// lost or whose listing was stale, is confirmed.
+    AlreadyPut(FileKey),
     /// The replica was listed and the staged files from `from` on cannot
     /// continue it, so they must go and new content takes a transaction above
     /// `confirmed`: the replica's newest level-0 object verifies and differs
@@ -199,7 +255,7 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
         }),
         UploadPlan::List => list_step(state, staging, remote, newest_staged).await,
         UploadPlan::Upload(key) => match witnesses.get(&key) {
-            Some(token) => put_step(state, staging, remote, token).await,
+            Some(token) => put_step(state, staging, remote, token, newest_staged).await,
             // No witness: the file is refused unread, as a lost one is.
             None => Err(fail(state, Fault::StagedLost)),
         },
@@ -215,6 +271,7 @@ pub(crate) fn inventory_fault(err: &InventoryError) -> Fault {
     match err {
         InventoryError::Store(err) => Fault::from_remote(err),
         InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_) => {
+            mark!(Boot17);
             Fault::RemoteCorrupt
         }
     }
@@ -229,19 +286,33 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     let inventory = Inventory::load(remote)
         .await
         .map_err(|err| fail(state, inventory_fault(&err)))?;
-    let newest = inventory.newest();
     let confirmed = state.confirmed();
+    let probed = look_past(&inventory, staging, remote, confirmed, newest_staged)
+        .await
+        .map_err(|fault| fail(state, fault))?;
+    let seen = Seen {
+        inventory: &inventory,
+        probed,
+    };
+    let newest = seen.newest();
     if newest > newest_staged {
+        mark!(Up10);
         return Err(fail(state, Fault::RemoteAheadOfLocal));
     }
     if newest < confirmed {
+        mark!(Up11);
         return Err(fail(state, Fault::RemoteRegressed));
     }
     let known = match newest {
         Some(tail) if newest > confirmed => {
-            let verdict = judge_tail(&inventory, staging, remote, tail)
-                .await
-                .map_err(|fault| fail(state, fault))?;
+            let verdict = match seen.level_zero(tail) {
+                Some(size) => judge_tail(staging, remote, tail, size)
+                    .await
+                    .map_err(|fault| fail(state, fault))?,
+                // The newest transaction is in a higher level only: nothing
+                // at level 0 to read back.
+                None => TailVerdict::Sound,
+            };
             match verdict {
                 TailVerdict::Sound => newest,
                 TailVerdict::Replace => tail.prev().max(confirmed),
@@ -256,6 +327,167 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
         state: UploadState::At(known),
         did: Did::Listed { newest: known },
     })
+}
+
+/// What a listing showed, with the keys reads found past it.
+struct Seen<'a> {
+    inventory: &'a Inventory,
+    /// The keys found by reads, ascending by transaction.
+    probed: Vec<FileKey>,
+}
+
+impl Seen<'_> {
+    fn newest(&self) -> Option<Txid> {
+        let probed = self.probed.last().map(|key| key.range().max());
+        self.inventory.newest().max(probed)
+    }
+
+    /// Whether the level-0 key of `txid` holds an object, and its listed
+    /// size when a listing showed it (a probe learns no size).
+    fn level_zero(&self, txid: Txid) -> Option<Option<u64>> {
+        let key = staged_key(txid);
+        if self.probed.contains(&key) {
+            return Some(None);
+        }
+        self.inventory
+            .level(Level::ZERO)
+            .iter()
+            .find(|info| info.key == key)
+            .map(|info| Some(info.size))
+    }
+}
+
+/// Reads what a listing cannot prove. A file it shows past the local
+/// position is another writer's only when a read finds it (a listing that
+/// lags a delete shows a file that is gone: list again); otherwise the
+/// keys past it are probed ([`probe_past`]), through at least the newest
+/// staged transaction, which this engine may have uploaded already.
+async fn look_past<L: ObjectStore, S: ObjectStore>(
+    inventory: &Inventory,
+    staging: &L,
+    remote: &S,
+    confirmed: Option<Txid>,
+    newest_staged: Option<Txid>,
+) -> Result<Vec<FileKey>, Fault> {
+    if inventory.newest() > newest_staged {
+        return Err(if past_known(remote, inventory, newest_staged).await? {
+            Fault::RemoteAheadOfLocal
+        } else {
+            Fault::RemoteObjectMissing
+        });
+    }
+    // The probe looks at no more than PROBE_CAP transactions, so no more staged files than
+    // that bound it.
+    let cap = usize::try_from(PROBE_CAP).unwrap_or(usize::MAX);
+    let staged = staged_from(staging, inventory.newest(), cap).await?;
+    let through = staged.last().map(|info| info.key.range().max());
+    probe_past(remote, inventory.newest(), confirmed, through).await
+}
+
+/// Whether a read finds any of the listed files that reach past `known`,
+/// newest first, at most [`PROBE_CAP`] of them. A listing that lags a delete
+/// shows a file that is gone; only a file that is there proves another
+/// writer.
+///
+/// # Errors
+/// The replica's fault when a read fails other than by a missing key.
+pub(crate) async fn past_known<S: ObjectStore>(
+    remote: &S,
+    inventory: &Inventory,
+    known: Option<Txid>,
+) -> Result<bool, Fault> {
+    let mut past: Vec<&FileInfo> = inventory
+        .files()
+        .iter()
+        .filter(|info| Some(info.key.range().max()) > known)
+        .collect();
+    past.sort_by_key(|info| std::cmp::Reverse(info.key.range().max()));
+    let cap = usize::try_from(PROBE_CAP).unwrap_or(usize::MAX);
+    for info in past.into_iter().take(cap) {
+        if exists(remote, &info.key).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The keys past a listing that reads find, ascending. S3 and its peers
+/// read their own writes at once while a listing may lag behind them, so a
+/// listing's absence of a key is not evidence; a read's is.
+///
+/// Each transaction from the one after `listed` (from `confirmed`, when that
+/// is later, so that a relist proves what was confirmed is still there
+/// before a regression is reported) is looked for under the keys a reader
+/// can name without a listing (`crate::probe`): its level-0 file, a level-0
+/// file from the first transaction, and the snapshot that ends at it. A
+/// higher-level file has a start no read can guess. The reads go on through
+/// `through` (the newest staged transaction: a gap below it does not end
+/// them, since this engine may have uploaded anything it staged), then stop
+/// once [`PROBE_GAP`] transactions in a row past the last one found are
+/// missing, and never look at more than [`PROBE_CAP`] transactions. A fresh
+/// listing with nothing staged past it costs [`fresh_probe_reads`] reads, of
+/// keys that are not there (three per transaction).
+///
+/// # Errors
+/// The replica's fault when a read fails other than by a missing key.
+pub(crate) async fn probe_past<S: ObjectStore>(
+    remote: &S,
+    listed: Option<Txid>,
+    confirmed: Option<Txid>,
+    through: Option<Txid>,
+) -> Result<Vec<FileKey>, Fault> {
+    let first = match (listed, confirmed) {
+        (listed, Some(confirmed)) if listed < Some(confirmed) => Some(confirmed),
+        (listed, _) => listed.map_or(Some(Txid::MIN), Txid::next),
+    };
+    let mut found = Vec::new();
+    let (mut at, mut missed) = (first, 0_u32);
+    for _ in 0..PROBE_CAP {
+        let Some(txid) = at.filter(|txid| missed <= PROBE_GAP || Some(*txid) <= through) else {
+            break;
+        };
+        match holder(remote, txid).await? {
+            Some(key) => {
+                found.push(key);
+                missed = 0;
+            }
+            None => missed = missed.saturating_add(1),
+        }
+        at = txid.next();
+    }
+    Ok(found)
+}
+
+/// The reads a probe past a listing that ends at `listed` makes when it finds nothing: the
+/// keys named for each of the [`PROBE_GAP`] + 1 transactions after it (`crate::probe`).
+#[must_use]
+pub fn fresh_probe_reads(listed: Option<Txid>) -> u64 {
+    let mut reads = 0_u64;
+    let mut at = listed.map_or(Some(Txid::MIN), Txid::next);
+    for _ in 0..=PROBE_GAP {
+        let Some(txid) = at else { break };
+        reads = reads.saturating_add(probe::reads_per_transaction(txid));
+        at = txid.next();
+    }
+    reads
+}
+
+/// The first key named for `txid` that a read finds (`crate::probe`).
+async fn holder<S: ObjectStore>(remote: &S, txid: Txid) -> Result<Option<FileKey>, Fault> {
+    probe::holder(remote, txid)
+        .await
+        .map_err(|err| Fault::from_remote(&err))
+}
+
+/// Whether the replica holds an object under `key`, by a read: a listing may
+/// show a key that is gone or leave out one that is there, a read does not.
+///
+/// # Errors
+/// The replica's fault when the read fails other than by a missing key.
+pub(crate) async fn exists<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
+    probe::exists(remote, key)
+        .await
+        .map_err(|err| Fault::from_remote(&err))
 }
 
 fn diverged(confirmed: Txid, from: Txid) -> Uploaded {
@@ -279,56 +511,51 @@ enum TailVerdict {
 }
 
 /// Judges the replica's newest level-0 file against the staged file under
-/// the same key. Only the newest key is read back: an older one was confirmed
+/// the same key; `size` is the replica object's listed size, when a listing
+/// showed it. Only the newest key is read back: an older one was confirmed
 /// by its own commit in an earlier run, and reading every key at boot would be
 /// a whole replica scan.
 async fn judge_tail<L: ObjectStore, S: ObjectStore>(
-    inventory: &Inventory,
     staging: &L,
     remote: &S,
     tail: Txid,
+    size: Option<u64>,
 ) -> Result<TailVerdict, Fault> {
     let key = staged_key(tail);
-    let Some(listed) = inventory
-        .level(Level::ZERO)
-        .iter()
-        .find(|info| info.key == key)
-    else {
-        return Ok(TailVerdict::Sound);
-    };
     let after = tail.prev().map(TxidRange::single);
     let limit = PageLimit::ONE;
     let page = staging
         .list(Level::ZERO, after, limit)
         .await
         .map_err(|err| Fault::from_staging(&err))?;
-    match page.files.first() {
-        Some(staged) if staged.key == key => {
-            if staged.size == listed.size && same_bytes(staging, remote, &key).await? {
-                return Ok(TailVerdict::Sound);
-            }
-            if staged_verifies(staging, &key).await? {
-                if !remote_verifies(remote, &key).await? {
-                    return Ok(TailVerdict::Replace);
-                }
-                // Both copies verify on their own reads, so the first compare
-                // read something wrong or they differ: a second compare
-                // decides, as one read never condemns a file.
-                return Ok(if same_bytes(staging, remote, &key).await? {
-                    TailVerdict::Sound
-                } else {
-                    TailVerdict::Diverged
-                });
-            }
-            // A torn staged copy says nothing about the replica's object.
-            remote_decodes(remote, &key)
-                .await
-                .map(|()| TailVerdict::Sound)
-        }
-        _ => remote_decodes(remote, &key)
+    let Some(staged) = page.files.first().filter(|staged| staged.key == key) else {
+        return remote_decodes(remote, &key)
             .await
-            .map(|()| TailVerdict::Sound),
+            .map(|()| TailVerdict::Sound);
+    };
+    if size.is_none_or(|size| size == staged.size) && same_bytes(staging, remote, &key).await? {
+        return Ok(TailVerdict::Sound);
     }
+    // One read never condemns a file: a staged copy that fails to verify is
+    // read again before it is taken as torn.
+    if !staged_verifies(staging, &key).await? && !staged_verifies(staging, &key).await? {
+        // Torn on two reads: it says nothing about the replica's object.
+        return remote_decodes(remote, &key)
+            .await
+            .map(|()| TailVerdict::Sound);
+    }
+    if remote_torn(remote, &key).await? {
+        mark!(Boot16);
+        return Ok(TailVerdict::Replace);
+    }
+    // Both copies verify on their own reads, so the first compare read
+    // something wrong or they differ: a second compare decides, as one read
+    // never condemns a file.
+    Ok(if same_bytes(staging, remote, &key).await? {
+        TailVerdict::Sound
+    } else {
+        TailVerdict::Diverged
+    })
 }
 
 /// Streams both copies and compares them chunk by chunk.
@@ -365,6 +592,7 @@ async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(),
     if remote_verifies(remote, key).await? {
         Ok(())
     } else {
+        mark!(Boot14);
         Err(Fault::RemoteCorrupt)
     }
 }
@@ -378,6 +606,14 @@ pub(crate) async fn remote_verifies<S: ObjectStore>(
     key: &FileKey,
 ) -> Result<bool, Fault> {
     verifies(remote, key, CHUNK, Fault::from_remote).await
+}
+
+/// Whether the replica's object `key` fails verification on two reads in a
+/// row. Writing over it is decided by this, never by one read: a read that
+/// came back wrong says nothing about the stored bytes, and a verifying
+/// object with other bytes is never written over.
+async fn remote_torn<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
+    Ok(!remote_verifies(remote, key).await? && !remote_verifies(remote, key).await?)
 }
 
 /// Whether the staged file `key` verifies whole and names exactly `key`.
@@ -495,17 +731,18 @@ pub(crate) enum Swept {
     /// This file failed verification on its first failed read: nothing was
     /// deleted, since one read says nothing about the stored bytes.
     Suspect(FileKey),
-    /// The suspect failed again: it and every staged file after it were
-    /// deleted, from this transaction on.
-    Dropped(Txid),
+    /// The suspect failed again: it and every staged file after it must go,
+    /// from this transaction on ([`drop_staged_from`]). The caller deletes
+    /// them, once what they vouched for is recorded.
+    Condemned(Txid),
 }
 
 /// Verifies every staged level-0 file the replica may still need: from
 /// `confirmed`, the replica's newest transaction, on (everything when the
-/// replica is empty). The first that does not verify is deleted, with every
-/// one after it ([`drop_staged_from`]), only when it is `suspect`, the file an
-/// earlier tick's read already failed on; otherwise it is reported as the new
-/// suspect and nothing is deleted.
+/// replica is empty). The first that does not verify is condemned, with every
+/// one after it, only when it is `suspect`, the file an earlier tick's read
+/// already failed on; otherwise it is reported as the new suspect. The sweep
+/// deletes nothing itself.
 ///
 /// # Errors
 /// The staging store's fault when it cannot list, read or delete.
@@ -519,11 +756,11 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
         for info in page {
             if !staged_verifies(staging, &info.key).await? {
                 if suspect != Some(info.key) {
+                    mark!(Boot5);
                     return Ok(Swept::Suspect(info.key));
                 }
-                let from = info.key.range().min();
-                drop_staged_from(staging, from).await?;
-                return Ok(Swept::Dropped(from));
+                mark!(Boot5);
+                return Ok(Swept::Condemned(info.key.range().min()));
             }
         }
     }
@@ -532,6 +769,9 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
 
 /// Why a copy did not commit, and so what the state becomes.
 enum PutError {
+    /// The bucket refused a [`WriteMode::New`] commit: the key holds an
+    /// object.
+    Taken,
     /// Nothing can have been published.
     Before(Fault),
     /// The commit failed or its answer cannot be believed.
@@ -546,37 +786,106 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
     token: &Witnessed,
+    newest_staged: Option<Txid>,
 ) -> Result<Uploaded, UploadFailed> {
     let key = token.key();
-    match put_staged(staging, remote, token).await {
-        Ok(info) => Ok(Uploaded {
-            state: UploadState::At(Some(key.range().max())),
-            did: Did::Put(info),
-        }),
+    match put_staged(staging, remote, token, WriteMode::New).await {
+        Err(PutError::Taken) => taken(state, staging, remote, token, newest_staged).await,
+        outcome => settle_put(state, remote, key, outcome, WriteMode::New).await,
+    }
+}
+
+/// The state and step a put's outcome gives (a refusal is [`taken`]'s);
+/// `mode` is the mode the put was written with.
+async fn settle_put<S: ObjectStore>(
+    state: UploadState,
+    remote: &S,
+    key: FileKey,
+    outcome: Result<FileInfo, PutError>,
+    mode: WriteMode,
+) -> Result<Uploaded, UploadFailed> {
+    match outcome {
+        Ok(info) => Ok(put_done(key, info)),
         Err(PutError::Before(fault)) => Err(fail(state, fault)),
         Err(PutError::Rejected(fault)) => {
-            // Best effort: the retry replaces the key either way, and a boot
-            // listing reads it back, so a failed delete costs only visibility.
-            drop(remote.delete(&[key]).await);
+            mark!(Up8);
+            // A rejected create-only write created the object it rejects (the
+            // bucket refuses a taken key before it takes any bytes), so the
+            // object is this attempt's and it goes. Best effort: the retry
+            // replaces the key either way, and a boot listing reads it back,
+            // so a failed delete costs only visibility. A write that may
+            // have replaced an object deletes nothing: a delete after a
+            // failed write never takes a key that held something before it.
+            if mode == WriteMode::New {
+                drop(remote.delete(&[key]).await);
+            }
             Err(fail(state, fault))
         }
-        Err(PutError::Commit(fault)) => Err(fail(
-            UploadState::ListFirst {
-                confirmed: state.confirmed(),
-            },
-            fault,
-        )),
+        Err(PutError::Commit(fault)) => Err(fail(list_first(state), fault)),
+        // Only a `New` write is refused; a refused `Replace` is a store that
+        // broke its contract, and a listing finds out what it holds.
+        Err(PutError::Taken) => Err(fail(list_first(state), Fault::UploadAmbiguous)),
     }
+}
+
+fn put_done(key: FileKey, info: FileInfo) -> Uploaded {
+    Uploaded {
+        state: UploadState::At(Some(key.range().max())),
+        did: Did::Put(info),
+    }
+}
+
+fn list_first(state: UploadState) -> UploadState {
+    UploadState::ListFirst {
+        confirmed: state.confirmed(),
+    }
+}
+
+/// The bucket refused the upload of `key`: an object is already there. See
+/// the module docs for what each read-back finds.
+async fn taken<L: ObjectStore, S: ObjectStore>(
+    state: UploadState,
+    staging: &L,
+    remote: &S,
+    token: &Witnessed,
+    newest_staged: Option<Txid>,
+) -> Result<Uploaded, UploadFailed> {
+    let key = token.key();
+    let relist = |fault| fail(list_first(state), fault);
+    let already = Uploaded {
+        state: UploadState::At(Some(key.range().max())),
+        did: Did::AlreadyPut(key),
+    };
+    if same_bytes(staging, remote, &key).await.map_err(relist)? {
+        return Ok(already);
+    }
+    // One read never condemns a file: the staged copy must verify on a read
+    // of its own before the replica's object is judged against it.
+    if !staged_verifies(staging, &key).await.map_err(relist)? {
+        return Err(fail(state, Fault::StagedLost));
+    }
+    if remote_torn(remote, &key).await.map_err(relist)? {
+        let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
+        return settle_put(state, remote, key, outcome, WriteMode::Replace).await;
+    }
+    // Both verify: a second compare decides, as the listing's read-back does.
+    if same_bytes(staging, remote, &key).await.map_err(relist)? {
+        return Ok(already);
+    }
+    // The relist reads the refused key whatever its listing shows (the
+    // probe starts at the key after what was confirmed, which is this one).
+    list_step(list_first(state), staging, remote, newest_staged).await
 }
 
 async fn put_staged<L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &S,
     token: &Witnessed,
+    mode: WriteMode,
 ) -> Result<FileInfo, PutError> {
     let key = &token.key();
     let mut upload = None;
-    if let Err(err) = copy_verified(staging, remote, token, &mut upload).await {
+    if let Err(err) = copy_verified(staging, remote, token, mode, &mut upload).await {
         if let Some(open) = upload {
             // Abort only releases scratch; a failure leaves nothing visible either way.
             drop(open.abort().await);
@@ -589,6 +898,11 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
     match open.commit().await {
         Ok(info) if info.key == *key => Ok(info),
         Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
+        Err(StoreError::AlreadyExists { key: taken })
+            if taken == *key && mode == WriteMode::New =>
+        {
+            Err(PutError::Taken)
+        }
         Err(err) => Err(commit_failed(Fault::from_remote(&err))),
     }
 }
@@ -597,6 +911,7 @@ fn commit_failed(fault: Fault) -> PutError {
     if fault == Fault::UploadChecksumMismatch {
         PutError::Rejected(fault)
     } else {
+        mark!(Up6);
         PutError::Commit(fault)
     }
 }
@@ -632,6 +947,7 @@ async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &'s S,
     token: &Witnessed,
+    mode: WriteMode,
     upload: &mut Option<Checked<'s, S>>,
 ) -> Result<(), PutError> {
     let key = &token.key();
@@ -657,7 +973,7 @@ async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
             (None, Some(header)) => {
                 names_key(&header, key)?;
                 // Stored before the first write so a failed write still aborts it.
-                let open = upload.insert(begin(remote, key, &header).await?);
+                let open = upload.insert(begin(remote, key, &header, mode).await?);
                 held.extend_from_slice(&chunk);
                 write_chunk(open, &held).await?;
                 held = Vec::new();
@@ -682,8 +998,9 @@ async fn begin<'s, S: ObjectStore>(
     remote: &'s S,
     key: &FileKey,
     header: &Header,
+    mode: WriteMode,
 ) -> Result<Checked<'s, S>, PutError> {
-    Checked::begin(remote, key, header.fields().timestamp)
+    Checked::begin(remote, key, header.fields().timestamp, mode)
         .await
         .map_err(|err| PutError::Before(Fault::from_remote(&err)))
 }

@@ -1,0 +1,13 @@
+diff --git a/crates/config/src/map.rs b/crates/config/src/map.rs
+index fdd92ca..6fefa01 100644
+--- a/crates/config/src/map.rs
++++ b/crates/config/src/map.rs
+@@ -521,7 +521,7 @@ fn checkpoint(
+ /// count they bound (WAL frames, database pages, files per upload) is itself at most
+ /// `u32::MAX`, so a larger threshold behaves exactly as `u32::MAX` does.
+ fn count(value: i64) -> Option<NonZeroU32> {
+-    NonZeroU32::new(u32::try_from(value).unwrap_or(u32::MAX))
++    u32::try_from(value).ok().and_then(NonZeroU32::new)
+ }
+ 
+ fn sync_limits(db: &DbConfig) -> Option<SyncLimits> {

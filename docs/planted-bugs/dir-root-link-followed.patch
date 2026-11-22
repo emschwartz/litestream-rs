@@ -1,0 +1,14 @@
+diff --git a/crates/config/src/map/dir.rs b/crates/config/src/map/dir.rs
+index 209846b..860c681 100644
+--- a/crates/config/src/map/dir.rs
++++ b/crates/config/src/map/dir.rs
+@@ -170,7 +170,8 @@ fn walk(
+             kind: error.kind(),
+         }
+     };
+-    let meta = std::fs::symlink_metadata(path).map_err(scan(path))?;
++    let meta = if root { std::fs::metadata(path) } else { std::fs::symlink_metadata(path) }
++        .map_err(scan(path))?;
+     if !meta.is_dir() {
+         return candidate(path, pattern, out);
+     }

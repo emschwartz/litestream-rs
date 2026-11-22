@@ -504,6 +504,14 @@ fn from_remote_keeps_the_kind_of_denial() {
     }
 }
 
+/// The uploader reads a refused key back before any fault is named; a refusal anywhere else
+/// is a key holding something the caller did not expect, which a listing settles.
+#[test]
+fn from_remote_already_exists_is_an_ambiguous_upload() {
+    let err = StoreError::AlreadyExists { key: key() };
+    assert_eq!(store_fault(&err), Fault::UploadAmbiguous);
+}
+
 #[test]
 fn from_remote_not_found_is_missing() {
     let err = StoreError::NotFound { key: key() };
@@ -544,6 +552,7 @@ fn from_staging_names_the_local_fault_for_every_store_error() {
             Fault::LocalIo,
         ),
         (StoreError::NotFound { key: key() }, Fault::StagedLost),
+        (StoreError::AlreadyExists { key: key() }, Fault::LocalIo),
         (
             StoreError::ScratchExhausted { key: key() },
             Fault::LocalDiskFull,

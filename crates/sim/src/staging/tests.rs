@@ -45,7 +45,7 @@ fn a_loss_the_engine_was_warned_of_goes_to_the_model_and_any_other_is_a_contract
 
 async fn put(store: &StagingRaw, n: u64, bytes: &[u8]) {
     let mut up = store
-        .begin_upload(&key(n), Timestamp::from_unix_millis(7))
+        .begin_upload(&key(n), Timestamp::from_unix_millis(7), WriteMode::Replace)
         .await
         .unwrap();
     up.write(bytes).await.unwrap();
@@ -86,7 +86,7 @@ fn an_upload_dropped_before_its_commit_leaves_nothing_the_judge_sees() {
     let store = StagingRaw::fs(CrashLaw::AllOrNothing);
     block_on(async {
         let mut up = store
-            .begin_upload(&key(1), Timestamp::from_unix_millis(7))
+            .begin_upload(&key(1), Timestamp::from_unix_millis(7), WriteMode::Replace)
             .await
             .unwrap();
         up.write(b"half").await.unwrap();

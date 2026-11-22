@@ -1,0 +1,18 @@
+diff --git a/crates/config/src/map/dir.rs b/crates/config/src/map/dir.rs
+index 209846b..0b198e1 100644
+--- a/crates/config/src/map/dir.rs
++++ b/crates/config/src/map/dir.rs
+@@ -194,11 +194,11 @@ fn walk(
+ fn candidate(path: &Path, pattern: &[u8], out: &mut Vec<PathBuf>) -> Result<(), DirProblem> {
+     let name = path.file_name().map(|n| n.as_bytes()).unwrap_or_default();
+     match pattern::matches(pattern, name) {
+-        Err(BadPattern) => Err(DirProblem::BadPattern {
++        Err(BadPattern) if pattern.is_empty() => Err(DirProblem::BadPattern {
+             pattern: String::from_utf8_lossy(pattern).into_owned(),
+             path: path.to_owned(),
+         }),
+-        Ok(false) => Ok(()),
++        Ok(false) | Err(BadPattern) => Ok(()),
+         Ok(true) => {
+             if is_sqlite(path) {
+                 out.push(path.to_owned());

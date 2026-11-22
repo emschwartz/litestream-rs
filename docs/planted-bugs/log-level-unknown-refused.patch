@@ -1,0 +1,12 @@
+diff --git a/crates/config/src/build.rs b/crates/config/src/build.rs
+index a0737a9..f98520d 100644
+--- a/crates/config/src/build.rs
++++ b/crates/config/src/build.rs
+@@ -463,6 +463,7 @@ fn logging(fields: Option<&Fields>, env: &dyn Env, walk: &mut Walk) -> Logging {
+                 used: "info",
+             };
+             walk.warn(path.key("level"), line, kind);
++            walk.problem(path.key("level"), line, ProblemKind::NotInV1 { feature: "x" });
+             LogLevel::Info
+         }),
+     };

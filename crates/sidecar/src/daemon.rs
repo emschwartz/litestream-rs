@@ -36,8 +36,8 @@ use std::time::Duration;
 use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
 use lsr_replica::{
-    DynStore, Gate, IfReplicationStops, Replicator, RestoreError, Runtime, Stopped, Trip,
-    restore_if_missing,
+    Config, DynStore, Gate, IfReplicationStops, Replicator, RestoreError, Runtime, Stopped, Trip,
+    record_takeover, restore_if_missing,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{CredentialChain, CredentialError, S3Store};
@@ -265,7 +265,7 @@ impl Daemon {
             return Ok(State::Failed);
         };
         if slot.restore && !exists(path) {
-            self.restore(path, store)?;
+            self.restore(path, store, slot.plan.config())?;
         }
         if !exists(path) {
             if first {
@@ -332,13 +332,35 @@ impl Daemon {
     }
 
     /// Go's `restoreIfNeeded`.
-    fn restore(&self, path: &Path, store: &Arc<dyn DynStore>) -> Result<(), Failure> {
+    ///
+    /// A restore records a takeover through what it restored, so the replicator started on
+    /// it builds on the replica instead of refusing it: the library writes it in the default
+    /// meta directory, and a configured `meta-dir` gets it here too.
+    fn restore(
+        &self,
+        path: &Path,
+        store: &Arc<dyn DynStore>,
+        config: &Config,
+    ) -> Result<(), Failure> {
         self.log.info(
             "attempting restore before replication",
             &[("path", path.into())],
         );
         match restore_if_missing(&**store, path) {
-            Ok(Some(_)) => self.log.info("restore completed", &[("path", path.into())]),
+            Ok(Some(restored)) => {
+                self.log.info("restore completed", &[("path", path.into())]);
+                let through = restored.reached();
+                if config.meta_dir.is_some()
+                    && let Some(meta) = config.meta_dir_for(path)
+                {
+                    record_takeover(&meta, through).map_err(|error| Failure {
+                        msg: "restore completed but the takeover record could not be written",
+                        error: error.to_string(),
+                    })?;
+                }
+                let msg = format!("takeover recorded through {through}");
+                self.log.info(&msg, &[("path", path.into())]);
+            }
             Ok(None) => self.log.info(
                 "database exists, skipping restore",
                 &[("path", path.into())],

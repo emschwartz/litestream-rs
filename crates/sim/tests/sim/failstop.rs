@@ -289,9 +289,16 @@ fn trip_times_are_engine_times() {
 #[test]
 #[ignore = "known false trip: seed 0x9f9, a restored staging backup under day-long clock steps"]
 fn known_false_trip_seed_0x9f9() {
-    let seed = Seed::new(0x9f9);
-    let weights = crate::unaided::weights(seed);
-    if let Err(failure) = lsr_sim::run_with(seed, 43, &weights, &Opts::default()) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: lsr_sim::AfterRestart::Retry,
+        clock_law: lsr_sim::ClockLaw::EachRead,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x9f9), crate::histories::seed_0x9f9::OPS, &opts) {
         panic!("{}", failure.violation);
     }
 }

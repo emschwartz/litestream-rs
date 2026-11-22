@@ -258,6 +258,25 @@ fn md5_of(body: &[u8]) -> [u8; 16] {
 
 type Headers = Vec<(&'static str, String)>;
 
+/// A condition a write asks the bucket to check before it publishes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Precondition {
+    /// No condition: the write replaces whatever the key holds.
+    None,
+    /// `If-None-Match: *`: publish only into a free key, else 412
+    /// `PreconditionFailed` and nothing changes.
+    KeyIsFree,
+}
+
+impl Precondition {
+    fn header(self) -> Option<(&'static str, String)> {
+        match self {
+            Self::None => None,
+            Self::KeyIsFree => Some(("if-none-match", "*".to_owned())),
+        }
+    }
+}
+
 impl Method {
     const fn to_signer(self) -> rusty_s3::Method {
         match self {
@@ -522,14 +541,27 @@ impl RequestBuilder {
         body: Vec<u8>,
         created_at: Timestamp,
     ) -> Result<WriteRequest, RequestError> {
+        self.put_object_if(now, key, body, created_at, Precondition::None)
+    }
+
+    /// [`Self::put_object`], with `precondition` sent (and signed) when it
+    /// names one.
+    ///
+    /// # Errors
+    /// [`RequestError::ClockOutOfRange`].
+    pub fn put_object_if(
+        &self,
+        now: Timestamp,
+        key: &FileKey,
+        body: Vec<u8>,
+        created_at: Timestamp,
+        precondition: Precondition,
+    ) -> Result<WriteRequest, RequestError> {
         let object = self.object(key);
         let mut action = self.bucket.put_object(Some(&self.credentials), &object);
-        self.write(
-            &mut action,
-            now,
-            body,
-            vec![(CREATED_AT_HEADER, created_at.to_string())],
-        )
+        let mut extra = vec![(CREATED_AT_HEADER, created_at.to_string())];
+        extra.extend(precondition.header());
+        self.write(&mut action, now, body, extra)
     }
 
     /// Starts a multipart upload; the created-at time is set here, on the object.
@@ -588,6 +620,24 @@ impl RequestBuilder {
         upload: &UploadId,
         etags: &[String],
     ) -> Result<HttpRequest, RequestError> {
+        self.complete_multipart_if(now, key, upload, etags, Precondition::None)
+    }
+
+    /// [`Self::complete_multipart`], with `precondition` sent (and signed)
+    /// when it names one: S3 checks it when the upload completes, not when it
+    /// starts.
+    ///
+    /// # Errors
+    /// [`RequestError::BadBatch`] and [`RequestError::ClockOutOfRange`], as
+    /// [`Self::complete_multipart`].
+    pub fn complete_multipart_if(
+        &self,
+        now: Timestamp,
+        key: &FileKey,
+        upload: &UploadId,
+        etags: &[String],
+        precondition: Precondition,
+    ) -> Result<HttpRequest, RequestError> {
         let max = usize::from(PartNumber::MAX_RAW);
         if etags.is_empty() || etags.len() > max {
             return Err(RequestError::BadBatch {
@@ -604,7 +654,9 @@ impl RequestBuilder {
         );
         let signed = {
             let size = action.clone().body().len();
-            self.sign(&mut action, now, vec![("content-length", size.to_string())])?
+            let mut extra = vec![("content-length", size.to_string())];
+            extra.extend(precondition.header());
+            self.sign(&mut action, now, extra)?
         };
         Ok(Self::finish(
             Method::Post,

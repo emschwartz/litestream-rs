@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use lsr_compat::{Manifest, all_fixtures};
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     CompactionInputs, FileInfo, FileKey, Level, MemStore, ObjectStore, PageLimit, Upload, compact,
@@ -57,7 +58,7 @@ fn files(replica: &Path) -> Vec<(FileKey, Vec<u8>)> {
 fn put(store: &MemStore, key: FileKey, bytes: &[u8]) -> FileInfo {
     block_on(async {
         let mut upload = store
-            .begin_upload(&key, Timestamp::from_unix_millis(0))
+            .begin_upload(&key, Timestamp::from_unix_millis(0), WriteMode::Replace)
             .await
             .expect("begin");
         upload.write(bytes).await.expect("write");

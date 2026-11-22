@@ -22,9 +22,13 @@ mod faults;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]
+mod histories;
+#[cfg(test)]
 mod known_wrong;
 #[cfg(test)]
 mod liveness;
+#[cfg(test)]
+mod marks;
 #[cfg(test)]
 mod replay;
 #[cfg(test)]
@@ -47,3 +51,5 @@ mod survival;
 mod tally;
 #[cfg(test)]
 mod unaided;
+#[cfg(test)]
+mod verify;
