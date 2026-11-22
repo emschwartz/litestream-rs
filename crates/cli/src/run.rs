@@ -63,16 +63,22 @@ pub enum Exit {
     /// not start, or a database did not start or drain). Go's `main` exits 1 on every error
     /// (`main.go:97-103`), so the child's own code is not passed on; it is in the log.
     ExecFailed,
+    /// `replicate -exec`: fail-stop held the application (`if-replication-stops`, decision
+    /// D19): the child was stopped for safety, or never started. A code of its own, so a
+    /// supervisor can tell a stop for safety from a crash. PROVISIONAL(#115): the code and its
+    /// line in the table await the owner (#41).
+    AppStopped,
 }
 
 impl Exit {
     /// Every code, for the help text.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Success,
         Self::Degraded,
         Self::ExecFailed,
         Self::Refused,
         Self::Environment,
+        Self::AppStopped,
         Self::Usage,
     ];
 
@@ -84,6 +90,7 @@ impl Exit {
             Self::Degraded | Self::ExecFailed => 1,
             Self::Refused => 2,
             Self::Environment => 3,
+            Self::AppStopped => 4,
             Self::Usage => 64,
         }
     }
@@ -101,6 +108,9 @@ impl Exit {
                 "store, destination or I/O failure; for replicate without -exec, a database that did not start or drain"
             }
             Self::Usage => "usage error",
+            Self::AppStopped => {
+                "replicate -exec: replication stopped and if-replication-stops held the application: it was stopped, or never started"
+            }
             Self::ExecFailed => {
                 "replicate -exec: the run failed, as Go exits 1 (the child exited non-zero, died by a signal outside a shutdown, was killed or did not start, or a database did not start or drain); the child's own code is in the log"
             }
@@ -360,6 +370,7 @@ pub fn exit_for_done(done: &Done) -> Exit {
             Some(Severity::Degraded) => Exit::Degraded,
             Some(Severity::Unrestorable) => Exit::Refused,
         },
+        Done::Daemon(finished) if finished.app_held.is_some() => Exit::AppStopped,
         Done::Daemon(finished) => match (finished.clean(), finished.ran_exec()) {
             (true, _) => Exit::Success,
             (false, true) => Exit::ExecFailed,
@@ -406,6 +417,7 @@ fn daemon_exit(error: &lsr_sidecar::SidecarError) -> Exit {
         | SidecarError::Map(_)
         | SidecarError::NotBuilt { .. }
         | SidecarError::Exec(_)
+        | SidecarError::StopAppWithoutExec
         | SidecarError::Addr(_) => Exit::Refused,
         SidecarError::Stdin(_) | SidecarError::Signals(_) => Exit::Environment,
     }

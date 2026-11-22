@@ -59,6 +59,9 @@ impl Actor {
             return;
         }
         self.kept.lag.failed(now);
+        if self.kept.listed && task == Task::Sync {
+            self.kept.sync_failed_after_listing = true;
+        }
         if !self.kept.listed && task == Task::Sync {
             self.kept.boot_failed = true;
             self.kept.refused_at_boot = if let Some(Fault::StoreDenied(why)) = fault {
@@ -202,11 +205,14 @@ impl Actor {
     }
 
     /// Whether this process's boot has been judged, for [`crate::AppGate`]: the replica was
-    /// listed, or a boot attempt failed for anything but the store refusing access (a store
-    /// that times out at boot does not hold the application).
+    /// listed and the snapshot the boot asked for, if any, was staged or tried (a stop it finds
+    /// is a stop at boot); or a boot attempt failed for anything but the store refusing access
+    /// (a store that times out at boot does not hold the application).
     #[must_use]
-    pub const fn boot_judged(&self) -> bool {
-        self.kept.listed || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
+    pub fn boot_judged(&self) -> bool {
+        let settled = self.pending().is_none() || self.kept.sync_failed_after_listing;
+        (self.kept.listed && settled)
+            || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
     }
 
     /// Whether an engine of this process has listed the replica.

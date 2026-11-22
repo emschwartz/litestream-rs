@@ -35,12 +35,15 @@ use std::time::Duration;
 
 use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
-use lsr_replica::{DynStore, Replicator, RestoreError, Runtime, Stopped, restore_if_missing};
+use lsr_replica::{
+    DynStore, Gate, IfReplicationStops, Replicator, RestoreError, Runtime, Stopped, Trip,
+    restore_if_missing,
+};
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{CredentialChain, CredentialError, S3Store};
 
 use crate::exec::ChildEnd;
-use crate::health::{Board, Entry};
+use crate::health::{Board, DbState, Entry};
 use crate::logging::{DbEvents, Logger, Value};
 use crate::signals;
 
@@ -62,6 +65,9 @@ pub struct Finished {
     pub dbs: Vec<(PathBuf, End)>,
     /// How the `-exec` child ended, when there was one.
     pub child: Option<ChildEnd>,
+    /// Fail-stop held the `-exec` application, and why: it was stopped, or never started
+    /// (`crate::failstop`).
+    pub app_held: Option<Trip>,
 }
 
 impl Finished {
@@ -173,6 +179,8 @@ pub(crate) struct Daemon {
     board: Board,
     grace: Duration,
     slots: Arc<Mutex<Vec<Slot>>>,
+    /// `if-replication-stops: stop-app`: a gate held while the `-exec` child runs stops it.
+    stop_app: bool,
 }
 
 impl std::fmt::Debug for Daemon {
@@ -201,6 +209,10 @@ impl Daemon {
             board,
             grace: plan.shutdown_sync_timeout(),
             slots: Arc::new(Mutex::new(Vec::new())),
+            stop_app: plan
+                .dbs()
+                .iter()
+                .any(|db| db.config().if_replication_stops == IfReplicationStops::StopApp),
         };
         if plan.dbs().is_empty() {
             daemon
@@ -426,11 +438,34 @@ impl Daemon {
             self.ended(&path, &end);
             dbs.push((path, end));
         }
-        Finished { dbs, child: None }
+        Finished {
+            dbs,
+            child: None,
+            app_held: None,
+        }
     }
 
     /// The daemon's clock, read now.
     #[must_use]
+    /// Every running database's fail-stop gate (`crate::failstop`): the `-exec` child's start
+    /// and stop wait on them. A database waiting for its file, or that failed to start, has
+    /// none: it does not hold the child, as it does not in Go.
+    pub(crate) fn gates(&self) -> Vec<(PathBuf, Gate)> {
+        self.board
+            .views()
+            .into_iter()
+            .filter_map(|view| match view.state {
+                DbState::Running(health) => Some((view.path, health.fail_stop.gate)),
+                DbState::Waiting | DbState::Failed => None,
+            })
+            .collect()
+    }
+
+    /// Whether a gate held while the `-exec` child runs stops it.
+    pub(crate) const fn stop_app(&self) -> bool {
+        self.stop_app
+    }
+
     pub(crate) fn now(&self) -> lsr_ltx::Timestamp {
         self.clock.now()
     }

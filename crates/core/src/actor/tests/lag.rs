@@ -392,3 +392,25 @@ fn an_operator_snapshot_while_caught_up_is_not_lag() {
     let seen = drive(&mut rig, &mut actor, T0 + 10, T0 + 2 * BOUND);
     assert_eq!(first_trip(&seen), None, "{seen:?}");
 }
+
+/// A boot that asks for a snapshot is judged once that snapshot is staged or its step fails:
+/// a stop the snapshot finds is a stop at boot, and holds an application not yet started.
+#[test]
+fn a_boot_is_judged_once_its_snapshot_is_tried() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    let boot = rig.tick(&mut actor, T0);
+    assert!(
+        matches!(
+            event(&boot),
+            Some(Event::Booted {
+                cause: Some(SnapshotCause::FirstSync)
+            })
+        ),
+        "{boot:?}"
+    );
+    assert!(actor.listed());
+    assert!(!actor.boot_judged(), "the boot's snapshot is still owed");
+    rig.settle(&mut actor, T0);
+    assert!(actor.boot_judged());
+}

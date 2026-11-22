@@ -40,6 +40,8 @@
 //! - `lsr_unreplicated_since_timestamp_seconds{db}` while a commit is not on the replica,
 //!   and `lsr_unreplicated_age_seconds{db}` (0 when caught up): the lag to alert on.
 //! - `lsr_wal_bytes{db}`: the WAL file's size, which a read lock held while uploads fail grows.
+//! - `lsr_app_held{db,cause}` 1 while fail-stop holds the application (`crate::failstop`;
+//!   the name is provisional).
 //! - `lsr_app_checkpoints_total{db,kind}` (`backfilled`, `restarted`, `stalled`) and
 //!   `lsr_app_notice{db,kind}` 1 while the application-checkpoint notice stands.
 //! - `lsr_resnapshot_pending{db,cause}` 1 when the next sync is a snapshot.
@@ -357,6 +359,18 @@ fn lag_series(out: &mut Out, dbs: &[(String, &Health)], now: Timestamp) {
         ("lsr_wal_bytes", "gauge", "The WAL file's size"),
         |h| h.wal_bytes.to_string(),
     );
+    let name = crate::failstop::APP_HELD_METRIC;
+    out.family(
+        name,
+        "gauge",
+        "1 while fail-stop holds the application, by why",
+    );
+    for (db, health) in dbs {
+        if let lsr_replica::Gate::Held(trip) = health.fail_stop.gate {
+            let cause = crate::failstop::trip_name(trip);
+            out.sample(name, &[("db", db), ("cause", cause)], "1".to_owned());
+        }
+    }
 }
 
 fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {

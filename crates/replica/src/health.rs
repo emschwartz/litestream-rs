@@ -271,8 +271,10 @@ pub enum VerifyOutcome {
 }
 
 impl Health {
-    /// The state before the thread has written anything.
-    pub(crate) const fn new(at: Timestamp) -> Self {
+    /// The state before the thread has written anything, reported at `at`: what a replicator
+    /// says before its first tick, and what a test outside this crate builds a health from.
+    #[must_use]
+    pub const fn new(at: Timestamp) -> Self {
         Self {
             reported_at: at,
             phase: Phase::Booting,
