@@ -15,3 +15,7 @@ mod plan_exhaustive;
 mod plan_lazy;
 #[cfg(test)]
 mod secret_shapes;
+#[cfg(test)]
+mod skip_guard;
+#[cfg(test)]
+mod walk;

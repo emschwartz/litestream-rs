@@ -171,6 +171,12 @@ pub fn all_fixtures() -> Result<Vec<PathBuf>, CompatError> {
             }
         }
     }
+    if out.is_empty() {
+        return Err(CompatError::Fixture(format!(
+            "no fixture with a {MANIFEST_FILE} under {}",
+            root.display()
+        )));
+    }
     Ok(out)
 }
 
