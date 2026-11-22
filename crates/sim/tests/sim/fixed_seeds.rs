@@ -118,7 +118,15 @@ mod fixed {
 
     /// Every regression drawn by the second frozen generator, with a digest
     /// of its operations.
-    const REGRESSIONS_V2: [(u64, u32, u64); 1] = [(0x1919f, 300, DIGEST_0X1919F)];
+    const REGRESSIONS_V2: [(u64, u32, u64); 7] = [
+        (0x1919f, 300, DIGEST_0X1919F),
+        (0x0000_126d_68fa_c4b6, 300, 0x7bbd_6969_a8b2_5f6c),
+        (0x0000_126d_68fa_c789, 119, 0xb2ed_748b_dd72_6cc0),
+        (0x0000_126d_68fa_cf21, 273, 0xb9c6_f8fa_c632_d264),
+        (0x0000_126d_68fa_d061, 300, 0x165c_89ce_c59a_9e7c),
+        (0x0000_126d_68fa_e16b, 288, 0x3c92_f7ff_423f_1364),
+        (0x0000_126d_68fa_cf74, 300, 0xe625_6fd2_022e_9eed),
+    ];
 
     /// FNV-1a over the operations' debug text: stable across builds, and any
     /// change to an operation or its fields changes it.
@@ -162,6 +170,63 @@ mod fixed {
         if let Err(failure) = run_ops(seed, &ops, &opts) {
             panic!("{failure}");
         }
+    }
+
+    /// The history `seed` drew under the second frozen generator, run as
+    /// `run_with` ran it then: drawn, under the crash law the seed's mix drew.
+    fn replay_v2(seed: u64, steps: u32) {
+        let seed = Seed::new(seed);
+        let ops = frozen_history(seed, steps, Generator::V2);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: Weights::mixed(seed).block_crash_law,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, &ops, &opts) {
+            panic!("{failure}");
+        }
+    }
+
+    // The rotating soak of 2026-11-22 ran on a tree before the witness fix
+    // above and failed these five with "latest went back from node N to
+    // node M, and no rewind cut node N off": a staging directory put back
+    // from a backup, or a staged file another valid one replaced, was
+    // uploaded by name after a later state. The second frozen generator
+    // draws exactly the operations that night drew.
+
+    #[test]
+    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac4b6() {
+        replay_v2(0x0000_126d_68fa_c4b6, 300);
+    }
+
+    #[test]
+    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789() {
+        replay_v2(0x0000_126d_68fa_c789, 119);
+    }
+
+    #[test]
+    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68facf21() {
+        replay_v2(0x0000_126d_68fa_cf21, 273);
+    }
+
+    #[test]
+    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fad061() {
+        replay_v2(0x0000_126d_68fa_d061, 300);
+    }
+
+    #[test]
+    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fae16b() {
+        replay_v2(0x0000_126d_68fa_e16b, 288);
+    }
+
+    // The same night: the level-bytes budget failed with "12050 is over the
+    // limit 10917" because it counted only this engine's own files, not
+    // another writer's that compaction merged. The budget now counts them
+    // (crates/sim/src/run.rs).
+
+    #[test]
+    fn another_writer_s_files_fit_the_level_bytes_budget_seed_0x126d68facf74() {
+        replay_v2(0x0000_126d_68fa_cf74, 300);
     }
 
     // Finding 2: a power loss tore a staged level-0 file whose commit never

@@ -95,6 +95,11 @@ fn held_error(op: StoreOp, auth: bool) -> StoreError {
 impl ObjectStore for View {
     type Upload = <MemStore as ObjectStore>::Upload;
 
+    /// Forwards to the store it views, with no fault: the simulator's stores leave no scratch.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.raw.remove_scratch().await
+    }
+
     async fn list(
         &self,
         level: Level,

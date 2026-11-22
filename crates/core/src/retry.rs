@@ -317,6 +317,11 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
         core.run(|| core.inner.delete(keys)).await
     }
 
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        let core = &*self.core;
+        core.run(|| core.inner.remove_scratch()).await
+    }
+
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         self.core.inner.batch_width(kind)
     }

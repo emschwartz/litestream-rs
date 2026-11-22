@@ -88,6 +88,7 @@ dependencies = [
 name = "lsr-core"
 version = "0.0.0"
 dependencies = [
+ "lsr-journal",
  "lsr-ltx",
  "lsr-spec",
  "lsr-wal",
@@ -111,6 +112,15 @@ dependencies = [
  "lsr-ltx",
  "lsr-spec",
  "lsr-wal",
+]
+
+[[package]]
+name = "lsr-journal"
+version = "0.0.0"
+dependencies = [
+ "crc",
+ "lsr-ltx",
+ "thiserror",
 ]
 
 [[package]]

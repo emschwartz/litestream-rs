@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 318bef8..780a515 100644
+index 6770efa..0218eaf 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -748,7 +748,7 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
+@@ -517,7 +517,7 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
      while let Some(page) = pages.next(staging).await? {
          for info in page {
              if !staged_verifies(staging, &info.key).await? {

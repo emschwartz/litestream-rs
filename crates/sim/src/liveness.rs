@@ -308,6 +308,39 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
     }
 }
 
+/// What a drawn run's own settings make true from its first step, as [`of_op`] says for an
+/// operation. Every field is named, with no rest pattern, so a new setting does not compile
+/// until it says here whether it is a fault the engine may have to answer (a disk lying from
+/// the start once went unnoted and failed runs).
+#[must_use]
+pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
+    let crate::run::Opts {
+        // What the harness records, raises, judges or expects: no change to the world.
+        plant: _,
+        trace: _,
+        record: _,
+        allow_stop: _,
+        judges: _,
+        drawn: _,
+        // The engine's own configuration.
+        responses: _,
+        retention: _,
+        switch_retention: _,
+        // A law for what a power loss keeps acts only at a power loss, which notes
+        // `PowerLoss`, and `StagedLost` for staged files it takes or brings back.
+        block_crash_law: _,
+        // The app's behaviour after a restart, and how the clock reads inside a tick.
+        after_restart: _,
+        clock_law: _,
+        lying_wal_sync,
+    } = opts;
+    if *lying_wal_sync {
+        &[Justifier::LyingDisk]
+    } else {
+        &[]
+    }
+}
+
 /// The oracle's state over one run.
 #[derive(Clone, Debug)]
 pub struct Liveness {
@@ -465,12 +498,19 @@ impl Liveness {
     ) -> Result<(), Violation> {
         let (staging, remote) = stores;
         let newest_staged = world.newest_staged();
-        let caught_up = self
-            .take_remote(remote)
-            .is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
+        let took = self.take_remote(remote);
         // A key the bucket refused because it already held it (a commit whose answer was
         // lost, confirmed by a read-back) leaves no put in the recorder: the replica holds it.
         self.uploaded.extend(world.replica_level_zero());
+        // The replica holds everything staging does only once no staged file is one it never
+        // took: a file left behind it (a backup put back, a forged file) is still to be dropped,
+        // and the fault that left it must be in the window when it is (seed 0xf42e9).
+        let left_behind = world
+            .staged_level_zero()
+            .iter()
+            .any(|key| !self.uploaded.contains(key));
+        let caught_up = !left_behind
+            && took.is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
         let staged = self.take_staging(staging, world, reach)?;
         let grew = self.take_counts(counts, reach)?;
         // A file with no WAL range is a snapshot for certain; one with a range
@@ -616,6 +656,8 @@ pub trait TickWorld {
     fn replica_level_zero(&self) -> Vec<FileKey> {
         Vec::new()
     }
+    /// The level-0 files in staging.
+    fn staged_level_zero(&self) -> Vec<FileKey>;
 }
 
 impl TickWorld for crate::World {
@@ -638,6 +680,10 @@ impl TickWorld for crate::World {
         self.remote_level_zero()
             .map(|files| files.into_iter().map(|info| info.key).collect())
             .unwrap_or_default()
+    }
+
+    fn staged_level_zero(&self) -> Vec<FileKey> {
+        crate::World::staged_level_zero(self)
     }
 }
 
@@ -670,6 +716,10 @@ impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
     fn replica_level_zero(&self) -> Vec<FileKey> {
         self.world.replica_level_zero()
     }
+
+    fn staged_level_zero(&self) -> Vec<FileKey> {
+        self.world.staged_level_zero()
+    }
 }
 
 /// What one tick staged at level 0.
@@ -700,6 +750,9 @@ mod tests {
         }
         fn replica_newest(&self) -> Option<u64> {
             Some(25)
+        }
+        fn staged_level_zero(&self) -> Vec<FileKey> {
+            Vec::new()
         }
     }
 
@@ -757,6 +810,79 @@ mod tests {
         )
         .unwrap();
         assert!(!live.window.contains(&Justifier::StagingEdited));
+    }
+
+    fn key(txid: u64) -> FileKey {
+        FileKey::new(
+            lsr_core::Level::ZERO,
+            lsr_ltx::TxidRange::single(lsr_ltx::Txid::new(txid).unwrap()),
+        )
+    }
+
+    /// Staging after an edit left an older file behind the replica: 37, which the replica
+    /// never took, beside 43, the newest, which it did.
+    struct LeftBehind {
+        staged: Vec<FileKey>,
+    }
+
+    impl TickWorld for LeftBehind {
+        fn full_image(&self, _: &FileKey) -> bool {
+            false
+        }
+        fn newest_staged(&self) -> Option<u64> {
+            Some(43)
+        }
+        fn replica_newest(&self) -> Option<u64> {
+            Some(43)
+        }
+        fn staged_level_zero(&self) -> Vec<FileKey> {
+            self.staged.clone()
+        }
+    }
+
+    /// An upload that reaches the newest staged file has not caught up while staging still
+    /// holds a file the replica never took: the edit that left it there stays in the window,
+    /// so the prune that later drops it is justified (seed 0xf42e9).
+    #[test]
+    fn an_upload_past_a_file_left_behind_keeps_the_staging_edit() {
+        let mut live = Liveness::new();
+        let mut reach = Reach::default();
+        live.window.clear();
+        live.note(Justifier::StagingEdited);
+        let world = LeftBehind {
+            staged: vec![key(37), key(43)],
+        };
+        let none = SnapshotCounts::default();
+        live.after_tick((&[], &[remote_put(43)]), &world, none, false, &mut reach)
+            .unwrap();
+        assert!(live.window.contains(&Justifier::StagingEdited));
+        let zero = lsr_ltx::Timestamp::from_unix_millis(0);
+        let prune = [RecorderEvent::Delete {
+            keys: vec![key(37)],
+            at: zero,
+            high: zero,
+        }];
+        let world = LeftBehind {
+            staged: vec![key(43)],
+        };
+        live.after_tick((&prune, &[remote_put(43)]), &world, none, false, &mut reach)
+            .unwrap();
+        assert_eq!(reach.get("liveness.given_up"), 1);
+    }
+
+    #[test]
+    fn a_disk_lying_from_the_start_is_noted_and_nothing_else_is() {
+        let lying = crate::run::Opts {
+            lying_wal_sync: true,
+            ..crate::run::Opts::default()
+        };
+        assert_eq!(of_opts(&lying), [Justifier::LyingDisk]);
+        let laws = crate::run::Opts {
+            drawn: true,
+            block_crash_law: true,
+            ..crate::run::Opts::default()
+        };
+        assert!(of_opts(&laws).is_empty());
     }
 
     #[test]

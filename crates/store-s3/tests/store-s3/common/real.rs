@@ -257,9 +257,8 @@ impl RealHarness {
         }
     }
 
-    /// Another store on the same bucket and prefix, with a client and
-    /// connections of its own: what a reader in another process sees.
-    pub fn second_client(&self) -> S3Store<Counting> {
+    /// A store over the same bucket and prefix that remembers nothing: the next process.
+    pub fn next_process(&self) -> S3Store<Counting> {
         let transport = Counting::new(
             store_transport(self.config.deadline()),
             Arc::new(Counts::default()),
@@ -611,7 +610,7 @@ struct Seen {
 /// the table is the measurement (kk-review section 4e). A provider that
 /// keeps a listing stale shows here before the engine's boot meets it.
 pub fn consistency_probe(h: &RealHarness) {
-    let reader = h.second_client();
+    let reader = h.next_process();
     let one = ReadLen::new(1).unwrap();
     let mut seen = Seen::default();
     for n in 1..=probe_rounds() {
@@ -714,6 +713,29 @@ pub fn dropped_multipart_is_invisible_then_aborted(h: &RealHarness) {
     assert_eq!(h.open_uploads(), 1);
     assert_eq!(h.store.pending_orphans(), 1);
     assert_eq!(h.store.abort_orphans().unwrap(), 1);
+    assert_eq!(h.open_uploads(), 0);
+}
+
+/// A process killed mid-upload takes its ids with it; the next process's boot finds the
+/// upload in the bucket's listing and aborts it.
+pub fn a_killed_process_s_upload_is_aborted_at_the_next_boot(h: &RealHarness) {
+    block_on(async {
+        let mut upload = h
+            .store
+            .begin_upload(
+                &h.key(0, 1, 1),
+                Timestamp::from_unix_millis(9),
+                lsr_core::WriteMode::Replace,
+            )
+            .await
+            .unwrap();
+        upload.write(&body(part(h))).await.unwrap();
+        // Dropped: its id lands in this process's memory only, which a kill loses.
+        drop(upload);
+    });
+    assert_eq!(h.open_uploads(), 1);
+    let next = h.next_process();
+    assert_eq!(block_on(next.remove_scratch()), Ok(1));
     assert_eq!(h.open_uploads(), 0);
 }
 
@@ -840,6 +862,7 @@ macro_rules! shared_cases {
                 consistency_probe,
                 part_size_boundary,
                 dropped_multipart_is_invisible_then_aborted,
+                a_killed_process_s_upload_is_aborted_at_the_next_boot,
                 abort_leaves_nothing,
                 abort_of_an_unknown_upload_is_not_a_failure,
             );

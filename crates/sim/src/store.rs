@@ -649,6 +649,12 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         Ok(())
     }
 
+    /// Forwarded without a verdict or a yield: the simulator's stores leave no scratch, and a
+    /// draw here would move every frozen schedule.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         lock(&self.state)
             .widths
@@ -928,6 +934,11 @@ impl<S: ObjectStore> ObjectStore for YieldEachCall<S> {
         YieldNow(false).await;
         self.inner.delete(keys).await
     }
+
+    /// Forwarded without a yield, so the await points a schedule counts are unchanged.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
 }
 
 /// An upload through [`YieldEachCall`].
@@ -1191,6 +1202,10 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
             });
         });
         Ok(())
+    }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
     }
 }
 
@@ -1596,6 +1611,10 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
             self.handle.fsync_all();
         }
         Ok(())
+    }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
     }
 }
 

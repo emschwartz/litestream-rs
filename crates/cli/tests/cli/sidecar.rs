@@ -635,6 +635,63 @@ fn health_is_200_while_degraded_and_503_once_stopped() {
     }
 }
 
+/// A connection past the bound is answered 503 while every place is held. The server takes
+/// places in the order it accepts connections, which is not always the order they were
+/// made, and a connection whose thread could not start (a loaded host) is closed and gives
+/// its place back. So a probe may be served (200): then every held connection the server
+/// closed is replaced, and the probe repeated, a bounded number of times.
+fn assert_refused_while_every_place_is_held(addr: SocketAddr) {
+    // Two more than the bound: the two connections before may still hold their places
+    // for a moment after their answers arrived.
+    let mut held: Vec<TcpStream> = (0..lsr_sidecar::MAX_CONNECTIONS + 2)
+        .map(|_| TcpStream::connect(addr).unwrap())
+        .collect();
+    let mut answers = Vec::new();
+    for _ in 0..1_000 {
+        match try_get(addr, "GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n") {
+            Some((503, body)) => {
+                assert!(body.contains("too many connections"), "{body}");
+                drop(held);
+                return;
+            }
+            other => answers.push(other.map(|(status, _)| status)),
+        }
+        for stream in &mut held {
+            if closed_by_peer(stream) {
+                *stream = TcpStream::connect(addr).unwrap();
+            }
+        }
+        std::thread::yield_now();
+    }
+    panic!("never refused with every place held: {answers:?}");
+}
+
+/// Whether the peer has closed `stream`: a read that returns end of file or an error at once.
+fn closed_by_peer(stream: &TcpStream) -> bool {
+    stream.set_nonblocking(true).unwrap();
+    let mut byte = [0_u8; 1];
+    let closed = match (&*stream).read(&mut byte) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(err) => err.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    stream.set_nonblocking(false).unwrap();
+    closed
+}
+
+/// [`get`], or `None` when the server closed the connection unanswered (a reset): past
+/// both of its bounds it closes without an answer, and places come back only as the
+/// threads that held them notice their peer is gone.
+fn try_get(addr: SocketAddr, request: &str) -> Option<(u16, String)> {
+    let mut stream = TcpStream::connect(addr).ok()?;
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    let (head, body) = response.split_once("\r\n\r\n")?;
+    let status = head.split(' ').nth(1)?.parse().ok()?;
+    Some((status, body.to_owned()))
+}
+
 /// A request head past the bound is answered 431 from a fixed buffer, and a connection
 /// past the bound is answered 503; the server keeps serving afterwards.
 #[test]
@@ -652,16 +709,19 @@ fn an_oversized_request_and_too_many_connections_are_refused() {
     assert_eq!(get(addr, &long).0, 431);
     assert_eq!(fetch(addr, "/healthz").0, 200);
 
-    // Two more than the bound: the two connections above may still hold their places
-    // for a moment after their answers arrived.
-    let held: Vec<TcpStream> = (0..lsr_sidecar::MAX_CONNECTIONS + 2)
-        .map(|_| TcpStream::connect(addr).unwrap())
-        .collect();
-    let (status, body) = fetch(addr, "/healthz");
-    assert_eq!(status, 503, "{body}");
-    assert!(body.contains("too many connections"), "{body}");
-    drop(held);
-    until(addr, "/healthz", |status, _| status == 200);
+    assert_refused_while_every_place_is_held(addr);
+    // The held places come back as their threads see the peers gone; until then a probe
+    // may be refused or closed unanswered.
+    let served = (0..100_000).any(|_| {
+        matches!(
+            try_get(addr, "GET /healthz HTTP/1.1\r\nHost: test\r\n\r\n"),
+            Some((200, _))
+        )
+    });
+    assert!(
+        served,
+        "never served again after the held connections closed"
+    );
     daemon.signal("TERM");
     assert_eq!(daemon.finish().0.code(), Some(0));
 }

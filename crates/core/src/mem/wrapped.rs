@@ -21,6 +21,9 @@ pub(crate) struct Wrapped {
     pub(crate) zero_sizes: bool,
     /// Reads begun, counted before any vanishing.
     pub(crate) reads: AtomicUsize,
+    /// Files the next listing of their level leaves out, as a directory read that races
+    /// a writer's rename can (POSIX leaves a file added during a `readdir` unspecified).
+    pub(crate) hide_once: Mutex<BTreeSet<FileKey>>,
     /// Files every listing leaves out, as a store whose listings lag its writes does; reads
     /// still find them.
     pub(crate) unlisted: BTreeSet<FileKey>,
@@ -42,6 +45,7 @@ impl Wrapped {
             vanish: Mutex::new(BTreeSet::new()),
             zero_sizes: false,
             reads: AtomicUsize::new(0),
+            hide_once: Mutex::new(BTreeSet::new()),
             unlisted: BTreeSet::new(),
         }
     }
@@ -56,6 +60,11 @@ impl Wrapped {
 impl ObjectStore for Wrapped {
     type Upload = <MemStore as ObjectStore>::Upload;
 
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     async fn list(
         &self,
         level: Level,
@@ -63,6 +72,10 @@ impl ObjectStore for Wrapped {
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
         let mut listing = self.inner.list(level, after, limit).await?;
+        {
+            let mut hidden = self.hide_once.lock().unwrap();
+            listing.files.retain(|file| !hidden.remove(&file.key));
+        }
         listing
             .files
             .retain(|file| !self.unlisted.contains(&file.key));

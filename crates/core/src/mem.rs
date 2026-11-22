@@ -52,6 +52,8 @@ struct State {
     /// Logical milliseconds, advanced by one at each commit.
     clock: i64,
     created_at_calls: u64,
+    /// Scratch files a killed writer left, as `remove_scratch` counts them.
+    scratch: u64,
     objects: BTreeMap<FileKey, Object>,
     unrecognized: BTreeMap<Level, BTreeSet<String>>,
     faults: VecDeque<(StoreOp, StoreError)>,
@@ -116,6 +118,20 @@ impl MemStore {
         if let Some(object) = self.lock().objects.get_mut(key) {
             object.dropped = true;
         }
+    }
+
+    /// Leaves `count` scratch files, as uploads a killed process began would: the next
+    /// [`ObjectStore::remove_scratch`] removes and counts them. Lets a test see that a
+    /// wrapper forwards it.
+    pub fn plant_scratch(&self, count: u64) {
+        let mut state = self.lock();
+        state.scratch = state.scratch.saturating_add(count);
+    }
+
+    /// Scratch files planted and not yet removed.
+    #[must_use]
+    pub fn scratch(&self) -> u64 {
+        self.lock().scratch
     }
 
     /// How many times [`ObjectStore::created_at`] was called.
@@ -228,6 +244,11 @@ impl MemStore {
 
 impl ObjectStore for MemStore {
     type Upload = MemUpload;
+
+    /// Removes what [`MemStore::plant_scratch`] left.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        Ok(std::mem::take(&mut self.lock().scratch))
+    }
 
     fn list(
         &self,

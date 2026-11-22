@@ -682,6 +682,15 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// The level-0 files in staging; none when it cannot be listed.
+    #[must_use]
+    pub fn staged_level_zero(&self) -> Vec<FileKey> {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX))
+            .map(|listing| listing.files.iter().map(|file| file.key).collect())
+            .unwrap_or_default()
+    }
+
     /// What the boot's witness cannot prove among the staged level-0 files
     /// the replica does not hold yet: a snapshot (a file with every page) or a
     /// hop (a file read from a WAL generation's first frame without every

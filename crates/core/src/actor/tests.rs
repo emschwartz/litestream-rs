@@ -98,6 +98,11 @@ impl Counting {
 impl ObjectStore for Counting {
     type Upload = <MemStore as ObjectStore>::Upload;
 
+    /// Forwards to the store it wraps.
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
     fn list(
         &self,
         level: Level,
@@ -468,6 +473,133 @@ fn maintenance_waits_for_idle_uploads() {
         .position(|t| matches!(event(t), Some(Event::Maintained { .. })))
         .unwrap();
     assert!(last_upload < first_maintain, "{seen:?}");
+}
+
+/// Files 2 to 5 uploaded above a level 1 that covers 1, then 6 to `last` staged at `at` and
+/// not uploaded, and the process gone.
+fn backlog(last: u8, at: i64) -> Rig {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=5 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    assert_eq!(level_one_max(&rig), Some(1));
+    // Each commit is staged by the tick after it, which then syncs again before any upload.
+    for n in 6..=last {
+        rig.commit(n);
+        rig.tick(&mut actor, at);
+    }
+    let backlog = staged(&rig).len();
+    assert!(
+        backlog > usize::from(last).saturating_sub(10),
+        "{backlog} staged"
+    );
+    drop(actor);
+    rig
+}
+
+/// [`backlog`]'s next process, one file per upload, ticked 14 times at `now`.
+fn boot_on_backlog(rig: &mut Rig, now: i64) -> (Actor, Vec<Tick>) {
+    let mut config = cfg();
+    config.upload.files_per_tick = Some(nz(1));
+    let mut actor = Actor::new(config);
+    let seen = (0..14).map(|_| rig.tick(&mut actor, now)).collect();
+    (actor, seen)
+}
+
+/// A boot with a backlog of staged files, as a process killed every few seconds leaves: its
+/// uploads never go idle within its life, and maintenance must still get its share. Before,
+/// it waited for every upload, so a crash loop never compacted, pruned or deleted.
+#[test]
+fn maintenance_gets_its_share_while_a_backlog_uploads() {
+    let mut rig = backlog(30, T0 + 2);
+    // A new level-1 window.
+    let (actor, seen) = boot_on_backlog(&mut rig, T0 + 60_000);
+    let compacted = seen.iter().position(|t| {
+        matches!(
+            event(t),
+            Some(Event::Maintained {
+                event: MaintainedEvent::Compacted(_),
+                ..
+            })
+        )
+    });
+    assert!(
+        compacted.is_some(),
+        "no compaction in the first ticks: {seen:?}"
+    );
+    assert!(level_one_max(&rig) > Some(5), "{seen:?}");
+    let uploads = seen
+        .iter()
+        .filter(|t| matches!(event(t), Some(Event::Uploaded(_))))
+        .count();
+    assert!(uploads >= 8, "uploads starved: {seen:?}");
+    // Uploads still had work when maintenance ran.
+    assert!(actor.replicated() < Some(Txid::new(30).unwrap()));
+}
+
+/// A snapshot due while the backlog uploads waits for idle uploads, so its last
+/// transaction is at most what was published; the compactions take the turns meanwhile.
+#[test]
+fn a_snapshot_due_during_a_backlog_waits_for_idle_uploads() {
+    // Staged a day later, so once the levels have compacted them nothing is due before
+    // the snapshot.
+    let now = T0 + 25 * 3_600_000;
+    let mut rig = backlog(80, now);
+    let level9 = |rig: &Rig| -> Vec<u64> {
+        Rig::files(&rig.remote, Level::SNAPSHOT)
+            .iter()
+            .map(|f| f.key.range().max().get())
+            .collect()
+    };
+    let before = level9(&rig);
+    let mut config = cfg();
+    config.upload.files_per_tick = Some(nz(1));
+    let mut actor = Actor::new(config);
+    let now = now + 1;
+    let mut seen = Vec::new();
+    while actor.replicated() < Some(Txid::new(80).unwrap()) {
+        assert!(seen.len() < 400, "never caught up: {seen:?}");
+        seen.push(rig.tick(&mut actor, now));
+        assert_eq!(
+            level9(&rig),
+            before,
+            "a snapshot while uploads were busy: {seen:?}"
+        );
+    }
+    let compactions = seen
+        .iter()
+        .filter(|t| {
+            matches!(
+                event(t),
+                Some(Event::Maintained {
+                    event: MaintainedEvent::Compacted(_),
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(compactions > 0, "{seen:?}");
+    // Once the snapshot waits, maintenance does not list again until uploads go idle: one
+    // deferral, not one per fair turn.
+    let waits = seen
+        .iter()
+        .filter(|t| {
+            matches!(
+                event(t),
+                Some(Event::Maintained {
+                    event: MaintainedEvent::Waiting { held: None },
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(waits, 1, "{seen:?}");
+    let after = rig.settle(&mut actor, now);
+    let newest = level9(&rig).last().copied();
+    assert!(
+        newest > before.last().copied(),
+        "never taken once idle: {after:?}"
+    );
 }
 
 #[test]
@@ -2083,6 +2215,27 @@ fn maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload() {
     let seen = rig.follow(&mut actor, T0 + 100_000, 40);
     no_stop(&seen);
     assert!(planned(&seen), "{seen:?}");
+}
+
+/// A boot removes what killed uploads left, in staging and in the replica, before it reads
+/// anything else; the stores' wrappers forward the call.
+#[test]
+fn a_boot_removes_the_scratch_killed_uploads_left() {
+    let mut rig = Rig::new();
+    rig.staging.inner.plant_scratch(2);
+    rig.remote.inner.plant_scratch(3);
+    assert_eq!(
+        (rig.staging.inner.scratch(), rig.remote.inner.scratch()),
+        (2, 3)
+    );
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0);
+    assert!(
+        matches!(event(&boot), Some(Event::Booted { .. })),
+        "{boot:?}"
+    );
+    assert_eq!(rig.staging.inner.scratch(), 0);
+    assert_eq!(rig.remote.inner.scratch(), 0);
 }
 
 /// A PASSIVE checkpoint stages no boundary snapshot, so the counter for one stays at

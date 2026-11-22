@@ -30,6 +30,8 @@ mod soak;
 #[cfg(test)]
 mod sqlite_rules;
 #[cfg(test)]
+mod stall_liveness;
+#[cfg(test)]
 mod survival;
 #[cfg(test)]
 mod tally;

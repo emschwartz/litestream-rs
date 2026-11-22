@@ -72,6 +72,9 @@ pub trait DynStore: Send + Sync {
     /// [`ObjectStore::delete`].
     fn delete_boxed<'a>(&'a self, keys: &'a [FileKey]) -> BoxFuture<'a, Result<(), StoreError>>;
 
+    /// [`ObjectStore::remove_scratch`].
+    fn remove_scratch_boxed(&self) -> BoxFuture<'_, Result<u64, StoreError>>;
+
     /// [`ObjectStore::batch_width`].
     fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize;
 
@@ -174,6 +177,10 @@ where
         Box::pin(self.delete(keys))
     }
 
+    fn remove_scratch_boxed(&self) -> BoxFuture<'_, Result<u64, StoreError>> {
+        Box::pin(self.remove_scratch())
+    }
+
     fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize {
         self.batch_width(kind)
     }
@@ -265,6 +272,10 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.0.delete_boxed(keys).await
+    }
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.0.remove_scratch_boxed().await
     }
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
@@ -481,6 +492,10 @@ impl ObjectStore for Metered {
         metered(&*self.clock, &self.meters.delete, call).await
     }
 
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.store.remove_scratch_boxed().await
+    }
+
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         self.store.batch_width_dyn(kind)
     }
@@ -566,6 +581,23 @@ mod tests {
     }
 
     lsr_core::conformance_suite!(ErasedHarness::new);
+
+    /// The boot's scratch removal reaches the application's store through each layer the
+    /// engine sees it by: the type erasure, its dyn view and the meters.
+    #[test]
+    fn remove_scratch_is_forwarded_by_every_layer() {
+        let mem = MemStore::new();
+        let store: Arc<dyn DynStore> = Arc::new(mem.clone());
+        mem.plant_scratch(7);
+        assert_eq!(block_on(store.remove_scratch_boxed()), Ok(7));
+        mem.plant_scratch(5);
+        assert_eq!(block_on(Erased(Arc::clone(&store)).remove_scratch()), Ok(5));
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(Timestamp::from_unix_millis(0)));
+        let metered = Metered::new(store, Arc::new(Meters::default()), clock);
+        mem.plant_scratch(3);
+        assert_eq!(block_on(metered.remove_scratch()), Ok(3));
+        assert_eq!(mem.scratch(), 0);
+    }
 
     #[test]
     fn metered_calls_and_bytes_are_counted() {

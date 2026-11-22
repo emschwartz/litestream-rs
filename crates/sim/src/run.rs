@@ -336,6 +336,9 @@ struct Runner {
     /// engine a probe past a listing that ends before what it confirmed, and
     /// a relist once it learns of the loss.
     regressions: u32,
+    /// Every injected store fault has healed and the run is judging
+    /// liveness: a stall no longer imposed by the world ends nothing.
+    settling: bool,
     /// The snapshot liveness oracle.
     liveness: crate::liveness::Liveness,
     judges: Judges,
@@ -421,6 +424,7 @@ impl Runner {
             rate_active: false,
             failed_boots: 0,
             regressions: 0,
+            settling: false,
             liveness: crate::liveness::Liveness::new(),
             judges: Judges::default(),
             app: after_restart::App::new(seed),
@@ -1011,6 +1015,11 @@ impl Runner {
             match self.step(None)?.0 {
                 Step::Drained(txid) => {
                     self.drained(txid)?;
+                    // A drain that finished after every fault healed ran each
+                    // task to the end: a stall left now is one nothing causes.
+                    if self.settling {
+                        self.no_stall_left()?;
+                    }
                     return self.judge_drained();
                 }
                 Step::Stopped(StopCause::Shutdown) if degraded || self.rate_active => {
@@ -1023,7 +1032,7 @@ impl Runner {
                 }
                 Step::Degraded(cause) => {
                     self.degraded_expected(cause)?;
-                    degraded = true;
+                    degraded |= self.excused(cause);
                 }
                 Step::Stopped(cause) if self.stop_expected(cause) => return Ok(()),
                 Step::Stopped(cause) => {
@@ -1895,6 +1904,7 @@ impl Runner {
                 break;
             }
         }
+        self.no_stall_left()?;
         within(Bound::DrainTicks, u64::from(!settled), 0)?;
         let limit = u64::from(TRUNCATE_PAGES)
             .saturating_add(self.max_tx_pages)
@@ -1921,15 +1931,61 @@ impl Runner {
             Step::Stopped(cause) => Err(bug_fault(format!(
                 "the engine stopped while idle: {cause:?}"
             ))),
-            Step::Degraded(cause) => self.degraded_expected(*cause).map(|()| true),
-            Step::Ran | Step::Drained(_) | Step::Crashed => Ok(false),
+            Step::Degraded(cause) if self.excused(*cause) => {
+                self.degraded_expected(*cause).map(|()| true)
+            }
+            // A stall the world no longer imposes must clear: keep ticking.
+            Step::Degraded(_) | Step::Ran | Step::Drained(_) | Step::Crashed => Ok(false),
         }
+    }
+
+    /// Whether a degraded state may end a liveness check. Before the run
+    /// settles any expected cause may; once every injected fault has healed,
+    /// a stall (a retried fault that kept failing) may only while the world
+    /// still imposes its fault ([`still_imposed`]): an engine still retrying
+    /// a fault nothing causes any more is stuck, not degraded.
+    fn excused(&self, cause: PersistentCause) -> bool {
+        match cause {
+            PersistentCause::Stalled(stall) if self.settling => still_imposed(stall),
+            PersistentCause::Stalled(_)
+            | PersistentCause::StoreDenied(_)
+            | PersistentCause::StoreRefused
+            | PersistentCause::RemoteCorrupt
+            | PersistentCause::OtherWriter
+            | PersistentCause::RemoteRegressed
+            | PersistentCause::WalCorrupt
+            | PersistentCause::WalTruncated
+            | PersistentCause::WalUnlinked
+            | PersistentCause::WalSyncFailed
+            | PersistentCause::PageSizeChanged { .. }
+            | PersistentCause::DatabasePageMismatch { .. }
+            | PersistentCause::Bug => true,
+        }
+    }
+
+    /// After the settle window: no task may still be stalled on a fault the
+    /// world no longer imposes.
+    fn no_stall_left(&self) -> Result<(), Violation> {
+        for task in Task::ALL {
+            if let Some(degraded) = self.actor.degraded(task)
+                && let PersistentCause::Stalled(stall) = degraded.cause
+                && !still_imposed(stall)
+            {
+                return Err(Violation::StuckRetrying {
+                    task: format!("{task:?}"),
+                    stall: format!("{stall:?}"),
+                    retries: degraded.retries,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// What a drawn run's power losses keep of the unsynced WAL writes: a
     /// drawn prefix, or the block law's draw; and whether the engine's own
-    /// sync of the WAL keeps anything.
-    fn draw_power_law(&self, seed: Seed, opts: &Opts) {
+    /// sync of the WAL keeps anything. What those settings make true for the
+    /// liveness oracle is [`crate::liveness::of_opts`]'s to say.
+    fn draw_power_law(&mut self, seed: Seed, opts: &Opts) {
         self.w.sqlite.tear_on_power_loss(seed.stream(14));
         if opts.block_crash_law {
             self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
@@ -1938,6 +1994,9 @@ impl Runner {
         }
         if opts.lying_wal_sync {
             self.w.sqlite.lie_on_our_sync();
+        }
+        for why in crate::liveness::of_opts(opts) {
+            self.liveness.note(*why);
         }
     }
 
@@ -1959,9 +2018,15 @@ impl Runner {
         }
         // Liveness is judged once every fault has cleared.
         self.rate_active = false;
+        self.settling = true;
+
         self.w.remote_faults.heal();
         self.w.staging_faults.heal();
         self.w.remote_faults.end_lag();
+        // Source failures injected and not yet met heal too: a queue of them
+        // would otherwise keep a task failing, and its stall would be the
+        // world's, not the engine's.
+        self.w.sqlite.heal_injections();
         self.drain()?;
         self.restore_all()?;
         self.report.reach.add(
@@ -2285,6 +2350,32 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::DatabasePageMismatch { .. }
         | StopCause::Shutdown
         | StopCause::Bug => false,
+    }
+}
+
+/// Whether the world still imposes a retried fault once every injected
+/// store fault has healed and the app has let go of its readers: the excuse
+/// table for a stall at the end of a run. Every fault starts unexcused; a
+/// variant becomes excused only with the condition that keeps causing it.
+const fn still_imposed(stall: lsr_core::Stall) -> bool {
+    use lsr_core::Stall as S;
+    match stall {
+        S::StoreTransient
+        | S::StoreThrottled
+        | S::RemoteObjectMissing
+        | S::UploadAmbiguous
+        | S::UploadChecksumMismatch
+        | S::StagedLost
+        | S::LocalDiskFull
+        | S::LocalIo
+        | S::LocalFsyncFailed
+        | S::SqliteBusy
+        | S::ReadersHeld
+        | S::WalMoved
+        | S::WalIndexInconsistent
+        | S::WalChangedUnderRead
+        | S::NothingToSnapshot
+        | S::ReadTxLost => false,
     }
 }
 
