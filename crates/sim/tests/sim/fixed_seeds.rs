@@ -438,3 +438,66 @@ mod restored_backup {
         }
     }
 }
+
+#[cfg(test)]
+mod unlinked {
+    use lsr_ltx::PageSize;
+    use lsr_sim::generate::{MetaOp, RemoteOp, WalOp};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Op, Opts, Seed};
+
+    /// A staging backup holding 1024-byte files is put back after the
+    /// database was vacuumed to 2048-byte pages and its new history uploaded,
+    /// and the bucket rolled back to that history's first file. The boot
+    /// listing confirmed it and uploaded the backup's next file after it, so
+    /// the replica chained two histories of two page sizes (seed 0x72a,
+    /// shrunk).
+    #[test]
+    fn a_staged_file_from_another_history_is_not_chained_seed_0x72a() {
+        let commit = Op::Commit {
+            pages: 3,
+            grow: false,
+        };
+        let ops = [
+            Op::Vacuum {
+                page_size: PageSize::new(1024),
+            },
+            Op::Shutdown,
+            Op::WalDamage {
+                op: WalOp::FlipLastFrameBit,
+                ticks: 6,
+            },
+            Op::Remote(RemoteOp::RollBack),
+            Op::ClockJump(17060),
+            Op::WalDamage {
+                op: WalOp::TruncateAtFrame(32),
+                ticks: 3,
+            },
+            Op::Remote(RemoteOp::RollBack),
+            Op::Meta(MetaOp::Save),
+            Op::Vacuum {
+                page_size: PageSize::new(2048),
+            },
+            Op::WalDamage {
+                op: WalOp::TearHeader,
+                ticks: 4,
+            },
+            Op::Shutdown,
+            Op::Shutdown,
+            commit,
+            Op::Shutdown,
+            Op::Remote(RemoteOp::RollBack),
+            Op::StagingDamage(MetaOp::Restore),
+            Op::Vacuum {
+                page_size: PageSize::new(1024),
+            },
+        ];
+        let opts = Opts {
+            drawn: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(Seed::new(0x72a), &ops, &opts) {
+            panic!("{}", failure.violation);
+        }
+    }
+}
