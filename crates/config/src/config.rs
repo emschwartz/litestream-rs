@@ -536,6 +536,8 @@ pub struct RustSettings {
     pub(crate) app_readers: AppReaders,
     pub(crate) app_autocheckpoint: Option<std::num::NonZeroU32>,
     pub(crate) responses: ResponseSettings,
+    pub(crate) if_replication_stops: lsr_replica::IfReplicationStops,
+    pub(crate) max_unreplicated_age: lsr_replica::MaxUnreplicatedAge,
 }
 
 impl RustSettings {
@@ -555,5 +557,15 @@ impl RustSettings {
     #[must_use]
     pub fn responses(self) -> ResponseSettings {
         self.responses
+    }
+    /// `if-replication-stops`: `report`, `hold-start` (the default) or `stop-app`.
+    #[must_use]
+    pub fn if_replication_stops(self) -> lsr_replica::IfReplicationStops {
+        self.if_replication_stops
+    }
+    /// `max-unreplicated-age`: 10 minutes when absent, at least 5.
+    #[must_use]
+    pub fn max_unreplicated_age(self) -> lsr_replica::MaxUnreplicatedAge {
+        self.max_unreplicated_age
     }
 }

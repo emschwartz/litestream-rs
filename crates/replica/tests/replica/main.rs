@@ -6,6 +6,8 @@
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+mod failstop;
+#[cfg(test)]
 mod gates;
 #[cfg(test)]
 mod rebuild;

@@ -454,7 +454,9 @@ fn a_boot_seed_from_the_staged_files_is_the_table_the_steps_built() {
     let (mut rig, position) = recorded();
     commit(&rig.wal, &[1, 3], 3);
     let next = position_of(rig.step_at(Step::Incremental(position)).unwrap());
-    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit())).unwrap();
+    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit()))
+        .unwrap()
+        .table;
     assert_eq!(seeded, rig.pages);
 }
 
@@ -473,7 +475,9 @@ fn a_staged_file_that_does_not_verify_empties_the_seed_up_to_it() {
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap();
     });
-    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit())).unwrap();
+    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit()))
+        .unwrap()
+        .table;
     assert_eq!(seeded.len(), 1);
     assert_eq!(seeded.get(pg(1)), rig.pages.get(pg(1)));
 }
