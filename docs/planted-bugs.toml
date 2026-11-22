@@ -394,3 +394,9 @@ name = "staging-dir-fsync"
 fix = "2bf9f99"
 package = "lsr-store-fs"
 tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]
+
+[[bug]]
+name = "delete-without-dir-sync"
+fix = "93d0510"
+package = "lsr-store-fs"
+tests = ["a_crash_after_a_delete_never_brings_the_file_back"]
