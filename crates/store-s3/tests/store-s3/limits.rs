@@ -18,6 +18,7 @@ use lsr_store_s3::{
 
 use crate::common::*;
 use crate::real::{PART, body};
+use lsr_core::WriteMode;
 
 /// Passes every request to the fake and notes the limit of each batch.
 struct Recording {
@@ -72,7 +73,11 @@ fn part_limit(config: S3Config) -> Vec<usize> {
     let (store, limits) = store_for(config);
     block_on(async {
         let mut up = store
-            .begin_upload(&key(0, 1, 1), Timestamp::from_unix_millis(5))
+            .begin_upload(
+                &key(0, 1, 1),
+                Timestamp::from_unix_millis(5),
+                WriteMode::Replace,
+            )
             .await
             .unwrap();
         up.write(&body(PART * 4)).await.unwrap();
@@ -102,7 +107,7 @@ fn concurrency_governs_only_parts() {
     let bytes = body(4);
     block_on(async {
         let mut up = store
-            .begin_upload(&k, Timestamp::from_unix_millis(5))
+            .begin_upload(&k, Timestamp::from_unix_millis(5), WriteMode::Replace)
             .await
             .unwrap();
         up.write(&bytes).await.unwrap();
@@ -130,7 +135,7 @@ fn creation_time_heads_go_sixteen_at_a_time() {
     let k = key(0, 1, 1);
     block_on(async {
         let mut up = store
-            .begin_upload(&k, Timestamp::from_unix_millis(5))
+            .begin_upload(&k, Timestamp::from_unix_millis(5), WriteMode::Replace)
             .await
             .unwrap();
         up.write(b"abcd").await.unwrap();
@@ -152,7 +157,7 @@ fn range_reads_and_listings_go_eight_at_a_time() {
     let k = key(0, 1, 1);
     block_on(async {
         let mut up = store
-            .begin_upload(&k, Timestamp::from_unix_millis(5))
+            .begin_upload(&k, Timestamp::from_unix_millis(5), WriteMode::Replace)
             .await
             .unwrap();
         up.write(b"abcd").await.unwrap();

@@ -57,7 +57,7 @@ use thiserror::Error;
 use crate::checked::Checked;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
-use crate::store::{ObjectStore, ReadLen, StoreError, Upload};
+use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
 
 #[cfg(test)]
 #[expect(
@@ -395,6 +395,7 @@ impl Reader {
             Ok(Next::Event(step)) => Ok(step),
             Ok(Next::End(verified)) => Ok(Step::End(verified)),
             Err(ReadFault::Store(StoreError::NotFound { key })) => {
+                mark!(Maint2);
                 Err(CompactError::InputVanished { key })
             }
             Err(ReadFault::Store(err)) => Err(CompactError::Source(err)),
@@ -729,7 +730,9 @@ async fn compact_with<S: ObjectStore, D: ObjectStore>(
     let encoder = Encoder::new(Vec::new(), header).map_err(CompactError::Encode)?;
     let key = FileKey::new(level, inputs.range());
     let created_at = header.fields().timestamp;
-    let mut upload = Checked::begin(dest, &key, created_at)
+    // A compacted file may be written again over itself (a retried
+    // compaction, Go's output for the same range), as Go's are.
+    let mut upload = Checked::begin(dest, &key, created_at, WriteMode::Replace)
         .await
         .map_err(CompactError::Dest)?;
     let written = write_output(&mut merge, encoder, &header, &mut upload).await;

@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/multipart.rs b/crates/store-s3/src/multipart.rs
+index 2c9e5a9..8a606ce 100644
+--- a/crates/store-s3/src/multipart.rs
++++ b/crates/store-s3/src/multipart.rs
+@@ -45,7 +45,7 @@ use crate::transport::{HttpResponse, Transport};
+ pub(crate) fn completed_etag_fits(etag: &str, parts: usize) -> bool {
+     let text = etag.trim().trim_matches('"');
+     let Some((digest, count)) = text.split_once('-') else {
+-        return true;
++        return false;
+     };
+     let multipart_form = digest.len() == 32
+         && digest.bytes().all(|b| b.is_ascii_hexdigit())

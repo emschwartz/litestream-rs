@@ -1,0 +1,13 @@
+diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
+index c22e3e04..b6901bd7 100644
+--- a/crates/cli/src/main.rs
++++ b/crates/cli/src/main.rs
+@@ -82,7 +82,7 @@ fn main() -> ExitCode {
+     let code = match exit {
+         Exit::Success | Exit::AppStopped => exit.code(),
+         Exit::Degraded | Exit::Refused | Exit::Environment | Exit::Usage | Exit::ExecFailed
+-            if is_replicate() =>
++            if is_replicate() && false =>
+         {
+             1
+         }

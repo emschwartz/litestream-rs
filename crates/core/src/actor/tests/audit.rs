@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::plan::{KeyTarget, PlanOutcome, plan};
+use crate::store::WriteMode;
 
 /// The remote's files at every level above 0, lowest level first.
 fn upper(rig: &Rig) -> Vec<FileInfo> {
@@ -30,7 +31,10 @@ fn rot(rig: &Rig, info: &FileInfo) {
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
     let bad = flipped(block_on(store.read(&info.key, 0, all)).unwrap());
     block_on(async {
-        let mut up = store.begin_upload(&info.key, ts(T0)).await.unwrap();
+        let mut up = store
+            .begin_upload(&info.key, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
         up.write(&bad).await.unwrap();
         up.commit().await.unwrap();
     });

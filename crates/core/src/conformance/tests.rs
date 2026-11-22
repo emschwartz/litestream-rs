@@ -22,6 +22,9 @@ enum Flaw {
     /// Lists every file as exact with a created-at time one millisecond off the
     /// committed one.
     ListsAnotherCreatedAt,
+    /// Takes every upload as `Replace`, as an S3 provider that ignores
+    /// `If-None-Match` would.
+    IgnoresWriteMode,
 }
 
 /// A [`MemStore`] with one [`Flaw`]; everything else is the model's.
@@ -35,13 +38,13 @@ impl Flawed {
     fn shown(&self, bytes: Vec<u8>) -> Vec<u8> {
         match self.flaw {
             Flaw::ReadsEmpty => Vec::new(),
-            Flaw::ListsAnotherCreatedAt => bytes,
+            Flaw::ListsAnotherCreatedAt | Flaw::IgnoresWriteMode => bytes,
         }
     }
 
     fn relist(&self, listing: Listing) -> Listing {
         match self.flaw {
-            Flaw::ReadsEmpty => listing,
+            Flaw::ReadsEmpty | Flaw::IgnoresWriteMode => listing,
             Flaw::ListsAnotherCreatedAt => Listing {
                 files: listing
                     .files
@@ -95,8 +98,13 @@ impl ObjectStore for Flawed {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<crate::MemUpload, StoreError> {
-        self.inner.begin_upload(key, created_at).await
+        let mode = match self.flaw {
+            Flaw::IgnoresWriteMode => WriteMode::Replace,
+            Flaw::ReadsEmpty | Flaw::ListsAnotherCreatedAt => mode,
+        };
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
@@ -183,6 +191,16 @@ fn a_store_that_lists_another_exact_created_at_fails_the_suite() {
 }
 
 #[test]
+fn a_store_that_replaces_on_a_new_upload_fails_the_suite() {
+    let harness = FlawedHarness::new(Flaw::IgnoresWriteMode);
+    let message = failed(block_on(a_new_upload_never_replaces(&harness)));
+    assert!(
+        message.starts_with("a New commit into a taken key"),
+        "{message}"
+    );
+}
+
+#[test]
 fn a_harness_that_cannot_inject_skips_the_late_commit_case() {
     let harness = NoInjection::default();
     assert!(!harness.fail_next_commit_after_publish());
@@ -196,7 +214,7 @@ fn the_mem_harness_injects_a_late_commit_failure() {
     block_on(async {
         let mut upload = harness
             .store()
-            .begin_upload(&key(0, 1, 1)?, at(CREATED_AT))
+            .begin_upload(&key(0, 1, 1)?, at(CREATED_AT), WriteMode::Replace)
             .await?;
         upload.write(b"x").await?;
         upload.commit().await.unwrap_err();

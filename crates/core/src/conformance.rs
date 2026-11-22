@@ -21,7 +21,9 @@ use std::thread::{self, Thread};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::layout::{CreatedAtSource, FileInfo, FileKey, Level, ListedTime};
-use crate::store::{ListAt, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, Upload};
+use crate::store::{
+    ListAt, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode,
+};
 
 /// Why a conformance case failed.
 #[derive(Debug)]
@@ -166,7 +168,9 @@ fn at(millis: i64) -> Timestamp {
 const CREATED_AT: i64 = 1_700_000_000_123;
 
 async fn put<S: ObjectStore>(store: &S, key: FileKey, bytes: &[u8]) -> Result<FileInfo, Failure> {
-    let mut upload = store.begin_upload(&key, at(CREATED_AT)).await?;
+    let mut upload = store
+        .begin_upload(&key, at(CREATED_AT), WriteMode::Replace)
+        .await?;
     upload.write(bytes).await?;
     Ok(upload.commit().await?)
 }
@@ -365,7 +369,9 @@ pub async fn scratch_names_are_not_unrecognized<H: Harness>(h: &H) -> Check {
     let target = key(0, 1, 1)?;
     let name = format!("{}.tmp", target.file_name());
     h.plant_unrecognized(target.level(), &name)?;
-    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
+    let mut upload = store
+        .begin_upload(&target, at(CREATED_AT), WriteMode::Replace)
+        .await?;
     upload.write(b"half").await?;
     drop(upload);
     let got = page_through(store, target.level(), 10, None).await?;
@@ -385,7 +391,9 @@ pub async fn commit_error_may_leave_the_object_visible<H: Harness>(h: &H) -> Che
     }
     let store = h.store();
     let target = key(0, 1, 1)?;
-    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
+    let mut upload = store
+        .begin_upload(&target, at(CREATED_AT), WriteMode::Replace)
+        .await?;
     upload.write(b"landed").await?;
     ensure!(
         upload.commit().await.is_err(),
@@ -412,7 +420,9 @@ pub async fn commit_error_may_leave_the_object_visible<H: Harness>(h: &H) -> Che
 pub async fn abort_publishes_nothing<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let fresh = key(1, 1, 1)?;
-    let mut upload = store.begin_upload(&fresh, at(CREATED_AT)).await?;
+    let mut upload = store
+        .begin_upload(&fresh, at(CREATED_AT), WriteMode::Replace)
+        .await?;
     upload.write(b"never seen").await?;
     upload.abort().await?;
     ensure!(
@@ -429,7 +439,9 @@ pub async fn abort_publishes_nothing<H: Harness>(h: &H) -> Check {
     );
 
     put(store, fresh, b"old").await?;
-    let mut upload = store.begin_upload(&fresh, at(CREATED_AT)).await?;
+    let mut upload = store
+        .begin_upload(&fresh, at(CREATED_AT), WriteMode::Replace)
+        .await?;
     upload.write(b"newer").await?;
     upload.abort().await?;
     ensure_eq!(
@@ -447,7 +459,9 @@ pub async fn abort_publishes_nothing<H: Harness>(h: &H) -> Check {
 pub async fn pending_and_dropped_uploads_are_invisible<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(0, 1, 1)?;
-    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
+    let mut upload = store
+        .begin_upload(&target, at(CREATED_AT), WriteMode::Replace)
+        .await?;
     upload.write(b"half").await?;
     ensure!(
         store
@@ -474,7 +488,9 @@ pub async fn pending_and_dropped_uploads_are_invisible<H: Harness>(h: &H) -> Che
     );
 
     put(store, target, b"kept").await?;
-    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
+    let mut upload = store
+        .begin_upload(&target, at(CREATED_AT), WriteMode::Replace)
+        .await?;
     upload.write(b"lost").await?;
     drop(upload);
     ensure_eq!(
@@ -548,6 +564,64 @@ pub async fn delete_is_idempotent<H: Harness>(h: &H) -> Check {
     Ok(())
 }
 
+/// A [`WriteMode::New`] upload publishes into a free key; into a taken key it
+/// publishes nothing, its commit fails with [`StoreError::AlreadyExists`] and
+/// the object stays as it was. A `Replace` upload still replaces it.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn a_new_upload_never_replaces<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let target = key(0, 7, 7)?;
+    let mut first = store
+        .begin_upload(&target, at(1_000), WriteMode::New)
+        .await?;
+    first.write(b"first").await?;
+    first.commit().await?;
+    let mut second = store
+        .begin_upload(&target, at(2_000), WriteMode::New)
+        .await?;
+    second.write(b"second!").await?;
+    match second.commit().await {
+        Err(StoreError::AlreadyExists { key: taken }) if taken == target => {}
+        other => {
+            return Err(Failure(format!(
+                "a New commit into a taken key: got {other:?}, want AlreadyExists"
+            )));
+        }
+    }
+    ensure_eq!(
+        read_all(store, &target).await?,
+        b"first".to_vec(),
+        "the object after a refused New commit"
+    );
+    let listing = store.list(target.level(), None, limit(10)?).await?;
+    ensure_eq!(
+        listing.files.iter().map(|f| f.size).collect::<Vec<_>>(),
+        [5],
+        "objects listed after a refused New commit"
+    );
+    ensure_eq!(
+        store
+            .created_at(&listed_one(store, target).await?)
+            .await?
+            .at(),
+        at(1_000),
+        "the created-at time after a refused New commit"
+    );
+    let mut third = store
+        .begin_upload(&target, at(3_000), WriteMode::Replace)
+        .await?;
+    third.write(b"third").await?;
+    third.commit().await?;
+    ensure_eq!(
+        read_all(store, &target).await?,
+        b"third".to_vec(),
+        "the object after a Replace commit"
+    );
+    Ok(())
+}
+
 /// Two uploads to one key never interleave: the last commit wins whole.
 ///
 /// # Errors
@@ -555,8 +629,12 @@ pub async fn delete_is_idempotent<H: Harness>(h: &H) -> Check {
 pub async fn two_uploads_to_one_key<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(2, 1, 4)?;
-    let mut first = store.begin_upload(&target, at(1_000)).await?;
-    let mut second = store.begin_upload(&target, at(2_000)).await?;
+    let mut first = store
+        .begin_upload(&target, at(1_000), WriteMode::Replace)
+        .await?;
+    let mut second = store
+        .begin_upload(&target, at(2_000), WriteMode::Replace)
+        .await?;
     first.write(b"aaaa").await?;
     second.write(b"bbbbbbbb").await?;
     first.write(b"aaaa").await?;
@@ -607,7 +685,9 @@ pub async fn two_uploads_to_one_key<H: Harness>(h: &H) -> Check {
 pub async fn chunks_concatenate_and_created_at_survives<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(5, 1, 1)?;
-    let mut upload = store.begin_upload(&target, at(CREATED_AT)).await?;
+    let mut upload = store
+        .begin_upload(&target, at(CREATED_AT), WriteMode::Replace)
+        .await?;
     for chunk in [&b"ab"[..], b"", b"cde"] {
         upload.write(chunk).await?;
     }
@@ -651,7 +731,9 @@ async fn put_with_created_at<S: ObjectStore>(
     bytes: &[u8],
     created_at: Timestamp,
 ) -> Result<FileInfo, Failure> {
-    let mut upload = store.begin_upload(&key, created_at).await?;
+    let mut upload = store
+        .begin_upload(&key, created_at, WriteMode::Replace)
+        .await?;
     upload.write(bytes).await?;
     Ok(upload.commit().await?)
 }
@@ -884,7 +966,7 @@ pub async fn created_at_many_agrees_with_created_at<H: Harness>(h: &H) -> Check 
     let (a, b, gone) = (key(7, 1, 1)?, key(7, 2, 2)?, key(7, 3, 3)?);
     put_with_created_at(store, a, b"a", at(CREATED_AT)).await?;
     put_with_created_at(store, b, b"bb", at(CREATED_AT + 1)).await?;
-    put_with_created_at(store, gone, b"c", at(CREATED_AT + 2)).await?;
+    put_with_created_at(store, gone, b"c", at(CREATED_AT)).await?;
     let files = [
         listed_one(store, a).await?,
         listed_one(store, gone).await?,
@@ -904,6 +986,15 @@ pub async fn created_at_many_agrees_with_created_at<H: Harness>(h: &H) -> Check 
         want.get(1).cloned(),
         Some(Err(StoreError::NotFound { key: gone })),
         "the deleted file's slot"
+    );
+    let times: Vec<_> = want
+        .iter()
+        .map(|got| got.as_ref().ok().map(|created| created.at()))
+        .collect();
+    ensure_eq!(
+        times,
+        vec![Some(at(CREATED_AT)), None, Some(at(CREATED_AT + 1))],
+        "each slot holds its own file's created-at time"
     );
     Ok(())
 }
@@ -928,6 +1019,7 @@ macro_rules! conformance_suite {
             read_of_missing_key_is_not_found,
             delete_is_idempotent,
             two_uploads_to_one_key,
+            a_new_upload_never_replaces,
             chunks_concatenate_and_created_at_survives,
             created_at_returns_the_committed_created_at,
             listed_created_at_is_exact_or_marked,

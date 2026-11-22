@@ -444,6 +444,8 @@ pub enum StoreClass {
     Denied(Denied),
     /// [`StoreError::NotFound`].
     NotFound,
+    /// [`StoreError::AlreadyExists`].
+    AlreadyExists,
     /// [`StoreError::ScratchExhausted`].
     ScratchExhausted,
     /// [`StoreError::Corrupt`].
@@ -461,7 +463,7 @@ pub const STORE_OPS: [StoreOp; 4] = [
 ];
 
 /// Every store error class, every denial kind among them ([`store_class`] checks it).
-pub const STORE_CLASSES: [StoreClass; 11] = [
+pub const STORE_CLASSES: [StoreClass; 12] = [
     StoreClass::Transient,
     StoreClass::Throttled,
     StoreClass::Denied(Denied::Credentials),
@@ -470,6 +472,7 @@ pub const STORE_CLASSES: [StoreClass; 11] = [
     StoreClass::Denied(Denied::BucketMissing),
     StoreClass::Denied(Denied::Tls),
     StoreClass::NotFound,
+    StoreClass::AlreadyExists,
     StoreClass::ScratchExhausted,
     StoreClass::Corrupt,
     StoreClass::Refused,
@@ -503,6 +506,7 @@ pub const fn store_class(err: &StoreError) -> StoreClass {
             Denied::Tls => Denied::Tls,
         }),
         StoreError::NotFound { .. } => StoreClass::NotFound,
+        StoreError::AlreadyExists { .. } => StoreClass::AlreadyExists,
         StoreError::ScratchExhausted { .. } => StoreClass::ScratchExhausted,
         StoreError::Corrupt { .. } => StoreClass::Corrupt,
         StoreError::Refused { .. } => StoreClass::Refused,
@@ -515,6 +519,9 @@ const CORRUPT_IS_WORLD: &str = "an unusable stored object is a fact about the ob
 const NOT_FOUND_IS_STALE: &str = "a NotFound for an object the store holds is a stale or negative \
                                   read, the store-staleness draw (issue #127, item F); for one it \
                                   does not hold, the read follows a delete or a loss drawn elsewhere";
+const TAKEN_IS_WORLD: &str = "a taken key is a fact about the store: a create-only upload is \
+                              answered from what the key holds, an earlier ambiguous commit or \
+                              another writer, each drawn elsewhere";
 const NOT_FOUND_NEVER: &str = "neither store reports NotFound here: a listing of nothing is empty, a delete of nothing succeeds";
 
 /// The cell of `op` and `class` on `target`: the staging store against `store-fs`, the replica
@@ -531,6 +538,12 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
         StoreClass::NotFound => match op {
             StoreOp::Read => Cell::Impossible(NOT_FOUND_IS_STALE),
             StoreOp::List | StoreOp::Upload | StoreOp::Delete => Cell::Impossible(NOT_FOUND_NEVER),
+        },
+        StoreClass::AlreadyExists => match op {
+            StoreOp::Upload => Cell::Impossible(TAKEN_IS_WORLD),
+            StoreOp::List | StoreOp::Read | StoreOp::Delete => {
+                Cell::Impossible("only a create-only upload asks whether a key is taken")
+            }
         },
         StoreClass::ScratchExhausted => match (target, op) {
             (Target::Staging, StoreOp::Upload) => Cell::Drawn,
@@ -601,8 +614,11 @@ fn store_error(
             op,
             status: pick(entropy, &[400, 405, 411, 501], 400),
         },
-        StoreClass::NotFound | StoreClass::ScratchExhausted | StoreClass::Corrupt => {
-            // NotFound and Corrupt are never drawn. A scratch exhaustion names a key the
+        StoreClass::NotFound
+        | StoreClass::AlreadyExists
+        | StoreClass::ScratchExhausted
+        | StoreClass::Corrupt => {
+            // NotFound, AlreadyExists and Corrupt are never drawn. A scratch exhaustion names a key the
             // engine only reports, never acts on.
             placeholder_error(op, class)
         }
@@ -627,6 +643,7 @@ fn placeholder_error(op: StoreOp, class: StoreClass) -> StoreError {
         | StoreClass::Throttled
         | StoreClass::Denied(_)
         | StoreClass::NotFound
+        | StoreClass::AlreadyExists
         | StoreClass::Refused => transient,
     }
 }
@@ -699,6 +716,7 @@ pub const fn refused_before_acting(err: &StoreError) -> bool {
         StoreClass::Transient
         | StoreClass::Throttled
         | StoreClass::NotFound
+        | StoreClass::AlreadyExists
         | StoreClass::Corrupt => false,
     }
 }
@@ -716,6 +734,7 @@ pub const fn store_stop(target: Target, err: &StoreError) -> Option<StopCause> {
             StoreClass::Transient
             | StoreClass::Throttled
             | StoreClass::NotFound
+            | StoreClass::AlreadyExists
             | StoreClass::ScratchExhausted,
         )
         | (Target::Staging, _) => None,

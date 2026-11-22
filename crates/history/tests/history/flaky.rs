@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use lsr_core::{
     CreatedAt, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
-    StoreOp, Upload,
+    StoreOp, Upload, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 use tempfile::TempDir;
@@ -85,8 +85,9 @@ impl<S: ObjectStore> ObjectStore for Flaky<S> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        let inner = self.inner.begin_upload(key, created_at).await?;
+        let inner = self.inner.begin_upload(key, created_at, mode).await?;
         Ok(FlakyUpload {
             inner,
             failing: Arc::clone(&self.failing),

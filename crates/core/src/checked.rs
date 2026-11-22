@@ -18,7 +18,7 @@ use std::future::Future;
 use lsr_ltx::Timestamp;
 
 use crate::layout::{FileInfo, FileKey};
-use crate::store::{CorruptCause, ObjectStore, StoreError, Upload};
+use crate::store::{CorruptCause, ObjectStore, StoreError, Upload, WriteMode};
 
 /// An upload into `store` whose commit is checked against the bytes written.
 #[derive(Debug)]
@@ -30,7 +30,8 @@ pub(crate) struct Checked<'s, S: ObjectStore> {
 }
 
 impl<'s, S: ObjectStore> Checked<'s, S> {
-    /// Opens an upload of `key` in `store`.
+    /// Opens an upload of `key` in `store`, which `mode` says may or may not
+    /// replace an object already under the key.
     ///
     /// # Errors
     /// What the store's `begin_upload` returned.
@@ -38,8 +39,9 @@ impl<'s, S: ObjectStore> Checked<'s, S> {
         store: &'s S,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self, StoreError> {
-        let upload = store.begin_upload(key, created_at).await?;
+        let upload = store.begin_upload(key, created_at, mode).await?;
         Ok(Self {
             store,
             key: *key,

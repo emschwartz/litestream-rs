@@ -31,6 +31,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     AsOfPlanner, BatchKind, CreatedAt, DatabaseSink, FakeWal, FileInfo, FileKey, Inventory,
@@ -273,6 +274,7 @@ impl ObjectStore for Spool {
         &self,
         key: &FileKey,
         _created_at: Timestamp,
+        _mode: WriteMode,
     ) -> Result<NoUpload, StoreError> {
         Err(StoreError::NotFound { key: *key })
     }
@@ -486,6 +488,7 @@ impl ObjectStore for Void {
         &self,
         key: &FileKey,
         _created_at: Timestamp,
+        _mode: WriteMode,
     ) -> Result<VoidUpload, StoreError> {
         Ok(VoidUpload {
             key: *key,

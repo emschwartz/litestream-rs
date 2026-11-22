@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Entropy, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit, ReadLen,
-    StoreError, Upload,
+    StoreError, Upload, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 use lsr_store_fs::{FsStore, FsUpload};
@@ -262,15 +262,16 @@ impl ObjectStore for StagingRaw {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<StagingUpload, StoreError> {
         match self {
             Self::Mem(s) => s
-                .begin_upload(key, created_at)
+                .begin_upload(key, created_at, mode)
                 .await
                 .map(StagingUpload::Mem),
             Self::Fs(s) => s
                 .store
-                .begin_upload(key, created_at)
+                .begin_upload(key, created_at, mode)
                 .await
                 .map(StagingUpload::Fs),
         }

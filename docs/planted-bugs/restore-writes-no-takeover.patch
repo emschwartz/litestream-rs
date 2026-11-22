@@ -1,0 +1,14 @@
+diff --git a/crates/replica/src/restore.rs b/crates/replica/src/restore.rs
+index f37eaa8..675502f 100644
+--- a/crates/replica/src/restore.rs
++++ b/crates/replica/src/restore.rs
+@@ -66,8 +66,7 @@ pub fn restore_with(
+         options,
+         sink,
+     ))?;
+-    write_takeover(&meta, TakeoverRecord::through(restored.reached()))
+-        .map_err(|err| RestoreError::TakeoverRecord { kind: err.kind() })?;
++    let _ = (meta, TakeoverRecord::through(restored.reached()));
+     Ok(restored)
+ }
+ 

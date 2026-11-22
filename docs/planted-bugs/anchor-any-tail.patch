@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/recover.rs b/crates/core/src/recover.rs
-index f833e36..2066fba 100644
+index f992b8e..0477488 100644
 --- a/crates/core/src/recover.rs
 +++ b/crates/core/src/recover.rs
-@@ -249,7 +249,7 @@ impl NewestStagedFile {
+@@ -240,7 +240,7 @@ impl NewestStagedFile {
                      | LastPageCheck::NoFrame(_)
                      | LastPageCheck::Rewritten => false,
                  };
@@ -11,7 +11,7 @@ index f833e36..2066fba 100644
                      LastPageCheck::Rewritten
                  } else {
                      checked
-@@ -426,9 +426,7 @@ fn match_last_page<R: Read + Seek>(
+@@ -452,9 +452,7 @@ fn match_last_page<R: Read + Seek>(
  ) -> Result<LastPageCheck, Fault> {
      let last_page = match (check, pages.last) {
          (FrameCheck::Frame(frame), _) => match pages.wanted {
@@ -20,5 +20,5 @@ index f833e36..2066fba 100644
 -            Some(_) => LastPage::of_frame(&frame),
 +            None | Some(_) => LastPage::of_frame(&frame),
          },
-         (FrameCheck::Miss(Miss::NotACommit), Some(last)) if end.frame_index() == 0 => last,
-         (FrameCheck::Miss(miss), _) => return Ok(LastPageCheck::NoFrame(miss)),
+         // At the WAL's start there is no frame before: the newest staged file's last page
+         // stands, and `resume` accepts the start. Elsewhere `resume` fails as `frame_before`

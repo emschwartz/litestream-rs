@@ -254,7 +254,10 @@ fn counts_carry_across_a_replaced_engine() {
         ..AppCheckpoints::NONE
     };
     let both = first.then(later);
-    assert_eq!((both.ran(), both.stalled, both.last), (3, 1, later.last));
+    assert_eq!(
+        (both.ran(), both.stalled, both.total(), both.last),
+        (3, 1, 4, later.last)
+    );
 }
 
 /// The read lock's read mark in the model: SQLite's read mark 0, or a mark at a frame.
