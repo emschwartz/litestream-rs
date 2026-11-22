@@ -1100,13 +1100,13 @@ impl<B: Backend> Rig<B> {
                 };
                 model.commit(&tx.pages, tx.db_size, app, at);
             }
-            model.on_power_loss(salts.unwrap_or(Salts { salt1: 0, salt2: 0 }), frames);
+            model.on_power_loss(salts.unwrap_or(Salts { salt1: 0, salt2: 0 }), frames, at);
         }
         self.adopt_recovered(&left.0, &left.1, salts, frames)?;
         self.mirror.seen = salts.map(|salts| (salts, frames));
-        // The acknowledgements start again, and so does what settling waits for: a boot that
-        // continues (the WAL kept everything staged) has nothing new to upload.
-        self.acked.note_rewound();
+        // What settling waits for starts again: a boot that continues (the WAL kept everything
+        // staged) has nothing new to upload. The acknowledgements stand: a power loss does not
+        // touch the replica, so `Latest` may not fall below what the engine acknowledged.
         self.staged.clear();
         self.wal_syncs = self.vfs.syncs(FileKind::Wal);
         self.restart()

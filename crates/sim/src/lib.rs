@@ -19,6 +19,7 @@
 //! [`World::run_tick`].
 
 pub mod budget;
+pub mod clock;
 pub mod contract;
 pub mod crash_law;
 pub mod exec;
@@ -39,6 +40,7 @@ pub mod store;
 mod testkit;
 pub mod world;
 
+pub use clock::{ClockLaw, SimClock};
 pub use exec::{Polls, RunEnd, count_polls, run_until};
 pub use generate::{
     AfterRestart, EnvFault, Generator, Hold, Op, Target, Weights, frozen_history, history,
@@ -51,8 +53,8 @@ pub use reach::Reach;
 pub use run::{Failure, Judges, Opts, RunReport, run, run_with, shrink};
 pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
 pub use sqlite::{
-    AppCommit, AutoTally, CheckpointNumbers, CrashKind, CreatedAt, InTickCommit, OtherProcessMode,
-    ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, SimWal,
+    AppCommit, AutoTally, CheckpointNumbers, CrashKind, CreatedAt, InTickCommit, InTickSite,
+    OtherProcessMode, ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, SimWal,
 };
 pub use store::{
     FaultHandle, FaultShape, Faults, HeldFault, HighWater, Lost, Recorder, RecorderCounts,

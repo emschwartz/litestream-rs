@@ -81,7 +81,9 @@ jobs:
       - run: just commit-check origin/${{ github.base_ref }}
 
   # The S3 store against a real server: MinIO in Docker, with the throwaway local credentials
-  # already in scripts/minio.sh. Nothing else is configured or reachable.
+  # already in scripts/minio.sh, and Toxiproxy in front of it for the network-fault tests (built
+  # from source at a pinned version by scripts/toxiproxy.sh, hence Go). Nothing else is
+  # configured or reachable.
   test-s3:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -91,6 +93,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,just
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
       - run: just test-s3
 
   # The pinned Go versions: committed fixtures plus the live tests. The other releases and

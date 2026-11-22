@@ -20,14 +20,14 @@ use tempfile::TempDir;
 
 use crate::real::{Rng, Scratch, judge};
 
-const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
-const PATIENCE: Duration = Duration::from_secs(600);
-const POLL: Duration = Duration::from_secs(1);
+pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
+pub const PATIENCE: Duration = Duration::from_secs(600);
+pub const POLL: Duration = Duration::from_secs(1);
 /// Health looks before a wait gives up: the replicator wakes a waiter on every change and at
 /// least every `CALLER_SLICE`, so this is about a minute of nothing changing.
 const LOOKS: u32 = 1_200;
 
-fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
+pub fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
     let looks = std::cell::Cell::new(0_u32);
     let seen = replicator.wait_until(PATIENCE, |health| {
         looks.set(looks.get().saturating_add(1));
@@ -39,22 +39,29 @@ fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
     }
 }
 
-struct Run<'a, S> {
+/// One driven run: the engine writes through `store`, restores read `restore` (the same store,
+/// or the one behind a faulty network, so restores are judged while the fault holds).
+pub struct Run<'a, S, R = S> {
     store: &'a Arc<S>,
+    restore: &'a R,
     db: &'a Path,
     app: Connection,
     runtime: Runtime,
-    clock: lsr_replica::FakeClockHandle,
+    pub clock: lsr_replica::FakeClockHandle,
     replicator: Option<Replicator>,
     log: Log,
-    judge: Judge,
+    pub judge: Judge,
     tip: chain::Chain,
-    rng: Rng,
+    pub rng: Rng,
     scratch: Scratch,
 }
 
-impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
-    fn new(store: &'a Arc<S>, dir: &Path, db: &'a Path, seed: u64) -> Self {
+impl<'a, S, R> Run<'a, S, R>
+where
+    S: ObjectStore<Upload: 'static> + Send + Sync + 'static,
+    R: ObjectStore<Upload: 'static>,
+{
+    pub fn new(store: &'a Arc<S>, restore: &'a R, dir: &Path, db: &'a Path, seed: u64) -> Self {
         let app = Connection::open(db).unwrap();
         app.busy_timeout(Duration::from_secs(5)).unwrap();
         app.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
@@ -65,6 +72,7 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         let tip = chain::Chain::new();
         Self {
             store,
+            restore,
             db,
             app,
             runtime,
@@ -78,7 +86,7 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         }
     }
 
-    fn start(&mut self) {
+    pub fn start(&mut self) {
         let store: Arc<dyn DynStore> = Arc::<S>::clone(self.store);
         let replicator =
             Replicator::start_with(self.db, store, Config::default(), self.runtime.clone())
@@ -87,11 +95,11 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         self.replicator = Some(replicator);
     }
 
-    fn replicator(&self) -> &Replicator {
+    pub fn replicator(&self) -> &Replicator {
         self.replicator.as_ref().unwrap()
     }
 
-    fn commit(&mut self) {
+    pub fn commit(&mut self) {
         let payload = self.rng.payload();
         let next = self.tip.next(&payload);
         let begun = self.clock.now().unix_millis();
@@ -103,7 +111,7 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
 
     /// The clock moves one poll and the replicator is left to catch up: whatever it has synced
     /// is on the replica. The drained stops are where lag is judged, so this asks no more.
-    fn poll(&mut self) {
+    pub fn poll(&mut self) {
         self.clock.advance(POLL);
         wait(self.replicator(), |h| {
             h.synced.map(|(txid, _)| txid) == h.replicated.map(|(txid, _)| txid)
@@ -112,7 +120,7 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
     }
 
     /// Stops with a drain; everything committed reached the replica, so `Latest` is the head.
-    fn stop(&mut self) {
+    pub fn stop(&mut self) {
         let replicator = self.replicator.take().unwrap();
         let stop = replicator.stop(PATIENCE);
         wait(&replicator, |h| {
@@ -123,12 +131,11 @@ impl<'a, S: ObjectStore<Upload: 'static> + Send + Sync + 'static> Run<'a, S> {
         self.judged(true, Some(0));
     }
 
-    fn judged(&mut self, sweep: bool, lag: Option<i64>) {
+    pub fn judged(&mut self, sweep: bool, lag: Option<i64>) {
         let now = self.clock.now();
         let instants = self.rng.instants(2, START.unix_millis(), now);
-        let store: &S = self.store;
         judge(
-            store,
+            self.restore,
             &self.scratch,
             &self.log,
             &mut self.judge,
@@ -163,7 +170,7 @@ fn run<S: ObjectStore<Upload: 'static> + Send + Sync + 'static>(
 ) -> Counts {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("app.db");
-    let mut run = Run::new(store, dir.path(), &db, seed);
+    let mut run = Run::new(store, store.as_ref(), dir.path(), &db, seed);
     run.start();
     run.steps(steps);
     run.commit();

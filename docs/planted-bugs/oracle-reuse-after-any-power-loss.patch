@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/oracle.rs b/crates/sim/src/oracle.rs
+index 62fb34d..c707ca0 100644
+--- a/crates/sim/src/oracle.rs
++++ b/crates/sim/src/oracle.rs
+@@ -488,7 +488,7 @@ fn covers(
+ /// `first` to a power loss before then, so nothing still holds what the id first named. Any
+ /// other reuse is the engine's.
+ fn reusable(model: &Model, ground: Ground<'_>, txid: Txid, first: CommitId, at: usize) -> bool {
+-    ground.lost.contains(&txid) || model.cut_by(first, at)
++    ground.lost.contains(&txid) || model.cut_by(first, at) || model.rewound()
+ }
+ 
+ /// The commit a file compacted through `txid` at recorder position `at`

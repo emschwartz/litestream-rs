@@ -1,14 +1,14 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index a36a38e..0e17fe9 100644
+index eed7ed9..e309e67 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -751,7 +751,8 @@ impl Actor {
-             Recovered::Snapshot { cause, .. } => Err(cause),
-             Recovered::Stop(cause) => return self.verdict(Task::Sync, cause, now),
+@@ -897,7 +897,8 @@ impl Actor {
          };
--        let cause = boot_cause(lost, refused, from.err());
+         // A report only, and one a boot that fails later reads again.
+         self.kept.journal = journal_signal(journal, newest_staged.as_ref(), &upload);
+-        let cause = boot_cause(dropped, refused, from.err());
 +        let cause =
-+            boot_cause(lost, refused, from.err()).or(Some(SnapshotCause::LastPageMismatch));
++            boot_cause(dropped, refused, from.err()).or(Some(SnapshotCause::LastPageMismatch));
          let pending = pending_at_boot(self.kept.asked(), cause);
          let course = match (from, pending) {
              (Ok(position), snapshot) => Course::At {

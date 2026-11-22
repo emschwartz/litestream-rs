@@ -1,7 +1,7 @@
 # The engine journal: storage contract
 
 Status: the storage protocol is specified, machine-checked, and implemented. The engine reads the
-journal at boot and reports what it found (`Actor::journal`, `docs/BEHAVIOR.md` BOOT-24 to BOOT-28),
+journal at boot and reports what it found (`Actor::journal`, `docs/BEHAVIOR.md` BOOT-25 to BOOT-29),
 but does not write it or decide on it yet. The record and its codec are `lsr-journal`; the writer is
 `lsr_core::JournalWriter`, run step for step against the model by
 `crates/core/tests/core/journal_model.rs`. This document is the contract both are built against.
