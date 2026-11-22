@@ -9,8 +9,8 @@
 //!
 //! The scan of the whole file under [`ScanLimit::FirstInvalidFrame`] is the
 //! reference every other check is held to: a truncated copy, a committed end,
-//! a resumed position and a flipped page byte must each give an exact,
-//! predictable part of it.
+//! a resumed position, whether a commit follows a boundary, and a flipped page
+//! byte must each give an exact, predictable part of it.
 
 mod probe;
 
@@ -473,6 +473,21 @@ fn check_resume(wal: &Wal, reader: &mut WalReader<Probe>, whole: &Scan, params: 
     }
 }
 
+/// A whole committed transaction chains on from a boundary exactly when the whole scan found
+/// one after it: every boundary but the last has one, and the last is where the scan stopped
+/// for want of a commit, so none follows it whatever the tail holds.
+fn check_commit_follows(wal: &Wal, reader: &mut WalReader<Probe>) {
+    let last = wal.bounds.len().saturating_sub(1);
+    for (at, bound) in wal.bounds.iter().enumerate() {
+        let follows = reader.commit_follows(bound);
+        if follows.as_ref().ok() != Some(&(at < last)) {
+            violation(&format!(
+                "commit_follows at boundary {at} of {last} gave {follows:?}"
+            ));
+        }
+    }
+}
+
 /// Scanning on from boundary `at` gives the whole scan's transactions from there and its end.
 fn check_rest(
     wal: &Wal,
@@ -708,6 +723,7 @@ pub fn wal(data: &[u8]) {
     check_truncation(&wal, &whole, &params);
     check_committed(&wal, &mut reader, &whole, &params);
     check_resume(&wal, &mut reader, &whole, &params);
+    check_commit_follows(&wal, &mut reader);
     check_page_map(&wal, &whole);
     check_read_page(&wal, &mut reader, &whole, &params);
 }
