@@ -23,7 +23,7 @@ use lsr_ltx::PageSize;
 use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, WalOp};
 use crate::run::{Opts, RunReport, Seen, run_ops};
 use crate::seed::Seed;
-use crate::sqlite::OtherProcessMode;
+use crate::sqlite::{CrashKind, OtherProcessMode};
 
 /// A [`SnapshotCause`] without its payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -471,6 +471,162 @@ pub fn newest_staged_file_lost() -> Scenario {
     );
     s.check = Some(no_refusal);
     s
+}
+
+/// One deploy on a host whose volume outlives the machine (fly.io replaces the
+/// VM on every deploy; the database and its meta directory stay): the app
+/// commits and the replicator ships it, then `stop` ends the process.
+fn deploy(stop: Vec<Op>) -> Vec<Op> {
+    let mut ops = vec![commit(2, false)];
+    ops.extend(ticks(3));
+    ops.extend([commit(1, false), commit(2, false)]);
+    ops.extend(stop);
+    ops
+}
+
+/// Three deploys that each end with SIGTERM: the final sync completes and the
+/// process exits. The app's connections are set up as replication asks
+/// (`PERSIST_WAL`), so SQLite's last close keeps the WAL. Each new process
+/// continues where the last stopped: no snapshot after the first, no stop.
+#[must_use]
+pub fn deploy_cycle_after_sigterm() -> Scenario {
+    let mut s = build(
+        "deploy_cycle_after_sigterm",
+        vec![
+            deploy(vec![Op::Shutdown]),
+            deploy(vec![Op::Shutdown]),
+            deploy(vec![Op::Shutdown]),
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Event(EventMatch::Booted(None)), Expect::Oracle],
+    );
+    s.check = Some(deploys_continue);
+    s
+}
+
+/// Three deploys that each end in SIGKILL during the final sync (fly.io's kill
+/// timeout is below the shutdown sync's): the process dies at a point of the
+/// sync or upload it was in. The next process continues: no snapshot, no stop.
+#[must_use]
+pub fn deploy_cycle_after_sigkill() -> Scenario {
+    let kill = || vec![Op::Crash(CrashKind::Process)];
+    let mut s = build(
+        "deploy_cycle_after_sigkill",
+        vec![
+            deploy(kill()),
+            deploy(kill()),
+            deploy(kill()),
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Event(EventMatch::Booted(None)), Expect::Oracle],
+    );
+    s.check = Some(deploys_continue);
+    s
+}
+
+/// SIGKILL just after the engine's own PASSIVE checkpoint let the WAL restart,
+/// before the new generation's first file was staged; a file staged in the
+/// old generation was still pending (its upload's answer lost). The proof that
+/// the restart followed the engine's own checkpoint lives in memory, so the
+/// next process cannot tell this WAL from one the app restarted after frames
+/// the engine never saw: it drops the pending file and snapshots
+/// (`StagedUnverified`, BOOT-11 in `docs/BEHAVIOR.md`). It never stops. Closing
+/// this needs that proof to outlive the process (the engine journal).
+#[must_use]
+pub fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() -> Scenario {
+    let lost_answer = Op::StoreFault {
+        target: crate::generate::Target::Remote,
+        op: lsr_core::StoreOp::Upload,
+        ahead: 0,
+        shape: crate::store::FaultShape::ErrorAfterPublish(lsr_core::StoreError::Transient {
+            op: lsr_core::StoreOp::Upload,
+            kind: std::io::ErrorKind::ConnectionReset,
+        }),
+    };
+    let mut s = build(
+        "deploy_cycle_sigkill_after_a_wal_restart_snapshots",
+        vec![
+            deploy(vec![Op::Shutdown]),
+            vec![commit(2, false), Op::Tick, lost_answer, Op::Tick],
+            vec![Op::Crash(CrashKind::Process)],
+            ticks(SETTLE),
+            vec![commit(1, false)],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Booted(Some(CauseKind::StagedUnverified))),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(no_refusal);
+    s
+}
+
+/// A deploy whose app runs at SQLite's defaults (no `PERSIST_WAL`): its last
+/// close checkpoints the WAL into the database and deletes it. The next
+/// process finds no WAL and snapshots (`WalMissing`, BOOT-7 in
+/// `docs/BEHAVIOR.md`). It never stops: staging still holds the replica's
+/// newest file.
+#[must_use]
+pub fn deploy_cycle_with_the_wal_deleted_at_close() -> Scenario {
+    let closed = vec![
+        Op::Shutdown,
+        Op::OurReader { begin: false },
+        Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+        Op::EnvFault(EnvFault::DeleteWal),
+    ];
+    let mut s = build(
+        "deploy_cycle_with_the_wal_deleted_at_close",
+        vec![
+            deploy(closed),
+            vec![Op::Tick, commit(1, false)],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Booted(Some(CauseKind::WalMissing))),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(no_refusal);
+    s
+}
+
+/// Every boot after the first continued, nothing resnapshotted, and nothing
+/// stopped but the drains the deploys asked for.
+fn deploys_continue(report: &RunReport) -> Result<(), String> {
+    let mut boots = 0_u32;
+    for seen in &report.seen {
+        match seen {
+            Seen::Event(lsr_core::Event::Booted { cause }) => {
+                boots = boots.saturating_add(1);
+                if boots > 1
+                    && let Some(cause) = cause
+                {
+                    return Err(format!("boot {boots} snapshotted: {cause:?}"));
+                }
+            }
+            Seen::Event(lsr_core::Event::Resnapshot(cause)) => {
+                return Err(format!("a running engine resnapshotted: {cause:?}"));
+            }
+            Seen::Stop(cause) if *cause != StopCause::Shutdown => {
+                return Err(format!("stopped: {cause:?}"));
+            }
+            Seen::Event(_)
+            | Seen::Stop(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle
+            | Seen::Tick { .. } => {}
+        }
+    }
+    if boots < 2 {
+        return Err(format!("only {boots} boots"));
+    }
+    Ok(())
 }
 
 /// No boot refused replica files: every one continued or snapshotted.

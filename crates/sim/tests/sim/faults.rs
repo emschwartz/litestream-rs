@@ -271,6 +271,26 @@ fn vm_restore_stops_until_a_take_over() {
 }
 
 #[test]
+fn deploy_cycle_after_sigterm() {
+    run(scenario::deploy_cycle_after_sigterm);
+}
+
+#[test]
+fn deploy_cycle_after_sigkill() {
+    run(scenario::deploy_cycle_after_sigkill);
+}
+
+#[test]
+fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() {
+    run(scenario::deploy_cycle_sigkill_after_a_wal_restart_snapshots);
+}
+
+#[test]
+fn deploy_cycle_with_the_wal_deleted_at_close() {
+    run(scenario::deploy_cycle_with_the_wal_deleted_at_close);
+}
+
+#[test]
 fn bucket_rolled_back() {
     run(scenario::bucket_rolled_back);
 }
