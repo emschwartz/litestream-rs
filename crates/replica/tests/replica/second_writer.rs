@@ -215,8 +215,6 @@ fn a_stop_for_another_writer_survives_a_restart() {
     });
     clock.advance(Duration::from_secs(600));
     wait(&first, stopped_for_other_writer);
-    let record = meta_of(&site).join("lsr-stop");
-    assert!(record.exists(), "the stop is recorded");
     assert_eq!(stopped(&first), Stopped::Stopped(StopCause::OtherWriter));
 
     site.commit(2);
@@ -230,17 +228,12 @@ fn a_stop_for_another_writer_survives_a_restart() {
         "nothing went above it"
     );
     assert_eq!(stopped(&second), Stopped::Stopped(StopCause::OtherWriter));
-    assert!(record.exists());
 
     block_on(FsStore::new(&site.replica).delete(&[foreign])).unwrap();
     let (runtime, clock) = fake();
     let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     clock.advance(Duration::from_secs(1));
     wait(&third, caught_up);
-    assert!(
-        !record.exists(),
-        "the record went with the other writer's file"
-    );
     assert!(matches!(stopped(&third), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
@@ -337,4 +330,41 @@ fn a_refused_boot_names_the_tip_and_a_take_over_clears_it() {
     assert_eq!(health.phase, Phase::Running, "{health:?}");
     assert!(newest_l0(&site) > Some(foreign.range().max()));
     assert!(matches!(stopped(&third), Stopped::Drained { .. }));
+}
+
+/// A takeover record that does not decode is reported and ignored, as if there were none: a
+/// boot the live WAL vouches for continues instead of refusing the start.
+#[test]
+fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
+    let site = Site::new();
+    site.commit(2);
+    let (runtime, _clock) = fake();
+    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    wait(&first, caught_up);
+    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
+    std::fs::write(
+        meta_of(&site).join("lsr-takeover"),
+        b"lsr-takeover 1 garbage\n",
+    )
+    .unwrap();
+    let (sink, events) = lsr_replica::ChannelSink::new(std::num::NonZeroUsize::new(64).unwrap());
+    let (runtime, clock) = fake();
+    let second =
+        Replicator::start_with_events(&site.db, site.store(), config(), runtime, Box::new(sink))
+            .unwrap();
+    site.commit(1);
+    clock.advance(Duration::from_secs(1));
+    let health = wait(&second, |h| {
+        caught_up(h) || matches!(h.phase, Phase::Stopped(_))
+    });
+    assert_eq!(health.phase, Phase::Running, "{health:?}");
+    let mut warned = false;
+    while let Some(event) = events.try_recv() {
+        warned |= matches!(
+            event,
+            lsr_replica::Event::TakeoverRecordUnusable(lsr_replica::TakeoverUnusable::Invalid(_))
+        );
+    }
+    assert!(warned, "the unusable record is reported");
+    assert!(matches!(stopped(&second), Stopped::Drained { .. }));
 }

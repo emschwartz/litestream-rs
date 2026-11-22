@@ -872,6 +872,23 @@ impl World {
         }
     }
 
+    /// Whether staging and the replica both hold `key` with different bytes:
+    /// a staged copy edited or forged under a key the replica took.
+    ///
+    /// # Errors
+    /// Either store's error other than a missing key.
+    pub fn staged_differs_from_remote(&self, key: FileKey) -> Result<bool, StoreError> {
+        let read = |store: &MemStore| match read_all(store, &key) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StoreError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
+        };
+        Ok(match (read(&self.staging_raw)?, read(&self.remote_raw)?) {
+            (Some(staged), Some(remote)) => staged != remote,
+            (Some(_) | None, None) | (None, Some(_)) => false,
+        })
+    }
+
     /// Deletes replica `key` if it still holds exactly `bytes`; whether it did.
     ///
     /// # Errors

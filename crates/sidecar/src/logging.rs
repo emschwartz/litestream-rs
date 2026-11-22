@@ -306,10 +306,10 @@ impl EventSink for DbEvents {
                 self.log.log(LogLevel::Error, &msg, &[db, through]);
                 return;
             }
-            Event::StopNotRecorded { kind } => (
-                LogLevel::Error,
-                "the stop for another writer could not be recorded; a restart may not keep it",
-                vec![("kind", debug(kind))],
+            Event::TakeoverRecordUnusable(unusable) => (
+                LogLevel::Warn,
+                "the takeover record in the meta directory (lsr-takeover) cannot be used and is ignored; the boot builds only on what the WAL vouches for",
+                vec![("problem", debug(unusable))],
             ),
             Event::TakeoverNotRecorded { kind } => (
                 LogLevel::Error,

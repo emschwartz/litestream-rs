@@ -28,7 +28,6 @@ use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
-use crate::stop_record::StopRecord;
 use crate::takeover::TakeoverRecord;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
@@ -121,11 +120,6 @@ pub(super) struct Kept {
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
-    /// A stop for another writer that must outlive this process
-    /// (`crate::stop_record`): set by that stop, or handed in by the driver
-    /// from the last process; a boot clears it once the replica no longer
-    /// holds a transaction past the record's.
-    pub(super) stop_record: Option<StopRecord>,
     /// The takeover the driver handed in (`crate::takeover`): an operator's,
     /// a restore's, or one this engine asked for before dropping its own
     /// staged files.
@@ -153,7 +147,6 @@ impl Kept {
             suspect_staged: None,
             snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
-            stop_record: None,
             takeover: None,
             wanted_takeover: None,
             refused_through: None,
@@ -178,7 +171,6 @@ impl Kept {
             suspect_staged,
             snapshots,
             unproven,
-            stop_record,
             takeover,
             wanted_takeover: _,
             refused_through,
@@ -196,7 +188,6 @@ impl Kept {
             suspect_staged: *suspect_staged,
             snapshots: *snapshots,
             unproven: *unproven,
-            stop_record: *stop_record,
             takeover: *takeover,
             // A rebuilt engine boots again and asks again for what it needs.
             wanted_takeover: None,

@@ -74,7 +74,7 @@ fn staging_behind_a_replica_the_wal_vouches_for_continues() {
 }
 
 /// A foreign writer put a file above everything while the engine was down
-/// (it never saw it, so it has no stop record): nothing vouches for it, so
+/// (it never saw it): nothing vouches for it, so
 /// the boot stops and names the replica's newest transaction, and writes
 /// nothing.
 #[test]
@@ -91,11 +91,6 @@ fn a_foreign_file_put_while_the_engine_was_down_stops_the_boot() {
     );
     assert_eq!(actor.refused_through(), Some(tx(4)));
     assert_eq!(Rig::files(&rig.remote, Level::ZERO).len(), before);
-    assert_eq!(
-        actor.stop_record(),
-        None,
-        "a boot's refusal records nothing"
-    );
 }
 
 /// A VM restored to an older image: database, WAL and staging all put back,
@@ -174,26 +169,6 @@ fn continuing_past_another_writer_skips_the_gate() {
         ),
         "{boot:?}"
     );
-}
-
-/// A takeover through the replica's newest overrides a stop record: the
-/// operator chose to replicate over those files, and the record goes.
-#[test]
-fn a_takeover_covering_the_replica_clears_a_stop_record() {
-    let mut rig = three();
-    super::second_writer::put_foreign(&rig, 4);
-    let mut actor = go_like_actor();
-    actor.remember_stop(crate::StopRecord::other_writer(Some(tx(3))));
-    actor.remember_takeover(TakeoverRecord::through(tx(4)));
-    let boot = rig.tick(&mut actor, T0 + 2);
-    assert!(
-        matches!(
-            booted(&boot),
-            Some(Some(SnapshotCause::BehindRemote { .. }))
-        ),
-        "{boot:?}"
-    );
-    assert_eq!(actor.stop_record(), None);
 }
 
 /// The engine drops its own staged files the replica holds (the newest

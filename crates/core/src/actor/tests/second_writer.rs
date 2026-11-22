@@ -1,11 +1,10 @@
-//! Another writer on the replica: the stop it causes is kept for the next
-//! process (`crate::stop_record`), and a regression that only maintenance's
-//! listing can see is caught there.
+//! Another writer on the replica: the stop it causes holds across a restart
+//! because the next boot refuses its files again (`crate::takeover`), and a
+//! regression that only maintenance's listing can see is caught there.
 
 use lsr_ltx::{Encoder, Header, HeaderFields};
 
 use super::*;
-use crate::StopRecord;
 
 fn go_like_actor() -> Actor {
     Actor::new(go_like())
@@ -57,30 +56,26 @@ fn newest_l0(rig: &Rig) -> Option<u64> {
 }
 
 /// Stops the caught-up engine for another writer whose file sits above
-/// everything it has; returns the record it leaves.
-fn stopped_by_other_writer(rig: &mut Rig) -> StopRecord {
+/// everything it has.
+fn stopped_by_other_writer(rig: &mut Rig) {
     let mut actor = go_like_actor();
     rig.settle(&mut actor, T0);
     let ours = actor.staged().max(actor.engine.upload.confirmed());
     put_foreign(rig, ours.unwrap().next().unwrap().get());
     let tick = actor.fault(Task::Upload, Fault::RemoteAheadOfLocal, ts(T0 + 10));
     assert_eq!(tick, Tick::Stopped(StopCause::OtherWriter));
-    let record = actor.stop_record().expect("the stop is recorded");
-    assert_eq!(record, StopRecord::other_writer(ours));
-    record
 }
 
 /// The defect: a restart took the other writer's file as `BehindRemote` and
-/// snapshotted above it. With the record handed back, the boot stops again
-/// and writes nothing, while the file stands.
+/// snapshotted above it. The boot now refuses replica files nothing vouches
+/// for, so it stops again and writes nothing while the file stands.
 #[test]
 fn a_restart_keeps_the_stop_for_another_writer() {
     let mut rig = Rig::new();
-    let record = stopped_by_other_writer(&mut rig);
+    stopped_by_other_writer(&mut rig);
     rig.commit(2);
     let before = newest_l0(&rig);
     let mut next = go_like_actor();
-    next.remember_stop(record);
     let seen = rig.follow(&mut next, T0 + 20, 20);
     assert_eq!(
         seen.last(),
@@ -94,28 +89,26 @@ fn a_restart_keeps_the_stop_for_another_writer() {
         "{seen:?}"
     );
     assert_eq!(newest_l0(&rig), before, "nothing was uploaded above it");
-    assert_eq!(next.stop_record(), Some(record));
+    assert_eq!(next.refused_through().map(Txid::get), before);
 }
 
-/// Once the operator removes the other writer's files the record goes and
-/// the boot replicates as before.
+/// Once the operator removes the other writer's files the boot replicates
+/// as before.
 #[test]
-fn the_stop_record_goes_once_the_other_writers_files_are_gone() {
+fn a_restart_replicates_once_the_other_writers_files_are_gone() {
     let mut rig = Rig::new();
-    let record = stopped_by_other_writer(&mut rig);
+    stopped_by_other_writer(&mut rig);
     let foreign = newest_l0(&rig).unwrap();
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(foreign).unwrap()));
     block_on(rig.remote.inner.delete(&[key])).unwrap();
     rig.commit(2);
     let mut next = go_like_actor();
-    next.remember_stop(record);
     let seen = rig.follow(&mut next, T0 + 20, 50);
     assert!(
         seen.iter()
             .any(|t| matches!(event(t), Some(Event::Booted { .. }))),
         "{seen:?}"
     );
-    assert_eq!(next.stop_record(), None);
     assert_eq!(
         newest_l0(&rig),
         Some(foreign),
@@ -123,50 +116,19 @@ fn the_stop_record_goes_once_the_other_writers_files_are_gone() {
     );
 }
 
-/// An operator who chose to continue past another writer gets that, record
-/// or not: the record is dropped unread.
+/// An operator who chose to continue past another writer gets that: the
+/// boot builds above its files, as Go does.
 #[test]
-fn continuing_past_another_writer_drops_the_stop_record() {
+fn continuing_past_another_writer_boots_above_its_files() {
     let mut rig = Rig::new();
-    let record = stopped_by_other_writer(&mut rig);
+    stopped_by_other_writer(&mut rig);
     let mut config = go_like();
     config.responses.other_writer = crate::OtherWriter::ContinueAndInterleaveHistories;
     let mut next = Actor::new(config);
-    next.remember_stop(record);
     let seen = rig.follow(&mut next, T0 + 20, 50);
     assert!(
         seen.iter()
             .any(|t| matches!(event(t), Some(Event::Booted { .. }))),
-        "{seen:?}"
-    );
-    assert_eq!(next.stop_record(), None);
-}
-
-/// A failed listing while the record is checked waits its backoff like any
-/// boot failure, and keeps the record.
-#[test]
-fn a_failed_listing_keeps_the_stop_record() {
-    let mut rig = Rig::new();
-    let record = stopped_by_other_writer(&mut rig);
-    rig.remote.inner.inject_failure(
-        StoreOp::List,
-        StoreError::Transient {
-            op: StoreOp::List,
-            kind: ErrorKind::TimedOut,
-        },
-    );
-    let mut next = go_like_actor();
-    next.remember_stop(record);
-    let tick = rig.tick(&mut next, T0 + 20);
-    assert!(
-        matches!(event(&tick), Some(Event::Retrying { .. })),
-        "{tick:?}"
-    );
-    assert_eq!(next.stop_record(), Some(record));
-    let seen = rig.follow(&mut next, T0 + 20, 20);
-    assert_eq!(
-        seen.last(),
-        Some(&Tick::Stopped(StopCause::OtherWriter)),
         "{seen:?}"
     );
 }
@@ -281,66 +243,18 @@ fn a_running_engine_stops_when_another_writer_took_its_next_id() {
         "{seen:?}"
     );
     assert_eq!(newest_l0(&rig), Some(next.get()));
-    assert_eq!(
-        actor.stop_record(),
-        Some(StopRecord::other_writer(next.prev()))
-    );
+    // The restart: staging holds this engine's own copy of `next`, the
+    // replica the other writer's. The boot sees the divergence under one key
+    // and refuses it, with nothing kept from the stop.
     let mut restarted = go_like_actor();
-    restarted.remember_stop(actor.stop_record().unwrap());
     let again = rig.follow(&mut restarted, T0 + 20, 20);
     assert_eq!(
         again.last(),
         Some(&Tick::Stopped(StopCause::OtherWriter)),
         "{again:?}"
     );
-}
-
-/// The same divergence after the staged file changed under the engine (a
-/// staging backup put back while it ran) says nothing about writers: the
-/// staged file goes and a snapshot follows, as before.
-/// A configuration that continues past another writer keeps no stop record when a running
-/// engine finds one at its next id, not even for the tick before it reboots: the record exists
-/// only to make a restart stop again.
-#[test]
-fn continuing_past_another_writer_at_the_next_id_records_no_stop() {
-    let mut rig = Rig::new();
-    let mut config = go_like();
-    config.responses.other_writer = crate::OtherWriter::ContinueAndInterleaveHistories;
-    let mut actor = Actor::new(config);
-    rig.settle(&mut actor, T0);
-    rig.commit(2);
-    rig.tick(&mut actor, T0 + 10);
-    let next = actor.staged().unwrap();
-    rig.remote
-        .inner
-        .inject_failure_after_publish(StoreError::Transient {
-            op: StoreOp::Upload,
-            kind: ErrorKind::TimedOut,
-        });
-    rig.tick(&mut actor, T0 + 10);
-    put_foreign(&rig, next.get());
-    // The tick that meets the other writer's file: the driver stores whatever record it
-    // leaves, before the engine reboots.
-    let mut at = T0 + 10;
-    let met = (0..50).find_map(|_| {
-        let tick = rig.tick(&mut actor, at);
-        if let Tick::Ran {
-            next: Next::At(next),
-            ..
-        } = &tick
-        {
-            at = at.max(next.unix_millis());
-        }
-        matches!(
-            event(&tick),
-            Some(Event::Degraded {
-                cause: PersistentCause::OtherWriter,
-                ..
-            })
-        )
-        .then(|| actor.stop_record())
-    });
-    assert_eq!(met, Some(None));
+    assert_eq!(restarted.refused_through(), Some(next));
+    assert_eq!(newest_l0(&rig), Some(next.get()), "nothing went over it");
 }
 
 #[test]
@@ -371,7 +285,6 @@ fn a_divergence_from_a_replaced_staged_file_is_not_another_writer() {
         !seen.contains(&Tick::Stopped(StopCause::OtherWriter)),
         "{seen:?}"
     );
-    assert_eq!(actor.stop_record(), None);
 }
 
 /// What a host published, by its `Uploaded(Put)` events.

@@ -106,7 +106,6 @@ use crate::recover::{
 use crate::regression_watch::RegressionWatch;
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
-use crate::stop_record::StopRecord;
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
@@ -411,13 +410,6 @@ impl Actor {
         }
     }
 
-    /// Hands the actor a stop for another writer that an earlier process
-    /// recorded (`crate::stop_record`), before its first tick. Its boot stops
-    /// again while the replica still holds a transaction past the record's.
-    pub fn remember_stop(&mut self, record: StopRecord) {
-        self.kept.stop_record = Some(record);
-    }
-
     /// Hands the actor the takeover record an operator or a restore left
     /// (`crate::takeover`), before its first tick, or the one it asked for
     /// ([`Self::takeover_wanted`]) once it is durable: a boot may then build
@@ -457,15 +449,6 @@ impl Actor {
     #[must_use]
     pub const fn refused_through(&self) -> Option<Txid> {
         self.kept.refused_through
-    }
-
-    /// The stop for another writer the driver must keep for the next
-    /// process, or `None` when there is none to keep (none was made, or a
-    /// boot found the other writer's files gone). The driver stores it, or
-    /// removes what it stored, whenever this changes.
-    #[must_use]
-    pub const fn stop_record(&self) -> Option<StopRecord> {
-        self.kept.stop_record
     }
 
     /// Whether the engine has booted: listed the replica and recovered its
@@ -904,27 +887,22 @@ impl Actor {
     }
 
     fn stop(&mut self, cause: StopCause) -> Tick {
-        // A stop for another writer must outlive the process. The record names
-        // what this engine has staged or confirmed, the evidence the stop was
-        // judged on; not the ids it acknowledged before a rollback took them,
-        // which another writer's file may now hold. A doubt then keeps the
-        // stop, and an operator clears it.
-        // A boot's refusal records nothing: every boot judges the replica
-        // again, and the record would outlive the files it was about.
-        if cause == StopCause::OtherWriter && self.booted() && self.kept.stop_record.is_none() {
-            let ours = self.staged().max(self.engine.upload.confirmed());
-            self.kept.stop_record = Some(StopRecord::other_writer(ours));
-        }
+        // A stop for another writer needs no record to outlive the process:
+        // the next boot refuses the other writer's files again, whether they
+        // stand above staging or under a key staging holds another copy of
+        // (`crate::takeover`).
         self.kept.stop = Stop::Stopped(cause);
         Tick::Stopped(cause)
     }
 
     /// The takeover a boot may build on (`crate::takeover`): `Off` when the
-    /// configuration continues past another writer, which checks nothing and
-    /// drops a stop record unread, so the boot takes the replica as it is.
-    fn boot_takeover(&mut self) -> Takeover {
-        if self.kept.cfg.responses.other_writer == OtherWriter::ContinueAndInterleaveHistories {
-            self.kept.stop_record = None;
+    /// configuration continues past another writer, which checks nothing, so
+    /// the boot takes the replica as it is.
+    const fn boot_takeover(&self) -> Takeover {
+        if matches!(
+            self.kept.cfg.responses.other_writer,
+            OtherWriter::ContinueAndInterleaveHistories
+        ) {
             return Takeover::Off;
         }
         Takeover::Vouch(self.kept.takeover)
@@ -943,6 +921,10 @@ impl Actor {
         match step {
             BootStep::Fault(fault) => self.fault(Task::Sync, fault, now),
             BootStep::Vouch(record) => self.want_takeover(Task::Sync, record, now),
+            BootStep::Refused(through) => {
+                self.kept.refused_through = Some(through);
+                self.verdict(Task::Sync, StopCause::OtherWriter, now)
+            }
         }
     }
 
@@ -992,15 +974,14 @@ impl Actor {
             return self.ran(Event::Idle, now);
         }
         let takeover = self.boot_takeover();
-        let (suspect, record) = (&mut self.kept.suspect_staged, &mut self.kept.stop_record);
-        let listed = boot_listing(env.staging, env.remote, suspect, record, takeover).await;
+        let suspect = &mut self.kept.suspect_staged;
+        let listed = boot_listing(env.staging, env.remote, suspect, takeover).await;
         let Listed {
             upload,
             dropped,
             gate,
         } = match listed {
-            Ok(Some(listed)) => listed,
-            Ok(None) => return self.verdict(Task::Sync, StopCause::OtherWriter, now),
+            Ok(listed) => listed,
             Err(step) => return self.boot_step(step, now),
         };
         let Judged {
@@ -1708,14 +1689,7 @@ impl Actor {
             None => Ok(false),
         };
         match ours {
-            Ok(true) => {
-                let stops = self.kept.cfg.responses.other_writer == OtherWriter::Stop;
-                if stops && self.kept.stop_record.is_none() {
-                    let below = from.prev().max(self.engine.upload.confirmed());
-                    self.kept.stop_record = Some(StopRecord::other_writer(below));
-                }
-                self.fault(Task::Upload, Fault::RemoteAheadOfLocal, now)
-            }
+            Ok(true) => self.fault(Task::Upload, Fault::RemoteAheadOfLocal, now),
             Ok(false) => {
                 if let Some(tick) = self.vouch_before_drop(Task::Upload, Some(from), now) {
                     return tick;
@@ -2266,6 +2240,9 @@ enum BootStep {
     /// The boot would drop staged files the replica holds, and needs this
     /// takeover durable first.
     Vouch(TakeoverRecord),
+    /// The replica holds another writer's file through this transaction:
+    /// the boot stops with `OtherWriter`.
+    Refused(Txid),
 }
 
 impl From<Fault> for BootStep {
@@ -2282,15 +2259,6 @@ enum Takeover {
     Off,
     /// The live WAL's word, or this takeover record covering them.
     Vouch(Option<TakeoverRecord>),
-}
-
-impl Takeover {
-    const fn record(self) -> Option<TakeoverRecord> {
-        match self {
-            Self::Off => None,
-            Self::Vouch(record) => record,
-        }
-    }
 }
 
 /// What a boot needs before it builds on replica files above the local
@@ -2368,18 +2336,18 @@ enum Dropped {
 /// otherwise it becomes the suspect and the boot fails with `StagedLost`, to
 /// read it again on the next try.
 ///
-/// A stop for another writer recorded by an earlier process (`record`) is
-/// judged on the same listing, before staging is touched: `Ok(None)` while
-/// the replica still holds a transaction past the record's, and the record
-/// goes once it does not (`crate::stop_record`), or once an operator's
-/// takeover covers the replica's newest transaction (`crate::takeover`).
+/// A replica newest level-0 file that verifies and differs from the staged
+/// copy under the same key is another writer's unless a takeover record
+/// covers it: this engine uploads only from witnessed, synced staged copies
+/// and keeps a takeover record before deleting its own, so without an
+/// operator's hand a boot divergence is a second writer (the contested id).
+/// The boot refuses it before touching staging (`BootStep::Refused`).
 async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     staging: &L,
     remote: &R,
     suspect: &mut Option<FileKey>,
-    record: &mut Option<StopRecord>,
     takeover: Takeover,
-) -> Result<Option<Listed>, BootStep> {
+) -> Result<Listed, BootStep> {
     // Where staging stood before this boot dropped anything of its own: the
     // position replica files must be vouched for above.
     let local = newest_level_zero(staging)
@@ -2400,16 +2368,13 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     };
     let tip = upload.confirmed();
     let gate = BootGate { takeover, local };
-    let taken_over = tip
-        .zip(takeover.record())
-        .is_some_and(|(tip, record)| record.covers(tip));
-    if !taken_over && record.is_some_and(|record| record.still_stopped(tip)) {
-        return Ok(None);
-    }
-    *record = None;
-    // The staged files from `from` on cannot continue the replica: they go,
-    // and recovery snapshots above what the replica holds.
+    // The staged files from `from` on cannot continue the replica: unless
+    // the replica's object is another writer's, they go, and recovery
+    // snapshots above what the replica holds.
     if let Some(from) = diverged {
+        if let Some(tip) = tip.filter(|tip| gate.refuses(*tip)) {
+            return Err(BootStep::Refused(tip));
+        }
         gate.vouch(remote, tip).await?;
         drop_staged_from(staging, from).await?;
     }
@@ -2431,11 +2396,11 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
         (None, Some(from)) => Dropped::Unreadable(from),
         (None, None) => Dropped::Nothing,
     };
-    Ok(Some(Listed {
+    Ok(Listed {
         upload,
         dropped,
         gate,
-    }))
+    })
 }
 
 /// What boot's listing leaves for the rest of the boot.

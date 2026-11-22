@@ -38,9 +38,10 @@
 //! Go takes no lock, so a Go process on the same meta directory is not refused; nor is a
 //! second writer on the bucket prefix (`start` makes no store call). Either is caught when the
 //! replica shows files above everything this engine staged, which stops the replicator by
-//! default (`Responses::GO_LIKE`, `other_writer: Stop`). That stop is recorded in
-//! `<meta>/lsr-stop`, so a restart stops again while the other writer's files are on the
-//! replica, and replicates once an operator has removed them ([`lsr_core::StopRecord`]).
+//! default (`Responses::GO_LIKE`, `other_writer: Stop`). A restart stops again while the
+//! other writer's files are on the replica, since the boot refuses replica files nothing local
+//! vouches for, and replicates once an operator has removed them or run `lsr take-over`
+//! ([`lsr_core::TakeoverRecord`]).
 
 #![forbid(unsafe_code)]
 
@@ -61,7 +62,7 @@ mod thread;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 pub use error::{RestoreError, StartError, TakeOverError};
-pub use events::{ChannelSink, Event, EventReceiver, EventSink};
+pub use events::{ChannelSink, Event, EventReceiver, EventSink, TakeoverUnusable};
 pub use exec::block_on;
 pub use health::{
     AppNotice, Booted, Counters, Gone, Health, Mismatch, OpCounters, Phase, Stopped, StoreCounters,

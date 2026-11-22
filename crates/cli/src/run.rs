@@ -781,8 +781,7 @@ async fn verify_command(args: VerifyArgs) -> Result<Done, CliError> {
 }
 
 /// `lsr take-over`: a takeover record through the replica's newest transaction in the
-/// database's meta directory, which also clears a stop for another writer there
-/// (`lsr_core::TakeoverRecord`).
+/// database's meta directory (`lsr_core::TakeoverRecord`).
 async fn take_over_command(args: TakeOverArgs) -> Result<Done, CliError> {
     let meta = match args.meta_dir {
         Some(meta) => meta,

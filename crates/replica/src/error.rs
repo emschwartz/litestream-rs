@@ -43,26 +43,6 @@ pub enum StartError {
         /// What the file system said.
         kind: io::ErrorKind,
     },
-    /// The stop record an earlier run left (`lsr-stop`: it stopped for another writer on the
-    /// replica) cannot be read. A stop is never taken as absent.
-    #[error("the stop record cannot be read: {kind:?}")]
-    StopRecordUnreadable {
-        /// What the file system said.
-        kind: io::ErrorKind,
-    },
-    /// The stop record an earlier run left does not decode, as after an edit or a damaged
-    /// disk. Remove it once the other writer is dealt with.
-    #[error("the stop record is damaged: {0}")]
-    StopRecordInvalid(#[source] lsr_core::StopRecordError),
-    /// The takeover record a take-over or a restore left (`lsr-takeover`) cannot be read.
-    #[error("the takeover record cannot be read: {kind:?}")]
-    TakeoverRecordUnreadable {
-        /// What the file system said.
-        kind: io::ErrorKind,
-    },
-    /// The takeover record does not decode. Run `lsr take-over` again to write a sound one.
-    #[error("the takeover record is damaged: {0}")]
-    TakeoverRecordInvalid(#[source] lsr_core::TakeoverRecordError),
     /// SQLite refused to open the database or to set it up.
     #[error("SQLite refused the database (result code {code})")]
     Sqlite {

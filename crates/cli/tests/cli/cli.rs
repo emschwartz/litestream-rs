@@ -1066,17 +1066,15 @@ fn restore_json_reports_go_s_fields() {
 }
 
 /// `lsr take-over <db>` records a takeover through the replica's newest transaction in the
-/// database's meta directory, and clears a stop record there.
+/// database's meta directory.
 #[test]
-fn take_over_records_the_replicas_newest_transaction_and_clears_a_stop() {
+fn take_over_records_the_replicas_newest_transaction() {
     let db = sqlite_pages();
     let work = tempfile::tempdir().expect("tempdir");
     let replica = work.path().join("replica");
     replica_of(&replica, &db);
     let database = work.path().join("app.db");
     let meta = work.path().join(".app.db-litestream");
-    fs::create_dir(&meta).expect("meta");
-    fs::write(meta.join("lsr-stop"), "lsr-stop 1 other-writer none\n").expect("stop");
     let run = lsr(&[
         "take-over",
         path_str(&database),
@@ -1091,7 +1089,6 @@ fn take_over_records_the_replicas_newest_transaction_and_clears_a_stop() {
     );
     let record = fs::read(meta.join("lsr-takeover")).expect("takeover record");
     lsr_core::TakeoverRecord::decode(&record).expect("a takeover record");
-    assert!(!meta.join("lsr-stop").exists(), "the stop record went");
 }
 
 /// `lsr restore` to an output that names no file is refused with exit 3 before anything is

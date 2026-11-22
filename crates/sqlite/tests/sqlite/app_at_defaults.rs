@@ -307,7 +307,11 @@ fn a_sidecar_deploy_snapshots_only_when_the_application_closes_last() {
         rig.insert(1500).unwrap();
         rig.settle().unwrap();
         let want = app_last.then_some(SnapshotCause::WalMissing);
-        assert_eq!(boots_and_snapshots(&rig, from), vec![want], "{at}: the boot");
+        assert_eq!(
+            boots_and_snapshots(&rig, from),
+            vec![want],
+            "{at}: the boot"
+        );
         rig.check().unwrap();
     }
 }

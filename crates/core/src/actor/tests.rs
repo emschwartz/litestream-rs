@@ -777,8 +777,8 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
 /// it list the replica finds another writer's file above its own newest staged file and stops on
 /// `OtherWriter`, the one stop the default responses make. The restart used to forget the stop:
 /// the new boot took the other writer's file as history it is behind (`behind_remote`),
-/// snapshotted after it and uploaded, interleaving two databases in one history. The stop's record
-/// (`crate::stop_record`), handed to the next actor as a driver does, makes the restart stop again.
+/// snapshotted after it and uploaded, interleaving two databases in one history. The new boot now
+/// refuses replica files nothing vouches for (`crate::takeover`), so the restart stops again.
 #[test]
 fn a_restart_after_an_other_writer_stop_stops_again() {
     let (mut other, mut writer) = caught_up();
@@ -806,7 +806,6 @@ fn a_restart_after_an_other_writer_stop_stops_again() {
     );
     let before = everything(&rig).1;
     let mut restarted = Actor::new(cfg());
-    restarted.remember_stop(actor.stop_record().expect("the stop is recorded"));
     let ticks = rig.follow(&mut restarted, T0 + 40, 60);
     assert_eq!(
         ticks.last(),

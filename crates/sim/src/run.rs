@@ -303,13 +303,6 @@ struct Runner {
     /// measured from it, since an earlier reading is clamped.
     latest: Option<Timestamp>,
     saved: Option<StagedCopy>,
-    /// The stop record a driver keeps in the meta directory
-    /// ([`lsr_core::StopRecord`]): durable once a tick ends, handed to
-    /// every new actor, and copied, put back and deleted with the staging
-    /// directory by the meta operations.
-    stop_record: Option<lsr_core::StopRecord>,
-    /// The stop record saved with [`Runner::saved`].
-    saved_stop_record: Option<lsr_core::StopRecord>,
     /// The takeover record an operator's take-over left in the meta
     /// directory ([`lsr_core::TakeoverRecord`]), handed to every new actor.
     takeover: Option<lsr_core::TakeoverRecord>,
@@ -426,8 +419,6 @@ impl Runner {
             latest: None,
             saved: None,
             saved_notes: Vec::new(),
-            stop_record: None,
-            saved_stop_record: None,
             takeover: None,
             saved_takeover: None,
             staging_disturbed: false,
@@ -466,9 +457,6 @@ impl Runner {
             ..base
         });
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
-        if let Some(record) = self.stop_record {
-            self.actor.remember_stop(record);
-        }
         if let Some(record) = self.takeover {
             self.actor.remember_takeover(record);
         }
@@ -682,14 +670,8 @@ impl Runner {
         self.liveness_before_tick(booting);
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
-        let record0 = self.actor.stop_record();
         self.staging_moved()?;
         let ended = self.run_one(plan);
-        // The driver stores the record, or removes it, when a tick that ended
-        // changed it; a tick a crash cut short stored nothing.
-        if matches!(ended, TickEnd::Done(_)) && self.actor.stop_record() != record0 {
-            self.stop_record = self.actor.stop_record();
-        }
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
         }
@@ -807,8 +789,16 @@ impl Runner {
             return Ok(step);
         }
         // With staging intact, everything this engine put on the replica is at
-        // or below what staging holds: a refusal then has no cause.
-        if !self.staging_disturbed {
+        // or below what staging holds, under the bytes staging holds: a
+        // refusal then has no cause. A staged copy that differs from the
+        // replica's object under the same key was edited or forged (an
+        // operation), and the boot refuses that divergence by design.
+        let key = lsr_core::FileKey::new(lsr_core::Level::ZERO, lsr_ltx::TxidRange::single(tip));
+        let diverged = self
+            .w
+            .staged_differs_from_remote(key)
+            .map_err(|err| bug_fault(format!("reading the stores failed: {err}")))?;
+        if !self.staging_disturbed && !diverged {
             return Err(bug_fault(format!(
                 "a boot refused replica files through {tip} with staging intact and no other writer"
             )));
@@ -1482,24 +1472,14 @@ impl Runner {
     }
 
     /// A supervisor restarts an engine that stopped for another writer while
-    /// that writer's file still stands: the stop is recorded, so the boot must
-    /// stop again, never boot and snapshot above the file.
+    /// that writer's file still stands: the boot refuses replica files nothing
+    /// vouches for, so it must stop again, never boot and snapshot above the
+    /// file.
     fn restart_while_stopped(
         &mut self,
         key: lsr_core::FileKey,
         bytes: &[u8],
     ) -> Result<(), Violation> {
-        // A boot's refusal records nothing: every boot judges again.
-        if self.actor.stop_record().is_none() && self.actor.refused_through().is_none() {
-            return Err(bug_fault(
-                "a stop for another writer left no record".to_owned(),
-            ));
-        }
-        // The operator deleted the meta directory since: the next process
-        // starts with no memory of the stop, by the operator's choice.
-        if self.stop_record.is_none() && self.actor.refused_through().is_none() {
-            return Ok(());
-        }
         self.restart(CrashKind::Process);
         for _ in 0..SETTLE_AFTER_RESTART {
             let (step, stats) = self.step(None)?;
@@ -1790,7 +1770,6 @@ impl Runner {
                         })
                         .collect();
                     self.saved = Some(copy);
-                    self.saved_stop_record = self.stop_record;
                     self.saved_takeover = self.takeover;
                     true
                 })
@@ -1801,7 +1780,6 @@ impl Runner {
                     None => Ok(false),
                 };
                 if matches!(done, Ok(true)) {
-                    self.stop_record = self.saved_stop_record;
                     self.takeover = self.saved_takeover;
                     self.put_back = self.w.staging_recorder.len();
                     self.renote_saved();
@@ -1817,7 +1795,6 @@ impl Runner {
             }),
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
             MetaOp::DeleteAll => {
-                self.stop_record = None;
                 self.takeover = None;
                 w.wipe_staging()
                     .map(|()| true)

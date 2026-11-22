@@ -16,19 +16,35 @@
 //! and a restore writes one through the transaction it restored, so a
 //! container that restores at start never stops. A record covers only what
 //! the replica held when it was written: another writer's file above it
-//! stops the engine again.
+//! stops the engine again. So does a replica newest file that verifies and
+//! differs from the staged copy under the same key (another writer at this
+//! engine's next id) unless the record covers it.
 //!
-//! The record is local state Go never reads, beside the stop record
-//! (`crate::stop_record`); both are fields-in-waiting of the engine journal.
+//! The engine also asks its driver for one before it deletes staged files the
+//! replica may hold ([`crate::Actor::takeover_wanted`]), through what those
+//! files vouched for, so a crash before the replacing snapshot does not make
+//! the next boot refuse its own files.
+//!
+//! The record is local state Go never reads, a candidate fact for the engine
+//! journal (`docs/journal.md`); nothing is released, so this format can then
+//! simply go.
 //! The stored form is one line, parsed strictly:
 //! `lsr-takeover 1 <through>\n`, `<through>` as 16 lower-case hex digits.
 
 use lsr_ltx::Txid;
 use thiserror::Error;
 
-use crate::stop_record::txid_word;
-
 const MAGIC: &str = "lsr-takeover";
+
+/// A transaction id as the record stores it: exactly 16 lower-case hex
+/// digits, not zero.
+fn txid_word(word: &str) -> Option<Txid> {
+    let lower_hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
+    if word.len() != 16 || !word.chars().all(lower_hex) {
+        return None;
+    }
+    Txid::new(u64::from_str_radix(word, 16).ok()?)
+}
 const VERSION: &str = "1";
 /// The longest stored form: the words, two spaces, 16 digits and a newline.
 const MAX_LEN: usize = 32;

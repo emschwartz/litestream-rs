@@ -71,8 +71,8 @@ pub fn restore_with(
     Ok(restored)
 }
 
-/// Records a takeover through `through` in the meta directory `meta` (created if missing),
-/// and clears a stop for another writer there. Every restore records one in the target's
+/// Records a takeover through `through` in the meta directory `meta` (created if missing).
+/// Every restore records one in the target's
 /// default meta directory itself; a driver whose database has its own `Config::meta_dir`
 /// records it there.
 ///
@@ -83,8 +83,7 @@ pub fn record_takeover(meta: &Path, through: Txid) -> io::Result<()> {
 }
 
 /// `lsr take-over`: records that the database whose meta directory is `meta` may replicate
-/// over everything `store` holds now, through its newest transaction, and clears a stop for
-/// another writer there. Returns that transaction, or `None` for an empty replica (nothing is
+/// over everything `store` holds now, through its newest transaction. Returns that transaction, or `None` for an empty replica (nothing is
 /// written). A replicator's next start then builds on those files (a snapshot above them)
 /// instead of refusing them; a file another writer puts above them later is refused again.
 ///

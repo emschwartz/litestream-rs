@@ -50,7 +50,6 @@ mod snapshot;
 mod source;
 #[cfg(feature = "testing")]
 pub mod spec_view;
-mod stop_record;
 mod store;
 #[cfg(test)]
 mod stuck;
@@ -130,7 +129,6 @@ pub use source::{
 pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
-pub use stop_record::{StopRecord, StopRecordError};
 pub use store::{
     BatchKind, CorruptCause, Denied, ListAt, Listing, ListingStalled, ObjectStore, PageLimit,
     PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,

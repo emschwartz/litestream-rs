@@ -41,18 +41,18 @@ use std::sync::Arc;
 
 use lsr_core::{
     Actor, AppCheckpoints, Degraded, Did, Env, Event as EngineEvent, Level, ObjectStore, PageLimit,
-    PersistentCause, Phase as EnginePhase, Response, StopCause, StopRecord, TakeoverRecord, Task,
-    Tick, Unfinished, WalSource, retry_wait,
+    PersistentCause, Phase as EnginePhase, Response, StopCause, TakeoverRecord, Task, Tick,
+    Unfinished, WalSource, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
 use lsr_store_fs::FsStore;
 
 use crate::config::Config;
-use crate::events::{Event, EventSink};
+use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
 use crate::health::{Counters, Gone, Phase, Stopped};
-use crate::meta::{MetaLock, write_own_takeover, write_stop};
+use crate::meta::{MetaLock, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -178,12 +178,10 @@ pub(crate) struct Worker {
     seen: Seen,
     /// The scheduled verify, when `Config::verify_interval` is set.
     scheduled: Option<Scheduled>,
-    /// The meta directory, where the stop record is kept (`crate::meta`).
+    /// The meta directory, where the takeover record is kept (`crate::meta`).
     meta: PathBuf,
     /// The meta directory's lock, held for the thread's life.
     _meta_lock: Option<MetaLock>,
-    /// The stop record as the meta directory holds it.
-    recorded: Option<StopRecord>,
     /// The clock's last reading, to notice it stepping back.
     last_reading: Option<Timestamp>,
 }
@@ -249,26 +247,23 @@ impl Worker {
             scheduled,
             meta: meta.to_owned(),
             _meta_lock: None,
-            recorded: None,
             last_reading: None,
         }
     }
 
-    /// The meta directory's lock to hold, and the stop and takeover records an earlier run,
-    /// a take-over or a restore left there, which the engine judges at its boot.
+    /// The meta directory's lock to hold, and the takeover record an earlier run, a
+    /// take-over or a restore left there, which the engine judges at its boot. One that
+    /// cannot be used is reported and ignored, as if there were none.
     pub(crate) fn with_meta(
         mut self,
         lock: MetaLock,
-        record: Option<StopRecord>,
-        takeover: Option<TakeoverRecord>,
+        takeover: Result<Option<TakeoverRecord>, TakeoverUnusable>,
     ) -> Self {
         self._meta_lock = Some(lock);
-        self.recorded = record;
-        if let Some(record) = record {
-            self.actor.remember_stop(record);
-        }
-        if let Some(takeover) = takeover {
-            self.actor.remember_takeover(takeover);
+        match takeover {
+            Ok(Some(takeover)) => self.actor.remember_takeover(takeover),
+            Ok(None) => {}
+            Err(unusable) => self.emit(&Event::TakeoverRecordUnusable(unusable)),
         }
         self
     }
@@ -280,23 +275,9 @@ impl Worker {
         let Some(record) = self.actor.takeover_wanted() else {
             return;
         };
-        match write_own_takeover(&self.meta, record) {
+        match write_takeover(&self.meta, record) {
             Ok(()) => self.actor.remember_takeover(record),
             Err(err) => self.emit(&Event::TakeoverNotRecorded { kind: err.kind() }),
-        }
-    }
-
-    /// Writes the engine's stop record to the meta directory, or removes it, when it changed.
-    /// A failed write is reported once per change: the stop holds in this process, and a
-    /// restart may not keep it.
-    fn keep_stop_record(&mut self) {
-        let record = self.actor.stop_record();
-        if record == self.recorded {
-            return;
-        }
-        self.recorded = record;
-        if let Err(err) = write_stop(&self.meta, record) {
-            self.emit(&Event::StopNotRecorded { kind: err.kind() });
         }
     }
 
@@ -476,7 +457,6 @@ impl Worker {
             .as_ref()
             .and_then(Scheduled::kept_restore_point);
         self.actor.keep_restore_point_for_verify(verify);
-        self.keep_stop_record();
         self.keep_takeover();
         // The snapshot is written before the event goes out, so a sink that reads health on an
         // event sees the state after it.

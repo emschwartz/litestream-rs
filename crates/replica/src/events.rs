@@ -43,13 +43,10 @@ pub enum Event {
     },
     /// The engine stopped by a cause and waits for a person.
     Stopped(StopCause),
-    /// The engine stopped for another writer and the stop could not be recorded in the meta
-    /// directory (`lsr-stop`), or a record it no longer needs could not be removed. The stop
-    /// holds in this process; a restart may not keep it, or may stop again for nothing.
-    StopNotRecorded {
-        /// What the file system said.
-        kind: std::io::ErrorKind,
-    },
+    /// The takeover record in the meta directory (`lsr-takeover`) could not be read or did not
+    /// decode at start. It is ignored, as if there were none: the boot builds only on what the
+    /// live WAL vouches for, and refuses the rest until `lsr take-over` writes a sound record.
+    TakeoverRecordUnusable(TakeoverUnusable),
     /// The engine asked for a takeover record before deleting staged files the replica holds
     /// (`lsr_core::Event::TakeoverWanted`), and it could not be written in the meta directory.
     /// The engine deletes nothing and retries after its backoff.
@@ -216,4 +213,16 @@ mod tests {
         assert_eq!(rx.recv(), Some(Event::Panicked { rebuilt: true }));
         assert_eq!(rx.recv(), None);
     }
+}
+
+/// Why the takeover record at start was not used ([`Event::TakeoverRecordUnusable`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TakeoverUnusable {
+    /// The file exists and cannot be read.
+    Unreadable {
+        /// What the file system said.
+        kind: std::io::ErrorKind,
+    },
+    /// The file does not decode: a write cut short, an edit, a damaged disk.
+    Invalid(lsr_core::TakeoverRecordError),
 }
