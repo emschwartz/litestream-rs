@@ -1,13 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index c9906d0..ae51060 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1530,7 +1530,7 @@ impl Actor {
+@@ -1706,7 +1706,7 @@
                      // One failed read says nothing about the staged bytes: the
                      // file is dropped only when a read on a later tick fails too.
                      if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan)
 -                        && self.kept.suspect_staged.replace(key) == Some(key)
 +                        && (self.kept.suspect_staged.replace(key) == Some(key) || true)
                      {
-                         self.kept.suspect_staged = None;
-                         mark!(Run16);
+                         if let Some(tick) = self.vouch_before_drop(Task::Upload, None, now) {
+                             return Some(tick);

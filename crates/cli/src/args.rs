@@ -35,11 +35,13 @@ pub enum CommandName {
     Verify,
     /// `lsr files`.
     Files,
+    /// `lsr take-over <db>`.
+    TakeOver,
 }
 
 impl CommandName {
     /// Every subcommand, in help order.
-    pub const ALL: [Self; 3] = [Self::Restore, Self::Verify, Self::Files];
+    pub const ALL: [Self; 4] = [Self::Restore, Self::Verify, Self::Files, Self::TakeOver];
 
     /// The word typed after `lsr`.
     pub const fn word(self) -> &'static str {
@@ -47,6 +49,15 @@ impl CommandName {
             Self::Restore => "restore",
             Self::Verify => "verify",
             Self::Files => "files",
+            Self::TakeOver => "take-over",
+        }
+    }
+
+    /// The positional argument after the word, for the help text.
+    pub const fn positional(self) -> Option<&'static str> {
+        match self {
+            Self::Restore | Self::Verify | Self::Files => None,
+            Self::TakeOver => Some("<db>"),
         }
     }
 
@@ -56,6 +67,9 @@ impl CommandName {
             Self::Restore => "rebuild a database from a replica; never touches an existing file",
             Self::Verify => "check a replica for damage and gaps without restoring",
             Self::Files => "list every file of a replica with its size and stored time",
+            Self::TakeOver => {
+                "let <db> replicate over what the replica holds now, after a replicator refused files it has no record of writing: records a takeover through the replica's newest transaction in <db>'s meta directory"
+            }
         }
     }
 }
@@ -85,6 +99,7 @@ pub const FLAGS: &[FlagSpec] = &[
             CommandName::Restore,
             CommandName::Verify,
             CommandName::Files,
+            CommandName::TakeOver,
         ],
         help: "the replica: a directory that holds ltx/, or s3://<bucket>/<prefix>",
     },
@@ -96,6 +111,7 @@ pub const FLAGS: &[FlagSpec] = &[
             CommandName::Restore,
             CommandName::Verify,
             CommandName::Files,
+            CommandName::TakeOver,
         ],
         help: "s3 only: the service endpoint (http or https), for anything but AWS",
     },
@@ -107,6 +123,7 @@ pub const FLAGS: &[FlagSpec] = &[
             CommandName::Restore,
             CommandName::Verify,
             CommandName::Files,
+            CommandName::TakeOver,
         ],
         help: "s3 only: the signing region (default us-east-1)",
     },
@@ -118,8 +135,16 @@ pub const FLAGS: &[FlagSpec] = &[
             CommandName::Restore,
             CommandName::Verify,
             CommandName::Files,
+            CommandName::TakeOver,
         ],
         help: "s3 only: address the bucket as endpoint/bucket instead of bucket.endpoint",
+    },
+    FlagSpec {
+        name: "--meta-dir",
+        value: Some("<dir>"),
+        required: false,
+        commands: &[CommandName::TakeOver],
+        help: "the database's meta directory when its config sets one (default .<name>-litestream beside it)",
     },
     FlagSpec {
         name: "--output",
@@ -233,6 +258,8 @@ pub enum Command {
     Verify(VerifyArgs),
     /// List a replica's files.
     Files(FilesArgs),
+    /// Record a takeover.
+    TakeOver(TakeOverArgs),
     /// Go's `replicate` daemon: the arguments after `replicate`, read by `lsr-sidecar`.
     Daemon(Vec<String>),
     /// `lsr config check <file>`.
@@ -299,6 +326,17 @@ pub struct RestoreArgs {
     pub json: bool,
 }
 
+/// `lsr take-over`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TakeOverArgs {
+    /// The database that may replicate over the replica.
+    pub database: PathBuf,
+    /// The replica.
+    pub replica: Replica,
+    /// Its meta directory, when not the default.
+    pub meta_dir: Option<PathBuf>,
+}
+
 /// `lsr verify`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct VerifyArgs {
@@ -327,6 +365,9 @@ pub enum UsageError {
     /// Nothing after `lsr`.
     #[error("no command given")]
     NoCommand,
+    /// `lsr take-over` with no database path before its flags.
+    #[error("take-over needs the database path first: lsr take-over <db> --replica <dir>")]
+    MissingDatabase,
     /// The first argument is not a subcommand.
     #[error("unknown command {name:?}")]
     UnknownCommand {
@@ -631,6 +672,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "restore" => CommandName::Restore,
         "verify" => CommandName::Verify,
         "files" => CommandName::Files,
+        "take-over" => return parse_take_over(args.get(1..).unwrap_or_default()),
         "replicate" => {
             return Ok(Command::Daemon(args.get(1..).unwrap_or_default().to_vec()));
         }
@@ -672,7 +714,27 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             json: flags.has("--json"),
             resolved: flags.has("--created-at"),
         }),
+        CommandName::TakeOver => return Err(UsageError::MissingDatabase),
     })
+}
+
+/// `take-over <db> [flags]`: the database path, then the flags.
+fn parse_take_over(rest: &[String]) -> Result<Command, UsageError> {
+    let command = CommandName::TakeOver;
+    let (database, flags) = match rest.split_first() {
+        Some((first, _)) if is_help(first) => return Ok(Command::Help),
+        Some((first, flags)) if !first.starts_with('-') => (PathBuf::from(first), flags),
+        Some(_) | None => return Err(UsageError::MissingDatabase),
+    };
+    let flags = match scan(command, flags)? {
+        Scan::Help => return Ok(Command::Help),
+        Scan::Flags(seen) => Flags { command, seen },
+    };
+    Ok(Command::TakeOver(TakeOverArgs {
+        database,
+        replica: flags.replica()?,
+        meta_dir: flags.value("--meta-dir").map(PathBuf::from),
+    }))
 }
 
 #[cfg(test)]

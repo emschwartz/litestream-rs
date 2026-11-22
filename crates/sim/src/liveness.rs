@@ -315,7 +315,10 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         | Op::AppAutocheckpoint(_)
         | Op::Shrink { .. }
         | Op::Heal
-        | Op::Verify => &[],
+        | Op::Verify
+        // The operator's word lets a boot build above the replica; the
+        // snapshot that follows is justified by what disturbed staging.
+        | Op::TakeOver => &[],
     }
 }
 

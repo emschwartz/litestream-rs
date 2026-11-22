@@ -99,3 +99,15 @@ fn lines_below_the_level_are_dropped_and_events_carry_the_database_and_cause() {
         "time=1970-01-01T00:00:00.000Z level=INFO msg=\"snapshot required\" db=app.db cause=OperatorRequested\n"
     );
 }
+
+/// The refusal's text is the operator's instruction, approved word for word.
+#[test]
+fn a_refusal_logs_the_approved_text() {
+    let txid = Txid::new(0x2a).unwrap();
+    assert_eq!(
+        refused_message(txid),
+        format!(
+            "replicate refused: the replica holds transactions up to {txid} that this database has no record of writing. Another replicator may be using this prefix. To replicate this database over them: `lsr take-over <db>`. To get them instead: `lsr restore`."
+        )
+    );
+}

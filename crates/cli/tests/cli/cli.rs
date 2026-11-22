@@ -641,7 +641,14 @@ fn integrity_check_publishes_a_valid_database_in_every_mode() {
         if let Some(line) = line {
             assert!(run.stdout.contains(line), "{check}: {}", run.stdout);
         }
-        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1, "{check}");
+        // The database and its meta directory, which holds only the takeover record a
+        // restore leaves for the replicator started on it.
+        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 2, "{check}");
+        let meta = dir.path().join(".out.db-litestream");
+        assert_eq!(fs::read_dir(&meta).expect("meta").count(), 1, "{check}");
+        let record = fs::read(meta.join("lsr-takeover")).expect("takeover record");
+        assert!(lsr_core::TakeoverRecord::decode(&record).is_ok(), "{check}");
+        assert!(run.stdout.contains("takeover recorded through"), "{check}");
     }
 }
 
@@ -1056,4 +1063,46 @@ fn restore_json_reports_go_s_fields() {
     assert_eq!(json["txid"], json!(chain.reaches().to_string()), "{json}");
     assert_eq!(json["files"], json!(chain.files().len()), "{json}");
     assert!(json["checksum_verified"].is_boolean(), "{json}");
+}
+
+/// `lsr take-over <db>` records a takeover through the replica's newest transaction in the
+/// database's meta directory.
+#[test]
+fn take_over_records_the_replicas_newest_transaction() {
+    let db = sqlite_pages();
+    let work = tempfile::tempdir().expect("tempdir");
+    let replica = work.path().join("replica");
+    replica_of(&replica, &db);
+    let database = work.path().join("app.db");
+    let meta = work.path().join(".app.db-litestream");
+    let run = lsr(&[
+        "take-over",
+        path_str(&database),
+        "--replica",
+        path_str(&replica),
+    ]);
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{}", run.stdout);
+    assert!(
+        run.stdout.starts_with("takeover recorded through "),
+        "{}",
+        run.stdout
+    );
+    let record = fs::read(meta.join("lsr-takeover")).expect("takeover record");
+    lsr_core::TakeoverRecord::decode(&record).expect("a takeover record");
+}
+
+/// `lsr restore` to an output that names no file is refused with exit 3 before anything is
+/// written: it has no meta directory for the takeover record.
+#[test]
+fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
+    let db = sqlite_pages();
+    let work = tempfile::tempdir().expect("tempdir");
+    let replica = work.path().join("replica");
+    replica_of(&replica, &db);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("sub").join("..");
+    let run = restore_checked(&replica, &output, "none");
+    assert_eq!(run.code, 3, "{}", run.stderr);
+    assert!(run.stderr.contains("no meta directory"), "{}", run.stderr);
+    assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
 }

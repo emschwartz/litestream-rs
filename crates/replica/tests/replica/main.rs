@@ -6,6 +6,7 @@
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+mod deploy;
 mod failstop;
 #[cfg(test)]
 mod gates;
@@ -15,6 +16,8 @@ mod rebuild;
 mod replicator;
 #[cfg(test)]
 mod restored;
+#[cfg(test)]
+mod second_writer;
 #[cfg(test)]
 mod verify;
 // Schedule exploration, only under `--cfg shuttle` (`just shuttle`).

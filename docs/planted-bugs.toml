@@ -26,6 +26,17 @@
 # rules they guarded are planted below as the witness-* entries. page-size-after-vacuum (b352aba): its
 # arm (an unusable newest staged file still names its page size) decides only with an empty replica,
 # where every staged file is pending and the boot witness now deletes an unusable one first.
+# other-writer-stop-forgotten-sim (a9da6c6): since a boot refuses replica files that neither the
+# WAL nor a takeover record vouches for, a restart after a stop for another writer's file above
+# staging stops again with or without the stop record, so the scenario cannot tell; the record
+# still decides the case of another writer at the engine's next id, which the core entry plants.
+# replica-page-size-unread-sim (7bf9707): seed 0x13's run no longer reaches the boot it pinned
+# once the engine asks for a takeover record before deleting staged files (one more tick changes
+# the interleaving); the test stays as a regression run, and the core entry plants the defect.
+# other-writer-stop-forgotten (a9da6c6) and stop-record-not-kept (a939338): the stop record they
+# planted into is gone (68d2d90). A restart after a stop for another writer now stops by the
+# boot's refusal: of files above staging (boot-gate-refuses-nothing) or of a divergence under the
+# engine's next id (boot-divergence-snapshots-above-another-writer).
 
 [[bug]]
 name = "canary-no-op"
@@ -461,6 +472,44 @@ tests = [
     "a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
 ]
 
+[[bug]]
+name = "meta-dir-unlocked"
+fix = "a939338"
+package = "lsr-replica"
+test_bin = "replica"
+tests = [
+    "second_writer::a_second_engine_on_one_meta_directory_is_refused",
+    "second_writer::a_second_process_on_one_meta_directory_is_refused",
+]
+
+# A replica that lost files while the engine ran went unseen by maintenance.
+[[bug]]
+name = "regression-unwatched"
+fix = "5cf9f56"
+package = "lsr-core"
+tests = ["a_rollback_while_running_is_seen_by_the_next_maintenance_listing"]
+
+[[bug]]
+name = "regression-unwatched-sim"
+fix = "5cf9f56"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::bucket_rolled_back_unseen"]
+
+# The sibling: a watched key missing from a listing taken as lost without the read.
+[[bug]]
+name = "regression-on-listing-alone"
+fix = "5cf9f56"
+package = "lsr-core"
+tests = ["a_lagging_listing_is_not_a_regression"]
+
+# A running engine's divergence from another writer's file snapshotted above it.
+[[bug]]
+name = "divergence-snapshots-above-another-writer"
+fix = "8ce228d"
+package = "lsr-core"
+tests = ["a_running_engine_stops_when_another_writer_took_its_next_id"]
+
 # The same defect against the simulator, killed by the swarm unaided under the each-read clock law.
 [[bug]]
 name = "seal-stamped-at-checkpoint-start-sim"
@@ -646,14 +695,6 @@ fix = "7bf9707"
 package = "lsr-core"
 tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
 
-# The same plant, judged by the simulator's lying-reads hold where it was found.
-[[bug]]
-name = "replica-page-size-unread-sim"
-fix = "7bf9707"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13"]
-
 # A stall threshold no outage reaches: a plain-retry fault never degrades, the defect 538bd84
 # fixed, judged by the simulator's health-truth check under a long outage hold.
 [[bug]]
@@ -680,6 +721,75 @@ name = "staging-dir-fsync"
 fix = "2bf9f99"
 package = "lsr-store-fs"
 tests = ["a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_torn"]
+
+# A boot that refused replica files the live WAL vouches for: a wiped staging directory in the
+# same WAL generation stopped instead of continuing.
+[[bug]]
+name = "boot-gate-wal-vouch-skipped"
+fix = "aa1165d"
+package = "lsr-core"
+tests = [
+    "vouch::a_wiped_staging_in_the_same_wal_generation_continues",
+    "vouch::staging_behind_a_replica_the_wal_vouches_for_continues",
+]
+
+[[bug]]
+name = "boot-gate-wal-vouch-skipped-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["newest_staged_file_lost", "restored_old_meta"]
+
+# A takeover record that covers nothing: a take-over never clears a refusal or a stop record.
+[[bug]]
+name = "boot-gate-takeover-ignored"
+fix = "aa1165d"
+package = "lsr-core"
+tests = ["vouch::a_vm_restore_stops_until_a_takeover_covers_the_replica"]
+
+[[bug]]
+name = "boot-gate-takeover-ignored-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["vm_restore_stops_until_a_take_over"]
+
+# A boot that refuses nothing: replica files nothing vouches for are snapshotted above, as before
+# the fix.
+[[bug]]
+name = "boot-gate-refuses-nothing"
+fix = "aa1165d"
+package = "lsr-core"
+tests = [
+    "vouch::a_foreign_file_put_while_the_engine_was_down_stops_the_boot",
+    "vouch::a_takeover_does_not_cover_a_foreign_file_above_it",
+]
+
+[[bug]]
+name = "boot-gate-refuses-nothing-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "foreign_file_while_down_stops",
+    "vm_restore_stops_until_a_take_over",
+    "latest_never_goes_back_after_two_second_writers_seed_0xb9",
+]
+
+# A restore that leaves no takeover record: the replicator started on it refuses the replica.
+[[bug]]
+name = "restore-writes-no-takeover"
+fix = "0fcb1b6"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["second_writer::a_restored_database_replicates_without_a_refusal"]
+
+[[bug]]
+name = "restore-writes-no-takeover-cli"
+fix = "54e47f8"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["integrity_check_publishes_a_valid_database_in_every_mode"]
 
 # The engine journal's rules (docs/journal.md): each is a rule of the writer, the codec or the
 # model, not a fix of a shipped defect; `fix` is the commit that introduced it.
@@ -791,6 +901,46 @@ tests = [
     "journal_model::the_writer_matches_the_model_under_the_block_law",
 ]
 
+# The engine deletes staged files the replica holds with no takeover record kept first: a crash
+# before the replacing snapshot leaves the next boot refusing the engine's own files.
+[[bug]]
+name = "takeover-before-drop-skipped"
+fix = "88577ff"
+package = "lsr-core"
+tests = ["vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal"]
+
+[[bug]]
+name = "takeover-before-drop-skipped-sim"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+
+# A running drop of an unreadable staged file records only through the confirmed transaction,
+# short of a file whose upload published with its answer lost.
+[[bug]]
+name = "running-drop-record-capped-at-confirmed"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5"]
+
+# A boot drop records only through the confirmed transaction, short of a listed tail the
+# listing judged torn.
+[[bug]]
+name = "boot-drop-record-capped-at-confirmed"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+
+# An unanswered request for the record asks again at once, forever, instead of waiting.
+[[bug]]
+name = "takeover-ask-spins"
+fix = "88577ff"
+package = "lsr-core"
+tests = ["vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits"]
+
 [[bug]]
 name = "dry-run-gap-not-relisted"
 fix = "3e344e6"
@@ -848,6 +998,22 @@ fix = "af15d43"
 package = "lsr-replica"
 tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]
 
+# A boot divergence (the replica's newest file verifies and differs from the staged copy under
+# the same key) dropped the staged copy and snapshotted above another writer's file.
+[[bug]]
+name = "boot-divergence-snapshots-above-another-writer"
+fix = "68d2d90"
+package = "lsr-core"
+tests = ["a_running_engine_stops_when_another_writer_took_its_next_id"]
+
+# An unusable takeover record taken as covering everything instead of as absent.
+[[bug]]
+name = "unusable-takeover-taken-as-given"
+fix = "68d2d90"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["second_writer::an_unusable_takeover_record_is_reported_and_costs_no_stop"]
+
 [[bug]]
 name = "journal-first-run-reported"
 fix = "27ef518"
@@ -879,7 +1045,7 @@ name = "success-keeps-a-stall"
 fix = "checker-holes (stall liveness)"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xa2"]
+tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0xf434c"]
 
 [[bug]]
 name = "journal-debt-not-recorded"

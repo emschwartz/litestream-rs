@@ -883,9 +883,11 @@ impl World {
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(next));
         // Another writer's file is a sound one: the same pages under the next
-        // transaction.
+        // transaction, from a WAL that is not this database's, so it names no
+        // origin in it and the live WAL cannot vouch for it.
         let Some(bytes) = rewritten(&read_all(&self.remote_raw, &newest)?, |fields| {
             fields.txids = TxidRange::single(next);
+            fields.wal = None;
         }) else {
             return Ok(None);
         };
@@ -910,6 +912,25 @@ impl World {
             Err(StoreError::NotFound { .. }) => Ok(false),
             Err(other) => Err(other),
         }
+    }
+
+    /// Whether staging and the replica both hold `key` with different bytes:
+    /// a staged copy edited or forged under a key the replica took.
+    ///
+    /// # Errors
+    /// Either store's error other than a missing key.
+    pub fn staged_differs_from_remote(&self, key: FileKey) -> Result<bool, StoreError> {
+        let found = |read: Result<Vec<u8>, StoreError>| match read {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StoreError::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
+        };
+        let staged = found(read_all(&self.staging_raw, &key))?;
+        let remote = found(read_all(&self.remote_raw, &key))?;
+        Ok(match (staged, remote) {
+            (Some(staged), Some(remote)) => staged != remote,
+            (Some(_) | None, None) | (None, Some(_)) => false,
+        })
     }
 
     /// Deletes replica `key` if it still holds exactly `bytes`; whether it did.
@@ -1027,6 +1048,22 @@ impl World {
             }
         }
         Ok(None)
+    }
+
+    /// Whether staging holds `key` under bytes the engine never put there: a
+    /// copy an operation forged or put back, which stays the operator's for as
+    /// long as it is staged, whatever the replica holds now.
+    ///
+    /// # Errors
+    /// The store's error other than a missing key.
+    pub fn staged_not_the_engines(&self, key: FileKey) -> Result<bool, StoreError> {
+        match read_all(&self.staging_raw, &key) {
+            Ok(bytes) => Ok(!self
+                .engine_puts(0)
+                .contains(&(key, crate::store::content_digest(&bytes)))),
+            Err(StoreError::NotFound { .. }) => Ok(false),
+            Err(other) => Err(other),
+        }
     }
 
     /// Every (key, digest) the staging recorder took a put of since event `since`.

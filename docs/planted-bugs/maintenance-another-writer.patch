@@ -1,8 +1,7 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index c9906d0..d429eb9 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1701,7 +1701,7 @@ impl Actor {
+@@ -1925,7 +1925,7 @@
          // its position: a file past it is another writer's. In steady state
          // this listing is the first to see one, and nothing may be planned
          // from it (no compaction, snapshot or delete takes it as input).

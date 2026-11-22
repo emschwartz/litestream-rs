@@ -63,6 +63,9 @@ struct Counting {
     /// Keys whose next read returns its bytes with the middle one flipped,
     /// the stored bytes untouched: one bad read.
     flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// Keys every listing leaves out while reads still find them: a listing
+    /// that lags the bucket.
+    unlisted: Arc<std::sync::Mutex<Vec<FileKey>>>,
 }
 
 impl Counting {
@@ -117,7 +120,13 @@ impl ObjectStore for Counting {
             .and_then(PageLimit::new)
             .filter(|cap| cap.get() < limit.get())
             .unwrap_or(limit);
-        self.inner.list(level, after, limit)
+        let unlisted = self.unlisted.lock().unwrap().clone();
+        let listed = self.inner.list(level, after, limit);
+        async move {
+            let mut listing = listed.await?;
+            listing.files.retain(|info| !unlisted.contains(&info.key));
+            Ok(listing)
+        }
     }
 
     fn read(
@@ -192,6 +201,9 @@ struct Rig {
     ck: FakeCheckpointer,
     staging: Counting,
     remote: Counting,
+    /// The takeover record a driver would keep in the meta directory: what an
+    /// actor asked for ([`Actor::takeover_wanted`]), handed back at once.
+    takeover: Option<crate::TakeoverRecord>,
 }
 
 impl Rig {
@@ -215,6 +227,7 @@ impl Rig {
             ck,
             staging: Counting::default(),
             remote: Counting::default(),
+            takeover: None,
         };
         rig.commit(1);
         rig
@@ -234,7 +247,21 @@ impl Rig {
             clock: &FakeClock::new(ts(now)),
             journal: None,
         };
-        block_on(actor.tick(env, ts(now)))
+        let tick = block_on(actor.tick(env, ts(now)));
+        // The rig is the driver: it keeps the takeover the actor asked for
+        // and ticks on, as the replicator thread does, so a test sees the
+        // tick that did the work.
+        if let Tick::Ran {
+            event: Event::TakeoverWanted(wanted),
+            ..
+        } = tick
+        {
+            let held = self.takeover.filter(|held| held.txid() > wanted.txid());
+            self.takeover = Some(held.unwrap_or(wanted));
+            actor.remember_takeover(wanted);
+            return self.tick(actor, now);
+        }
+        tick
     }
 
     /// Ticks at `now` while the actor says it has work.
@@ -844,19 +871,24 @@ fn a_replica_ahead_of_staging_names_the_page_size() {
     assert_eq!(everything(&rig).1, before.1, "nothing reaches the replica");
 }
 
-/// An upload's commit is ambiguous, and before the listing that follows,
-/// another writer's verifying object replaces transaction 2 on the replica.
-/// The listing finds it unlike the staged file: the staged files from 2 on
-/// must go and the next file is a snapshot above 2. When that delete failed,
-/// the uploader had already taken 2 as confirmed and uploaded the staged 3,
-/// built on the staged 2, onto the other object (seed 0xd79).
+/// An upload's commit is ambiguous, and before the listing that follows a
+/// verifying object replaces transaction 2 on the replica, while the staged 2
+/// is replaced too (a staging backup put back), so the divergence is no proof
+/// of another writer. The listing finds the replica's object unlike the
+/// staged file: the staged files from 2 on must go and the next file is a
+/// snapshot above 2. When that delete failed, the uploader had already taken
+/// 2 as confirmed and uploaded the staged 3, built on the staged 2, onto the
+/// other object (seed 0xd79).
 #[test]
 fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
-    let (mut other, mut writer) = caught_up();
-    other.commit(9);
-    other.follow(&mut writer, T0 + 10, 20);
     let two = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
-    let theirs = block_on(other.remote.inner.read(&two, 0, ReadLen::CHUNK)).unwrap();
+    let other_two = |n: u8| {
+        let (mut other, mut writer) = caught_up();
+        other.commit(n);
+        other.follow(&mut writer, T0 + 10, 20);
+        block_on(other.remote.inner.read(&two, 0, ReadLen::CHUNK)).unwrap()
+    };
+    let (theirs, restored) = (other_two(9), other_two(7));
     let (mut rig, mut actor) = caught_up();
     rig.remote
         .inner
@@ -870,11 +902,16 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
             break;
         }
     }
-    block_on(async {
-        let mut up = rig.remote.inner.begin_upload(&two, ts(T0)).await.unwrap();
-        up.write(&theirs).await.unwrap();
-        up.commit().await.unwrap();
-    });
+    for (store, bytes) in [
+        (&rig.remote.inner, &theirs),
+        (&rig.staging.inner, &restored),
+    ] {
+        block_on(async {
+            let mut up = store.begin_upload(&two, ts(T0)).await.unwrap();
+            up.write(bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
     rig.staging
         .inner
         .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
@@ -892,14 +929,13 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
     assert!(resnapshot < put_three, "{ticks:?}");
 }
 
-/// Expected to fail until the engine keeps a durable record (BOOT-21, BOOT-22; D9 in
-/// `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes it list the replica finds
-/// another writer's file above its own newest staged file and stops on `OtherWriter`, the one
-/// stop the default responses make. A restart forgets the stop: the new boot takes the other
-/// writer's file as history it is behind (`behind_remote`), snapshots after it and uploads, so
-/// the replica's one history interleaves two databases. The restart must stop again, or refuse.
+/// BOOT-21 and BOOT-22 (D9 in `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes
+/// it list the replica finds another writer's file above its own newest staged file and stops on
+/// `OtherWriter`, the one stop the default responses make. The restart used to forget the stop:
+/// the new boot took the other writer's file as history it is behind (`behind_remote`),
+/// snapshotted after it and uploaded, interleaving two databases in one history. The new boot now
+/// refuses replica files nothing vouches for (`crate::takeover`), so the restart stops again.
 #[test]
-#[ignore = "known wrong, BOOT-21 and BOOT-22: an OtherWriter stop is forgotten by a restart; needs a durable engine-owned record"]
 fn a_restart_after_an_other_writer_stop_stops_again() {
     let (mut other, mut writer) = caught_up();
     other.commit(9);
@@ -2094,8 +2130,10 @@ mod no_wal_yet;
 mod pages;
 mod rejected_snapshot;
 mod rewound;
+mod second_writer;
 mod stamp;
 mod tasks;
+mod vouch;
 mod wal_barrier;
 mod witness;
 
@@ -2128,13 +2166,24 @@ fn l0(n: u64) -> FileKey {
 
 /// One read of a sound staged file returns a flipped byte during boot's
 /// sweep. A read that fails verification is evidence about the read: boot
-/// deletes nothing on it, and the file is uploaded as it is.
+/// deletes nothing on it, and the file is uploaded as it is. With and
+/// without a takeover record already covering staging: asking for one is
+/// itself a second read, so only a held record shows a first read deleting.
 #[test]
 fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
+    for held in [false, true] {
+        one_bad_read_at_boot(held);
+    }
+}
+
+fn one_bad_read_at_boot(held: bool) {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
     rig.staging.flip_next_read(l0(3));
     let mut actor = Actor::new(cfg());
+    if held {
+        actor.remember_takeover(crate::TakeoverRecord::through(Txid::new(4).unwrap()));
+    }
     let first = rig.tick(&mut actor, T0 + 2);
     // The bad read deletes nothing: when the WAL could stage the files again,
     // a deletion would not show as a snapshot, only as files gone.
@@ -2146,10 +2195,20 @@ fn one_bad_read_of_a_staged_file_at_boot_drops_nothing() {
 }
 
 /// One read of a sound staged file returns a flipped byte while the upload
-/// task copies it: nothing is dropped, and a later tick uploads it.
+/// task copies it: nothing is dropped, and a later tick uploads it. With and
+/// without a takeover record already covering staging, as at boot.
 #[test]
 fn one_bad_read_of_a_staged_file_while_uploading_drops_nothing() {
+    for held in [false, true] {
+        one_bad_read_while_uploading(held);
+    }
+}
+
+fn one_bad_read_while_uploading(held: bool) {
     let (mut rig, mut actor) = caught_up();
+    if held {
+        actor.remember_takeover(crate::TakeoverRecord::through(Txid::new(2).unwrap()));
+    }
     rig.commit(2);
     assert!(matches!(
         event(&rig.tick(&mut actor, T0 + 1)),

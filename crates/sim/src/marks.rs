@@ -152,8 +152,10 @@ classes! {
     Heal = "Heal", Input;
     Verify = "Verify", Input;
     // Undrawn: the generator draws Crash instead; Restart, PowerLoss, LyingWalSync (a
-    // per-run setting in the mixes instead), OurReader and AppAutocheckpoint are scenario steps.
+    // per-run setting in the mixes instead), OurReader, AppAutocheckpoint and TakeOver are
+    // scenario steps.
     Restart = "Restart", Undrawn;
+    TakeOver = "TakeOver", Undrawn;
     PowerLoss = "PowerLoss", Undrawn;
     LyingWalSync = "LyingWalSync", Undrawn;
     OurReader = "OurReader", Undrawn;
@@ -334,6 +336,7 @@ impl Class {
             Op::Heal => Self::Heal,
             Op::Verify => Self::Verify,
             Op::Restart => Self::Restart,
+            Op::TakeOver => Self::TakeOver,
             Op::PowerLoss => Self::PowerLoss,
             Op::LyingWalSync => Self::LyingWalSync,
             Op::OurReader { .. } => Self::OurReader,
