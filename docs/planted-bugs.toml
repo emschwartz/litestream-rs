@@ -299,7 +299,7 @@ tests = [
 
 [[bug]]
 name = "restore-gap-not-relisted"
-fix = "2e340a8"
+fix = "eec4cd5"
 package = "lsr-core"
 tests = [
     "a_gap_from_a_listing_that_raced_a_writer_is_listed_again",
