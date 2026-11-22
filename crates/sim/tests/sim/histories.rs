@@ -24,11 +24,11 @@ pub mod seed_0x46;
 pub mod seed_0x585;
 pub mod seed_0x753;
 pub mod seed_0x9f9;
-pub mod seed_0xa2;
 pub mod seed_0xb6b;
 pub mod seed_0xb9e;
 pub mod seed_0xe9;
 pub mod seed_0xf;
+pub mod seed_0xf434c;
 pub mod seed_0xf488c;
 
 /// What guards a recorded history against passing for nothing.
@@ -121,8 +121,8 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         Guard::Own("anchor-any-tail"),
     ),
     (
-        "seed_0xa2",
-        "a_stall_ends_with_the_fault_that_caused_it_seed_0xa2",
+        "seed_0xf434c",
+        "a_stall_ends_with_the_fault_that_caused_it_seed_0xf434c",
         Guard::Own("success-keeps-a-stall"),
     ),
     (
