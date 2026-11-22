@@ -1,0 +1,164 @@
+# Evidence rows as data: what a test has shown about a circumstance, in a form a machine checks.
+#
+# This is the rows-as-data scheme of the behaviour accounting's closed-world section, started with
+# the rows the checker work touched and a few older ones; the behaviour table is still prose and
+# moves here row by row. `crates/compat/tests/compat/evidence.rs` checks the file:
+#
+# - in `just check` (with no listing): ids are unique; a row's mark is derived, never typed: it is
+#   tested when any evidence list is non-empty, and then it carries no `none`; a row with empty
+#   lists carries `none`, one of the closed list of untested marks; every kill names a ledger
+#   entry in docs/planted-bugs.toml whose package is the cited test's, one of whose test filters
+#   matches the cited test, and that test is one of the row's own; a tested row has a kill or an
+#   `unkilled` reason, never both silent.
+# - in `just evidence-fresh` (part of `just check`, which writes `cargo nextest list` to target/):
+#   every cited test exists; a row citing an ignored test names the just recipe that runs it in
+#   `runs_in`, and that recipe exists; a kill's test is not ignored (the nightly ledger run, `just
+#   planted-bugs`, runs no ignored test, so an ignored kill would never be demonstrated).
+#
+# The nightly ledger run is what makes a kill true: it plants each entry and requires its tests to
+# fail. So every tested row with a kill is backed by a planted bug that its cited test kills.
+#
+#   id          unique; the prefix names the group (CHK: the checkers themselves, BOOT, RUN, ...)
+#   circumstance  what happens in the world or the code
+#   detected    tests that produce the circumstance and assert the response, each as
+#               `<binary id>::<test path>`: the two columns `cargo nextest list --message-format
+#               oneline` prints, joined by `::` (the upstream test map's form)
+#   survived    tests that judge a restore while the circumstance holds
+#   recovered   tests that judge a restore after it cleared
+#   none        only when every list is empty: code only | assumed | untested | unknown |
+#               known wrong | accepted, undetected
+#   runs_in     the just recipe that runs the row's ignored tests
+#   unkilled    why a tested row has no planted bug yet; the check prints these
+#   [[row.kill]] test = one of the row's tests, plant = a ledger entry name
+
+[[row]]
+id = "CHK-1"
+circumstance = "A transaction id covers a second commit after a power loss that cut neither commit"
+detected = ["lsr-sim::oracle::tests::a_power_loss_that_cut_nothing_covered_does_not_excuse_a_reused_id"]
+[[row.kill]]
+test = "lsr-sim::oracle::tests::a_power_loss_that_cut_nothing_covered_does_not_excuse_a_reused_id"
+plant = "oracle-reuse-after-any-power-loss"
+
+[[row]]
+id = "CHK-2"
+circumstance = "Latest falls below an acknowledged transaction after a power loss, which never touches the replica"
+detected = ["lsr-sim::world::tests::a_power_loss_keeps_the_acknowledgements"]
+[[row.kill]]
+test = "lsr-sim::world::tests::a_power_loss_keeps_the_acknowledgements"
+plant = "acks-forgotten-on-power-loss"
+
+[[row]]
+id = "CHK-3"
+circumstance = "Latest goes back over a recorded rewind the engine never reported"
+detected = [
+    "lsr-history::history::judge::a_rewind_the_engine_did_not_report_does_not_excuse_going_back",
+    "lsr-history::history::judge::a_report_before_the_rewind_does_not_cover_it",
+]
+[[row.kill]]
+test = "lsr-history::history::judge::a_rewind_the_engine_did_not_report_does_not_excuse_going_back"
+plant = "rewind-excused-without-report"
+[[row.kill]]
+test = "lsr-history::history::judge::a_report_before_the_rewind_does_not_cover_it"
+plant = "rewind-excused-without-report"
+
+[[row]]
+id = "CHK-4"
+circumstance = "A regression the driver excused (a bucket rollback) is never reported by the engine"
+none = "known wrong"
+
+[[row]]
+id = "RUN-STAMP-1"
+circumstance = "The application commits after a tick read its clock and before the sync reads the committed end"
+detected = [
+    "lsr-core::actor::tests::stamp::a_commit_after_the_tick_began_is_not_stamped_before_it_landed",
+    "lsr-sim::sim::clock_reads::a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681",
+]
+[[row.kill]]
+test = "lsr-core::actor::tests::stamp::a_commit_after_the_tick_began_is_not_stamped_before_it_landed"
+plant = "stamp-before-committed-read"
+[[row.kill]]
+test = "lsr-sim::sim::clock_reads::a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681"
+plant = "stamp-before-committed-read-sim"
+
+[[row]]
+id = "RUN-STAMP-2"
+circumstance = "The application commits inside a tick, right before a checkpoint's write barrier"
+detected = [
+    "lsr-core::actor::tests::stamp::a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed",
+    "lsr-sim::sim::clock_reads::a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552",
+]
+[[row.kill]]
+test = "lsr-core::actor::tests::stamp::a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed"
+plant = "seal-stamped-at-checkpoint-start"
+[[row.kill]]
+test = "lsr-sim::sim::clock_reads::a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552"
+plant = "seal-stamped-at-checkpoint-start-sim"
+
+[[row]]
+id = "BOOT-UNLINK"
+circumstance = "A staged file the engine unlinked comes back after a power loss, the directory never synced"
+detected = [
+    "lsr-sim::store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law",
+    "lsr-sim::store::tests::a_commit_after_an_unlink_makes_it_durable",
+]
+# The swarm brings such files back and judges every restore after them (unaided campaign,
+# crates/sim/tests/sim/unaided.rs); no single seed is pinned as a named test yet.
+[[row.kill]]
+test = "lsr-sim::store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law"
+plant = "unlink-durable-at-once"
+
+[[row]]
+id = "UP-NET-RESET"
+circumstance = "The connection to the store resets part way through a request or a response body"
+survived = ["lsr-history::history::network::resets_mid_body_leave_only_committed_states"]
+recovered = ["lsr-history::history::network::resets_mid_body_leave_only_committed_states"]
+runs_in = "test-s3"
+unkilled = "needs MinIO and Toxiproxy; the nightly ledger run starts no services"
+
+[[row]]
+id = "UP-NET-TIMEOUT"
+circumstance = "The store acts on a request and its response never arrives"
+survived = ["lsr-history::history::network::a_timeout_after_the_request_was_sent_leaves_only_committed_states"]
+recovered = ["lsr-history::history::network::a_timeout_after_the_request_was_sent_leaves_only_committed_states"]
+runs_in = "test-s3"
+unkilled = "needs MinIO and Toxiproxy; the nightly ledger run starts no services"
+
+[[row]]
+id = "UP-NET-SLOW"
+circumstance = "Bodies arrive sliced into small writes, or over a slow link with latency"
+survived = [
+    "lsr-history::history::network::sliced_bodies_leave_only_committed_states",
+    "lsr-history::history::network::a_slow_link_leaves_only_committed_states",
+]
+runs_in = "test-s3"
+unkilled = "needs MinIO and Toxiproxy; the nightly ledger run starts no services"
+
+[[row]]
+id = "BOOT-LISTING-CURSOR"
+circumstance = "A staging listing's cursor never advances"
+detected = [
+    "lsr-core::pages::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
+    "lsr-core::recover::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
+]
+[[row.kill]]
+test = "lsr-core::pages::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop"
+plant = "listing-cursor"
+[[row.kill]]
+test = "lsr-core::recover::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop"
+plant = "listing-cursor"
+
+[[row]]
+id = "BOOT-READ-LOCK-LAPSE"
+circumstance = "The process restarts while the engine's read transaction had lapsed"
+recovered = ["lsr-sim::sim::fixed_seeds::lapse::a_restart_after_a_lapsed_read_lock_loses_no_commit"]
+[[row.kill]]
+test = "lsr-sim::sim::fixed_seeds::lapse::a_restart_after_a_lapsed_read_lock_loses_no_commit"
+plant = "sim-read-lock-retake"
+
+[[row]]
+id = "RUN-REQUESTED-SNAPSHOT"
+circumstance = "An operator asks for a snapshot after the WAL moved under the engine"
+recovered = ["lsr-sim::sim::fixed_seeds::requested::a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page"]
+[[row.kill]]
+test = "lsr-sim::sim::fixed_seeds::requested::a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page"
+plant = "recover-before-trusting-snapshot"

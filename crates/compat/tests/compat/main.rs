@@ -10,6 +10,8 @@ mod alternation;
 #[cfg(test)]
 mod compaction;
 #[cfg(test)]
+mod evidence;
+#[cfg(test)]
 mod fixtures;
 #[cfg(test)]
 mod handover;

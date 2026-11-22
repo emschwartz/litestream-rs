@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features upstream-test-map-fresh
+check: fmt-check clippy test doctest features upstream-test-map-fresh evidence-fresh
 
 fmt-check:
     cargo fmt --all -- --check
@@ -316,6 +316,19 @@ upstream-test-map-fresh:
     list="$(cd "${CARGO_TARGET_DIR:-target}/upstream-test-map" && pwd)/rust-tests.txt"
     cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$list"
     LSR_UPSTREAM_TEST_MAP_RUST_TESTS="$list" cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=upstream_test_map::every_counterpart_exists)'
+
+# Every test docs/evidence.toml cites exists, a row citing an ignored test names the recipe that
+# runs it, and no planted bug's killing test is ignored (crates/compat/tests/compat/evidence.rs).
+# The listings are generated into target/ and never committed, as for the upstream test map.
+evidence-fresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "${CARGO_TARGET_DIR:-target}/evidence"
+    dir="$(cd "${CARGO_TARGET_DIR:-target}/evidence" && pwd)"
+    cargo nextest list --workspace --all-features --locked --run-ignored all --message-format oneline --color never > "$dir/all.txt"
+    cargo nextest list --workspace --all-features --locked --run-ignored only --message-format oneline --color never > "$dir/ignored.txt"
+    LSR_EVIDENCE_ALL_TESTS="$dir/all.txt" LSR_EVIDENCE_IGNORED_TESTS="$dir/ignored.txt" \
+        cargo nextest run -p lsr-compat --test compat --locked --run-ignored only -E 'test(=evidence::every_cited_test_exists_and_runs_where_it_says)'
 
 # Regenerate the upstream test names in docs/upstream-test-map/upstream-tests.txt from the pinned clones
 # (`just upstream` first). The test map test in `check` reads this file, never the clone.

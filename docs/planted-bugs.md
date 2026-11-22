@@ -19,3 +19,13 @@ that caught it must fail.
 Mutation testing covers the lines a pull request changes: `just mutants-diff` (CI job `mutants-diff`)
 runs `cargo mutants --in-diff` over `lsr-core` and `lsr-ltx`. A missed mutant fails the job unless
 `docs/mutants-escapes.txt` lists it with its reason in `docs/mutants.md`.
+
+## Evidence rows
+
+`docs/evidence.toml` holds behaviour rows as data: what each row claims a named test shows
+(detected, survived or recovered), and, for a tested row, the ledger entry whose plant that test
+kills. `crates/compat/tests/compat/evidence.rs` checks the file in `just check` (every kill names
+an entry here whose package and test filters match the cited test) and, through `just
+evidence-fresh`, against `cargo nextest list` (every cited test exists, ignored ones name the
+recipe that runs them, no killing test is ignored). The nightly run of this ledger then makes
+each kill true. A tested row with no plant says why in `unkilled`, and the check prints it.
