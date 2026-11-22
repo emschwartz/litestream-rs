@@ -130,3 +130,87 @@ pub fn compressed_block_spans(file: &[u8]) -> Option<Vec<Range<usize>>> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::compressed_block_spans;
+    use crate::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
+
+    /// A Rust-written file of one 512-byte zero page with 0x55 at offset 100:
+    /// one block at 110..132 of four tokens, at 110 (0x1f: one literal, a
+    /// match continued in one byte), 115 (0x1f), 120 (0x0f: no literals, a
+    /// match continued in two bytes) and 125 (0x60: six literals to the end).
+    #[test]
+    fn a_rust_block_splits_at_its_last_token() {
+        let page_size = PageSize::new(512).unwrap();
+        let header = Header::new(HeaderFields {
+            tracked: false,
+            page_size,
+            commit: 1,
+            txids: TxidRange::new(Txid::new(1).unwrap(), Txid::new(1).unwrap()).unwrap(),
+            timestamp: Timestamp::from_unix_millis(0),
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .unwrap();
+        let mut page = vec![0_u8; 512];
+        page[100] = 0x55;
+        let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+        encoder
+            .write_page(PageNo::new(1, page_size).unwrap(), &page)
+            .unwrap();
+        let bytes = encoder.finish(None).unwrap().0;
+        assert_eq!(
+            bytes[110..132],
+            [
+                0x1f, 0x00, 0x01, 0x00, 0x50, 0x1f, 0x55, 0x64, 0x00, 0x50, 0x0f, 0x02, 0x00, 0xff,
+                0x20, 0x60, 0, 0, 0, 0, 0, 0
+            ],
+            "the encoder's output this test pins"
+        );
+        assert_eq!(
+            compressed_block_spans(&bytes),
+            Some(vec![110..125, 126..132])
+        );
+    }
+
+    /// A Go ltx v0.5.1 file: one legacy frame (FLG 0x64, content checksum on)
+    /// whose single compressed block of 1062 bytes starts at 117 and whose last
+    /// token, 0xe0 (fourteen literals), is at 1164.
+    #[test]
+    fn a_go_legacy_block_splits_at_its_last_token() {
+        let bytes = include_bytes!(
+            "../tests/fixtures/ltx-v0.5.1/4096/0000000000000004-0000000000000005.ltx"
+        );
+        assert_eq!(bytes[113..117], 1062_u32.to_le_bytes());
+        assert_eq!(bytes[1164], 0xe0);
+        assert_eq!(
+            compressed_block_spans(bytes),
+            Some(vec![117..1164, 1165..1179])
+        );
+    }
+
+    /// Two legacy frames without a content checksum (FLG 0x60): nothing follows
+    /// the end mark, so the second frame starts right after it. Each block is
+    /// one literal and a match of nibble 2 (no continuation), then a token of
+    /// three literals.
+    #[test]
+    fn legacy_frames_without_a_content_checksum_end_at_the_end_mark() {
+        let block = [0x12, b'x', 0x01, 0x00, 0x30, b'a', b'b', b'c'];
+        let mut file = vec![0_u8; 100];
+        for pgno in [1_u8, 2] {
+            file.extend_from_slice(&[0, 0, 0, pgno, 0, 0]);
+            file.extend_from_slice(&0x184d_2204_u32.to_le_bytes());
+            file.extend_from_slice(&[0x60, 0x40, 0]);
+            file.extend_from_slice(&8_u32.to_le_bytes());
+            file.extend_from_slice(&block);
+            file.extend_from_slice(&[0; 4]);
+        }
+        file.extend_from_slice(&[0; 6]);
+        assert_eq!(
+            compressed_block_spans(&file),
+            Some(vec![117..121, 122..125, 146..150, 151..154])
+        );
+    }
+}
