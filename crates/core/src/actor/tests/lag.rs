@@ -311,26 +311,74 @@ fn the_bound_is_at_least_the_backoff_cap() {
     assert!(MaxUnreplicatedAge::new(Duration::from_secs(300)).is_some());
 }
 
-/// A boot that cannot vouch for its pending staged files deletes them and snapshots their end
-/// state, stamped at that boot. The clock keeps the deleted files' stamps: those commits have
-/// been off the replica since then, and the snapshot's stamp would restart it.
-#[test]
-fn a_boot_that_deletes_pending_files_keeps_their_stamps() {
-    let (mut rig, actor) = lagging(10_000);
-    let since = actor.unreplicated_since().expect("the clock runs");
-    rig.wal.force_restart();
-    rig.commit(3);
+/// A caught-up actor whose replica refuses every upload from now on, and the same page 1 the
+/// last commit wrote committed again: a transaction that changes nothing, as the driver's start
+/// and the frame after a checkpoint are.
+fn a_no_op_pending() -> (Rig, Actor) {
+    let mut rig = Rig::new();
     let mut actor = Actor::new(go_like());
-    let boot = rig.tick(&mut actor, T0 + 120_000);
+    rig.settle(&mut actor, T0);
+    remote_down(&rig, 10_000);
+    rig.commit(1);
+    rig.tick(&mut actor, T0 + 10);
+    (rig, actor)
+}
+
+/// A staged file that changes no page holds no commit of the application's: no clock, and
+/// no trip however long the replica refuses it.
+#[test]
+fn a_file_that_changes_nothing_is_not_lag() {
+    let (mut rig, mut actor) = a_no_op_pending();
     assert!(
-        matches!(
-            event(&boot),
-            Some(Event::Booted {
-                cause: Some(SnapshotCause::StagedUnverified { .. })
-            })
-        ),
-        "{boot:?}"
+        actor.staged() > actor.replicated(),
+        "the no-op file is staged, not uploaded"
     );
-    drive(&mut rig, &mut actor, T0 + 120_000, T0 + 180_000);
-    assert_eq!(actor.unreplicated_since(), Some(since));
+    assert_eq!(actor.unreplicated_since(), None);
+    let seen = drive(&mut rig, &mut actor, T0 + 10, T0 + 2 * BOUND);
+    assert_eq!(first_trip(&seen), None, "{seen:?}");
+}
+
+/// The same file still pending when the process restarts: the boot finds it changes nothing
+/// against the files before it, so a crash loop with the store down and the application idle
+/// never trips.
+#[test]
+fn a_file_that_changes_nothing_is_not_lag_after_a_restart() {
+    let (mut rig, _) = a_no_op_pending();
+    let mut actor = Actor::new(go_like());
+    let seen = drive(&mut rig, &mut actor, T0 + 60_000, T0 + 2 * BOUND);
+    assert!(actor.booted());
+    assert!(actor.staged() > actor.replicated());
+    assert_eq!(actor.unreplicated_since(), None);
+    assert_eq!(first_trip(&seen), None, "{seen:?}");
+}
+
+/// A commit after the no-op file is lag again, dated from that commit's file.
+#[test]
+fn a_commit_after_a_file_that_changes_nothing_is_lag() {
+    let (mut rig, mut actor) = a_no_op_pending();
+    rig.commit(2);
+    rig.settle(&mut actor, T0 + 1_000);
+    let since = actor
+        .unreplicated_since()
+        .expect("the commit is off the replica");
+    assert!(since.unix_millis() >= T0 + 10, "{since:?}");
+}
+
+/// An operator's snapshot taken while nothing is off the replica holds nothing the replica
+/// lacks: no clock while the replica refuses it.
+#[test]
+fn an_operator_snapshot_while_caught_up_is_not_lag() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    rig.settle(&mut actor, T0);
+    remote_down(&rig, 10_000);
+    actor.request_snapshot();
+    rig.tick(&mut actor, T0 + 10);
+    assert!(
+        actor.staged() > actor.replicated(),
+        "the snapshot is staged, not uploaded"
+    );
+    assert_eq!(actor.unreplicated_since(), None);
+    let seen = drive(&mut rig, &mut actor, T0 + 10, T0 + 2 * BOUND);
+    assert_eq!(first_trip(&seen), None, "{seen:?}");
 }

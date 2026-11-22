@@ -1,7 +1,7 @@
 //! The fail-stop judge's place in the run loop (`crate::failstop`): after every tick it learns
 //! what fired, whether the replica now holds everything, and judges the engine's trip.
 
-use lsr_core::{Event, RestoreTarget, Tick};
+use lsr_core::{Did, Event, RestoreTarget, Tick};
 use lsr_ltx::Timestamp;
 
 use super::Runner;
@@ -19,12 +19,8 @@ impl Runner {
         began: Timestamp,
         fired0: (Fired, Fired),
         ended: &TickEnd<Tick>,
-        committed_in_tick: bool,
     ) -> Result<(), Violation> {
-        if committed_in_tick {
-            self.fail_stop
-                .committed(began, began.unix_millis().saturating_sub(self.jumped));
-        }
+        self.fail_stop_commits();
         let (remote, staging) = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
         let reported_failure = match ended {
             TickEnd::Done(Tick::Ran { event, .. }) => match event {
@@ -49,9 +45,15 @@ impl Runner {
             refusal_fired: remote.refused > fired0.0.refused,
         };
         self.fail_stop.saw(tick);
-        if self.w.remote_recorder.len() != self.fail_stop_seen {
-            self.fail_stop.put(remote.doubtful > fired0.0.doubtful);
-        }
+        let believed = matches!(
+            ended,
+            TickEnd::Done(Tick::Ran {
+                event: Event::Uploaded(Did::Put(_)),
+                ..
+            })
+        );
+        self.fail_stop
+            .put(remote.doubtful > fired0.0.doubtful, believed);
         self.fail_stop_caught_up()?;
         let trip = self.actor.trip();
         if self.report.trips.last().map(|(_, was)| *was) != Some(trip) {
@@ -75,7 +77,7 @@ impl Runner {
         if let Ok((got, _)) = restored_digest(&self.w.remote_raw, RestoreTarget::Latest)?
             && got == want
         {
-            self.fail_stop.caught_up();
+            self.fail_stop.caught_up(want);
         }
         Ok(())
     }
@@ -87,6 +89,26 @@ impl Runner {
             self.fail_stop.replica_changed_outside();
             self.fail_stop_seen = usize::MAX;
         }
+    }
+
+    /// Tells the judge of every commit the model gained since it last looked (the app's, a
+    /// vacuum's, one inside a tick), dated at the start of the operation that made it: never
+    /// later than the commit, so the age the judge measures is never short.
+    pub(super) fn fail_stop_commits(&mut self) {
+        let commits = self.w.model.commits().len();
+        if commits == self.fail_stop_commits {
+            return;
+        }
+        self.fail_stop_commits = commits;
+        let at = self.op_began;
+        let after = image_digest(&self.w.model.newest_image());
+        let before = std::mem::replace(&mut self.fail_stop_image, after);
+        self.fail_stop.committed(
+            at,
+            at.unix_millis().saturating_sub(self.jumped),
+            before,
+            after,
+        );
     }
 
     /// The bound the engines of this run are built with.

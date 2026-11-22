@@ -68,6 +68,7 @@ mod parts;
 mod state;
 mod unproven;
 
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -861,12 +862,10 @@ impl Actor {
             return self.ran(Event::Idle, now);
         }
         let suspect = &mut self.kept.suspect_staged;
-        let (upload, dropped, pending_stamp) =
-            match boot_listing(env.staging, env.remote, suspect).await {
-                Ok(listed) => listed,
-                Err(fault) => return self.fault(Task::Sync, fault, now),
-            };
-        self.kept.lag.floor(pending_stamp);
+        let (upload, dropped) = match boot_listing(env.staging, env.remote, suspect).await {
+            Ok(listed) => listed,
+            Err(fault) => return self.fault(Task::Sync, fault, now),
+        };
         let Judged {
             pending: Pending { tokens, refused },
             upload,
@@ -900,21 +899,22 @@ impl Actor {
         };
         // Only a boot that continues seeds the table, from the staged files boot
         // already verified: a snapshot records every page it reads.
-        let pages = match course {
+        let (pages, quiet) = match course {
             Course::At {
                 position,
                 snapshot: None,
                 ..
             } => match seeded(env.staging, upload.confirmed(), position.commit()).await {
-                Ok(pages) => pages,
+                Ok(seeded) => (seeded.table, seeded.quiet),
                 Err(fault) => return self.fault(Task::Sync, fault, now),
             },
             Course::At {
                 snapshot: Some(_), ..
             }
             | Course::Snapshot { .. }
-            | Course::Unbooted => PageChecksumTable::new(),
+            | Course::Unbooted => (PageChecksumTable::new(), BTreeSet::new()),
         };
+        self.quiet_at_boot(quiet);
         // Every step succeeded: the engine is assigned whole.
         self.engine = Engine {
             course,
@@ -1363,11 +1363,22 @@ impl Actor {
                 };
             }
             Synced::Wrote {
-                end, txs, witness, ..
+                end,
+                txs,
+                witness,
+                changes,
+                ..
             } => {
+                let key = witness.key();
                 self.engine.witnesses.insert(witness);
                 // With a cause pending, the step that wrote was the snapshot.
-                if self.pending().is_some() {
+                if !changes {
+                    self.note_quiet_file(key);
+                }
+                if let Some(cause) = self.pending() {
+                    if changes {
+                        self.note_quiet_snapshot(cause, key);
+                    }
                     self.kept.snapshot_asked = false;
                 }
                 if self.engine.gate == Gate::NextWrite {
@@ -2060,7 +2071,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     staging: &L,
     remote: &R,
     suspect: &mut Option<FileKey>,
-) -> Result<(UploadState, Dropped, Option<Timestamp>), Fault> {
+) -> Result<(UploadState, Dropped), Fault> {
     // At boot a replica ahead of the local newest staged file is `recover`'s to judge (a
     // snapshot after it), not the uploader's (a stop), so the listing names no newest staged file.
     let start = UploadState::ListFirst { confirmed: None };
@@ -2074,7 +2085,6 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
         Ok(listed) => (listed.state, None),
         Err(failed) => return Err(failed.fault),
     };
-    let pending_stamp = oldest_pending_stamp(staging, upload.confirmed()).await?;
     // The staged files from `from` on cannot continue the replica: they go,
     // and recovery snapshots above what the replica holds.
     if let Some(from) = diverged {
@@ -2094,21 +2104,7 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
         (None, Some(from)) => Dropped::Unreadable(from),
         (None, None) => Dropped::Nothing,
     };
-    Ok((upload, dropped, pending_stamp))
-}
-
-/// The oldest exact created-at time among the staged level-0 files above `confirmed`: the
-/// fail-stop clock's floor (`crate::failstop`), read before boot deletes any of them.
-async fn oldest_pending_stamp<L: ObjectStore>(
-    staging: &L,
-    confirmed: Option<Txid>,
-) -> Result<Option<Timestamp>, Fault> {
-    Ok(crate::upload::staged_from(staging, confirmed)
-        .await?
-        .iter()
-        .filter(|info| Some(info.key.range().min()) > confirmed)
-        .filter_map(|info| info.created_at().map(crate::layout::CreatedAt::at))
-        .min())
+    Ok((upload, dropped))
 }
 
 /// Boot's witness pass over the pending staged files (`crate::witness`).

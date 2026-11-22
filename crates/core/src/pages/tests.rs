@@ -212,9 +212,13 @@ fn only_vouched_staged_files_seed_the_table() {
             up.commit().await.unwrap();
         });
     }
-    let all = crate::conformance::block_on(seeded(&staging, None, nz(4))).unwrap();
+    let all = crate::conformance::block_on(seeded(&staging, None, nz(4)))
+        .unwrap()
+        .table;
     assert_eq!(all.len(), 3);
-    let vouched = crate::conformance::block_on(seeded(&staging, Txid::new(3), nz(4))).unwrap();
+    let vouched = crate::conformance::block_on(seeded(&staging, Txid::new(3), nz(4)))
+        .unwrap()
+        .table;
     assert_eq!(vouched.len(), 2);
     let mut vouched = vouched;
     // Page 2 was only in file 2: unknown, so any bytes pass and are recorded.

@@ -326,6 +326,12 @@ struct Runner {
     jumped: i64,
     /// The replica recorder's length when the fail-stop judge last restored `Latest`.
     fail_stop_seen: usize,
+    /// The digest of the model's newest image as the fail-stop judge last took it.
+    fail_stop_image: lsr_history::Digest,
+    /// How many commits the model held when the fail-stop judge last looked.
+    fail_stop_commits: usize,
+    /// The clock when the operation being applied began: what the judge dates its commits by.
+    op_began: Timestamp,
     /// Replica recorder events already judged by [`judge_put`].
     puts_judged: usize,
     /// The staging recorder's length when a staging backup was last put
@@ -354,6 +360,9 @@ impl Runner {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
         let mut w = World::new(seed, page_size, FIRST_DB_PAGES);
         w.start_driver();
+        let start = w.clock.now();
+        let image = crate::history::image_digest(&w.model.newest_image());
+        let commits = w.model.commits().len();
         Self {
             w,
             actor: Actor::new(actor_config()),
@@ -383,9 +392,10 @@ impl Runner {
             expected_sizes: Vec::new(),
             life: Incarnation::default(),
             // The database's first content is on no replica yet.
-            fail_stop: FailStopJudge::starting(lsr_ltx::Timestamp::from_unix_millis(
-                crate::world::EPOCH_MILLIS,
-            )),
+            fail_stop: FailStopJudge::starting(start, image),
+            fail_stop_image: image,
+            fail_stop_commits: commits,
+            op_began: start,
             jumped: 0,
             fail_stop_seen: 0,
             puts_judged: 0,
@@ -629,7 +639,7 @@ impl Runner {
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
-        self.judge_fail_stop(began, fired0, &ended, in_tick.is_some())?;
+        self.judge_fail_stop(began, fired0, &ended)?;
         self.note_tick(began, remote0);
         if self.trace {
             self.report.trace.push(format!("    tick: {ended:?}"));
@@ -938,9 +948,6 @@ impl Runner {
         all.append(&mut pages);
         let before = self.w.sqlite.db_size();
         if let Some(id) = self.w.app_commit(&all, db_size) {
-            let now = self.now();
-            self.fail_stop
-                .committed(now, now.unix_millis().saturating_sub(self.jumped));
             self.app
                 .logged(id, &all, db_size, self.w.sqlite.page_size());
             if db_size < before {
@@ -1297,7 +1304,9 @@ impl Runner {
     /// by content at random (see [`crate::history`]).
     fn apply_judged(&mut self, op: &Op) -> Result<(), Violation> {
         self.op_began_at = self.w.sqlite.mx_frame();
+        self.op_began = self.now();
         self.apply(op)?;
+        self.fail_stop_commits();
         self.after_restart();
         self.recovery_agrees()?;
         if self.judges.history && self.w.history.draw() {

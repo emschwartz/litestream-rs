@@ -227,10 +227,13 @@ impl Witnesses {
         self.by_txid.retain(|txid, _| *txid < from);
     }
 
-    /// The stamp of the oldest pending staged file, if any is held.
+    /// The stamp of the oldest pending staged file not in `but`, if any is held.
     #[must_use]
-    pub fn oldest_stamp(&self) -> Option<Timestamp> {
-        self.by_txid.values().next().map(Witnessed::stamp)
+    pub fn oldest_stamp_but(&self, but: &std::collections::BTreeSet<Txid>) -> Option<Timestamp> {
+        self.by_txid
+            .iter()
+            .find(|(txid, _)| !but.contains(*txid))
+            .map(|(_, token)| token.stamp())
     }
 
     /// How many tokens are held.

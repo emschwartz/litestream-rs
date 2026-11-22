@@ -8,13 +8,37 @@
 //! only trip for a stop or a refusal at boot (`docs/decisions.md` D25). A rebuilt engine
 //! keeps the clock it had.
 
-use lsr_ltx::Timestamp;
+use std::collections::BTreeSet;
+
+use lsr_ltx::{Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
 use super::{Actor, Task, Tick, Waiter};
 use crate::failstop::{Trip, trip};
-use crate::fault::{Fault, Next};
+use crate::fault::{Fault, Next, SnapshotCause};
+use crate::layout::FileKey;
 use crate::source::WalSource;
+
+/// Whether a snapshot for `cause` is a doubt about continuity, not a finding of commits the
+/// staged files lack.
+const fn doubt_only(cause: SnapshotCause) -> bool {
+    match cause {
+        SnapshotCause::OperatorRequested
+        | SnapshotCause::GenerationChanged
+        | SnapshotCause::WalMissing
+        | SnapshotCause::PrevFrameMismatch
+        | SnapshotCause::LastPageMismatch
+        | SnapshotCause::NewestStagedFileUnreadable => true,
+        // The database's first copy, a replica ahead of us, frames a checkpoint or a failed
+        // sync moved past staging, a rewind, staged files deleted: commits may be in the file.
+        SnapshotCause::FirstSync
+        | SnapshotCause::BehindRemote { .. }
+        | SnapshotCause::LocalRewound { .. }
+        | SnapshotCause::CheckpointBoundary
+        | SnapshotCause::WalSyncFailed
+        | SnapshotCause::StagedUnverified { .. } => false,
+    }
+}
 
 /// Whether a failure of the task can keep a commit off the replica: the tasks a commit passes
 /// through on its way there. A blocked checkpoint, a prune or maintenance never does.
@@ -66,24 +90,68 @@ impl Actor {
             // keeps the clock it had, untouched.
             return;
         }
+        if let Some(replicated) = self.replicated() {
+            self.kept.quiet.retain(|txid| *txid > replicated);
+        }
         let was_behind = self.kept.lag.since().is_some();
         let end = wal.committed().ok().map(|read| read.end());
         let behind = self.behind(end, was_behind);
-        let oldest = self.engine.witnesses.oldest_stamp();
+        let oldest = self.engine.witnesses.oldest_stamp_but(&self.kept.quiet);
         let bound = self.kept.cfg.max_unreplicated_age;
         self.kept.lag.observe(behind, oldest, bound, now);
     }
 
     /// Whether anything committed is off the replica: WAL frames past the synced position, a
     /// staged file not confirmed on the replica, or a snapshot owed while lag was already
-    /// running or for pending files a boot deleted (its commits are in the database file
+    /// running for a cause that found commits past staging (they are in the database file
     /// only). A wal-index that cannot be read
     /// says nothing new: the lag stands as it was.
     fn behind(&self, end: Option<CommittedEnd>, was_behind: bool) -> bool {
         let wal_ahead = end.map_or(was_behind, |end| self.wal_ahead(end));
-        let unconfirmed = self.staged() > self.replicated();
-        let owed = (was_behind || self.kept.lag.has_floor()) && self.pending().is_some();
+        let unconfirmed = self.staged() > self.replicated() && !self.only_quiet_pending();
+        let owed = was_behind && self.pending().is_some_and(|cause| !doubt_only(cause));
         wal_ahead || unconfirmed || owed
+    }
+
+    /// Whether every staged file the replica lacks holds no commit of the application's.
+    fn only_quiet_pending(&self) -> bool {
+        let (Some(staged), replicated) = (self.staged(), self.replicated()) else {
+            return false;
+        };
+        let first = replicated.map_or(Some(Txid::MIN), Txid::next);
+        let Some(first) = first.filter(|first| *first <= staged) else {
+            return false;
+        };
+        let pending = staged.get().saturating_sub(first.get()).saturating_add(1);
+        let quiet = self.kept.quiet.range(first..=staged).count();
+        u64::try_from(quiet).is_ok_and(|quiet| quiet == pending)
+    }
+
+    /// Notes the snapshot a step just staged as `key` as quiet when it was staged while nothing
+    /// was known off the replica, for a cause that is a doubt about the WAL's continuity rather
+    /// than a finding of unstaged frames: it holds what the replica already holds, as far as
+    /// the engine can tell. A commit the engine never saw (made and checkpointed away by
+    /// another process between two ticks) would be missed until the next commit starts the
+    /// clock: a late trip, never a false one.
+    pub(super) fn note_quiet_snapshot(&mut self, cause: SnapshotCause, key: FileKey) {
+        let caught_up = self.kept.lag.since().is_none() && self.staged() == self.replicated();
+        if doubt_only(cause) && caught_up {
+            self.kept.quiet.insert(key.range().max());
+        }
+    }
+
+    /// Notes a file a sync step just staged as `key` as quiet: it changes no page of the state
+    /// the files before it left, so it holds the engine's own write (the driver's start, the
+    /// frame that moves the WAL past a checkpoint), no commit of the application's. The clock
+    /// may already run for its frames while they were unstaged; they were never lag.
+    pub(super) fn note_quiet_file(&mut self, key: FileKey) {
+        self.kept.quiet.insert(key.range().max());
+    }
+
+    /// Takes the quiet files a boot found among the pending ones, and lets go of marks the
+    /// replica has passed.
+    pub(super) fn quiet_at_boot(&mut self, quiet: BTreeSet<Txid>) {
+        self.kept.quiet = quiet;
     }
 
     /// Whether the committed WAL holds a frame past the synced position.

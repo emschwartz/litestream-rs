@@ -15,6 +15,8 @@
 //! so "no position and no snapshot pending" cannot be written down. A boot
 //! builds a whole `Engine` and assigns it only when every step succeeded.
 
+use std::collections::BTreeSet;
+
 use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
@@ -127,6 +129,10 @@ pub(super) struct Kept {
     pub(super) listed: bool,
     /// The last boot failure before the first listing was the store refusing access.
     pub(super) refused_at_boot: Option<Denied>,
+    /// Pending staged files that hold no commit of the application's: a file that changes no
+    /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
+    /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
+    pub(super) quiet: BTreeSet<Txid>,
 }
 
 impl Kept {
@@ -146,6 +152,7 @@ impl Kept {
             lag: Lag::default(),
             listed: false,
             refused_at_boot: None,
+            quiet: BTreeSet::new(),
         }
     }
 
@@ -169,6 +176,7 @@ impl Kept {
             lag,
             listed,
             refused_at_boot,
+            quiet: _,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -185,6 +193,8 @@ impl Kept {
             lag: *lag,
             listed: *listed,
             refused_at_boot: *refused_at_boot,
+            // Beliefs about staged files: the rebuilt engine's boot judges them again.
+            quiet: BTreeSet::new(),
         }
     }
 

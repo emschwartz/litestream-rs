@@ -689,12 +689,6 @@ tests = [
     "failstop::tests::the_release_latches",
 ]
 
-[[bug]]
-name = "failstop-boot-forgets-deleted-stamps"
-fix = "83cef31"
-package = "lsr-core"
-tests = ["lag::a_boot_that_deletes_pending_files_keeps_their_stamps"]
-
 # The same plants against the simulator: the judge of every run catches the early trips unaided
 # (random histories), the named runs catch the late ones.
 

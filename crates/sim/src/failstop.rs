@@ -29,13 +29,17 @@ use lsr_ltx::Timestamp;
 use crate::oracle::Violation;
 
 /// The simulator's view of what is off the replica.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct FailStopJudge {
     /// The run's first instant, on both clocks: the earliest any commit can date from.
     first: Option<(Timestamp, i64)>,
     /// The first commit since the replica last held everything: on the engine's clock, and on
     /// the simulator's time with the clock's steps taken out.
     since: Option<(Timestamp, i64)>,
+    /// The digest of every image the database held since then, the one before the first
+    /// commit included. When the newest appears twice (a commit that changed nothing, a vacuum
+    /// at the same size), a restore that shows it cannot tell which commit the replica holds.
+    images: Vec<lsr_history::Digest>,
     /// The latest tick on which an attempt failed, on both clocks.
     failed: Option<(Timestamp, i64)>,
     /// A store refusal fired since the last start.
@@ -64,18 +68,31 @@ pub struct TickSeen {
 impl FailStopJudge {
     /// A judge for a run whose database already holds content at `start`, on no replica yet.
     #[must_use]
-    pub fn starting(start: Timestamp) -> Self {
+    pub fn starting(start: Timestamp, image: lsr_history::Digest) -> Self {
         let first = Some((start, start.unix_millis()));
         Self {
             first,
             since: first,
+            images: vec![image],
             ..Self::default()
         }
     }
 
-    /// The app committed at `at` (`true_at` with steps taken out).
-    pub fn committed(&mut self, at: Timestamp, true_at: i64) {
+    /// The app committed at `at` (`true_at` with steps taken out), taking the database from the
+    /// image `before` to `after`.
+    pub fn committed(
+        &mut self,
+        at: Timestamp,
+        true_at: i64,
+        before: lsr_history::Digest,
+        after: lsr_history::Digest,
+    ) {
+        if self.since.is_none() {
+            self.images.clear();
+            self.images.push(before);
+        }
         self.since.get_or_insert((at, true_at));
+        self.images.push(after);
     }
 
     /// Something outside the engine changed the replica (a rollback, an operator's delete,
@@ -86,17 +103,25 @@ impl FailStopJudge {
         self.since = self.first.or(self.since);
     }
 
-    /// A restore of the replica's `Latest` is the model's newest image. Ignored while an
-    /// upload's answer is in doubt.
-    pub fn caught_up(&mut self) {
-        if !self.doubt {
+    /// A restore of the replica's `Latest` is the model's newest image, `newest`. Ignored while
+    /// an upload's answer is in doubt, and while that image is not one commit's alone.
+    pub fn caught_up(&mut self, newest: lsr_history::Digest) {
+        let alone = self.images.iter().filter(|image| **image == newest).count() <= 1;
+        if !self.doubt && alone {
             self.since = None;
+            self.images.clear();
         }
     }
 
-    /// After a tick that put to the replica: whether an answer in it could not be believed.
-    pub const fn put(&mut self, doubtful: bool) {
-        self.doubt = doubtful;
+    /// After a tick: whether an upload answer in it could not be believed, and whether the
+    /// engine took an upload as landed. Only the engine's own believed upload ends a doubt: a
+    /// file another writer puts tells the engine nothing.
+    pub const fn put(&mut self, doubtful: bool, believed: bool) {
+        if doubtful {
+            self.doubt = true;
+        } else if believed {
+            self.doubt = false;
+        }
     }
 
     /// Whether anything may be off the replica.
