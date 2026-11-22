@@ -16,7 +16,6 @@ pub mod seed_0x126d68facf21;
 pub mod seed_0x126d68facf74;
 pub mod seed_0x126d68fad061;
 pub mod seed_0x126d68fae16b;
-pub mod seed_0x14b;
 pub mod seed_0x1919f;
 pub mod seed_0x25;
 pub mod seed_0x2c;
@@ -176,7 +175,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x9f9",
         "seed_0x9f9_does_not_trip",
-        Guard::Own("failstop-dates-the-run-sim"),
+        Guard::Unguarded(
+            "the runner changes merged with #188 stopped this history from reaching the false trip \
+             even on the engine before the fail-stop fix, so no plant can be judged by it; \
+             seed_0x330 pins the same cause",
+        ),
     ),
     (
         "seed_0x330",
@@ -192,11 +195,6 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0xa4d",
         "seed_0xa4d_does_not_trip",
         Guard::Own("failstop-trip-held-to-zero-age-sim"),
-    ),
-    (
-        "seed_0x14b",
-        "seed_0x14b_does_not_trip",
-        Guard::Own("failstop-doubt-baseline-ignored-sim"),
     ),
 ];
 

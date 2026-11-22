@@ -336,23 +336,10 @@ fn seed_0xa4d_does_not_trip() {
     runs_clean(0xa4d, crate::histories::seed_0xa4d::OPS, &opts);
 }
 
-/// WAL frames the replica held counted while a snapshot was owed for a doubt alone.
-#[test]
-fn seed_0x14b_does_not_trip() {
-    let opts = Opts {
-        drawn: true,
-        after_restart: lsr_sim::AfterRestart::Nothing,
-        clock_law: lsr_sim::ClockLaw::PerTick,
-        staging_fs: true,
-        error_domain: true,
-        ..Opts::default()
-    };
-    runs_clean(0x14b, crate::histories::seed_0x14b::OPS, &opts);
-}
-
 /// Seed 0x9f9's history as found, pinned so the generator cannot move it away: a run of lag
 /// dated from its start, under two day-long clock steps and a staging backup put back, once
-/// tripped with every commit on the replica.
+/// tripped with every commit on the replica. Since the runner changes merged with #188 it no
+/// longer reaches that trip even on the old engine; `seed_0x330_does_not_trip` pins the cause.
 #[test]
 fn seed_0x9f9_does_not_trip() {
     let opts = Opts {

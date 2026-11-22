@@ -2,7 +2,9 @@
 //! the clock stepped a day forward, and the newest staged file rewritten under the running
 //! engine. The engine tripped for age with every commit on the replica: a checkpoint staged
 //! the frame that moves the WAL past a restart, which changes no page, and the clock counted
-//! it as a commit (`docs/decisions.md` D81).
+//! it as a commit (`docs/decisions.md` D81). Since the runner changes merged with #188 this
+//! history no longer reaches the trip even on the old engine; `seed_0x8ef_does_not_trip` and
+//! lsr-core's `a_seal_that_changes_no_page_is_reported_quiet` pin the cause.
 
 use std::io::ErrorKind;
 

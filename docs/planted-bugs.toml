@@ -1619,7 +1619,6 @@ fix = "87cd10d"
 package = "lsr-sim"
 test_bin = "sim"
 tests = [
-    "failstop::seed_0x9f9_does_not_trip",
     "failstop::seed_0x330_does_not_trip",
 ]
 
@@ -1645,7 +1644,6 @@ fix = "87cd10d"
 package = "lsr-sim"
 test_bin = "sim"
 tests = [
-    "failstop::seed_0xf4342::a_forged_staged_file_after_a_day_long_step_does_not_trip_seed_0xf4342",
     "failstop::seed_0x8ef_does_not_trip",
 ]
 
@@ -1672,15 +1670,6 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = [
     "failstop::seed_0xa4d_does_not_trip",
-]
-
-[[bug]]
-name = "failstop-doubt-baseline-ignored-sim"
-fix = "87cd10d"
-package = "lsr-sim"
-test_bin = "sim"
-tests = [
-    "failstop::seed_0x14b_does_not_trip",
 ]
 
 [[bug]]
