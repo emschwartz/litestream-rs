@@ -442,3 +442,22 @@ fn an_unwritable_journal_is_reported_and_the_debt_is_paid_from_memory() {
     assert_eq!(actor.journal(), None);
     assert_eq!(recorded(&mut journal), Some(lsr_journal::Unproven::No));
 }
+
+/// A journal read at boot that cannot be written lags only while the engine owes what it does
+/// not hold: once the debt is paid from memory, the record read is again all there is to know,
+/// and the report clears without a write.
+#[test]
+fn an_unwritable_journal_stops_lagging_once_the_debt_is_paid() {
+    let mut journal = MemJournal {
+        writes_fail: true,
+        ..valid()
+    };
+    let (mut rig, mut actor, until) = failed_sync(&mut journal);
+    assert_eq!(
+        actor.journal(),
+        Some(JournalSignal::Unwritable(ErrorKind::StorageFull))
+    );
+    let seen = settle(&mut rig, &mut actor, until, Some(&mut journal));
+    assert_eq!(truncates(&rig), 1, "{seen:?}");
+    assert_eq!(actor.journal(), None, "nothing is owed, so nothing lags");
+}
