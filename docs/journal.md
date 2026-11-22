@@ -15,8 +15,13 @@ and `journal_scenarios.rs` (named histories). `just journal-model` runs the deep
 One file per database, `<meta>/lsr-journal`, never renamed, never unlinked, never sent to the
 replica. 8192 bytes: slot 0 is bytes 0 to 4096, slot 1 is 4096 to 8192. A slot holds one record
 in its first 512 bytes (magic, version, length, sequence number, body, CRC-32C over all of it)
-and zeros after. The body is the four facts: the floor (destination digest, bound, optional
-anchor), the unproven-WAL debt, the snapshot budget's two numbers, and at most one pending proof.
+and zeros after. The body is the five facts: the floor (destination digest, bound, optional
+anchor), the unproven-WAL debt, the snapshot budget's two numbers, at most one pending proof, and
+at most one verdict that the database file was found ahead of its WAL (its restore point, page
+count, first page and time; `docs/decisions.md` D103). A record holding the verdict is version 2;
+every other record is version 1, so a binary that predates the verdict reads it as `Newer` only
+while a verdict stands. While two verdicts stand, the later keeps the earlier's restore point; the
+writer refuses a record that moves it forward.
 
 ## Reading
 

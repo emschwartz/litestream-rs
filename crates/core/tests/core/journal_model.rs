@@ -51,6 +51,9 @@ fn journal_of(facts: &model::Facts) -> Journal {
             },
             wal: WalChecksum(3, 4),
         }),
+        // The model's facts carry no verdict: its storage properties do not depend on what a
+        // record holds, and the verdict's one rule is checked by the codec's own tests.
+        ahead: None,
     }
 }
 
