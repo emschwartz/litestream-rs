@@ -37,8 +37,8 @@ use lsr_core::conformance::block_on;
 use lsr_core::{
     Actor, ActorConfig, CheckpointConfig, CheckpointMode, Checkpointer, Clock, Env, Event,
     FakeClock, Fault, FileInfo, Inventory, L0Retention, Maintenance, MemStore, Next, ObjectStore,
-    PageSource, ReadLen, Responses, StopCause, StoreError, SyncConfig, Tick, Upload, UploadConfig,
-    WalSource,
+    PageSource, PersistentCause, ReadLen, Responses, StopCause, StoreError, SyncConfig, Tick,
+    Upload, UploadConfig, WalSource,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp, Txid};
 use lsr_sim::{
@@ -421,6 +421,7 @@ pub struct Rig<B: Backend> {
     /// Each tick's window calls, per kind of file and call, counted after it.
     calls: Vec<BTreeMap<(FileKind, Op), u32>>,
     faults: Vec<Fault>,
+    degraded: Vec<PersistentCause>,
     everywhere: bool,
 }
 
@@ -478,6 +479,7 @@ impl<B: Backend> Rig<B> {
             ticks: Vec::new(),
             calls: Vec::new(),
             faults: Vec::new(),
+            degraded: Vec::new(),
             everywhere: false,
         };
         rig.observe()?;
@@ -610,6 +612,12 @@ impl<B: Backend> Rig<B> {
         &self.faults
     }
 
+    /// Every cause a tick reported a task degraded by, in order.
+    #[must_use]
+    pub fn degraded(&self) -> &[PersistentCause] {
+        &self.degraded
+    }
+
     /// The model of what SQLite committed, when the rig keeps one.
     #[must_use]
     pub const fn model(&self) -> Option<&Model> {
@@ -734,8 +742,8 @@ impl<B: Backend> Rig<B> {
         match event {
             Event::Uploaded(did) => self.acked.on_did(did),
             Event::Retrying { fault, .. } => self.faults.push(*fault),
+            Event::Degraded { cause, .. } => self.degraded.push(*cause),
             Event::Booted { .. }
-            | Event::Degraded { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
             | Event::Maintained { .. }
@@ -830,7 +838,7 @@ impl<B: Backend> Rig<B> {
                     return Ok(());
                 }
                 Tick::Ran {
-                    event: Event::Retrying { .. },
+                    event: Event::Retrying { .. } | Event::Degraded { .. },
                     ..
                 } => retries = retries.saturating_add(1),
                 Tick::Ran {
@@ -841,6 +849,23 @@ impl<B: Backend> Rig<B> {
             }
         }
         Err(RigError::Unsettled(SETTLE_TICKS))
+    }
+
+    /// Whether a tick from the `from`th on left the sync task degraded by a failed WAL sync: the
+    /// TRUNCATE that pays for it is what the reader blocks then.
+    fn truncate_owed_since(&self, from: usize) -> bool {
+        self.ticks.iter().skip(from).any(|tick| {
+            matches!(
+                tick,
+                Tick::Ran {
+                    event: Event::Degraded {
+                        cause: PersistentCause::WalSyncFailed,
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
     }
 
     /// Whether a tick from the `from`th on ran a checkpoint of `mode` that `busy` describes.
@@ -894,6 +919,7 @@ impl<B: Backend> Rig<B> {
             let blocked = reader.is_some_and(|taken| {
                 self.checkpointed_since(taken, CheckpointMode::Passive, true)
                     || self.checkpointed_since(taken, CheckpointMode::Truncate, true)
+                    || self.truncate_owed_since(taken)
             });
             if blocked {
                 self.app.close(READER)?;

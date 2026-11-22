@@ -174,6 +174,7 @@ pub struct Responses {
     pub credentials: Response, pub store_refused: Response,
     pub remote_corrupt: Response, pub remote_regressed: Response,
     pub wal_corrupt: Response, pub wal_truncated: Response, pub wal_unlinked: Response,
+    pub wal_sync_failed: Response,
     pub page_size_changed: Response, pub database_page_mismatch: Response,
     /// `KeepTrying` rebuilds the engine and boots again, at most once per
     /// interval; it never resumes state a panic unwound through.

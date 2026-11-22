@@ -588,6 +588,7 @@ fn responses(fields: &Fields, walk: &mut Walk) -> ResponseSettings {
         wal_corrupt: one("wal-corrupt"),
         wal_truncated: one("wal-truncated"),
         wal_unlinked: one("wal-unlinked"),
+        wal_sync_failed: one("wal-sync-failed"),
         page_size_changed: one("page-size-changed"),
         bug: one("bug"),
         other_writer: None,

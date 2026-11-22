@@ -1014,6 +1014,7 @@ Plus `pinned_on_zero_single_restart`: our read tx on read mark 0, one app write 
 | WalCorruptBelowCommitted | `bit_flip_in_committed_frame` |
 | WalTruncatedBelowCommitted | `wal_truncated_externally_under_lock` |
 | WalUnlinked | `wal_unlinked_mid_run` |
+| WalSyncFailed | `wal_fsync_fails` (added later; the simulator keeps the failed sync's bytes off its disk for good) |
 | ShutdownDeadline | `sigterm_during_upload` |
 | Bug | none: the oracle's `BugFault` violation asserts it never fires over the fixed set |
 

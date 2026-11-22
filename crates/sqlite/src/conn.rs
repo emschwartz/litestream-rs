@@ -107,9 +107,9 @@ pub(crate) struct Inner {
     issued: u64,
     returned: u64,
     /// A sync of the WAL failed. The kernel reports a failed writeback once and then calls the
-    /// pages clean, so every later sync answers the same: nothing the WAL held then is known
-    /// to be on disk.
-    wal_sync_failed: bool,
+    /// pages clean, so every later sync answers the same, until a TRUNCATE checkpoint completes
+    /// (`Checkpointer::checkpoint`): nothing the WAL held then is known to be on disk.
+    pub(crate) wal_sync_failed: bool,
 }
 
 /// Which file a path named: device and inode.
