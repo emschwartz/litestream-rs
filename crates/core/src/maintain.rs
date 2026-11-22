@@ -32,7 +32,8 @@
 //! input is newer than the window start: 100 source files drain as four jobs
 //! in one window and the last one closes it. A hole in the source ends the run
 //! and the next job starts after it, so a hole one level down is the same hole
-//! here and no file claims transactions nobody wrote (Go merges across it).
+//! here and no file claims transactions nobody wrote (Go's compactor refuses
+//! the whole run, `ltx/compactor.go:125`, so that level stops compacting).
 //! When the source has nothing above the destination the level is idle: no
 //! write, no job, no wake time.
 //!

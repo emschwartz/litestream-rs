@@ -316,8 +316,9 @@ pub(crate) const R2_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add
 pub const CREATION_TIME_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(15);
 
 /// Ranged reads (a restore reading ahead) and listing pages (the levels of an
-/// inventory) in flight at once. Go does neither side by side, so there is no
-/// Go value; not configurable. Memory is this many read lengths for reads.
+/// inventory) in flight at once. Not Go's figures: Go opens up to 32 of a restore
+/// plan's files at once (`restoreOpenConcurrency`, `replica.go:826`) and lists
+/// levels in turn. Not configurable. Memory is this many read lengths for reads.
 pub const READ_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(7);
 
 /// A count as bytes, for the memory bounds below; a `usize` fits a `u64` on every target

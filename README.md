@@ -154,7 +154,7 @@ Behaviour differs where Go's is unsafe or silent. Go references are to upstream 
 | Restart after a crash | Compares the last page and the log's salts | Compares the whole newest staged file with the log, and reads back the newest file of each level |
 | A second writer on the replica | No check | Stops (configurable) |
 | Persistent failures | Logged, retried | Retried with the same 5 minute cap, and reported as a typed degraded state per task |
-| Merging | Unbounded number of inputs, merges across a gap | At most 32 inputs, never across a gap |
+| Merging | Unbounded number of inputs; a gap in a level fails its merges | At most 32 inputs; a gap ends one merge and the next starts after it |
 | Large-log checkpoint (TRUNCATE) | At 121,359 pages | Only if the application says it holds no long readers (`ReaderTracking::Tracked`, or `app-readers: none`) |
 | Unknown config key | Warns and starts | Refuses to start, with a suggestion |
 | Config key for a missing feature | n/a | Refused unless at its off value; a knob with no effect here warns |
@@ -171,7 +171,7 @@ Defaults are Go's (1 s polling, checkpoints at 1,000 pages or 1 minute, levels a
 | Same, on Cloudflare R2 | 2 | 2, and a configured value wins |
 | Same, on Tigris | 2 | 5 |
 | Requests for file creation times in flight | 50 | 16 |
-| Restore reads and listing pages in flight | 1 | 8 |
+| Restore reads in flight | Opens up to 32 files at once | 8 ranged reads |
 
 Rust-only settings live under one top-level `litestream-rs:` key in `litestream.yml`, which Go ignores, so one file starts either. `lsr replicate` takes Go's flags as they are; `lsr restore`, `verify` and `files` have their own (`--replica`, `--output`).
 
