@@ -226,7 +226,8 @@ impl Witnesses {
     #[cfg(test)]
     pub(crate) fn trust_all<S: ObjectStore>(staging: &S) -> Self {
         let mut all = Self::new();
-        let files = crate::conformance::block_on(staged_from(staging, None)).unwrap_or_default();
+        let files = crate::conformance::block_on(staged_from(staging, None, usize::MAX))
+            .unwrap_or_default();
         for info in files {
             let bytes = crate::conformance::block_on(staging.read(
                 &info.key,
@@ -341,7 +342,8 @@ where
 {
     let from = confirmed.map_or(Some(Txid::MIN), Txid::next);
     let pending: Vec<FileInfo> = match from {
-        Some(from) => staged_from(staging, Some(from)).await?,
+        // One past the cap: the first file no token could be minted for.
+        Some(from) => staged_from(staging, Some(from), MAX_WITNESSED.saturating_add(1)).await?,
         None => Vec::new(),
     };
     let Some(first) = pending.first() else {
