@@ -288,3 +288,48 @@ fn a_crash_loop_with_writes_and_wal_restarts_stays_bounded() {
     );
     restores_to(world.dir.path(), &world.replica, &app);
 }
+
+/// Waits until a scratch file appears under `dir`: the engine has begun writing a file there.
+/// Bounded by a count of directory reads, never the clock.
+fn wait_for_scratch(dir: &Path) {
+    for _ in 0..1_000_000 {
+        if !files(dir, &own_scratch).0.is_empty() {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("no scratch under {}", dir.display());
+}
+
+/// A process killed every time before its boot snapshot is staged never moves the replica:
+/// each boot starts the snapshot again from nothing. The application writes and closes
+/// between boots (its close checkpoints and restarts the WAL), so every boot owes a snapshot
+/// of the whole database, and every boot is killed while staging it. After the loop the
+/// replica must hold at least the first boot's writes; today it holds only what the very
+/// first, unkilled boot uploaded.
+#[test]
+#[ignore = "livelock: a boot snapshot cut short by a kill keeps no progress; resuming it needs durable engine state (the local engine journal design)"]
+fn a_boot_snapshot_cut_short_every_boot_still_moves_the_replica() {
+    let world = World::new();
+    // The first boot replicates the database as it is.
+    let mut daemon = replicate(&world.config);
+    daemon.wait_for(&["msg=uploaded", "Put("]);
+    daemon.signal("KILL");
+    drop(daemon.finish());
+    let first = files(&world.replica, &objects).1;
+    for _ in 0..BOOTS {
+        {
+            let app = database(&world.db);
+            write(&app, 200);
+        }
+        let daemon = replicate(&world.config);
+        wait_for_scratch(&world.staging.join("ltx").join("0"));
+        daemon.signal("KILL");
+        drop(daemon.finish());
+    }
+    let after = files(&world.replica, &objects).1;
+    assert!(
+        after > first,
+        "the replica never moved: {first} bytes, then {after}"
+    );
+}
