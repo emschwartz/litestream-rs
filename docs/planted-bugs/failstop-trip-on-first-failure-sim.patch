@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/failstop.rs b/crates/core/src/failstop.rs
+index 7a32fca..455bd35 100644
+--- a/crates/core/src/failstop.rs
++++ b/crates/core/src/failstop.rs
+@@ -240,7 +240,7 @@ impl Lag {
+         let since = oldest.map_or(seen, |stamp| stamp.min(seen)).min(now);
+         self.since = Some(since);
+         let at = since.saturating_add(bound.get());
+-        if now >= at && self.failed.is_some_and(|failed| failed >= at) {
++        if self.failed.is_some() {
+             self.tripped = true;
+         }
+     }

@@ -461,7 +461,7 @@ notes = "The restore test for a page-size change vacuums while the engine is dow
 [[row]]
 table = "Running"
 id = "RUN-12"
-circumstance = "A database-file page read for a snapshot or for a grown page is not what the page table recorded for it (`pages.rs`)"
+circumstance = "A database-file page read for a snapshot or for a grown page is not what the page table recorded for it (`pages.rs`). Not checked at a checkpoint boundary (CKPT-4)"
 response = "degraded, `DatabasePageMismatch { pgno }`. On the retry the page is shipped as the file holds it. The task stays degraded and retention stays pinned"
 signal = "`database_page_mismatch`, with the page number in `/healthz`"
 at_risk = "The replica now holds bytes no commit wrote (G1 qualifier). The last good restore point is kept"
@@ -490,10 +490,10 @@ response = "retry, `LocalDiskFull` for ENOSPC, EDQUOT or no free scratch name (`
 signal = "\"retrying\", then `local_disk_full` or `local_io` in `Health.degraded`"
 at_risk = "Lag, without bound while the disk is full. The WAL keeps growing on what is often the same disk"
 recovery = "An operator frees space"
-detected_by = "sim::`disk_full_on_staging`, core::`a_full_staging_disk_is_disk_full`; plant::`staging-enospc-local-io`"
+detected_by = "sim::`disk_full_on_staging`, core::`a_full_staging_disk_is_disk_full`, core::`a_local_read_error_comparing_copies_is_a_staging_fault`, core::`a_local_read_error_while_compacting_is_a_staging_fault`; plant::`staging-enospc-local-io`, plant::`compact-local-read-as-remote`"
 survived_by = "sim::`a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts`"
 recovered_by = "sim::`disk_full_on_staging`"
-notes = "The scenario injects one `ScratchExhausted` on one staging upload, then recovers. No disk is filled; lasting ENOSPC and the WAL growth are **untested**. The stall is shown for `LocalDiskFull` on the upload task by core::`a_retried_fault_that_persists_ends_degraded_as_a_stall` (eight injected failures), not on the sync task. The hold in `a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts` fails every staging upload with ENOSPC (a transient `StorageFull`, as the directory store reports it) for 6 ticks while the app commits, and the replica is judged in the middle and at the end: S. ENOSPC and EDQUOT are `LocalDiskFull` (core::`a_full_staging_disk_is_disk_full`); they were `LocalIo`"
+notes = "The scenario injects one `ScratchExhausted` on one staging upload, then recovers. No disk is filled; lasting ENOSPC and the WAL growth are **untested**. The stall is shown for `LocalDiskFull` on the upload task by core::`a_retried_fault_that_persists_ends_degraded_as_a_stall` (eight injected failures), not on the sync task. The hold in `a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts` fails every staging upload with ENOSPC (a transient `StorageFull`, as the directory store reports it) for 6 ticks while the app commits, and the replica is judged in the middle and at the end: S. ENOSPC and EDQUOT are `LocalDiskFull` (core::`a_full_staging_disk_is_disk_full`); they were `LocalIo`. Level-1 compaction reads level 0 from staging when its copies are the replica's; a failed staging read there is classified as a staging fault (`CompactError::Local`, `Fault::from_staging`), never as a replica one. Before, it went through the replica classifier: a full or unreadable staging disk read as a replica fault (a denied read as `credentials`)"
 
 [[row]]
 table = "Running"
@@ -664,11 +664,11 @@ notes = "The scenario injects the `ReadersHeld` result. The decision in `Guarded
 table = "Checkpoint"
 id = "CKPT-4"
 circumstance = "A TRUNCATE that changed the WAL (new header or shorter file)"
-response = "snapshot under the write lock, `CheckpointBoundary` (`checkpoint.rs`). A TRUNCATE that found the WAL unchanged takes none"
+response = "snapshot under the write lock, `CheckpointBoundary` (`checkpoint.rs`). A TRUNCATE that found the WAL unchanged takes none. The snapshot does not check database pages against the page table: the TRUNCATE ends the engine's read transaction, so a commit that landed after the last step is backfilled with the rest, and its pages are the application's (D121)"
 signal = "`checkpoint_boundary`"
-at_risk = "None"
+at_risk = "None. Damage to a page between its last check and the boundary is shipped (D121)"
 recovery = "Automatic"
-detected_by = "sim::`truncate_threshold_crossed`, core::`a_truncate_snapshots_the_new_generation_once_under_the_write_lock`, core::`a_busy_truncate_that_changed_nothing_takes_no_snapshot`"
+detected_by = "sim::`truncate_threshold_crossed`, core::`a_truncate_snapshots_the_new_generation_once_under_the_write_lock`, core::`a_busy_truncate_that_changed_nothing_takes_no_snapshot`, sqlite::`a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage`; plant::`boundary-snapshot-keeps-page-table`"
 recovered_by = "sim::`truncate_threshold_crossed`"
 
 [[row]]
@@ -691,7 +691,7 @@ signal = "\"retrying\""
 at_risk = "**unknown.** The simulator's model keeps the barrier held, so the application never writes again; it has no scenario for this (`sim/src/scenario/faults.rs`)"
 recovery = "**unknown**"
 no_test = "unknown"
-notes = "core tests cover the reporting only"
+notes = "core tests cover the reporting only. On lsr-sqlite, the transaction a failed release leaves open is rolled back at the writer's next use (CKPT-9)"
 
 [[row]]
 table = "Checkpoint"
@@ -714,6 +714,17 @@ at_risk = "**unknown.** Whether pages SQLite believes checkpointed can be lost, 
 recovery = "**unknown**"
 no_test = "unknown"
 notes = "None for the consequence"
+
+[[row]]
+table = "Checkpoint"
+id = "CKPT-9"
+circumstance = "A barrier's or write lock's release whose ROLLBACK fails leaves the writer connection's transaction open with no lock outstanding; or the sequence bump is asked for while a lock is outstanding (`sqlite/src/conn.rs` `free_writer`)"
+response = "The next use of the writer (the bump, or the next barrier or write lock) rolls the leftover transaction back first, and fails if that rollback fails. A bump while a lock is outstanding is refused, `Io(InvalidInput)`. Before, the bump ran inside the open transaction and the next release undid it unseen"
+signal = "\"retrying\" when the rollback fails"
+at_risk = "None. The application's writers stay blocked by the open transaction until the engine's next use of the writer, at most one checkpoint interval"
+recovery = "Automatic"
+detected_by = "sqlite::`a_bump_after_a_release_that_failed_is_committed`, sqlite::`a_bump_under_a_lock_is_refused`; plant::`bump-inside-leftover-writer-transaction`"
+notes = "Found by the differential of the simulator's SQLite model against lsr-sqlite (sqlite::`the_model_answers_the_engine_as_sqlite_does`), which now agrees on this call. The failed ROLLBACK is injected with an SQLite authorizer on the writer connection"
 
 [[row]]
 table = "Upload"
@@ -1915,3 +1926,112 @@ at_risk = "None (a checker)"
 recovery = "None"
 detected_by = "sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0xa2`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
 notes = "Before, any stall ended a liveness judgment and excused an undrained shutdown, so an engine still retrying a fault nothing caused any more, or reporting degraded for nothing, passed. The run's end now also heals the SQLite source failures still queued"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-1"
+circumstance = "The engine stops for any cause but the end of a drain (`failstop.rs`, `actor/lag.rs`): with the default responses only another writer; any cause set to `stop`"
+response = "trip `Stopped(cause)` at once, with no bound; under `hold-start` an application not yet released is held, under `stop-app` a running one is stopped, under `report` nothing is held"
+signal = "`/healthz` 503 with `held_by` the stop's cause name and `app` = `held`, log `start refused` or `app stopped`"
+at_risk = "What the stop itself leaves off the replica"
+recovery = "Operator: fix the cause (or `lsr take-over`), restart"
+detected_by = "core::`an_unsafe_stop_trips_and_a_drain_does_not`, core::`a_stop_trips_and_wins`, core::`the_gate_follows_the_table`, core::`the_release_latches`, replica::`an_unsafe_stop_while_running_refuses_commits_only_under_stop_app`, cli::`an_unsafe_stop_at_boot_holds_the_child`, cli::`an_unsafe_stop_while_running_stops_the_child_under_stop_app`, plant::`failstop-starts-over-a-stop`, plant::`failstop-exec-ignores-the-gate`, plant::`failstop-stop-app-never-stops`"
+notes = "Another writer's boot stop from #110 is covered by the same trip with no code of its own"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-2"
+circumstance = "A commit has been off the replica for `max-unreplicated-age` (10 minutes, at least 5), and a sync or upload attempt made at or after the bound failed. The clock starts at the oldest pending staged file's stamp, or the first time this process saw the lag, the older; at the bound the sync and upload waits are let go once, the probe"
+response = "trip `UnreplicatedTooLong`; held only under `stop-app` (decision D17); clears when the age is zero"
+signal = "`/healthz` 503, `held_by` = `unreplicated_too_long`; `lsr_unreplicated_age_seconds`"
+at_risk = "Commits newer than the bound, until uploads land"
+recovery = "Automatic once uploads land"
+detected_by = "core::`a_store_down_past_the_bound_trips_at_the_probe`, core::`a_trip_for_age_clears_once_caught_up`, sim::`a_store_down_past_the_bound_trips_in_time_and_clears_after`, plant::`failstop-never-trips`, plant::`failstop-no-probe`, plant::`failstop-no-clear`, plant::`failstop-clock-from-last-failure`"
+recovered_by = "sim::`a_store_down_past_the_bound_trips_in_time_and_clears_after`"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-3"
+circumstance = "The process restarts, or crash-loops, while commits are staged and not uploaded"
+response = "the clock keeps the oldest pending staged file's stamp, and health's `unreplicated_since` with it"
+signal = "as FS-2"
+at_risk = "as FS-2"
+recovery = "Automatic"
+detected_by = "core::`a_crash_loop_does_not_reset_the_clock`, sim::`a_crash_loop_trips_for_age`, replica::`a_restart_keeps_the_age_of_a_commit_off_the_replica`, plant::`failstop-clock-from-process-start`, plant::`failstop-health-lag-restarts`"
+notes = "A boot that deletes pending files it cannot vouch for stages a snapshot stamped at that boot, so the clock moves once, there; WAL frames no life staged count from the life that sees them (decision D80)"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-4"
+circumstance = "The engine wrote a TRUNCATE (after a failed WAL sync, or a checkpoint past the synced end) and owes a snapshot: the commits are in the database file only"
+response = "the lag that was running keeps running until the snapshot is staged"
+signal = "as FS-2"
+at_risk = "The commits the TRUNCATE moved"
+recovery = "Automatic"
+detected_by = "core::`a_snapshot_owed_after_a_truncate_keeps_the_lag`, plant::`failstop-forgets-owed-snapshot`"
+notes = "health's own formula read zero in this window before the fix"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-5"
+circumstance = "A staged file that changes no page (the driver's start and the frame after each checkpoint rewrite page 1 unchanged), or a snapshot for a doubt alone (an operator's request, a WAL whose continuity cannot be proven) staged while nothing was off the replica"
+response = "not lag: no clock, no trip however long the replica refuses it; a boot finds such files among the pending ones while it seeds the page table"
+signal = "none"
+at_risk = "None"
+recovery = "n/a"
+detected_by = "core::`a_file_that_changes_nothing_is_not_lag`, core::`a_file_that_changes_nothing_is_not_lag_after_a_restart`, core::`an_operator_snapshot_while_caught_up_is_not_lag`, core::`a_commit_after_a_file_that_changes_nothing_is_lag`, plant::`failstop-no-op-file-is-lag`, plant::`failstop-no-op-forgotten-at-boot`, plant::`failstop-operator-snapshot-is-lag`, plant::`failstop-quiet-hides-commits`"
+notes = "Found by the false-trip judge over random histories"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-6"
+circumstance = "Before this process has listed the replica once, the store refuses it (`credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls`)"
+response = "trip `RefusedAtStart`; holds under `hold-start` and `stop-app` until the first listing, then releases with no operator action (decision D16)"
+signal = "`/healthz` 503, `held_by` = `refused_at_start`; commits fail with 531 in the library"
+at_risk = "None from the hold; commits made meanwhile are local"
+recovery = "Automatic at the first listing"
+detected_by = "core::`a_refusal_at_boot_trips_until_the_first_listing`, core::`the_gate_follows_the_table`, sim::`a_refusal_at_boot_holds_until_it_heals`, replica::`a_refusal_at_boot_refuses_commits_until_the_first_listing`, plant::`failstop-holds-after-listing`, plant::`failstop-no-hold-on-boot-refusal`"
+recovered_by = "sim::`a_refusal_at_boot_holds_until_it_heals`, replica::`a_refusal_at_boot_refuses_commits_until_the_first_listing`"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-7"
+circumstance = "Faults that must never trip: a store outage or throttling healed inside the bound, timeouts at boot with nothing unreplicated, a refusal after the first listing inside the bound, maintenance faults, clock steps with a healthy store, restarts and power loss with an honest disk"
+response = "no trip"
+signal = "health and metrics as each fault's own row"
+at_risk = "As each fault's row"
+recovery = "n/a"
+detected_by = "sim::`a_short_outage_never_trips`, sim::`throttling_inside_the_bound_never_trips`, sim::`a_store_down_at_boot_does_not_trip`, sim::`a_refusal_after_the_first_listing_inside_the_bound_never_trips`, sim::`clock_steps_never_trip`, sim::`restarts_never_trip`, core::`a_heal_inside_the_backoff_is_found_by_the_probe_and_never_trips`, core::`a_failure_before_the_bound_never_trips`, core::`a_maintenance_fault_never_trips`, core::`a_timeout_at_boot_is_no_refusal`, oracle::`FalseTrip`, plant::`failstop-trip-on-first-failure`, plant::`failstop-trip-on-degraded`, plant::`failstop-boot-timeout-holds`, plant::`failstop-holds-on-an-unreachable-store`"
+notes = "The false-trip judge checks every simulator run (`sim/src/failstop.rs`); its age is an upper bound, so it can be lenient, never strict"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-8"
+circumstance = "A wall-clock step forward while the store is failing"
+response = "may trip early: the engine cannot tell a step from a long pause, and a step forward is time passing on the clock it reads"
+signal = "as FS-2"
+at_risk = "None the step adds"
+recovery = "Automatic once uploads land"
+no_test = "accepted, undetected"
+notes = "With a healthy store the probe succeeds and nothing trips (`clock_steps_never_trip`)"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-9"
+circumstance = "`if-replication-stops: stop-app` with no `-exec` and no `exec` key"
+response = "refused by the daemon and by `config check` (decision D20)"
+signal = "exit 2"
+at_risk = "n/a"
+recovery = "Operator"
+detected_by = "cli::`stop_app_without_exec_is_refused`, config::`if_replication_stops_defaults_to_hold_start_and_the_bound_to_ten_minutes`, plant::`failstop-stop-app-without-exec-allowed`"
+
+[[row]]
+table = "The checkers themselves"
+id = "CHK-8"
+circumstance = "An error the engine's SQLite seam or one of its stores can return, from some call, that no simulated history ever draws"
+response = "The simulator's error domain (`sim/src/domain.rs`) lists every SQLite-side operation against every source error, and every store operation on both stores against every store error and denial kind, in matches with no wildcard: each cell is drawn, a world fault, impossible with a reason checked against lsr-sqlite, store-fs and store-s3, unmodelled, or known wrong. A new operation or error variant breaks the build there"
+signal = "None (a checker)"
+at_risk = "None (a checker)"
+recovery = "None"
+detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`, sim::`known_wrong::a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf`, sim::`known_wrong::a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_0x585`, sim::`known_wrong::compaction_takes_a_staging_denial_as_staging_seed_0xb9e`"
+notes = "Before, histories drew two store errors and two SQLite errors on nine of twelve operations. The whole domain (22 source cells, 40 store cells, drawn last in the swarm mix) found D2 unaided in 85 of 3000 mixed seeds (first at seed 18) and a new defect, compaction classifying staging errors as the replica's (1 seed). D2 was a known-wrong cell until the engine journal fixed it (seed 0xf now must pass). The same cell stays known-wrong for what a failed sync still costs: a checkpoint copies unproven frames into the database file and a power loss leaves a file no commit made (detection at boot is the journal's next step), 1 of 3000 mixed seeds once D2 was fixed (seed 0x585), left out of the per-push seeds and counted as known in the nightly; the compaction cell was too until #145 fixed it, and its seed now must pass. Three cells are unmodelled, gaps in the simulator listed in section 6 (C9): an unlinked WAL. A checkpoint whose read-transaction retake is lost is drawn: the simulated checkpointer ends and retakes the read transaction around a failed checkpoint as lsr-sqlite does. WAL damage while a failed sync's writeback is lost is skipped and counted (`wal.damage_skipped.writeback_lost`)"

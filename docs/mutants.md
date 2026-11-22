@@ -300,3 +300,10 @@ created-at time or a listing with `Default::default()`, which those types do not
 The four-job run filled the disk after 70 mutants and reported four of them unviable from the failed build
 (`conformance.rs:65:9`, `71:5`, `504:12`, `mem.rs:103:9` with 0). They were run again at one job, with the
 three it had not reached, and the tally above counts the second result.
+
+### Fail-stop (#115): equivalent survivors of `just mutants-diff`
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `pages.rs` `seeded` | `min() > from` becomes `>=` | The extra file it calls pending is the confirmed one; a quiet mark at or below the confirmed transaction is trimmed in `Actor::observe_lag` before any read. |
+| `actor/lag.rs` `Actor::observe_lag` | `retain(txid > replicated)` becomes `>=` | `only_quiet_pending` reads the marks from the transaction after the replicated one, so a kept mark equal to it is never read. |

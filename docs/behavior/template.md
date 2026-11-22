@@ -223,7 +223,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Disk full | In | RUN-14 | sim `disk_full_on_staging` | Never escalates past "retrying" |
 | Read error (EIO) on the WAL or database | In | RUN-13 | sim `eio_on_wal_read`; LazyFS dead-mount restores (`scripts/lazyfs.py`): a torn fault kills the filesystem under the running engine and the replica is restored meanwhile | |
 | A disk that reports fsync success and keeps nothing | Out for prevention (no software can make it durable), in for detection | BOOT-9: detected only while the regrown WAL differs from what was staged | sim `power_loss_wal_rewind` (`Op::LyingWalSync`); plant `wal-barrier`; sim `a_power_loss_on_a_lying_disk_leaves_the_replica_restorable_while_it_lies` (a power loss inside a lying-disk hold, restores judged while the disk still lies) | No software can make such a disk durable. The replica is then ahead of the database (G2) |
-| Bit rot in the database file | Partly | RUN-12 for a page the engine has seen. A page never seen is replicated as found | sim `db_page_flipped_under_sync` | A scrubber is not built |
+| Bit rot in the database file | Partly | RUN-12 for a page the engine has seen, except in the snapshot after a TRUNCATE (CKPT-4). A page never seen is replicated as found | sim `db_page_flipped_under_sync` | A scrubber is not built |
 | Bit rot in a staged file | In | BOOT-5, RUN-16 | sim `staged_byte_flip_before_upload`, `newest_staged_file_byte_flip` | |
 | Torn write inside a block (old 512e disks) | Out. Reason: 4Kn and 512e-with-atomic-sector drives are the norm; SQLite's own WAL checksums catch a torn frame | n/a | n/a | The block law has no sub-block tear, so this is asserted, not shown |
 | Filesystems where locks or shared mmap do not work (NFS, virtiofs, some container bind mounts) | **Gap.** SQLite itself is unsafe there, but users do it and the engine does not refuse | Not detected | None | **unknown**. A startup self-test or a documented refusal is missing (A2) |
@@ -430,6 +430,12 @@ The compat tests are `#[ignore]` in the gate and run by `just compat`, which CI 
 
 <!-- rows: Handover with Go Litestream -->
 
+### Fail-stop
+
+`if-replication-stops` (`report`, `hold-start` by default, `stop-app`) and `max-unreplicated-age` (`docs/proposals/fail-stop.md`, decisions D14 to D22 and D80 to D83). Three things trip it and nothing else; what a trip does depends on the mode and on whether the application was released yet. The library refuses commits through a commit hook; `-exec` holds or stops the child; plain sidecar answers 503.
+
+<!-- rows: Fail-stop -->
+
 ### Config and startup
 
 <!-- rows: Config and startup -->
@@ -566,6 +572,7 @@ These are defects in the evidence, not in the engine. Each weakens a guarantee's
 | C6 | The real-engine history runs in the gate are one seed with no faults, and one seed of four power-loss cycles; the larger runs are `#[ignore]` | G1's outside-the-engine evidence is thin except nightly LazyFS | None |
 | C8 | After WAL or page damage the simulator's model adopts whatever SQLite now reads (`adopt_local_state` in `sim/src/world.rs`) | The oracle could not fail on shipped damage | Fixed: oracle `CorruptionRestored` refuses the adopted state (CHK-6) |
 | C7 | The simulator has one clock read once per tick | It could not produce the stamp-order defect #98 fixed | Fixed: a per-read clock law, drawn last in the mix (RUN-25, RUN-26) |
+| C9 | The simulator's model cannot follow an unlinked WAL through a later power loss, or WAL damage or a lying disk while a failed sync's writeback is lost | Those error-domain cells are unmodelled and never drawn (CHK-8); the damage and the lying disk are skipped and counted | Issue #127 item D |
 
 ### Unknowns
 

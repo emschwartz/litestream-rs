@@ -73,10 +73,12 @@
 //! cannot run ([`Actor::app_checkpoints`]). The count changes no decision.
 
 mod clock;
+mod lag;
 mod parts;
 mod state;
 mod unproven;
 
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -95,6 +97,7 @@ use crate::checkpoint::{
 };
 use crate::created_at::{ResolvedCreatedAt, resolve};
 use crate::env::Clock;
+use crate::failstop::MaxUnreplicatedAge;
 use crate::fault::{
     Action, Backoff, Clamped, Fault, Next, PersistentCause, Policy, Responses, STALLED_AFTER,
     SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
@@ -190,6 +193,9 @@ pub struct ActorConfig {
     pub shutdown_grace: Duration,
     /// What each persistent failure does: keep trying, or stop.
     pub responses: Responses,
+    /// How long a commit may stay off the replica before fail-stop trips for it
+    /// (`crate::failstop`), and when the probe at the bound runs.
+    pub max_unreplicated_age: MaxUnreplicatedAge,
 }
 
 /// What a maintenance tick did.
@@ -625,6 +631,8 @@ impl Actor {
         };
         let tick = self.tick_at(&mut env, now).await;
         let tick = self.reconcile_journal(env.journal.as_deref_mut(), tick, now);
+        self.observe_lag(env.wal, now);
+        let tick = self.wake_for_probe(tick);
         self.wake_on_wall(tick)
     }
 
@@ -642,6 +650,7 @@ impl Actor {
         R: ObjectStore,
     {
         self.expire(now);
+        self.probe_at_bound(now);
         if self.engine.pages.mismatch().is_none() {
             self.kept.tasks.page_matches_again();
         }
@@ -724,19 +733,18 @@ impl Actor {
 
     /// Routes a fault by its policy. The only place `policy` is called.
     fn fault(&mut self, waiter: impl Into<Waiter>, fault: Fault, now: Timestamp) -> Tick {
+        let waiter = waiter.into();
         self.sync_failed(fault);
+        self.lag_failed(waiter, Some(fault), now);
         match policy(&fault) {
             Policy::Retry(backoff) => {
-                let waiter = waiter.into();
                 if let Some(stall) = self.stalled(waiter, &fault) {
                     return self.persistent(waiter, PersistentCause::Stalled(stall), backoff, now);
                 }
                 let until = self.wait(waiter, backoff, now);
                 self.ran(Event::Retrying { fault, until }, now)
             }
-            Policy::Persistent(cause) => {
-                self.persistent(waiter.into(), cause, Backoff::Doubling, now)
-            }
+            Policy::Persistent(cause) => self.persistent(waiter, cause, Backoff::Doubling, now),
             Policy::Shutdown => self.stop(StopCause::Shutdown),
         }
     }
@@ -771,6 +779,7 @@ impl Actor {
     /// A recovery verdict that names a stop cause: a persistent one goes to
     /// the configured response, the end of a drain stops.
     fn verdict(&mut self, task: Task, cause: StopCause, now: Timestamp) -> Tick {
+        self.lag_failed(Waiter::Task(task), None, now);
         match PersistentCause::of(cause) {
             Some(cause) => self.persistent(Waiter::Task(task), cause, Backoff::Doubling, now),
             None => self.stop(cause),
@@ -924,23 +933,11 @@ impl Actor {
                 cause: pending.unwrap_or(found),
             },
         };
-        // Only a boot that continues seeds the table, from the staged files boot
-        // already verified: a snapshot records every page it reads.
-        let pages = match course {
-            Course::At {
-                position,
-                snapshot: None,
-                ..
-            } => match seeded(env.staging, upload.confirmed(), position.commit()).await {
-                Ok(pages) => pages,
-                Err(fault) => return self.fault(Task::Sync, fault, now),
-            },
-            Course::At {
-                snapshot: Some(_), ..
-            }
-            | Course::Snapshot { .. }
-            | Course::Unbooted => PageChecksumTable::new(),
+        let (pages, quiet) = match boot_seed(env.staging, &course, upload.confirmed()).await {
+            Ok(seeded) => seeded,
+            Err(fault) => return self.fault(Task::Sync, fault, now),
         };
+        self.quiet_at_boot(quiet);
         // Every step succeeded: the engine is assigned whole.
         self.engine = Engine {
             course,
@@ -1402,11 +1399,22 @@ impl Actor {
                 };
             }
             Synced::Wrote {
-                end, txs, witness, ..
+                end,
+                txs,
+                witness,
+                changes,
+                ..
             } => {
+                let key = witness.key();
                 self.engine.witnesses.insert(witness);
                 // With a cause pending, the step that wrote was the snapshot.
+                if !changes {
+                    self.note_quiet_file(key);
+                }
                 if let Some(cause) = self.pending() {
+                    if changes {
+                        self.note_quiet_snapshot(cause, key, &end);
+                    }
                     self.kept.snapshot_asked = false;
                     self.kept.snapshots.count(&cause);
                 }
@@ -2326,6 +2334,31 @@ struct Judged {
     pending: Pending,
     upload: UploadState,
     booted: Booted,
+}
+
+/// The page table and the quiet files a boot starts with. Only a boot that continues seeds
+/// the table, from the staged files boot already verified: a snapshot records every page it
+/// reads.
+async fn boot_seed<L: ObjectStore>(
+    staging: &L,
+    course: &Course,
+    confirmed: Option<Txid>,
+) -> Result<(PageChecksumTable, BTreeSet<Txid>), Fault> {
+    match course {
+        Course::At {
+            position,
+            snapshot: None,
+            ..
+        } => {
+            let seeded = seeded(staging, confirmed, position.commit()).await?;
+            Ok((seeded.table, seeded.quiet))
+        }
+        Course::At {
+            snapshot: Some(_), ..
+        }
+        | Course::Snapshot { .. }
+        | Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),
+    }
 }
 
 /// The witness pass and recovery, on one wal-index read and one reader opened after it:

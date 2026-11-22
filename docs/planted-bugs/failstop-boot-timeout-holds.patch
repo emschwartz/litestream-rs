@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+index bac2e63..faff29d 100644
+--- a/crates/core/src/actor/lag.rs
++++ b/crates/core/src/actor/lag.rs
+@@ -39,7 +39,7 @@ impl Actor {
+             self.kept.refused_at_boot = if let Some(Fault::StoreDenied(why)) = fault {
+                 Some(why)
+             } else {
+-                None
++                Some(crate::store::Denied::Credentials)
+             };
+         }
+     }
