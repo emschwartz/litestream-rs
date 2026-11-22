@@ -1,0 +1,55 @@
+diff --git a/crates/history/src/judge.rs b/crates/history/src/judge.rs
+index 4f3456e6..ed35ab39 100644
+--- a/crates/history/src/judge.rs
++++ b/crates/history/src/judge.rs
+@@ -7,10 +7,7 @@
+ //!    commit made is [`Anomaly::NotInHistory`], always fatal.
+ //! 2. **Never backwards on a branch.** Each `Latest` restore extends the previous one, unless a
+ //!    rewind the log recorded after the previous node cut it off, and the new node descends from
+-//!    that rewind's target ([`Anomaly::WentBackwards`]). The previous restore is its content, not
+-//!    the nodes that had it then: commits made since (an app redoing what a power loss took)
+-//!    can leave the database in that state again on a new branch, and a restore that extends
+-//!    such a node went forward from what the previous one showed. A driver that took files from the
++//!    that rewind's target ([`Anomaly::WentBackwards`]). A driver that took files from the
+ //!    replica itself says so with [`Judge::excuse_regression`]. Under
+ //!    [`Signals::Required`] neither excuse is the driver's alone: a rewind explains a step only
+ //!    when the engine itself reported a loss ([`Judge::signal`]) after it, or the step is
+@@ -207,8 +204,7 @@ fn step(log: &Log, previous: &[NodeId], nodes: &[NodeId]) -> Step {
+ pub struct Judge {
+     mode: AheadMode,
+     signals: Signals,
+-    // The previous `Latest` restore's content, looked up in the log anew at every judgment.
+-    previous: Option<Digest>,
++    previous: Vec<NodeId>,
+     excused: bool,
+     // The engine's loss reports, each by how many rewinds the log had recorded when it came.
+     reported: Vec<usize>,
+@@ -325,23 +321,20 @@ impl Judge {
+         if on_branch.is_empty() {
+             self.ahead(Target::Latest, chosen)?;
+         }
+-        let previous = self
+-            .previous
+-            .map_or_else(Vec::new, |seen| log.find(&seen).to_vec());
+-        self.onward(log, &previous, &nodes)?;
+-        self.previous = Some(digest);
++        self.onward(log, &nodes)?;
++        self.previous = nodes;
+         self.excused = false;
+         Ok(chosen)
+     }
+ 
+     /// Whether moving from the previous `Latest` to `nodes` stays on a branch, or is explained.
+-    fn onward(&mut self, log: &Log, previous: &[NodeId], nodes: &[NodeId]) -> Result<(), Anomaly> {
++    fn onward(&mut self, log: &Log, nodes: &[NodeId]) -> Result<(), Anomaly> {
+         let first = |list: &[NodeId]| list.first().map_or(0, |n| n.get());
+         let unsignaled = || Anomaly::Unsignaled {
+-            from: first(previous),
++            from: first(&self.previous),
+             to: first(nodes),
+         };
+-        match step(log, previous, nodes) {
++        match step(log, &self.previous, nodes) {
+             Step::Forward => Ok(()),
+             Step::Rewound(index) if self.reported_since(index) => {
+                 self.counts.rewound = self.counts.rewound.saturating_add(1);

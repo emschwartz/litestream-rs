@@ -438,6 +438,7 @@ impl Acked {
     pub fn on_did(&mut self, did: &Did) {
         match did {
             Did::Put(info) => self.record(info.key.range().max()),
+            Did::AlreadyPut(key) => self.record(key.range().max()),
             Did::Diverged { confirmed, .. } => self.record(*confirmed),
             Did::Listed {
                 newest: Some(newest),
@@ -506,7 +507,7 @@ fn range_str(range: TxidRange) -> String {
 }
 
 /// Which commit each transaction id covers, from the recorder and the model.
-fn covers(
+pub(crate) fn covers(
     model: &Model,
     recorder: &RecorderLog,
     ground: Ground<'_>,
@@ -582,9 +583,14 @@ fn covers(
         }
     }
     // Another writer's file holds the pages of the file it copied, so its
-    // transaction is that file's commit wherever it was compacted into.
+    // transaction is that file's commit wherever it was compacted into. While
+    // it still stands (no removal, no level-0 put of the engine's own since),
+    // it is the file a restore of its id reads, whatever an earlier put of
+    // that id (rolled back since) held.
     for (theirs, copied) in ground.foreign {
-        if let Some(commit) = cover.get(copied).copied() {
+        if let Some(standing) = foreign_cover(ground, &cover, &replaced, *theirs, usize::MAX) {
+            cover.insert(*theirs, standing);
+        } else if let Some(commit) = cover.get(copied).copied() {
             cover.entry(*theirs).or_insert(commit);
         }
     }
@@ -704,7 +710,7 @@ fn increasing(
 }
 
 /// The first page where the restored database differs from `image`.
-fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
+pub(crate) fn first_diff(image: &PageImage, got: &lsr_core::Database) -> Option<u32> {
     let want = image.db_size();
     let have = got.page_count();
     if want != have {

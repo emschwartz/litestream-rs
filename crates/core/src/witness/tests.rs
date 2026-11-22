@@ -126,3 +126,63 @@ fn room_runs_out_at_the_cap() {
     all.confirmed(Some(txid(1)));
     assert!(all.has_room(1));
 }
+
+/// A staged file longer than one read decodes whole: only a short read ends
+/// the file.
+#[test]
+fn a_file_longer_than_one_read_is_decoded_whole() {
+    let page_size = PageSize::new(4096).unwrap();
+    let count = 300_u32;
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size,
+        commit: count,
+        txids: TxidRange::single(txid(1)),
+        timestamp: Timestamp::from_unix_millis(1),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    // Bytes LZ4 cannot shrink, so the file outgrows one read.
+    let mut state = 0x9e37_79b9_u32;
+    let mut noise = || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state.to_le_bytes()[0]
+    };
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for n in 1..=count {
+        let data: Vec<u8> = (0..page_size.bytes()).map(|_| noise()).collect();
+        encoder
+            .write_page(PageNo::new(n, page_size).unwrap(), &data)
+            .unwrap();
+    }
+    let bytes = encoder.finish(None).unwrap().0;
+    assert!(
+        bytes.len() > usize::try_from(READ.get()).unwrap(),
+        "{}",
+        bytes.len()
+    );
+    let store = crate::mem::MemStore::new();
+    crate::conformance::block_on(async {
+        let mut up = store
+            .begin_upload(
+                &key(1),
+                Timestamp::from_unix_millis(1),
+                crate::store::WriteMode::Replace,
+            )
+            .await
+            .unwrap();
+        crate::store::Upload::write(&mut up, &bytes).await.unwrap();
+        crate::store::Upload::commit(up).await.unwrap();
+    });
+    let decoded = crate::conformance::block_on(decode(&store, key(1), Fault::from_staging))
+        .unwrap()
+        .unwrap();
+    assert_eq!(decoded.pages.len(), 300);
+    let mut tally = ByteTally::new();
+    tally.add(&bytes);
+    assert_eq!(decoded.bytes, tally);
+}

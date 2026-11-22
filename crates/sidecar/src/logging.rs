@@ -300,12 +300,36 @@ impl EventSink for DbEvents {
                 "replication stopped",
                 vec![("cause", debug(cause))],
             ),
+            Event::Refused { through } => {
+                let msg = refused_message(*through);
+                let through = ("through", Value::from(through.get()));
+                self.log.log(LogLevel::Error, &msg, &[db, through]);
+                return;
+            }
+            Event::TakeoverRecordUnusable(unusable) => (
+                LogLevel::Warn,
+                "the takeover record in the meta directory (lsr-takeover) cannot be used and is ignored; the boot builds only on what the WAL vouches for",
+                vec![("problem", debug(unusable))],
+            ),
+            Event::TakeoverNotRecorded { kind } => (
+                LogLevel::Error,
+                "the takeover record could not be written; staged files are kept until it is",
+                vec![("kind", debug(kind))],
+            ),
             Event::Verified { txid, outcome } => verified_line(*txid, *outcome),
         };
         let mut all = vec![db];
         all.extend(fields);
         self.log.log(level, msg, &all);
     }
+}
+
+/// The approved text for a boot that refused the replica's newest transactions: nothing
+/// local vouched for them (`lsr_replica::Event::Refused`).
+fn refused_message(through: Txid) -> String {
+    format!(
+        "replicate refused: the replica holds transactions up to {through} that this database has no record of writing. Another replicator may be using this prefix. To replicate this database over them: `lsr take-over <db>`. To get them instead: `lsr restore`."
+    )
 }
 
 type Line = (LogLevel, &'static str, Vec<(&'static str, Value)>);
@@ -389,6 +413,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             LogLevel::Warn,
             "clock went backwards",
             vec![("clamped", debug(clamped))],
+        ),
+        EngineEvent::TakeoverWanted(record) => (
+            LogLevel::Info,
+            "takeover record kept before dropping staged files",
+            vec![("through", record.txid().get().into())],
         ),
     })
 }

@@ -9,6 +9,12 @@
 //! nothing. A multipart upload's non-final parts under 5 MiB are refused
 //! (EntityTooSmall), as S3 does.
 //!
+//! `If-None-Match: *` on a PUT or a CompleteMultipartUpload is honoured as
+//! the MinIO and Tigris spikes measured: a taken key answers 412
+//! `PreconditionFailed`, changes nothing, and leaves a refused upload open.
+//! [`FakeS3::refuse_conditional_writes`] makes it a provider without
+//! conditional writes instead, which answers 501 `NotImplemented`.
+//!
 //! It does not check signatures. It checks the signing rule MinIO enforces both
 //! ways: every header sent must be named in `X-Amz-SignedHeaders`, and every
 //! header named there (but `host`) must be sent, else 400 AccessDenied.
@@ -63,6 +69,8 @@ struct State {
     uploads: BTreeMap<String, Pending>,
     next_upload: u64,
     denied_deletes: BTreeSet<String>,
+    /// Answers a conditional write with 501, as a provider without them.
+    no_conditional_writes: bool,
 }
 
 /// An in-memory bucket behind the [`Transport`] trait.
@@ -144,6 +152,12 @@ impl FakeS3 {
         self.state().uploads.len()
     }
 
+    /// Makes every conditional write answer 501 `NotImplemented`, as a
+    /// provider without conditional writes does.
+    pub fn refuse_conditional_writes(&self) {
+        self.state().no_conditional_writes = true;
+    }
+
     /// Makes DeleteObjects report `AccessDenied` for `key` and leave it in place.
     pub fn deny_delete(&self, key: &str) {
         self.state().denied_deletes.insert(key.to_owned());
@@ -193,6 +207,9 @@ impl FakeS3 {
         if let Err(refused) = check_md5(request, true) {
             return refused;
         }
+        if let Err(refused) = check_key_free(state, request, &key) {
+            return refused;
+        }
         let object = Object {
             etag: quoted_md5(request.body()),
             body: request.body().to_vec(),
@@ -216,6 +233,9 @@ impl FakeS3 {
             Ok(joined) => joined,
             Err(refused) => return refused,
         };
+        if let Err(refused) = check_key_free(state, request, key) {
+            return refused;
+        }
         let object = Object {
             etag: joined.etag.clone(),
             body: joined.body,
@@ -372,6 +392,21 @@ fn check_signed_headers(request: &HttpRequest) -> Result<(), HttpResponse> {
 
 /// Checks `Content-MD5` against the body. A write need not carry one; a
 /// DeleteObjects must (`required`).
+/// `If-None-Match: *`: the key must be free.
+fn check_key_free(state: &State, request: &HttpRequest, key: &str) -> Result<(), HttpResponse> {
+    match request.header("if-none-match") {
+        None => Ok(()),
+        Some(_) if state.no_conditional_writes => {
+            Err(error_response(501, Some("NotImplemented"), None))
+        }
+        Some("*") if state.objects.contains_key(key) => {
+            Err(error_response(412, Some("PreconditionFailed"), None))
+        }
+        Some("*") => Ok(()),
+        Some(_) => Err(error_response(400, Some("InvalidArgument"), None)),
+    }
+}
+
 fn check_md5(request: &HttpRequest, optional: bool) -> Result<(), HttpResponse> {
     let Some(text) = request.header("content-md5") else {
         return if optional {

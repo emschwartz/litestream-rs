@@ -17,9 +17,10 @@ runs:
     - run: just upstream
       shell: bash
     # The key covers what decides the binaries: the build script, the pinned upstream commit
-    # (fetch-upstream.sh) and the fixtures, whose directories name the pinned Go versions.
+    # (fetch-upstream.sh), the fixtures, whose directories name the pinned Go versions, and the
+    # config dumper's added Go file.
     - if: inputs.cache == 'true'
       uses: actions/cache@v4
       with:
         path: .upstream/bin
-        key: go-bin-${{ runner.os }}-${{ hashFiles('scripts/build-go-litestream.sh', 'scripts/fetch-upstream.sh', 'crates/compat/fixtures/*/*/manifest.json') }}
+        key: go-bin-${{ runner.os }}-${{ hashFiles('scripts/build-go-litestream.sh', 'scripts/fetch-upstream.sh', 'crates/compat/fixtures/*/*/manifest.json', 'crates/compat/go/dump/*') }}

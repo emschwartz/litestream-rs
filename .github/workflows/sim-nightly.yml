@@ -36,3 +36,10 @@ jobs:
         env:
           SECONDS_INPUT: ${{ inputs.seconds }}
           DAY_INPUT: ${{ inputs.day }}
+      # What the night reached, per behaviour-table row and fault class, whether it passed or not.
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: sim-reach
+          path: target/sim-reach.json
+          if-no-files-found: warn

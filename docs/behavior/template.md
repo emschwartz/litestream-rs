@@ -31,19 +31,19 @@ Rows that earn none of the three carry one of these instead:
 
 Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "local", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs.toml` and re-planted nightly.
 
-**Tally of the 157 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
+**Tally of the 176 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
 
 | Mark | Rows |
 |---|---|
-| D R | 52 |
-| D | 50 |
-| D S | 7 |
-| D S R | 4 |
+| D R | 56 |
+| D | 68 |
+| D S | 6 |
+| D S R | 5 |
 | S | 1 |
-| untested | 18 |
+| untested | 14 |
 | code only | 8 |
-| unknown | 10 |
-| known wrong | 5 |
+| unknown | 9 |
+| known wrong | 7 |
 | accepted, undetected | 2 |
 
 **Changes in review.** Main is described as it is. Where an open branch changes a row, the last column names it:
@@ -81,11 +81,11 @@ Version 0.0.0: these are what the code is built to deliver.
 | A1 | An fsync that returns success made the bytes durable | Assumed | A power loss can rewind the database below the replica. Detected in part (BOOT-9); see G2 |
 | A2 | SQLite's file locks and shared memory work on this filesystem | Assumed. No self-test | The read-lock proofs (RUN-7, CKPT-1) prove nothing. **unknown** on NFS, virtiofs, gRPC-FUSE |
 | A3 | Only SQLite writes the database file and the WAL | Partly checked | A foreign write to the WAL is caught by frame checksums (RUN-4). A foreign write to a database page is caught only if the engine has seen that page before (RUN-12) |
-| A4 | One replicator process writes to a replica prefix, and one process uses a staging directory | Not enforced. No lock exists on either | A second writer on the prefix is detected from a listing, late (UP-10, UP-14), and not at all at boot (BOOT-22). Two processes on one staging directory are not detected (WORLD-1) |
+| A4 | One replicator process writes to a replica prefix, and one process uses a staging directory | Staging: enforced for engines of this port on one host with the meta directory on a local filesystem, by an exclusive lock on `<meta>/lsr-lock` (CFG-36, WORLD-1); not across NFS, SMB or FUSE mounts, and not against a Go process. Prefix: not enforced | A second writer on the prefix is detected from a listing, late (UP-10, UP-14), and at boot whenever its files are above this database's position and neither the live WAL nor a takeover record vouches for them (BOOT-22). Two processes on one staging directory outside the lock's reach are not detected (WORLD-1) |
 | A5 | The store returns the bytes it acknowledged, or bytes that fail to decode | Checked per file | Content-MD5 on every PUT and part, and a full LTX decode on every read. A different valid file under the same key is not caught (L1) |
 | A6 | Every listing shows every object the bucket holds. This covers the engine's listings and the one listing a restore makes | **False on main for stores whose listings lag** | Engine side: a transaction id is reused for other content (BOOT-18). Restore side: an older state is returned as "latest" with exit 0 (WORLD-4) |
 | A7 | The bucket is never replaced by an older copy of itself while the engine is down | **Not detected on main** | The older bucket is taken as the bucket (BOOT-19) |
-| A8 | The database, WAL and staging directory are never together replaced by an older copy (a VM or volume snapshot put back) | Detected as `behind_remote`, not prevented | The latest state goes back to the snapshot's state (WORLD-3). A G2 exception |
+| A8 | The database, WAL and staging directory are never together replaced by an older copy (a VM or volume snapshot put back) | Detected: the boot refuses the replica's newer files (`other_writer`, BOOT-22) until an operator runs `lsr take-over` or `lsr restore`; not prevented | None until the operator chooses. After `lsr take-over` the latest state goes back to the snapshot's state (WORLD-3), a G2 exception the operator asked for |
 | A9 | 64-bit checksums do not collide; a WAL `salt2` (32 random bits) does not repeat across the restarts being compared | Accepted risk | Not testable |
 | A10 | The application runs `synchronous=NORMAL` or `FULL` | Not checked | Under `OFF` SQLite does not sync before a checkpoint and the engine's fsync of the WAL is the only barrier. **unknown** |
 
@@ -127,7 +127,7 @@ Version 0.0.0: these are what the code is built to deliver.
 | Exception | The engine's signal | Can the signal be missing? |
 |---|---|---|
 | The local database rewound below what the replica held: power loss on a disk that lied about fsync, a WAL cut by another program, or routine loss under a failed barrier | Snapshot cause `local_rewound`; `RecoverEvent::LocalRewound` | Yes, when the regrown WAL is byte-identical in the staged range. Then nothing differs either |
-| Database, WAL and staging were all put back from an older copy (VM or volume snapshot; WORLD-3) | Snapshot cause `behind_remote` | No, but the same cause is raised for a wiped staging directory and for another writer's files (BOOT-6, BOOT-22). The signal does not say which |
+| Database, WAL and staging were all put back from an older copy (VM or volume snapshot; WORLD-3) | Stop `other_writer`, with the error line "replicate refused: the replica holds transactions up to {txid} ..." (`Event::Refused`) | No: another writer's files at boot give the same stop (BOOT-22). The line names both ways out. A wiped staging directory no longer raises it when the WAL vouches for the replica (BOOT-6) |
 | The WAL was lost and the database file is older than the replica (an operator restored the file; a WAL deleted before its frames were checkpointed) | Snapshot cause `wal_missing` or `generation_changed` | No, but these causes are also routine and harmless, so they do not identify a regression |
 | Something removed the replica's newest files while the engine ran | Degraded cause `remote_regressed`, only if an ambiguous commit makes the uploader list (UP-11). Otherwise a retention hold, `ListingBehind`, which is not a degraded state | Yes (D17) |
 | The restore's own listing lagged (WORLD-4) | None. The engine is not involved | Always |
@@ -233,6 +233,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Fault | Scope | What the engine does | Rig |
 |---|---|---|---|
 | The application's own automatic or manual checkpoints | In | Counted and reported as a notice; they cannot pass the engine's read mark (RUN-22) | sim `app_autocheckpoints`; sim `rules_match_sqlite` compares the model with real SQLite |
+| The application commits (growing the database or not), begins or ends a reader, checkpoints in any mode or deletes the WAL between two of the engine's calls into SQLite inside one tick | In | The read-lock proofs (RUN-7, CKPT-1): what lands before a committed read is in the step, what lands after waits for the next | sim `Op::AppInTick` in swarm mixes (`sim/src/sqlite/in_tick.rs`), at any call of the tick, reads included; `Op::CommitInTick` for the one commit before the checkpoint's barrier |
 | Another process checkpoints while the engine is down | In | BOOT-7, BOOT-8 | sim `app_checkpoint_while_down`; sqlite `the_apps_last_close_while_the_replicator_is_down_keeps_or_deletes_the_wal` |
 | WAL deleted, truncated or its header torn | In | BOOT-7, RUN-5, RUN-6, RUN-9 | sim `wal_deleted_while_down`, `wal_header_torn`, `wal_truncated_externally_under_lock`, `wal_unlinked_mid_run` |
 | WAL rewritten with other bytes in the same generation | In | BOOT-9, BOOT-10 | sim `wal_regrown_same_salts_diff_bytes`, `wal_rewritten_same_length`; core `a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued` |
@@ -262,7 +263,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Process paused (SIGSTOP, cgroup freezer, VM live migration, laptop sleep), also while holding the write barrier or the read transaction | **Gap** | WORLD-2 | None. **unknown** |
 | Two processes on one database and one staging directory | **Gap** | WORLD-1. No lock exists | None. **unknown** |
 | Failover with the old host still alive | **Gap** | WORLD-5 | None. **untested** |
-| VM or volume snapshot put back | **Gap** | WORLD-3 | sim `restored_old_meta` covers staging alone |
+| VM or volume snapshot put back | In, detected at boot | WORLD-3, BOOT-22 | sim `vm_restore_stops_until_a_take_over` |
 | Filesystem remounted read-only; EROFS, EMFILE, EDQUOT | **Gap** | WORLD-16 | None. **untested** |
 | The host application exits before a drain returns, or starves the replicator thread | **Gap** | WORLD-30 | None |
 
@@ -288,8 +289,8 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Credentials revoked, a policy refusing, a missing bucket, a failed TLS check | In | UP-4 | sim `creds_revoked_mid_run`, `permission_revoked_mid_run`, `bucket_deleted_mid_run`, `tls_fails_mid_run` |
 | Objects deleted by someone else (an operator, a lifecycle rule) | In for the newest files, partly for the middle | UP-11, UP-12, MAINT-11 | sim `remote_file_deleted_externally`, `bucket_rolled_back` |
 | Bucket rolled back to an earlier version | Partly while running (seen only at an uploader listing). **known wrong** across a restart | UP-11, BOOT-19 | sim `Op::Remote(RollBack)` |
-| A second writer on the same prefix | In, detected late | UP-10, UP-14, BOOT-22 | sim `second_writer_mid_run`, `maintenance_stops_on_another_writer_seed_0x50c` |
-| Listings that lag the bucket | **Not modelled on main** | Trusted (BOOT-18, MAINT-12) | The lag law exists on #96 only. A consistency probe exists on #96 (`consistency_probe`); no result is in the repository |
+| A second writer on the same prefix | In, detected late while running; at boot when it wrote while this engine was down | UP-10, UP-14, BOOT-22 | sim `second_writer_mid_run`, `maintenance_stops_on_another_writer_seed_0x50c`, `foreign_file_while_down_stops` |
+| Listings that lag the bucket | Modelled: `Op::LaggingListings` hides a write or a delete from listings for a bounded number of list calls; reads stay exact | Read past (BOOT-18, MAINT-12) | sim lag law, judged with no allowance; `consistency_probe` on MinIO: 0 stale results in 1000 rounds. Tigris and R2 not measured |
 | Multipart quirks: 200 with an error body, a retried Complete answered `NoSuchUpload`, ETags not in MD5 form | Partly | UP-13 | store-s3 fault transport. Fixed on #96 |
 | Versioned buckets | **Gap.** Standard for backup buckets | A delete leaves a noncurrent version and a delete marker; the engine sees the key as gone, which is what it expects. A version restore by an operator is a rollback (BOOT-19, UP-11). Storage is not reclaimed by retention. All by reasoning | None. **unknown** (WORLD-24) |
 | Object lock, or a policy that denies delete | **Gap** | Retention deletes fail for good, reported as `permission_denied` on the maintenance task (WORLD-23) | store-s3 `a_delete_refused_for_one_key_is_a_permission_denial` (the class only). **untested** in the engine |
@@ -320,6 +321,7 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 | `lsr_unreplicated_age_seconds`, `lsr_replicated_txid`, `lsr_wal_bytes` | `Health` in `replica/src/health.rs` | Lag and local growth. The age gauge is 0 only when a booted engine shows the replica caught up; before that it counts from the process's start (N1) |
 | `lsr_verify_failing`, `lsr_verify_failing_txid`, `lsr_verify_failing_page` | `replica/src/health.rs` | The scheduled verify found the replica restores something the live database never held |
 | `lsr_app_notice`, `lsr_app_checkpoints_total` | `replica/src/health.rs` | The application ran checkpoints of its own. A notice, not a failure |
+| `Health.journal`, `/healthz` `journal` and `journal_detail`, `lsr_journal_signal{signal}` | `replica/src/health.rs`, `sidecar/src/health.rs` | What the engine journal says: `missing`, `unreadable`, `newer_version`, `slot_unreadable` (boot read it so, until the next boot; BOOT-25 to BOOT-29) or `unwritable` (it lags what the engine holds; RUN-27). A notice, not a failure: `/healthz` stays 200 |
 | `lsr_panics_total` | `replica/src/health.rs` | Panics caught at the thread boundary |
 
 There is no per-cause count of snapshots taken on main. It is on #86 (`lsr_snapshots_total{db,cause}`).
@@ -464,7 +466,7 @@ Every `SnapshotCause` variant (`core/src/fault.rs`). A snapshot reads every page
 | `SnapshotCause` | Fires when | Why a snapshot | Needed? | Cheaper sound proof | Rows |
 |---|---|---|---|---|---|
 | `FirstSync` | No staged file and no replica level-0 file to continue from | There is nothing to build on | Yes | None | BOOT-1 |
-| `BehindRemote` | At boot, the replica's newest transaction is above the newest staged file's | The staged position is older than the replica | The doubt is real; the full upload is not needed | Read the replica's newest level-0 file and compare it with the live WAL, as boot already does when staging is empty. One small GET | BOOT-6, BOOT-22 |
+| `BehindRemote` | At boot, the replica's newest transaction is above the newest staged file's, the WAL does not vouch for the replica's newest file, and a takeover record covers it | An operator took over (`lsr take-over`, or a restore) a replica this database has no record of writing | The doubt is real | None: the boot already reads the replica's newest level-0 file and continues without a snapshot when the WAL vouches for it | BOOT-6, BOOT-22 |
 | `NewestStagedFileUnreadable` | A staged file failed verification twice, or diverged from the replica's object, or had no witness token (boot refuses no more than the cap: RUN-18 holds the position instead) | The chain from the replica to the WAL has a hole in staging | After a divergence, yes. After a drop for verification it is taken only when recovery cannot continue from the newest file left (BOOT-5); mid-run (RUN-16) it is always taken, since a checkpoint may have removed the dropped frames and nothing judges that before the drop | Mid-run, judge the WAL against the newest file left before dropping, as boot does. The boot drop and the witness-cap case (RUN-18) no longer snapshot | BOOT-5, BOOT-13, RUN-16, RUN-17 |
 | `WalMissing` | No WAL file, or a torn header | Commits after the position may have been checkpointed and are in no WAL | Yes. Not needed in one common case: a database just restored from this replica, which is snapshotted in full right after being downloaded | Compare the database's pages with per-page digests of the replica's tip and ship only the pages that differ. Needs local state that survives restarts | BOOT-7, RUN-9 |
 | `GenerationChanged` | At boot, any salt change. Running, a restart that the read lock and `salt1 + 1` do not prove, or frames abandoned after the position | Commits written after the position and overwritten by the restart are in no WAL | The doubt is real in the sidecar case. Not when the crash fell between the engine's own checkpoint and its first file of the new generation | The page-digest compare above. This is the cause behind the measured crash-loop storm (BOOT-20) | BOOT-8, RUN-8, RUN-10 |
@@ -490,7 +492,7 @@ Under the default responses only two causes stop the engine: `OtherWriter` and `
 
 | `StopCause` | Stops by default? | Why continuing is unsafe | What the operator does |
 |---|---|---|---|
-| `OtherWriter` | **Yes** | Two writers on one prefix give one transaction id two contents, and each one's retention can delete the other's files. Continuing would damage a history this engine does not own | Find the other replicator. Stop one. If the other's files should go, remove them. Restart. Note BOOT-22: a restart alone, with the other writer's files still there, continues above them |
+| `OtherWriter` | **Yes** | Two writers on one prefix give one transaction id two contents, and each one's retention can delete the other's files. Continuing would damage a history this engine does not own | Find the other replicator. Stop one. If the other's files should go, remove them, or run `lsr take-over <db>` to replicate above them. Restart. A restart alone stops again (BOOT-21, BOOT-22) |
 | `Shutdown` | **Yes**, not configurable | A drain's deadline passed. The caller asked for an end | Nothing. The next start replicates what was left; the stop reported how much |
 | `StoreDenied(Denied)` | No | Not unsafe. Stopping makes an access failure loud for an orchestrator | Fix what the kind names (the keys, the policy, the host clock, the bucket name, the TLS trust); restart |
 | `StoreRefused` | No | Not unsafe | Read the status in the log; fix the request's cause; restart |
@@ -525,16 +527,16 @@ Three other ways replication ends that are not a `StopCause`:
 | D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Expected-fail test: sim `a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed_0x484` (ignored) | BOOT-19, G1 | None open. Issue #99 |
 | D4 | **Closed by #98.** A restore as of an instant could return a state committed up to one tick's read after the instant | G3 | Merged |
 | D5 | A boot or relist listing that lags the bucket is trusted | BOOT-18, MAINT-12 | #96 |
-| D6 | No conditional writes: a second writer or a reused id replaces an object instead of being refused | UP-14, GO-9 | #96 |
+| D6 | No conditional writes: a second writer or a reused id replaces an object instead of being refused. Two writers in step replace each other indefinitely and neither stops (expected-fail test core::`failover_with_the_old_host_alive_never_publishes_one_id_twice` (`#[ignore]` until #96)) | UP-14, GO-9, WORLD-5 | #96, with UP-17 on `claude/second-writer` |
 | D7 | A retried multipart Complete that already succeeded is reported as `store_refused` | UP-13 | #96 |
-| D9 | **Confirmed by review.** Retry counts, waits, degraded states and stops reset on restart. The one stop the engine makes by default, `OtherWriter`, is undone by the default supervisor action: `boot_listing` names no newest staged file, so `recover_traced` returns `BehindRemote` for a boot and `Stop(OtherWriter)` only for a running position. The stop must be durable, or the boot must refuse | BOOT-21, BOOT-22 | Recorded as G3 in `docs/proposals/beyond-go.md`; issue #99. No branch |
+| D9 | **Partly closed.** Retry counts, waits and degraded states still reset on restart. The one stop the engine makes by default, `OtherWriter`, holds across a restart because every boot refuses the other writer's files again (BOOT-13, BOOT-22), whether it saw them before or was down when they appeared | BOOT-21, BOOT-22; a halt across restarts goes unreported, reached unaided by the simulator's overlapping holds (CHK-9) and counted as known in the nightly | `claude/second-writer` for the stop; G3 in `docs/proposals/beyond-go.md` and issue #99 for the rest |
 | D10 | A commit is dated by when it was staged. After an outage, a restore as of an instant inside the outage leaves out commits made before that instant. The contract "what the replica held at t" is not stated anywhere a user reads | G3 | None. None |
 | D12 | **Closed by #104.** A fault whose policy is a plain retry never became a degraded state. Now each degrades its task as `Stalled(<fault>)` at the 8th failure in a row, and a failed WAL fsync is its own persistent cause, `WalSyncFailed` | RUN-3, RUN-13, RUN-14, CKPT-3 | Merged |
 | D13 | **Closed.** Past 4096 pending files a staged file got no token and was certain to be refused, which cost a snapshot and every restore point from there on. The engine now holds its position at the cap, and boot witnesses no more than the cap and stages the rest again from the WAL | RUN-18 | Closed |
 | D14 | **Closed.** A boot that dropped an unreadable staged file snapshotted even when the WAL could regenerate it. It now continues when recovery does. The running twin (RUN-16) still snapshots | BOOT-5 | Closed |
 | D15 | A staged snapshot of a rewound database is deleted by the next boot if the process died before uploading it, and taken again | BOOT-9 | #89 |
 | D16 | **Closed.** A missing bucket and a TLS failure were reported as `credentials`. Each is now its own kind (N4) | UP-4 | Closed |
-| D17 | **Confirmed by review.** A bucket rolled back while the engine runs is recognised as `remote_regressed` only if an ambiguous commit makes the uploader list. Otherwise the engine uploads above the hole and the only signal is a retention hold | UP-11, G2 | Issue #99 |
+| D17 | **Closed for a running engine.** A bucket rolled back while the engine runs was recognised as `remote_regressed` only if an ambiguous commit made the uploader list. Each maintenance listing now checks what the engine watched since the last one, and a read decides lag from loss. Open: a loss between a boot and its first maintenance listing that removes only what the boot listed | UP-11, G2 | `claude/second-writer` |
 
 ### Defects found by the review of version 1
 
@@ -542,7 +544,7 @@ Three other ways replication ends that are not a `StopCause`:
 |---|---|---|---|---|
 | N1 | **Half closed.** `lsr_unreplicated_age_seconds` read 0 until the first boot of a process completed; it now counts from the start of any wait no booted engine vouches for (`Progress::unproven`, `replica/src/thread.rs`). Open: it restarts from the process's start after every restart, so a crash loop understates lag | replica `the_lag_counts_from_the_start_while_the_first_boot_fails`; plant `lag-zero-before-boot`. The restart half is read in the code, not run | G4, G7 | Issue #99 for the restart half |
 | N2 | **Closed.** A backward clock step held every timer for the size of the step: `Actor::clock` returned the old reading while the clock was behind. Observed before the fix (a one-second retry asked to wake an hour later after an hour's step back). Engine time now slews (`actor/clock.rs`) | core `a_backward_clock_step_does_not_freeze_a_retry_wait`, sim `clock_steps_back_an_hour_mid_retry`; plants `clock-step-back-freezes-timers`, `clock-step-back-freezes-timers-sim` | RUN-19, WORLD-14 | Closed, the replica thread's own waits included (WORLD-14) |
-| N3 | No cross-process exclusion on the staging directory, and the `OtherWriter` detector is probably blind when two writers share it | No lock found by search. Consequence inferred | WORLD-1, A4 | Issue #99 |
+| N3 | **Closed on local filesystems.** No cross-process exclusion on the staging directory existed; now an exclusive lock on `<meta>/lsr-lock` refuses a second engine at start. Open: NFS, SMB and FUSE mounts, and a Go process on the same meta directory | Lock tests in `replica/tests/replica/second_writer.rs` | WORLD-1, A4 | `claude/second-writer` |
 | N4 | **Closed.** The `credentials` cause absorbed every 401 and 403, every S3 auth code including `RequestTimeTooSkewed`, a TLS failure and `NoSuchBucket`. Now five kinds (`StoreDenied`), an archived object is `store_refused`, and a batch delete refusing a key is `permission_denied` instead of transient. KMS key codes are `permission_denied` (store-s3 `classify_denials_by_what_to_fix`) | store-s3 `classify_denials_by_what_to_fix`; plant `denial-classes` | UP-4, WORLD-15, WORLD-22, WORLD-23 | Closed |
 
 ### Defects found by restores judged during a fault
@@ -554,7 +556,7 @@ Found on branch `claude/survival-tests` by the simulator's holds (`Op::Hold`, `s
 | S1 | **Fixed on the branch.** A restore of `Latest` or `AsOf` through a listing that lags published an older database and reported success | WORLD-4, G0, G2 | `claude/survival-tests`; plants `restore-trusts-listing`, `dry-run-trusts-listing` |
 | S2 | **Fixed on the branch.** A restore over a listing that shows nothing answered "empty replica", which `--if-replica-exists` turns into a skipped restore with success: an application could start on an empty database over a replica that holds its history | WORLD-4, G0 | `claude/survival-tests`; plant `empty-listing-is-empty-replica` |
 | S3 | **Fixed on the branch.** A boot with staging gone took a replica header that did not decode for no page size and snapshotted a new page size onto the prefix (swarm seed 0x13, under lying reads) | BOOT-15 | `claude/survival-tests`; plant `replica-page-size-unread` |
-| S4 | Open, not triaged to a fix. Swarm seed 0xb9, shrunk to 13 operations (two second writers, a corrupt publish, a checksum-mismatch upload, redone commits): `Latest` goes back from one node to an older one with no rewind recorded, while the oracle passes. Matches the class of D9 (a boot that snapshots over another writer's files) | BOOT-22, G2 | Handed to the second-writer work |
+| S4 | **Closed** on `claude/second-writer`: the boot refuses replica files nothing vouches for (BOOT-22), and the test runs un-ignored. Swarm seed 0xb9, shrunk to 13 operations (two second writers, a corrupt publish, a checksum-mismatch upload, redone commits): `Latest` goes back from one node to an older one with no rewind recorded, while the oracle passes. Matches the class of D9 (a boot that snapshots over another writer's files) | BOOT-22, G2 | Handed to the second-writer work |
 | S5 | **A checker defect, fixed on `claude/survival-followup`.** Swarm seed 0x70f: the compaction byte budget counted a rolled-back level-1 file beside the file that replaced it at that level, 142 bytes over. No engine cost | MAINT | sim `a_rolled_back_output_replaced_at_its_level_counts_once` |
 | S6 | Lasting ENOSPC on staging (a transient `StorageFull`, as the directory store reports it) is retried as `LocalIo`, not `LocalDiskFull`; only `ScratchExhausted` maps to `LocalDiskFull` | RUN-14, D12 | Handed to the health and classification work |
 

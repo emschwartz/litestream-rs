@@ -12,7 +12,7 @@ fn rejected(key: Option<FileKey>) -> StoreError {
 
 /// Ticks until the top compaction level is published: the next upload to the
 /// replica is then the first snapshot.
-fn before_first_snapshot() -> (Rig, Actor) {
+pub(super) fn before_first_snapshot() -> (Rig, Actor) {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     let top = Level::new(cfg().maintenance.top().get()).unwrap();

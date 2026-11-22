@@ -92,6 +92,7 @@ impl ObjectStore for Endless {
         &self,
         _key: &FileKey,
         _created_at: Timestamp,
+        _mode: crate::store::WriteMode,
     ) -> Result<MemUpload, StoreError> {
         Err(transient())
     }

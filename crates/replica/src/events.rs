@@ -33,8 +33,27 @@ pub enum Event {
         /// Whether the engine was rebuilt (else it stopped).
         rebuilt: bool,
     },
+    /// The boot refused to replicate: the replica holds transactions through `through` that
+    /// this database has no record of writing, which neither the live WAL nor a takeover
+    /// record vouches for (`lsr_core::TakeoverRecord`). `Stopped(OtherWriter)` follows.
+    /// `lsr take-over` writes a takeover record; `lsr restore` gets those transactions.
+    Refused {
+        /// The replica's newest transaction.
+        through: Txid,
+    },
     /// The engine stopped by a cause and waits for a person.
     Stopped(StopCause),
+    /// The takeover record in the meta directory (`lsr-takeover`) could not be read or did not
+    /// decode at start. It is ignored, as if there were none: the boot builds only on what the
+    /// live WAL vouches for, and refuses the rest until `lsr take-over` writes a sound record.
+    TakeoverRecordUnusable(TakeoverUnusable),
+    /// The engine asked for a takeover record before deleting staged files the replica holds
+    /// (`lsr_core::Event::TakeoverWanted`), and it could not be written in the meta directory.
+    /// The engine deletes nothing and retries after its backoff.
+    TakeoverNotRecorded {
+        /// What the file system said.
+        kind: std::io::ErrorKind,
+    },
     /// A scheduled verify ended: the restore of `txid` compared with the live database at
     /// `txid`. A failure is a degraded state (`Health::verification`) that names what differed.
     Verified {
@@ -194,4 +213,16 @@ mod tests {
         assert_eq!(rx.recv(), Some(Event::Panicked { rebuilt: true }));
         assert_eq!(rx.recv(), None);
     }
+}
+
+/// Why the takeover record at start was not used ([`Event::TakeoverRecordUnusable`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TakeoverUnusable {
+    /// The file exists and cannot be read.
+    Unreadable {
+        /// What the file system said.
+        kind: std::io::ErrorKind,
+    },
+    /// The file does not decode: a write cut short, an edit, a damaged disk.
+    Invalid(lsr_core::TakeoverRecordError),
 }

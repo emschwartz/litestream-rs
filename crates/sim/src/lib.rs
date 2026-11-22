@@ -31,10 +31,12 @@ pub mod generate;
 pub mod history;
 pub mod journal;
 pub mod liveness;
+pub mod marks;
 pub mod memfs;
 pub mod model;
 pub mod oracle;
 pub mod reach;
+pub mod record;
 pub mod recovery;
 pub mod resources;
 pub mod run;
@@ -49,9 +51,7 @@ pub mod world;
 
 pub use clock::{ClockLaw, SimClock};
 pub use exec::{Polls, RunEnd, count_polls, run_until};
-pub use generate::{
-    AfterRestart, EnvFault, Generator, Hold, Op, Target, Weights, frozen_history, history,
-};
+pub use generate::{AfterRestart, AppAt, AppOp, EnvFault, Hold, Op, Target, Weights, history};
 pub use model::{CommitId, CommitRec, Model, PageImage, Recovery};
 pub use oracle::{
     Acked, Bound, Checked, Ground, Violation, Windows, bug_fault, check, check_with, within,
@@ -60,8 +60,9 @@ pub use reach::Reach;
 pub use run::{Failure, Judges, Opts, RunReport, run, run_with, shrink};
 pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
 pub use sqlite::{
-    AppCommit, AutoTally, CheckpointNumbers, CrashKind, CreatedAt, InTickCommit, InTickSite,
-    OtherProcessMode, ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite, SimWal,
+    AppCommit, AutoTally, CheckpointNumbers, CrashKind, CreatedAt, InTickAt, InTickCommit,
+    InTickDone, InTickOp, InTickRan, InTickSite, OtherProcessMode, ReaderId, SimCheckpointer,
+    SimPages, SimSource, SimSqlite, SimWal,
 };
 pub use store::{
     FaultHandle, FaultShape, Faults, HeldFault, HighWater, Lost, Recorder, RecorderCounts,
