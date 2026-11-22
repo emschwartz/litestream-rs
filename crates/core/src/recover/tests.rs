@@ -963,6 +963,7 @@ fn shape(recovered: &Recovered) -> String {
         Recovered::Snapshot { cause, .. } => match cause {
             SnapshotCause::BehindRemote { .. } => "BehindRemote".into(),
             SnapshotCause::LocalRewound { .. } => "LocalRewound".into(),
+            SnapshotCause::StagedUnwitnessed { .. } => "StagedUnwitnessed".into(),
             SnapshotCause::FirstSync
             | SnapshotCause::NewestStagedFileUnreadable
             | SnapshotCause::WalMissing

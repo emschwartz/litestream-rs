@@ -54,6 +54,7 @@ mod stuck;
 mod sync;
 mod upload;
 mod verify;
+mod witness;
 
 pub use actor::{
     Actor, ActorConfig, Degraded, Env, Event, MaintainedEvent, Phase, Task, Tick, Unfinished,
@@ -133,3 +134,4 @@ pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,
 };
+pub use witness::{Witnessed, Witnesses};

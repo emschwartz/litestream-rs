@@ -28,8 +28,8 @@ pub(crate) mod cases {
     use lsr_core::{
         ContiguousChain, Depth, Did, Due, FakeClock, FileKey, Inventory, Job, L0Retention, Level,
         MaintainState, Maintenance, MemSink, MemStore, NewestStagedFile, ObjectStore, PlanOutcome,
-        ResolvedCreatedAt, RestoreError, RestoreTarget, Restored, Upload, UploadState, due,
-        plan_reference, resolve, restore, upload_next, verify,
+        ResolvedCreatedAt, RestoreError, RestoreTarget, Restored, Upload, UploadState, Witnesses,
+        due, plan_reference, resolve, restore, upload_next, verify,
     };
     use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
     use lsr_store_s3::{
@@ -394,6 +394,7 @@ pub(crate) mod cases {
                 &staging,
                 &store,
                 Some(txid(TXNS)),
+                &Witnesses::new(),
             ))
         });
         let done = done.unwrap();
