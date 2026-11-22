@@ -45,6 +45,8 @@ writes stay on the runner; the corpus only grows by the minimised commits below.
 
 ## The 24-hour run
 
+Last run: 2026-11-21 at `2170497`, all five targets for 86,401 s each, with no crash, timeout or out-of-memory (issue #11; the minimised corpus landed in #73). The two planner targets added since, `plan_contract` and `plan_lazy`, have not had a 24-hour run.
+
 Five processes, one per target, each on its own core (`just fuzz` caps each at 2 GiB RSS, so five need
 about 10 GiB free). Run it from the main checkout on a machine that stays up:
 
