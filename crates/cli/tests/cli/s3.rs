@@ -234,7 +234,11 @@ fn secret_never_on_stderr_against_a_403() {
         );
         assert_eq!((run.code, run.stdout.as_str()), (3, ""), "{}", run.stderr);
         assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
-        assert!(run.stderr.contains("not authorized"), "{}", run.stderr);
+        assert!(
+            run.stderr.contains("refused: permission denied"),
+            "{}",
+            run.stderr
+        );
         assert_no_canary(&run);
         assert!(
             !run.stderr.contains(&server.addr.to_string()),

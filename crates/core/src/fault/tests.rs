@@ -8,7 +8,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::layout::{FileKey, Level};
-use crate::store::StoreOp;
+use crate::store::{Denied, StoreOp};
 use lsr_ltx::{Txid, TxidRange};
 
 fn ps() -> PageSize {
@@ -65,11 +65,38 @@ policy_is!(
     Fault::StoreThrottled { retry_after: None },
     doubling()
 );
-policy_is!(
-    store_auth_is_persistent_on_credentials,
-    Fault::StoreAuth,
-    persistent(PersistentCause::Credentials)
-);
+/// Every kind of access refusal is persistent under its own cause: they need
+/// different fixes, so one is never reported as another.
+#[test]
+fn store_denied_is_persistent_under_its_own_kind() {
+    for why in DENIED {
+        assert_eq!(
+            policy(&Fault::StoreDenied(why)),
+            persistent(PersistentCause::StoreDenied(why))
+        );
+    }
+}
+
+const DENIED: [Denied; 5] = [
+    Denied::Credentials,
+    Denied::Permission,
+    Denied::ClockSkew,
+    Denied::BucketMissing,
+    Denied::Tls,
+];
+
+/// Ties [`DENIED`] to the enum: a new kind breaks this match first.
+#[test]
+fn every_denied_kind_is_listed() {
+    let listed = |why: Denied| match why {
+        Denied::Credentials
+        | Denied::Permission
+        | Denied::ClockSkew
+        | Denied::BucketMissing
+        | Denied::Tls => true,
+    };
+    assert!(DENIED.into_iter().all(listed));
+}
 policy_is!(
     remote_object_missing_retries,
     Fault::RemoteObjectMissing,
@@ -181,7 +208,7 @@ fn every_fault_has_a_named_policy_test() {
     let tested = |fault: &Fault| match fault {
         Fault::StoreTransient
         | Fault::StoreThrottled { .. }
-        | Fault::StoreAuth
+        | Fault::StoreDenied(_)
         | Fault::RemoteObjectMissing
         | Fault::UploadAmbiguous
         | Fault::UploadChecksumMismatch
@@ -216,9 +243,13 @@ fn page_two() -> PageNo {
     PageNo::new(2, PageSize::MIN).unwrap()
 }
 
-fn every_persistent_cause() -> [PersistentCause; 12] {
+fn every_persistent_cause() -> [PersistentCause; 16] {
     [
-        PersistentCause::Credentials,
+        PersistentCause::StoreDenied(Denied::Credentials),
+        PersistentCause::StoreDenied(Denied::Permission),
+        PersistentCause::StoreDenied(Denied::ClockSkew),
+        PersistentCause::StoreDenied(Denied::BucketMissing),
+        PersistentCause::StoreDenied(Denied::Tls),
         PersistentCause::StoreRefused,
         PersistentCause::RemoteCorrupt,
         PersistentCause::OtherWriter,
@@ -240,7 +271,13 @@ fn every_persistent_cause() -> [PersistentCause; 12] {
 #[test]
 fn every_persistent_cause_is_listed() {
     let listed = |cause: PersistentCause| match cause {
-        PersistentCause::Credentials
+        PersistentCause::StoreDenied(
+            Denied::Credentials
+            | Denied::Permission
+            | Denied::ClockSkew
+            | Denied::BucketMissing
+            | Denied::Tls,
+        )
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
         | PersistentCause::OtherWriter
@@ -290,7 +327,7 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
         let want = match cause {
             PersistentCause::Bug | PersistentCause::OtherWriter => Action::Rebuild,
             PersistentCause::RemoteRegressed => Action::Relist,
-            PersistentCause::Credentials
+            PersistentCause::StoreDenied(_)
             | PersistentCause::StoreRefused
             | PersistentCause::RemoteCorrupt
             | PersistentCause::WalCorrupt
@@ -311,7 +348,13 @@ fn each_field_names_one_cause() {
     for cause in every_persistent_cause() {
         let mut one = Responses::GO_LIKE;
         match cause {
-            PersistentCause::Credentials => one.credentials = Response::Stop,
+            PersistentCause::StoreDenied(why) => match why {
+                Denied::Credentials => one.credentials = Response::Stop,
+                Denied::Permission => one.permission_denied = Response::Stop,
+                Denied::ClockSkew => one.clock_skew = Response::Stop,
+                Denied::BucketMissing => one.bucket_missing = Response::Stop,
+                Denied::Tls => one.tls = Response::Stop,
+            },
             PersistentCause::StoreRefused => one.store_refused = Response::Stop,
             PersistentCause::RemoteCorrupt => one.remote_corrupt = Response::Stop,
             PersistentCause::OtherWriter => {
@@ -346,11 +389,15 @@ fn a_persistent_cause_and_its_stop_cause_round_trip() {
 
 /// Every fault, pinned by the match in [`every_fault_has_a_named_policy_test`]'s spirit: the
 /// array's length breaks when a variant is added.
-fn every_fault() -> [Fault; 29] {
+fn every_fault() -> [Fault; 33] {
     [
         Fault::StoreTransient,
         Fault::StoreThrottled { retry_after: None },
-        Fault::StoreAuth,
+        Fault::StoreDenied(Denied::Credentials),
+        Fault::StoreDenied(Denied::Permission),
+        Fault::StoreDenied(Denied::ClockSkew),
+        Fault::StoreDenied(Denied::BucketMissing),
+        Fault::StoreDenied(Denied::Tls),
         Fault::RemoteObjectMissing,
         Fault::UploadAmbiguous,
         Fault::UploadChecksumMismatch,
@@ -447,13 +494,14 @@ fn from_remote_throttled_without_or_with_a_zero_wait_names_none() {
 }
 
 #[test]
-fn from_remote_auth() {
-    assert_eq!(
-        store_fault(&StoreError::Auth {
-            op: StoreOp::Upload
-        }),
-        Fault::StoreAuth
-    );
+fn from_remote_keeps_the_kind_of_denial() {
+    for why in DENIED {
+        let err = StoreError::Denied {
+            op: StoreOp::Upload,
+            why,
+        };
+        assert_eq!(store_fault(&err), Fault::StoreDenied(why));
+    }
 }
 
 #[test]
@@ -488,7 +536,13 @@ fn from_staging_names_the_local_fault_for_every_store_error() {
             },
             Fault::LocalIo,
         ),
-        (StoreError::Auth { op: StoreOp::Read }, Fault::LocalIo),
+        (
+            StoreError::Denied {
+                op: StoreOp::Read,
+                why: Denied::Credentials,
+            },
+            Fault::LocalIo,
+        ),
         (StoreError::NotFound { key: key() }, Fault::StagedLost),
         (
             StoreError::ScratchExhausted { key: key() },
@@ -507,11 +561,24 @@ fn from_staging_names_the_local_fault_for_every_store_error() {
     }
 }
 
+/// ENOSPC (and EDQUOT) on the staging directory is a full disk, not an
+/// unnamed local I/O error: the operator's fix is to free space.
+#[test]
+fn a_full_staging_disk_is_disk_full() {
+    for kind in [ErrorKind::StorageFull, ErrorKind::QuotaExceeded] {
+        let err = StoreError::Transient {
+            op: StoreOp::Upload,
+            kind,
+        };
+        assert_eq!(Fault::from_staging(&err), Fault::LocalDiskFull, "{kind:?}");
+    }
+}
+
 #[test]
 fn no_staging_error_is_blamed_on_the_replica() {
     let remote_only = [
         Fault::StoreTransient,
-        Fault::StoreAuth,
+        Fault::StoreDenied(Denied::Credentials),
         Fault::RemoteObjectMissing,
         Fault::UploadAmbiguous,
         Fault::UploadChecksumMismatch,
@@ -519,7 +586,10 @@ fn no_staging_error_is_blamed_on_the_replica() {
         Fault::RemoteCorrupt,
     ];
     let errs = [
-        StoreError::Auth { op: StoreOp::Read },
+        StoreError::Denied {
+            op: StoreOp::Read,
+            why: Denied::Credentials,
+        },
         StoreError::Refused {
             op: StoreOp::Read,
             status: 501,

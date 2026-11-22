@@ -10,8 +10,8 @@
 //! state machine hands it a [`Next`].
 //!
 //! A [`Policy::Persistent`] fault is one that waiting alone is not expected to
-//! fix: credentials refused, a corrupt object, a damaged WAL, a failed WAL
-//! sync, another writer.
+//! fix: the store refusing access, a corrupt object, a damaged WAL, a failed
+//! WAL sync, another writer.
 //! What happens then is configuration, one field of [`Responses`] per
 //! [`PersistentCause`] (`docs/PLAN.md`, the degraded-state section). [`Response::KeepTrying`]
 //! puts the task that failed in a degraded state: it retries with the doubling
@@ -38,10 +38,12 @@
 //! a maintenance level keeps does not stall: maintenance blocks no write's way to the replica.
 //!
 //! Two things are deliberately not faults. A clock that steps backwards is
-//! clamped and reported as [`Clamped`]. A power-loss WAL rewind is a snapshot
+//! reported as [`Clamped`]; engine time never goes back and keeps moving
+//! (`actor::clock`). A power-loss WAL rewind is a snapshot
 //! with cause [`SnapshotCause::LocalRewound`]: it is expected under
 //! `synchronous=NORMAL`, and stopping would leave every later write unreplicated.
 
+use std::io;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -52,7 +54,7 @@ use crate::compact::CompactError;
 use crate::created_at::ResolveError;
 use crate::maintain::MaintainError;
 use crate::source::SourceError;
-use crate::store::{CorruptCause, ListingStalled, StoreError};
+use crate::store::{CorruptCause, Denied, ListingStalled, StoreError};
 
 /// The longest a retry waits (Go `DefaultSyncBackoffMax`).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
@@ -68,8 +70,8 @@ pub enum Fault {
         /// The wait the store named.
         retry_after: Option<Duration>,
     },
-    /// The store refuses our credentials.
-    StoreAuth,
+    /// The store refuses access, or could not be reached securely.
+    StoreDenied(Denied),
     /// An object we listed or staged is gone from the replica.
     RemoteObjectMissing,
     /// An upload's commit failed after the object may have become visible.
@@ -92,8 +94,10 @@ pub enum Fault {
     /// too (one failed read says nothing about the stored bytes), the engine
     /// deletes that file and every staged file after it, and the next file is
     /// a snapshot taking the first transaction the replica lacks, so the chain
-    /// has no hole (`upload::sweep_staged` at boot, the upload task mid-run;
-    /// elsewhere the task retries and the next boot sweeps).
+    /// has no hole (the upload task mid-run; elsewhere the task retries and
+    /// the next boot sweeps). At boot (`upload::sweep_staged`) recovery then
+    /// judges the newest file left, and when the WAL continues from it the
+    /// deleted range is staged again from the WAL instead.
     ///
     /// A file that tears this way was never acknowledged as staged: its
     /// commit had not returned. The filesystem store syncs a file before its
@@ -421,9 +425,10 @@ impl SnapshotCounts {
 /// whose configured response is to stop, or a drain whose deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopCause {
-    /// Credentials or permissions refuse the store.
-    Credentials,
-    /// The store refuses a request outright (not credentials).
+    /// The store refuses access, or could not be reached securely; the kind
+    /// says what a person must fix.
+    StoreDenied(Denied),
+    /// The store refuses a request outright (not an access refusal).
     StoreRefused,
     /// A replica object is corrupt.
     RemoteCorrupt,
@@ -465,9 +470,10 @@ pub enum StopCause {
 /// [`Responses`] say whether the engine keeps trying or stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PersistentCause {
-    /// Credentials or permissions refuse the store.
-    Credentials,
-    /// The store refuses a request outright (not credentials).
+    /// The store refuses access, or could not be reached securely; the kind
+    /// says what a person must fix.
+    StoreDenied(Denied),
+    /// The store refuses a request outright (not an access refusal).
     StoreRefused,
     /// A replica object is corrupt.
     RemoteCorrupt,
@@ -570,7 +576,7 @@ impl Stall {
             Fault::WalChangedUnderRead => Some(Self::WalChangedUnderRead),
             Fault::NothingToSnapshot => Some(Self::NothingToSnapshot),
             Fault::ReadTxLost => Some(Self::ReadTxLost),
-            Fault::StoreAuth
+            Fault::StoreDenied(_)
             | Fault::StoreRefused
             | Fault::RemoteCorrupt
             | Fault::RemoteAheadOfLocal
@@ -593,7 +599,7 @@ impl PersistentCause {
     #[must_use]
     pub const fn of(cause: StopCause) -> Option<Self> {
         match cause {
-            StopCause::Credentials => Some(Self::Credentials),
+            StopCause::StoreDenied(why) => Some(Self::StoreDenied(why)),
             StopCause::StoreRefused => Some(Self::StoreRefused),
             StopCause::RemoteCorrupt => Some(Self::RemoteCorrupt),
             StopCause::OtherWriter => Some(Self::OtherWriter),
@@ -616,7 +622,7 @@ impl PersistentCause {
     #[must_use]
     pub const fn stop(self) -> Option<StopCause> {
         Some(match self {
-            Self::Credentials => StopCause::Credentials,
+            Self::StoreDenied(why) => StopCause::StoreDenied(why),
             Self::StoreRefused => StopCause::StoreRefused,
             Self::RemoteCorrupt => StopCause::RemoteCorrupt,
             Self::OtherWriter => StopCause::OtherWriter,
@@ -660,8 +666,16 @@ pub enum OtherWriter {
 /// map, so a new cause does not build until every preset names its response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Responses {
-    /// The store refuses the credentials.
+    /// The store does not accept the credentials.
     pub credentials: Response,
+    /// A policy refuses a request the credentials are accepted for.
+    pub permission_denied: Response,
+    /// The host clock is too far from the store's.
+    pub clock_skew: Response,
+    /// The bucket does not exist.
+    pub bucket_missing: Response,
+    /// The TLS handshake or certificate check failed.
+    pub tls: Response,
     /// The store refuses a request outright.
     pub store_refused: Response,
     /// A replica object is corrupt.
@@ -702,6 +716,10 @@ impl Responses {
     /// other writer.
     pub const GO_LIKE: Self = Self {
         credentials: Response::KeepTrying,
+        permission_denied: Response::KeepTrying,
+        clock_skew: Response::KeepTrying,
+        bucket_missing: Response::KeepTrying,
+        tls: Response::KeepTrying,
         store_refused: Response::KeepTrying,
         remote_corrupt: Response::KeepTrying,
         remote_regressed: Response::KeepTrying,
@@ -718,6 +736,10 @@ impl Responses {
     /// Stop on every cause.
     pub const STRICT: Self = Self {
         credentials: Response::Stop,
+        permission_denied: Response::Stop,
+        clock_skew: Response::Stop,
+        bucket_missing: Response::Stop,
+        tls: Response::Stop,
         store_refused: Response::Stop,
         remote_corrupt: Response::Stop,
         remote_regressed: Response::Stop,
@@ -740,10 +762,21 @@ impl Responses {
         }
     }
 
+    /// The response to one kind of access refusal.
+    const fn denied(&self, why: Denied) -> Response {
+        match why {
+            Denied::Credentials => self.credentials,
+            Denied::Permission => self.permission_denied,
+            Denied::ClockSkew => self.clock_skew,
+            Denied::BucketMissing => self.bucket_missing,
+            Denied::Tls => self.tls,
+        }
+    }
+
     /// What the actor does about `cause`.
     pub(crate) const fn action(&self, cause: PersistentCause) -> Action {
         let response = match cause {
-            PersistentCause::Credentials => self.credentials,
+            PersistentCause::StoreDenied(why) => self.denied(why),
             PersistentCause::StoreRefused => self.store_refused,
             PersistentCause::RemoteCorrupt => self.remote_corrupt,
             PersistentCause::WalCorrupt => self.wal_corrupt,
@@ -851,7 +884,7 @@ pub const fn policy(fault: &Fault) -> Policy {
                 now: *now,
             })
         }
-        Fault::StoreAuth => Policy::Persistent(PersistentCause::Credentials),
+        Fault::StoreDenied(why) => Policy::Persistent(PersistentCause::StoreDenied(*why)),
         Fault::StoreRefused => Policy::Persistent(PersistentCause::StoreRefused),
         Fault::RemoteCorrupt => Policy::Persistent(PersistentCause::RemoteCorrupt),
         Fault::RemoteAheadOfLocal => Policy::Persistent(PersistentCause::OtherWriter),
@@ -903,7 +936,7 @@ impl Fault {
             StoreError::Throttled { retry_after, .. } => Self::StoreThrottled {
                 retry_after: retry_after.filter(|wait| !wait.is_zero()),
             },
-            StoreError::Auth { .. } => Self::StoreAuth,
+            StoreError::Denied { why, .. } => Self::StoreDenied(*why),
             StoreError::Refused { .. } => Self::StoreRefused,
             StoreError::NotFound { .. } => Self::RemoteObjectMissing,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
@@ -922,13 +955,18 @@ impl Fault {
     /// The same error means something else here. A missing or unusable staged
     /// file is lost, not a relist. A write whose stored size differs is the
     /// torn write to encode again. A permission error retries, so an operator
-    /// can fix the directory without a restart.
+    /// can fix the directory without a restart. A write the disk or a quota
+    /// has no room for is a full disk, whatever the store calls it.
     #[must_use]
     pub const fn from_staging(err: &StoreError) -> Self {
         match err {
+            StoreError::Transient {
+                kind: io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded,
+                ..
+            } => Self::LocalDiskFull,
             StoreError::Transient { .. }
             | StoreError::Throttled { .. }
-            | StoreError::Auth { .. }
+            | StoreError::Denied { .. }
             | StoreError::Refused { .. } => Self::LocalIo,
             StoreError::NotFound { .. } => Self::StagedLost,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
@@ -1049,7 +1087,7 @@ impl Fault {
             Self::UploadAmbiguous | Self::UploadChecksumMismatch => true,
             Self::StoreTransient
             | Self::StoreThrottled { .. }
-            | Self::StoreAuth
+            | Self::StoreDenied(_)
             | Self::RemoteObjectMissing
             | Self::StoreRefused
             | Self::RemoteCorrupt
@@ -1109,11 +1147,13 @@ pub enum Next {
     OnWalChange,
 }
 
-/// The clock read earlier than the last timestamp used; the later one is used
-/// instead and this is reported. An event, not a fault: nothing is retried.
+/// The clock read earlier than its last reading. Engine time keeps its value
+/// and advances at half the wall clock's rate until the wall clock catches up,
+/// so no timer stops; each step back is reported once. An event, not a fault:
+/// nothing is retried.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clamped {
-    /// The last timestamp used.
+    /// Engine time at the step, which it keeps.
     pub prev: Timestamp,
     /// The earlier time the clock read.
     pub now: Timestamp,

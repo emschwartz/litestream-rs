@@ -192,18 +192,19 @@ fn a_crash_at_any_step_of_a_commit_loses_nothing_committed_and_shows_nothing_tor
     }
 }
 
-/// Expected to fail: a delete removes the name and does not sync its directory, so after a
-/// power loss a deleted staged file can come back (D11 in `docs/BEHAVIOR.md`). Whether the
-/// engine tolerates a staged file coming back is not settled; the store's delete makes no
-/// promise either way today.
+/// A delete syncs the level directory of every key before it returns, so after a power loss
+/// at any step a deleted file is either still there because the delete had not returned, or
+/// gone for good (D11 in `docs/BEHAVIOR.md`). Without the sync a deleted staged file can come
+/// back.
 #[test]
-#[ignore = "known gap, D11: a delete is not followed by a directory sync, so a deleted file can return after power loss"]
 fn a_crash_after_a_delete_never_brings_the_file_back() {
     let dir = TempDir::new().unwrap();
     let store = FsStore::new(dir.path().join("replica"));
     let ((), steps) = capture(|| {
         upload(&store, key(1, 1), b"first");
         block_on(store.delete(&[key(1, 1)])).unwrap();
+        // A retry of a delete that already removed the name still syncs before it returns.
+        block_on(store.delete(&[key(1, 1), key(2, 2)])).unwrap();
     });
     if let Some(why) = first_broken(&steps, true) {
         panic!("{why}");

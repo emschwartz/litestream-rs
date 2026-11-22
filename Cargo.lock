@@ -1065,6 +1065,7 @@ name = "lsr-store-fs"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
+ "lsr-journal",
  "lsr-ltx",
  "tempfile",
 ]

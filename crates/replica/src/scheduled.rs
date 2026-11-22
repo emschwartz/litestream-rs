@@ -279,7 +279,10 @@ mod tests {
     #[test]
     fn a_run_that_could_not_finish_is_incomplete_not_failed() {
         assert_eq!(classify(None), (VerifyOutcome::Incomplete, None));
-        let failed = VerifyError::Store(StoreError::Auth { op: StoreOp::List });
+        let failed = VerifyError::Store(StoreError::Denied {
+            op: StoreOp::List,
+            why: lsr_core::Denied::Credentials,
+        });
         assert_eq!(
             classify(Some(Err(failed))),
             (VerifyOutcome::Incomplete, None)

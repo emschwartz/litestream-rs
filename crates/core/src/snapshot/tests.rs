@@ -397,12 +397,16 @@ fn snapshot_store_error_maps_by_from_remote() {
     // from_staging would read this as local I/O.
     rig.remote.inject_failure(
         StoreOp::Upload,
-        StoreError::Auth {
+        StoreError::Denied {
             op: StoreOp::Upload,
+            why: crate::store::Denied::Credentials,
         },
     );
     let failed = rig.snapshot(5000).unwrap_err();
-    assert_eq!(failed.fault, Fault::StoreAuth);
+    assert_eq!(
+        failed.fault,
+        Fault::StoreDenied(crate::store::Denied::Credentials)
+    );
     assert_eq!(failed.key.level(), Level::SNAPSHOT);
     assert_eq!(rig.remote_files(), 0);
     // The same call, again, is the retry.

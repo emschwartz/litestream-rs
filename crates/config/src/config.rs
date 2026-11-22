@@ -500,6 +500,14 @@ pub enum OtherWriterSetting {
 pub struct ResponseSettings {
     /// `credentials`.
     pub credentials: Option<ResponseSetting>,
+    /// `permission-denied`.
+    pub permission_denied: Option<ResponseSetting>,
+    /// `clock-skew`.
+    pub clock_skew: Option<ResponseSetting>,
+    /// `bucket-missing`.
+    pub bucket_missing: Option<ResponseSetting>,
+    /// `tls`.
+    pub tls: Option<ResponseSetting>,
     /// `store-refused`.
     pub store_refused: Option<ResponseSetting>,
     /// `remote-corrupt`.

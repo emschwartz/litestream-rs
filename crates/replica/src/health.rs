@@ -156,6 +156,8 @@ pub struct Health {
     pub replicated: Option<(Txid, Timestamp)>,
     /// When the oldest commit not yet on the replica was first seen; `None` when caught up.
     /// This is the lag to alert on: the age of `replicated` grows on an idle database too.
+    /// Only a booted engine can say the replica is caught up: before the first boot, and while
+    /// a rebuilt engine waits to boot again, this holds when that wait began, never `None`.
     pub unreplicated_since: Option<Timestamp>,
     /// The WAL file's size: a WAL the read lock holds while uploads are degraded fills the disk.
     pub wal_bytes: u64,

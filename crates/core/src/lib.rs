@@ -128,8 +128,8 @@ pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
 pub use store::{
-    BatchKind, CorruptCause, ListAt, Listing, ListingStalled, ObjectStore, PageLimit, PartNumber,
-    ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
+    BatchKind, CorruptCause, Denied, ListAt, Listing, ListingStalled, ObjectStore, PageLimit,
+    PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use upload::{Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, upload_next};
