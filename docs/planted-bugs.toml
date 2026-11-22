@@ -25,6 +25,7 @@ package = "lsr-core"
 tests = [
     "plan::tests::a_later_snapshot_ending_right_after_the_chain_does_not_date_that_transaction",
     "a_later_snapshot_ending_right_after_the_chain_does_not_hide_a_straddle",
+    "every_small_inventory_plans_as_of_the_same_lazily",
 ]
 
 [[bug]]
