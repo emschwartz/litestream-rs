@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 878a440..10da76f 100644
+index 3956549..966a263 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -651,17 +651,12 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
+@@ -782,17 +782,12 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
      }
      // One read never condemns a file: the staged copy must verify on a read
      // of its own before the replica's object is judged against it.
@@ -10,8 +10,8 @@ index 878a440..10da76f 100644
 -        return Err(fail(state, Fault::StagedLost));
 -    }
 +
-     if !remote_verifies(remote, &key).await.map_err(relist)? {
-         let outcome = put_staged(staging, remote, &key, WriteMode::Replace).await;
+     if remote_torn(remote, &key).await.map_err(relist)? {
+         let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
          return settle_put(state, remote, key, outcome).await;
      }
 -    // Both verify: a second compare decides, as the listing's read-back does.
@@ -19,6 +19,6 @@ index 878a440..10da76f 100644
 -        return Ok(already);
 -    }
 +
-     let listed = list_step(list_first(state), staging, remote, newest_staged).await?;
-     let txid = key.range().max();
-     match plan_upload(&listed.state, newest_staged) {
+     // The relist reads the refused key whatever its listing shows (the
+     // probe starts at the key after what was confirmed, which is this one).
+     list_step(list_first(state), staging, remote, newest_staged).await

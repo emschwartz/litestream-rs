@@ -217,7 +217,7 @@ tests = [
 # sending the header.
 [[bug]]
 name = "drop-if-none-match"
-fix = "f9de310"
+fix = "92613ce"
 package = "lsr-store-s3"
 test_bin = "store-s3"
 tests = [
@@ -229,32 +229,85 @@ tests = [
 # A refused upload is taken as the engine's own earlier commit without reading the object back.
 [[bug]]
 name = "refusal-without-read-back"
-fix = "f9de310"
+fix = "92613ce"
 package = "lsr-core"
 tests = [
     "a_refused_upload_of_other_verifying_bytes_is_never_written_over",
-    "a_refusal_overrules_a_listing_too_stale_to_show_the_key",
+    "a_refusal_behind_a_listing_too_stale_to_show_the_key_is_judged_by_reads",
     "a_refused_upload_with_the_replica_ahead_is_another_writer",
     "a_refused_upload_over_an_object_that_does_not_verify_replaces_it",
 ]
 
 [[bug]]
 name = "refusal-judged-from-one-read"
-fix = "08b920e"
+fix = "af8ea2f"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["one_bad_staged_read_after_a_refusal_confirms_no_other_object_seed_0x4ef"]
 
 [[bug]]
 name = "spent-multipart-upload"
-fix = "707e9b0"
+fix = "ce35d57"
 package = "lsr-store-s3"
 test_bin = "store-s3"
 tests = ["a_retried_complete_finding_its_upload_spent_is_settled_by_a_head"]
 
 [[bug]]
 name = "completed-etag-form"
-fix = "707e9b0"
+fix = "ce35d57"
 package = "lsr-store-s3"
 test_bin = "store-s3"
 tests = ["a_completed_etag_in_another_form_is_not_taken_for_damage"]
+
+# A boot or relist takes a listing's newest as the replica's, with no reads past it: a listing
+# that lags hides the engine's own uploads.
+[[bug]]
+name = "listing-trusted-without-probe"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = [
+    "a_listing_that_hides_the_newest_uploads_is_corrected_by_reads",
+    "a_relist_that_hides_confirmed_uploads_is_no_regression",
+    "a_snapshot_a_listing_hides_is_found_by_a_read",
+    "the_probe_reads_through_the_newest_staged_transaction",
+]
+
+# The same plant, judged by the simulator's lagging listings.
+[[bug]]
+name = "boot-trusts-a-stale-listing"
+fix = "8c7d8ce"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files",
+    "a_lagging_relist_does_not_report_the_replica_gone_backwards_seed_0x440",
+    "a_lagging_boot_listing_does_not_send_an_upload_into_a_freed_key_seed_0x4c5",
+]
+
+# A file a listing shows past the engine's position stops it with no read to find the file.
+[[bug]]
+name = "other-writer-from-a-listing-alone"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = ["maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it"]
+
+# Maintenance plans from a listing that ends before the engine's confirmed upload.
+[[bug]]
+name = "maintenance-plans-from-a-lagging-listing"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = ["maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload"]
+
+# One failed read of the staged copy takes it as torn and confirms the replica's differing object.
+[[bug]]
+name = "tail-judged-from-one-read"
+fix = "34f1694"
+package = "lsr-core"
+tests = ["one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object"]
+
+# One failed read of the replica's copy takes it as torn and writes the staged file over it.
+[[bug]]
+name = "replica-replaced-on-one-read"
+fix = "34f1694"
+package = "lsr-core"
+tests = ["one_torn_read_of_the_replica_copy_does_not_write_over_it"]
