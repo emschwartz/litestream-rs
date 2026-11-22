@@ -84,6 +84,9 @@ pub const REQUIRED: &[&str] = &[
     "degraded.PageSizeChanged",
     "commit.shrinks", // a database that loses pages: the restore truncates
     "event.Clamped",  // a clock that went back (ledger: time-provenance)
+    // Staging on the real directory store over the in-memory filesystem, and a power loss there.
+    "staging_fs.runs",
+    "staging_fs.power_loss",
 ];
 
 /// States printed even at zero but not required of the fixed seed set, each
@@ -113,6 +116,14 @@ pub const UNREQUIRED: &[(&str, &str)] = &[
     (
         "staged.Torn",
         "a torn newest staged file at boot: seeds 1..64 never tear one, 3 of seeds 1..400 do",
+    ),
+    (
+        "staging_fs.undone_entries",
+        "on the directory store: a power loss that undid a directory entry no sync covered",
+    ),
+    (
+        "staging_fs.changed_files",
+        "on the directory store: a power loss that changed a file's bytes or mtime",
     ),
 ];
 

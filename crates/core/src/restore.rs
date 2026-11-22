@@ -25,8 +25,15 @@
 //! transaction's own file, and a snapshot ending at it (after planning, so an `AsOf` target's
 //! created-at reads come first). A store whose listings lag its writes
 //! would otherwise give an older state as the newest, with success. A key found that way is
-//! listed for again, as a vanished file is, and after [MAX_ATTEMPTS] the restore fails with
-//! [RestoreError::ListingBehind]. A `Txid` target needs no such read: its answer is fixed by
+//! listed for again. A file found that way is either hidden by a lagging listing or put by a
+//! replicator after the listing, and one read cannot tell; the next listing can. A listing
+//! that shows the file found before it has caught up, and that round is the writer's progress:
+//! the restore follows it, up to [MAX_CHASE] listings, and then takes the next listing as it
+//! stands ([Restored::writer_outpaced]): restoring the latest state while a writer runs may
+//! answer any committed state, and one at least as new as every file a read found during the
+//! restore is a sound answer, where failing would mean no restore ever finishes against a busy
+//! writer. A listing that still ends below a file found before it began lags, and after
+//! [MAX_ATTEMPTS] such listings the restore fails with [RestoreError::ListingBehind]. A `Txid` target needs no such read: its answer is fixed by
 //! the files that end at or below it, and a hole the lag leaves is a gap the planner refuses.
 //! An empty listing is read past for every target, at the first transaction's key: a replica
 //! that exists must never look like none (the command line's `--if-replica-exists` skips a
@@ -275,12 +282,10 @@ pub enum RestoreError {
         /// The file missing on the last attempt.
         missing: FileKey,
     },
-    /// Every listing ended below a level-0 file a read found past it: the
-    /// store's listings lag its writes, so the newest state it lists is not
-    /// the newest it holds.
-    #[error(
-        "{found} exists past the listed newest on each of {attempts} listings; the listing lags"
-    )]
+    /// Three listings did not show a level-0 file a read had found before they began: the
+    /// store's listings lag its writes, so the newest state it lists is not the newest it
+    /// holds.
+    #[error("{found} exists past the listed newest after {attempts} listings; the listing lags")]
     ListingBehind {
         /// Listings tried.
         attempts: u8,
@@ -349,6 +354,7 @@ pub struct Restored {
     created_at_read: u64,
     post_apply: Option<DbChecksum>,
     inside_file: Option<FileKey>,
+    writer_outpaced: bool,
 }
 
 impl Restored {
@@ -410,6 +416,16 @@ impl Restored {
     pub const fn inside_file(&self) -> Option<FileKey> {
         self.inside_file
     }
+
+    /// Whether a writer kept putting a new file after each listing for [MAX_CHASE]
+    /// listings, and the restore then took the next listing as it stood: every listing
+    /// had shown the file found before it, so none lagged, and the database is a committed
+    /// state at least as new as every file a read found during the restore, though not
+    /// necessarily the writer's newest by the time it is published.
+    #[must_use]
+    pub const fn writer_outpaced(&self) -> bool {
+        self.writer_outpaced
+    }
 }
 
 /// How one attempt ended without a database.
@@ -421,7 +437,12 @@ enum Abort {
     /// on a fresh listing; a gap every attempt shows is the replica's.
     Gap(PlanOutcome),
     /// A file exists past the listing's newest: list again.
-    Behind(FileKey),
+    Behind {
+        /// The file a read found.
+        found: FileKey,
+        /// The newest transaction the listing showed.
+        listed: Option<Txid>,
+    },
     Fatal(RestoreError),
 }
 
@@ -482,7 +503,9 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     let mut bytes_read = 0_u64;
     let mut created_at_read = 0_u64;
     let probe = listed.is_none();
+    let mut retries = Retries::default();
     loop {
+        let probe = probe && !retries.trusting;
         let source = listed.take().map_or(Source::List { probe }, Source::Given);
         let applied = attempt_once(
             store,
@@ -512,34 +535,96 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                     created_at_read,
                     post_apply: last.trailer().post_apply(),
                     inside_file,
+                    writer_outpaced: retries.trusting,
                 });
             }
             Err(Abort::Fatal(err)) => return Err(err),
-            Err(Abort::Vanished(missing)) if attempt >= MAX_ATTEMPTS => {
-                mark!(Rest4);
-                mark!(World28);
-                return Err(RestoreError::Unstable {
-                    attempts: attempt,
-                    missing,
-                });
-            }
-            Err(Abort::Behind(found)) if attempt >= MAX_ATTEMPTS => {
-                mark!(World4);
-                return Err(RestoreError::ListingBehind {
-                    attempts: attempt,
-                    found,
-                });
-            }
-            Err(Abort::Vanished(_) | Abort::Behind(_)) => {
-                mark!(Rest4);
-                sink.reset().map_err(sink_fault(SinkOp::Reset))?;
+            Err(abort) => {
+                // A gap stops the plan before the first file: nothing to reset.
+                let applied_nothing = matches!(abort, Abort::Gap(_));
+                retries.after(abort, attempt)?;
+                if !applied_nothing {
+                    sink.reset().map_err(sink_fault(SinkOp::Reset))?;
+                }
                 attempt = attempt.saturating_add(1);
             }
-            Err(Abort::Gap(outcome)) if attempt >= MAX_ATTEMPTS => {
-                return Err(RestoreError::NoPlan(NoPlan(outcome)));
+        }
+    }
+}
+
+/// Listings a restore makes while it follows a replicator that keeps uploading, at most.
+const MAX_CHASE: u8 = 64;
+
+/// Why a restore listed again, counted toward the limits on each reason.
+#[derive(Default)]
+struct Retries {
+    /// Attempts that found a planned file gone.
+    vanished: u8,
+    /// Attempts whose listing planned a gap.
+    gaps: u8,
+    /// Attempts whose listing did not show a file a read had found after an earlier
+    /// listing: the store's listing lags.
+    lagged: u8,
+    /// The file the last read past a listing found.
+    chased: Option<FileKey>,
+    /// A writer outpaced [MAX_CHASE] listings that all caught up: the next listing is taken
+    /// as it stands, with no read past it.
+    trusting: bool,
+}
+
+impl Retries {
+    /// Counts `abort`, made by attempt `attempt`, or fails when its reason is exhausted.
+    ///
+    /// A file found past a listing is a lagging listing or a writer that put it after the
+    /// listing; one read cannot tell. The next listing can: one that shows the file found
+    /// before it is not behind it, so that round is the writer's progress and is not counted
+    /// as a lag. Only a listing that still ends below a file found before it began counts.
+    fn after(&mut self, abort: Abort, attempt: u8) -> Result<(), RestoreError> {
+        match abort {
+            Abort::Fatal(err) => Err(err),
+            Abort::Vanished(missing) => {
+                mark!(Rest4);
+                self.vanished = self.vanished.saturating_add(1);
+                if self.vanished >= MAX_ATTEMPTS {
+                    mark!(World28);
+                    return Err(RestoreError::Unstable {
+                        attempts: attempt,
+                        missing,
+                    });
+                }
+                Ok(())
             }
-            // Nothing was applied: the plan stopped before the first file.
-            Err(Abort::Gap(_)) => attempt = attempt.saturating_add(1),
+            Abort::Gap(outcome) => {
+                self.gaps = self.gaps.saturating_add(1);
+                if self.gaps >= MAX_ATTEMPTS {
+                    return Err(RestoreError::NoPlan(NoPlan(outcome)));
+                }
+                Ok(())
+            }
+            Abort::Behind { found, listed } => {
+                let caught_up = self
+                    .chased
+                    .is_some_and(|before| listed >= Some(before.range().max()));
+                if !caught_up {
+                    self.lagged = self.lagged.saturating_add(1);
+                }
+                self.chased = Some(found);
+                // Lagging listings are counted on their own, so past the bound only a
+                // round that caught up remains, and the restore stops reading past the
+                // listing; the last term only bounds the loop if that reasoning is wrong.
+                let exhausted = attempt >= MAX_CHASE.saturating_add(MAX_ATTEMPTS);
+                if self.lagged >= MAX_ATTEMPTS || exhausted {
+                    mark!(World4);
+                    return Err(RestoreError::ListingBehind {
+                        attempts: attempt,
+                        found,
+                    });
+                }
+                if caught_up && attempt >= MAX_CHASE {
+                    self.trusting = true;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -579,7 +664,10 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         && empty
         && let Some(found) = listed_past(store, inventory).await?
     {
-        return Err(Abort::Behind(found));
+        return Err(Abort::Behind {
+            found,
+            listed: inventory.newest(),
+        });
     }
     let (chain, inside_file) = match plan_target(store, inventory, target, created_at_read).await? {
         PlanOutcome::Plan(chain) => (chain, None),
@@ -604,7 +692,10 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         && !matches!(target, RestoreTarget::Txid(_))
         && let Some(found) = listed_past(store, inventory).await?
     {
-        return Err(Abort::Behind(found));
+        return Err(Abort::Behind {
+            found,
+            listed: inventory.newest(),
+        });
     }
     let last = apply_chain(store, &chain, sink, bytes_read).await?;
     Ok((chain, last, inside_file))

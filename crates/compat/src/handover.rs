@@ -69,7 +69,8 @@ pub fn wait_staged_past(
         process.ensure_running()?;
         now = position(fixture)?;
         Ok(now > after)
-    })?;
+    })
+    .map_err(|err| process.explain(err))?;
     now.ok_or_else(|| CompatError::Fixture("nothing was staged".to_owned()))
 }
 
@@ -88,7 +89,8 @@ pub fn wait_uploaded(process: &mut Replicator, fixture: &AppFixture) -> Result<T
             now = uploaded(fixture)?;
             Ok(staged.is_some() && now == staged)
         },
-    )?;
+    )
+    .map_err(|err| process.explain(err))?;
     now.ok_or_else(|| CompatError::Fixture("nothing was uploaded".to_owned()))
 }
 
@@ -117,6 +119,7 @@ pub fn wait_boot_file(
             None => fixture.remote().l0_starting_at(next)?,
         };
         Ok(found.is_some())
-    })?;
+    })
+    .map_err(|err| process.explain(err))?;
     found.ok_or_else(|| CompatError::Timeout(what.clone()))
 }

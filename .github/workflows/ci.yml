@@ -115,6 +115,14 @@ jobs:
       - run: just compat
         env:
           LSR_ALTERNATION_SEED: "1"
+      # A failed alternation keeps its fixture (database, staging, replica and both processes'
+      # logs) under the temp directory; uploaded, the failure can be classified afterwards.
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: compat-fixtures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/lsr-alternation-*
+          if-no-files-found: ignore
 
   # Go and Rust on one S3 bucket: MinIO in Docker, as test-s3, with the throwaway credentials in
   # scripts/minio.sh. The recipe unsets every AWS_* and LITESTREAM_* variable and the tests
