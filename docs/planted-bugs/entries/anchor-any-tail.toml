@@ -1,0 +1,11 @@
+# Killed unaided: no test was written for this defect. The swarm's own history (seed 44's drawn
+# mix) fails under it. The same plant at the witness's own anchor is witness-anchor-held below. It
+# re-expresses on main the plant the history
+# judge's work measured on the boot-witness branch: the boot accepts the newest staged file as
+# its position whenever the WAL holds a commit frame at its end in the same generation, without
+# comparing its last page or the range it covers.
+name = "anchor-any-tail"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["unaided::swarm_seed_44_restores_only_committed_states"]

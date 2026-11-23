@@ -1,0 +1,4 @@
+name = "witness-cap-boot"
+fix = "2024ca8"
+package = "lsr-core"
+tests = ["pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal"]

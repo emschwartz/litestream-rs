@@ -5,7 +5,7 @@
 # ///
 """The planted-bug ledger runner (docs/planted-bugs.md).
 
-For each entry of docs/planted-bugs.toml: the named tests must pass on a clean scratch copy of
+For each entry in docs/planted-bugs/entries/: the named tests must pass on a clean scratch copy of
 HEAD, then must each fail once the entry's patch is applied. Exits 1 when a planted bug survives
 (a defect in the tests), a patch no longer applies (re-express the entry's patch against the
 current tree, or retire the entry with a reason), a test does not run, or a build breaks.
@@ -43,8 +43,9 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LEDGER = ROOT / "docs" / "planted-bugs.toml"
 PATCHES = ROOT / "docs" / "planted-bugs"
+# One file per entry, so adding one never edits a file another branch also appends to.
+ENTRIES = PATCHES / "entries"
 SCRATCH = ROOT / "target" / "planted-bugs"
 TREE = SCRATCH / "tree"
 LOCK = SCRATCH / "lock"
@@ -253,11 +254,15 @@ def main() -> int:
     ap.add_argument("--no-wait", action="store_true",
                     help="refuse to start while another run holds the lock, instead of waiting")
     opts = ap.parse_args()
-    bugs = tomllib.loads(LEDGER.read_text())["bug"]
-    names = [b["name"] for b in bugs]
-    if len(set(names)) != len(names):
-        print("planted-bugs: duplicate entry name", file=sys.stderr)
+    bugs = load_ledger()
+    if not bugs:
+        print(f"planted-bugs: no entries under {ENTRIES}", file=sys.stderr)
         return 1
+    misnamed = [b["name"] for b in bugs if b["name"] != b["file"]]
+    if misnamed:
+        print(f"planted-bugs: an entry's file must be named <name>.toml: {misnamed}", file=sys.stderr)
+        return 1
+    names = [b["name"] for b in bugs]
     unknown = [n for n in opts.only if n not in names]
     if unknown:
         print(f"planted-bugs: no such entry: {unknown}", file=sys.stderr)
@@ -287,6 +292,12 @@ def main() -> int:
         print(f"planted-bugs: {stale}; no verdict is about this checkout", file=sys.stderr)
         return 1
     return report(rows, opts.keep)
+
+
+def load_ledger() -> list[dict]:
+    """Every entry, sorted by file name; each carries its file's stem as `file`."""
+    return [{**tomllib.loads(path.read_text()), "file": path.stem}
+            for path in sorted(ENTRIES.glob("*.toml"))]
 
 
 def run_ledger(bugs: list[dict], head: str, rows: list[tuple[str, str, str, str]]) -> None:

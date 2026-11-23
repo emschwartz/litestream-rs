@@ -1,0 +1,10 @@
+name = "lz4-frame-checksums"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::frame_header_checksum",
+    "errors::frame_block_checksum",
+    "errors::frame_content_checksum",
+    "corruption::every_bit_flip_of_a_go_file_fails_or_aliases",
+]

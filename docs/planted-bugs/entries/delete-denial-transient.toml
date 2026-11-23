@@ -1,0 +1,5 @@
+name = "delete-denial-transient"
+fix = "9224a25"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_delete_refused_for_one_key_is_a_permission_denial"]

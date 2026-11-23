@@ -1,0 +1,8 @@
+name = "rewind-excused-without-report"
+fix = "checker-holes (oracle exemptions)"
+package = "lsr-history"
+test_bin = "history"
+tests = [
+    "judge::a_rewind_the_engine_did_not_report_does_not_excuse_going_back",
+    "judge::a_report_before_the_rewind_does_not_cover_it",
+]

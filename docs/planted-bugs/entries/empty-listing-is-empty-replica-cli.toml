@@ -1,0 +1,6 @@
+# The same plant, judged where it does harm: `--if-replica-exists` skips the restore with success.
+name = "empty-listing-is-empty-replica-cli"
+fix = "a5c7d57"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing"]

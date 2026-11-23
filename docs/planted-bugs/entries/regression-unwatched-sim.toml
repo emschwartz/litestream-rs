@@ -1,0 +1,5 @@
+name = "regression-unwatched-sim"
+fix = "5cf9f56"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::bucket_rolled_back_unseen"]

@@ -1,0 +1,7 @@
+# A boot drop records only through the confirmed transaction, short of a listed tail the
+# listing judged torn.
+name = "boot-drop-record-capped-at-confirmed"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]

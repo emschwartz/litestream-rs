@@ -1,0 +1,6 @@
+name = "failstop-operator-snapshot-is-lag"
+fix = "c96e94d"
+package = "lsr-core"
+tests = [
+    "lag::an_operator_snapshot_while_caught_up_is_not_lag",
+]
