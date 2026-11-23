@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lsr_config::{
-    Credentials, Expand, GoConfig, ProcessEnv, ReplicaKind, ReplicaPlan, expand_path,
+    Credentials, DbSource, Expand, GoConfig, ProcessEnv, ReplicaKind, ReplicaPlan, expand_path,
 };
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
@@ -45,7 +45,8 @@ use lsr_store_s3::{ConfigError, CredentialError, S3Credentials};
 use thiserror::Error;
 
 use crate::args::{
-    Command, FilesArgs, Replica, RestoreArgs, RestoreFrom, TakeOverArgs, UsageError, VerifyArgs,
+    Command, DatabasesArgs, FilesArgs, LtxArgs, LtxFrom, Replica, RestoreArgs, RestoreFrom,
+    TakeOverArgs, UsageError, VerifyArgs,
 };
 use crate::render;
 use crate::replica::{self, Remote};
@@ -241,6 +242,22 @@ pub struct RestoreDone {
 pub enum Done {
     /// A restore ran to an end: restored, planned or skipped.
     Restore(Box<RestoreDone>),
+    /// Go's `databases`: each database's path and replica type.
+    Databases {
+        /// Path and type (`file`, `s3`), in config order.
+        rows: Vec<(String, &'static str)>,
+        /// JSON instead of text.
+        json: bool,
+    },
+    /// Go's `ltx`: the files listed, in level then name order.
+    Ltx {
+        /// The files.
+        files: Vec<lsr_core::FileInfo>,
+        /// JSON instead of text.
+        json: bool,
+        /// Run as `wal`: warn that it is deprecated.
+        as_wal: bool,
+    },
     /// A replica was checked.
     Verified {
         /// How much was read.
@@ -448,6 +465,8 @@ pub fn exit_for_done(done: &Done) -> Exit {
         },
         Done::ConfigChecked(checked) => config_exit(checked),
         Done::Restore(_)
+        | Done::Databases { .. }
+        | Done::Ltx { .. }
         | Done::TakenOver { .. }
         | Done::Files { .. }
         | Done::DaemonHelp(_)
@@ -545,6 +564,8 @@ pub fn exit_for_error(error: &CliError) -> Exit {
 pub async fn run(command: Command) -> Result<Done, CliError> {
     match command {
         Command::Restore(args) => restore_command(args).await,
+        Command::Databases(args) => databases_command(&args),
+        Command::Ltx(args) => ltx_command(args).await,
         Command::Verify(args) => verify_command(args).await,
         Command::Files(args) => files_command(args).await,
         Command::TakeOver(args) => take_over_command(args).await,
@@ -704,27 +725,101 @@ fn resolve_from(
                 let source = Source::of_url(&url);
                 return Ok(Resolution::OutputExists(output, source));
             }
-            let loaded = GoConfig::for_one_database(&output.to_string_lossy(), &url, &ProcessEnv)
-                .map_err(CliError::Config)?;
-            let plan = lsr_config::plan(&loaded.config, &ProcessEnv).map_err(CliError::Plan)?;
-            let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
-            Ok(Resolution::Open(Opening::of_plan(db.replica()), output))
+            let opening = url_replica(&output.to_string_lossy(), &url)?;
+            Ok(Resolution::Open(opening, output))
         }
         RestoreFrom::Database { path, config } => {
-            let loaded = lsr_sidecar::load_config(config.as_deref(), expand)?;
-            let want = expand_path(&path, &ProcessEnv).map_err(CliError::DatabasePath)?;
-            // Go's `DBConfig` reads only the `path` entries: `dir` entries are not scanned
-            // and the other entries are not built.
-            let narrowed = loaded
-                .config
-                .only_database(&want)
-                .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
-            let plan = lsr_config::plan(&narrowed, &ProcessEnv).map_err(CliError::Plan)?;
-            let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
-            let output = output.unwrap_or_else(|| db.path().to_path_buf());
-            Ok(Resolution::Open(Opening::of_plan(db.replica()), output))
+            let (opening, db) = config_replica(&path, config.as_deref(), expand)?;
+            Ok(Resolution::Open(opening, output.unwrap_or(db)))
         }
     }
+}
+
+/// Go's `NewReplicaFromConfig(&ReplicaConfig{URL: url})`: the replica a URL names, read as a
+/// config's `url:` for a database at `database`.
+fn url_replica(database: &str, url: &str) -> Result<Opening, CliError> {
+    let loaded =
+        GoConfig::for_one_database(database, url, &ProcessEnv).map_err(CliError::Config)?;
+    let plan = lsr_config::plan(&loaded.config, &ProcessEnv).map_err(CliError::Plan)?;
+    let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
+    Ok(Opening::of_plan(db.replica()))
+}
+
+/// Go's `ReadConfig` then `DBConfig(expand(path))`: the replica of the config's `path` entry
+/// for `path`, and that database's path.
+fn config_replica(
+    path: &str,
+    config: Option<&str>,
+    expand: Expand,
+) -> Result<(Opening, PathBuf), CliError> {
+    let loaded = lsr_sidecar::load_config(config, expand)?;
+    let want = expand_path(path, &ProcessEnv).map_err(CliError::DatabasePath)?;
+    let narrowed = loaded
+        .config
+        .only_database(&want)
+        .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
+    let plan = lsr_config::plan(&narrowed, &ProcessEnv).map_err(CliError::Plan)?;
+    let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
+    Ok((Opening::of_plan(db.replica()), db.path().to_path_buf()))
+}
+
+const fn expand_of(no_expand_env: bool) -> Expand {
+    if no_expand_env {
+        Expand::Off
+    } else {
+        Expand::Env
+    }
+}
+
+/// Go's `databases`: every entry of the config with its replica's type. A `path` entry prints
+/// its path. A `dir` entry prints its directory, unscanned: Go expands the entry's empty
+/// `path` and prints the working directory instead (docs/decisions.md D53).
+fn databases_command(args: &DatabasesArgs) -> Result<Done, CliError> {
+    let loaded = lsr_sidecar::load_config(args.config.as_deref(), expand_of(args.no_expand_env))?;
+    let mut rows = Vec::new();
+    for db in loaded.config.dbs() {
+        let path = match db.source() {
+            DbSource::Path(path) => path.display().to_string(),
+            DbSource::Dir(dir) => expand_path(dir.dir(), &ProcessEnv)
+                .map_err(CliError::DatabasePath)?
+                .display()
+                .to_string(),
+        };
+        let kind = db.replica().map_or("", |r| r.kind().word());
+        rows.push((path, kind));
+    }
+    Ok(Done::Databases {
+        rows,
+        json: args.json,
+    })
+}
+
+/// Go's `ltx`: the LTX files of one level, or of every level, as the replica lists them.
+async fn ltx_command(args: LtxArgs) -> Result<Done, CliError> {
+    let opening = match args.from {
+        LtxFrom::Url(url) => url_replica("ltx.db", &url)?,
+        LtxFrom::Database { path, config } => {
+            config_replica(&path, config.as_deref(), expand_of(args.no_expand_env))?.0
+        }
+    };
+    let inventory = match &opening.replica {
+        Replica::Dir(path) => Inventory::load(&FsStore::new(path)).await?,
+        Replica::S3(config) => {
+            let store = replica::open_s3_with((**config).clone(), opening.keys.clone())?;
+            Inventory::load(&store).await?
+        }
+    };
+    let files = inventory
+        .files()
+        .iter()
+        .filter(|f| args.level.is_none_or(|level| f.key.level() == level))
+        .copied()
+        .collect();
+    Ok(Done::Ltx {
+        files,
+        json: args.json,
+        as_wal: args.as_wal,
+    })
 }
 
 /// The restore, or with `dry_run` its plan. A directory with no `ltx/` folder is opened
