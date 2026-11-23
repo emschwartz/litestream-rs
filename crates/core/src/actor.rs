@@ -1192,8 +1192,11 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if let Some(tick) = self.wal_unit(env, now, true).await {
+        if let Some(tick) = self.owed_upload(env, now).await {
             return tick;
+        }
+        if let Some(tick) = self.wal_unit(env, now, true).await {
+            return self.passed_over_uploads(tick);
         }
         if self.fair_turn() {
             if let Some(tick) = self.prune_unit(env, now).await {
@@ -1231,8 +1234,11 @@ impl Actor {
                 self.missed(env, now).await
             };
         }
-        if let Some(tick) = self.wal_unit(env, now, false).await {
+        if let Some(tick) = self.owed_upload(env, now).await {
             return tick;
+        }
+        if let Some(tick) = self.wal_unit(env, now, false).await {
+            return self.passed_over_uploads(tick);
         }
         if let Some(tick) = self.upload_unit(env, now).await {
             return tick;
@@ -1331,6 +1337,16 @@ impl Actor {
         self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
         self.raise_floor(state.confirmed());
         self.engine.witnesses.confirmed(state.confirmed());
+        // Only a position the uploader stands on passes the dropped ids; a
+        // listing still owed keeps them, since it may confirm less.
+        if let UploadState::At(confirmed) = state
+            && self
+                .engine
+                .dropped_acknowledged
+                .is_some_and(|dropped| Some(dropped.max()) <= confirmed)
+        {
+            self.engine.dropped_acknowledged = None;
+        }
     }
 
     /// The checkpoint the policy wants now, when its task and the sync task
@@ -1735,6 +1751,26 @@ impl Actor {
         position
     }
 
+    /// Moves the upload past acknowledged ids a drop removed from staging.
+    ///
+    /// A drop after a rollback places the snapshot above the acknowledged
+    /// ids, which are never taken again. A listing afterwards confirms only
+    /// what the replica still holds, so the next planned id can be one of
+    /// those: it has no staged file, and planning it would fail every upload
+    /// with `StagedLost` until a restart. Their pages are in the snapshot
+    /// above, so the upload resumes there.
+    fn pass_dropped_acknowledged(&mut self) {
+        let (Some(dropped), UploadState::At(confirmed)) =
+            (self.engine.dropped_acknowledged, self.engine.upload)
+        else {
+            return;
+        };
+        let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
+        if next.is_some_and(|next| dropped.contains(next)) {
+            self.engine.upload = UploadState::At(Some(dropped.max()));
+        }
+    }
+
     /// The newest id an upload step may treat as this engine's own.
     ///
     /// A listing judges the replica against everything this engine put
@@ -1759,6 +1795,7 @@ impl Actor {
         if !self.upload_ready(now) {
             return None;
         }
+        self.engine.syncs_ahead = 0;
         let limit = self
             .kept
             .cfg
@@ -1767,6 +1804,7 @@ impl Actor {
             .map_or(u32::MAX, NonZeroU32::get);
         let mut last = Did::Nothing;
         for _ in 0..limit {
+            self.pass_dropped_acknowledged();
             let plan = plan_upload(&self.engine.upload, self.staged());
             let bound = self.upload_bound(plan);
             let witnesses = &self.engine.witnesses;
@@ -1902,6 +1940,7 @@ impl Actor {
         // are gone with their staged copies: they are never taken again, so
         // the uploads resume with the snapshot above them.
         let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
+        self.engine.dropped_acknowledged = acknowledged.and_then(|ack| TxidRange::new(from, ack));
         if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload) {
             self.engine.upload = UploadState::At(confirmed.max(Some(ack)));
         }
@@ -1919,7 +1958,10 @@ impl Actor {
             staged: from.prev(),
             cause,
         };
-        self.kept.tasks.get_mut(Task::Upload).succeed();
+        // The unreadable files are gone, so the next upload may run at once; but nothing has
+        // reached the replica, so the failures so far still count toward a stall, and a
+        // degraded state stays until an upload goes through.
+        self.kept.tasks.get_mut(Task::Upload).probe();
         self.ran(Event::Resnapshot(cause), now)
     }
 
@@ -2412,6 +2454,25 @@ impl Actor {
     /// one statement of it: the task's unit and the next wake both ask here.
     fn upload_ready(&self, now: Timestamp) -> bool {
         self.kept.tasks.ready(Task::Upload, now) && !self.uploads_idle()
+    }
+
+    /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row ended
+    /// in the WAL step; it runs only when uploads are ready, and resets the count when it does.
+    async fn owed_upload<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        if self.engine.syncs_ahead < state::FAIR_SHARE {
+            return None;
+        }
+        self.upload_unit(env, now).await
+    }
+
+    /// `tick`, from the WAL step, counted: the upload step resets the count when it runs.
+    fn passed_over_uploads(&mut self, tick: Tick) -> Tick {
+        self.engine.syncs_ahead = self.engine.syncs_ahead.saturating_add(1);
+        tick
     }
 
     /// The transaction the prune task may delete through, when it may run.

@@ -566,11 +566,11 @@ notes = "The scenario injects a size mismatch on commit, not a failed fsync, the
 table = "Running"
 id = "RUN-16"
 circumstance = "A staged file is missing or fails verification when its turn to upload comes. First failed read: retry. Second failed read of the same file on a later tick: it and every staged file after it are deleted (`actor.rs`)"
-response = "retry, then snapshot, `NewestStagedFileUnreadable`"
-signal = "`newest_staged_file_unreadable`"
+response = "retry, then snapshot, `NewestStagedFileUnreadable`. The upload's failures so far still count toward a stall and its degraded state stays: nothing reached the replica, so only an upload that goes through clears them. Deleted ids the replica had acknowledged and then lost (a rollback) are never taken again: the snapshot goes above them, and a listing that confirms less moves the uploads past them to it"
+signal = "`newest_staged_file_unreadable`; the upload task's degraded state, kept"
 at_risk = "Restore points of the deleted files"
 recovery = "Automatic"
-detected_by = "core::`one_bad_read_of_a_staged_file_while_uploading_drops_nothing`, core::`the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots`, sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`; plant::`delete-on-one-failed-read-upload`"
+detected_by = "core::`one_bad_read_of_a_staged_file_while_uploading_drops_nothing`, core::`the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots`, core::`a_resnapshot_keeps_the_failed_uploads_toward_a_stall`, core::`uploads_resume_above_acknowledged_ids_a_rollback_took`, sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`; plant::`delete-on-one-failed-read-upload`"
 recovered_by = "sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`"
 
 [[row]]
@@ -704,6 +704,17 @@ at_risk = "None"
 recovery = "None needed"
 detected_by = "core::`a_step_from_the_start_follows_a_header_written_again_with_the_same_salts`, sqlite::`a_header_written_again_with_the_same_salts_replicates_what_follows`, core::`frames_regrown_from_a_header_written_again_are_a_rewind`, wal::`generation_unchanged_reads_the_header_again`; plant::`start-seed-from-old-header`, plant::`start-seed-from-old-header-sqlite`, plant::`rechained-before-end-ignored`"
 notes = "Before the fix the old seed failed the first frame's checksum under unchanged salts, which read as `WalCorrupt` for good (Go v0.5.18 killed at its WAL restart, then the application's next commit)"
+
+[[row]]
+table = "Running"
+id = "RUN-29"
+circumstance = "The application commits before every tick, so the WAL step finds new frames and stages them on each one, while uploads are ready"
+response = "After 8 ticks in a row (the fair share prune and maintenance also get) that ended in the WAL step, the next tick's upload step runs first when uploads are ready. One upload step uploads everything staged, or `files_per_tick` files, so with the default no backlog builds"
+signal = "None"
+at_risk = "None"
+recovery = "None needed"
+detected_by = "core::`uploads_keep_up_with_an_app_that_commits_every_tick`"
+notes = "Before the fix a WAL step that staged files ended the tick before the upload step, so uploads never ran while commits kept coming: replication halted with no failure, and health had nothing to report (simulator seed 0x593, the last ticks of a lagging listing's hold, after a resnapshot cleared the upload task's degraded state, which RUN-16 now keeps)"
 
 [[row]]
 table = "Checkpoint"
