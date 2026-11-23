@@ -1,0 +1,12 @@
+# The same plant, judged by the simulator's lagging listings. The freed-key history (seed 0x4c5)
+# left the list once boot learned to stop on another writer: the engine now stops before it merges
+# that writer's file, so no level-1 file holds the freed key and the planted tree passes it.
+name = "boot-trusts-a-stale-listing"
+patch = "listing-trusted-without-probe"
+fix = "8c7d8ce"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files",
+    "a_lagging_relist_does_not_report_the_replica_gone_backwards_seed_0x440",
+]

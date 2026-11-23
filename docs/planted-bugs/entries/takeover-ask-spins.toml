@@ -1,0 +1,5 @@
+# An unanswered request for the record asks again at once, forever, instead of waiting.
+name = "takeover-ask-spins"
+fix = "88577ff"
+package = "lsr-core"
+tests = ["vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits"]

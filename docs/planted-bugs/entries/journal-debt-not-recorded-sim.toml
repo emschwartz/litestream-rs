@@ -1,0 +1,11 @@
+name = "journal-debt-not-recorded-sim"
+patch = "journal-debt-not-recorded"
+fix = "8ef5a8f"
+package = "lsr-sim"
+test_bin = "sim"
+# Seed 0xf's must-pass test (known_wrong.rs) passes with this bug planted too, so it does not
+# catch it and is not listed; why that history no longer reaches the restart is not yet known.
+tests = [
+    "faults::wal_fsync_fails_then_restart",
+    "kill_after_fault::a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116",
+]

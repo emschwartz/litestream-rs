@@ -1,0 +1,5 @@
+name = "url-timestamp-empty-replica-skipped"
+fix = "claude/dropin-commands"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["a_url_restore_with_a_timestamp_refuses_an_empty_replica"]

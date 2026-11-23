@@ -1,0 +1,4 @@
+name = "config-type-mismatch-read-as-absent"
+fix = "claude/config-field-types"
+package = "lsr-config"
+tests = ["build::tests::a_value_of_the_wrong_type_is_a_problem_not_an_absent_key"]

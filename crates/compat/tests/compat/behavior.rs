@@ -227,18 +227,23 @@ struct Bug {
 }
 
 fn ledger() -> BTreeMap<String, Bug> {
-    #[derive(Deserialize)]
-    struct Ledger {
-        bug: Vec<Bug>,
-    }
-    let path = docs().join("planted-bugs.toml");
-    let ledger: Ledger =
-        toml::from_str(&read(&path)).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let dir = docs().join("planted-bugs/entries");
+    let ledger: BTreeMap<String, Bug> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|x| x == "toml"))
+        .map(|path| {
+            let bug: Bug = toml::from_str(&read(&path))
+                .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+            (bug.name.clone(), bug)
+        })
+        .collect();
+    assert!(
+        !ledger.is_empty(),
+        "no ledger entries under {}",
+        dir.display()
+    );
     ledger
-        .bug
-        .into_iter()
-        .map(|b| (b.name.clone(), b))
-        .collect()
 }
 
 /// Whether the test a row cites as `kind::name` is one the ledger entry's run would fail: the

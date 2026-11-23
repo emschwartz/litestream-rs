@@ -359,6 +359,9 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         staging_fs: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
+        // Which SQLite the engine runs against: each backend's faults are drawn and noted
+        // as the model's are.
+        sqlite: _,
         lying_wal_sync,
     } = opts;
     if *lying_wal_sync {
@@ -533,8 +536,8 @@ impl Liveness {
         // lost, confirmed by a read-back) leaves no put in the recorder: the replica holds it.
         self.uploaded.extend(world.replica_level_zero());
         // The replica holds everything staging does only once no staged file is one it never
-        // took: a file left behind it (a backup put back, a forged file) is still to be dropped,
-        // and the fault that left it must be in the window when it is (seed 0xf42e9).
+        // took: a file left behind it (a backup put back, a file damaged in place) is still to be
+        // dropped, and the fault that left it must be in the window when it is (seed 0xf42e9).
         let left_behind = world
             .staged_level_zero()
             .iter()

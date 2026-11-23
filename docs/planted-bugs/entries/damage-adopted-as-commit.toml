@@ -1,0 +1,4 @@
+name = "damage-adopted-as-commit"
+fix = "checker-holes (model adoption)"
+package = "lsr-sim"
+tests = ["history::tests::a_restore_of_a_state_adopted_from_damage_fails"]

@@ -1,0 +1,8 @@
+name = "journal-debt-not-recorded-sqlite"
+patch = "journal-debt-not-recorded"
+fix = "8ef5a8f"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "power_loss::a_restart_after_a_failed_wal_sync_ships_no_unproven_frame",
+]

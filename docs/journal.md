@@ -153,7 +153,7 @@ block size, the tearing device, unreadable sectors) and keeps the real writer be
 byte-level file that applies the model's outcome for every system call in bytes. Each write is
 replayed with the model's outcomes scripted; the writer must make the same calls in the same
 order, and the file (read as records), the writer's position and every boot's verdict must equal
-the model's. Thirteen planted bugs in `docs/planted-bugs.toml` (`journal-*`) put back each rule of
+the model's. Thirteen planted bugs in `docs/planted-bugs/entries/` (`journal-*`) put back each rule of
 the writer, the codec and the model, and the named tests must fail.
 
 ## Plants

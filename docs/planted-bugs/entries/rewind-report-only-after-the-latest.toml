@@ -1,0 +1,5 @@
+name = "rewind-report-only-after-the-latest"
+fix = "checker-holes (rewind reports)"
+package = "lsr-history"
+test_bin = "history"
+tests = ["judge::a_report_after_any_explaining_rewind_covers_the_step"]

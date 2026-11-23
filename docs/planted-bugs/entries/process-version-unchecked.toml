@@ -1,0 +1,4 @@
+name = "process-version-unchecked"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["chain::sources_tests::credential_process_output_is_checked"]

@@ -632,7 +632,8 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         "floor",
         Keep::Journalled(
             Record::EngineJournal,
-            "the confirmed floor for the configured destination: every id at or below it is              taken, and its anchor names the bytes confirmed there (issue #171, item 4)",
+            "the confirmed floor for the configured destination: every id at or below it is \
+             taken, and its anchor names the bytes confirmed there (issue #171, item 4)",
         ),
     ),
 ];

@@ -1,7 +1,9 @@
 use lsr_store_s3::{Provider, UrlStyle};
 
 use super::*;
-use lsr_core::AsOfInside;
+use lsr_core::{AsOfInside, RestoreTarget};
+use lsr_ltx::{Timestamp, Txid};
+use lsr_replica::local::IntegrityCheck;
 
 fn words(line: &str) -> Vec<String> {
     line.split_whitespace().map(str::to_owned).collect()
@@ -23,9 +25,10 @@ fn txid(raw: u64) -> Txid {
 fn restore_latest_is_the_default_target() {
     assert_eq!(
         parsed("restore --replica r --output o"),
-        Ok(Command::Restore(RestoreArgs {
-            replica: Replica::Dir("r".into()),
-            output: "o".into(),
+        Ok(Command::Restore(Box::new(RestoreArgs {
+            from: RestoreFrom::Replica(Replica::Dir("r".into())),
+            output: Some("o".into()),
+            no_expand_env: false,
             target: RestoreTarget::Latest,
             as_of_inside: AsOfInside::Refuse,
             clear_journal_files: false,
@@ -34,7 +37,11 @@ fn restore_latest_is_the_default_target() {
             if_replica_exists: false,
             dry_run: false,
             json: false,
-        }))
+            force: false,
+            parallelism: false,
+            txid_and_timestamp: false,
+            timestamp_given: false,
+        })))
     );
 }
 
@@ -225,13 +232,16 @@ fn missing_required_flag_for_every_required_flag() {
             let mut args = words(line);
             let at = args.iter().position(|a| a == spec.name).unwrap();
             args.drain(at..=at + 1);
-            assert_eq!(
-                parse(&args),
-                Err(UsageError::MissingFlag {
+            // restore reads Go's grammar: no source at all is Go's own refusal.
+            let want = if command == CommandName::Restore {
+                UsageError::GoSourceMissing
+            } else {
+                UsageError::MissingFlag {
                     command: command.word(),
-                    flag: spec.name
-                })
-            );
+                    flag: spec.name,
+                }
+            };
+            assert_eq!(parse(&args), Err(want));
             checked += 1;
         }
     }
@@ -245,14 +255,20 @@ fn missing_required_flag_for_every_required_flag() {
     );
 }
 
+/// Go refuses a txid and a timestamp together only when it plans or restores, so the parse
+/// keeps both and marks the line; a zero txid is no txid.
 #[test]
 fn two_targets_at_once() {
-    assert_eq!(
-        usage(
-            "restore --replica r --output o --txid 0000000000000001 --timestamp 2026-01-01T00:00:00Z"
-        ),
-        UsageError::ConflictingTargets
-    );
+    let marked = |line: &str| match parsed(line) {
+        Ok(Command::Restore(args)) => args.txid_and_timestamp,
+        other => panic!("{line}: {other:?}"),
+    };
+    assert!(marked(
+        "restore --replica r --output o --txid 0000000000000001 --timestamp 2026-01-01T00:00:00Z"
+    ));
+    assert!(!marked(
+        "restore --replica r --output o --txid 0000000000000000 --timestamp 2026-01-01T00:00:00Z"
+    ));
 }
 
 #[test]
@@ -298,30 +314,37 @@ fn bare_word_where_a_flag_belongs() {
     );
 }
 
+/// Go's `txidVar`: sixteen hex digits in any case, refused as the flag is read; zero is
+/// Go's "latest".
 #[test]
-fn bad_txid() {
+fn txid_as_go_reads_it() {
+    for bad in ["2a", "000000000000002g", "0x0000000000002a"] {
+        let line = format!("restore --replica r --output o --txid {bad}");
+        assert_eq!(
+            usage(&line).to_string(),
+            format!("invalid value {bad:?} for flag -txid: invalid txid format")
+        );
+    }
+    let target = |line: &str| match parsed(line) {
+        Ok(Command::Restore(args)) => args.target,
+        other => panic!("{line}: {other:?}"),
+    };
     assert_eq!(
-        usage("restore --replica r --output o --txid 2a"),
-        UsageError::BadTxid {
-            value: "2a".into(),
-            source: ParseTxidError::Length { found: 2 }
-        }
+        target("restore --replica r --output o -txid 000000000000002A"),
+        RestoreTarget::Txid(txid(42))
     );
-    assert!(matches!(
-        usage("restore --replica r --output o --txid 0000000000000000"),
-        UsageError::BadTxid {
-            source: ParseTxidError::Zero,
-            ..
-        }
-    ));
+    assert_eq!(
+        target("restore --replica r --output o -txid 0000000000000000"),
+        RestoreTarget::Latest
+    );
 }
 
 #[test]
 fn bad_timestamp() {
-    assert!(matches!(
+    assert_eq!(
         usage("restore --replica r --output o --timestamp yesterday"),
-        UsageError::BadTimestamp { .. }
-    ));
+        UsageError::GoTimestamp
+    );
 }
 
 #[test]
@@ -358,15 +381,13 @@ fn bad_integrity_check() {
             usage(&format!(
                 "restore --replica r --output o --integrity-check {word}"
             )),
-            UsageError::BadIntegrityCheck { value: word.into() },
+            UsageError::GoIntegrityCheck { value: word.into() },
             "{word}"
         );
     }
     assert_eq!(
-        usage("restore --replica r --output o --integrity-check"),
-        UsageError::MissingValue {
-            flag: "--integrity-check"
-        }
+        usage("restore --replica r --output o --integrity-check").to_string(),
+        "flag needs an argument: -integrity-check"
     );
     assert!(matches!(
         usage("verify --replica r --integrity-check quick"),
@@ -486,10 +507,12 @@ fn restore_accepts_every_url_the_daemon_accepts() {
             panic!("{url}: not an S3 replica");
         };
         let restore = match parsed(&format!("restore --replica {url} --output o")) {
-            Ok(Command::Restore(RestoreArgs {
-                replica: Replica::S3(config),
-                ..
-            })) => config,
+            Ok(Command::Restore(args)) => match args.from {
+                RestoreFrom::Replica(Replica::S3(config)) => config,
+                other @ (RestoreFrom::Replica(Replica::Dir(_))
+                | RestoreFrom::Url(_)
+                | RestoreFrom::Database { .. }) => panic!("{url}: {other:?}"),
+            },
             other => panic!("{url}: {other:?}"),
         };
         assert_eq!(restore, *daemon, "{url}");
@@ -625,6 +648,8 @@ fn every_flag_in_the_table_is_accepted_by_its_commands() {
                 "--timestamp" => "2026-01-01T00:00:00Z",
                 "--depth" => "names",
                 "--integrity-check" => "full",
+                "-parallelism" => "4",
+                "-follow-interval" => "1s",
                 _ => "x",
             };
             let extra = spec.value.map_or(String::new(), |_| format!(" {value}"));
@@ -650,7 +675,13 @@ fn every_flag_in_the_table_is_accepted_by_its_commands() {
                     spec.name
                 );
                 assert!(
-                    matches!(usage(&line), UsageError::UnknownFlag { .. }),
+                    matches!(
+                        usage(&line),
+                        UsageError::UnknownFlag { .. }
+                            | UsageError::GoFlag(
+                                lsr_sidecar::goflag::FlagError::UnknownFlag { .. }
+                            )
+                    ),
                     "{line}"
                 );
             }
@@ -678,6 +709,15 @@ fn help_documents_every_flag_command_and_exit_code() {
     for exit in crate::run::Exit::ALL {
         assert!(help.contains(&format!("{:<3}{}", exit.code(), exit.meaning())));
     }
+}
+
+/// Go's follow mode is not built: refused by name, never read as a one-shot restore.
+#[test]
+fn follow_mode_is_refused_as_not_built() {
+    for line in ["restore -f -o o s3://b/p", "restore --f=true /data/db"] {
+        assert_eq!(usage(line), UsageError::FollowNotBuilt, "{line}");
+    }
+    assert!(UsageError::FollowNotBuilt.to_string().contains("#177"));
 }
 
 #[test]

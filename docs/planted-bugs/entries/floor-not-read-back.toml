@@ -1,0 +1,6 @@
+# The confirmed floor (issue #171, item 4, journal half; docs/decisions.md D107).
+# A boot does not read the recorded floor back.
+name = "floor-not-read-back"
+fix = "claude/journal-floor"
+package = "lsr-core"
+tests = ["actor::tests::journal::the_floor_is_read_back_and_a_rollback_before_the_boot_does_not_lower_it"]

@@ -3,7 +3,7 @@
 //!
 //! A recorded history can still stop reaching its bug when the runner or the engine around it
 //! changes, and then it passes for nothing. So every history names, in [`GUARDS`], the planted
-//! bug in `docs/planted-bugs.toml` its test must fail under (`just planted-bugs` runs each one
+//! bug in `docs/planted-bugs/entries/` its test must fail under (`just planted-bugs` runs each one
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
@@ -36,6 +36,7 @@ pub mod seed_0xb6b;
 pub mod seed_0xb9e;
 pub mod seed_0xe9;
 pub mod seed_0xf;
+pub mod seed_0xf45b5;
 pub mod seed_0xf488c;
 
 /// What guards a recorded history against passing for nothing.
@@ -225,15 +226,20 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0xa4d_does_not_trip",
         Guard::Own("failstop-trip-held-to-zero-age-sim"),
     ),
+    (
+        "seed_0xf45b5",
+        "a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5",
+        Guard::Own("running-drop-record-capped-at-confirmed"),
+    ),
 ];
 
 /// The ledger's entries, by name, with the test-name substrings each lists.
 fn ledger() -> Vec<(String, Vec<String>)> {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs.toml");
-    let text = std::fs::read_to_string(&path).unwrap();
-    text.split("[[bug]]")
-        .skip(1)
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs/entries");
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
         .map(|entry| {
             let quoted = |line: &str| -> Vec<String> {
                 line.split('"')
@@ -254,7 +260,13 @@ fn ledger() -> Vec<(String, Vec<String>)> {
                 .unwrap_or_default();
             (name, tests)
         })
-        .collect()
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "no ledger entries under {}",
+        dir.display()
+    );
+    entries
 }
 
 #[test]

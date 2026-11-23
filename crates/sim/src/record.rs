@@ -305,6 +305,7 @@ fn env(fault: EnvFault) -> Result<String, Unprintable> {
         EnvFault::TruncateFails => "EnvFault::TruncateFails".to_owned(),
         EnvFault::FlipDatabasePage(pgno) => format!("EnvFault::FlipDatabasePage({pgno})"),
         EnvFault::DriverWritesNothing => "EnvFault::DriverWritesNothing".to_owned(),
+        EnvFault::EvictPageCache => "EnvFault::EvictPageCache".to_owned(),
     })
 }
 
@@ -359,7 +360,6 @@ const fn meta(meta: MetaOp) -> &'static str {
         MetaOp::TruncateNewest => "MetaOp::TruncateNewest",
         MetaOp::StripNewestOrigin => "MetaOp::StripNewestOrigin",
         MetaOp::DeleteAll => "MetaOp::DeleteAll",
-        MetaOp::ForgeNewest => "MetaOp::ForgeNewest",
     }
 }
 

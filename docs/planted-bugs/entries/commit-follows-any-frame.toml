@@ -1,0 +1,7 @@
+# Any frame that verifies taken for a commit: a rolled-back spill after a cursor would count as a
+# commit that outlived a restart. The `wal` fuzz target's commit_follows check, over its corpus.
+name = "commit-follows-any-frame"
+fix = "plant"
+package = "lsr-fuzzing"
+test_bin = "fuzzing"
+tests = ["corpus::wal_corpus_replays"]

@@ -1,0 +1,6 @@
+# The confirmed floor (issue #171, item 4, journal half; docs/decisions.md D107).
+# With no destination the record's floor is dropped.
+name = "floor-record-dropped-unconfigured"
+fix = "claude/journal-floor"
+package = "lsr-core"
+tests = ["actor::tests::journal::no_destination_keeps_no_floor_and_leaves_the_record_s"]

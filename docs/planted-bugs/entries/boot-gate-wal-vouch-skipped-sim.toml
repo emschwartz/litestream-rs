@@ -1,0 +1,6 @@
+name = "boot-gate-wal-vouch-skipped-sim"
+patch = "boot-gate-wal-vouch-skipped"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["newest_staged_file_lost", "restored_old_meta"]

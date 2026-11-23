@@ -1,0 +1,21 @@
+diff --git a/crates/store-s3/src/chain.rs b/crates/store-s3/src/chain.rs
+index 219b4667..8fe1d67a 100644
+--- a/crates/store-s3/src/chain.rs
++++ b/crates/store-s3/src/chain.rs
+@@ -199,13 +199,13 @@ impl CredentialChain {
+         if let Some(credentials) = &self.explicit {
+             return Ok(Resolved::fixed(credentials.clone(), Source::Explicit));
+         }
+-        if let Ok(credentials) = environment {
+-            return Ok(Resolved::fixed(credentials, Source::Environment));
+-        }
+         if let Some(file) = self.var("AWS_WEB_IDENTITY_TOKEN_FILE") {
+             let role = self.var("AWS_ROLE_ARN");
+             return self.web_identity(file, role, self.var("AWS_ROLE_SESSION_NAME"));
+         }
++        if let Ok(credentials) = environment {
++            return Ok(Resolved::fixed(credentials, Source::Environment));
++        }
+         if let Some(section) = &section
+             && let Some(resolved) =
+                 self.profile_source(section, &files.credentials_path, &profile)?
