@@ -905,7 +905,7 @@ response = "**stop**, `OtherWriter` (default). No upload, compaction or delete f
 signal = "`other_writer`; `/healthz` 503"
 at_risk = "Everything committed after the stop is unreplicated until an operator acts. The steady state makes no listing, so the other writer is seen only at the next maintenance listing or after an ambiguous commit. A maintenance listing follows this engine's own upload by at most one compaction window (30 s by default) once uploads are idle; an engine with nothing to upload lists only when its next scheduled job is due. No bound on detection is asserted: **code only**"
 recovery = "An operator removes the other writer, then restarts"
-detected_by = "core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer_seed_0x50c`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`, core::`vouch::a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy`, core::`vouch::maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload`, core::`vouch::a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas`; oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
+detected_by = "core::`maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it`, core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer_seed_0x50c`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`, core::`vouch::a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy`, core::`vouch::maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload`, core::`vouch::a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas`; oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
 recovered_by = "sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`"
 notes = "R only after the other writer's files were removed. No restore is judged with two writers' files in the bucket"
 in_review = "#96"
@@ -1332,7 +1332,7 @@ response = "Replication goes on. The last good restore point is kept from retent
 signal = "`Health.verification.failing`, `lsr_verify_failing`, with the first differing page and the transaction"
 at_risk = "The replica is wrong from some point after the last good run"
 recovery = "The next passing run clears it. An operator requests a snapshot"
-detected_by = "replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_a_rollback_took_seed_0xd`; plant::`verify-no-plan-called-merged`"
+detected_by = "core::`against::a_transaction_the_replica_does_not_hold_fails_to_restore`, replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_a_rollback_took_seed_0xd`; plant::`verify-no-plan-called-merged`"
 
 [[row]]
 table = "Verify"
@@ -2456,7 +2456,7 @@ response = "The oracle fails the run at the end of the final drain or after idle
 signal = "oracle `StuckRetrying`"
 at_risk = "None (a checker)"
 recovery = "None"
-detected_by = "sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
+detected_by = "core::`degraded::a_retried_fault_that_persists_ends_degraded_as_a_stall`, sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
 notes = "Before, any stall ended a liveness judgment and excused an undrained shutdown, so an engine still retrying a fault nothing caused any more, or reporting degraded for nothing, passed. The run's end now also heals the SQLite source failures still queued"
 
 [[row]]
