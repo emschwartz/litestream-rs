@@ -606,8 +606,8 @@ fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreError
                 }
                 lsr_config::Credentials::FromEnvironment => CredentialChain::from_process(),
             };
-            let resolved = chain.resolve()?;
-            let store = S3Store::new((**config).clone(), resolved.into_credentials())?;
+            let resolved = chain.with_region(config.region().as_str()).resolve()?;
+            let store = S3Store::resolved((**config).clone(), &resolved)?;
             Ok(Arc::new(store))
         }
     }

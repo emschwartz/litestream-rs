@@ -65,11 +65,12 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D41 | `watch: true` on a `dir` entry, refused since the phase-4 plan: keep refusing under D33? | Keep refusing until built; the owner chooses | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
 | D42 | The config file names only one of `access-key-id` and `secret-access-key`: ignore it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
 | D43 | A shared AWS file holds a line that is not INI: skip it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
-| D44 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles) | A gap to build under D33, tracked in #176; refused by name until then | Claude (dropin-creds), from the parent session | 2026-11-22 | gap, open |
+| D44 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles) | Built in Go's order, except assumed roles, SSO and login sessions, which are refused by name; tracked in #176 | Claude (dropin-roles), from the parent session | 2026-11-22 | partly built, gap open |
 | D45 | Config Go accepts and litestream-rs refuses at load or start (unknown and duplicate keys, values no start could use, schedules core does not run): copy Go under D33? | No: keep refusing, naming the key | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D46 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
 | D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
+| D49 | Temporary credentials: refresh before expiry, and a source that answers without keys | Refresh five minutes early; refuse an answer without keys or an STS answer without credentials | Claude (dropin-roles), **delegated** | 2026-11-22 | open to owner review |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D62 | What does the simulator's hold judge require of an as-of restore through a fault? | The as-of bound (G3), not the raw replica's answer | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
@@ -643,13 +644,13 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a real file with a harmless non-INI line turns up.
 - **Links:** `docs/BEHAVIOR.md` CFG-22; `crates/store-s3/src/chain/ini.rs`.
 
-## D44. Credential sources that need a network call or a subprocess: a gap to build
+## D44. Credential sources that need a network call or a subprocess: built, except assumed roles and SSO
 
-- **Question:** Go's SDK resolves EC2 instance roles, ECS and EKS container credentials, web-identity tokens, assumed roles (`role_arn` with `source_profile` or `credential_source`), SSO and `credential_process`. litestream-rs builds none of them (CFG-7), so an application on EC2, ECS or EKS with a role and no static keys does not start under `lsr`.
-- **Choice:** not an accepted trade-off. D33 (full drop-in) requires these, and they are tracked as a gap to build in #176, which names the Go code to match and the differential that will prove it. Until then the chain finds no keys and the start fails naming the sources it tried.
-- **Cost until built:** role-based deployments need static keys under litestream-rs.
-- **Evidence of the gap:** `compat::go_resolves_what_rust_does_not_build` asserts it, so building any source shows there first.
-- **Links:** #176; `docs/BEHAVIOR.md` CFG-7; `crates/store-s3/src/chain.rs`.
+- **Question:** Go's SDK resolves EC2 instance roles, ECS and EKS container credentials, web-identity tokens, assumed roles (`role_arn` with `source_profile` or `credential_source`), IAM Identity Center (SSO), login sessions and `credential_process`. Without them an application on EC2, ECS or EKS with a role and no static keys does not start under `lsr`.
+- **Choice:** built in the SDK's order, after the environment's keys: web identity from the environment, then the profile (static keys, `web_identity_token_file`, `credential_process`), then container credentials, then the instance metadata service, each as the SDK v1.19.6 and `feature/ec2/imds` v1.18.16 call them, with the SDK's load-time profile checks. Still a gap, tracked in #176: assumed roles over `source_profile` or `credential_source`, SSO and login sessions. A profile that needs one is refused, naming the source, rather than skipped, so the chain never signs with credentials Go would not have chosen.
+- **Cost until the rest is built:** a deployment that assumes a role from a profile, or signs in through SSO, needs static keys or a source that is built.
+- **Evidence:** `compat::go_and_rust_fetch_the_same_temporary_credentials` (a differential against Go's SDK over a fake STS, container endpoint and metadata service); `compat::go_resolves_what_rust_does_not_build` asserts the remaining gap, so building it shows there first.
+- **Links:** #176; `docs/BEHAVIOR.md` CFG-7, CFG-41, CFG-42, CFG-43; `crates/store-s3/src/chain.rs`, `chain/remote.rs`, `chain/process.rs`, `signer.rs`.
 
 ## D45. Config refusals stricter than Go (delegated)
 
@@ -690,6 +691,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost until built:** a deployment that runs one of these commands, or graphs one of these series, needs Go Litestream for it.
 - **Evidence of the gap:** `compat::go_and_lsr_read_the_same_replicate_command_lines` accepts the `-once` refusals only by their message, tied here.
 - **Links:** #177; `docs/BEHAVIOR.md` CFG-33, CFG-35.
+
+## D49. Temporary credentials: refreshed early, and an answer without keys refused (delegated)
+
+- **Question:** three places where litestream-rs's temporary credentials could follow Go's SDK exactly or differ. (1) The SDK fetches again only once the cached credentials have expired. (2) A container or metadata answer that parses but holds no keys (`{}`) becomes credentials with an empty key id, which every request then signs with and every bucket refuses. (3) An STS answer without `Credentials` or `Expiration` crashes the process (`stscreds/web_identity_provider.go:152`, `assume_role_provider.go:321` dereference them unchecked).
+- **Choice:** (1) fetch five minutes before expiry, so no request is signed with credentials that expire in flight; a failed fetch keeps credentials that are still valid and is tried on the next request, and once they have expired the store fails `Transient` when waiting may help (no answer, 5xx, 429) and `Denied(Credentials)` otherwise, which the health handle reports. (2) and (3) refuse the answer when it arrives, naming the source. None of the three changes what a replica holds; (2) and (3) turn a later refusal or a crash into an earlier, named one.
+- **Delegated:** decided by the agent building #176 for the owner.
+- **Cost if wrong:** (1) one more fetch per credential lifetime than Go makes. (2) a credential endpoint that legitimately answers without keys (none is known) would start under Go and not under litestream-rs, though Go could not sign a request that a bucket accepts.
+- **Evidence:** `store-s3::signer::tests` (refresh margin, failed fetch, the two failure classes); `compat::go_and_rust_fetch_the_same_temporary_credentials` counts Go's empty key and Go's crash as refusals and requires litestream-rs to refuse.
+- **Links:** `docs/BEHAVIOR.md` CFG-42, CFG-43; `crates/store-s3/src/source.rs`, `signer.rs`.
 
 ## D74. Every engine commit checks the size the store acknowledged (delegated)
 
