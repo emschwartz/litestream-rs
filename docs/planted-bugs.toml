@@ -122,6 +122,7 @@ tests = [
 # The same plant, judged by the simulator: stored created-at times dropped, AsOf judged by origin.
 [[bug]]
 name = "time-provenance-sim"
+patch = "time-provenance"
 fix = "a427b57"
 package = "lsr-sim"
 test_bin = "sim"
@@ -360,6 +361,7 @@ tests = [
 # that writer's file, so no level-1 file holds the freed key and the planted tree passes it.
 [[bug]]
 name = "boot-trusts-a-stale-listing"
+patch = "listing-trusted-without-probe"
 fix = "8c7d8ce"
 package = "lsr-sim"
 test_bin = "sim"
@@ -474,6 +476,7 @@ tests = [
 
 [[bug]]
 name = "skip-boot-scratch-cleanup-core"
+patch = "skip-boot-scratch-cleanup"
 fix = "31842f7"
 package = "lsr-core"
 tests = [
@@ -593,6 +596,7 @@ tests = ["a_rollback_while_running_is_seen_by_the_next_maintenance_listing"]
 
 [[bug]]
 name = "regression-unwatched-sim"
+patch = "regression-unwatched"
 fix = "5cf9f56"
 package = "lsr-sim"
 test_bin = "sim"
@@ -713,6 +717,7 @@ tests = [
 
 [[bug]]
 name = "clock-step-back-freezes-timers-sim"
+patch = "clock-step-back-freezes-timers"
 fix = "48aee1d"
 package = "lsr-sim"
 test_bin = "sim"
@@ -765,6 +770,7 @@ tests = [
 # hold lasts must be the raw replica's answer or an error.
 [[bug]]
 name = "restore-trusts-listing-sim"
+patch = "restore-trusts-listing"
 fix = "32572b5"
 package = "lsr-sim"
 test_bin = "sim"
@@ -786,6 +792,7 @@ tests = ["restore::tests::a_listing_that_shows_nothing_over_a_first_file_is_not_
 # The same plant, judged where it does harm: `--if-replica-exists` skips the restore with success.
 [[bug]]
 name = "empty-listing-is-empty-replica-cli"
+patch = "empty-listing-is-empty-replica"
 fix = "a5c7d57"
 package = "lsr-cli"
 bin = "lsr"
@@ -837,6 +844,7 @@ tests = [
 
 [[bug]]
 name = "boot-gate-wal-vouch-skipped-sim"
+patch = "boot-gate-wal-vouch-skipped"
 fix = "aa1165d"
 package = "lsr-sim"
 test_bin = "sim"
@@ -851,6 +859,7 @@ tests = ["vouch::a_vm_restore_stops_until_a_takeover_covers_the_replica"]
 
 [[bug]]
 name = "boot-gate-takeover-ignored-sim"
+patch = "boot-gate-takeover-ignored"
 fix = "aa1165d"
 package = "lsr-sim"
 test_bin = "sim"
@@ -869,6 +878,7 @@ tests = [
 
 [[bug]]
 name = "boot-gate-refuses-nothing-sim"
+patch = "boot-gate-refuses-nothing"
 fix = "aa1165d"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1013,6 +1023,7 @@ tests = ["vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_
 
 [[bug]]
 name = "takeover-before-drop-skipped-sim"
+patch = "takeover-before-drop-skipped"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1160,6 +1171,7 @@ tests = [
 
 [[bug]]
 name = "journal-debt-not-recorded-sim"
+patch = "journal-debt-not-recorded"
 fix = "8ef5a8f"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1169,6 +1181,7 @@ tests = ["faults::wal_fsync_fails_then_restart"]
 
 [[bug]]
 name = "journal-debt-not-recorded-sqlite"
+patch = "journal-debt-not-recorded"
 fix = "8ef5a8f"
 package = "lsr-sqlite"
 test_bin = "sqlite"
@@ -1466,6 +1479,7 @@ tests = ["sidecar::stop_app_without_exec_is_refused"]
 
 [[bug]]
 name = "failstop-trip-on-first-failure-sim"
+patch = "failstop-trip-on-first-failure"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1476,6 +1490,7 @@ tests = [
 
 [[bug]]
 name = "failstop-never-trips-sim"
+patch = "failstop-never-trips"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1486,6 +1501,7 @@ tests = [
 
 [[bug]]
 name = "failstop-no-probe-sim"
+patch = "failstop-no-probe"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1495,6 +1511,7 @@ tests = [
 
 [[bug]]
 name = "failstop-clock-from-process-start-sim"
+patch = "failstop-clock-from-process-start"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1504,6 +1521,7 @@ tests = [
 
 [[bug]]
 name = "failstop-trip-on-degraded-sim"
+patch = "failstop-trip-on-degraded"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1514,6 +1532,7 @@ tests = [
 
 [[bug]]
 name = "failstop-no-clear-sim"
+patch = "failstop-no-clear"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1523,6 +1542,7 @@ tests = [
 
 [[bug]]
 name = "failstop-holds-after-listing-sim"
+patch = "failstop-holds-after-listing"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1615,6 +1635,7 @@ tests = [
 
 [[bug]]
 name = "failstop-dates-the-run-sim"
+patch = "failstop-dates-the-run"
 fix = "87cd10d"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1665,6 +1686,7 @@ tests = [
 
 [[bug]]
 name = "failstop-trip-held-to-zero-age-sim"
+patch = "failstop-trip-held-to-zero-age"
 fix = "87cd10d"
 package = "lsr-sim"
 test_bin = "sim"
@@ -1693,6 +1715,7 @@ tests = [
 
 [[bug]]
 name = "journal-created-only-on-debt-cli"
+patch = "journal-created-only-on-debt"
 fix = "6f700f9a"
 package = "lsr-cli"
 test_bin = "cli"
@@ -1904,6 +1927,7 @@ tests = ["go_s_flag_refusals_are_usage_errors"]
 # crates/sim/src/sqlite/in_tick.rs); main's swarm kills it on none of seeds 1000001 to 1002000.
 [[bug]]
 name = "boundary-snapshot-keeps-page-table-sim"
+patch = "boundary-snapshot-keeps-page-table"
 fix = "claude/boundary-snapshot-pages"
 package = "lsr-sim"
 test_bin = "sim"
