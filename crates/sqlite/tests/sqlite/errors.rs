@@ -71,19 +71,6 @@ fn open_an_in_memory_database_is_not_wal() {
 }
 
 #[test]
-fn setup_on_an_in_memory_connection_has_no_file_to_persist() {
-    let conn = Connection::open_in_memory().unwrap();
-    assert!(matches!(
-        app_connection(&conn),
-        Err(SetupError::PersistWal(_))
-    ));
-    assert!(matches!(
-        check_app_connection(&conn),
-        Err(SetupError::PersistWal(_))
-    ));
-}
-
-#[test]
 fn a_failing_setup_pragma_is_a_sqlite_error() {
     let (_dir, path, _app) = fresh();
     let conn = app(&path);
@@ -96,23 +83,25 @@ fn a_failing_setup_pragma_is_a_sqlite_error() {
 }
 
 #[test]
-fn check_reports_each_setting_that_is_off() {
+fn check_reports_automatic_checkpoints_left_on() {
     let (_dir, path, _app) = fresh();
     let conn = app(&path);
     assert!(matches!(
         check_app_connection(&conn),
-        Err(SetupError::PersistWalOff)
+        Err(SetupError::AutocheckpointOn { pages: 1000 })
     ));
     app_connection(&conn).unwrap();
-    conn.pragma_update(None, "wal_autocheckpoint", 1000)
-        .unwrap();
+    check_app_connection(&conn).unwrap();
+    conn.pragma_update(None, "wal_autocheckpoint", 250).unwrap();
     assert!(matches!(
         check_app_connection(&conn),
-        Err(SetupError::AutocheckpointOn { pages: 1000 })
+        Err(SetupError::AutocheckpointOn { pages: 250 })
     ));
 }
 
-/// The application's pool: every connection set up and checked, and the WAL survives the last close.
+/// The application's pool: every connection set up and checked. The replicator's connections are
+/// the ones that keep the WAL, so it survives when the pool closes first and is deleted when
+/// the pool closes last (docs/decisions.md D123).
 #[test]
 fn app_helpers_on_a_pooled_connection() {
     let (_dir, path, first) = fresh();
@@ -129,11 +118,19 @@ fn app_helpers_on_a_pooled_connection() {
         conn.execute("INSERT INTO t(v) VALUES (?1)", [n]).unwrap();
     }
     let wal = live.wal_path();
-    drop(live);
     drop(pool);
+    drop(live);
+    assert!(wal.exists(), "the replicator closed last and kept the WAL");
+    let last = app(&path);
+    app_connection(&last).unwrap();
+    // A connection that never read the database has no WAL open, and its close leaves the file.
+    last.execute("INSERT INTO t(v) VALUES (4)", []).unwrap();
+    let live = Sqlite::open(&path).unwrap();
+    drop(live);
+    drop(last);
     assert!(
-        wal.exists(),
-        "PERSIST_WAL: the last application connection to close kept the WAL"
+        !wal.exists(),
+        "an application connection closed last and deleted the WAL"
     );
 }
 

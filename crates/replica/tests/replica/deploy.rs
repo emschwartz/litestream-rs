@@ -1,10 +1,15 @@
 //! The deploy cycle of a host whose volume outlives the machine (fly.io replaces the VM on
 //! every deploy): a process runs the application and the replicator in-process on a database
-//! and meta directory that stay, and ends either by SIGTERM (the replicator stops, the final
-//! sync completes, the process exits and SQLite's last close runs) or by SIGKILL during the
-//! final sync (fly.io's kill timeout is below the shutdown sync's). Each deploy is a real
-//! child process; a new one on the same files must continue: no snapshot after the first
-//! boot, no stop, and the replica restores what the database holds.
+//! and meta directory that stay, and ends either by SIGTERM (the application closes its
+//! connections, the replicator stops, the final sync completes and the process exits) or by
+//! SIGKILL during the final sync (fly.io's kill timeout is below the shutdown sync's). Each
+//! deploy is a real child process; a new one on the same files must continue: no snapshot after
+//! the first boot, no stop, and the replica restores what the database holds.
+//!
+//! The order of a SIGTERM's closes matters. The replicator's connections keep the WAL when
+//! they close last; an application connection that closes last deletes it (SQLite's default,
+//! which `app_connection` leaves alone, docs/decisions.md D123), and the next deploy then
+//! snapshots (`WalMissing`) and goes on.
 
 use crate::common;
 
@@ -14,7 +19,7 @@ use std::process::{ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{assert_same, booted, config, fake, stopped};
+use common::{assert_same, booted, config, fake, stopped_moving};
 use lsr_replica::{Event, EventSink, Replicator, RestoreTarget, restore};
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
@@ -26,8 +31,12 @@ const CHILD_DIR: &str = "LSR_DEPLOY_DIR";
 /// How a deploy ends.
 #[derive(Clone, Copy, Debug)]
 enum End {
-    /// SIGTERM: the child stops its replicator, which drains, and exits.
+    /// SIGTERM: the child closes the application's connection, stops its replicator, which
+    /// drains, and exits.
     Term,
+    /// SIGTERM in the other order: the replicator stops first and the application's connection is
+    /// the database's last to close.
+    TermAppLast,
     /// SIGKILL once the child has begun its final sync with work left to ship.
     Kill,
 }
@@ -51,8 +60,13 @@ fn deploy(dir: &Path, end: End) -> Vec<String> {
     let mut events = until(&mut lines, "lsr-deploy: ready");
     let mut stdin = child.stdin.take().unwrap();
     match end {
-        End::Term => {
-            stdin.write_all(b"term\n").unwrap();
+        End::Term | End::TermAppLast => {
+            let verb: &[u8] = if matches!(end, End::Term) {
+                b"term\n"
+            } else {
+                b"term-app-last\n"
+            };
+            stdin.write_all(verb).unwrap();
             drop(stdin);
             events.extend(until(&mut lines, "lsr-deploy: exited"));
             assert!(child.wait().unwrap().success());
@@ -129,6 +143,30 @@ fn deploys_ending_in_sigterm_continue_with_no_snapshot_and_no_stop() {
     restores(dir.path());
 }
 
+/// A deploy whose application connection closes after the replicator's: SQLite deletes the WAL at
+/// that close, so the next deploy finds none and snapshots (`WalMissing`). It never stops,
+/// nothing is refused, and the deploy after it, closed in the documented order, continues.
+#[test]
+fn a_deploy_whose_application_closes_last_snapshots_once_and_does_not_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    deploy(dir.path(), End::TermAppLast);
+    assert!(!dir.path().join("app.db-wal").exists());
+    let events = deploy(dir.path(), End::Term);
+    let boots: Vec<&String> = events.iter().filter(|e| e.contains("Booted")).collect();
+    assert!(
+        matches!(boots.as_slice(), [boot] if boot.contains("WalMissing")),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.contains("Refused") || e.contains("Stopped(")),
+        "{events:?}"
+    );
+    continued(2, &deploy(dir.path(), End::Term));
+    restores(dir.path());
+}
+
 /// Three deploys ending in SIGKILL during the final sync, then one ending in SIGTERM: every
 /// boot after the first continues, and the last drain leaves the replica whole.
 #[test]
@@ -156,7 +194,8 @@ impl EventSink for Printer {
 
 /// The child's half of the deploy tests: started by them with [`CHILD_DIR`], and nothing at
 /// all when run as a test of its own. The application commits and the replicator ships; on
-/// `term` the replicator stops and the process exits after the application's last close; on
+/// `term` the application's connection closes, the replicator stops and the process exits; on
+/// `term-app-last` the replicator stops first; on
 /// `kill` the application commits more and the replicator begins its final sync, and the
 /// parent kills the process.
 #[test]
@@ -173,7 +212,7 @@ fn deploy_child() {
     app.execute_batch("CREATE TABLE IF NOT EXISTS t(id INTEGER PRIMARY KEY, v BLOB)")
         .unwrap();
     let store = Arc::new(FsStore::new(dir.join("replica")));
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator =
         Replicator::start_with_events(&db, store, config(), runtime, Box::new(Printer)).unwrap();
     booted(&replicator);
@@ -202,9 +241,20 @@ fn deploy_child() {
         drop(std::io::stdin().read_line(&mut rest));
         return;
     }
-    stopped(&replicator);
-    drop(replicator);
-    drop(app);
+    // A boot that owes a snapshot can find the database busy with the application's inserts and
+    // retry after a wait (`SqliteBusy`), and the drain waits with it: the clock moves meanwhile.
+    let stop = || {
+        stopped_moving(&replicator, &clock, Duration::from_secs(1));
+    };
+    if line.trim() == "term-app-last" {
+        stop();
+        drop(replicator);
+        drop(app);
+    } else {
+        drop(app);
+        stop();
+        drop(replicator);
+    }
     println!("lsr-deploy: exited");
     std::io::stdout().flush().unwrap();
 }

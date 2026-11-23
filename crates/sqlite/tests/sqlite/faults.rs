@@ -8,11 +8,11 @@
 //!
 //! Each case also runs in both [`Placement`]s (`both`): the application in this process, set up as
 //! replication asks, and the application in a child process at SQLite's defaults (automatic
-//! checkpoints at 1000 frames, no `PERSIST_WAL`), with the read lock, the engine and the oracle
+//! checkpoints at 1000 frames), with the read lock, the engine and the oracle
 //! here, as beside a sidecar. One case's answer differs by placement and states both
 //! (`abandoned_frames_answers`; both are a snapshot). In this process only:
-//! `persist_wal_keeps_a_wal_a_page_size_change_makes_stale`, which is about the in-process
-//! application's own setting, and the power-loss file (`power_loss.rs`), whose loss undoes what the
+//! `persist_wal_keeps_a_wal_a_page_size_change_makes_stale`, which is about one connection's
+//! own setting, and the power-loss file (`power_loss.rs`), whose loss undoes what the
 //! application wrote through this process's fault VFS. The killed-writer file (`kill.rs`) runs in
 //! both. The cases only an application at SQLite's defaults has are in `app_at_defaults.rs`.
 
@@ -839,10 +839,6 @@ fn page_size_change<B: Backend>(placement: Placement) {
     assert_eq!(size, [4096], "WAL mode keeps the page size");
     rig.check().unwrap();
     rig.stop_replicator();
-    // PERSIST_WAL would keep the old page size's WAL through the change
-    // (`persist_wal_keeps_a_wal_a_page_size_change_makes_stale`): the application turns it off first
-    // (an application at SQLite's defaults never had it on).
-    rig.app_persist_wal_off().unwrap();
     rig.exec(
         "PRAGMA journal_mode = DELETE; PRAGMA page_size = 8192; VACUUM; PRAGMA journal_mode = WAL;",
     )
@@ -860,11 +856,12 @@ fn page_size_change<B: Backend>(placement: Placement) {
     rig.check().unwrap();
 }
 
-/// SQLite belief, and a hazard for applications: `SQLITE_FCNTL_PERSIST_WAL` (which `app_connection`
-/// turns on) keeps the WAL file when the database leaves WAL mode, frames and all, and SQLite
-/// does not discard a WAL whose page size differs from the database's when it comes back. A
-/// page-size change through `journal_mode = DELETE` and VACUUM with the setting on leaves the
-/// database unreadable ("malformed database schema") until the stale `-wal` is removed.
+/// SQLite belief, and why `app_connection` does not turn `SQLITE_FCNTL_PERSIST_WAL` on
+/// (docs/decisions.md D123; `leaving_wal.rs` has the cases that hold it to that): the flag keeps
+/// the WAL file when the database leaves WAL mode, frames and all, and SQLite does not discard
+/// a WAL whose page size differs from the database's when it comes back. A page-size change
+/// through `journal_mode = DELETE` and VACUUM with the flag on leaves the database unreadable
+/// ("malformed database schema") until the stale `-wal` is removed.
 #[test]
 fn persist_wal_keeps_a_wal_a_page_size_change_makes_stale() {
     let dir = TempDir::new().unwrap();
@@ -872,7 +869,12 @@ fn persist_wal_keeps_a_wal_a_page_size_change_makes_stale() {
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
         .unwrap();
-    lsr_sqlite::app_connection(&conn).unwrap();
+    let mut on = 1;
+    conn.file_control(
+        Some(rusqlite::MAIN_DB),
+        rusqlite::FileControl::PersistWal(&mut on),
+    )
+    .unwrap();
     conn.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (randomblob(3000));")
         .unwrap();
     let changed = conn.execute_batch(
