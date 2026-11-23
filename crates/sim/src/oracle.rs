@@ -332,6 +332,14 @@ pub enum Violation {
         /// What happened to it.
         how: String,
     },
+    /// On a store without conditional writes, a level-0 file was written as a replace while
+    /// health called uploads healthy: a second writer under the same key would go unrefused and
+    /// unreported (`docs/decisions.md` D79).
+    #[error("{key} was replaced with nothing reporting that the store cannot refuse a taken key")]
+    UnguardedReplace {
+        /// The file.
+        key: String,
+    },
     /// After every injected fault healed and the app let go, a task was
     /// still stalled on a retried fault the world no longer imposes: the
     /// engine is stuck retrying, and health says degraded for nothing.

@@ -296,6 +296,9 @@ pub struct World {
     pub foreign_sizes: Vec<(FileKey, u64)>,
     /// Files the engine deleted as a repair, after they failed to verify.
     pub repaired: Vec<FileKey>,
+    /// The replica's store has no conditional writes: every create-only commit is refused
+    /// ([`lsr_core::MemStore::refuse_create_only`], D79).
+    pub no_create_only: bool,
     crash_entropy: SeededEntropy,
     in_tick: Option<CommittedInTick>,
     // When the app's armed in-tick commit landed, by the app's own clock read.
@@ -333,8 +336,7 @@ impl World {
             seed.stream(3),
         )
         .corrupting_through(remote_raw.clone());
-        let initial = PageImage::from_bytes(page_size, &sqlite.image());
-        let model = Model::new(initial);
+        let model = Model::new(PageImage::from_bytes(page_size, &sqlite.image()));
         let history = History::new(
             &model,
             lsr_core::Clock::now(clock.as_ref()),
@@ -375,6 +377,7 @@ impl World {
             foreign_put: Vec::new(),
             foreign_sizes: Vec::new(),
             repaired: Vec::new(),
+            no_create_only: false,
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
             in_tick_time: Arc::default(),

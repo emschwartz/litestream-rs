@@ -216,6 +216,7 @@ mod tests {
     fn put(key: FileKey, size: u64) -> RecorderEvent {
         RecorderEvent::Put {
             key,
+            mode: lsr_core::WriteMode::New,
             header: None,
             origin: None,
             created_at: Timestamp::from_unix_millis(0),

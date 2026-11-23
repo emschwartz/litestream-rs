@@ -357,6 +357,9 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,
+        // A store without conditional writes refuses the first create-only upload of each
+        // process, which publishes nothing and is retried as a replace: no snapshot follows.
+        no_create_only: _,
         lying_wal_sync,
     } = opts;
     if *lying_wal_sync {
@@ -843,6 +846,7 @@ mod tests {
                 lsr_core::Level::ZERO,
                 lsr_ltx::TxidRange::single(lsr_ltx::Txid::new(txid).unwrap()),
             ),
+            mode: lsr_core::WriteMode::New,
             header: None,
             origin: None,
             created_at: zero,

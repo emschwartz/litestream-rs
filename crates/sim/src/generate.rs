@@ -331,6 +331,10 @@ pub enum MetaOp {
 /// A step on the replica from outside the engine. Scenarios only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteOp {
+    /// The replica's store turns out to have no conditional writes, as an S3 provider that
+    /// answers `If-None-Match` with `NotImplemented`: from now on every create-only commit is
+    /// refused with nothing published (`docs/decisions.md` D79).
+    RefuseCreateOnly,
     /// Another writer puts a level-0 file one transaction past the newest:
     /// the newest file's pages under the next transaction.
     PutUnrecognized,
@@ -460,6 +464,11 @@ pub struct Weights {
     /// store's own syncs and renames. Not an operation, for the same reason as
     /// `block_crash_law`.
     pub staging_fs: bool,
+    /// Whether the replica's store has no conditional writes for the whole run, as an S3
+    /// provider that answers `If-None-Match` with `NotImplemented`: every create-only commit is
+    /// refused (`docs/decisions.md` D79). Not an operation, for the same reason as
+    /// `block_crash_law`.
+    pub no_create_only: bool,
     /// Store and SQLite-side faults draw their error from the whole error domain
     /// ([`crate::domain`]): every operation, every error an implementation can return from
     /// it. When unset they draw from the older subset (two store errors, two SQLite errors on
@@ -569,6 +578,7 @@ impl Default for Weights {
             // keep their shape; swarm mixes draw the law.
             clock_law: ClockLaw::PerTick,
             staging_fs: false,
+            no_create_only: false,
             error_domain: false,
             known_wrong: false,
             overlap: false,
@@ -723,6 +733,7 @@ impl Weights {
             after_restart: AfterRestart::Nothing,
             clock_law: ClockLaw::PerTick,
             staging_fs: false,
+            no_create_only: false,
             error_domain: false,
             known_wrong: false,
             overlap: false,
@@ -781,6 +792,8 @@ impl Weights {
         mix.other_connection_commit = weight(false);
         // And after that, for the same reason: page-cache eviction after a failed WAL fsync.
         mix.evict_page_cache = weight(false);
+        // And after that: a store without conditional writes in a quarter of the swarm.
+        mix.no_create_only = below(&entropy, 4) == 0;
         mix
     }
 
