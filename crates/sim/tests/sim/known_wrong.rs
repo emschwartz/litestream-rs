@@ -130,7 +130,7 @@ fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
 /// needed: the replica takes transactions 1, 4 and 5 under lagging listings; five rollbacks
 /// take it back to 1; the engine, not noticing (D17), uploads 6; staging is wiped and a boot
 /// under a lagging listing stages 4 and 5 again. With `PROBE_GAP` raised to 30 it passes, so
-/// the probe's gap is what fails. Kept as a recording, as D164 allows while the cause is not
+/// the probe's gap is what fails. Kept as a recording, as D165 allows while the cause is not
 /// fully stated: which keys the lagging listing still shows the boot is not yet worked out,
 /// and the runner's own draws matter (other seeds fail as a wrong restore or pass).
 #[test]
