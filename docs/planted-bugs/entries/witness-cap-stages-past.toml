@@ -1,0 +1,6 @@
+name = "witness-cap-stages-past"
+fix = "2024ca8"
+package = "lsr-core"
+tests = [
+    "a_replica_outage_past_the_witness_cap_holds_the_position_and_costs_no_snapshot",
+]

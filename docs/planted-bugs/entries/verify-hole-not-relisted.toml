@@ -1,0 +1,6 @@
+name = "verify-hole-not-relisted"
+fix = "2a4844a"
+package = "lsr-core"
+tests = [
+    "a_hole_one_listing_showed_is_listed_again_and_not_reported",
+]

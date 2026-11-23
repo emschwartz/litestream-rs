@@ -1,0 +1,7 @@
+name = "witness-trailer-compare"
+fix = "39ac68b"
+package = "lsr-core"
+tests = [
+    "a_staged_file_replaced_under_a_running_engine_is_never_uploaded",
+    "a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible",
+]

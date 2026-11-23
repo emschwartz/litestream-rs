@@ -1,0 +1,7 @@
+name = "s3-boot-forgets-killed-uploads"
+fix = "829eb8a"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "a_killed_process_s_multipart_upload_is_aborted_at_the_next_boot",
+]

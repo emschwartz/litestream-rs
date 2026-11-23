@@ -121,6 +121,12 @@ fn an_unsafe_stop_while_running_refuses_commits_only_under_stop_app() {
 
 /// Health's lag survives a restart: a commit staged and never uploaded keeps its age when the
 /// replicator starts again, where it used to count from the new start (issue #115).
+///
+/// The age it keeps is the staged file's: when the thread staged it, `synced`'s time. Before
+/// the restart health may date the commit a tick earlier, from the observation that first saw
+/// its WAL frames (if it landed while a tick ran and the clock moved before the next); that
+/// sighting is this process's alone and does not survive (`docs/decisions.md` D80, D85), so
+/// comparing with it failed under load.
 #[test]
 fn a_restart_keeps_the_age_of_a_commit_off_the_replica() {
     let site = Site::new();
@@ -136,7 +142,7 @@ fn a_restart_keeps_the_age_of_a_commit_off_the_replica() {
     let lagging = wait(&replicator, |h| {
         h.unreplicated_since.is_some() && h.synced > h.replicated
     });
-    let since = lagging.unreplicated_since.unwrap();
+    let staged_at = lagging.synced.map(|(_, at)| at).unwrap();
     drop(replicator);
     clock.advance(Duration::from_secs(120));
     let again = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
@@ -144,8 +150,8 @@ fn a_restart_keeps_the_age_of_a_commit_off_the_replica() {
         h.phase == Phase::Running && h.unreplicated_since.is_some()
     });
     assert!(
-        after.unreplicated_since.unwrap() <= since,
-        "{since:?} became {:?}",
+        after.unreplicated_since.unwrap() <= staged_at,
+        "staged at {staged_at:?}, dated {:?} after the restart",
         after.unreplicated_since
     );
 }

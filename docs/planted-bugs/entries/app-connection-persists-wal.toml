@@ -1,0 +1,11 @@
+# `app_connection` turned SQLITE_FCNTL_PERSIST_WAL on, so a connection that left WAL mode kept
+# the WAL and a page-size change made then read back as a corrupt database (docs/decisions.md D123).
+name = "app-connection-persists-wal"
+fix = "claude/persist-wal-vacuum"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "a_page_size_change_outside_wal_mode_leaves_a_sound_database",
+    "leaving_wal_mode_removes_the_wal",
+    "a_page_size_change_after_the_replicator_closed_last_leaves_a_sound_database",
+]

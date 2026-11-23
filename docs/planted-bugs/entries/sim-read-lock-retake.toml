@@ -1,0 +1,5 @@
+name = "sim-read-lock-retake"
+fix = "617c183"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_restart_after_a_lapsed_read_lock_loses_no_commit"]

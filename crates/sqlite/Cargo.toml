@@ -12,8 +12,9 @@ workspace = true
 
 [features]
 # The real-SQLite fault suite's support: the fault-injecting VFS and the harness that drives the
-# actor over a backend and judges the replica with the simulator's oracle.
-testing = ["dep:lsr-sim", "dep:lsr-store-fs", "lsr-core/testing"]
+# actor over a backend and judges the replica with the simulator's oracle. `serialize` reads the
+# database back through SQLite for the simulator's real backend.
+testing = ["dep:lsr-sim", "dep:lsr-store-fs", "lsr-core/testing", "rusqlite/serialize"]
 
 [dependencies]
 lsr-core.workspace = true
@@ -32,7 +33,7 @@ rusqlite = { workspace = true, features = ["limits", "hooks"] }
 # The fault suite in tests/ runs on the testing feature.
 lsr-sqlite = { workspace = true, features = ["testing"] }
 # The big cases restore into a file and compare it with the database.
-lsr-local.workspace = true
+lsr-replica.workspace = true
 # The crash cycles judge every restore against the tree of committed histories.
 lsr-history.workspace = true
 tempfile.workspace = true

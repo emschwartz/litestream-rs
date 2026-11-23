@@ -1,0 +1,7 @@
+name = "skip-boot-scratch-cleanup"
+fix = "31842f7"
+package = "lsr-cli"
+test_bin = "cli"
+tests = [
+    "a_crash_loop_of_short_boots_with_no_change_leaves_nothing_growing",
+]

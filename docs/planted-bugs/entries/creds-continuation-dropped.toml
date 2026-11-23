@@ -1,0 +1,4 @@
+name = "creds-continuation-dropped"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::an_indented_line_without_a_separator_continues_the_value"]

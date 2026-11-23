@@ -21,8 +21,8 @@ use std::path::PathBuf;
 
 use lsr_config::{ReplicaProblem, S3Overrides, S3Url, s3_config};
 use lsr_core::{AsOfInside, Depth, RestoreTarget};
-use lsr_local::IntegrityCheck;
 use lsr_ltx::{ParseTxidError, Timestamp, TimestampParseError, Txid};
+use lsr_replica::local::IntegrityCheck;
 use lsr_store_s3::{ConfigError, Endpoint, Region, S3Config};
 use thiserror::Error;
 

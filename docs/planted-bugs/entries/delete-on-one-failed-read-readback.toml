@@ -1,0 +1,6 @@
+name = "delete-on-one-failed-read-readback"
+fix = "8d820b4"
+package = "lsr-core"
+tests = [
+    "one_bad_read_of_a_sound_snapshot_deletes_nothing",
+]
