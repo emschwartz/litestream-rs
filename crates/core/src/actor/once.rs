@@ -19,11 +19,11 @@ use lsr_ltx::Txid;
 
 use super::{Actor, Env, Event, MaintainedEvent, Stepped, Task, Tick};
 use crate::fault::Fault;
+use crate::fault::role::Role;
 use crate::layout::FileInfo;
 use crate::publish::Why;
 use crate::snapshot::write_snapshot;
 use crate::source::{Checkpointer, PageSource, WalSource};
-use crate::fault::role::Role;
 use lsr_ltx::Timestamp;
 
 /// Steps that end without a proof before the snapshot is given up: a checkpoint by another
