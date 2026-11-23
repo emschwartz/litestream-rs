@@ -1092,6 +1092,33 @@ mod lagging_listings {
     use lsr_sim::run::run_ops;
     use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
 
+    /// Bucket rollbacks take transactions 1 to 4 and leave 5, staging is wiped, and the boot
+    /// lists behind a lag that shows nothing. Its walk stopped after 3 missing transactions,
+    /// short of 5, so it took the replica as empty, wrote a first sync and uploaded a new 4
+    /// below the replica's 5: the latest state went back with no signal (seed 0x95a under its
+    /// mixed mix, 22 recorded operations). With nothing staged to bound it, the walk now goes to
+    /// its cap and finds 5.
+    #[test]
+    fn a_boot_with_staging_wiped_walks_past_a_wide_hole_seed_0x95a() {
+        let seed = Seed::new(0x95a);
+        let weights = Weights::mixed(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
+            clock_law: weights.clock_law,
+            overlap: weights.overlap,
+            error_domain: weights.error_domain,
+            known_wrong: weights.known_wrong,
+            staging_fs: weights.staging_fs,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, crate::histories::seed_0x95a::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
+
     /// Lagging listings, bucket rollbacks and a second writer: with the probe past a listing
     /// naming no level 1 to 8 key, a restore of a transaction differs from its commit (seed
     /// 0x4f4 under its swarm mix, 72 recorded operations). It stands in for the seeds 0x517 and

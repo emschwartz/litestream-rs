@@ -120,7 +120,7 @@ pub enum Op {
         /// Which operation.
         op: StoreOp,
         /// How many calls of it pass first.
-        ahead: u8,
+        ahead: u16,
         /// What the failure looks like.
         shape: FaultShape,
     },
@@ -818,7 +818,7 @@ fn store_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
     Op::StoreFault {
         target,
         op,
-        ahead: small(entropy, 4),
+        ahead: u16::from(small(entropy, 4)),
         shape: shape(entropy, op, error),
     }
 }

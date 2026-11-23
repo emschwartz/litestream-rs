@@ -362,18 +362,20 @@ pub fn window_scenarios() -> &'static [fn() -> Scenario] {
 
 /// The reads a boot's probe past its listing makes on a replica it lists whole, as a fault's
 /// count of calls ahead. These scenarios boot on a replica whose transaction 1 sits at levels
-/// 0, 1 and 9, so the probe also names a level-1 key from 2 and a level-2 key from 1.
-fn probe_reads() -> u8 {
+/// 0, 1 and 9, so the probe also names a level-1 key from 2 and a level-2 key from 1. With
+/// `staged` the staging directory still holds files and the walk stops at its gap; without, it
+/// walks to its cap.
+fn probe_reads(staged: bool) -> u16 {
     use lsr_core::Level;
     let levels = [
         Level::ZERO,
         Level::new(1).unwrap_or(Level::ZERO),
         Level::SNAPSHOT,
     ];
-    u8::try_from(super::probe_reads_past(&levels)).unwrap_or(u8::MAX)
+    u16::try_from(super::probe_reads_past(&levels, staged)).unwrap_or(u16::MAX)
 }
 
-fn remote_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {
+fn remote_fault(op: StoreOp, ahead: u16, shape: FaultShape) -> Op {
     Op::StoreFault {
         target: Target::Remote,
         op,
@@ -382,7 +384,7 @@ fn remote_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {
     }
 }
 
-fn staging_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {
+fn staging_fault(op: StoreOp, ahead: u16, shape: FaultShape) -> Op {
     Op::StoreFault {
         target: Target::Staging,
         op,
@@ -701,7 +703,7 @@ pub fn remote_file_deleted_externally() -> Scenario {
             vec![
                 remote_fault(
                     StoreOp::Read,
-                    probe_reads(),
+                    probe_reads(true),
                     FaultShape::Error(StoreError::NotFound { key: some_key() }),
                 ),
                 Op::Restart,
@@ -810,7 +812,7 @@ pub fn remote_bitrot_on_list_read() -> Scenario {
             vec![
                 remote_fault(
                     StoreOp::Read,
-                    probe_reads(),
+                    probe_reads(false),
                     FaultShape::FlipByteOnRead { at: 100 },
                 ),
                 Op::EnvFault(EnvFault::WipeStaging),

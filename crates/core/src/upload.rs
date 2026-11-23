@@ -308,6 +308,11 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
             };
             match verdict {
                 TailVerdict::Sound => newest,
+                // Replacing the tail would end the replica below a file the listing shows that
+                // already holds it: an end the boot cannot prove, so it stops.
+                TailVerdict::Replace if held_above(&inventory, tail) => {
+                    return Err(fail(state, Fault::RemoteCorrupt));
+                }
                 TailVerdict::Replace => tail.prev().max(confirmed),
                 TailVerdict::Diverged => {
                     return Ok(diverged(tail, tail));
@@ -320,6 +325,15 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
         state: UploadState::At(known),
         did: Did::Listed { newest: known },
     })
+}
+
+/// Whether a level 1 to 9 file in `inventory` holds `txid`: it covers it, so the transaction's
+/// level-0 file cannot be written again without giving it a second content.
+fn held_above(inventory: &Inventory, txid: Txid) -> bool {
+    inventory
+        .files()
+        .iter()
+        .any(|info| info.key.level() != Level::ZERO && info.key.range().contains(txid))
 }
 
 /// What a listing showed, with the keys reads found past it.
@@ -373,9 +387,46 @@ async fn look_past<L: ObjectStore, S: ObjectStore>(
     // that bound it.
     let cap = usize::try_from(PROBE_CAP).unwrap_or(usize::MAX);
     let staged = staged_from(staging, inventory.newest(), cap).await?;
-    let through = staged.last().map(|info| info.key.range().max());
+    let through = match staged.last() {
+        Some(info) => Some(info.key.range().max()),
+        // Nothing staged at all (staging wiped or lost): nothing bounds what the replica may
+        // hold past the listing, and a bucket rollback can leave a hole wider than the gap
+        // below files a lagging listing hides, so the walk goes to its cap.
+        None if staging_is_empty(staging, inventory).await? => {
+            first_past(inventory.newest(), confirmed).and_then(|first| {
+                Txid::new(
+                    first
+                        .get()
+                        .saturating_add(u64::from(PROBE_CAP).saturating_sub(1)),
+                )
+            })
+        }
+        None => None,
+    };
     let starts = Starts::of(inventory);
     probe_past(remote, inventory.newest(), confirmed, through, &starts).await
+}
+
+/// Whether staging holds no file at all. Past an empty listing the staged files past it are all
+/// of them, so no second listing is made.
+async fn staging_is_empty<L: ObjectStore>(
+    staging: &L,
+    inventory: &Inventory,
+) -> Result<bool, Fault> {
+    if inventory.newest().is_none() {
+        return Ok(true);
+    }
+    Ok(staged_from(staging, None, 1).await?.is_empty())
+}
+
+/// The first transaction a probe past a listing ending at `listed` looks for: the one after
+/// it, or `confirmed` when the listing ends before it (a relist proves what was confirmed is
+/// still there before a regression is reported).
+fn first_past(listed: Option<Txid>, confirmed: Option<Txid>) -> Option<Txid> {
+    match (listed, confirmed) {
+        (listed, Some(confirmed)) if listed < Some(confirmed) => Some(confirmed),
+        (listed, _) => listed.map_or(Some(Txid::MIN), Txid::next),
+    }
 }
 
 /// Whether a read finds any of the listed files that reach past `known`,
@@ -431,10 +482,7 @@ pub(crate) async fn probe_past<S: ObjectStore>(
     through: Option<Txid>,
     starts: &Starts,
 ) -> Result<Vec<FileKey>, Fault> {
-    let first = match (listed, confirmed) {
-        (listed, Some(confirmed)) if listed < Some(confirmed) => Some(confirmed),
-        (listed, _) => listed.map_or(Some(Txid::MIN), Txid::next),
-    };
+    let first = first_past(listed, confirmed);
     probe::walk(remote, first, through, starts, false)
         .await
         .map_err(|err| Fault::from_remote(&err))
@@ -449,6 +497,27 @@ pub fn fresh_probe_reads(listed: Option<Txid>, starts: &Starts) -> u64 {
     for _ in 0..=PROBE_GAP {
         let Some(txid) = at else { break };
         reads = reads.saturating_add(probe::reads_per_transaction(txid, starts));
+        at = txid.next();
+    }
+    reads
+}
+
+/// The reads a probe past a listing that ends at `listed` makes when nothing is staged and it
+/// finds nothing: every key named for the [`PROBE_GAP`] + 1 transactions after it, then the
+/// level-0 and snapshot keys for each transaction up to [`PROBE_CAP`] (`crate::probe`).
+#[must_use]
+pub fn capped_probe_reads(listed: Option<Txid>, starts: &Starts) -> u64 {
+    let past_gap = starts.level_zero_only();
+    let mut reads = 0_u64;
+    let mut at = listed.map_or(Some(Txid::MIN), Txid::next);
+    for index in 0..PROBE_CAP {
+        let Some(txid) = at else { break };
+        let named = if index <= PROBE_GAP {
+            starts
+        } else {
+            &past_gap
+        };
+        reads = reads.saturating_add(probe::reads_per_transaction(txid, named));
         at = txid.next();
     }
     reads

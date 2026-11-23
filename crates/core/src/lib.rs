@@ -116,7 +116,7 @@ pub use position::{
     Continuity, LastPage, Position, ReachedEnd, ReadLockHold, SyncedOffset, SyncedThrough,
     WalFileLen,
 };
-pub use probe::{NAMED_KEYS_MAX, Starts};
+pub use probe::{NAMED_KEYS_MAX, Starts, WALK_READS_MAX};
 pub use recover::{
     BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
     RecoverEvent, Recovered, Verdict, WalView, recover, recover_traced,
@@ -145,7 +145,7 @@ pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, s
 pub use takeover::{TakeoverRecord, TakeoverRecordError};
 pub use upload::{
     Did, PROBE_CAP, PROBE_GAP, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
-    fresh_probe_reads, upload_next,
+    capped_probe_reads, fresh_probe_reads, upload_next,
 };
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,

@@ -45,6 +45,23 @@ pub const PROBE_GAP: u32 = 3;
 /// each of levels 1 to 8, and the snapshot.
 pub const NAMED_KEYS_MAX: u64 = 3 + 1 + 2 * 8;
 
+/// The most keys named for one transaction past a walk's gap window: its level-0 file, a
+/// level-0 file from the first transaction and one from where the listed level 0 ends, and
+/// the snapshot.
+const NAMED_KEYS_PAST_GAP: u64 = 4;
+
+/// The most reads one [`walk`] makes: every key for the transactions inside its gap window,
+/// the level-0 and snapshot keys for the rest, up to [`PROBE_CAP`] transactions.
+#[expect(
+    clippy::as_conversions,
+    reason = "u32 constants widen to u64 losslessly; `From` is not const"
+)]
+pub const WALK_READS_MAX: u64 = {
+    let window = PROBE_GAP as u64 + 1;
+    let rest = PROBE_CAP as u64 - window;
+    window * NAMED_KEYS_MAX + rest * NAMED_KEYS_PAST_GAP
+};
+
 /// A probe asks only whether an object exists, so it reads one byte.
 const PROBE_LEN: ReadLen = ReadLen::or_chunk(1);
 
@@ -56,6 +73,17 @@ const PROBE_LEN: ReadLen = ReadLen::or_chunk(1);
 pub struct Starts(Vec<(Level, Txid)>);
 
 impl Starts {
+    /// These starts without the level 1 to 8 ones: what a walk names past its gap window.
+    pub(crate) fn level_zero_only(&self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .copied()
+                .filter(|(level, _)| *level == Level::ZERO)
+                .collect(),
+        )
+    }
+
     /// The starts `inventory` implies.
     #[must_use]
     pub fn of(inventory: &Inventory) -> Self {
@@ -164,12 +192,21 @@ pub(crate) async fn walk<S: ObjectStore>(
     first_only: bool,
 ) -> Result<Vec<FileKey>, StoreError> {
     let mut found = Vec::new();
+    let level_zero_only = starts.level_zero_only();
     let (mut at, mut missed) = (first, 0_u32);
     for _ in 0..PROBE_CAP {
         let Some(txid) = at.filter(|txid| missed <= PROBE_GAP || Some(*txid) <= through) else {
             break;
         };
-        match holder(store, txid, starts).await? {
+        // Past the gap window, only the level-0 and snapshot keys: a level 1 to 8 file starts
+        // where the listing implies, so one that ends this far past it is a run long enough
+        // to have left level-0 files the window finds first.
+        let named = if missed <= PROBE_GAP {
+            starts
+        } else {
+            &level_zero_only
+        };
+        match holder(store, txid, named).await? {
             Some(key) => {
                 found.push(key);
                 if first_only {

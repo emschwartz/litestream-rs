@@ -25,6 +25,7 @@ pub mod seed_0x46;
 pub mod seed_0x4f4;
 pub mod seed_0x585;
 pub mod seed_0x753;
+pub mod seed_0x95a;
 pub mod seed_0x9f9;
 pub mod seed_0xb6b;
 pub mod seed_0xb9e;
@@ -48,6 +49,11 @@ pub enum Guard {
 
 /// Every recorded history: its module, the test that runs it, and its guard.
 pub const GUARDS: &[(&str, &str, Guard)] = &[
+    (
+        "seed_0x95a",
+        "a_boot_with_staging_wiped_walks_past_a_wide_hole_seed_0x95a",
+        Guard::Own("boot-walk-stops-at-the-gap-with-staging-empty-sim"),
+    ),
     (
         "seed_0x4f4",
         "a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4",

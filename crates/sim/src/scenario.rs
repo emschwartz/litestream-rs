@@ -1167,19 +1167,21 @@ pub fn power_loss_wal_rewind() -> Scenario {
 mod faults;
 pub use faults::*;
 
-/// The reads a boot's probe makes past a listing that holds what a first sync wrote: the
-/// level-0 file and the snapshot of transaction 1. A first compaction into level 1 would
-/// start at 1, so the probe names a level-1 key for each transaction too.
+/// The reads a boot's probe makes, with staging wiped, past a listing that holds what a first
+/// sync wrote: the level-0 file and the snapshot of transaction 1. A first compaction into
+/// level 1 would start at 1, so the probe names a level-1 key for each transaction too, and with
+/// nothing staged it walks to its cap.
 #[must_use]
 pub fn first_sync_probe_reads() -> u64 {
-    probe_reads_past(&[lsr_core::Level::ZERO, lsr_core::Level::SNAPSHOT])
+    probe_reads_past(&[lsr_core::Level::ZERO, lsr_core::Level::SNAPSHOT], false)
 }
 
 /// The reads a boot's probe makes past a listing that holds transaction 1 in each of
-/// `levels` and nothing newer (`lsr_core::Starts` for the higher-level keys it names). The
-/// listing comes from a store holding a placeholder object under each key.
+/// `levels` and nothing newer (`lsr_core::Starts` for the higher-level keys it names): to its
+/// gap with `staged`, to its cap with nothing staged. The listing comes from a store holding a
+/// placeholder object under each key.
 #[must_use]
-pub fn probe_reads_past(levels: &[lsr_core::Level]) -> u64 {
+pub fn probe_reads_past(levels: &[lsr_core::Level], staged: bool) -> u64 {
     use lsr_core::conformance::block_on;
     use lsr_core::{ObjectStore, Upload, WriteMode};
     let one = lsr_ltx::Txid::MIN;
@@ -1196,6 +1198,11 @@ pub fn probe_reads_past(levels: &[lsr_core::Level]) -> u64 {
         }
     }
     block_on(lsr_core::Inventory::load(&store)).map_or(u64::MAX, |listed| {
-        lsr_core::fresh_probe_reads(Some(one), &lsr_core::Starts::of(&listed))
+        let starts = lsr_core::Starts::of(&listed);
+        if staged {
+            lsr_core::fresh_probe_reads(Some(one), &starts)
+        } else {
+            lsr_core::capped_probe_reads(Some(one), &starts)
+        }
     })
 }

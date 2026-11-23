@@ -594,8 +594,8 @@ fn a_listing_never_moves_confirmed_backwards_through_a_size_check() {
 }
 
 /// A tail that equals what is already confirmed was confirmed by its own
-/// commit, so the listing does not read it back: its one read is the probe's
-/// miss past the tail.
+/// commit, so the listing does not read it back: its reads are the probe's
+/// misses past the tail, to its cap since nothing is staged.
 #[test]
 fn a_listing_does_not_read_back_a_tail_already_confirmed() {
     let (staging, remote) = (MemStore::new(), Probe::default());
@@ -607,8 +607,21 @@ fn a_listing_does_not_read_back_a_tail_already_confirmed() {
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
     assert_eq!(
         u64::from(remote.log().reads),
-        fresh_probe_reads(Some(txid(1)), &starts_of(&remote.inner))
+        capped_probe_reads(Some(txid(1)), &starts_of(&remote.inner))
     );
+}
+
+/// With nothing staged, nothing bounds what the replica holds past a listing, and a bucket
+/// rollback can leave a hole wider than the gap below the files a lagging listing hides: the
+/// probe walks to its cap and finds the file past the hole (seed 0x95a's shape).
+#[test]
+fn with_nothing_staged_the_probe_walks_past_a_wide_hole() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let past_hole = 3 + u64::from(PROBE_GAP);
+    put_bytes(&remote.inner, key(past_hole), &encode(past_hole));
+    remote.log().unlisted.push(key(past_hole));
+    let listed = next(UploadState::Unknown, &staging, &remote, past_hole).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(past_hole))));
 }
 
 #[test]
@@ -1423,6 +1436,28 @@ fn a_hidden_level_one_file_past_the_listing_is_found_by_its_level_key() {
     );
 }
 
+/// A level-0 tail the reads judge torn is replaced by its staged copy, which lowers the end
+/// the listing found by one. When a level 1 to 9 file already holds that transaction, the
+/// end would fall below an object the listing shows and the replacement would give the
+/// transaction a second content, so the boot stops instead: an end it cannot prove is not
+/// taken.
+#[test]
+fn a_torn_tail_a_higher_level_file_already_holds_is_not_replaced() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    stage(&staging, 2);
+    put_bytes(&remote.inner, key(1), &encode(1));
+    put_bytes(&remote.inner, key(2), b"torn");
+    let level_one = FileKey::new(
+        Level::new(1).unwrap(),
+        TxidRange::new(txid(1), txid(2)).unwrap(),
+    );
+    put_bytes(&remote.inner, level_one, &encode(2));
+    let failed = next(UploadState::Unknown, &staging, &remote, 2).unwrap_err();
+    assert_eq!(failed.fault, Fault::RemoteCorrupt);
+    assert_eq!(read_all(&remote.inner, &key(2)), b"torn");
+}
+
 /// The residue (BOOT-31 in docs/behavior.toml): a listing that hides level 1's previous file as well hides where
 /// the next one starts, so a level-1 file with no level-0 input left stays unnamed and the
 /// replica looks as if it ends earlier. Pinned so a change that finds it says so.
@@ -1476,7 +1511,9 @@ fn a_relist_that_hides_confirmed_uploads_is_no_regression() {
 #[test]
 fn the_probe_past_a_listing_reads_past_short_gaps_and_stops_at_its_cap() {
     let (staging, remote) = (MemStore::new(), Probe::default());
-    put_bytes(&remote.inner, key(1), &encode(1));
+    // Something staged, at the listing's end: the gap, not the cap, ends the walk.
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &bytes);
     let _ = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
     // The listed tail's read-back (one chunk) and the probe's misses, two
     // keys for each transaction.
