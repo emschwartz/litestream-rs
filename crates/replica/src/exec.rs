@@ -33,3 +33,46 @@ pub fn block_on<F: Future>(fut: F) -> F::Output {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    /// Pending until another thread sets the flag; that thread wakes the waker it was handed,
+    /// once, after the flag is set.
+    struct WokenFromElsewhere {
+        done: Arc<AtomicBool>,
+        started: bool,
+    }
+
+    impl Future for WokenFromElsewhere {
+        type Output = ();
+
+        fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.done.load(Ordering::SeqCst) {
+                return Poll::Ready(());
+            }
+            if !self.started {
+                self.started = true;
+                let (done, waker) = (Arc::clone(&self.done), cx.waker().clone());
+                thread::spawn(move || {
+                    done.store(true, Ordering::SeqCst);
+                    waker.wake();
+                });
+            }
+            Poll::Pending
+        }
+    }
+
+    /// A future woken from another thread is polled again: the waker unparks the thread
+    /// `block_on` parked.
+    #[test]
+    fn a_wake_from_another_thread_resumes_the_future() {
+        block_on(WokenFromElsewhere {
+            done: Arc::new(AtomicBool::new(false)),
+            started: false,
+        });
+    }
+}

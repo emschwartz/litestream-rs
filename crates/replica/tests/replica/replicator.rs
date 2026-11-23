@@ -395,6 +395,40 @@ fn a_stopped_replicator_reports_its_cause() {
     );
 }
 
+/// A database page changed in the file without a WAL frame degrades syncing; the operator's
+/// acceptance of the file as it is ends the degradation.
+#[test]
+fn accepting_the_database_pages_ends_a_page_mismatch() {
+    use std::os::unix::fs::FileExt as _;
+    let site = Site::new();
+    site.commit(20);
+    site.app
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+        .unwrap();
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    wait(&replicator, caught_up);
+    // Page 3 lives in the database file alone: the WAL is empty since the checkpoint.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&site.db)
+        .unwrap();
+    file.write_all_at(&[0xEE; 4096], 2 * 4096).unwrap();
+    replicator.request_snapshot();
+    let mismatched = |h: &lsr_replica::Health| {
+        h.task(Task::Sync)
+            .is_some_and(|d| matches!(d.cause, DegradedCause::DatabasePageMismatch { .. }))
+    };
+    wait(&replicator, mismatched);
+    replicator.accept_database_pages();
+    replicator.request_snapshot();
+    wait(&replicator, |h| h.task(Task::Sync).is_none());
+    assert!(matches!(
+        stopped_moving(&replicator, &clock, POLL),
+        Stopped::Drained { .. }
+    ));
+}
+
 /// An operator's snapshot is staged at once, with no new commit, and reported as an event.
 #[test]
 fn request_snapshot_stages_a_snapshot_and_events_report_it() {

@@ -127,3 +127,30 @@ pub enum TakeOverError {
         kind: io::ErrorKind,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failure that never reached SQLite carries no SQLite code, and says so with a value
+    /// no SQLite code takes.
+    #[test]
+    fn an_open_failure_outside_sqlite_has_code_minus_one() {
+        let outside = lsr_sqlite::OpenError::Sqlite {
+            path: "db".into(),
+            source: rusqlite::Error::InvalidQuery,
+        };
+        assert!(matches!(
+            StartError::from(outside),
+            StartError::Sqlite { code: -1 }
+        ));
+        let busy = lsr_sqlite::OpenError::Sqlite {
+            path: "db".into(),
+            source: rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), None),
+        };
+        assert!(matches!(
+            StartError::from(busy),
+            StartError::Sqlite { code: 5 }
+        ));
+    }
+}
