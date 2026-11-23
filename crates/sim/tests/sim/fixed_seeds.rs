@@ -1092,6 +1092,31 @@ mod lagging_listings {
     use lsr_sim::run::run_ops;
     use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
 
+    /// Lagging listings, bucket rollbacks and a second writer: with the probe past a listing
+    /// naming no level 1 to 8 key, a restore of a transaction differs from its commit (seed
+    /// 0x4f4 under its swarm mix, 72 recorded operations). It stands in for the seeds 0x517 and
+    /// 0x4dc histories, recorded on an older tree, that no longer reach the defect.
+    #[test]
+    fn a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4() {
+        let seed = Seed::new(0x4f4);
+        let weights = Weights::swarm(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
+            clock_law: weights.clock_law,
+            overlap: weights.overlap,
+            error_domain: weights.error_domain,
+            known_wrong: weights.known_wrong,
+            staging_fs: weights.staging_fs,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, crate::histories::seed_0x4f4::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
+
     /// The replica's listings lag; the engine uploads transactions 4 and 5,
     /// its staging directory is wiped and it boots again. The boot listing
     /// does not show 5 yet, so the engine took the replica as ending at 4; the

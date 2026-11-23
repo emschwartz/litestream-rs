@@ -1788,10 +1788,7 @@ name = "probe-skips-higher-levels-sim"
 fix = "7945943"
 package = "lsr-sim"
 test_bin = "sim"
-tests = [
-    "a_lagging_listing_that_hides_a_merged_file_sends_no_upload_into_its_key_seed_0x517",
-    "a_merged_file_hidden_from_a_lagging_listing_is_found_by_its_level_key_seed_0x4dc",
-]
+tests = ["a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4"]
 
 [[bug]]
 name = "restore-reads-one-transaction-past"

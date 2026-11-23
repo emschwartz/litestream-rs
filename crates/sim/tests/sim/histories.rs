@@ -22,6 +22,7 @@ pub mod seed_0x2c;
 pub mod seed_0x2d;
 pub mod seed_0x31c;
 pub mod seed_0x46;
+pub mod seed_0x4f4;
 pub mod seed_0x585;
 pub mod seed_0x753;
 pub mod seed_0x9f9;
@@ -47,6 +48,11 @@ pub enum Guard {
 
 /// Every recorded history: its module, the test that runs it, and its guard.
 pub const GUARDS: &[(&str, &str, Guard)] = &[
+    (
+        "seed_0x4f4",
+        "a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4",
+        Guard::Own("probe-skips-higher-levels-sim"),
+    ),
     (
         "seed_0x25",
         "a_torn_staged_file_is_dropped_seed_0x25",
