@@ -39,6 +39,8 @@ md-5.workspace = true
 # FakeS3 decodes listed keys.
 percent-encoding = { workspace = true, optional = true }
 rusty-s3.workspace = true
+# The JSON documents the container, instance-metadata and process sources answer with.
+serde_json.workspace = true
 thiserror.workspace = true
 ureq = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

@@ -1,0 +1,4 @@
+name = "witness-lists-staging-whole"
+fix = "3853a92"
+package = "lsr-core"
+tests = ["the_witness_pass_refuses_from_the_first_pending_file_without_listing_them_all"]

@@ -1,0 +1,6 @@
+name = "start-seed-from-old-header-sim"
+patch = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::a_header_written_again_by_another_connection_is_followed"]

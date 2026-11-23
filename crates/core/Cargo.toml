@@ -35,8 +35,6 @@ lsr-core = { workspace = true, features = ["testing"] }
 lsr-spec.workspace = true
 # The journal differential test writes a newer version's record by hand.
 crc.workspace = true
-# The memory gates (tests/core/mem.rs) count heap through this allocator.
-lsr-heap.workspace = true
 
 [lints]
 workspace = true

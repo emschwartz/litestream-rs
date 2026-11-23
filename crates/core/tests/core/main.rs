@@ -8,6 +8,8 @@ mod created_at_sources;
 #[cfg(test)]
 mod gates;
 #[cfg(test)]
+mod heap;
+#[cfg(test)]
 #[expect(
     clippy::arithmetic_side_effects,
     clippy::wildcard_enum_match_arm,

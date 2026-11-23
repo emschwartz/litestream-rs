@@ -1,0 +1,6 @@
+name = "journal-lower-seq-wins"
+fix = "c9d9d4a"
+package = "lsr-journal"
+tests = [
+    "the_higher_sequence_number_wins",
+]

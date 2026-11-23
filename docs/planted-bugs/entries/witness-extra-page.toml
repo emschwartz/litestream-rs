@@ -1,0 +1,8 @@
+# The witness's page count compared with at least, not exactly: a pending file carrying one page
+# its range never wrote is proven and uploaded. Found by a blind recall pilot, which no layer caught.
+name = "witness-extra-page"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "a_pending_file_with_one_page_too_many_is_refused",
+]

@@ -1,0 +1,6 @@
+name = "journal-debt-forgiven-at-truncate"
+fix = "8ef5a8f"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_restart_after_a_failed_wal_sync_still_owes_the_truncate",
+]
