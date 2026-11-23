@@ -884,3 +884,42 @@ fn an_unwritable_journal_reports_a_floor_it_does_not_hold() {
     assert_eq!(actor.journal(), None);
     assert_eq!(floor_recorded(&mut journal), actor.floor());
 }
+
+/// A rebuilt engine boots beside the floor it held, which a journal that cannot be written lags:
+/// the boot keeps the floor it held, never the lower one recorded.
+#[test]
+fn a_rebuild_keeps_the_floor_a_lagging_journal_does_not_hold() {
+    let mut journal = MemJournal::default();
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    rig.commit(2);
+    settle(&mut rig, &mut actor, T0, Some(&mut journal));
+    let recorded = floor_recorded(&mut journal).expect("a floor");
+    journal.writes_fail = true;
+    rig.commit(3);
+    settle(&mut rig, &mut actor, T0 + 10, Some(&mut journal));
+    let held = actor.floor().expect("a floor");
+    assert!(held.bound() > recorded.bound(), "{held:?} {recorded:?}");
+    assert_eq!(
+        floor_recorded(&mut journal),
+        Some(recorded),
+        "the journal lags"
+    );
+    actor.fault(
+        Task::Upload,
+        Fault::Bug(crate::fault::BugSite::PageMap),
+        ts(T0 + 20),
+    );
+    let mut now = T0 + 20;
+    let mut booted = false;
+    for _ in 0..50 {
+        let seen = tick(&mut rig, &mut actor, now, Some(&mut journal));
+        booted |= matches!(event(&seen), Some(Event::Booted { .. }));
+        if booted {
+            break;
+        }
+        now += 1_000;
+    }
+    assert!(booted, "the rebuilt engine boots");
+    assert_eq!(actor.floor(), Some(held), "the held floor stands");
+}

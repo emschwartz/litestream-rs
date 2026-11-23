@@ -37,14 +37,12 @@ impl Actor {
         self.kept.floor = Some(Floor::new(destination, bound, anchor));
     }
 
-    /// Takes the floor a journal recorded when it is the configured destination's.
+    /// Takes the floor a journal recorded when it is the configured destination's. A floor held
+    /// already (a rebuilt engine boots beside its `Kept`) stands: the record holds only what this
+    /// process wrote, so it is never ahead of it, and it lags when the journal cannot be written.
     pub(super) fn adopt_floor(&mut self, recorded: Option<Floor>) {
         let ours = recorded.filter(|floor| Some(floor.replica()) == self.kept.cfg.destination);
-        self.kept.floor = match (self.kept.floor, ours) {
-            (Some(held), Some(read)) if read.bound() > held.bound() => Some(read),
-            (Some(held), _) => Some(held),
-            (None, read) => read,
-        };
+        self.kept.floor = self.kept.floor.or(ours);
     }
 
     /// The replica lost files it held (a bucket rollback): the floor claims nothing about its
