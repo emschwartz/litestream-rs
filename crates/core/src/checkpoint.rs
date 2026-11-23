@@ -192,7 +192,6 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
             .min_pages
             .is_some_and(|min| observed.synced_frames >= min.get())
     {
-        mark!(Ckpt1);
         return Decision::Passive(CheckpointTrigger::MinPages);
     }
     if let CheckpointState::Pending { last } = state
@@ -201,7 +200,6 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
             .is_some_and(|interval| observed.now.saturating_duration_since(*last) >= interval)
         && observed.synced_frames > 1
     {
-        mark!(Ckpt1);
         return Decision::Passive(CheckpointTrigger::Interval);
     }
     Decision::Nothing
@@ -561,7 +559,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
             // transaction was retaken.
             self.take_read_lock(run.epoch);
             return Ok(if run.busy {
-                mark!(Ckpt2);
                 CheckpointOutcome::Busy
             } else {
                 CheckpointOutcome::NotRestarted
@@ -598,13 +595,11 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
             // proof and the checkpoint: catch up before claiming the end.
             self.step(Step::Incremental(self.position())).await?;
             return Ok(if run.busy {
-                mark!(Ckpt2);
                 CheckpointOutcome::Busy
             } else {
                 CheckpointOutcome::NotRestarted
             });
         }
-        mark!(Ckpt4);
         self.boundary_snapshot().await?;
         Ok(CheckpointOutcome::Truncated)
     }
@@ -711,6 +706,9 @@ pub(crate) async fn checkpoint_in<W: WalSource, P: PageSource, C: Checkpointer, 
     let result = match mode {
         CheckpointMode::Passive => protocol.passive().await,
         CheckpointMode::Truncate => protocol.truncate().await,
+        // The policy decides PASSIVE or TRUNCATE; only the cure after a failed WAL sync runs FULL,
+        // outside the protocol.
+        CheckpointMode::Full => Err(BugSite::FullCheckpointInProtocol.hit()),
     };
     let staged = Staged {
         reached: protocol.good,

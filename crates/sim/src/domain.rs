@@ -71,21 +71,11 @@ pub enum KnownWrong {
     /// is never reported degraded (BEHAVIOR's D9). Reached by a restart inside an overlapping
     /// hold ([`crate::Weights::overlap`]), not by a cell of the tables.
     HaltForgottenAtRestart,
-    /// Bucket rollbacks leave a hole below the engine's newest upload, staging is wiped, and a
-    /// lagging listing hides that upload: the boot reads past its listing only until three
-    /// transactions in a row are missing (`PROBE_GAP`), takes the hole for the replica's end
-    /// and uploads under the hidden file, so a restore of the latest state goes back with no
-    /// stop (BOOT-18). Reached by those three draws together, not by a cell of the tables.
-    ProbeStopsInAHole,
 }
 
 impl KnownWrong {
     /// Every known defect.
-    pub const ALL: [Self; 3] = [
-        Self::DatabaseAheadOfWal,
-        Self::HaltForgottenAtRestart,
-        Self::ProbeStopsInAHole,
-    ];
+    pub const ALL: [Self; 2] = [Self::DatabaseAheadOfWal, Self::HaltForgottenAtRestart];
 
     /// Where the defect is tracked and who fixes it.
     #[must_use]
@@ -97,10 +87,6 @@ impl KnownWrong {
             }
             Self::HaltForgottenAtRestart => {
                 "#99 (D9); open: retry counts, waits and degraded states must survive a restart"
-            }
-            Self::ProbeStopsInAHole => {
-                "BOOT-18 (#171); fixed by the survival session's probe walk \
-                 (claude/merged-level-probe)"
             }
         }
     }
@@ -116,10 +102,6 @@ impl KnownWrong {
             Self::HaltForgottenAtRestart => {
                 matches!(violation, Violation::HealthBlind { restarts, .. } if *restarts > 0)
             }
-            Self::ProbeStopsInAHole => matches!(
-                violation,
-                Violation::History(lsr_history::Anomaly::WentBackwards { .. })
-            ),
         }
     }
 
@@ -751,35 +733,9 @@ pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<Kn
     if restarts_in_holds {
         known.push(KnownWrong::HaltForgottenAtRestart);
     }
-    if weights.known_wrong && probe_hole_drawn(ops) {
-        known.push(KnownWrong::ProbeStopsInAHole);
-    }
     known.sort_unstable();
     known.dedup();
     known
-}
-
-/// Whether `ops` draw what [`KnownWrong::ProbeStopsInAHole`] needs: a bucket rollback, a
-/// lagging listing (as a step or a hold) and staging wiped.
-fn probe_hole_drawn(ops: &[crate::generate::Op]) -> bool {
-    use crate::generate::{Hold, Op, RemoteOp};
-    let rollback = ops
-        .iter()
-        .any(|op| matches!(op, Op::Remote(RemoteOp::RollBack)));
-    let lag = ops.iter().any(|op| {
-        matches!(
-            op,
-            Op::LaggingListings { .. }
-                | Op::Hold {
-                    hold: Hold::LaggingListing,
-                    ..
-                }
-        )
-    });
-    let wiped = ops
-        .iter()
-        .any(|op| matches!(op, Op::EnvFault(EnvFault::WipeStaging)));
-    rollback && lag && wiped
 }
 
 /// Whether an error says the request was not carried out, so it may not follow a publish:

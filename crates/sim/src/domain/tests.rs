@@ -102,15 +102,12 @@ fn every_cell_is_drawn_or_says_why_not() {
         );
     }
     // Every known defect is reached by some cell, but D9, which a restart inside an
-    // overlapping hold reaches, the mixed database, which D2's cell reaches with a power
-    // loss, and the probe stopping in a hole, which a rollback, a lagging listing and a wiped
-    // staging directory reach together.
+    // overlapping hold reaches, and the mixed database, which D2's cell reaches with a power
+    // loss.
     for known in KnownWrong::ALL.into_iter().filter(|known| {
         !matches!(
             known,
-            KnownWrong::HaltForgottenAtRestart
-                | KnownWrong::DatabaseAheadOfWal
-                | KnownWrong::ProbeStopsInAHole
+            KnownWrong::HaltForgottenAtRestart | KnownWrong::DatabaseAheadOfWal
         )
     }) {
         assert!(

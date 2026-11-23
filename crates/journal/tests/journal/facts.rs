@@ -105,3 +105,21 @@ fn a_kept_restore_point_never_moves_forward() {
         })
     );
 }
+
+/// A destination's id is the FNV-1a 64 digest of its name: fixed for a name, different for
+/// names that differ in one byte.
+#[test]
+fn a_destination_id_is_the_digest_of_its_name() {
+    assert_eq!(
+        lsr_journal::ReplicaId::of(b""),
+        lsr_journal::ReplicaId(0xcbf2_9ce4_8422_2325_u64.to_le_bytes())
+    );
+    assert_eq!(
+        lsr_journal::ReplicaId::of(b"a"),
+        lsr_journal::ReplicaId(0xaf63_dc4c_8601_ec8c_u64.to_le_bytes())
+    );
+    assert_ne!(
+        lsr_journal::ReplicaId::of(b"s3://b/p"),
+        lsr_journal::ReplicaId::of(b"s3://b/q")
+    );
+}

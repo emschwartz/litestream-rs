@@ -16,7 +16,9 @@ use std::time::Duration;
 use lsr_core::{Denied, SourceError, SourceOp, StoreError, StoreOp};
 use lsr_ltx::{PageNo, PageSize};
 
-use crate::generate::{AppAt, AppOp, EnvFault, Hold, MetaOp, Op, RemoteOp, Target, WalOp};
+use crate::generate::{
+    AppAt, AppOp, EnvFault, Hold, HttpFault, MetaOp, Op, RemoteOp, Target, WalOp,
+};
 use crate::sqlite::{CrashKind, OtherProcessMode};
 use crate::store::FaultShape;
 
@@ -71,7 +73,18 @@ const IMPORTS: &[(&str, &[&str])] = &[
     (
         "lsr_sim::generate",
         &[
-            "AppAt", "AppOp", "EnvFault", "Hold", "MetaOp", "Op", "RemoteOp", "Target", "WalOp",
+            "AppAt",
+            "AppOp",
+            "DenialCode",
+            "EnvFault",
+            "Hold",
+            "HttpFault",
+            "HttpShape",
+            "MetaOp",
+            "Op",
+            "RemoteOp",
+            "Target",
+            "WalOp",
         ],
     ),
     ("lsr_sim", &["CrashKind", "FaultShape", "OtherProcessMode"]),
@@ -125,6 +138,7 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         Op::OurReader { begin } => format!("Op::OurReader {{ begin: {begin} }}"),
         Op::Remote(remote) => format!("Op::Remote({})", self::remote(*remote)),
         Op::AppAutocheckpoint(frames) => format!("Op::AppAutocheckpoint({frames:?})"),
+        Op::HttpFault(fault) => format!("Op::HttpFault({})", http_fault(*fault)),
         Op::Shrink { pages } => format!("Op::Shrink {{ pages: {pages} }}"),
         Op::SecondWriter { ticks } => format!("Op::SecondWriter {{ ticks: {ticks} }}"),
         Op::StagingDamage(meta) => format!("Op::StagingDamage({})", self::meta(*meta)),
@@ -175,6 +189,7 @@ const fn checkpoint(mode: OtherProcessMode) -> &'static str {
         OtherProcessMode::Passive => "OtherProcessMode::Passive",
         OtherProcessMode::Restart => "OtherProcessMode::Restart",
         OtherProcessMode::Truncate => "OtherProcessMode::Truncate",
+        OtherProcessMode::Full => "OtherProcessMode::Full",
     }
 }
 
@@ -284,6 +299,24 @@ fn io_kind(kind: ErrorKind) -> Result<String, Unprintable> {
         other => return Err(Unprintable(format!("io::ErrorKind::{other:?}"))),
     };
     Ok(format!("ErrorKind::{name}"))
+}
+
+fn http_fault(fault: HttpFault) -> String {
+    let (name, shape) = match fault {
+        HttpFault::SlowDown(shape) => ("SlowDown", shape),
+        HttpFault::TooManyRequests(shape) => ("TooManyRequests", shape),
+        HttpFault::Internal(shape) => ("Internal", shape),
+        HttpFault::RequestTimeout(shape) => ("RequestTimeout", shape),
+        HttpFault::AfterPublish(shape) => ("AfterPublish", shape),
+        HttpFault::TruncateBody(shape) => ("TruncateBody", shape),
+        HttpFault::WrongEtag(shape) => ("WrongEtag", shape),
+        HttpFault::ConnectionReset(shape) => ("ConnectionReset", shape),
+        HttpFault::Denied(shape, code) => {
+            return format!("HttpFault::Denied(HttpShape::{shape:?}, DenialCode::{code:?})");
+        }
+        HttpFault::DenyDeletes => return "HttpFault::DenyDeletes".to_owned(),
+    };
+    format!("HttpFault::{name}(HttpShape::{shape:?})")
 }
 
 fn env(fault: EnvFault) -> Result<String, Unprintable> {

@@ -120,6 +120,8 @@ pub enum OtherProcessMode {
     Restart,
     /// `PRAGMA wal_checkpoint(TRUNCATE)`.
     Truncate,
+    /// `PRAGMA wal_checkpoint(FULL)`: copies everything, waiting for readers, and leaves the WAL.
+    Full,
 }
 
 impl From<CheckpointMode> for OtherProcessMode {
@@ -127,6 +129,7 @@ impl From<CheckpointMode> for OtherProcessMode {
         match mode {
             CheckpointMode::Passive => Self::Passive,
             CheckpointMode::Truncate => Self::Truncate,
+            CheckpointMode::Full => Self::Full,
         }
     }
 }
@@ -794,7 +797,12 @@ impl State {
         let mut busy = degraded;
         self.backfill();
         if !degraded && mode != OtherProcessMode::Passive {
-            if self.index.backfilled < self.index.mx_frame || self.slot_held_by_other(by) {
+            // FULL waits only until every frame is copied; RESTART and TRUNCATE also wait for the
+            // readers to leave the WAL, so the next writer may start it again.
+            let restarts = mode != OtherProcessMode::Full;
+            if self.index.backfilled < self.index.mx_frame
+                || (restarts && self.slot_held_by_other(by))
+            {
                 busy = true;
             } else if mode == OtherProcessMode::Truncate {
                 self.restart(by);

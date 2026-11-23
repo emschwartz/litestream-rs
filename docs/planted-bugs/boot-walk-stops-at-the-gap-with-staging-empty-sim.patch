@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 8eb785b1..58de6e43 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -392,7 +392,7 @@ async fn look_past<L: ObjectStore, S: ObjectStore>(
+         // Nothing staged at all (staging wiped or lost): nothing bounds what the replica may
+         // hold past the listing, and a bucket rollback can leave a hole wider than the gap
+         // below files a lagging listing hides, so the walk goes to its cap.
+-        None if staging_is_empty(staging, inventory).await? => {
++        None if false && staging_is_empty(staging, inventory).await? => {
+             first_past(inventory.newest(), confirmed).and_then(|first| {
+                 Txid::new(
+                     first

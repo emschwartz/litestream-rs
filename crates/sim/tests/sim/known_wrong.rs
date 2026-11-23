@@ -126,21 +126,18 @@ fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
     );
 }
 
-/// Bucket rollbacks leave a hole below the engine's newest upload, staging is wiped, and lagging
-/// listings hide what changed: the boot's read past its listing stops in the hole (at most
-/// three missing transactions, `PROBE_GAP`), the engine stages transactions the replica
-/// already holds above the hole, and a restore of the latest state then applies the old upload
-/// on top of the new ones and goes back to an older state, with no stop (BOOT-18).
+/// Fixed: bucket rollbacks leave a hole below the engine's newest upload, staging is wiped, and
+/// lagging listings hide what changed. The boot's read past its listing used to stop in the hole
+/// (at most three missing transactions), stage transactions the replica already held above it,
+/// and leave a latest state that went back to an older one with no stop (BOOT-18). With nothing
+/// staged the walk now runs to its cap, so this must pass.
 ///
 /// Shrunk by hand from the survival campaign's seed 0x95a (83 operations) to these 22, each
-/// needed: the replica takes transactions 1, 4 and 5 under lagging listings; five rollbacks
-/// take it back to 1; the engine, not noticing (D17), uploads 6; staging is wiped and a boot
-/// under a lagging listing stages 4 and 5 again. With `PROBE_GAP` raised to 30 it passes, so
-/// the probe's gap is what fails. Kept as a recording, as D165 allows while the cause is not
-/// fully stated: which keys the lagging listing still shows the boot is not yet worked out,
-/// and the runner's own draws matter (other seeds fail as a wrong restore or pass).
+/// needed to reach the defect: the replica takes transactions 1, 4 and 5 under lagging listings;
+/// five rollbacks take it back to 1; the engine, not noticing (D17), uploads 6; staging is wiped
+/// and a boot under a lagging listing stages 4 and 5 again.
 #[test]
-fn a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back() {
+fn a_hole_wider_than_the_probe_below_a_hidden_upload_is_walked_past() {
     use lsr_core::{SourceError, SourceOp};
     use lsr_sim::EnvFault;
     use lsr_sim::generate::{Hold, RemoteOp};
@@ -188,5 +185,7 @@ fn a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back() {
         staging_fs: true,
         ..Opts::default()
     };
-    still_fails(0x95a, &ops, &opts, KnownWrong::ProbeStopsInAHole);
+    if let Err(failure) = run_ops(Seed::new(0x95a), &ops, &opts) {
+        panic!("{failure}");
+    }
 }

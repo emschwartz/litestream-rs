@@ -1,5 +1,5 @@
 //! The runner's side of [`crate::marks`]: what the stores and SQLite saw, added to the run's
-//! fault-class and row counts at its end.
+//! fault-class counts at its end.
 
 use super::Runner;
 
@@ -19,6 +19,5 @@ impl Runner {
         .collect();
         let taken = self.w.sqlite.taken_injections();
         self.marks.tally(&mut self.report.reach, &hits, &taken);
-        crate::marks::take_rows(&mut self.report.reach);
     }
 }

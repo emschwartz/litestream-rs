@@ -129,7 +129,7 @@ fn tally(found: Option<Found>, pgno: PageNo) -> Found {
     }
 }
 
-fn open_fault(err: OpenError) -> Fault {
+pub(crate) fn open_fault(err: OpenError) -> Fault {
     match err {
         OpenError::Io(_) => Fault::LocalIo,
         // A header torn mid-restart: the next recover classifies it.

@@ -1,12 +1,8 @@
-//! Coverage marks for the soak: per behaviour-table row and per fault class,
-//! counts a nightly gate can fail on.
+//! Coverage marks for the soak: per fault class, counts a nightly gate can fail on.
 //!
 //! [`crate::reach`] counts states by name and gates the 64 fixed seeds. This
-//! module adds the two keyings the soak is accountable for:
+//! module adds the keying the soak is accountable for:
 //!
-//! - **Rows.** `lsr_core::marks` counts each `mark!(Row::X)` site the engine
-//!   reached; [`take_rows`] moves the counts into a run's reach as
-//!   `row.<ID>`, for example `row.RUN-13`.
 //! - **Fault classes.** Every variant of every injector (`Op`, `MetaOp`,
 //!   `RemoteOp`, `WalOp`, `EnvFault`, `FaultShape`, `Hold`) maps, through a
 //!   match with no wildcard, to one [`Class`]; a new variant does not build
@@ -27,7 +23,7 @@
 //!
 //! [`gate`] reads a soak's summed reach and names every required count left
 //! at zero. What is required follows from a class's [`Kind`]; a count a class
-//! cannot earn, or a row nothing in the soak can reach, says why in
+//! cannot earn says why in
 //! [`EXEMPT`]. The key [`CANARY`] is required and nothing bumps it, so a gate
 //! that reports zeros at all reports it: a soak passes when the canary is its
 //! only zero ([`Gate::passed`]).
@@ -179,6 +175,7 @@ classes! {
     EnvWipeStaging = "EnvFault.WipeStaging", Once;
     EnvSource = "EnvFault.Source", Once;
     EnvEvictPageCache = "EnvFault.EvictPageCache", Once;
+    HttpFault = "HttpFault", Once;
     // Undrawn: these EnvFault variants are scenario steps (see their docs in generate.rs).
     // A finding of issue #127 row 42 and others: they never meet another fault by chance.
     EnvShmMidUpdate = "EnvFault.ShmMidUpdate", Undrawn;
@@ -245,50 +242,9 @@ const WRITE_LOCK_RARE: &str =
 const PAGE_COUNT_RARE: &str =
     "the engine reads the page count in few ticks, and an app step arms for one tick; a finding";
 
-/// A count the gate would require that a class cannot earn, or a row the
-/// soak cannot reach, with the reason. Each is a known gap in what the soak
+/// A count the gate would require that a class cannot earn, with the reason. Each is a known gap in what the soak
 /// exercises, not a pass.
 pub const EXEMPT: &[(&str, &str)] = &[
-    // Rows no seed of a 4000-seed soak reached (seeds 100000 to 103999). Each is a finding: a
-    // branch of the engine the swarm never drives, so its row has no evidence from the soak.
-    (
-        "row.BOOT-17",
-        "no listing returns a conflicting duplicate or stalls; MemStore never does",
-    ),
-    (
-        "row.RUN-12",
-        "a database page changed outside SQLite is scenario only (FlipDatabasePage)",
-    ),
-    (
-        "row.RUN-18",
-        "the witness table never fills: runs stage too few files (the large profile's job)",
-    ),
-    (
-        "row.MAINT-2",
-        "no merge input vanishes mid-compaction: nothing deletes during a merge",
-    ),
-    (
-        "row.REST-5",
-        "no replica file's header disagrees with its key; nothing draws one",
-    ),
-    (
-        "row.VERIFY-1",
-        "lsr verify runs, but no latest state plans and then fails to restore: no damage in the \
-         latest chain survives to a verify",
-    ),
-    (
-        "row.VERIFY-4",
-        "the scheduled verify reads the transaction it just confirmed; no compaction merges it \
-         away before the restore",
-    ),
-    (
-        "row.WORLD-13",
-        "a clock step back across a restart never reaches the snapshot created-at hold",
-    ),
-    (
-        "row.WORLD-28",
-        "no restore meets files vanishing on every attempt; retention never races one",
-    ),
     // Lasting faults no restore is judged during.
     (
         "fault.SecondWriter.judged_during",
@@ -392,6 +348,7 @@ impl Class {
             Op::LyingWalSync => Self::LyingWalSync,
             Op::OurReader { .. } => Self::OurReader,
             Op::AppAutocheckpoint(_) => Self::AppAutocheckpoint,
+            Op::HttpFault(_) => Self::HttpFault,
             Op::Crash(CrashKind::Process) => Self::CrashProcess,
             Op::Crash(CrashKind::Power) => Self::CrashPower,
             Op::ClockJump(_) => Self::ClockJump,
@@ -547,14 +504,6 @@ impl Class {
     }
 }
 
-/// Moves the row marks the engine counted on this thread into `reach`, as
-/// `row.<ID>`.
-pub fn take_rows(reach: &mut Reach) {
-    for (row, hits) in lsr_core::marks::take() {
-        reach.add(format!("row.{}", row.id()), hits);
-    }
-}
-
 /// One run's fault-class counts, kept as the runner applies its steps.
 #[derive(Debug)]
 pub struct FaultMarks {
@@ -574,11 +523,9 @@ pub struct FaultMarks {
 }
 
 impl FaultMarks {
-    /// Starts a run's counts, and the engine's row count on this thread with
-    /// them, so a run's rows are its own.
+    /// Starts a run's counts.
     #[must_use]
     pub fn new() -> Self {
-        drop(lsr_core::marks::take());
         Self {
             counts: BTreeMap::new(),
             active: BTreeSet::new(),
@@ -721,16 +668,11 @@ impl Gate {
     }
 }
 
-/// Every key the gate requires above zero: the canary, a `row.<ID>` per row
-/// with a mark site, and each class's required counts, less [`EXEMPT`].
+/// Every key the gate requires above zero: the canary and each class's required
+/// counts, less [`EXEMPT`].
 #[must_use]
 pub fn required_keys() -> Vec<String> {
     let mut keys = vec![CANARY.to_owned()];
-    keys.extend(
-        lsr_core::marks::Row::ALL
-            .iter()
-            .map(|row| format!("row.{}", row.id())),
-    );
     for class in Class::ALL {
         keys.extend(class.required().iter().map(|count| class.key(*count)));
     }
@@ -795,13 +737,8 @@ mod tests {
     }
 
     #[test]
-    fn every_exemption_names_a_required_count_or_row() {
+    fn every_exemption_names_a_required_count() {
         let mut all = vec![CANARY.to_owned()];
-        all.extend(
-            lsr_core::marks::Row::ALL
-                .iter()
-                .map(|row| format!("row.{}", row.id())),
-        );
         for class in Class::ALL {
             all.extend(class.required().iter().map(|count| class.key(*count)));
         }

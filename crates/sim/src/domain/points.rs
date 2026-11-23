@@ -33,18 +33,21 @@ pub enum Action {
     CheckpointRestart,
     /// [`AppOp::Checkpoint`] in TRUNCATE mode.
     CheckpointTruncate,
+    /// [`AppOp::Checkpoint`] in FULL mode.
+    CheckpointFull,
     /// [`AppOp::DeleteWal`].
     DeleteWal,
 }
 
 /// Every action.
-pub const ACTIONS: [Action; 7] = [
+pub const ACTIONS: [Action; 8] = [
     Action::Commit,
     Action::ReaderBegin,
     Action::ReaderEnd,
     Action::CheckpointPassive,
     Action::CheckpointRestart,
     Action::CheckpointTruncate,
+    Action::CheckpointFull,
     Action::DeleteWal,
 ];
 
@@ -59,6 +62,7 @@ impl Action {
             AppOp::Checkpoint(OtherProcessMode::Passive) => Self::CheckpointPassive,
             AppOp::Checkpoint(OtherProcessMode::Restart) => Self::CheckpointRestart,
             AppOp::Checkpoint(OtherProcessMode::Truncate) => Self::CheckpointTruncate,
+            AppOp::Checkpoint(OtherProcessMode::Full) => Self::CheckpointFull,
             AppOp::DeleteWal => Self::DeleteWal,
         }
     }
@@ -71,6 +75,7 @@ impl Action {
             Self::CheckpointPassive => "Checkpoint.Passive",
             Self::CheckpointRestart => "Checkpoint.Restart",
             Self::CheckpointTruncate => "Checkpoint.Truncate",
+            Self::CheckpointFull => "Checkpoint.Full",
             Self::DeleteWal => "DeleteWal",
         }
     }
@@ -120,6 +125,23 @@ pub const fn point_cell(call: SourceOp, action: Action) -> Cell {
             | Action::CheckpointTruncate
             | Action::DeleteWal,
         ) => Cell::Drawn,
+        (
+            SourceOp::Open
+            | SourceOp::Len
+            | SourceOp::Committed
+            | SourceOp::PageCount
+            | SourceOp::ReadPage
+            | SourceOp::BeginBarrier
+            | SourceOp::EndBarrier
+            | SourceOp::Checkpoint
+            | SourceOp::BumpSeq
+            | SourceOp::BeginWriteLock
+            | SourceOp::EndWriteLock
+            | SourceOp::Sync,
+            Action::CheckpointFull,
+        ) => Cell::Unmodelled(
+            "the generator draws no FULL checkpoint by another process; only scenarios run one",
+        ),
     }
 }
 
