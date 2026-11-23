@@ -791,7 +791,13 @@ pub fn a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it() -> 
     let mut s = build(
         "a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it",
         vec![
-            vec![commit(3, false), Op::Shutdown, commit(2, false), Op::Tick, Op::Tick],
+            vec![
+                commit(3, false),
+                Op::Shutdown,
+                commit(2, false),
+                Op::Tick,
+                Op::Tick,
+            ],
             vec![
                 fail(
                     Target::Remote,
