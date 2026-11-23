@@ -500,3 +500,28 @@ fn a_refusal_over_a_forged_staged_copy_is_expected_after_a_rollback_seed_0xf43e5
         panic!("{failure}");
     }
 }
+
+/// Seed 0x82's recorded history: maintenance wrote a level-9 snapshot while the replica's
+/// listings lagged, the next listing did not show it, and maintenance wrote it again under the
+/// same key with other bytes (first found as mixed seeds 0x171 and 0x5c, whose draws later
+/// moved). The snapshot it wrote is now watched like the engine's uploads: a listing that
+/// hides it plans nothing and is taken again later.
+#[test]
+fn a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82() {
+    let opts = lsr_sim::Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: false,
+        after_restart: lsr_sim::AfterRestart::Busy,
+        clock_law: lsr_sim::ClockLaw::EachRead,
+        overlap: true,
+        error_domain: false,
+        known_wrong: false,
+        staging_fs: true,
+        ..lsr_sim::Opts::default()
+    };
+    let ops = crate::histories::seed_0x82::OPS;
+    if let Err(failure) = lsr_sim::run::run_ops(Seed::new(0x82), ops, &opts) {
+        panic!("{failure}");
+    }
+}
