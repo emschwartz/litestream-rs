@@ -1,0 +1,5 @@
+name = "databases-scans-dir-entries"
+fix = "claude/dropin-readonly"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["databases_lists_each_entry_without_scanning_a_dir"]

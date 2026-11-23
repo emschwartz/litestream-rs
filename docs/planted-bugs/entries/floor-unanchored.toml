@@ -1,6 +1,0 @@
-# The confirmed floor (issue #171, item 4, journal half; docs/decisions.md D107).
-# The floor never carries the confirmed file's bytes.
-name = "floor-unanchored"
-fix = "claude/journal-floor"
-package = "lsr-core"
-tests = ["actor::tests::journal::a_confirmed_upload_raises_the_floor_anchored_on_the_bytes_it_put"]

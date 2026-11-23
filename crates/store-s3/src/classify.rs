@@ -797,6 +797,13 @@ mod tests {
             S3Code::from_body(&error_body("SlowDown")),
             Some(S3Code::SlowDown)
         );
+        for (name, code) in [
+            ("AllAccessDisabled", S3Code::AllAccessDisabled),
+            ("InvalidDigest", S3Code::InvalidDigest),
+            ("InvalidRange", S3Code::InvalidRange),
+        ] {
+            assert_eq!(S3Code::from_body(&error_body(name)), Some(code), "{name}");
+        }
         assert_eq!(S3Code::from_body(&error_body("Weird")), Some(S3Code::Other));
         assert_eq!(S3Code::from_body(b""), None);
         assert_eq!(S3Code::from_body(&[0xff, 0xfe]), None);

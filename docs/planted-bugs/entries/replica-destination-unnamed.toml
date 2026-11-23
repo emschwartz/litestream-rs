@@ -1,6 +1,0 @@
-# The confirmed floor (issue #171, item 4, journal half; docs/decisions.md D107).
-# The sidecar names no destination for its replica.
-name = "replica-destination-unnamed"
-fix = "claude/journal-floor"
-package = "lsr-config"
-tests = ["map::each_replica_plan_names_its_destination_for_the_journal"]

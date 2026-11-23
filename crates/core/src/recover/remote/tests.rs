@@ -9,10 +9,19 @@ use crate::fault::SnapshotCause;
 use crate::layout::{FileKey, Level};
 use crate::mem::MemStore;
 use crate::recover::BootWal;
-use crate::recover::{LastPageCheck, PositionSource, Recovered, recover};
+use crate::recover::{LastPageCheck, PositionSource, Recovered};
 use crate::source::FakeWal;
 use crate::store::WriteMode;
 use crate::store::{ObjectStore, Upload};
+
+/// The decision alone: these tests judge verdicts, and the events have tests of their own.
+fn recover(
+    source: Option<PositionSource<'_>>,
+    wal: &crate::recover::WalView,
+    remote: Option<lsr_ltx::Txid>,
+) -> Recovered {
+    crate::recover::recover_traced(source, wal, remote).recovered
+}
 
 const PS: PageSize = PageSize::MIN;
 /// A WAL frame: its 24-byte header and one page.

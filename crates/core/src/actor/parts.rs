@@ -169,6 +169,9 @@ pub(super) struct Kept {
     pub(super) journal_read: Option<Journal>,
     /// How the last journal write ended: an error is `JournalUnwritable` until one succeeds.
     pub(super) journal_write: Result<(), ErrorKind>,
+    /// Recoveries that found a commit abandoned after the read lock was taken: a report,
+    /// kept across rebuilds, since the snapshot that follows names only the generation change.
+    pub(super) read_lock_violations: u64,
     /// Whether the next sync step is the ahead-of-WAL check (`super::ahead`). A rebuild keeps
     /// it: the rebuilt engine boots over the same files.
     pub(super) ahead_check: AheadCheck,
@@ -209,6 +212,7 @@ impl Kept {
             writer: None,
             journal_read: None,
             journal_write: Ok(()),
+            read_lock_violations: 0,
             ahead_check: AheadCheck::No,
             ahead: None,
             ahead_notice: None,
@@ -248,6 +252,7 @@ impl Kept {
             writer,
             journal_read,
             journal_write,
+            read_lock_violations,
             ahead_check,
             ahead,
             ahead_notice,
@@ -282,6 +287,7 @@ impl Kept {
             writer: writer.clone(),
             journal_read: *journal_read,
             journal_write: *journal_write,
+            read_lock_violations: *read_lock_violations,
             ahead_check: *ahead_check,
             ahead: *ahead,
             ahead_notice: *ahead_notice,
@@ -608,6 +614,10 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "journal_write",
         Keep::Ephemeral("whether the last journal write failed; tried again every tick"),
+    ),
+    (
+        "read_lock_violations",
+        Keep::Ephemeral("read-lock violations recovery found since the process began: a report"),
     ),
     (
         "ahead_check",
