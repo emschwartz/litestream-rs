@@ -18,6 +18,7 @@
 //!   drawn histories run the engine against this crate on a real database.
 
 pub mod harness;
+mod host_fs;
 pub mod real;
 pub mod vfs;
 

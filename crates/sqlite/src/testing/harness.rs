@@ -46,6 +46,8 @@ use lsr_sim::{
     Recovery, Violation, bug_fault,
 };
 use lsr_store_fs::{FsJournalFile, FsStore};
+
+use super::host_fs::HostFs;
 use lsr_wal::{Salts, WalOffset};
 use rusqlite::{Connection, OpenFlags};
 
@@ -429,11 +431,11 @@ pub struct Rig<B: Backend> {
     backend: Option<B>,
     actor: Actor,
     clock: FakeClock,
-    staging: Recorder<FsStore>,
+    staging: Recorder<FsStore<HostFs>>,
     /// The engine journal beside staging, reopened by every restart as a new process would.
     journal: FsJournalFile,
     meta: PathBuf,
-    remote: Recorder<FsStore>,
+    remote: Recorder<FsStore<HostFs>>,
     staging_log: RecorderLog,
     remote_log: RecorderLog,
     remote_root: PathBuf,
@@ -482,9 +484,9 @@ impl<B: Backend> Rig<B> {
         let backend = B::open_limited(&db, vfs.name(), cfg.journal_size_limit)
             .map_err(|err| RigError::Open(Box::new(err)))?;
         let meta = root.join("meta");
-        let staging = Recorder::new(FsStore::new(&meta));
+        let staging = Recorder::new(FsStore::with_fs(&meta, HostFs));
         let remote_root = root.join("replica");
-        let remote = Recorder::new(FsStore::new(&remote_root));
+        let remote = Recorder::new(FsStore::with_fs(&remote_root, HostFs));
         let mut rig = Self {
             mirror: Mirror {
                 wal: suffixed(&db, "-wal"),
@@ -1053,7 +1055,10 @@ impl<B: Backend> Rig<B> {
             .as_ref()
             .ok_or(RigError::State("judge without a model"))?;
         let copy = MemStore::new();
-        block_on(copy_store(&FsStore::new(&self.remote_root), &copy))?;
+        block_on(copy_store(
+            &FsStore::with_fs(&self.remote_root, HostFs),
+            &copy,
+        ))?;
         let copy = lsr_sim::remote::Bucket::Mem(copy);
         Ok(lsr_sim::check(model, &self.remote_log, &copy, &self.acked)?)
     }
@@ -1246,7 +1251,7 @@ fn local_writer(db: &Path, vfs: &str, writer: u32, rows: u32) -> Result<(), RigE
 }
 
 /// Copies every file of `from` into `to`, so the oracle can judge a replica on disk.
-async fn copy_store(from: &FsStore, to: &MemStore) -> Result<(), RigError> {
+async fn copy_store(from: &FsStore<HostFs>, to: &MemStore) -> Result<(), RigError> {
     let store = |err: StoreError| RigError::Store(err.to_string());
     let inventory = Inventory::load(from)
         .await
@@ -1259,7 +1264,7 @@ async fn copy_store(from: &FsStore, to: &MemStore) -> Result<(), RigError> {
 }
 
 async fn copy_file(
-    from: &FsStore,
+    from: &FsStore<HostFs>,
     to: &MemStore,
     file: &FileInfo,
     chunk: ReadLen,

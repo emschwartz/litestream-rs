@@ -14,7 +14,7 @@ workspace = true
 # The real-SQLite fault suite's support: the fault-injecting VFS and the harness that drives the
 # actor over a backend and judges the replica with the simulator's oracle. `serialize` reads the
 # database back through SQLite for the simulator's real backend.
-testing = ["dep:lsr-sim", "dep:lsr-store-fs", "lsr-core/testing", "rusqlite/serialize"]
+testing = ["dep:lsr-sim", "dep:lsr-store-fs", "dep:rustix", "lsr-core/testing", "rusqlite/serialize"]
 
 [dependencies]
 lsr-core.workspace = true
@@ -22,6 +22,7 @@ lsr-ltx.workspace = true
 lsr-sim = { workspace = true, optional = true }
 lsr-store-fs = { workspace = true, optional = true }
 lsr-wal.workspace = true
+rustix = { workspace = true, features = ["fs"], optional = true }
 rusqlite.workspace = true
 thiserror.workspace = true
 
