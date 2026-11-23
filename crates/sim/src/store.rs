@@ -1108,6 +1108,8 @@ struct TapState {
     counts: RecorderCounts,
     clock: Option<(Arc<FakeClock>, HighWater)>,
     landed: Option<Landed>,
+    // Objects a commit reported failed that the bucket took all the same.
+    rejected: Vec<FileKey>,
 }
 
 impl std::fmt::Debug for TapState {
@@ -1144,6 +1146,13 @@ pub struct RecorderLog {
 }
 
 impl RecorderLog {
+    /// With a bucket to ask ([`Recorder::landed_through`]), the objects whose commit the store
+    /// reported failed, in order: published or not, the engine may distrust and delete each.
+    #[must_use]
+    pub fn rejected(&self) -> Vec<FileKey> {
+        lock(&self.state).rejected.clone()
+    }
+
     /// Every event so far, oldest first.
     #[must_use]
     pub fn events(&self) -> Vec<RecorderEvent> {
@@ -1381,10 +1390,17 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             // An object the store accepted is recorded. The recorder sits below `Faults`, so a
             // commit it sees fail published only if the store failed after the bucket took it,
             // which the bucket itself says (`Recorder::landed_through`).
-            let landed = outcome.is_ok()
-                || s.landed
-                    .as_ref()
-                    .is_some_and(|probe| probe(&key) == Some(digest));
+            // With a bucket to ask, a failed commit may have published and been removed again
+            // (an S3 store deletes an object whose ETag came back wrong before it reports the
+            // error): the engine may delete the key either way, so it is listed as rejected.
+            let landed = match (&outcome, &s.landed) {
+                (Ok(_), _) => true,
+                (Err(_), Some(probe)) => {
+                    s.rejected.push(key);
+                    probe(&key) == Some(digest)
+                }
+                (Err(_), None) => false,
+            };
             if landed {
                 let (at, high) = s.times();
                 s.events.push(RecorderEvent::Put {

@@ -2698,6 +2698,10 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         runner.report.staging_events = runner.w.staging_recorder.events();
         runner.report.remote_damaged = runner.w.remote_faults.damaged();
         runner.report.remote_rejected = runner.w.remote_faults.rejected();
+        runner
+            .report
+            .remote_rejected
+            .extend(runner.w.remote_recorder.rejected());
     }
     Ok(runner.report)
 }

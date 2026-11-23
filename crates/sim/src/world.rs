@@ -1321,6 +1321,7 @@ impl World {
     /// The first [`Violation`].
     pub fn check(&self, retention: Option<Windows>) -> Result<Checked, Violation> {
         let mut exempt = self.remote_faults.rejected();
+        exempt.extend(self.remote_recorder.rejected());
         let damaged = self.remote_faults.damaged();
         let flipped = self.remote_faults.flipped();
         for key in &self.repaired {
