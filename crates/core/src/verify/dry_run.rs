@@ -17,8 +17,9 @@ use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError, WriteMo
 
 /// A [DatabaseSink] that keeps each page's checksum and nothing else: 8 bytes
 /// a page, no page bytes, and nothing is ever published.
-struct DigestSink<'a> {
-    pages: &'a mut BTreeMap<u32, PageChecksum>,
+pub(crate) struct DigestSink<'a> {
+    /// Page number to checksum.
+    pub(crate) pages: &'a mut BTreeMap<u32, PageChecksum>,
 }
 
 impl DatabaseSink for DigestSink<'_> {

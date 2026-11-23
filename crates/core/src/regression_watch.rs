@@ -8,8 +8,8 @@
 //!
 //! A [`RegressionWatch`] names objects this process is sure stand on the replica: one
 //! anchor from the last maintenance listing (the last file of a level whose
-//! range holds the published transaction) and every level-0 file an upload
-//! confirmed since. Nothing this engine does deletes any of them before the
+//! range holds the published transaction), every level-0 file an upload
+//! confirmed since, and the last snapshot this process wrote since. Nothing this engine does deletes any of them before the
 //! next maintenance listing: deletes run only on the job planned from a
 //! listing, in that listing's tick, retention never deletes a level's last
 //! file, and a read-back repair that deletes the anchor forgets it
@@ -18,7 +18,9 @@
 //! One that is missing ([`RegressionWatch::missing`]) is read, because a listing may lag
 //! the bucket and a read may not: `NotFound` is a regression
 //! (`Fault::RemoteRegressed`, whose configured response relists, or stops);
-//! a read that finds it says the listing lags, and nothing is decided. A
+//! a read that finds it says the listing lags, and nothing is decided: maintenance plans
+//! nothing from that listing and lists again later. A snapshot the listing hides would
+//! otherwise be planned and written again under its own key with other bytes. A
 //! rollback to any earlier version removes every object written after that
 //! version, so it removes the anchor (written before the last listing) or
 //! the uploads after it, whichever it reaches.
@@ -46,6 +48,8 @@ pub(crate) struct RegressionWatch {
     /// The level-0 transactions uploads confirmed since, first and last:
     /// one key each, consecutive, as the uploader puts them.
     uploaded: Option<(Txid, Txid)>,
+    /// The last snapshot maintenance wrote since the last listing.
+    made: Option<FileKey>,
 }
 
 impl RegressionWatch {
@@ -62,6 +66,18 @@ impl RegressionWatch {
         Some(Self {
             anchor: Some(anchor),
             uploaded: None,
+            made: None,
+        })
+    }
+
+    /// Adds the snapshot maintenance wrote: nothing deletes the newest snapshot before
+    /// the next listing shows it, so that listing must.
+    pub(crate) fn made(watch: Option<Self>, key: FileKey) -> Option<Self> {
+        let (anchor, uploaded) = watch.map_or((None, None), |watch| (watch.anchor, watch.uploaded));
+        Some(Self {
+            anchor,
+            uploaded,
+            made: Some(key),
         })
     }
 
@@ -75,6 +91,7 @@ impl RegressionWatch {
         }
         let txid = range.max();
         let anchor = watch.and_then(|watch| watch.anchor);
+        let made = watch.and_then(|watch| watch.made);
         let uploaded = match watch.and_then(|watch| watch.uploaded) {
             Some((first, last)) if last.next() == Some(txid) => (first, txid),
             Some(_) | None => (txid, txid),
@@ -82,6 +99,7 @@ impl RegressionWatch {
         Some(Self {
             anchor,
             uploaded: Some(uploaded),
+            made,
         })
     }
 
@@ -96,7 +114,12 @@ impl RegressionWatch {
                 || range.max() < *first
                 || range.max() > *last
         });
-        (anchor.is_some() || uploaded.is_some()).then_some(Self { anchor, uploaded })
+        let made = watch.made.filter(|made| *made != key);
+        (anchor.is_some() || uploaded.is_some() || made.is_some()).then_some(Self {
+            anchor,
+            uploaded,
+            made,
+        })
     }
 
     /// The first watched object `inventory` does not list, anchor first.
@@ -109,6 +132,9 @@ impl RegressionWatch {
         };
         if let Some(anchor) = self.anchor.filter(|anchor| !listed(anchor)) {
             return Some(anchor);
+        }
+        if let Some(made) = self.made.filter(|made| !listed(made)) {
+            return Some(made);
         }
         let (first, last) = self.uploaded?;
         let mut txid = first;
@@ -159,6 +185,7 @@ mod tests {
         let watch = RegressionWatch {
             anchor: None,
             uploaded: Some((txid(3), txid(7))),
+            made: None,
         };
         let cases = [
             (key(1, 5, 5), true, "another level"),
@@ -188,6 +215,21 @@ mod tests {
             None
         );
         assert_eq!(RegressionWatch::after_listing(&compacted, None), None);
+    }
+
+    /// A snapshot maintenance wrote is watched until a listing shows it: a listing that
+    /// hides it names it missing, and forgetting it (the engine deleted it) stops the watch.
+    #[test]
+    fn a_snapshot_written_since_the_listing_is_missing_until_listed() {
+        let before = inventory(&[key(0, 3, 3), key(1, 1, 3)]);
+        let watch = RegressionWatch::after_listing(&before, Some(txid(3)));
+        let snapshot = key(9, 1, 3);
+        let watch = RegressionWatch::made(watch, snapshot).unwrap();
+        assert_eq!(watch.missing(&before), Some(snapshot));
+        let after = inventory(&[key(0, 3, 3), key(1, 1, 3), snapshot]);
+        assert_eq!(watch.missing(&after), None);
+        let alone = RegressionWatch::made(None, snapshot);
+        assert_eq!(RegressionWatch::forget(alone, snapshot), None);
     }
 
     #[test]

@@ -167,7 +167,7 @@ Added 2026-11-20 at the owner's request. A `litestream`-style daemon over the sa
 - `lsr replicate` grown into a daemon: one process, many databases, each its own actor thread; signals for reload and shutdown (`final_sync` on SIGTERM within a deadline); `health()` exposed for the application (a status file or a local HTTP endpoint, decided in the phase 4 task plan).
 - Configuration: whether to read Go's `litestream.yml` as is (drop-in) or a stricter subset that refuses unknown keys (design goal: "disabled" is not zero), decided in the phase 4 task plan.
 - The read lock across processes: a SQLite read transaction in the sidecar works as in phase 3 (ruling P0); POSIX locks conflict across processes, so the in-process descriptor hazard of section 6 is gone, and the pure-Rust read lock of #9 is simpler here (`docs/notes/pure-rust-read-lock.md`, deployment B).
-- Checkpoints from outside the application: the application must still run with `wal_autocheckpoint = 0` and `PERSIST_WAL`, which a sidecar cannot set for it; the phase 4 plan says how that is checked and what happens when the application checkpoints anyway (phase 3's outside-checkpoint cases already cover the replication side).
+- Checkpoints from outside the application: the application must still run with `wal_autocheckpoint = 0`, which a sidecar cannot set for it (`PERSIST_WAL` is no longer asked of an application, decisions D123); the phase 4 plan says how that is checked and what happens when the application checkpoints anyway (phase 3's outside-checkpoint cases already cover the replication side).
 - Compatibility: the phase 3 alternation test, run as Go sidecar to Rust sidecar and back on one prefix.
 **Exit:** the alternation test and the phase 3 fault suite pass with the library in a separate process; a Go user's config and meta directory start the Rust sidecar with no snapshot when the WAL is intact.
 
@@ -178,7 +178,7 @@ From the storage-fault review against TigerBeetle's fault model (2026-11-20). Re
 
 Out of scope for this repository. An application that adopts the library provides:
 
-- The replicator started before any connection pool opens, with `PERSIST_WAL` and `wal_autocheckpoint = 0` on every connection, and no other checkpointer on the live file.
+- The replicator started before any connection pool opens, with `wal_autocheckpoint = 0` on every connection, and no other checkpointer on the live file. Not `PERSIST_WAL`: on a connection that leaves WAL mode it keeps a WAL SQLite goes on reading, and a page-size change then corrupts the database (decisions D123). The replicator's own connections set it, so the application closes its connections before the replicator stops; a connection that closes after it deletes the WAL and the next start snapshots.
 - No `std::fs` open of the database files anywhere in the process: closing any descriptor on the file drops every POSIX lock SQLite holds.
 - `final_sync` called after its writers close, inside its shutdown budget.
 - A signal for long-lived readers, so the library stays PASSIVE while one runs.

@@ -21,10 +21,16 @@ pub mod seed_0x25;
 pub mod seed_0x2c;
 pub mod seed_0x2d;
 pub mod seed_0x31c;
+pub mod seed_0x330;
 pub mod seed_0x46;
+pub mod seed_0x4c;
 pub mod seed_0x585;
 pub mod seed_0x753;
+pub mod seed_0x80e;
+pub mod seed_0x82;
+pub mod seed_0x8ef;
 pub mod seed_0x9f9;
+pub mod seed_0xa4d;
 pub mod seed_0xb6b;
 pub mod seed_0xb9e;
 pub mod seed_0xe9;
@@ -48,6 +54,16 @@ pub enum Guard {
 /// Every recorded history: its module, the test that runs it, and its guard.
 pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
+        "seed_0x82",
+        "a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82",
+        Guard::Own("written-snapshot-unwatched"),
+    ),
+    (
+        "seed_0x80e",
+        "an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e",
+        Guard::Own("hold-as-of-demands-the-raw-answer-sim"),
+    ),
+    (
         "seed_0x25",
         "a_torn_staged_file_is_dropped_seed_0x25",
         Guard::OnPath("always-snapshot-at-boot"),
@@ -61,6 +77,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0x46",
         "a_torn_staged_file_is_dropped_seed_0x46",
         Guard::OnPath("always-snapshot-at-boot"),
+    ),
+    (
+        "seed_0x4c",
+        "a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c",
+        Guard::Own("sim-short-object-damage"),
     ),
     (
         "seed_0x126d68ef1c07",
@@ -141,7 +162,12 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0xf",
         "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf",
-        Guard::Own("journal-debt-not-recorded-sim"),
+        Guard::Unguarded(
+            "it passes with journal-debt-not-recorded-sim planted too, so it no longer reaches the \
+             restart that would owe the TRUNCATE: an other-process RESTART checkpoint follows the \
+             failed sync before any crash (histories/seed_0xf.rs lines 284 and 288), which may start a new WAL \
+             generation first; the cause is not yet confirmed",
+        ),
     ),
     (
         "seed_0x585",
@@ -171,11 +197,27 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     ),
     (
         "seed_0x9f9",
-        "known_false_trip_seed_0x9f9",
+        "seed_0x9f9_does_not_trip",
         Guard::Unguarded(
-            "it is a known false trip, ignored until resolved (docs/decisions.md D27): it fails \
-             on main, so no plant can be judged by it",
+            "the runner changes merged with #188 stopped this history from reaching the false trip \
+             even on the engine before the fail-stop fix, so no plant can be judged by it; \
+             seed_0x330 pins the same cause",
         ),
+    ),
+    (
+        "seed_0x330",
+        "seed_0x330_does_not_trip",
+        Guard::Own("failstop-dates-the-run-sim"),
+    ),
+    (
+        "seed_0x8ef",
+        "seed_0x8ef_does_not_trip",
+        Guard::Own("failstop-checkpoint-quiet-forgotten"),
+    ),
+    (
+        "seed_0xa4d",
+        "seed_0xa4d_does_not_trip",
+        Guard::Own("failstop-trip-held-to-zero-age-sim"),
     ),
 ];
 

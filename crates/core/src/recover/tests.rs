@@ -1206,6 +1206,7 @@ fn rule_6_a_restart_with_an_unrelated_checkpoint_seq_is_still_one_restart() {
     let probes = Probes {
         prev: FrameCheck::Miss(Miss::NotACommit),
         stale_next: false,
+        rechained: false,
     };
     assert!(matches!(
         recover(Some(PositionSource::Running(&pos, probes)), &view, None),
@@ -1239,6 +1240,7 @@ fn rule_6_a_pinned_position_with_no_frames_follows_a_new_header_with_any_salts()
     let probes = Probes {
         prev: FrameCheck::Miss(Miss::NotACommit),
         stale_next: false,
+        rechained: false,
     };
     let verdict = recover_traced(
         Some(PositionSource::Running(&empty, probes)),
@@ -1482,6 +1484,40 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(crate::MemStore::new());
     let got = crate::conformance::block_on(newest_level_zero(&staging));
     assert_eq!(got, Err(Fault::LocalIo));
+}
+
+/// The frames under a running position were regrown byte for byte from a header written again
+/// with the same salts and another seed: each frame verifies on its own and the last page
+/// matches, but the frame before the end carries another running checksum than the position
+/// scanned to it. The frames the position covers are not the ones it staged: a rewind, never a
+/// continue that a later scan would meet as damage.
+#[test]
+fn frames_regrown_from_a_header_written_again_are_a_rewind() {
+    let wal = fresh();
+    let pos = position(&wal, 2, Continuity::Broken);
+    let seq = wal.checkpoint_seq();
+    wal.rewrite_header(seq.wrapping_add(5));
+    commit(&wal, &[1, 2], 2);
+    commit(&wal, &[2, 3], 3);
+    assert_eq!(wal.salts(), pos.cursor().salts());
+    let checked = probes(&wal, &pos);
+    assert!(checked.rechained);
+    assert!(matches!(checked.prev, FrameCheck::Frame(_)), "{checked:?}");
+    let verdict = run_running(&wal, &pos, None);
+    assert!(
+        matches!(
+            verdict.recovered,
+            Recovered::Snapshot {
+                cause: SnapshotCause::LocalRewound { .. },
+                ..
+            }
+        ),
+        "{verdict:?}"
+    );
+    assert!(matches!(
+        verdict.event,
+        Some(RecoverEvent::LocalRewound { .. })
+    ));
 }
 
 /// A range past the live WAL's committed end is not proof either way, but its

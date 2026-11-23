@@ -59,6 +59,10 @@ jobs:
           name: compat-fixtures-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/lsr-alternation-*
           if-no-files-found: ignore
+      # The artifact is not reachable from where failures are triaged; the job log is. The
+      # kept database, WAL and wal-index go into the log too, small enough to rebuild from it.
+      - if: failure()
+        run: ./scripts/print-kept-fixtures.sh
 
   # A tag the compat table does not list needs an era decision there; it was still run by
   # name above, so this only names it.

@@ -206,7 +206,7 @@ Evidence: the planner's self-check runs on every job (`retention` in `core/src/m
 
 ## 2. Fault model
 
-Scope has three values here. **In**: the engine is meant to keep G1 to G4 through the fault and a rig produces it. **Out**: excluded on purpose, with the reason given; an operator must prevent it. **Gap**: the fault is real, the engine is meant to cope or nobody decided, and no rig produces it. v1 filed several gaps as "out". "Rig" names what produces the fault in a test; "rig: none" is itself a finding.
+Scope has three values here. **In**: the engine is meant to keep G1 to G4 through the fault and a rig produces it. **Out**: excluded on purpose, with the reason given; an operator must prevent it. Deliberate forgery of local or replica files is out (D131): files written to pass the engine's checks. **Gap**: the fault is real, the engine is meant to cope or nobody decided, and no rig produces it. v1 filed several gaps as "out". "Rig" names what produces the fault in a test; "rig: none" is itself a finding.
 
 The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, other-process reader and checkpoint, crash, power loss, lying WAL sync, store fault, environment fault, clock jump, shutdown, snapshot request, staging damage, WAL damage, second writer, remote rollback, dropped created-at), `FaultShape` (error, error after publish, size or checksum mismatch, corrupt publish, flip a byte on read, fail at a rate), and `EnvFault`. A store fault fires at one call index or at a rate; **no shape holds a fault until a later step**, which is why lasting conditions have no S mark. Anything not in that list has no simulator rig.
 
@@ -234,7 +234,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 |---|---|---|---|
 | The application's own automatic or manual checkpoints | In | Counted and reported as a notice; they cannot pass the engine's read mark (RUN-22) | sim `app_autocheckpoints`; sim `rules_match_sqlite` compares the model with real SQLite |
 | The application commits (growing the database or not), begins or ends a reader, checkpoints in any mode or deletes the WAL between two of the engine's calls into SQLite inside one tick | In | The read-lock proofs (RUN-7, CKPT-1): what lands before a committed read is in the step, what lands after waits for the next | sim `Op::AppInTick` in swarm mixes (`sim/src/sqlite/in_tick.rs`), at any call of the tick, reads included; `Op::CommitInTick` for the one commit before the checkpoint's barrier |
-| Another process checkpoints while the engine is down | In | BOOT-7, BOOT-8 | sim `app_checkpoint_while_down`; sqlite `the_apps_last_close_while_the_replicator_is_down_keeps_or_deletes_the_wal` |
+| Another process checkpoints while the engine is down | In | BOOT-7, BOOT-8 | sim `app_checkpoint_while_down`; sqlite `the_apps_last_close_while_the_replicator_is_down_deletes_the_wal` |
 | WAL deleted, truncated or its header torn | In | BOOT-7, RUN-5, RUN-6, RUN-9 | sim `wal_deleted_while_down`, `wal_header_torn`, `wal_truncated_externally_under_lock`, `wal_unlinked_mid_run` |
 | WAL rewritten with other bytes in the same generation | In | BOOT-9, BOOT-10 | sim `wal_regrown_same_salts_diff_bytes`, `wal_rewritten_same_length`; core `a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued` |
 | A committed WAL frame flips a bit | In | RUN-4 | sim `bit_flip_in_committed_frame`, `bit_flip_in_committed_frame_healed` |
@@ -314,7 +314,7 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 
 | Signal | Where | Meaning |
 |---|---|---|
-| `Health.degraded[task]`, `/healthz` `degraded[]`, `lsr_degraded{task,cause}` | `replica/src/health.rs`, `sidecar/src/health.rs` | A persistent cause the task keeps retrying. Cause names: `credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls`, `store_refused`, `remote_corrupt`, `other_writer`, `remote_regressed`, `wal_corrupt`, `wal_truncated`, `wal_unlinked`, `wal_sync_failed`, `page_size_changed`, `database_page_mismatch`, `bug`; and for a stall (a retried fault that failed 8 times in a row), the fault's name: `store_transient`, `store_throttled`, `remote_object_missing`, `upload_ambiguous`, `upload_checksum_mismatch`, `staged_lost`, `local_disk_full`, `local_io`, `local_fsync_failed`, `sqlite_busy`, `readers_held`, `wal_moved`, `wal_index_inconsistent`, `wal_changed_under_read`, `nothing_to_snapshot`, `read_tx_lost` (`cause_name`, `stall_name` in `sidecar/src/health.rs`) |
+| `Health.degraded[task]`, `/healthz` `degraded[]`, `lsr_degraded{task,cause}` | `replica/src/health.rs`, `sidecar/src/health.rs` | A persistent cause the task keeps retrying. Cause names: `credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls`, `store_refused`, `remote_corrupt`, `other_writer`, `remote_regressed`, `wal_corrupt`, `wal_truncated`, `wal_unlinked`, `wal_sync_failed`, `page_size_changed`, `database_page_mismatch`, `database_ahead_of_wal`, `bug`; and for a stall (a retried fault that failed 8 times in a row), the fault's name: `store_transient`, `store_throttled`, `remote_object_missing`, `upload_ambiguous`, `upload_checksum_mismatch`, `staged_lost`, `local_disk_full`, `local_io`, `local_fsync_failed`, `sqlite_busy`, `readers_held`, `wal_moved`, `wal_index_inconsistent`, `wal_changed_under_read`, `nothing_to_snapshot`, `read_tx_lost` (`cause_name`, `stall_name` in `sidecar/src/health.rs`) |
 | `Health.phase`, `lsr_db_state`, `lsr_stopped`, `/healthz` status | `sidecar/src/health.rs` | 200 while booting, running, draining, degraded or waiting for a file. 503 once any database stopped, failed to start, or lost its thread |
 | `lsr_retries_total`, log line "retrying" | `sidecar/src/logging.rs` | A fault whose policy is to retry, for its first 7 failures in a row on one task. From the 8th the task is degraded as a stall (row above) and stays so until it succeeds. No retried fault stops the engine |
 | `lsr_resnapshot_pending{cause}`, log "snapshot required", boot log `cause=` | `sidecar/src/health.rs` | The next file is a snapshot, and why |
@@ -322,6 +322,7 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 | `lsr_verify_failing`, `lsr_verify_failing_txid`, `lsr_verify_failing_page` | `replica/src/health.rs` | The scheduled verify found the replica restores something the live database never held |
 | `lsr_app_notice`, `lsr_app_checkpoints_total` | `replica/src/health.rs` | The application ran checkpoints of its own. A notice, not a failure |
 | `Health.journal`, `/healthz` `journal` and `journal_detail`, `lsr_journal_signal{signal}` | `replica/src/health.rs`, `sidecar/src/health.rs` | What the engine journal says: `missing`, `unreadable`, `newer_version`, `slot_unreadable` (boot read it so, until the next boot; BOOT-25 to BOOT-29) or `unwritable` (it lags what the engine holds; RUN-27). A notice, not a failure: `/healthz` stays 200 |
+| `Health.ahead_of_wal`, `/healthz` `database_ahead_of_wal` (`pages`, `first_page`, `restore_point`, `kept_until`), `lsr_database_ahead_of_wal` | `replica/src/health.rs`, `sidecar/src/health.rs` | A boot after a failed WAL sync found the database file ahead of its WAL; the state before it is kept until `kept_until` (BOOT-31). A notice, not a failure: `/healthz` stays 200 and it ends on its own |
 | `lsr_panics_total` | `replica/src/health.rs` | Panics caught at the thread boundary |
 
 There is no per-cause count of snapshots taken on main. It is on #86 (`lsr_snapshots_total{db,cause}`).
@@ -488,7 +489,7 @@ Every `SnapshotCause` variant (`core/src/fault.rs`). A snapshot reads every page
 
 Every `StopCause` variant (`core/src/fault.rs`). A stopped engine does no I/O; every later tick returns the same cause (core `stop_is_terminal`). `/healthz` answers 503 and `lsr_stopped` is set. Nothing but a restart of the replicator clears a stop, and a restart forgets the stop (BOOT-21).
 
-Under the default responses only two causes stop the engine: `OtherWriter` and `Shutdown`. The other eleven stop only when configured to (`Responses::STRICT`, or one field set to `Stop`).
+Under the default responses only two causes stop the engine: `OtherWriter` and `Shutdown`. The other twelve stop only when configured to (`Responses::STRICT`, or one field set to `Stop`).
 
 | `StopCause` | Stops by default? | Why continuing is unsafe | What the operator does |
 |---|---|---|---|
@@ -504,6 +505,7 @@ Under the default responses only two causes stop the engine: `OtherWriter` and `
 | `WalSyncFailed` | No | The frames the failed sync covered may never reach the disk | Restart: the engine journal holds the debt, and the restarted engine runs the TRUNCATE before it stages anything. If `JournalUnwritable` is also reported, run `PRAGMA wal_checkpoint(TRUNCATE)` from the application before restarting |
 | `PageSizeChanged` | No | A replica prefix holds one page size, in this port and in Go | Point the replicator at a new prefix. The old prefix keeps every state up to the change |
 | `DatabasePageMismatch` | No | The database file holds bytes no WAL frame wrote. Shipping them replicates possible corruption | Inspect the page named in `/healthz`. Then either repair the database, or accept it (`accept_database_pages`) |
+| `DatabaseAheadOfWal` | No | A boot after a failed WAL sync found database pages from commits the WAL lost. Shipping them replicates a state no commit made | Nothing is required: the state before it stays restorable for seven days (`/healthz` `database_ahead_of_wal.kept_until`). Restore to `restore_point` if the commits built on the damaged pages must not stand. Under `STRICT` the stop happens once; a restart cures the debt with the notice standing (BOOT-31) |
 | `Bug` | No | The engine's own state contradicted itself | Report it with the `BugSite` from the log. A restart boots from disk and bucket |
 
 Three other ways replication ends that are not a `StopCause`:

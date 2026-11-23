@@ -141,6 +141,12 @@ fn frame_buf(page_size: PageSize) -> Vec<u8> {
     vec![0; usize_from(u32::try_from(frame_len(page_size)).unwrap_or(0))]
 }
 
+/// Fills `buf` from `at`; `false` when the file ends first, so the caller reports a
+/// truncation rather than read the zeros left in the rest of `buf`.
+fn read_full<R: Read + Seek>(reader: &mut R, at: u64, buf: &mut [u8]) -> io::Result<bool> {
+    Ok(read_at(reader, at, buf)? == buf.len())
+}
+
 /// Reads up to `buf.len()` bytes at `at`, fewer only at the end of the file.
 fn read_at<R: Read + Seek>(reader: &mut R, at: u64, buf: &mut [u8]) -> io::Result<usize> {
     reader.seek(SeekFrom::Start(at))?;
@@ -179,22 +185,24 @@ impl<R: Read + Seek> WalReader<R> {
         &self.header
     }
 
-    /// Whether the file's header, read again now, still names the generation this
-    /// reader was opened on.
+    /// Whether the file's header, read again now, is still the one this reader was
+    /// opened on.
     ///
-    /// A short file, an unreadable header or other salts answer `false`: the WAL
-    /// was truncated or restarted since `open`. SQLite writes a restart's header
-    /// before any new frame, so after a failed read below the committed end a
-    /// header that still matches means the bytes are wrong inside one generation.
+    /// A short file, an unreadable header or any other header answers `false`: the WAL
+    /// was truncated or restarted since `open`, or its header was written again with the
+    /// same salts and another seed (SQLite does that once the wal-index holds no frame of
+    /// the generation). SQLite writes a header before any frame chained from it, so after
+    /// a failed read below the committed end a header that still matches means the bytes
+    /// are wrong inside one generation.
     ///
     /// # Errors
     /// An I/O failure reading the header.
     pub fn generation_unchanged(&mut self) -> io::Result<bool> {
         let mut bytes = [0; HEADER_LEN];
-        if read_at(&mut self.reader, 0, &mut bytes)? < HEADER_LEN {
+        if !read_full(&mut self.reader, 0, &mut bytes)? {
             return Ok(false);
         }
-        Ok(WalHeader::decode(&bytes).is_ok_and(|now| now.salts() == self.header.salts()))
+        Ok(WalHeader::decode(&bytes).is_ok_and(|now| now == self.header))
     }
 
     /// The cursor before the first frame.
@@ -261,7 +269,7 @@ impl<R: Read + Seek> WalReader<R> {
         let mut buf = frame_buf(page_size);
         let (mut at, mut checksum) = (cursor.next(), cursor.checksum());
         loop {
-            if read_at(&mut self.reader, at.get(), &mut buf)? < buf.len() {
+            if !read_full(&mut self.reader, at.get(), &mut buf)? {
                 return Ok(false);
             }
             let Ok(frame) = verify_frame(
@@ -298,12 +306,33 @@ impl<R: Read + Seek> WalReader<R> {
         expected: Salts,
         within: CommittedEnd,
     ) -> Result<FrameRef, ResumeError> {
+        self.chained_before(at, expected, within)
+            .map(|(frame, _checksum)| frame)
+    }
+
+    /// [`Self::frame_before`], with the running checksum that frame carries. A caller that
+    /// remembers the checksum it scanned to `at` tells by it whether the chain before `at` is
+    /// still the one it scanned: SQLite writes a generation's header again, same salts and
+    /// another seed, once its wal-index holds no frame, and frames regrown from that header
+    /// verify on their own while carrying other checksums.
+    ///
+    /// # Errors
+    /// As [`Self::frame_before`].
+    pub fn chained_before(
+        &mut self,
+        at: WalOffset,
+        expected: Salts,
+        within: CommittedEnd,
+    ) -> Result<(FrameRef, WalChecksum), ResumeError> {
         match self.verified_before(at, expected, within)? {
-            Some((offset, frame)) => Ok(FrameRef {
-                pgno: frame.pgno,
-                offset,
-                digest: frame.digest,
-            }),
+            Some((offset, frame)) => Ok((
+                FrameRef {
+                    pgno: frame.pgno,
+                    offset,
+                    digest: frame.digest,
+                },
+                frame.checksum,
+            )),
             None => Err(ResumeError::NotAtCommit { at }),
         }
     }
@@ -344,7 +373,7 @@ impl<R: Read + Seek> WalReader<R> {
         };
         let running = self.checksum_before(prev, at)?;
         let mut buf = frame_buf(page_size);
-        if read_at(&mut self.reader, prev.get(), &mut buf)? < buf.len() {
+        if !read_full(&mut self.reader, prev.get(), &mut buf)? {
             return Err(ResumeError::Truncated { at });
         }
         let frame = verify_frame(&buf, self.header.byte_order(), page_size, expected, running)
@@ -366,7 +395,7 @@ impl<R: Read + Seek> WalReader<R> {
             return Ok(self.header.checksum());
         };
         let mut bytes = [0; FRAME_HEADER_LEN];
-        if read_at(&mut self.reader, before.get(), &mut bytes)? < FRAME_HEADER_LEN {
+        if !read_full(&mut self.reader, before.get(), &mut bytes)? {
             return Err(ResumeError::Truncated { at });
         }
         let mut fields = Fields::new(&bytes);
@@ -505,7 +534,7 @@ impl<R: Read + Seek> WalReader<R> {
             .get()
             .saturating_add(u64::try_from(FRAME_HEADER_LEN).unwrap_or(0));
         let (pgno, offset) = (frame.pgno, frame.offset);
-        if read_at(&mut self.reader, at, buf)? < buf.len() {
+        if !read_full(&mut self.reader, at, buf)? {
             return Err(ReadPageError::Truncated { pgno, offset });
         }
         if PageChecksum::of(pgno, buf) != frame.digest {

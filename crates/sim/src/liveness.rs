@@ -299,6 +299,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         Op::LaggingListings { .. }
         | Op::Commit { .. }
         | Op::CommitInTick { .. }
+        | Op::OtherConnectionCommit { .. }
         | Op::AppInTick { .. }
         | Op::Spill
         | Op::Rollback
@@ -530,8 +531,8 @@ impl Liveness {
         // lost, confirmed by a read-back) leaves no put in the recorder: the replica holds it.
         self.uploaded.extend(world.replica_level_zero());
         // The replica holds everything staging does only once no staged file is one it never
-        // took: a file left behind it (a backup put back, a forged file) is still to be dropped,
-        // and the fault that left it must be in the window when it is (seed 0xf42e9).
+        // took: a file left behind it (a backup put back, a file damaged in place) is still to be
+        // dropped, and the fault that left it must be in the window when it is (seed 0xf42e9).
         let left_behind = world
             .staged_level_zero()
             .iter()
