@@ -278,11 +278,15 @@ fn sts(action: String, answer: Answer) -> Reply {
 }
 
 fn document(prefix: &str, token_key: &str) -> String {
-    format!(
-        "{{\"Code\":\"Success\",\"Type\":\"AWS-HMAC\",\"AccessKeyId\":\"{prefix}-id\",\
-         \"SecretAccessKey\":\"{prefix}-secret\",\"{token_key}\":\"{prefix}-token\",\
-         \"Expiration\":\"{EXPIRATION}\"}}"
-    )
+    serde_json::json!({
+        "Code": "Success",
+        "Type": "AWS-HMAC",
+        "AccessKeyId": format!("{prefix}-id"),
+        "SecretAccessKey": format!("{prefix}-secret"),
+        token_key: format!("{prefix}-token"),
+        "Expiration": EXPIRATION,
+    })
+    .to_string()
 }
 
 fn json_answer(answer: Answer, prefix: &str, token_key: &str, empty: &str) -> Reply {

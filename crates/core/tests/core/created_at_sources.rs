@@ -54,6 +54,9 @@ fn stored_created_at_constructors_only_in_stores() {
             "crates/core/src/mem.rs",
             "crates/compat/",
             "crates/fuzzing/",
+            // The simulator's view of the S3 replica's bucket: a store over the bucket's own
+            // objects, which reads their created-at metadata as the S3 store does.
+            "crates/sim/src/remote.rs",
         ],
     );
     assert!(
