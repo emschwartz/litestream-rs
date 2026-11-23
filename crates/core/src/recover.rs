@@ -46,6 +46,7 @@ use lsr_wal::{
     WalError, WalHeader, WalOffset, WalReader,
 };
 
+use crate::fault::role::{Role, Staging};
 use crate::fault::{Fault, SnapshotCause, StopCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
@@ -168,11 +169,19 @@ impl NewestStagedFile {
         staging: &L,
         wal: Option<BootWal<'_, R>>,
     ) -> Result<Option<Self>, Fault> {
+        Self::load_in(&Staging(staging), wal).await
+    }
+
+    /// [`Self::load`] with each store as its role.
+    pub(crate) async fn load_in<L: Role, R: Read + Seek>(
+        staging: &L,
+        wal: Option<BootWal<'_, R>>,
+    ) -> Result<Option<Self>, Fault> {
         let Some(newest) = newest_level_zero(staging).await? else {
             return Ok(None);
         };
         let txid = newest.key.range().max();
-        let header = read_header(staging, &newest.key, Fault::from_staging).await?;
+        let header = read_header(staging, &newest.key, L::fault).await?;
         let unreadable = Self::Unreadable { txid };
         let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
             return Ok(Some(unreadable));
@@ -183,7 +192,7 @@ impl NewestStagedFile {
         let file = NewestStagedFileSource {
             store: staging,
             key: newest.key,
-            fault: Fault::from_staging,
+            fault: L::fault,
         };
         let view = Self::checked(&file, None, &header, origin, wal).await?;
         Ok(Some(view.unwrap_or(unreadable)))
@@ -471,18 +480,16 @@ fn match_last_page<R: Read + Seek>(
     }
 }
 
-pub(crate) async fn newest_level_zero<L: ObjectStore>(
-    staging: &L,
-) -> Result<Option<FileInfo>, Fault> {
-    newest_listed(staging, Fault::from_staging, Fault::from_staging_listing).await
+pub(crate) async fn newest_level_zero<L: Role>(staging: &L) -> Result<Option<FileInfo>, Fault> {
+    newest_listed(staging, L::fault, Fault::from_staging_listing).await
 }
 
 /// The replica's newest level-0 file as listed, whatever its bytes: a tail a
 /// listing judged torn is still on the replica.
-pub(crate) async fn newest_replica_level_zero<R: ObjectStore>(
+pub(crate) async fn newest_replica_level_zero<R: Role>(
     remote: &R,
 ) -> Result<Option<FileInfo>, Fault> {
-    newest_listed(remote, Fault::from_remote, |_stalled| Fault::RemoteCorrupt).await
+    newest_listed(remote, R::fault, |_stalled| Fault::RemoteCorrupt).await
 }
 
 async fn newest_listed<S: ObjectStore>(

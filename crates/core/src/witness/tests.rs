@@ -5,6 +5,7 @@
 use lsr_ltx::{Encoder, HeaderFields, PageSize, Timestamp};
 
 use super::*;
+use crate::fault::role::{Role, Staging};
 
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
@@ -178,9 +179,13 @@ fn a_file_longer_than_one_read_is_decoded_whole() {
         crate::store::Upload::write(&mut up, &bytes).await.unwrap();
         crate::store::Upload::commit(up).await.unwrap();
     });
-    let decoded = crate::conformance::block_on(decode(&store, key(1), Fault::from_staging))
-        .unwrap()
-        .unwrap();
+    let decoded = crate::conformance::block_on(decode(
+        &store,
+        key(1),
+        Staging::<crate::mem::MemStore>::fault,
+    ))
+    .unwrap()
+    .unwrap();
     assert_eq!(decoded.pages.len(), 300);
     let mut tally = ByteTally::new();
     tally.add(&bytes);
