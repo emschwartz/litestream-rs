@@ -116,6 +116,7 @@ use crate::maintain::{
 };
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
+use crate::probe::Starts;
 use crate::publish::Why;
 use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent, Recovered,
@@ -2168,7 +2169,15 @@ impl Actor {
         if inventory.newest() >= published || self.engine.maintain.gone == published {
             return None;
         }
-        match probe_past(remote, inventory.newest(), published, None).await {
+        match probe_past(
+            remote,
+            inventory.newest(),
+            published,
+            None,
+            &Starts::of(inventory),
+        )
+        .await
+        {
             Ok(found) if found.is_empty() => {
                 self.engine.maintain.gone = published;
                 None
@@ -2502,8 +2511,11 @@ impl BootGate {
         // A listing may lag the replica's writes: keys past it are read for, through the
         // staged position (any staged file may be on the replica), as boot reads past every
         // listing. A record capped short of a key the listing hid refuses this engine's own
-        // upload at a later boot.
-        let past = probe_past(remote, listed, tip, Some(local)).await?;
+        // upload at a later boot. The listing here is of level 0 alone, so the probe names
+        // no level 1 to 8 start: a merged file it then misses above `local` caps the record
+        // short, and a later boot refuses the replica's files, a stop and never a silent loss.
+        // Listing every level here would cost each vouch ten more listing calls.
+        let past = probe_past(remote, listed, tip, Some(local), &Starts::default()).await?;
         let found = past.last().map(|key| key.range().max());
         let replica = tip.max(listed).max(found);
         match replica.map(|replica| replica.min(local)) {

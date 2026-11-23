@@ -540,6 +540,67 @@ fn a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing() {
     assert_eq!(sink.published(), None);
 }
 
+/// A bucket rolled back under a writer that went on above it leaves a hole right after
+/// what a lagging listing shows (simulator seed 0x12e on the overlapping-faults branch). The
+/// read past the listing used to look at the next transaction only, found the hole, and
+/// published the listing's older state as the newest. It now walks on as the engine's own
+/// probe does and finds the file past the hole.
+#[test]
+fn a_hole_right_after_a_lagging_listing_does_not_hide_the_files_past_it() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 3, &[(1, 3)]));
+    put_spec(&store, 0, &Spec::plain(512, 1, 3, 3, &[(1, 3)]));
+    let mut store = Wrapped::new(store);
+    store.unlisted.extend([key(9, 1, 3), key(0, 3, 3)]);
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert!(
+        matches!(
+            result,
+            Err(RestoreError::ListingBehind { attempts: 3, found }) if found == key(0, 3, 3)
+        ),
+        "{result:?}"
+    );
+    assert_eq!(sink.published(), None);
+}
+
+/// A level-0 file that spans several transactions (Go may write one) starts after the
+/// listed level-0 files, so the walk names it from there and a listing that hides it is
+/// told from a whole one.
+#[test]
+fn a_hidden_level_zero_file_of_several_transactions_is_found_from_where_level_zero_ends() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    put_spec(&store, 0, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    put_spec(&store, 0, &Spec::plain(512, 1, 2, 4, &[(1, 4)]));
+    let mut store = Wrapped::new(store);
+    store.unlisted.insert(key(0, 2, 4));
+    let (result, sink) = run(&store, RestoreTarget::Latest);
+    assert!(
+        matches!(
+            result,
+            Err(RestoreError::ListingBehind { attempts: 3, found }) if found == key(0, 2, 4)
+        ),
+        "{result:?}"
+    );
+    assert_eq!(sink.published(), None);
+}
+
+/// The residue, pinned so a change that closes it says so (known wrong in
+/// `docs/BEHAVIOR.md`): a hole wider than the walk's gap right after a lagging listing's end
+/// hides every newer file, and the restore publishes the listing's older state as the newest.
+#[test]
+fn a_hole_wider_than_the_walk_past_a_lagging_listing_still_hides_the_newest() {
+    let store = MemStore::new();
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, 1, &[(1, 1)]));
+    let past_hole = 2 + u64::from(crate::probe::PROBE_GAP) + 1;
+    put_spec(&store, 9, &Spec::plain(512, 1, 1, past_hole, &[(1, 7)]));
+    let mut store = Wrapped::new(store);
+    store.unlisted.insert(key(9, 1, past_hole));
+    let (result, _) = run(&store, RestoreTarget::Latest);
+    assert_eq!(result.unwrap().reached(), txid(1));
+}
+
 #[test]
 fn a_hidden_snapshot_past_the_listing_fails_an_as_of_restore() {
     let store = MemStore::new();
@@ -673,12 +734,13 @@ fn a_whole_listing_costs_one_read_per_named_key_past_it() {
     let (result, sink) = run(&store, RestoreTarget::Latest);
     assert_eq!(result.unwrap().attempts(), 1);
     assert_eq!(seeds(&sink.published().unwrap()), [3]);
-    // The three files of the chain, and the keys named for transaction 4.
-    let past = crate::probe::reads_per_transaction(txid(4));
-    assert_eq!(
-        u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap(),
-        3 + past
-    );
+    let reads = u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap();
+    // The three files of the chain, and the keys named for each transaction the walk past
+    // the listing looks at.
+    let listed = block_on(Inventory::load(&store)).unwrap();
+    let starts = crate::probe::Starts::of(&listed);
+    let past = crate::upload::fresh_probe_reads(listed.newest(), &starts);
+    assert_eq!(reads, 3 + past);
 }
 
 #[test]
@@ -961,7 +1023,7 @@ fn a_file_larger_than_one_chunk_is_read_in_several_reads() {
     let restored = result.unwrap();
     // One-byte reads of the keys named past the listing (nothing there), then one full
     // chunk, then the short rest: no empty read follows.
-    let past = crate::probe::reads_per_transaction(txid(2));
+    let past = crate::upload::fresh_probe_reads(Some(txid(1)), &crate::probe::Starts::default());
     assert_eq!(
         u64::try_from(store.reads.load(Ordering::Relaxed)).unwrap(),
         past + 2

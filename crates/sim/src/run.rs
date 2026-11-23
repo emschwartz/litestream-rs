@@ -1831,7 +1831,7 @@ impl Runner {
         &mut self,
         target: Target,
         op: lsr_core::StoreOp,
-        ahead: u8,
+        ahead: u16,
         shape: crate::FaultShape,
     ) {
         self.kill_armed = true;

@@ -1,0 +1,8 @@
+# A restore of the newest state read only one transaction past its listing instead of walking past it.
+name = "restore-reads-one-transaction-past"
+fix = "7945943"
+package = "lsr-core"
+tests = [
+    "a_hole_right_after_a_lagging_listing_does_not_hide_the_files_past_it",
+    "a_hidden_level_zero_file_of_several_transactions_is_found_from_where_level_zero_ends",
+]
