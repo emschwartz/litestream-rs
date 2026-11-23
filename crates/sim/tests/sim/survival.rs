@@ -471,20 +471,6 @@ fn a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7() {
     }
 }
 
-/// Unaided search seed 0xf43e5: an operator forged the newest staged file, a power loss later let
-/// the judge take staging as whole again, and bucket rollbacks took the replica's copy of that
-/// key. The next boot still read the replica's old copy (a lagging listing) and refused the
-/// divergence, as it must over a forged staged file; the judge, reading the replica as it stood
-/// after the rollback, saw no divergence and called the refusal causeless. A staged copy the
-/// engine never put is the operator's for as long as it is staged.
-#[test]
-fn a_refusal_over_a_forged_staged_copy_is_expected_after_a_rollback_seed_0xf43e5() {
-    let seed = Seed::new(0xf43e5);
-    if let Err(failure) = run(seed, 300, &Weights::mixed(seed)) {
-        panic!("{failure}");
-    }
-}
-
 /// Seed 0x82's recorded history: maintenance wrote a level-9 snapshot while the replica's
 /// listings lagged, the next listing did not show it, and maintenance wrote it again under the
 /// same key with other bytes (first found as mixed seeds 0x171 and 0x5c, whose draws later

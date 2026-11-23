@@ -1102,22 +1102,6 @@ impl World {
         Ok(None)
     }
 
-    /// Whether staging holds `key` under bytes the engine never put there: a
-    /// copy an operation rewrote or put back, which stays the operator's for as
-    /// long as it is staged, whatever the replica holds now.
-    ///
-    /// # Errors
-    /// The store's error other than a missing key.
-    pub fn staged_not_the_engines(&self, key: FileKey) -> Result<bool, StoreError> {
-        match read_all(&self.staging_raw, &key) {
-            Ok(bytes) => Ok(!self
-                .engine_puts(0)
-                .contains(&(key, crate::store::content_digest(&bytes)))),
-            Err(StoreError::NotFound { .. }) => Ok(false),
-            Err(other) => Err(other),
-        }
-    }
-
     /// Every (key, digest) the staging recorder took a put of since event `since`.
     fn engine_puts(&self, since: usize) -> BTreeSet<(FileKey, u64)> {
         self.staging_recorder

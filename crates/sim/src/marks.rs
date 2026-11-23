@@ -196,7 +196,8 @@ classes! {
     MetaTruncateNewest = "Meta.TruncateNewest", Undrawn;
     MetaStripNewestOrigin = "Meta.StripNewestOrigin", Undrawn;
     MetaDeleteAll = "Meta.DeleteAll", Once;
-    MetaForgeNewest = "Meta.ForgeNewest", Once;
+    // Undrawn: forged files are out of scope (docs/decisions.md D131).
+    MetaForgeNewest = "Meta.ForgeNewest", Undrawn;
     // Undrawn: a copy saved while down changes nothing; the generator saves while running.
     DamageSave = "StagingDamage.Save", Undrawn;
     DamageRestore = "StagingDamage.Restore", Once;
@@ -206,7 +207,8 @@ classes! {
     DamageStripNewestOrigin = "StagingDamage.StripNewestOrigin", Once;
     // Undrawn: EnvFault.WipeStaging is the drawn form of this.
     DamageDeleteAll = "StagingDamage.DeleteAll", Undrawn;
-    DamageForgeNewest = "StagingDamage.ForgeNewest", Once;
+    // Undrawn: forged files are out of scope (docs/decisions.md D131).
+    DamageForgeNewest = "StagingDamage.ForgeNewest", Undrawn;
     // Undrawn: SecondWriter is the drawn form of these two.
     RemotePutUnrecognized = "Remote.PutUnrecognized", Undrawn;
     RemoteRemoveUnrecognized = "Remote.RemoveUnrecognized", Undrawn;
