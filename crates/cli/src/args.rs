@@ -1,11 +1,14 @@
 //! Argument parsing: pure, no I/O, no process exit.
 //!
-//! One table, [`FLAGS`], names every flag with the commands that take it, its
-//! value placeholder, whether it is required and its help line. The parser
-//! reads the table and the help text is generated from it, so neither can
-//! accept or document a flag the other does not know. A flag takes its value
-//! as the next argument (`--replica dir`); a value that starts with `--` is
-//! read as a missing value, so a path like that is written `./--name`.
+//! `restore` reads Go's flag grammar (`restore.rs`, `lsr-sidecar`'s `goflag`), and its
+//! flags are listed for the help text in [`RESTORE_FLAGS`]. `lsr`'s own commands
+//! (`verify`, `files`, `take-over`, `config check`) are read by clap, built from
+//! the [`Command`](clap::Command)s below; the help text lists their flags from the
+//! same definitions, so it cannot document a flag the parser does not know. A
+//! flag takes its value as the next argument (`--replica dir`); a value that
+//! starts with `--` is read as a missing value, so a path like that is written
+//! `./--name`. Clap's own help, version and error output are off: `main` prints
+//! `lsr`'s help and one-line errors.
 //!
 //! `--replica` is a directory or an `s3://` URL, read by the daemon's own parser
 //! (`lsr_config::S3Url`), so `lsr restore` accepts every URL a `replica: url:`
@@ -18,6 +21,9 @@
 //! two-argument form `lsr replicate DB_PATH REPLICA_URL` included.
 
 use std::path::PathBuf;
+
+use clap::error::{ContextKind, ErrorKind};
+use clap::{Arg, ArgAction, ArgMatches};
 
 use lsr_config::{ReplicaProblem, S3Overrides, S3Url, s3_config};
 use lsr_core::Depth;
@@ -78,206 +84,147 @@ impl CommandName {
     }
 }
 
-/// One flag of the command line.
+/// One flag of a command's help text.
 #[derive(Debug)]
-pub struct FlagSpec {
+pub struct HelpFlag {
     /// The flag with its dashes.
-    pub name: &'static str,
+    pub name: String,
     /// The placeholder of its value, or `None` for a switch.
-    pub value: Option<&'static str>,
+    pub value: Option<String>,
     /// Whether the command refuses to run without it.
     pub required: bool,
-    /// The commands that take it.
-    pub commands: &'static [CommandName],
     /// One help line.
-    pub help: &'static str,
+    pub help: String,
 }
 
-/// Every flag the parser accepts.
-pub const FLAGS: &[FlagSpec] = &[
-    FlagSpec {
+/// The flag of `restore`'s help text, as a constant row.
+struct RestoreFlag {
+    name: &'static str,
+    value: Option<&'static str>,
+    required: bool,
+    help: &'static str,
+}
+
+/// Every flag `restore` accepts, for the help text; the parser is Go's flag grammar.
+const RESTORE_FLAGS: &[RestoreFlag] = &[
+    RestoreFlag {
         name: "--replica",
         value: Some("<dir>"),
         required: true,
-        commands: &[
-            CommandName::Restore,
-            CommandName::Verify,
-            CommandName::Files,
-            CommandName::TakeOver,
-        ],
         help: "the replica: a directory that holds ltx/, or s3://<bucket>/<prefix>",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--endpoint",
         value: Some("<url>"),
         required: false,
-        commands: &[
-            CommandName::Restore,
-            CommandName::Verify,
-            CommandName::Files,
-            CommandName::TakeOver,
-        ],
         help: "s3 only: the service endpoint (http or https), for anything but AWS",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--region",
         value: Some("<name>"),
         required: false,
-        commands: &[
-            CommandName::Restore,
-            CommandName::Verify,
-            CommandName::Files,
-            CommandName::TakeOver,
-        ],
         help: "s3 only: the signing region (default us-east-1)",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--force-path-style",
         value: None,
         required: false,
-        commands: &[
-            CommandName::Restore,
-            CommandName::Verify,
-            CommandName::Files,
-            CommandName::TakeOver,
-        ],
         help: "s3 only: address the bucket as endpoint/bucket instead of bucket.endpoint",
     },
-    FlagSpec {
-        name: "--meta-dir",
-        value: Some("<dir>"),
-        required: false,
-        commands: &[CommandName::TakeOver],
-        help: "the database's meta directory when its config sets one (default .<name>-litestream beside it)",
-    },
-    FlagSpec {
+    RestoreFlag {
         name: "--output",
         value: Some("<path>"),
         required: false,
-        commands: &[CommandName::Restore],
         help: "the database to create, as Go's -o; with a DB_PATH the default is DB_PATH itself; an existing empty file is replaced, any other refused without -force",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--txid",
         value: Some("<16 hex digits>"),
         required: false,
-        commands: &[CommandName::Restore],
         help: "restore the state right after this transaction (not with --timestamp)",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--timestamp",
         value: Some("<rfc3339>"),
         required: false,
-        commands: &[CommandName::Restore],
         help: "restore the newest state created before this instant (not with --txid)",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--allow-earlier",
         value: None,
         required: false,
-        commands: &[CommandName::Restore],
         help: "With --timestamp, restore the newest state provably before the instant when the instant falls inside a compacted file, instead of refusing.",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--clear-journal-files",
         value: None,
         required: false,
-        commands: &[CommandName::Restore],
         help: "first remove a stale -wal, -shm or -journal beside the output",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--integrity-check",
         value: Some("none|quick|full"),
         required: false,
-        commands: &[CommandName::Restore],
         help: "run SQLite's quick_check or integrity_check on the result before publishing it; a failure publishes nothing (default none)",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--if-db-not-exists",
         value: None,
         required: false,
-        commands: &[CommandName::Restore],
         help: "exit 0 without restoring when something already exists at the output",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--if-replica-exists",
         value: None,
         required: false,
-        commands: &[CommandName::Restore],
         help: "exit 0 without restoring when the replica holds no LTX file (a directory with no ltx/ included, as in Go); a target a replica with files cannot meet is still refused; --dry-run ignores it, as Go's does",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "--dry-run",
         value: None,
         required: false,
-        commands: &[CommandName::Restore],
         help: "check the output and print the files a restore would apply, writing and removing nothing",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "-o",
         value: Some("<path>"),
         required: false,
-        commands: &[CommandName::Restore],
         help: "Go's spelling of --output",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "-config",
         value: Some("<file>"),
         required: false,
-        commands: &[CommandName::Restore],
         help: "with a DB_PATH, the config that names it (default $LITESTREAM_CONFIG, else /etc/litestream.yml; - reads standard input); not with a REPLICA_URL",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "-no-expand-env",
         value: None,
         required: false,
-        commands: &[CommandName::Restore],
         help: "read the config without expanding environment variables",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "-force",
         value: None,
         required: false,
-        commands: &[CommandName::Restore],
         help: "replace an existing output and remove its -wal, -shm and -journal; the old file stays until the restored one is complete and checked, then is replaced in one rename",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "-parallelism",
         value: Some("<n>"),
         required: false,
-        commands: &[CommandName::Restore],
         help: "accepted with a warning and no effect, as Go",
     },
-    FlagSpec {
+    RestoreFlag {
         name: "-follow-interval",
         value: Some("<duration>"),
         required: false,
-        commands: &[CommandName::Restore],
         help: "accepted for Go's -f, which is not built yet (#177); -f itself is refused",
     },
-    FlagSpec {
-        name: "--depth",
-        value: Some("names|contents"),
-        required: false,
-        commands: &[CommandName::Verify],
-        help: "names lists only; contents (the default) reads and decodes every file",
-    },
-    FlagSpec {
-        name: "--created-at",
-        value: None,
-        required: false,
-        commands: &[CommandName::Files],
-        help: "s3 only: read each file's stored time with one HEAD per file (default: the listed times, no HEADs)",
-    },
-    FlagSpec {
+    RestoreFlag {
         name: "--json",
         value: None,
         required: false,
-        commands: &[
-            CommandName::Restore,
-            CommandName::Verify,
-            CommandName::Files,
-        ],
         help: "print one JSON object instead of text",
     },
 ];
@@ -291,10 +238,6 @@ pub enum Replica {
     /// shared files at run time.
     S3(Box<S3Config>),
 }
-
-/// The flags that only mean something for an S3 replica.
-#[cfg(test)]
-const S3_ONLY_FLAGS: [&str; 3] = ["--endpoint", "--region", "--force-path-style"];
 
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -333,24 +276,6 @@ pub const CONFIG_CHECK_USAGE: &str = "lsr config check <file>";
 
 /// One line for the help text.
 pub const CONFIG_CHECK_SUMMARY: &str = "read a Go litestream.yml as the daemon would and print every refusal and warning a start would; writes nothing and touches no bucket, but scans a dir entry as a start does";
-
-/// `config check <file>`.
-fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
-    match rest {
-        [check, file] if check == "check" && !is_help(file) => {
-            Ok(Command::ConfigCheck(PathBuf::from(file)))
-        }
-        [check, ..] if check == "check" && rest.iter().any(|a| is_help(a)) => Ok(Command::Help),
-        [check, ..] if check == "check" => Err(UsageError::ConfigCheckArguments {
-            found: rest.len().saturating_sub(1),
-        }),
-        [] => Err(UsageError::NoCommand),
-        [other, ..] if is_help(other) => Ok(Command::Help),
-        [other, ..] => Err(UsageError::UnknownCommand {
-            name: format!("config {other}"),
-        }),
-    }
-}
 
 /// `lsr take-over`.
 #[derive(Debug, PartialEq, Eq)]
@@ -524,95 +449,214 @@ pub enum UsageError {
     },
 }
 
-/// What the scan of one subcommand's arguments found.
-enum Scan {
-    Help,
-    Flags(Vec<(&'static str, Option<String>)>),
-}
-
 fn is_help(arg: &str) -> bool {
     matches!(arg, "-h" | "--help")
 }
 
-fn scan(command: CommandName, rest: &[String]) -> Result<Scan, UsageError> {
-    let mut seen: Vec<(&'static str, Option<String>)> = Vec::new();
-    let mut args = rest.iter();
-    while let Some(arg) = args.next() {
-        if is_help(arg) {
-            return Ok(Scan::Help);
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            return Err(UsageError::UnexpectedArgument {
-                argument: arg.clone(),
-            });
-        }
-        let spec = FLAGS
-            .iter()
-            .find(|spec| spec.name == arg && spec.commands.contains(&command))
-            .ok_or_else(|| UsageError::UnknownFlag {
-                command: command.word(),
-                flag: arg.clone(),
-            })?;
-        if seen.iter().any(|(name, _)| *name == spec.name) {
-            return Err(UsageError::DuplicateFlag { flag: spec.name });
-        }
-        let value = match spec.value {
-            None => None,
-            Some(_) => Some(
-                args.next()
-                    .filter(|value| !value.starts_with("--"))
-                    .ok_or(UsageError::MissingValue { flag: spec.name })?
-                    .clone(),
-            ),
-        };
-        seen.push((spec.name, value));
+/// A flag's value is the next argument, unless that is another `--flag`.
+fn flag_value(raw: &str) -> Result<String, String> {
+    if raw.starts_with("--") {
+        Err("a flag, not a value".to_owned())
+    } else {
+        Ok(raw.to_owned())
     }
-    Ok(Scan::Flags(seen))
 }
 
-/// The flags of one command line, looked up by name.
-struct Flags {
-    command: CommandName,
-    seen: Vec<(&'static str, Option<String>)>,
+fn value_flag(name: &'static str, value: &'static str, help: &'static str) -> Arg {
+    Arg::new(name)
+        .long(name)
+        .value_name(value)
+        .help(help)
+        .num_args(1)
+        .allow_hyphen_values(true)
+        .value_parser(flag_value)
 }
 
-impl Flags {
-    fn value(&self, flag: &str) -> Option<&str> {
-        self.seen
-            .iter()
-            .find(|(name, _)| *name == flag)
-            .and_then(|(_, value)| value.as_deref())
-    }
+fn switch(name: &'static str, help: &'static str) -> Arg {
+    Arg::new(name)
+        .long(name)
+        .help(help)
+        .action(ArgAction::SetTrue)
+}
 
-    fn has(&self, flag: &str) -> bool {
-        self.seen.iter().any(|(name, _)| *name == flag)
-    }
-
-    fn require(&self, flag: &'static str) -> Result<&str, UsageError> {
-        self.value(flag).ok_or(UsageError::MissingFlag {
-            command: self.command.word(),
-            flag,
-        })
-    }
-
-    fn replica(&self) -> Result<Replica, UsageError> {
-        let value = self.require("--replica")?;
-        replica_of(
-            value,
-            self.value("--endpoint").map(str::to_owned),
-            self.value("--region").map(str::to_owned),
-            self.has("--force-path-style"),
+/// The flags every command that names a replica takes.
+fn replica_flags(command: clap::Command) -> clap::Command {
+    command
+        .arg(
+            value_flag(
+                "replica",
+                "<dir>",
+                "the replica: a directory that holds ltx/, or s3://<bucket>/<prefix>",
+            )
+            .required(true),
         )
-    }
+        .arg(value_flag(
+            "endpoint",
+            "<url>",
+            "s3 only: the service endpoint (http or https), for anything but AWS",
+        ))
+        .arg(value_flag(
+            "region",
+            "<name>",
+            "s3 only: the signing region (default us-east-1)",
+        ))
+        .arg(switch(
+            "force-path-style",
+            "s3 only: address the bucket as endpoint/bucket instead of bucket.endpoint",
+        ))
+}
 
-    fn depth(&self) -> Result<Depth, UsageError> {
-        match self.value("--depth") {
-            None | Some("contents") => Ok(Depth::Contents),
-            Some("names") => Ok(Depth::Names),
-            Some(other) => Err(UsageError::BadDepth {
-                value: other.to_owned(),
-            }),
+/// The clap definition of one of `lsr`'s own commands; `None` for `restore`, which reads
+/// Go's grammar.
+fn own_command(command: CommandName) -> Option<clap::Command> {
+    let base = clap::Command::new(command.word())
+        .no_binary_name(true)
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .disable_help_subcommand(true);
+    match command {
+        CommandName::Restore => None,
+        CommandName::Verify => Some(
+            replica_flags(base)
+                .arg(value_flag(
+                    "depth",
+                    "names|contents",
+                    "names lists only; contents (the default) reads and decodes every file",
+                ))
+                .arg(switch("json", "print one JSON object instead of text")),
+        ),
+        CommandName::Files => Some(
+            replica_flags(base)
+                .arg(switch(
+                    "created-at",
+                    "s3 only: read each file's stored time with one HEAD per file (default: the listed times, no HEADs)",
+                ))
+                .arg(switch("json", "print one JSON object instead of text")),
+        ),
+        CommandName::TakeOver => Some(replica_flags(base).arg(value_flag(
+            "meta-dir",
+            "<dir>",
+            "the database's meta directory when its config sets one (default .<name>-litestream beside it)",
+        ))),
+    }
+}
+
+/// The flags of `command` for the help text, in the order they are listed.
+pub fn help_flags(command: CommandName) -> Vec<HelpFlag> {
+    let Some(own) = own_command(command) else {
+        return RESTORE_FLAGS
+            .iter()
+            .map(|flag| HelpFlag {
+                name: flag.name.to_owned(),
+                value: flag.value.map(str::to_owned),
+                required: flag.required,
+                help: flag.help.to_owned(),
+            })
+            .collect();
+    };
+    own.get_arguments()
+        .map(|arg| HelpFlag {
+            name: format!("--{}", arg.get_id()),
+            value: arg
+                .get_value_names()
+                .and_then(<[_]>::first)
+                .map(ToString::to_string),
+            required: arg.is_required_set(),
+            help: arg.get_help().map(ToString::to_string).unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// The names of `lsr`'s own flags, to give a clap error the `&'static str` a [`UsageError`] holds.
+const OWN_FLAGS: [&str; 8] = [
+    "--replica",
+    "--endpoint",
+    "--region",
+    "--force-path-style",
+    "--meta-dir",
+    "--depth",
+    "--created-at",
+    "--json",
+];
+
+/// The `UsageError` for a clap refusal, by the kind of refusal and the argument it names.
+fn usage_error(command: CommandName, error: &clap::Error) -> UsageError {
+    let arg = error
+        .get(ContextKind::InvalidArg)
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let flag = OWN_FLAGS
+        .into_iter()
+        .find(|known| arg.split_whitespace().next() == Some(known));
+    match (error.kind(), flag) {
+        (ErrorKind::ArgumentConflict, Some(flag)) => UsageError::DuplicateFlag { flag },
+        (
+            ErrorKind::InvalidValue | ErrorKind::ValueValidation | ErrorKind::WrongNumberOfValues,
+            Some(flag),
+        ) => UsageError::MissingValue { flag },
+        (ErrorKind::MissingRequiredArgument, Some(flag)) => UsageError::MissingFlag {
+            command: command.word(),
+            flag,
+        },
+        (ErrorKind::UnknownArgument, _) if arg.starts_with('-') && arg != "-" => {
+            UsageError::UnknownFlag {
+                command: command.word(),
+                flag: arg,
+            }
         }
+        _ => UsageError::UnexpectedArgument { argument: arg },
+    }
+}
+
+/// Reads the arguments after a command's word, or `None` when help was asked for first.
+/// A `-h` or `--help` in flag position (not another flag's value) wins over what follows
+/// it, and over a missing required flag, but not over a refusal before it.
+fn read_own(
+    command: CommandName,
+    cli: clap::Command,
+    rest: &[String],
+) -> Result<Option<ArgMatches>, UsageError> {
+    let value_flags: Vec<String> = cli
+        .get_arguments()
+        .filter(|arg| arg.get_action().takes_values())
+        .map(|arg| format!("--{}", arg.get_id()))
+        .collect();
+    let help_at = rest.iter().enumerate().position(|(at, arg)| {
+        is_help(arg)
+            && !at
+                .checked_sub(1)
+                .is_some_and(|b| rest.get(b).is_some_and(|p| value_flags.contains(p)))
+    });
+    let (read, cli) = match help_at {
+        Some(at) => (
+            rest.get(..at).unwrap_or_default(),
+            cli.mut_args(|arg| arg.required(false)),
+        ),
+        None => (rest, cli),
+    };
+    let matches = cli
+        .try_get_matches_from(read)
+        .map_err(|error| usage_error(command, &error))?;
+    Ok(help_at.is_none().then_some(matches))
+}
+
+fn replica_of_matches(matches: &ArgMatches) -> Result<Replica, UsageError> {
+    let value = |name: &str| matches.get_one::<String>(name).cloned();
+    replica_of(
+        &value("replica").unwrap_or_default(),
+        value("endpoint"),
+        value("region"),
+        matches.get_flag("force-path-style"),
+    )
+}
+
+fn depth_of(matches: &ArgMatches) -> Result<Depth, UsageError> {
+    match matches.get_one::<String>("depth").map(String::as_str) {
+        None | Some("contents") => Ok(Depth::Contents),
+        Some("names") => Ok(Depth::Names),
+        Some(other) => Err(UsageError::BadDepth {
+            value: other.to_owned(),
+        }),
     }
 }
 
@@ -686,79 +730,100 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     let Some(first) = args.first() else {
         return Err(UsageError::NoCommand);
     };
-    let command = match first.as_str() {
-        "-h" | "--help" | "help" => return Ok(Command::Help),
-        "-V" | "--version" => return Ok(Command::Version),
-        "restore" => {
-            return match restore::parse(args.get(1..).unwrap_or_default())? {
-                Restore::Run(args) => Ok(Command::Restore(args)),
-                Restore::Help => Ok(Command::Help),
-            };
-        }
-        "databases" => {
-            return match inspect::parse_databases(args.get(1..).unwrap_or_default())? {
-                Inspect::Run(args) => Ok(Command::Databases(args)),
-                Inspect::Help => Ok(Command::Help),
-            };
-        }
-        word @ ("ltx" | "wal") => {
-            let as_wal = word == "wal";
-            return match inspect::parse_ltx(args.get(1..).unwrap_or_default(), as_wal)? {
-                Inspect::Run(args) => Ok(Command::Ltx(args)),
-                Inspect::Help => Ok(Command::Help),
-            };
-        }
-        "verify" => CommandName::Verify,
-        "files" => CommandName::Files,
-        "take-over" => return parse_take_over(args.get(1..).unwrap_or_default()),
-        "replicate" => {
-            return Ok(Command::Daemon(args.get(1..).unwrap_or_default().to_vec()));
-        }
-        "config" => return parse_config(args.get(1..).unwrap_or_default()),
-        other => {
-            return Err(UsageError::UnknownCommand {
-                name: other.to_owned(),
-            });
-        }
-    };
     let rest = args.get(1..).unwrap_or_default();
-    let flags = match scan(command, rest)? {
-        Scan::Help => return Ok(Command::Help),
-        Scan::Flags(seen) => Flags { command, seen },
+    match first.as_str() {
+        "-h" | "--help" | "help" => Ok(Command::Help),
+        "-V" | "--version" => Ok(Command::Version),
+        "restore" => match restore::parse(rest)? {
+            Restore::Run(args) => Ok(Command::Restore(args)),
+            Restore::Help => Ok(Command::Help),
+        },
+        "databases" => match inspect::parse_databases(rest)? {
+            Inspect::Run(args) => Ok(Command::Databases(args)),
+            Inspect::Help => Ok(Command::Help),
+        },
+        word @ ("ltx" | "wal") => match inspect::parse_ltx(rest, word == "wal")? {
+            Inspect::Run(args) => Ok(Command::Ltx(args)),
+            Inspect::Help => Ok(Command::Help),
+        },
+        "verify" => parse_own(CommandName::Verify, rest),
+        "files" => parse_own(CommandName::Files, rest),
+        "take-over" => parse_own(CommandName::TakeOver, rest),
+        "replicate" => Ok(Command::Daemon(rest.to_vec())),
+        "config" => parse_config(rest),
+        other => Err(UsageError::UnknownCommand {
+            name: other.to_owned(),
+        }),
+    }
+}
+
+/// `verify`, `files` and `take-over <db>`: read by clap. `take-over` takes the database path
+/// first, then its flags.
+fn parse_own(command: CommandName, rest: &[String]) -> Result<Command, UsageError> {
+    let (database, flags) = match (command, rest.split_first()) {
+        (CommandName::TakeOver, Some((first, _))) if is_help(first) => return Ok(Command::Help),
+        (CommandName::TakeOver, Some((first, flags))) if !first.starts_with('-') => {
+            (PathBuf::from(first), flags)
+        }
+        (CommandName::TakeOver, _) => return Err(UsageError::MissingDatabase),
+        (_, _) => (PathBuf::new(), rest),
     };
+    let Some(cli) = own_command(command) else {
+        return Err(UsageError::NoCommand);
+    };
+    let Some(matches) = read_own(command, cli, flags)? else {
+        return Ok(Command::Help);
+    };
+    let json = matches.try_get_one::<bool>("json").ok().flatten().copied() == Some(true);
     Ok(match command {
-        CommandName::Restore => return Err(UsageError::NoCommand),
         CommandName::Verify => Command::Verify(VerifyArgs {
-            replica: flags.replica()?,
-            depth: flags.depth()?,
-            json: flags.has("--json"),
+            replica: replica_of_matches(&matches)?,
+            depth: depth_of(&matches)?,
+            json,
         }),
         CommandName::Files => Command::Files(FilesArgs {
-            replica: flags.replica()?,
-            json: flags.has("--json"),
-            resolved: flags.has("--created-at"),
+            replica: replica_of_matches(&matches)?,
+            json,
+            resolved: matches.get_flag("created-at"),
         }),
-        CommandName::TakeOver => return Err(UsageError::MissingDatabase),
+        CommandName::TakeOver => Command::TakeOver(TakeOverArgs {
+            database,
+            replica: replica_of_matches(&matches)?,
+            meta_dir: matches.get_one::<String>("meta-dir").map(PathBuf::from),
+        }),
+        CommandName::Restore => return Err(UsageError::NoCommand),
     })
 }
 
-/// `take-over <db> [flags]`: the database path, then the flags.
-fn parse_take_over(rest: &[String]) -> Result<Command, UsageError> {
-    let command = CommandName::TakeOver;
-    let (database, flags) = match rest.split_first() {
-        Some((first, _)) if is_help(first) => return Ok(Command::Help),
-        Some((first, flags)) if !first.starts_with('-') => (PathBuf::from(first), flags),
-        Some(_) | None => return Err(UsageError::MissingDatabase),
-    };
-    let flags = match scan(command, flags)? {
-        Scan::Help => return Ok(Command::Help),
-        Scan::Flags(seen) => Flags { command, seen },
-    };
-    Ok(Command::TakeOver(TakeOverArgs {
-        database,
-        replica: flags.replica()?,
-        meta_dir: flags.value("--meta-dir").map(PathBuf::from),
-    }))
+/// `config check <file>`.
+fn parse_config(rest: &[String]) -> Result<Command, UsageError> {
+    let check = clap::Command::new("check")
+        .no_binary_name(true)
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .disable_help_subcommand(true)
+        .arg(Arg::new("file").required(true));
+    match rest.split_first() {
+        None => Err(UsageError::NoCommand),
+        Some((word, _)) if is_help(word) => Ok(Command::Help),
+        Some((word, args)) if word == "check" => {
+            if args.iter().any(|arg| is_help(arg)) {
+                return Ok(Command::Help);
+            }
+            let found = args.len();
+            let matches = check
+                .try_get_matches_from(args)
+                .map_err(|_refused| UsageError::ConfigCheckArguments { found })?;
+            let file = matches
+                .get_one::<String>("file")
+                .cloned()
+                .unwrap_or_default();
+            Ok(Command::ConfigCheck(PathBuf::from(file)))
+        }
+        Some((other, _)) => Err(UsageError::UnknownCommand {
+            name: format!("config {other}"),
+        }),
+    }
 }
 
 #[cfg(test)]
