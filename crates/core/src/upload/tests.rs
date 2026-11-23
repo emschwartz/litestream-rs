@@ -1759,3 +1759,43 @@ proptest! {
         prop_assert_eq!(first_past(listed.map(txid), confirmed.map(txid)), first.map(txid));
     }
 }
+
+/// The probe's read bounds are its real maxima, reached and not passed. Every level 1 to 8
+/// holds a file with a level-below file two transactions above it, so a listing implies two
+/// starts at each of them, and a snapshot puts the listing's end past every start: each
+/// transaction past it names [`crate::NAMED_KEYS_MAX`] keys. A walk through a staged range
+/// that reaches the cap, with every key missing, then makes [`crate::WALK_READS_MAX`] reads:
+/// all keys inside the gap window, the level-0 and snapshot keys past it.
+#[test]
+fn the_worst_walk_reads_exactly_its_bounds() {
+    let remote = Probe::default();
+    for raw in 1..=8_u8 {
+        let level = Level::new(raw).unwrap();
+        let end = 2 * u64::from(8 - raw) + 1;
+        put_bytes(
+            &remote.inner,
+            FileKey::new(level, TxidRange::single(txid(end))),
+            b"x",
+        );
+    }
+    put_bytes(&remote.inner, key(17), b"x");
+    put_bytes(&remote.inner, FileKey::snapshot(txid(20)), b"x");
+    let starts = starts_of(&remote.inner);
+    let first = txid(21);
+    assert_eq!(
+        crate::probe::reads_per_transaction(first, &starts),
+        crate::NAMED_KEYS_MAX
+    );
+    let through = txid(20 + u64::from(PROBE_CAP));
+    let reads = remote.log().reads;
+    let found = block_on(crate::probe::walk(
+        &remote,
+        Some(first),
+        Some(through),
+        &starts,
+        false,
+    ));
+    assert_eq!(found.unwrap(), Vec::<FileKey>::new());
+    let walked = u64::from(remote.log().reads - reads);
+    assert_eq!(walked, crate::WALK_READS_MAX);
+}
