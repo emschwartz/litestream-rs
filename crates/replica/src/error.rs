@@ -2,7 +2,7 @@
 
 use std::io;
 
-use lsr_local::CreateError;
+use crate::local::CreateError;
 
 /// Why [`crate::Replicator::start`] returned no replicator. Nothing is pinned or running when
 /// it returns one of these.

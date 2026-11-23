@@ -13,8 +13,8 @@ workspace = true
 [dependencies]
 lsr-config.workspace = true
 lsr-core = { workspace = true, features = ["testing"] }
-lsr-local.workspace = true
 lsr-ltx.workspace = true
+lsr-replica.workspace = true
 lsr-sqlite.workspace = true
 lsr-store-fs.workspace = true
 lsr-store-s3 = { workspace = true, features = ["testing"] }
