@@ -172,7 +172,7 @@ fn a_second_signal_cuts_the_drain() {
 }
 
 /// `-once`: every database synced and uploaded, then exit. `-once -force-snapshot` ends each
-/// with one level-9 file of the whole database (docs/decisions.md D164). `-enforce-retention`
+/// with one level-9 file of the whole database (docs/decisions.md D167). `-enforce-retention`
 /// is refused (no one-off retention pass yet).
 #[test]
 fn once_replicates_everything_committed_and_exits() {

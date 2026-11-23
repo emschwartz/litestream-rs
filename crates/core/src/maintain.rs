@@ -61,8 +61,9 @@ mod state;
 use lsr_ltx::{TRAILER_LEN, Timestamp, Txid};
 use thiserror::Error;
 
-use crate::compact::{CompactError, Compacted, CompactionInputs, MAX_INPUTS, compact};
+use crate::compact::{CompactError, Compacted, CompactionInputs, MAX_INPUTS, compact_in};
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
+use crate::fault::role::Role;
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
@@ -537,7 +538,6 @@ fn plan_level(
     {
         return Ok(Step::Wait(next));
     }
-    mark!(Maint1);
     let run = contiguous_run(above);
     Ok(
         match CompactionInputs::new(run)
@@ -681,7 +681,7 @@ pub enum Outcome {
 /// before (an earlier run's output that retention may already count as
 /// cover): an output key a read finds taken before the write is not written
 /// over, and the job is planned again from a fresh listing.
-pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
+pub(crate) async fn run_compact<L: Role, R: Role>(
     job: &CompactJob,
     local: &L,
     replica: &R,
@@ -695,7 +695,7 @@ pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
     let result = if job.level().get() == 1 {
         compact_level_one(job, local, replica).await
     } else {
-        compact(replica, replica, job.inputs(), job.level()).await
+        compact_in(replica, replica, job.inputs(), job.level()).await
     };
     match result {
         Ok(done) => Outcome::Compacted {
@@ -704,7 +704,6 @@ pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
         },
         Err(CompactError::InputVanished { key }) => Outcome::Replan { key },
         Err(CompactError::Dest(err)) if leaves_bad_output(&err) => {
-            mark!(Maint5);
             remove_rejected(replica, job.output_key(), err).await
         }
         Err(
@@ -721,20 +720,20 @@ pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
 
 /// Level 1 from the local copies of level 0 when they are the replica's
 /// objects, from the replica otherwise.
-async fn compact_level_one<L: ObjectStore, R: ObjectStore>(
+async fn compact_level_one<L: Role, R: Role>(
     job: &CompactJob,
     local: &L,
     replica: &R,
 ) -> Result<Compacted, CompactError> {
     if !local_is_replica(local, replica, job.inputs()).await? {
-        return compact(replica, replica, job.inputs(), job.level()).await;
+        return compact_in(replica, replica, job.inputs(), job.level()).await;
     }
-    match compact(local, replica, job.inputs(), job.level()).await {
+    // The source is staging here, so a failed read is staging's error
+    // (`CompactError::Local`), by its role.
+    match compact_in(local, replica, job.inputs(), job.level()).await {
         Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
-            compact(replica, replica, job.inputs(), job.level()).await
+            compact_in(replica, replica, job.inputs(), job.level()).await
         }
-        // The source here is staging.
-        Err(CompactError::Source(err)) => Err(CompactError::Local(err)),
         other => other,
     }
 }
@@ -753,7 +752,7 @@ const _: () = assert!(matches!(TRAILER_LEN.checked_add(1), Some(17)));
 /// replica. One read of 17 bytes per input from each store; a local copy that
 /// is gone or differs answers false, and a replica object that is gone is
 /// [`CompactError::InputVanished`].
-async fn local_is_replica<L: ObjectStore, R: ObjectStore>(
+async fn local_is_replica<L: Role, R: Role>(
     local: &L,
     replica: &R,
     inputs: &CompactionInputs,
@@ -766,7 +765,7 @@ async fn local_is_replica<L: ObjectStore, R: ObjectStore>(
         let ours = match local.read(&info.key, at, TAIL).await {
             Ok(bytes) => bytes,
             Err(StoreError::NotFound { .. }) => return Ok(false),
-            Err(err) => return Err(CompactError::Local(err)),
+            Err(err) => return Err(L::compact_input(err)),
         };
         if ours.len() != TRAILER_LEN {
             return Ok(false);
@@ -774,10 +773,9 @@ async fn local_is_replica<L: ObjectStore, R: ObjectStore>(
         let theirs = match replica.read(&info.key, at, TAIL).await {
             Ok(bytes) => bytes,
             Err(StoreError::NotFound { .. }) => {
-                mark!(Maint2);
                 return Err(CompactError::InputVanished { key: info.key });
             }
-            Err(err) => return Err(CompactError::Source(err)),
+            Err(err) => return Err(R::compact_input(err)),
         };
         if ours != theirs {
             return Ok(false);

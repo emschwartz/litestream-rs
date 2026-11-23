@@ -52,6 +52,8 @@ mod seeded;
 #[cfg(test)]
 mod sidecar;
 #[cfg(test)]
+mod tracked_checksums;
+#[cfg(test)]
 mod upstream_test_map;
 #[cfg(test)]
 mod verify;

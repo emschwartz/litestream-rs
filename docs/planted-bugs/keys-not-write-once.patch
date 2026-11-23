@@ -1,12 +1,11 @@
 diff --git a/crates/sim/src/oracle.rs b/crates/sim/src/oracle.rs
-index 0a78e90..3877f42 100644
 --- a/crates/sim/src/oracle.rs
 +++ b/crates/sim/src/oracle.rs
-@@ -691,7 +691,6 @@ pub fn check_with(
+@@ -816,7 +816,6 @@
      ground: Ground<'_>,
  ) -> Result<Checked, Violation> {
      let cover = covers(model, recorder, ground)?;
 -    write_once(model, recorder, ground)?;
-     let inventory = block_on(Inventory::load(remote))
-         .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
-     let files = inventory.files();
+     let held = replica_files(remote);
+     let files = held.as_slice();
+     let mut out = Checked::default();

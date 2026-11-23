@@ -754,3 +754,42 @@ fn a_pending_file_with_one_page_too_many_is_refused() {
     assert!(!replica_holds(&rig, 2, &more));
     assert_eq!(restored(&rig), 2);
 }
+
+/// One read of a pending file that answers with another valid file (a lying read; the stored
+/// bytes are the engine's): the first witness pass refuses the file and the second witnesses
+/// it. Passes that disagree prove nothing, so the boot deletes nothing and retries
+/// (`LocalIo`); the next boot witnesses the stored bytes and uploads them.
+#[test]
+fn witness_passes_that_disagree_retry_the_boot() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let stored = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
+    let other = replace_staged(&rig, 3, 0xEE);
+    put_l0(&rig.staging.inner, 3, &stored);
+    // The boot reads the newest staged file once before it witnesses, so the second read
+    // from its start is the first witness pass's.
+    rig.staging.other_bytes_on_read(key, 2, other);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert!(
+        matches!(
+            event(&boot),
+            Some(Event::Retrying {
+                fault: Fault::LocalIo,
+                ..
+            })
+        ),
+        "{boot:?}"
+    );
+    assert_eq!(
+        rig.staging.reads_of(&key),
+        3,
+        "the boot ran two witness passes"
+    );
+    assert_eq!(staged(&rig), vec![2, 3], "the boot deleted nothing");
+    let seen = rig.settle(&mut actor, T0 + 1_002);
+    no_stop(&seen);
+    assert!(replica_holds(&rig, 3, &stored));
+}

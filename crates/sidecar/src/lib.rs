@@ -18,7 +18,7 @@
 //! `-once` starts every database and drains it at once: everything committed is
 //! synced and uploaded, as Go's `runOnce` syncs the database and then the replica.
 //! With `-force-snapshot` each drain then ends with one level-9 file of the whole
-//! database (`Replicator::request_final_snapshot`, docs/decisions.md D164); a database
+//! database (`Replicator::request_final_snapshot`, docs/decisions.md D167); a database
 //! whose snapshot was not written ends the run unclean.
 //!
 //! What this build refuses rather than ignores, since ignoring would change what
@@ -59,7 +59,7 @@ pub use daemon::{End, Finished};
 pub use error::SidecarError;
 pub use exec::{ChildEnd, During, ExecCommand, ExecError};
 pub use flags::{Parsed, UsageError};
-pub use http::{AddrError, MAX_CONNECTIONS, MAX_REQUEST};
+pub use http::{AddrError, MAX_CONNECTIONS, MAX_REQUEST, PPROF_NOT_SERVED};
 pub use json::string as json_string;
 
 use crate::daemon::Daemon;

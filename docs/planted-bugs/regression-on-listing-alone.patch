@@ -1,7 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 559c0a88..1f310702 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2000,8 +2000,7 @@
+@@ -2004,8 +2004,7 @@ impl Actor {
              return None;
          };
          match remote.read(&key, 0, ReadLen::or_chunk(1)).await {
@@ -10,4 +11,4 @@ diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 +            Ok(_) | Err(StoreError::NotFound { .. }) => {
                  Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
              }
-             Err(err) => Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now)),
+             Err(err) => Some(self.fault(Task::Maintenance, R::fault(&err), now)),

@@ -1,5 +1,5 @@
 //! The snapshot a drain ends with on request: Go's `replicate -once -force-snapshot`
-//! (`cmd/litestream/replicate.go:510-516`, `db.go:3102`), docs/decisions.md D164.
+//! (`cmd/litestream/replicate.go:510-516`, `db.go:3102`), docs/decisions.md D167.
 //!
 //! Go syncs, uploads, then writes the whole database as one level-9 file `1..position`, outside
 //! the snapshot interval and whatever the newest snapshot holds. Here a drain asked for it
@@ -23,7 +23,7 @@ use crate::layout::FileInfo;
 use crate::publish::Why;
 use crate::snapshot::write_snapshot;
 use crate::source::{Checkpointer, PageSource, WalSource};
-use crate::store::ObjectStore;
+use crate::fault::role::Role;
 use lsr_ltx::Timestamp;
 
 /// Steps that end without a proof before the snapshot is given up: a checkpoint by another
@@ -87,8 +87,8 @@ impl Actor {
         W: WalSource,
         P: PageSource,
         C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
+        L: Role,
+        R: Role,
     {
         let FinalSnapshot::Asked { tries } = self.kept.final_snapshot else {
             return None;
