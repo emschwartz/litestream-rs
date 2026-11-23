@@ -10,7 +10,7 @@
 //!
 //! What is here:
 //! - the replica's layout and the store contract (`layout`, `store`,
-//!   `inventory`, `resolved`);
+//!   `inventory`);
 //! - reading a replica: the restore planner and executor and the verifier
 //!   (`plan`, `restore`, `verify`);
 //! - writing one: position recovery, the sync step, the checkpoint policy

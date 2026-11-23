@@ -39,8 +39,8 @@ use lsr_core::conformance::block_on;
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, Level, MemStore,
     ObjectStore, PageLimit, PageSource, Position, PositionSource, Probes, ReadLen, SourceError,
-    Step, StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalSource, WalView, WriteLock,
-    checkpoint, recover_traced, sync_step,
+    StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalSource, WalView, WriteLock, checkpoint,
+    recover_traced, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
 use lsr_sim::{OtherProcessMode, ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite};
@@ -376,7 +376,8 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
         };
         let verdict = self.verdict(&mut wal, &view);
         let seen = format!("{verdict:?} {committed:?}");
-        let Ok(step) = Step::try_from(verdict.recovered) else {
+        let Ok(step) = crate::live_source::step_for(verdict.recovered, self.position.as_ref())
+        else {
             return format!("stop {seen}");
         };
         self.now += 10;

@@ -1001,15 +1001,15 @@ impl Actor {
         Some(self.want_takeover(task, TakeoverRecord::through(through), now))
     }
 
-    /// Lists the replica, witnesses the pending staged files against the
-    /// live WAL (`crate::witness`), reads the newest staged file left and
-    /// recovers (in that order). A failure anywhere boots again from the start.
     /// A boot step failed: the boot ends and is retried.
     fn boot_failed(&mut self, fault: Fault, now: Timestamp) -> Tick {
         mark!(Boot23);
         self.fault(Task::Sync, fault, now)
     }
 
+    /// Lists the replica, witnesses the pending staged files against the
+    /// live WAL (`crate::witness`), reads the newest staged file left and
+    /// recovers (in that order). A failure anywhere boots again from the start.
     async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
@@ -1382,7 +1382,7 @@ impl Actor {
             Ok(step) => step,
             Err(verdict) => return Ok(verdict),
         };
-        wal_barrier(&mut *env.wal, &committed)?;
+        wal_barrier(&mut *env.wal)?;
         let synced = sync_step(
             step,
             &mut reader,
@@ -1982,7 +1982,7 @@ impl Actor {
     }
 
     /// Everything this engine watched since its last maintenance listing must
-    /// be listed (`crate::watch`). One that is not is read: gone, the replica
+    /// be listed (`crate::regression_watch`). One that is not is read: gone, the replica
     /// lost files this process confirmed, and the uploader lists again (or
     /// the engine stops, as configured); found, the listing lags and nothing
     /// is decided, so the watch stands for the next listing. With nothing
@@ -2468,10 +2468,6 @@ impl BootGate {
     }
 }
 
-/// The newest staged file (or, with none staged, the replica's newest
-/// level-0 file), the replica's page size, and what recovery makes of them.
-/// A WAL whose page size is not the replica's stops here, before
-/// anything is staged.
 /// Removes the scratch files a killed process's uploads left, in staging and in the replica.
 /// A crash loop otherwise leaves one per boot, each as large as the file it was writing; at
 /// boot nothing of this engine is uploading yet. A failure is the directory's, which every
@@ -2783,7 +2779,12 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectSto
     })
 }
 
-/// Recovery at boot. When the replica holds transactions past the newest
+/// The newest staged file (or, with none staged, the replica's newest
+/// level-0 file), the replica's page size, and what recovery makes of them.
+/// A WAL whose page size is not the replica's stops here, before
+/// anything is staged.
+///
+/// When the replica holds transactions past the newest
 /// staged file (or anything, with nothing staged), its newest level-0 file is
 /// read and checked against the live WAL: a WAL that still holds its range
 /// with the same pages (`recover` continues from it) vouches for it, and the
@@ -2909,19 +2910,6 @@ async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize
     Err(Fault::RemoteCorrupt)
 }
 
-/// Why a boot's first sync is a snapshot.
-///
-/// Staged files that diverged from the replica's newest file are a snapshot
-/// whatever the WAL says: the replica holds other content under that
-/// transaction, and the next file must go above it. A staged file deleted as
-/// unreadable, or one the WAL did not vouch for (`refused`), is staged again
-/// from the WAL when recovery continues: recovery judged the newest file left
-/// against the live WAL, so the WAL holds every frame after it. A deleted
-/// file the replica already holds leaves staging behind the replica, which
-/// recovery answers with a snapshot (`BehindRemote`), so continuing never
-/// stages new content under a transaction the replica shows. When recovery
-/// cannot continue, the snapshot is named for what it replaces.
-/// The boot's recovery proved the staged position: the engine continues from it.
 /// The course a boot takes from where recovery left it, the snapshot cause the
 /// boot found, and an operator's request made before it.
 fn boot_course(
@@ -2948,11 +2936,24 @@ fn boot_course(
     }
 }
 
+/// The boot's recovery proved the staged position: the engine continues from it.
 fn boot_continues(position: Position) -> Result<Position, SnapshotCause> {
     mark!(Boot3);
     Ok(position)
 }
 
+/// Why a boot's first sync is a snapshot.
+///
+/// Staged files that diverged from the replica's newest file are a snapshot
+/// whatever the WAL says: the replica holds other content under that
+/// transaction, and the next file must go above it. A staged file deleted as
+/// unreadable, or one the WAL did not vouch for (`refused`), is staged again
+/// from the WAL when recovery continues: recovery judged the newest file left
+/// against the live WAL, so the WAL holds every frame after it. A deleted
+/// file the replica already holds leaves staging behind the replica, which
+/// recovery answers with a snapshot (`BehindRemote`), so continuing never
+/// stages new content under a transaction the replica shows. When recovery
+/// cannot continue, the snapshot is named for what it replaces.
 const fn boot_cause(
     dropped: Dropped,
     refused: Option<Txid>,
