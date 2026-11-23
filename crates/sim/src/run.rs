@@ -1234,6 +1234,9 @@ impl Runner {
         self.in_hold = true;
         let held = self.hold(hold, ticks);
         self.in_hold = false;
+        if self.trace {
+            self.report.trace.push("    hold ended".to_owned());
+        }
         held
     }
 

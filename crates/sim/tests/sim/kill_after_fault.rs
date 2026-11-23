@@ -58,6 +58,7 @@ fn the_law_does_not_kill_inside_a_hold_where_known_defects_are_not_counted() {
         known_wrong: false,
         // Overlapping holds: the hold runs a drawn sub-history, so faults fire inside it.
         overlap: true,
+        trace: true,
         ..lsr_sim::Opts::default()
     };
     let ops = [
@@ -82,7 +83,18 @@ fn the_law_does_not_kill_inside_a_hold_where_known_defects_are_not_counted() {
             ticks: 64,
         },
     ];
-    if let Err(failure) = lsr_sim::run::run_ops(Seed::new(1), &ops, &opts) {
-        panic!("{failure}");
-    }
+    let report = match lsr_sim::run::run_ops(Seed::new(1), &ops, &opts) {
+        Ok(report) => report,
+        Err(failure) => panic!("{failure}"),
+    };
+    let trace = report.trace.join("\n");
+    let held = trace
+        .split_once("Hold {")
+        .and_then(|(_, rest)| rest.split_once("hold ended"))
+        .map(|(inside, _)| inside)
+        .expect("the hold ran and ended");
+    assert!(
+        !held.contains("killed after a fault"),
+        "the law killed inside the hold:\n{trace}"
+    );
 }
