@@ -12,8 +12,8 @@
 //! `reqwest`. An application that already builds reqwest depends on this crate with
 //! `default-features = false, features = ["reqwest"]`, so ureq and its copy of
 //! the TLS stack stay out of its build. Either client, when the store builds
-//! it, trusts the system's certificate authorities, or Mozilla's when it has none
-//! (the `trust` module).
+//! it, trusts the system's certificate authorities (the operating system's verifier on macOS and
+//! Windows), or Mozilla's when a Linux or BSD system has none (the `trust` module).
 
 mod chain;
 mod classify;

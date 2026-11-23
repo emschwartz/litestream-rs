@@ -14,13 +14,15 @@ testing = ["dep:percent-encoding"]
 # HTTP clients, any combination: `UreqTransport` (blocking, no runtime; the
 # default and what `S3Store::new` uses) and `ReqwestTransport` (for applications that
 # already build reqwest and Tokio). The clients the store builds itself trust
-# the system's roots, or Mozilla's when it has none (the `trust` module).
+# the system's roots (the operating system's verifier on macOS and Windows), or Mozilla's
+# when a Linux or BSD system has none (the `trust` module).
 ureq = ["dep:ureq", "dep:rustls", "dep:rustls-native-certs"]
 reqwest = [
     "dep:reqwest",
     "dep:rustls",
     "rustls/ring",
     "rustls/tls12",
+    "dep:rustls-platform-verifier",
     "dep:rustls-native-certs",
     "dep:tokio",
     "dep:webpki-roots",
@@ -47,12 +49,22 @@ reqwest = { workspace = true, optional = true }
 # Root certificates from the system; for reqwest also its TLS config on ring,
 # and recognising a TLS failure inside reqwest's error chain.
 rustls = { workspace = true, optional = true, features = ["std"] }
-rustls-native-certs = { workspace = true, optional = true }
-webpki-roots = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }
 url.workspace = true
 zeroize.workspace = true
+
+# Linux and the BSDs: the system's root files through rustls-native-certs, and Mozilla's roots
+# when it finds none (ureq carries its own copy).
+[target.'cfg(all(unix, not(target_vendor = "apple")))'.dependencies]
+rustls-native-certs = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+
+# macOS and Windows: the operating system's verifier, which applies its revocation and
+# trust policy, as Go does there.
+[target.'cfg(not(all(unix, not(target_vendor = "apple"))))'.dependencies]
+ureq = { workspace = true, optional = true, features = ["platform-verifier"] }
+rustls-platform-verifier = { workspace = true, optional = true }
 
 [dev-dependencies]
 # An application runtime with worker threads, for the reqwest transport's tests.

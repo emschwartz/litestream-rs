@@ -48,9 +48,10 @@ impl std::fmt::Debug for UreqTransport {
 
 impl UreqTransport {
     /// A client whose every request fails as [`TransportError::Timeout`] after
-    /// `deadline`. It trusts the system's root certificates (`SSL_CERT_FILE` and
-    /// `SSL_CERT_DIR` when set), or Mozilla's roots when the system has none. That
-    /// set can differ from the one Go's `crypto/x509` trusts on an unusual system.
+    /// `deadline`. On Linux and the BSDs it trusts the system's root certificates
+    /// (`SSL_CERT_FILE` and `SSL_CERT_DIR` when set), or Mozilla's roots when the system
+    /// has none; that set can differ from Go's on an unusual system. On macOS and Windows
+    /// it asks the operating system's verifier.
     #[must_use]
     pub fn new(deadline: Duration) -> Self {
         let tls = ureq::tls::TlsConfig::builder()
@@ -86,13 +87,17 @@ impl UreqTransport {
 
 fn root_certs(roots: Roots) -> RootCerts {
     match roots {
+        #[cfg(all(unix, not(target_vendor = "apple")))]
         Roots::Certs(certs) => RootCerts::Specific(Arc::new(
             certs
                 .iter()
                 .map(|cert| Certificate::from_der(cert.as_ref()).to_owned())
                 .collect(),
         )),
+        #[cfg(all(unix, not(target_vendor = "apple")))]
         Roots::Mozilla => RootCerts::WebPki,
+        #[cfg(not(all(unix, not(target_vendor = "apple"))))]
+        Roots::Platform => RootCerts::PlatformVerifier,
     }
 }
 

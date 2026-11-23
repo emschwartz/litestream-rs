@@ -274,6 +274,12 @@ fn the_default_clients_read_the_process_environment() {
     let pki = Pki::new();
     let url = pki.serve();
     run_child(&url, Vars::default(), "refused");
+    // macOS and Windows ask the operating system and read neither variable.
+    let with_var = if cfg!(all(unix, not(target_vendor = "apple"))) {
+        "trusted"
+    } else {
+        "refused"
+    };
     let ca = pki.ca();
     run_child(
         &url,
@@ -281,7 +287,7 @@ fn the_default_clients_read_the_process_environment() {
             file: Some(&ca),
             dir: None,
         },
-        "trusted",
+        with_var,
     );
     run_child(
         &url,
@@ -289,12 +295,12 @@ fn the_default_clients_read_the_process_environment() {
             file: None,
             dir: Some(pki.dir.path()),
         },
-        "trusted",
+        with_var,
     );
 }
 
-/// Variables that name nothing leave no system roots, so Mozilla's are the fallback: they
-/// are not empty (a public site would verify) and still refuse the private CA.
+/// Variables that name nothing leave no system roots, so Mozilla's are the fallback (Linux
+/// and the BSDs): they still refuse the private CA.
 #[test]
 fn variables_naming_nothing_fall_back_to_mozilla_roots_and_refuse_the_private_ca() {
     let pki = Pki::new();

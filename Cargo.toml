@@ -43,8 +43,10 @@ percent-encoding = { version = "2", default-features = false, features = ["alloc
 # ureq already builds), so reqwest's own default provider, aws-lc-rs (a C build), stays out.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23.46", default-features = false }
-# The system's root certificates (Apache-2.0 OR ISC OR MIT), for the S3 store's own clients;
-# `webpki-roots` below is the fallback when the system holds none.
+# The operating system's certificate verifier, used on macOS and Windows as Go uses it there.
+rustls-platform-verifier = { version = "0.7", default-features = false }
+# The system's root certificates (Apache-2.0 OR ISC OR MIT) on Linux and the BSDs, for the S3
+# store's own clients; `webpki-roots` below is the fallback when the system holds none.
 rustls-native-certs = { version = "0.8", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
