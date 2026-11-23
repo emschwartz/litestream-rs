@@ -32,6 +32,7 @@ use lsr_ltx::{HEADER_LEN, Header, Txid, TxidRange};
 
 use super::{BootWal, NEWEST_STAGED_READ, NewestStagedFile, NewestStagedFileSource, Origin};
 use crate::fault::Fault;
+use crate::fault::role::{Replica, Role};
 use crate::layout::{FileKey, Level};
 use crate::store::{ObjectStore, StoreError};
 
@@ -50,12 +51,21 @@ impl NewestStagedFile {
         wal: Option<BootWal<'_, R>>,
         newest: Txid,
     ) -> Result<Option<Self>, Fault> {
+        Self::load_remote_in(&Replica(remote), wal, newest).await
+    }
+
+    /// [`Self::load_remote`] with each store as its role.
+    pub(crate) async fn load_remote_in<S: Role, R: Read + Seek>(
+        remote: &S,
+        wal: Option<BootWal<'_, R>>,
+        newest: Txid,
+    ) -> Result<Option<Self>, Fault> {
         let key = FileKey::new(Level::ZERO, TxidRange::single(newest));
         let len = NEWEST_STAGED_READ;
         let first = match remote.read(&key, 0, len).await {
             Ok(first) => first,
             Err(StoreError::NotFound { .. }) => return Ok(None),
-            Err(err) => return Err(Fault::from_remote(&err)),
+            Err(err) => return Err(S::fault(&err)),
         };
         let header = first
             .first_chunk::<HEADER_LEN>()
@@ -68,7 +78,7 @@ impl NewestStagedFile {
         let file = NewestStagedFileSource {
             store: remote,
             key,
-            fault: Fault::from_remote,
+            fault: S::fault,
         };
         let view = Self::checked(&file, Some(first), &header, origin, wal).await?;
         view.map(Some).ok_or(Fault::RemoteCorrupt)

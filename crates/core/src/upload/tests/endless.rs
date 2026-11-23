@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::*;
+use crate::fault::role::{Replica, Staging};
 use crate::layout::{CreatedAt, ListedTime};
 use crate::witness::witness_pending;
 
@@ -107,7 +108,7 @@ impl ObjectStore for Endless {
 #[test]
 fn the_sweep_judges_the_first_staged_file_without_listing_them_all() {
     let staging = Endless::default();
-    let swept = block_on(sweep_staged(&staging, None, None));
+    let swept = block_on(sweep_staged(&Staging(&staging), None, None));
     assert_eq!(swept, Ok(Swept::Suspect(key(1))));
     assert_eq!(staging.pages(), 1);
 }
@@ -121,7 +122,13 @@ fn the_witness_pass_refuses_from_the_first_pending_file_without_listing_them_all
     let remote = MemStore::new();
     let none: Option<crate::witness::LiveDb<'_, std::io::Cursor<Vec<u8>>, crate::source::FakeDb>> =
         None;
-    let pending = block_on(witness_pending(&staging, &remote, none, None)).unwrap();
+    let pending = block_on(witness_pending(
+        &Staging(&staging),
+        &Replica(&remote),
+        none,
+        None,
+    ))
+    .unwrap();
     assert_eq!(pending.refused, Some(txid(1)));
     assert!(pending.tokens.is_empty());
     let page = PageLimit::MAX.get();
@@ -143,7 +150,7 @@ fn a_drop_across_pages_deletes_newest_first() {
     for n in 1..=count {
         put_bytes(&staging.inner, key(n), b"x");
     }
-    block_on(drop_staged_from(&staging, txid(2))).unwrap();
+    block_on(drop_staged_from(&Staging(&staging), txid(2))).unwrap();
     let deleted: Vec<u64> = staging
         .log()
         .deletes

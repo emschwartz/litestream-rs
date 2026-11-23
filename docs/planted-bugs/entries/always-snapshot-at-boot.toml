@@ -1,4 +1,4 @@
-# The snapshot liveness oracle (crates/sim/src/liveness.rs): every boot snapshots. Every restore
+# The needless-snapshot check (crates/sim/src/needless_snapshot.rs): every boot snapshots. Every restore
 # still matches, so only an oracle that asks why a snapshot was taken can see it. lsr-core's
 # actor::tests::nothing_is_pruned_before_the_first_listing and
 # actor::tests::pages::a_boot_that_continues_checks_pages_the_last_run_recorded fail on it too.
@@ -7,7 +7,7 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = [
-    "liveness::restarts_with_nothing_damaged_never_snapshot",
+    "needless_snapshot::restarts_with_nothing_damaged_never_snapshot",
     "a_torn_staged_file_is_dropped_seed_0x25",
     "a_torn_staged_file_is_dropped_seed_0x2d",
     "a_torn_staged_file_is_dropped_seed_0x46",

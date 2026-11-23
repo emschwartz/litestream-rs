@@ -1,7 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 45dd24a1..18895abe 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2668,10 +2668,9 @@
+@@ -2686,10 +2686,9 @@ struct Listed {
  /// passes that disagree retry the boot.
  ///
  /// The listing leaves a torn newest key unconfirmed, for its staged copy to
@@ -12,10 +13,10 @@ diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 +/// be uploaded over it. When that copy is the file refused, the key stays
 +/// as the replica lists it and is confirmed: new content never takes a
 +/// transaction a listing showed, so the snapshot goes above it.
- async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
+ async fn boot_witness<W: WalSource, P: PageSource, C, L: Role, R: Role>(
      env: &mut Env<'_, W, P, C, L, R>,
      mut reader: Option<&mut WalReader<W::Wal>>,
-@@ -2694,12 +2693,16 @@
+@@ -2712,12 +2711,16 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: Role, R: Role>(
      drop_staged_from(env.staging, from).await?;
      let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
      let key = FileKey::new(Level::ZERO, TxidRange::single(from));
@@ -30,7 +31,7 @@ diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 +            PageLimit::ONE,
 +        )
          .await
-         .map_err(|err| Fault::from_remote(&err))?;
+         .map_err(|err| R::fault(&err))?;
 -    if next == Some(from) && held {
 +    if next == Some(from) && listed.files.first().is_some_and(|info| info.key == key) {
          return Ok((first, UploadState::At(Some(from))));

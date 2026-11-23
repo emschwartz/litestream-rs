@@ -48,10 +48,13 @@ fn a_commit_holding_what_was_written_passes_through() {
 }
 
 #[test]
-fn a_commit_acknowledged_short_is_deleted_and_reported() {
+fn a_create_only_commit_acknowledged_short_is_deleted_and_reported() {
     let store = SizeLiar(MemStore::new());
+    let got = write(&store, b"abcd", WriteMode::New)
+        .unwrap()
+        .map_err(Unpublished::into_error);
     assert_eq!(
-        put(&store, b"abcd"),
+        got.map(|published| published.info()),
         Err(StoreError::Corrupt {
             key: Some(key()),
             cause: CorruptCause::CommitSizeMismatch {
@@ -64,6 +67,31 @@ fn a_commit_acknowledged_short_is_deleted_and_reported() {
     assert_eq!(listed(&store.0), 0);
 }
 
+/// A replace may land on a key that held an acknowledged object: deleting what the short commit
+/// left would make the replica end a transaction early with no error (seed 0x1dc). The object is
+/// left, and the caller is told it was not removed.
+#[test]
+fn a_replace_acknowledged_short_is_reported_and_never_deleted() {
+    let store = SizeLiar(MemStore::new());
+    put(&store.0, b"abcd").unwrap();
+    assert_eq!(
+        put(&store, b"wxyz"),
+        Err(StoreError::Corrupt {
+            key: Some(key()),
+            cause: CorruptCause::CommitSizeMismatch {
+                wrote: 4,
+                stored: 3,
+                removed: false,
+            },
+        })
+    );
+    assert_eq!(
+        listed(&store.0),
+        1,
+        "a replace's short commit deleted the key"
+    );
+}
+
 #[test]
 fn a_short_commit_whose_delete_fails_says_the_object_may_remain() {
     let store = SizeLiar(MemStore::new());
@@ -74,8 +102,11 @@ fn a_short_commit_whose_delete_fails_says_the_object_may_remain() {
             kind: ErrorKind::TimedOut,
         },
     );
+    let got = write(&store, b"abcd", WriteMode::New)
+        .unwrap()
+        .map_err(Unpublished::into_error);
     assert_eq!(
-        put(&store, b"abcd"),
+        got.map(|published| published.info()),
         Err(StoreError::Corrupt {
             key: Some(key()),
             cause: CorruptCause::CommitSizeMismatch {

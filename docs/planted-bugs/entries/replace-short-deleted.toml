@@ -1,0 +1,10 @@
+# A replace acknowledged short deleted the key, which may have held an acknowledged object: the
+# replica then ended a transaction early with no error (simulator seed 0x1dc, D78).
+name = "replace-short-deleted"
+fix = "claude/replace-keeps"
+package = "lsr-core"
+tests = [
+    "publish::tests::a_replace_acknowledged_short_is_reported_and_never_deleted",
+    "retry::tests::a_replace_commit_size_mismatch_never_deletes_the_key",
+    "compact::tests::an_output_acknowledged_short_is_reported_and_left_to_the_caller",
+]

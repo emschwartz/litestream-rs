@@ -3,11 +3,15 @@
 //! **Writes.** A store's commit answers with the [`FileInfo`] it says it now
 //! holds. A store that took a short write as whole answers with fewer bytes
 //! than were sent, and the object under the key does not decode. [`Writer`]
-//! counts what was written and compares the answer with it: on a mismatch it
-//! deletes the object before it reports [`CorruptCause::CommitSizeMismatch`],
-//! so the engine never leaves a listable object it knows is short, and never
-//! takes one as published. `removed: false` (the delete failed too) tells the
-//! caller not to trust a listing of that key. A commit that holds is a
+//! counts what was written and compares the answer with it, and never takes a
+//! short object as published: it reports [`CorruptCause::CommitSizeMismatch`].
+//! After a create-only write it deletes the object first, since the key held
+//! nothing before. After a replace it deletes nothing (`removed: false`): the
+//! key may have held an acknowledged object, and a delete would end the
+//! replica a transaction early with no error, where the short object makes a
+//! restore stop with a typed one until the caller writes it again or removes
+//! it under a [`Removal`] reason. `removed: false` tells the caller not to
+//! trust a listing of that key. A commit that holds is a
 //! [`Published`], which says whether the write created the object or replaced
 //! one; [`ours`] makes the third kind, a key a read showed already holds our
 //! bytes.
@@ -167,7 +171,7 @@ impl<'s, S: ObjectStore> Writer<'s, S> {
             Err(err) => return Err(unpublished(err, key, mode)),
         };
         let keys = [key];
-        let info = settle(info, key, written, || store.delete(&keys))
+        let info = settle(info, key, written, mode, || store.delete(&keys))
             .await
             .map_err(Unpublished::Failed)?;
         let how = match mode {
@@ -274,8 +278,9 @@ pub(crate) async fn remove_staged<L: ObjectStore>(
 }
 
 /// `info` when the store holds the `written` bytes it was sent under `key`;
-/// otherwise the object is deleted through `delete` and the mismatch reported,
-/// saying whether the delete took.
+/// otherwise the mismatch is reported, saying whether the object is gone. Only
+/// a create-only write (`mode`) deletes it, through `delete`: a replace never
+/// takes a key that may have held something before it.
 ///
 /// # Errors
 /// [`StoreError::Corrupt`] with [`CorruptCause::CommitSizeMismatch`].
@@ -283,6 +288,7 @@ pub(crate) async fn settle<D, F>(
     info: FileInfo,
     key: FileKey,
     written: u64,
+    mode: WriteMode,
     delete: D,
 ) -> Result<FileInfo, StoreError>
 where
@@ -292,9 +298,16 @@ where
     if info.size == written {
         return Ok(info);
     }
-    // Safe to delete: the caller still holds what it wrote until a later
-    // verified listing, so the cost of a wrong delete is a rewrite.
-    let removed = delete().await.is_ok();
+    let removed = match mode {
+        // A create-only write found the key free: the object is ours alone, and the caller still
+        // holds what it wrote until a later verified listing, so a wrong delete costs a rewrite.
+        WriteMode::New => delete().await.is_ok(),
+        // A replace may land on a key that held an acknowledged object. Deleting what the short
+        // commit left would end the replica a transaction early with no error (seed 0x1dc); the
+        // object stays, a restore that meets it stops with a typed error, and the caller writes
+        // it again or removes it under a reason of its own (`Removal`).
+        WriteMode::Replace => false,
+    };
     Err(StoreError::Corrupt {
         key: Some(key),
         cause: CorruptCause::CommitSizeMismatch {
