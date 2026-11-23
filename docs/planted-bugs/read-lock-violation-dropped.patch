@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index b73641a1..ebbd4c2d 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -500,7 +500,6 @@ impl Actor {
+     fn noted(&mut self, verdict: Verdict) -> Recovered {
+         match verdict.event {
+             Some(RecoverEvent::ReadLockViolated { .. }) => {
+-                self.kept.read_lock_violations = self.kept.read_lock_violations.saturating_add(1);
+             }
+             // Its snapshot cause carries what it found.
+             Some(RecoverEvent::LocalRewound { .. }) | None => {}

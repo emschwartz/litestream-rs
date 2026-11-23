@@ -39,7 +39,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize};
 
 use crate::generate::{EnvFault, Target};
-use crate::oracle::{MODEL_DIVERGED, Violation};
+use crate::oracle::{MODEL_DIVERGED_AFTER_LOST_WRITEBACK, Violation};
 
 /// What a history may do with one (operation, error) pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,11 +95,13 @@ impl KnownWrong {
     #[must_use]
     pub fn matches(self, violation: &Violation) -> bool {
         match self {
-            Self::DatabaseAheadOfWal => {
-                matches!(violation, Violation::CorruptionRestored { .. })
-                    || matches!(violation, Violation::BugFault { context } if context == MODEL_DIVERGED)
+            Self::DatabaseAheadOfWal => matches!(
+                violation,
+                Violation::BugFault { context } if context == MODEL_DIVERGED_AFTER_LOST_WRITEBACK
+            ),
+            Self::HaltForgottenAtRestart => {
+                matches!(violation, Violation::HealthBlind { restarts, .. } if *restarts > 0)
             }
-            Self::HaltForgottenAtRestart => matches!(violation, Violation::HealthBlind { .. }),
         }
     }
 
