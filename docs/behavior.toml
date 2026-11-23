@@ -331,7 +331,7 @@ response = "continue"
 signal = "none"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`a_missing_journal_on_a_first_run_reports_nothing`, core::`a_restart_after_a_run_with_no_debt_reports_nothing`, cli::`a_deleted_journal_is_reported_on_the_next_start`; plant::`journal-first-run-reported`, plant::`journal-created-only-on-debt`, plant::`journal-created-only-on-debt-cli`"
+detected_by = "core::`a_missing_journal_on_a_first_run_reports_nothing`, core::`a_restart_after_a_run_with_no_debt_reports_nothing`, cli::`a_deleted_journal_is_reported_on_the_next_start`; plant::`journal-first-run-reported`, plant::`journal-created-only-on-debt`"
 notes = "Boot reads and reports, and nothing decides on it yet. The signal stands until the next boot; the first tick writes a record, so the next boot reads one (D101)"
 
 [[row]]
@@ -394,6 +394,18 @@ at_risk = "The commits the WAL lost, which no restore brings back. The latest st
 recovery = "Automatic. The notice and the kept restore point end seven days after the verdict, across restarts"
 detected_by = "core::`a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost`, core::`a_boot_with_a_debt_whose_file_kept_its_pages_comes_up_clean`, core::`a_recorded_verdict_stops_once_under_strict_responses`, core::`the_restore_point_is_kept_for_the_window_across_a_restart`, sidecar::`a_database_ahead_of_its_wal_is_a_notice_in_both_outputs`; plant::`debt-boot-skips-page-check`, plant::`ahead-verdict-not-journaled`, plant::`ahead-truncate-before-check`, plant::`ahead-check-counts-covered-pages`, plant::`ahead-restore-point-released-early`, plant::`ahead-window-restarts-at-boot`, plant::`ahead-notice-never-ends`"
 notes = "The simulator reaches it (seed 0x585, known-wrong cell `DatabaseAheadOfWal`); its world does not yet adopt the mixed state as damage, so it is caught by the simulator's model check, and the cell flips once the judge allows a restore at the kept restore point. A page above the newest staged size that no frame covers is not checked. Holding the read mark at the proven frame cannot prevent the mix (D104)"
+
+[[row]]
+table = "Boot"
+id = "BOOT-33"
+mark = "none: not yet placed: a journal row added after the marks; its branches are in core/src/actor/floor.rs"
+circumstance = "The engine confirms an upload, boots, or sees its replica roll back, with a destination named (`ActorConfig::destination`, from the replica's endpoint, bucket and prefix or directory; `core/src/actor/floor.rs`, `docs/decisions.md` D107)"
+response = "Every confirmed upload raises the confirmed floor to its transaction, anchored on the uploaded file's length, raw-byte digest and file checksum when this process holds its witness, and the end of the tick journals it. A boot reads it back for the same destination only and keeps it when its listing ends lower. A rollback seen while running withdraws the anchor and keeps the bound. Another destination's floor stays in the record, unadopted, until this destination has one; with no destination named the record's floor passes through"
+signal = "None of its own: the floor is in the journal and `Actor::floor`. A floor the journal cannot record keeps `JournalUnwritable` up"
+at_risk = "A boot does not yet act on the floor it reads: taking no id at or below it is the boot rule of issue #171, item 4, built on this. A journal lost, unwritable or unread forgets it, as every journalled fact. A changed region changes an S3 replica's default endpoint, so that boot adopts no floor"
+recovery = "Automatic"
+detected_by = "core::`a_confirmed_upload_raises_the_floor_anchored_on_the_bytes_it_put`, core::`the_floor_is_read_back_and_a_rollback_before_the_boot_does_not_lower_it`, core::`another_destination_s_floor_is_kept_in_the_record_but_not_adopted`, core::`no_destination_keeps_no_floor_and_leaves_the_record_s`, core::`a_rollback_seen_while_running_withdraws_the_anchor_and_keeps_the_bound`, core::`an_unwritable_journal_reports_a_floor_it_does_not_hold`, config::`each_replica_plan_names_its_destination_for_the_journal`; plant::`floor-never-raised`, plant::`floor-unanchored`, plant::`floor-adopted-for-any-destination`, plant::`floor-not-read-back`, plant::`floor-anchor-kept-after-regression`, plant::`floor-record-dropped-unconfigured`, plant::`replica-destination-unnamed`"
+notes = "The floor was in the journal's format, model and writer rules from the start; until this row the engine passed a recorded one through and wrote none"
 
 [[row]]
 table = "Running"

@@ -134,6 +134,17 @@ impl Witnessed {
         }
     }
 
+    /// The file's bytes as the engine journal records them: length, raw-byte digest and file
+    /// checksum.
+    #[must_use]
+    pub const fn triple(self) -> lsr_journal::Triple {
+        lsr_journal::Triple {
+            len: self.bytes.size,
+            digest: self.bytes.digest,
+            checksum: self.checksum,
+        }
+    }
+
     /// The file's header timestamp.
     #[must_use]
     pub const fn stamp(&self) -> Timestamp {
@@ -209,6 +220,10 @@ impl Witnesses {
     }
 
     /// The token for `key`, if one was taken for exactly that key.
+    pub(crate) fn ending_at(&self, txid: Txid) -> Option<Witnessed> {
+        self.by_txid.get(&txid).copied()
+    }
+
     pub(crate) fn get(&self, key: &FileKey) -> Option<&Witnessed> {
         self.by_txid
             .get(&key.range().max())

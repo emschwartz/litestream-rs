@@ -361,6 +361,7 @@ fn cfg() -> ActorConfig {
         // The tests written before the configurable responses expect a stop.
         responses: Responses::STRICT,
         max_unreplicated_age: crate::failstop::MaxUnreplicatedAge::DEFAULT,
+        destination: Some(lsr_journal::ReplicaId::of(b"test")),
     }
 }
 

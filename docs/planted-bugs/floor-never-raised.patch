@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/floor.rs b/crates/core/src/actor/floor.rs
+index db2d0714..bf2fdbef 100644
+--- a/crates/core/src/actor/floor.rs
++++ b/crates/core/src/actor/floor.rs
+@@ -26,7 +26,7 @@ impl Actor {
+         let (Some(destination), Some(bound)) = (self.kept.cfg.destination, confirmed) else {
+             return;
+         };
+-        if self.kept.floor.is_some_and(|floor| floor.bound() >= bound) {
++        if true || self.kept.floor.is_some_and(|floor| floor.bound() >= bound) {
+             return;
+         }
+         let anchor = self

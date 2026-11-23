@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index f42c833f..4fa939e8 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2641,7 +2641,7 @@ impl Actor {
+             self.kept.ahead,
+             // A floor is never dropped, another destination's included: the record keeps its
+             // own until this engine has one (`floor`).
+-            self.kept.floor.or(held.and_then(|held| held.floor)),
++            self.kept.floor,
+         );
+         if held.map(|held| (held.unproven, held.ahead, held.floor)) == Some(wanted) {
+             // Nothing the engine holds is missing from the journal: nothing lags it.

@@ -18,7 +18,11 @@
 #   bin      optional: run the unit tests of one binary target (cargo `--bin`), for a package
 #            with no library, such as lsr-cli
 #
-# Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
+# Not here, with the reason: journal-created-only-on-debt-cli (6f700f9a), retired with the confirmed
+# floor (D107): a sidecar run that replicates confirms an upload, which raises the floor, so every
+# such run writes a record whatever the "neither read nor wrote" rule does, and no end-to-end test
+# can see the rule; it is planted against core's runs with no destination (journal-created-only-on-debt).
+# a6e3e38 (level-0 retention oracle: it fixed the test, retention code is
 # unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant)
 # ab0021d (a feature: reverting it does not compile). Retired with the code they planted into:
 # staged-file-cannot-follow (bf78f6d) and staged-snapshot-of-earlier-wal (be104a7), the listing's header
@@ -1762,13 +1766,6 @@ tests = [
     "actor::tests::journal::a_failed_wal_sync_is_recorded_in_the_tick_that_met_it",
 ]
 
-[[bug]]
-name = "journal-created-only-on-debt-cli"
-fix = "6f700f9a"
-package = "lsr-cli"
-test_bin = "cli"
-tests = ["sidecar::a_deleted_journal_is_reported_on_the_next_start"]
-
 # The replicator never copies the journal's signal into its health, so the daemon shows
 # nothing when a journal is lost.
 [[bug]]
@@ -2059,3 +2056,50 @@ fix = "9f205d69"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82"]
+
+# The confirmed floor (issue #171, item 4, journal half; docs/decisions.md D107): each entry
+# undoes one rule of how the engine raises, anchors, reads back and keeps the floor.
+[[bug]]
+name = "floor-never-raised"
+fix = "claude/journal-floor"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_confirmed_upload_raises_the_floor_anchored_on_the_bytes_it_put",
+    "actor::tests::journal::an_unwritable_journal_reports_a_floor_it_does_not_hold",
+]
+
+[[bug]]
+name = "floor-unanchored"
+fix = "claude/journal-floor"
+package = "lsr-core"
+tests = ["actor::tests::journal::a_confirmed_upload_raises_the_floor_anchored_on_the_bytes_it_put"]
+
+[[bug]]
+name = "floor-adopted-for-any-destination"
+fix = "claude/journal-floor"
+package = "lsr-core"
+tests = ["actor::tests::journal::another_destination_s_floor_is_kept_in_the_record_but_not_adopted"]
+
+[[bug]]
+name = "floor-not-read-back"
+fix = "claude/journal-floor"
+package = "lsr-core"
+tests = ["actor::tests::journal::the_floor_is_read_back_and_a_rollback_before_the_boot_does_not_lower_it"]
+
+[[bug]]
+name = "floor-anchor-kept-after-regression"
+fix = "claude/journal-floor"
+package = "lsr-core"
+tests = ["actor::tests::journal::a_rollback_seen_while_running_withdraws_the_anchor_and_keeps_the_bound"]
+
+[[bug]]
+name = "floor-record-dropped-unconfigured"
+fix = "claude/journal-floor"
+package = "lsr-core"
+tests = ["actor::tests::journal::no_destination_keeps_no_floor_and_leaves_the_record_s"]
+
+[[bug]]
+name = "replica-destination-unnamed"
+fix = "claude/journal-floor"
+package = "lsr-config"
+tests = ["map::each_replica_plan_names_its_destination_for_the_journal"]

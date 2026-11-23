@@ -1,0 +1,12 @@
+diff --git a/crates/config/src/map.rs b/crates/config/src/map.rs
+index 71fb10df..b46e5c61 100644
+--- a/crates/config/src/map.rs
++++ b/crates/config/src/map.rs
+@@ -425,7 +425,6 @@ fn one(
+ ) -> Option<DbPlan> {
+     let mut config = base?.clone();
+     config.meta_dir = Some(meta?);
+-    config.destination = replica.as_ref().map(ReplicaPlan::destination);
+     Some(DbPlan {
+         entry: entry.clone(),
+         path,
