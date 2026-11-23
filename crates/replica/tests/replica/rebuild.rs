@@ -72,6 +72,18 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
         rebuilt.unreplicated_since, staged.unreplicated_since,
         "{rebuilt:?}"
     );
+    // The next rebuild panics too: the same cause, so the degraded state keeps its start.
+    let first = rebuilt.task(Task::Sync).unwrap();
+    // Short of the wait, the fresh engine has not booted, so it has not panicked again.
+    clock.advance(POLL);
+    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|h| h.counters.panics > 1);
+    assert!(parked.unwrap().is_none(), "the fresh engine booted early");
+    clock.advance(retry.saturating_mul(2));
+    let again = wait(&replicator, |h| h.counters.panics == 2);
+    let second = again.task(Task::Sync).unwrap();
+    assert_eq!(second.cause, DegradedCause::Bug, "{again:?}");
+    assert_eq!(second.since, first.since, "{again:?}");
+    assert!(second.retries > first.retries, "{again:?}");
     let stop = replicator.stop(Duration::from_secs(5));
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);

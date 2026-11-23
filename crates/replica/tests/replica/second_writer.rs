@@ -400,7 +400,7 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
     common::moved_until(&replicator, &clock, (poll, 240), |h| {
         h.synced > full.synced && h.counters.store.begin_upload.errors > errors
     });
-    let staging = FsStore::new(&meta_of(&site));
+    let staging = FsStore::new(meta_of(&site));
     let staged = block_on(staging.list(Level::ZERO, None, lsr_core::PageLimit::MAX)).unwrap();
     let lost = staged.files.last().unwrap().key;
     block_on(staging.delete(&[lost])).unwrap();
@@ -412,7 +412,7 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
         caught_up(h) && h.synced > full.synced
     });
     let record = std::fs::read(meta_of(&site).join("lsr-takeover")).unwrap();
-    assert!(lsr_replica::TakeoverRecord::decode(&record).is_ok());
+    lsr_replica::TakeoverRecord::decode(&record).unwrap();
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }

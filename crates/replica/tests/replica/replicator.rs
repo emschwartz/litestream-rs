@@ -674,16 +674,26 @@ fn an_app_checkpoint_is_counted_and_reported() {
         Some(AppNotice::Checkpointing { ran: 1 })
     );
     assert!(!health.is_degraded(), "a notice, not a degraded state");
-    let seen = events.drain();
+    // Reported once: later turns that see the same total say nothing more.
+    for _ in 0..3 {
+        clock.advance(POLL);
+        let now = clock.now();
+        wait(&replicator, |h| h.reported_at >= now);
+    }
+    let reports: Vec<_> = events
+        .drain()
+        .into_iter()
+        .filter(|event| matches!(event, Event::AppCheckpoint { .. }))
+        .collect();
     assert!(
-        seen.iter().any(|event| matches!(
-            event,
-            Event::AppCheckpoint {
+        matches!(
+            reports.as_slice(),
+            [Event::AppCheckpoint {
                 seen: AppCheckpoint::Backfilled { .. },
                 total: 1
-            }
-        )),
-        "{seen:?}"
+            }]
+        ),
+        "{reports:?}"
     );
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
