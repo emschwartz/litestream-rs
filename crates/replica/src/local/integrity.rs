@@ -1,5 +1,5 @@
 //! SQLite's own check of a restored database, run on the scratch file before
-//! [crate::FileSink::publish] links it to the target.
+//! [super::FileSink::publish] links it to the target.
 //!
 //! The LTX checksums prove the pages are the ones the replica holds; they say
 //! nothing about whether those pages form a valid SQLite database (a writer

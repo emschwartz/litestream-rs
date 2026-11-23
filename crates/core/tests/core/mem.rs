@@ -1,6 +1,6 @@
 //! Memory gates: peak heap as a number a test can hold a path to.
 //!
-//! A counting allocator ([`lsr_heap`]) measures the most heap a restore, a snapshot or
+//! A counting allocator ([`crate::heap`]) measures the most heap a restore, a snapshot or
 //! a plan holds at once, and each gate asserts the law the code documents rather than
 //! a figure from one machine:
 //!
@@ -31,6 +31,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::heap::{Counting, Peak, peak_of};
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
@@ -39,7 +40,6 @@ use lsr_core::{
     PlanOutcome, ReadLen, RestoreTarget, SourceError, Step, StepEnd, StoreError, SyncConfig,
     Synced, Upload, build_listing, plan, restore, sync_step,
 };
-use lsr_heap::{Counting, Peak, peak_of};
 use lsr_ltx::{
     DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
     TxidRange, lock_page,

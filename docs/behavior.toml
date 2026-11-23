@@ -1235,7 +1235,7 @@ detected_by = "core::`restore_equals_the_model_at_every_transaction`, core::`app
 [[row]]
 table = "Restore"
 id = "REST-2"
-mark = "none: checked in lsr-local and lsr-cli"
+mark = "none: checked in lsr-replica's local module and lsr-cli"
 circumstance = "The target file exists, or a `-wal`, `-shm` or `-journal` beside it exists"
 response = "refuse. Nothing is touched"
 signal = "exit 3; `AlreadyExists` naming the path"
@@ -1295,24 +1295,24 @@ notes = "S: restores through a replica store that fails every read or listing fa
 [[row]]
 table = "Restore"
 id = "REST-7"
-mark = "none: publish and the integrity check are in lsr-local and lsr-cli"
+mark = "none: publish and the integrity check are in lsr-replica's local module and lsr-cli"
 circumstance = "Publish fails. Before the hard link: nothing at the target (`NotVisible`). After it: the target is in place with its data fsynced, but the name may not survive a crash (`VisibleNotDurable`). With `--integrity-check`, a database SQLite finds invalid is refused and its scratch removed"
 response = "refuse"
 signal = "exit 3, or 2 for the integrity check"
 at_risk = "None"
 recovery = "Run again"
-detected_by = "cli::`integrity_check_refuses_a_corrupt_b_tree_with_exit_2`, local::`each_failed_step_says_whether_the_target_is_visible`"
+detected_by = "cli::`integrity_check_refuses_a_corrupt_b_tree_with_exit_2`, replica::`each_failed_step_says_whether_the_target_is_visible`"
 
 [[row]]
 table = "Restore"
 id = "REST-8"
-mark = "none: scratch files are reclaimed in lsr-local"
+mark = "none: scratch files are reclaimed in lsr-replica's local module"
 circumstance = "The restore is killed part way"
 response = "The scratch file is left. The next restore of that target takes its lock, truncates it and reuses it"
 signal = "none"
 at_risk = "None"
 recovery = "Run again"
-detected_by = "local::`a_scratch_left_by_a_crashed_restore_is_reclaimed`"
+detected_by = "replica::`a_scratch_left_by_a_crashed_restore_is_reclaimed`"
 
 [[row]]
 table = "Restore"
@@ -2352,13 +2352,13 @@ detected_by = "core::`unrecognized_names_hold`"
 [[row]]
 table = "Circumstances the code does not distinguish"
 id = "WORLD-27"
-mark = "none: in lsr-local"
+mark = "none: in lsr-replica's local module"
 circumstance = "Two restores to one target at once; a restore onto the live database's path"
 response = "Two at once: the second fails to lock `<target>.restore`. Onto a live database: refused because the target exists (REST-2)"
 signal = "exit 3"
 at_risk = "None"
 recovery = "n/a"
-detected_by = "local::`a_second_restore_of_one_target_is_refused_while_the_first_lives`, local::`create_refuses_a_target_that_exists`"
+detected_by = "replica::`a_second_restore_of_one_target_is_refused_while_the_first_lives`, replica::`create_refuses_a_target_that_exists`"
 
 [[row]]
 table = "Circumstances the code does not distinguish"
@@ -2458,13 +2458,13 @@ notes = "A5 does not cover staleness"
 [[row]]
 table = "Circumstances the code does not distinguish"
 id = "WORLD-36"
-mark = "none: in lsr-local"
+mark = "none: in lsr-replica's local module"
 circumstance = "The restore target is on a filesystem with no hard links"
 response = "Publish fails at the link step with nothing at the target (`NotVisible`)"
 signal = "exit 3"
 at_risk = "None. The restore cannot complete there"
 recovery = "Restore elsewhere"
-detected_by = "local::`each_failed_step_says_whether_the_target_is_visible`"
+detected_by = "replica::`each_failed_step_says_whether_the_target_is_visible`"
 notes = "The test injects the failing step; no linkless filesystem is used"
 
 [[row]]
