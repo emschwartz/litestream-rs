@@ -50,5 +50,5 @@ pub use index::{INDEX_TAIL_LEN, IndexError};
 pub use index::{IndexEntry, PageIndex, decode_frame};
 pub use order::OrderError;
 pub use page::{DbPages, PageNo, PageRef, PageSize, lock_page};
-pub use time::{TimeField, Timestamp, TimestampParseError};
+pub use time::{Timestamp, TimestampParseError};
 pub use trailer::{TRAILER_LEN, Trailer, TrailerError};

@@ -59,39 +59,45 @@ fn a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_
 }
 
 /// Fixed: a failed WAL sync was remembered in memory only, so a restart before the TRUNCATE
-/// staged frames the failed sync covered, until the engine journal recorded the debt. Seed 0xf,
-/// the first of the mixed set to reach it, must pass now.
+/// staged frames the failed sync covered, until the engine journal recorded the debt. Seed 0x21
+/// of the mixed set with the known-wrong cells drawn (its first 130 operations) reaches it on
+/// the tree that stops at another writer, where seed 0xf, whose history began with second
+/// writers, no longer did; it must pass now.
 #[test]
-fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf() {
+fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0x21() {
     let opts = Opts {
         drawn: true,
         block_crash_law: false,
         lying_wal_sync: false,
         after_restart: AfterRestart::Retry,
-        clock_law: ClockLaw::EachRead,
-        staging_fs: true,
+        clock_law: ClockLaw::PerTick,
+        error_domain: true,
+        known_wrong: true,
+        staging_fs: false,
         ..Opts::default()
     };
-    if let Err(failure) = run_ops(Seed::new(0xf), crate::histories::seed_0xf::OPS, &opts) {
+    if let Err(failure) = run_ops(Seed::new(0x21), crate::histories::seed_0x21::OPS, &opts) {
         panic!("{failure}");
     }
 }
 
 /// Fixed: a staging read refused for permission during level-1 compaction degraded maintenance
 /// as the replica's `StoreDenied(Permission)` until #145 routed compaction's local reads through
-/// `Fault::from_staging`. Seed 0xb9e, the one that reached it, must pass now; its cell is drawn.
+/// `Fault::from_staging`. Seed 0x68f of the fixed set's mix (its first 39 operations) reaches it
+/// on the tree that stops at another writer, where seed 0xb9e no longer did; it must pass now.
 #[test]
-fn compaction_takes_a_staging_denial_as_staging_seed_0xb9e() {
+fn compaction_takes_a_staging_denial_as_staging_seed_0x68f() {
     let opts = Opts {
         drawn: true,
         block_crash_law: true,
         lying_wal_sync: false,
-        after_restart: AfterRestart::Nothing,
-        clock_law: ClockLaw::PerTick,
-        staging_fs: true,
+        after_restart: AfterRestart::Redo,
+        clock_law: ClockLaw::EachRead,
+        error_domain: true,
+        staging_fs: false,
         ..Opts::default()
     };
-    if let Err(failure) = run_ops(Seed::new(0xb9e), crate::histories::seed_0xb9e::OPS, &opts) {
+    if let Err(failure) = run_ops(Seed::new(0x68f), crate::histories::seed_0x68f::OPS, &opts) {
         panic!("{failure}");
     }
 }

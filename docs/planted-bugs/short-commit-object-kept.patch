@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/publish.rs b/crates/core/src/publish.rs
-index 8989cfff..53a736eb 100644
+index dd397f64..b3f966af 100644
 --- a/crates/core/src/publish.rs
 +++ b/crates/core/src/publish.rs
-@@ -294,7 +294,7 @@ where
-     }
-     // Safe to delete: the caller still holds what it wrote until a later
-     // verified listing, so the cost of a wrong delete is a rewrite.
--    let removed = delete().await.is_ok();
-+    let removed = false && delete().await.is_ok();
-     Err(StoreError::Corrupt {
-         key: Some(key),
-         cause: CorruptCause::CommitSizeMismatch {
+@@ -301,7 +301,7 @@ where
+     let removed = match mode {
+         // A create-only write found the key free: the object is ours alone, and the caller still
+         // holds what it wrote until a later verified listing, so a wrong delete costs a rewrite.
+-        WriteMode::New => delete().await.is_ok(),
++        WriteMode::New => false && delete().await.is_ok(),
+         // A replace may land on a key that held an acknowledged object. Deleting what the short
+         // commit left would end the replica a transaction early with no error (seed 0x1dc); the
+         // object stays, a restore that meets it stops with a typed error, and the caller writes

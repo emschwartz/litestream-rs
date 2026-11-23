@@ -1,13 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index f48892f..94208ba 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1482,7 +1482,7 @@ impl Actor {
-         let key = FileKey::new(Level::ZERO, TxidRange::single(from));
-         let token = self.engine.witnesses.get(&key).copied();
+@@ -1813,7 +1813,7 @@
+         // took its id goes, as for a staged file that changed.
+         let vouched = Some(from) <= self.engine.dropped_through;
          let ours = match token {
--            Some(token) => still_holds(env.staging, &token).await,
-+            Some(_token) => Ok(false),
-             None => Ok(false),
+-            Some(token) if !vouched => still_holds(env.staging, &token).await,
++            Some(_token) if !vouched => Ok(false),
+             Some(_) | None => Ok(false),
          };
          match ours {

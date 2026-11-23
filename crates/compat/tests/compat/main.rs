@@ -46,7 +46,11 @@ mod rust_chains;
 #[cfg(test)]
 mod s3;
 #[cfg(test)]
+mod seeded;
+#[cfg(test)]
 mod sidecar;
+#[cfg(test)]
+mod tracked_checksums;
 #[cfg(test)]
 mod upstream_test_map;
 #[cfg(test)]
