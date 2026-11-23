@@ -479,6 +479,17 @@ fn a_reader_guard_holds_off_truncate() {
     assert_eq!(checkpoints(&seen, CheckpointMode::Truncate), 0, "{seen:?}");
     drop(guard);
     reader.execute_batch("COMMIT").unwrap();
+    // With the guard gone the held-off TRUNCATE runs, and the write lock its boundary
+    // snapshot took is released: the application commits again at once.
+    let mut truncates = 0;
+    for _ in 0..5 {
+        clock.advance(POLL);
+        let now = clock.now();
+        wait(&replicator, |h| h.reported_at >= now);
+        truncates += checkpoints(&events.drain(), CheckpointMode::Truncate);
+    }
+    assert!(truncates > 0, "no TRUNCATE once the guard was dropped");
+    site.commit(1);
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
