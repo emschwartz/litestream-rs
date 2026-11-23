@@ -244,7 +244,7 @@ impl<B: Backend> Stepper<B> {
     /// [`RigError::Store`] for a stop or a failed step.
     pub fn sync(&mut self) -> Result<StepDid, RigError> {
         let verdict = self.verdict()?;
-        let step = step_for(verdict.recovered, self.position.as_ref())
+        let step = step_after_recovery(verdict.recovered, self.position.as_ref())
             .map_err(|stop| RigError::Store(format!("the verdict stops: {stop:?}")))?;
         let (mut wal, _, committed) = self.view()?;
         self.now = self.now.saturating_add(10);
@@ -338,7 +338,7 @@ impl<B: Backend> Stepper<B> {
 
 /// The step a recovery verdict calls for, as the actor builds it: a snapshot keeps the clock
 /// from stepping back past the position it replaces.
-pub fn step_for(
+pub fn step_after_recovery(
     recovered: lsr_core::Recovered,
     position: Option<&lsr_core::Position>,
 ) -> Result<Step, lsr_core::StopCause> {

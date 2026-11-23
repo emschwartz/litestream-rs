@@ -146,7 +146,7 @@ impl Engine {
         let source = self.position.as_ref().map(|position| {
             PositionSource::Running(position, Probes::read(&mut wal, position).unwrap())
         });
-        let step = lsr_sqlite::testing::harness::step_for(
+        let step = lsr_sqlite::testing::harness::step_after_recovery(
             recover_traced(source, &view, None).recovered,
             self.position.as_ref(),
         )

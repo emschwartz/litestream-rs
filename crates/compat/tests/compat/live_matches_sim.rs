@@ -376,7 +376,8 @@ impl<S: WalSource, P: PageSource, C: Checkpointer> Engine<S, P, C> {
         };
         let verdict = self.verdict(&mut wal, &view);
         let seen = format!("{verdict:?} {committed:?}");
-        let Ok(step) = crate::live_source::step_for(verdict.recovered, self.position.as_ref())
+        let Ok(step) =
+            crate::live_source::step_after_recovery(verdict.recovered, self.position.as_ref())
         else {
             return format!("stop {seen}");
         };

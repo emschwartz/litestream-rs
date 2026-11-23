@@ -138,9 +138,9 @@ pub struct Counters {
     /// Snapshots staged, per cause: each one uploads the whole database, so
     /// a cause that keeps counting up is a cost to look into.
     pub snapshots: SnapshotCounts,
-    /// Recoveries that found a commit abandoned after the engine's read lock was taken: a
-    /// broken lock or a bug in the continuity proof. Each also counts as a
-    /// `generation_changed` snapshot; any count above zero is worth a report.
+    /// Recoveries that found commits lost to a WAL restart the read lock should have
+    /// prevented: a broken lock or a bug in the continuity proof. Each takes a snapshot, counted
+    /// as `generation_changed`; any count above zero is worth a report.
     pub read_lock_violations: u64,
 }
 

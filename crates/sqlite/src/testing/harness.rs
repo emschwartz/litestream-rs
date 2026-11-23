@@ -57,7 +57,7 @@ mod app;
 mod stepper;
 
 pub use app::{APP_DB, CHILD_ENTRY, MARK, Placement, serve_app};
-pub use stepper::{StepDid, Stepper, step_for};
+pub use stepper::{StepDid, Stepper, step_after_recovery};
 
 use app::{APP, App};
 

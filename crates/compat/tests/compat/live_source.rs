@@ -201,7 +201,8 @@ impl Rig {
 
     /// Recovers, then runs whatever step the decision calls for.
     fn sync(&mut self) -> Did {
-        let step = step_for(self.verdict().recovered, self.position.as_ref()).expect("no stop");
+        let step =
+            step_after_recovery(self.verdict().recovered, self.position.as_ref()).expect("no stop");
         self.run(step)
     }
 
@@ -511,7 +512,7 @@ fn the_barrier_waits_for_no_one() {
 
 /// The step a recovery verdict calls for, as the actor builds it: a snapshot keeps the clock
 /// from stepping back past the position it replaces.
-pub(crate) fn step_for(
+pub(crate) fn step_after_recovery(
     recovered: lsr_core::Recovered,
     position: Option<&lsr_core::Position>,
 ) -> Result<Step, lsr_core::StopCause> {
