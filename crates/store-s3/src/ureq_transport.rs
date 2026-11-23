@@ -48,18 +48,14 @@ impl std::fmt::Debug for UreqTransport {
 
 impl UreqTransport {
     /// A client whose every request fails as [`TransportError::Timeout`] after
-    /// `deadline`. It trusts the certificate authorities Go would trust in
-    /// this process: on Linux the system bundle and directories, replaced by
-    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` when set, Mozilla's roots when the
-    /// system has none; on macOS and Windows the operating system's verifier.
+    /// `deadline`. On Linux and the BSDs it trusts the system's root certificates
+    /// (`SSL_CERT_FILE` and `SSL_CERT_DIR` when set), or Mozilla's roots when the system
+    /// has none; that set can differ from Go's on an unusual system. On macOS and Windows
+    /// it asks the operating system's verifier.
     #[must_use]
     pub fn new(deadline: Duration) -> Self {
-        Self::with_roots(deadline, trust::system())
-    }
-
-    pub(crate) fn with_roots(deadline: Duration, roots: Roots) -> Self {
         let tls = ureq::tls::TlsConfig::builder()
-            .root_certs(root_certs(roots))
+            .root_certs(root_certs(trust::system()))
             .build();
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)

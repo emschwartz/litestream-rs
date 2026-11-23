@@ -39,6 +39,7 @@ use lsr_ltx::Timestamp;
 use lsr_wal::{OpenError, WalHeader, WalReader};
 
 use crate::env::Clock;
+use crate::fault::role::{Role, Staging};
 use crate::fault::{BugSite, Fault, Next, SnapshotCause};
 use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageChecksumTable;
@@ -191,7 +192,6 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
             .min_pages
             .is_some_and(|min| observed.synced_frames >= min.get())
     {
-        mark!(Ckpt1);
         return Decision::Passive(CheckpointTrigger::MinPages);
     }
     if let CheckpointState::Pending { last } = state
@@ -200,7 +200,6 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
             .is_some_and(|interval| observed.now.saturating_duration_since(*last) >= interval)
         && observed.synced_frames > 1
     {
-        mark!(Ckpt1);
         return Decision::Passive(CheckpointTrigger::Interval);
     }
     Decision::Nothing
@@ -457,7 +456,7 @@ struct Protocol<'a, W, P, C, L> {
     run: Option<CheckpointRun>,
 }
 
-impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, W, P, C, L> {
+impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C, L> {
     fn reader(&mut self) -> Result<WalReader<W::Wal>, Fault> {
         let file = self
             .wal
@@ -560,7 +559,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             // transaction was retaken.
             self.take_read_lock(run.epoch);
             return Ok(if run.busy {
-                mark!(Ckpt2);
                 CheckpointOutcome::Busy
             } else {
                 CheckpointOutcome::NotRestarted
@@ -597,13 +595,11 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
             // proof and the checkpoint: catch up before claiming the end.
             self.step(Step::Incremental(self.position())).await?;
             return Ok(if run.busy {
-                mark!(Ckpt2);
                 CheckpointOutcome::Busy
             } else {
                 CheckpointOutcome::NotRestarted
             });
         }
-        mark!(Ckpt4);
         self.boundary_snapshot().await?;
         Ok(CheckpointOutcome::Truncated)
     }
@@ -649,6 +645,40 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
     reason = "a failure carries what was staged, as a success does; one is returned per checkpoint"
 )]
 pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore>(
+    proof: SyncedThrough,
+    mode: CheckpointMode,
+    wal: &mut W,
+    db: &mut P,
+    pages: &mut PageChecksumTable,
+    ck: &mut C,
+    staging: &L,
+    cfg: &SyncConfig,
+    clock: &dyn Clock,
+) -> Result<Checkpointed, CheckpointFailed> {
+    checkpoint_in(
+        proof,
+        mode,
+        wal,
+        db,
+        pages,
+        ck,
+        &Staging(staging),
+        cfg,
+        clock,
+    )
+    .await
+}
+
+/// [`checkpoint`] with each store as its role.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the plan fixes this signature; each argument is a distinct source of the protocol"
+)]
+#[expect(
+    clippy::result_large_err,
+    reason = "a failure carries what was staged, as a success does; one is returned per checkpoint"
+)]
+pub(crate) async fn checkpoint_in<W: WalSource, P: PageSource, C: Checkpointer, L: Role>(
     proof: SyncedThrough,
     mode: CheckpointMode,
     wal: &mut W,

@@ -68,19 +68,21 @@ build() {
         failed=1
     fi
 }
-# The effective-config dumper (crates/compat/go/dump/lsrdump.go, see crates/compat/src/dump.rs):
-# the same export plus that one file in cmd/litestream, which acts only when LSR_DUMP is set.
+# The effective-config dumper (crates/compat/go/dump/lsrdump.go, see crates/compat/src/dump.rs)
+# and the compaction hook (lsrcompact.go): the same export plus those files in cmd/litestream,
+# which act only when LSR_DUMP or LSR_COMPACT is set.
 build_dump() {
     v=$1 rev=$2 bin=$3
     export_rev "$v" "$rev"
-    cp "$repo/crates/compat/go/dump/lsrdump.go" "$dir/cmd/litestream/lsrdump.go"
+    cp "$repo/crates/compat/go/dump/lsrdump.go" "$repo/crates/compat/go/dump/lsrcompact.go" \
+        "$dir/cmd/litestream/"
     if (cd "$dir" && CGO_ENABLED=1 GOFLAGS=-mod=mod go build -trimpath -o "$bin" ./cmd/litestream) >"$scratch/$v.dump.log" 2>&1; then
         echo "$v: dump built $(git -C "$src" rev-parse --short "$rev")"
     else
         echo "$v: dump FAILED $(grep -v '^$' "$scratch/$v.dump.log" | tail -n 1)"
         failed=1
     fi
-    rm -f "$dir/cmd/litestream/lsrdump.go"
+    rm -f "$dir/cmd/litestream/lsrdump.go" "$dir/cmd/litestream/lsrcompact.go"
 }
 build_vfs() {
     v=$1 rev=$2 so=$3
@@ -126,7 +128,8 @@ for v in $versions; do
     # Only the pinned commit the port reads has a dumper: the config differential is against it.
     if [ "$v" = "$pinned_head" ]; then
         dump="$out/litestream-dump-$v"
-        if [ -x "$dump" ] && [ "$dump" -nt "$repo/crates/compat/go/dump/lsrdump.go" ]; then
+        if [ -x "$dump" ] && [ "$dump" -nt "$repo/crates/compat/go/dump/lsrdump.go" ] &&
+            [ "$dump" -nt "$repo/crates/compat/go/dump/lsrcompact.go" ]; then
             echo "$v: dump present"
         else
             build_dump "$v" "$rev" "$dump"

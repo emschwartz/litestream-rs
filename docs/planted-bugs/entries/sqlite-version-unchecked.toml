@@ -1,0 +1,4 @@
+name = "sqlite-version-unchecked"
+fix = "claude/sqlite-version-check"
+package = "lsr-sqlite"
+tests = ["version::tests::another_version_or_build_of_sqlite_is_refused"]

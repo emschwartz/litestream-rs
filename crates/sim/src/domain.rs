@@ -670,7 +670,8 @@ pub fn draw_store(
 }
 
 /// The known defects a run of `ops` under `weights` could reach: those whose cells `ops` drew,
-/// and D9 when an overlapping hold may restart. A failure counts as known only in such a run.
+/// and D9 when an overlapping hold or the kill-after-fault law may restart inside a hold. A failure
+/// counts as known only in such a run.
 #[must_use]
 pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<KnownWrong> {
     use crate::generate::Op;
@@ -696,7 +697,8 @@ pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<Kn
             Cell::Drawn | Cell::World(_) | Cell::Impossible(_) | Cell::Unmodelled(_) => None,
         })
         .collect();
-    let restarts_in_holds = weights.overlap
+    // A restart inside a hold: an overlapping hold's own, or the kill-after-fault law's.
+    let restarts_in_holds = (weights.overlap || weights.kill_after_fault)
         && weights.known_wrong
         && ops
             .iter()

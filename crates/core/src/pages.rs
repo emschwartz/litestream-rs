@@ -56,10 +56,11 @@ use std::num::NonZeroU32;
 
 use lsr_ltx::{Event, PageChecksum, PageNo, PageSize, Txid};
 
+use crate::fault::role::Role;
 use crate::fault::{Fault, SnapshotCause};
 use crate::layout::{FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
-use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen};
+use crate::store::{ListAt, PageLimit, ReadLen};
 
 /// How much of a staged file one read asks for while seeding.
 const SEED_READ: ReadLen = ReadLen::CHUNK;
@@ -125,7 +126,6 @@ impl PageChecksumTable {
         if recorded == found || self.mismatched.get(&pgno) == Some(&found) {
             return Ok(());
         }
-        mark!(Run12);
         self.mismatched.insert(pgno, found);
         Err(Mismatch {
             pgno,
@@ -217,7 +217,7 @@ pub(crate) const fn snapshot_clears(cause: &SnapshotCause) -> bool {
 ///
 /// # Errors
 /// The staging store's fault when a list or read fails.
-pub(crate) async fn seeded<L: ObjectStore>(
+pub(crate) async fn seeded<L: Role>(
     staging: &L,
     from: Option<Txid>,
     commit: NonZeroU32,
@@ -232,7 +232,7 @@ pub(crate) async fn seeded<L: ObjectStore>(
         let page = staging
             .list(at.level, at.after, PageLimit::MAX)
             .await
-            .map_err(|err| Fault::from_staging(&err))?;
+            .map_err(|err| L::fault(&err))?;
         let vouched = page
             .files
             .iter()
@@ -277,7 +277,7 @@ struct SeedRead {
 
 /// Records every page of one staged file. A file that does not decode and
 /// verify whole empties the table: what it rewrote is unknown, and `None` says so.
-async fn seed_file<L: ObjectStore>(
+async fn seed_file<L: Role>(
     staging: &L,
     key: &FileKey,
     table: &mut PageChecksumTable,
@@ -307,7 +307,7 @@ async fn seed_file<L: ObjectStore>(
             }
             Ok(Some(SeedRead { commit, changes }))
         }
-        Err(ReadFault::Store(err)) => Err(Fault::from_staging(&err)),
+        Err(ReadFault::Store(err)) => Err(L::fault(&err)),
         Err(ReadFault::Decode(_)) => {
             table.clear();
             Ok(None)
