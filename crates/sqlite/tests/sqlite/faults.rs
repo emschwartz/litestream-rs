@@ -8,11 +8,11 @@
 //!
 //! Each case also runs in both [`Placement`]s (`both`): the application in this process, set up as
 //! replication asks, and the application in a child process at SQLite's defaults (automatic
-//! checkpoints at 1000 frames, no `PERSIST_WAL`), with the read lock, the engine and the oracle
+//! checkpoints at 1000 frames), with the read lock, the engine and the oracle
 //! here, as beside a sidecar. One case's answer differs by placement and states both
 //! (`abandoned_frames_answers`; both are a snapshot). In this process only:
-//! `persist_wal_keeps_a_wal_a_page_size_change_makes_stale`, which is about the in-process
-//! application's own setting, and the power-loss file (`power_loss.rs`), whose loss undoes what the
+//! `persist_wal_keeps_a_wal_a_page_size_change_makes_stale`, which is about one connection's
+//! own setting, and the power-loss file (`power_loss.rs`), whose loss undoes what the
 //! application wrote through this process's fault VFS. The killed-writer file (`kill.rs`) runs in
 //! both. The cases only an application at SQLite's defaults has are in `app_at_defaults.rs`.
 
@@ -839,10 +839,6 @@ fn page_size_change<B: Backend>(placement: Placement) {
     assert_eq!(size, [4096], "WAL mode keeps the page size");
     rig.check().unwrap();
     rig.stop_replicator();
-    // PERSIST_WAL would keep the old page size's WAL through the change
-    // (`persist_wal_keeps_a_wal_a_page_size_change_makes_stale`): the application turns it off first
-    // (an application at SQLite's defaults never had it on).
-    rig.app_persist_wal_off().unwrap();
     rig.exec(
         "PRAGMA journal_mode = DELETE; PRAGMA page_size = 8192; VACUUM; PRAGMA journal_mode = WAL;",
     )
@@ -860,11 +856,12 @@ fn page_size_change<B: Backend>(placement: Placement) {
     rig.check().unwrap();
 }
 
-/// SQLite belief, and a hazard for applications: `SQLITE_FCNTL_PERSIST_WAL` (which `app_connection`
-/// turns on) keeps the WAL file when the database leaves WAL mode, frames and all, and SQLite
-/// does not discard a WAL whose page size differs from the database's when it comes back. A
-/// page-size change through `journal_mode = DELETE` and VACUUM with the setting on leaves the
-/// database unreadable ("malformed database schema") until the stale `-wal` is removed.
+/// SQLite belief, and why `app_connection` does not turn `SQLITE_FCNTL_PERSIST_WAL` on
+/// (docs/decisions.md D123; `leaving_wal.rs` has the cases that hold it to that): the flag keeps
+/// the WAL file when the database leaves WAL mode, frames and all, and SQLite does not discard
+/// a WAL whose page size differs from the database's when it comes back. A page-size change
+/// through `journal_mode = DELETE` and VACUUM with the flag on leaves the database unreadable
+/// ("malformed database schema") until the stale `-wal` is removed.
 #[test]
 fn persist_wal_keeps_a_wal_a_page_size_change_makes_stale() {
     let dir = TempDir::new().unwrap();
@@ -872,7 +869,12 @@ fn persist_wal_keeps_a_wal_a_page_size_change_makes_stale() {
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
         .unwrap();
-    lsr_sqlite::app_connection(&conn).unwrap();
+    let mut on = 1;
+    conn.file_control(
+        Some(rusqlite::MAIN_DB),
+        rusqlite::FileControl::PersistWal(&mut on),
+    )
+    .unwrap();
     conn.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (randomblob(3000));")
         .unwrap();
     let changed = conn.execute_batch(
@@ -1093,4 +1095,89 @@ fn restore_then_replicate<B: Backend>(placement: Placement) {
         rows, 20,
         "the second restore holds the writes after the first"
     );
+}
+
+/// The WAL header's salts and checkpoint sequence, read from the file (SQLite takes no lock on
+/// `-wal`).
+fn wal_header(wal: &Path) -> ([u8; 8], u32) {
+    use std::io::Read;
+    #[expect(clippy::disallowed_methods, reason = "the WAL carries no POSIX lock")]
+    let mut file = std::fs::File::open(wal).unwrap();
+    let mut header = [0; 24];
+    file.read_exact(&mut header).unwrap();
+    let seq = u32::from_be_bytes(header[12..16].try_into().unwrap());
+    (header[16..24].try_into().unwrap(), seq)
+}
+
+/// SQLite belief: a restarted WAL's header can be written again with the same salts and another
+/// checkpoint sequence, so another chain seed. A restart resets the wal-index to no frame under
+/// new salts and counts the checkpoint in the restarting connection's own `nCkpt`; that
+/// connection writes the header when its first frame spills, and a rollback (or a writer killed
+/// before its commit) leaves the index at no frame. The next connection to write frame 1 writes
+/// the header again, with the index's salts (fresh random ones only when its own count is still
+/// zero) and its own count. A position the engine took at the start of that generation must
+/// follow the new header: nothing of the generation was replicated, so nothing is lost, and the
+/// commit after it replicates. (Go v0.5.18 killed at its WAL restart, then the application's next
+/// commit, stalled the alternation on WalCorrupt for good.)
+#[test]
+fn a_header_written_again_with_the_same_salts_replicates_what_follows() {
+    let dir = TempDir::new().unwrap();
+    let mut rig = rig::<Sqlite>(&dir, Placement::InProcess);
+    for _ in 0..5 {
+        rig.insert(3000).unwrap();
+    }
+    rig.settle().unwrap();
+    // With the replicator gone nothing holds a read mark, so a checkpoint backfills everything
+    // and the next write restarts the WAL.
+    rig.stop_replicator();
+    let app = lsr_sqlite::testing::harness::open_app(rig.db(), rig.vfs(), "NORMAL").unwrap();
+    let other = lsr_sqlite::testing::harness::open_app(rig.db(), rig.vfs(), "NORMAL").unwrap();
+    let wal = rig.wal();
+    // The application restarts the WAL once, the other connection twice: their counts differ
+    // and neither is zero.
+    let app_seq = restart_by_rollback(&mut rig, &app, &wal);
+    restart_by_rollback(&mut rig, &other, &wal);
+    let other_seq = restart_by_rollback(&mut rig, &other, &wal);
+    assert_ne!(other_seq, app_seq);
+    let spilled = wal_header(&wal);
+    rig.restart().unwrap();
+    rig.settle().unwrap();
+    // The application writes frame 1, and the header with it: same salts, its own count.
+    app.execute("INSERT INTO t(v) VALUES (randomblob(3000))", [])
+        .unwrap();
+    rig.observe().unwrap();
+    let (salts, seq) = wal_header(&wal);
+    assert_eq!(salts, spilled.0, "the same generation");
+    assert_eq!(
+        seq, app_seq,
+        "another checkpoint sequence, so another chain seed"
+    );
+    drop((app, other));
+    rig.settle().unwrap();
+    assert!(rig.degraded().is_empty(), "{:?}", rig.degraded());
+    rig.check().unwrap();
+}
+
+/// Commits a row on `conn`, backfills the WAL, then restarts it from a transaction that spills
+/// its first frame and rolls back: the wal-index is left at no frame under new salts, the
+/// header written by `conn`. Returns that header's checkpoint sequence, `conn`'s count. The rig
+/// reads the commit before the checkpoint can take it out of the WAL.
+fn restart_by_rollback(rig: &mut Rig<Sqlite>, conn: &rusqlite::Connection, wal: &Path) -> u32 {
+    conn.execute("INSERT INTO t(v) VALUES (randomblob(3000))", [])
+        .unwrap();
+    rig.observe().unwrap();
+    let (busy, log, done): (i64, i64, i64) = conn
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!((busy, log), (0, done), "a whole backfill");
+    let before = wal_header(wal);
+    conn.execute_batch(
+        "PRAGMA cache_size = 2; BEGIN; INSERT INTO t(v) SELECT randomblob(3000) FROM t, t AS u; ROLLBACK;",
+    )
+    .unwrap();
+    let after = wal_header(wal);
+    assert_ne!(after.0, before.0, "the spill restarted the WAL");
+    after.1
 }

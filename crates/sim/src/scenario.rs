@@ -449,8 +449,9 @@ fn deploy(stop: Vec<Op>) -> Vec<Op> {
 }
 
 /// Three deploys that each end with SIGTERM: the final sync completes and the
-/// process exits. The app's connections are set up as replication asks
-/// (`PERSIST_WAL`), so SQLite's last close keeps the WAL. Each new process
+/// process exits. The app closed its connections before the replicator
+/// stopped, so the replicator's close is the last and keeps the WAL (its own
+/// connections set `PERSIST_WAL`). Each new process
 /// continues where the last stopped: no snapshot after the first, no stop.
 #[must_use]
 pub fn deploy_cycle_after_sigterm() -> Scenario {
@@ -529,7 +530,7 @@ pub fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() -> Scenario {
     s
 }
 
-/// A deploy whose app runs at SQLite's defaults (no `PERSIST_WAL`): its last
+/// A deploy whose app closes its connections after the replicator's: its last
 /// close checkpoints the WAL into the database and deletes it. The next
 /// process finds no WAL and snapshots (`WalMissing`, BOOT-7 in
 /// `docs/BEHAVIOR.md`). It never stops: staging still holds the replica's

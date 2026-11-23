@@ -234,7 +234,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 |---|---|---|---|
 | The application's own automatic or manual checkpoints | In | Counted and reported as a notice; they cannot pass the engine's read mark (RUN-22) | sim `app_autocheckpoints`; sim `rules_match_sqlite` compares the model with real SQLite |
 | The application commits (growing the database or not), begins or ends a reader, checkpoints in any mode or deletes the WAL between two of the engine's calls into SQLite inside one tick | In | The read-lock proofs (RUN-7, CKPT-1): what lands before a committed read is in the step, what lands after waits for the next | sim `Op::AppInTick` in swarm mixes (`sim/src/sqlite/in_tick.rs`), at any call of the tick, reads included; `Op::CommitInTick` for the one commit before the checkpoint's barrier |
-| Another process checkpoints while the engine is down | In | BOOT-7, BOOT-8 | sim `app_checkpoint_while_down`; sqlite `the_apps_last_close_while_the_replicator_is_down_keeps_or_deletes_the_wal` |
+| Another process checkpoints while the engine is down | In | BOOT-7, BOOT-8 | sim `app_checkpoint_while_down`; sqlite `the_apps_last_close_while_the_replicator_is_down_deletes_the_wal` |
 | WAL deleted, truncated or its header torn | In | BOOT-7, RUN-5, RUN-6, RUN-9 | sim `wal_deleted_while_down`, `wal_header_torn`, `wal_truncated_externally_under_lock`, `wal_unlinked_mid_run` |
 | WAL rewritten with other bytes in the same generation | In | BOOT-9, BOOT-10 | sim `wal_regrown_same_salts_diff_bytes`, `wal_rewritten_same_length`; core `a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued` |
 | A committed WAL frame flips a bit | In | RUN-4 | sim `bit_flip_in_committed_frame`, `bit_flip_in_committed_frame_healed` |

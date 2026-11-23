@@ -478,7 +478,26 @@ impl Runner {
                 self.report.reach.bump(format!("hold.{}.same", name(hold)));
                 Ok(())
             }
-            (Ok(_), Ok(_)) => Err(wrong("another database than the replica holds".into())),
+            // As of an instant, the bound is the promise, not the raw replica's answer: a view
+            // that hides a merged file plans from the finer files under it and may answer newer
+            // than the raw replica's earlier-taken state, and both meet the bound.
+            (Ok((got, _)), Ok(_)) => match target {
+                RestoreTarget::AsOf(instant) => {
+                    self.w
+                        .history
+                        .judge_as_of(instant.unix_millis(), got)
+                        .map_err(|anomaly| {
+                            wrong(format!("an answer past the as-of bound: {anomaly}"))
+                        })?;
+                    self.report
+                        .reach
+                        .bump(format!("hold.{}.as_of_within_bound", name(hold)));
+                    Ok(())
+                }
+                RestoreTarget::Latest | RestoreTarget::Txid(_) => {
+                    Err(wrong("another database than the replica holds".into()))
+                }
+            },
             (Ok((got, reached)), Err(err)) => {
                 if hold == Hold::LaggingListing && self.behind_a_hole(&err, got, reached)? {
                     self.report.reach.bump("hold.LaggingListing.past_hole");
