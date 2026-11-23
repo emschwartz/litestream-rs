@@ -74,6 +74,7 @@
 //! checkpoints it did not run and infers the application's automatic checkpoints that
 //! cannot run ([`Actor::app_checkpoints`]). The count changes no decision.
 
+mod ahead;
 mod clock;
 mod lag;
 mod parts;
@@ -87,6 +88,7 @@ use std::time::Duration;
 use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
+pub use ahead::AHEAD_KEPT_FOR;
 use clock::EngineClock;
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
 pub use state::{Degraded, Phase, Task};
@@ -290,6 +292,25 @@ pub enum Event {
     /// driver writes it, hands it back with [`Actor::remember_takeover`], and
     /// ticks again. Nothing else ran.
     TakeoverWanted(TakeoverRecord),
+    /// Where a standing ahead-of-WAL verdict is (`docs/decisions.md` D103); nothing else ran.
+    AheadOfWal(AheadNotice),
+}
+
+/// What an operator is told about a standing ahead-of-WAL verdict besides its first report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AheadNotice {
+    /// A boot found the verdict recorded: the state before the damage is kept until `until`.
+    Kept {
+        /// The kept restore point.
+        restore_point: Txid,
+        /// When it goes back to normal retention.
+        until: Timestamp,
+    },
+    /// The window passed: the restore point is back under normal retention.
+    Released {
+        /// The restore point no longer kept.
+        restore_point: Txid,
+    },
 }
 
 /// How a tick ended.
@@ -701,6 +722,19 @@ impl Actor {
         R: ObjectStore,
     {
         self.expire(now);
+        if let Some(released) = self.expire_ahead(now) {
+            // The verdict's restore point goes back to retention, which may now delete its chain.
+            self.engine.maintain.stale = true;
+            self.kept.ahead_notice = Some(AheadNotice::Released {
+                restore_point: released,
+            });
+        }
+        if let Some(notice) = self.kept.ahead_notice.take() {
+            return Tick::Ran {
+                event: Event::AheadOfWal(notice),
+                next: Next::Now,
+            };
+        }
         self.probe_at_bound(now);
         if self.engine.pages.mismatch().is_none() {
             self.kept.tasks.page_matches_again();
@@ -1044,6 +1078,7 @@ impl Actor {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, now),
         };
+        let continued = matches!(recovered, Recovered::Continue(_));
         let from = match recovered {
             Recovered::Continue(at) | Recovered::WalRestarted(at) => boot_continues(at),
             Recovered::Snapshot { cause, .. } => Err(cause),
@@ -1054,6 +1089,7 @@ impl Actor {
         };
         // A boot that fails later reads the journal again.
         self.adopt_journal(journal, newest_staged.as_ref(), &upload);
+        self.owe_ahead_check(continued);
         let cause = boot_cause(dropped, refused, from.err());
         let staged = newest_staged.map(|newest_staged| newest_staged.txid());
         let course = boot_course(from, cause, self.kept.asked(), staged);
@@ -1277,7 +1313,7 @@ impl Actor {
         let wants_live = may_checkpoint && self.kept.live.wanted() && self.caught_up();
         let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
         let quiet = !self.wal_moved(committed) && self.pending().is_none() && !self.more_wal();
-        if quiet && !wants_proof {
+        if quiet && !wants_proof && !self.owes_ahead_check() {
             return None;
         }
         if self.owes_truncate() && !may_checkpoint {
@@ -1356,6 +1392,9 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Result<Stepped, Fault> {
+        if self.owes_ahead_check() {
+            return self.check_ahead(env, now).await;
+        }
         if self.owes_truncate() {
             return self.unprove(env);
         }
@@ -2351,6 +2390,7 @@ impl Actor {
             task(Task::Maintenance),
             self.engine.gate.until(),
             self.engine.maintain.until,
+            self.kept.ahead.map(ahead::kept_until),
         ];
         [task(Task::Sync), task(Task::Upload), deadline]
             .into_iter()
@@ -2537,6 +2577,7 @@ impl Actor {
         };
         if let Some(read) = self.kept.journal_read {
             self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
+            self.adopt_ahead(read.ahead);
         }
         self.kept.writer = Some(writer);
     }
@@ -2556,14 +2597,15 @@ impl Actor {
             return tick;
         };
         let held = writer.durable().copied().or(self.kept.journal_read);
-        let wanted = self.kept.unproven.recorded();
-        if held.map(|held| held.unproven) == Some(wanted) {
+        let wanted = (self.kept.unproven.recorded(), self.kept.ahead);
+        if held.map(|held| (held.unproven, held.ahead)) == Some(wanted) {
             // Nothing the engine holds is missing from the journal: nothing lags it.
             self.kept.journal_write = Ok(());
             return tick;
         }
         let record = lsr_journal::Journal {
-            unproven: wanted,
+            unproven: wanted.0,
+            ahead: wanted.1,
             ..held.unwrap_or(lsr_journal::Journal::ABSENT)
         };
         match writer.write(file, &record) {

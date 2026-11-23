@@ -158,6 +158,7 @@ pub const fn trip(
                 | StopCause::WalSyncFailed
                 | StopCause::PageSizeChanged { .. }
                 | StopCause::DatabasePageMismatch { .. }
+                | StopCause::DatabaseAheadOfWal { .. }
                 | StopCause::Bug),
             ),
             _,

@@ -46,6 +46,9 @@
 //! - `lsr_journal_signal{db,signal}` 1 while the engine journal reports something
 //!   (`missing`, `unreadable`, `newer_version`, `slot_unreadable`,
 //!   `unwritable`; `docs/journal.md`).
+//! - `lsr_database_ahead_of_wal{db}` 1 while a boot's finding stands that the database file
+//!   held pages from commits its WAL lost after a failed WAL sync, and the state before them is
+//!   kept restorable (seven days; `docs/decisions.md` D103), else 0.
 //! - `lsr_snapshots_total{db,cause}`: snapshots staged since the replicator started, every
 //!   cause listed, zeros included. Each uploads the whole database: a cause other than
 //!   `first_sync`, `checkpoint_boundary` or `operator_requested` that keeps counting up means
@@ -518,5 +521,15 @@ pub(crate) fn render(views: &[DbView], now: Timestamp) -> String {
     app_series(&mut out, &dbs);
     counter_series(&mut out, &dbs);
     verify_series(&mut out, &dbs);
+    per_db(
+        &mut out,
+        &dbs,
+        (
+            "lsr_database_ahead_of_wal",
+            "gauge",
+            "1 while the database file was found holding pages from commits its WAL lost, and the state before them is kept",
+        ),
+        |h| u8::from(h.ahead_of_wal.is_some()).to_string(),
+    );
     out.0
 }

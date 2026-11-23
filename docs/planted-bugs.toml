@@ -1163,10 +1163,9 @@ name = "journal-debt-not-recorded-sim"
 fix = "8ef5a8f"
 package = "lsr-sim"
 test_bin = "sim"
-tests = [
-    "faults::wal_fsync_fails_then_restart",
-    "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf",
-]
+# Seed 0xf's must-pass test (known_wrong.rs) passes with this bug planted too, so it does not
+# catch it and is not listed; why that history no longer reaches the restart is not yet known.
+tests = ["faults::wal_fsync_fails_then_restart"]
 
 [[bug]]
 name = "journal-debt-not-recorded-sqlite"
@@ -1630,6 +1629,71 @@ fix = "6f700f9a"
 package = "lsr-cli"
 test_bin = "cli"
 tests = ["sidecar::a_deleted_journal_is_reported_on_the_next_start"]
+
+# A boot that restores a WAL-sync debt skips the ahead-of-WAL check, so a database file no commit made is replicated as clean (docs/decisions.md D103).
+[[bug]]
+name = "debt-boot-skips-page-check"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
+]
+
+# The ahead-of-WAL verdict is never written to the journal, so a restart forgets it and the restore point it keeps.
+[[bug]]
+name = "ahead-verdict-not-journaled"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
+    "actor::tests::journal::a_recorded_verdict_stops_once_under_strict_responses",
+]
+
+# The TRUNCATE that pays the debt runs before the check and copies the WAL into the database file, evidence and all.
+[[bug]]
+name = "ahead-truncate-before-check"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
+]
+
+# The check also compares pages a WAL frame covers, so a file the WAL is simply ahead of reads as damaged.
+[[bug]]
+name = "ahead-check-counts-covered-pages"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_whose_file_kept_its_pages_comes_up_clean",
+]
+
+# The verdict's restore point goes back to retention after a minute instead of seven days.
+[[bug]]
+name = "ahead-restore-point-released-early"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::the_restore_point_is_kept_for_the_window_across_a_restart",
+]
+
+# A boot re-dates the recorded verdict, so its window starts again at every restart and never ends.
+[[bug]]
+name = "ahead-window-restarts-at-boot"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::the_restore_point_is_kept_for_the_window_across_a_restart",
+]
+
+# The verdict and its restore point are kept for ever.
+[[bug]]
+name = "ahead-notice-never-ends"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::the_restore_point_is_kept_for_the_window_across_a_restart",
+]
+
 # `dir:` scanning made to agree with Go's walk (claude/dropin-dir): each was found by the Go
 # differential (compat `dropin_dir`), which needs the Go dumper and so is ignored; the config
 # tests below are its Go-free counterparts.
