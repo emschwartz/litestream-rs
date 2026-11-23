@@ -20,7 +20,7 @@ use lsr_core::conformance::block_on;
 use lsr_core::{
     CommittedRead, FakeDb, FakeWal, FileKey, Level, MemStore, NewestStagedFile, ObjectStore,
     PositionSource, Recovered, SnapshotCause, Step, StepEnd, SyncConfig, Synced, Upload,
-    WalFileLen, WalView, recover, sync_step,
+    WalFileLen, WalView, recover_traced, sync_step,
 };
 use lsr_core::{PageLimit, ReadLen};
 use lsr_ltx::{Event, Header, PageNo, PageSize, ReadDecoder, Timestamp};
@@ -263,11 +263,12 @@ fn rust_continues_from_every_go_written_newest_file_and_its_next_file_passes_go_
         ))
         .expect("load")
         .expect("a newest file");
-        let recovered = recover(
+        let recovered = recover_traced(
             Some(PositionSource::Boot(&loaded)),
             &view_of(&wal, &reader),
             None,
-        );
+        )
+        .recovered;
         let Recovered::Continue(position) = recovered else {
             panic!("{}: {recovered:?}", go_file.fixture);
         };
@@ -317,11 +318,12 @@ fn a_go_newest_file_whose_wal_was_truncated_is_a_snapshot_not_a_continue() {
         .expect("load")
         .expect("a newest file");
         wal.truncate_file(usize::try_from(WAL_HEADER).expect("small"));
-        let recovered = recover(
+        let recovered = recover_traced(
             Some(PositionSource::Boot(&loaded)),
             &view_of(&wal, &reader),
             None,
-        );
+        )
+        .recovered;
         assert!(
             matches!(
                 recovered,

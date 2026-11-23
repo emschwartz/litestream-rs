@@ -444,3 +444,15 @@ assertions.
 | `filesystem.rs` `RealFs::sync_dir`, `File::sync_all` | replaced by `Ok(())` | An fsync that does nothing shows only after a power loss. The crash tests in `docs/planted-bugs.toml` (`delete-without-dir-sync` among them) check that the store makes the call, and the LazyFS rig checks the real syscall. |
 | `engine_journal.rs` `FsJournalFile::sync`, `sync_dir` | replaced by `Ok(())` | The same, for the journal file and its directory. |
 | `engine_journal.rs` `read_slot` | guard `err.kind() == UnexpectedEof` becomes `true` | Besides end of file, a read of an open journal fails only on a device fault no test can produce. |
+
+## store-s3: classify and listing
+
+`LSR_SKIP=minio,toxiproxy,tigris cargo mutants -p lsr-store-s3 --test-package lsr-store-s3 --test-tool nextest
+--jobs 4 --timeout 240 -f crates/store-s3/src/classify.rs -f crates/store-s3/src/list.rs` at commit `db94eb9`:
+85 mutants, 69 caught, 5 missed, 11 unviable, no timeouts. The tests that need MinIO, Toxiproxy or Tigris were
+skipped. After the tests below: 74 caught, 0 missed, 11 unviable. No survivor revealed a bug.
+
+| Where | Mutants | Resolution |
+| --- | --- | --- |
+| `classify.rs` `S3Code::from_name` | 3 (the `AllAccessDisabled`, `InvalidDigest` and `InvalidRange` arms deleted) | Caught: `code_is_read_from_the_body` now reads each of the three names. |
+| `list.rs` `name_bounds` | 2 (returns `None`, or made-up bounds) | Caught: `a_page_s_bounds_span_its_files_and_unrecognized_names`. The bounds are what the listing compares across pages to refuse one that went backwards. |
