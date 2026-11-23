@@ -8,7 +8,9 @@
 //! A commit writes a scratch file next to the target (`<name>.<pid>-<n>.tmp`,
 //! created exclusively, so two uploads to one key never share bytes), sets
 //! its mtime to the created-at time as Go does (the created-at time is the file's mtime),
-//! fsyncs it, renames it into place and fsyncs the directory. Go sets the
+//! fsyncs it, renames it into place and fsyncs the directory (a
+//! [`WriteMode::New`] upload hard-links it into place instead, which fails on
+//! a taken name, then removes the scratch name). Go sets the
 //! mtime after the rename; setting it first means no reader ever sees the file
 //! with the wrong time.
 //!
@@ -71,6 +73,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use journal::{Step, note};
 
 pub use filesystem::{DirEntryInfo, Fs, FsFile, Meta, RealFs};
+use lsr_core::WriteMode;
 
 use lsr_core::{
     CorruptCause, CreatedAt, FileInfo, FileKey, Level, ListedTime, Listing, ObjectStore, PageLimit,
@@ -301,7 +304,12 @@ impl<F: Fs> FsStore<F> {
         Ok((bytes, mtime_created_at(&meta, file.key)?))
     }
 
-    fn begin_now(&self, key: &FileKey, created_at: Timestamp) -> Result<FsUpload<F>, StoreError> {
+    fn begin_now(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+        mode: WriteMode,
+    ) -> Result<FsUpload<F>, StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
         let mtime = to_system_time(created_at).ok_or(StoreError::Corrupt {
             key: Some(*key),
@@ -320,6 +328,7 @@ impl<F: Fs> FsStore<F> {
             file,
             mtime,
             created_at,
+            mode,
             written: 0,
         })
     }
@@ -537,8 +546,9 @@ impl<F: Fs> ObjectStore for FsStore<F> {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<FsUpload<F>, StoreError>> + Send {
-        ready(self.begin_now(key, created_at))
+        ready(self.begin_now(key, created_at, mode))
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
@@ -561,10 +571,37 @@ pub struct FsUpload<F: Fs = RealFs> {
     file: F::File,
     mtime: SystemTime,
     created_at: Timestamp,
+    mode: WriteMode,
     written: u64,
 }
 
 impl<F: Fs> FsUpload<F> {
+    /// Moves the scratch file to the target; `false` when a [`WriteMode::New`]
+    /// upload found the target taken. A hard link fails atomically on a
+    /// taken name, which a rename cannot; the scratch name it leaves is
+    /// removed by the caller. A filesystem without hard links publishes by
+    /// rename, as a `Replace` does.
+    fn publish(&self) -> io::Result<bool> {
+        if self.mode == WriteMode::New {
+            match self.fs.hard_link(&self.scratch, &self.target) {
+                Ok(()) => {
+                    note(|| Step::Link {
+                        from: self.scratch.clone(),
+                        to: self.target.clone(),
+                    });
+                    self.fs.remove_file(&self.scratch)?;
+                    note(|| Step::Remove(self.scratch.clone()));
+                    return Ok(true);
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+                Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
+                Err(err) => return Err(err),
+            }
+        }
+        rename(&self.fs, &self.scratch, &self.target)?;
+        Ok(true)
+    }
+
     fn commit_now(self) -> Result<FileInfo, StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
         let result = (|| {
@@ -572,16 +609,23 @@ impl<F: Fs> FsUpload<F> {
             sync_file(&self.file, &self.scratch)?;
             let size = self.file.metadata()?.len();
             if size != self.written {
-                return Ok(Err(size));
+                return Ok(Err(Some(size)));
             }
-            rename(&self.fs, &self.scratch, &self.target)?;
+            if !self.publish()? {
+                return Ok(Err(None));
+            }
             // The rename is not durable until its directory entry is.
             sync_dir(&self.fs, &self.dir)?;
             Ok(Ok(size))
         })();
         match result {
+            Ok(Err(None)) => {
+                // Best effort: a scratch file that survives is invisible anyway.
+                let _removed = self.fs.remove_file(&self.scratch);
+                Err(StoreError::AlreadyExists { key: self.key })
+            }
             // Caught before the rename, so nothing wrong was ever published.
-            Ok(Err(stored)) => {
+            Ok(Err(Some(stored))) => {
                 let removed = self.fs.remove_file(&self.scratch).is_ok();
                 Err(StoreError::Corrupt {
                     key: Some(self.key),

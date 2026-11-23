@@ -1,8 +1,8 @@
 diff --git a/crates/store-s3/src/classify.rs b/crates/store-s3/src/classify.rs
-index 25b018d..8c6c2bc 100644
+index 10eb0a0..55445a1 100644
 --- a/crates/store-s3/src/classify.rs
 +++ b/crates/store-s3/src/classify.rs
-@@ -128,10 +128,10 @@ impl S3Code {
+@@ -140,10 +140,10 @@ impl S3Code {
              | Self::InvalidToken
              | Self::TokenRefreshRequired => Some(Denied::Credentials),
              Self::AccessDenied | Self::AllAccessDisabled | Self::KmsKeyUnusable => {
@@ -16,7 +16,7 @@ index 25b018d..8c6c2bc 100644
              Self::NoSuchKey
              | Self::NoSuchUpload
              | Self::SlowDown
-@@ -200,7 +200,7 @@ pub fn classify(
+@@ -215,7 +215,7 @@ pub fn classify(
          // shows its own code on the next request that carries a body.
          403 => Err(StoreError::Denied {
              op,
@@ -24,8 +24,8 @@ index 25b018d..8c6c2bc 100644
 +            why: Denied::Credentials,
          }),
          404 => Err(not_found(op, key, code, status)),
-         400 if code == Some(S3Code::BadDigest) => Err(StoreError::Corrupt {
-@@ -274,7 +274,7 @@ pub fn classify_transport(op: StoreOp, err: &TransportError) -> StoreError {
+         412 => Err(match key {
+@@ -348,7 +348,7 @@ pub fn classify_transport(op: StoreOp, err: &TransportError) -> StoreError {
          },
          TransportError::Tls => StoreError::Denied {
              op,

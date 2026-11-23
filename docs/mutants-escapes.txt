@@ -23,3 +23,21 @@ replace match guard verified.header\(\).txids\(\) == key.range\(\) with true in 
 replace > with >= in seeded
 # core actor/lag.rs observe_lag: a quiet mark equal to the replicated transaction is outside the range `only_quiet_pending` reads, so keeping it changes nothing.
 replace > with >= in Actor::observe_lag
+# core store.rs on_page: an unrecognized name never equals a key name, so `>` and `>=` at the cursor agree.
+replace > with >= in on_page
+# core store.rs ObjectStore::batch_width: the default already returns one.
+replace ObjectStore::batch_width -> NonZeroUsize with 1.try_into\(\).unwrap\(\)
+# core retain.rs past_snapshot: a file ending at the snapshot neither opens a hole nor moves the reach.
+replace > with >= in past_snapshot
+# core retain.rs latest_unplannable: a Latest plan always reaches the newest transaction; the guard is kept as a check.
+replace match guard chain.reaches\(\) == newest with true in latest_unplannable
+# core retain.rs pinned_chain: a Txid plan exists only when it reaches the target; the guard is kept as a check.
+replace match guard chain.reaches\(\) == restore_point with true in pinned_chain
+# core verify/against.rs compare: both sides hold every page up to their commit, so equal pages mean equal commits.
+replace match guard commit == live.commit.get\(\) with true in compare
+# core verify/dry_run.rs DigestSink::reset: a reset is followed by a chain that rewrites or truncates every page.
+dry_run\.rs:.*DigestSink.*::reset .* with Ok
+# core verify/dry_run.rs Counting::delete: a dry-run restore never deletes.
+dry_run\.rs:.*Counting.*::delete .* with Ok
+# core actor.rs prune_unit: a whole page taken implies a next page, since the newest staged file is listed above the bound; past one page the mutant costs one extra listing.
+replace && with \|\| in Actor::prune_unit

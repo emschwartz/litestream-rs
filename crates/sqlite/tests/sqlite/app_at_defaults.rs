@@ -275,3 +275,43 @@ fn the_app_process_opening_and_closing_the_database_files_leaves_the_read_lock_h
     );
     assert!(matches!(s.sync().unwrap(), StepDid::Wrote { txs: 1, .. }));
 }
+
+/// The sidecar's deploy (the application in its own process at SQLite's defaults, the
+/// replicator in another), in both orders the two processes can exit. The replicator's own
+/// connections set `PERSIST_WAL`, so whichever connection closes last decides the WAL: the
+/// application last deletes it and the next boot snapshots (`WalMissing`); the replicator last
+/// keeps it and the next boot continues with no snapshot.
+#[test]
+fn a_sidecar_deploy_snapshots_only_when_the_application_closes_last() {
+    for app_last in [true, false] {
+        let at = format!("application last {app_last}");
+        let dir = TempDir::new().unwrap();
+        let config = RigConfig::placed(Placement::SeparateProcess);
+        let mut rig = Rig::<Sqlite>::new(dir.path(), config).unwrap();
+        for _ in 0..3 {
+            rig.insert(1500).unwrap();
+            rig.settle().unwrap();
+        }
+        if app_last {
+            rig.stop_replicator();
+            rig.close_app().unwrap();
+        } else {
+            rig.close_app().unwrap();
+            rig.stop_replicator();
+        }
+        assert_eq!(rig.wal().exists(), !app_last, "{at}: the WAL file");
+        rig.open_app().unwrap();
+        rig.restart().unwrap();
+        let from = rig.ticks().len();
+        rig.tick().unwrap();
+        rig.insert(1500).unwrap();
+        rig.settle().unwrap();
+        let want = app_last.then_some(SnapshotCause::WalMissing);
+        assert_eq!(
+            boots_and_snapshots(&rig, from),
+            vec![want],
+            "{at}: the boot"
+        );
+        rig.check().unwrap();
+    }
+}

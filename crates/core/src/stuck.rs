@@ -9,6 +9,7 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::mem::{MemStore, MemUpload};
+use crate::store::WriteMode;
 use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError};
 
 /// How many listing calls a test tolerates before it calls the loop unbounded.
@@ -87,8 +88,9 @@ impl ObjectStore for StuckListing {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> impl Future<Output = Result<MemUpload, StoreError>> + Send {
-        self.inner.begin_upload(key, created_at)
+        self.inner.begin_upload(key, created_at, mode)
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {

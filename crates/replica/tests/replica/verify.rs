@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use common::{PATIENCE, Site, config, fake, moved_until, wait};
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     CreatedAt, FileInfo, FileKey, L0Retention, Level, Listing, Maintenance, ObjectStore, PageLimit,
@@ -155,7 +156,7 @@ fn rewrite_newest_page(site: &Site) -> (Txid, u32) {
         }
         let (file, _trailer) = encoder.finish(None).unwrap();
         let mut upload = store
-            .begin_upload(&info.key, header.fields().timestamp)
+            .begin_upload(&info.key, header.fields().timestamp, WriteMode::Replace)
             .await
             .unwrap();
         upload.write(&file).await.unwrap();
@@ -402,8 +403,9 @@ impl ObjectStore for Gated {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: WriteMode,
     ) -> Result<Self::Upload, StoreError> {
-        self.inner.begin_upload(key, created_at).await
+        self.inner.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

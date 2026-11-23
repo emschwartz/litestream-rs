@@ -54,17 +54,18 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
+| D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
 | D40 | An S3 replica with an empty prefix (`s3://bucket`, or `bucket` with no `path`): copy Go? | No: refuse, as before | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
 | D41 | `watch: true` on a `dir` entry, refused since the phase-4 plan: keep refusing under D33? | Keep refusing until built; the owner chooses | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
 | D42 | The config file names only one of `access-key-id` and `secret-access-key`: ignore it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
 | D43 | A shared AWS file holds a line that is not INI: skip it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
-| D44 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles) | A gap to build under D33, tracked in #176; refused by name until then | Claude (dropin-creds), from the parent session | 2026-11-22 | gap, open |
+| D44 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles) | Built in Go's order, except assumed roles, SSO and login sessions, which are refused by name; tracked in #176 | Claude (dropin-roles), from the parent session | 2026-11-22 | partly built, gap open |
 | D45 | Config Go accepts and litestream-rs refuses at load or start (unknown and duplicate keys, values no start could use, schedules core does not run): copy Go under D33? | No: keep refusing, naming the key | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D46 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
 | D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
-
-| D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
+| D49 | Temporary credentials: refresh before expiry, and a source that answers without keys | Refresh five minutes early; refuse an answer without keys or an STS answer without credentials | Claude (dropin-roles), **delegated** | 2026-11-22 | open to owner review |
+| D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -170,7 +171,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Question:** at boot the replica holds files above this database's position. They may be ours (staging wiped, a VM put back, a Go run) or another writer's. With no local record, which?
 - **Options:** (a) stop unless the WAL vouches; (c) snapshot on top, as Go does; a new generation or prefix.
 - **Choice (owner):** (a). Every replica id above the local position must be vouched for by the WAL (continue, no snapshot) or by a record (snapshot above). Otherwise the engine stops with `OtherWriter`. `lsr take-over <db>` writes the record. `lsr restore` writes it too, so a restore followed by a start never stops.
-- **Cost accepted:** a false stop when the proof is gone: the meta directory deleted after a WAL restart, a VM or volume put back from an older copy, a Go run with another meta directory followed by a WAL restart. All are operator actions, and the fix is one command. Go never stops here, so this departs from Go; `ContinueAndInterleaveHistories` keeps Go's behaviour.
+- **Cost accepted:** a false stop when the proof is gone: the meta directory deleted after a WAL restart, a VM or volume put back from an older copy, a Go run with another meta directory followed by a WAL restart. All are operator actions, and the fix is one command. The engine's own deletes of staged files the replica holds cannot cause one: before any such delete it has the driver keep a takeover record through what those files vouched for (BOOT-30), so a crash before the replacing snapshot boots clean. The deploy cycle of a host that keeps its volume (SIGTERM or SIGKILL each deploy, WORLD-41) never stops. Go never stops here, so this departs from Go; `ContinueAndInterleaveHistories` keeps Go's behaviour.
 - **Why:** in normal operation the replica is never ahead, so only damage, an operator or another writer reaches this case. Snapshotting on top lets an empty or foreign database become "latest", and retention then removes the real one.
 - **Revisit if:** false stops show up in unattended flows, or conditional writes (#96) plus a durable stop make "last to boot wins" safe enough.
 - **Links:** `docs/BEHAVIOR.md` BOOT-6, BOOT-22, WORLD-3; #110; `crates/core/src/actor.rs` (`boot_recover`), `recover.rs` (`recover_traced`).
@@ -258,7 +259,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** one more small file until the journal can hold it; a restart to apply.
 - **Why:** a held `-exec` daemon is the case where the operator needs the command most, and stopping it first may end the container.
 - **Revisit if:** the journal gains a safe second writer, or the command moves into the daemon.
-- **Links:** #110 (stop record, meta-directory lock), `docs/journal.md`.
+- **Links:** #110 (meta-directory lock, takeover record), `docs/journal.md`.
 
 ## D22. The bound: 10 minutes, no byte bound (delegated)
 
@@ -339,6 +340,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a first run builds it (about a minute) and CI's `test-s3` job needs Go.
 - **Revisit if:** the build breaks on a Go release.
 - **Links:** #111.
+
 ## D31. Merging while many branches are in flight
 
 - **Options:** every PR merges the latest main and re-runs CI before it lands; or a PR lands on its own green CI when it has no textual conflict, and main's CI checks the combination.
@@ -346,6 +348,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** main can be red for about one CI run after a bad combination, and not every commit on main passed CI as a whole.
 - **Why:** with six or more branches open, each merge cost every other branch a merge and a 20 minute CI run, for hours of serial waiting. The one real catch in that period (renamed causes) would have shown as a red main within one run.
 - **Revisit if:** before any release, or when main goes red more than once a day.
+- **Amended 2026-11-22 (owner):** PRs land by squash-merge, so `main` keeps no merge commits; each PR becomes one commit titled by its conventional PR title. Batches of several PRs are no longer integrated as one merge commit.
 - **Links:** the merge protocol in the session notes; AGENTS.md.
 
 ## D32. An unusable KMS key is a permission refusal
@@ -366,6 +369,16 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a Go behaviour on this surface would lose data. Then ours differs, with its own entry here.
 - **Links:** #121 (cuts 2, 4 and 5 withdrawn), docs/release-bar.md.
 
+## D50. A boot divergence is a refusal, and the stop record goes (delegated)
+
+- **Question:** at boot the replica's newest level-0 file verifies and differs from the staged copy under the same key (BOOT-13). It used to stand while the staged files went and a snapshot followed above it. With rule (a) (D12), is that still right, and is the stop record (`lsr-stop`) still needed?
+- **Choice:** refuse it with `OtherWriter` unless a takeover record covers the replica's newest key, and delete the stop record, its codec and its file. An unusable takeover record is ignored as absent and reported, never refusing the start.
+- **Options considered:** keep BOOT-13's snapshot and the stop record, which alone stopped a restart after another writer took this engine's next id; refuse the start on an unusable record.
+- **Why:** this engine uploads only from witnessed, synced staged copies and keeps a takeover record before deleting its own (BOOT-30), so without an operator's hand a boot divergence is another writer at this engine's next id. Refusing it covers that restart without a record, and rule (a) covers the other writer's files above staging, so the stop record kept nothing the boot does not now see. One fewer meta-directory file and crash-consistency surface. An unusable takeover record then costs only what no record costs.
+- **Cost accepted:** an operator who puts back a staging backup holding another copy of the replica's newest key stops instead of snapshotting; `lsr take-over` clears it, as for D12's other operator actions.
+- **Revisit if:** a world without an operator's hand produces a boot divergence.
+- **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-38, CFG-39; `crates/core/src/actor.rs` (`boot_listing`); #110.
+
 ## D35. A stall at the end of a run
 
 - **Options:** accept any stall as a degraded state (before); fail any stall once every injected fault has healed; fail it unless the world still imposes its fault.
@@ -374,6 +387,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a fault the world keeps imposing after the heal (none today) needs a table entry, or its runs fail.
 - **Revisit if:** a fault is added that the end of the run cannot heal.
 - **Links:** the stall-liveness PR; #104.
+
 ## D70. Known-wrong cells
 
 - **Options:** let the per-push seeds go red until each defect is fixed; leave the fault out of every draw; draw it where failures are classified.
@@ -447,6 +461,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
 - **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
 - **Links:** #127 item I.
+
 ## D40. An S3 replica with an empty prefix (delegated)
 
 - **Question:** Go accepts an S3 replica with no prefix and writes keys with a leading slash (`/0000/...`, `rc.go` at 041a8c3). litestream-rs refuses it at load (ruling F10, `docs/plans/phase-1-reading.md`). D33 asks for Go's behaviour wherever Go is not wrong.
@@ -531,6 +546,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Dropped before review:** `Replicator::writes_refused` and the `lsr_app_held` metric; health and `/healthz` carry the same state.
 - **Revisit if:** operators misread any of them in practice.
 - **Links:** #115, #149, `crates/sidecar/src/failstop.rs`, `crates/cli/src/run.rs` (the exit table).
+
 ## D42. A lone `access-key-id` or `secret-access-key` (delegated)
 
 - **Question:** Go builds static credentials only when the config file gives both keys; with one, it ignores it and signs with whatever the AWS SDK's default chain finds (environment, shared files, the instance role). litestream-rs refuses the file. D33 asks for Go's behaviour unless Go is wrong.
@@ -557,7 +573,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Choice:** built in the SDK's order, after the environment's keys: web identity from the environment, then the profile (static keys, `web_identity_token_file`, `credential_process`), then container credentials, then the instance metadata service, each as the SDK v1.19.6 and `feature/ec2/imds` v1.18.16 call them, with the SDK's load-time profile checks. Still a gap, tracked in #176: assumed roles over `source_profile` or `credential_source`, SSO and login sessions. A profile that needs one is refused, naming the source, rather than skipped, so the chain never signs with credentials Go would not have chosen.
 - **Cost until the rest is built:** a deployment that assumes a role from a profile, or signs in through SSO, needs static keys or a source that is built.
 - **Evidence:** `compat::go_and_rust_fetch_the_same_temporary_credentials` (a differential against Go's SDK over a fake STS, container endpoint and metadata service); `compat::go_resolves_what_rust_does_not_build` asserts the remaining gap, so building it shows there first.
-- **Links:** #176; `docs/BEHAVIOR.md` CFG-7, CFG-36, CFG-37, CFG-38; `crates/store-s3/src/chain.rs`, `chain/remote.rs`, `chain/process.rs`, `signer.rs`.
+- **Links:** #176; `docs/BEHAVIOR.md` CFG-7, CFG-41, CFG-42, CFG-43; `crates/store-s3/src/chain.rs`, `chain/remote.rs`, `chain/process.rs`, `signer.rs`.
 
 ## D45. Config refusals stricter than Go (delegated)
 
@@ -606,7 +622,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Delegated:** decided by the agent building #176 for the owner.
 - **Cost if wrong:** (1) one more fetch per credential lifetime than Go makes. (2) a credential endpoint that legitimately answers without keys (none is known) would start under Go and not under litestream-rs, though Go could not sign a request that a bucket accepts.
 - **Evidence:** `store-s3::signer::tests` (refresh margin, failed fetch, the two failure classes); `compat::go_and_rust_fetch_the_same_temporary_credentials` counts Go's empty key and Go's crash as refusals and requires litestream-rs to refuse.
-- **Links:** `docs/BEHAVIOR.md` CFG-37, CFG-38; `crates/store-s3/src/source.rs`, `signer.rs`.
+- **Links:** `docs/BEHAVIOR.md` CFG-42, CFG-43; `crates/store-s3/src/source.rs`, `signer.rs`.
 
 ## D74. Every engine commit checks the size the store acknowledged (delegated)
 
@@ -616,6 +632,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a delete after every mismatched commit. A store that misreports sizes on objects it holds whole loses them to the delete and they are written again; the caller still holds the bytes until a verified listing. The type does not stop a future engine function from calling `begin_upload` directly; the planted bugs `compact-commit-unchecked` and `short-commit-object-kept` catch the two paths that exist.
 - **Revisit if:** a new engine path writes to a store.
 - **Links:** #127 (the blind-plant pilot's second gap), `docs/planted-bugs.toml`.
+
+## D111. What the soak must reach (delegated)
+
+- **Options:** keep reach keyed by state name and gated on 64 fixed seeds; key it by behaviour row and fault class and gate every night's soak on zeros.
+- **Choice:** both. `mark!(<Row>)` on the detecting branch in lsr-core, compiled only under `verify`; each `docs/behavior.toml` row says `mark = "site"` or `"none: <reason>"`. Every injector variant maps through a wildcard-free match to a fault class counted drawn, applied, skipped, hit, judged during and judged after. The nightly soak fails when a sited row or a required class count is zero; `canary.never` must be the only zero. A class the mixes never draw is `Undrawn` with its reason and must stay undrawn. A required count that cannot be earned is listed in `EXEMPT` (`crates/sim/src/marks.rs`) with its reason. "A weight set to 0 goes red" is an in-process test on every push (the second writer's weight), not a nightly scratch tree.
+- **Why:** a green soak said nothing about what it exercised (issue #127, section 4). A count per row turns "covered" from a reading of the generator into a number from a run.
+- **Cost accepted:** `hit` is exact only for store faults and injected SQLite failures; for every other class it means an engine tick ran with the fault in place or after it, which is not proof the damage was read. A row whose detection sits in a `const fn` mapping arm has no site yet ("not yet placed"). A rare class or row that a short night misses makes that night red until a floor or an exemption says otherwise.
+- **Revisit if:** a night goes red on a key that a longer soak reaches (add a floor per key), or the marks start deriving BEHAVIOR's D, S and R (section 7.3, item 2).
+- **Links:** #127.
 
 ## Unverified, not recorded
 

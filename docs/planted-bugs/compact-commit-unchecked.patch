@@ -1,22 +1,21 @@
 diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
-index 6cd81f42..0dc03d3e 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
-@@ -54,7 +54,6 @@ use lsr_ltx::{
+@@ -54,7 +54,6 @@
  };
  use thiserror::Error;
  
 -use crate::checked::Checked;
  use crate::layout::{FileInfo, FileKey, Level};
  use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
- use crate::store::{ObjectStore, ReadLen, StoreError, Upload};
-@@ -729,7 +728,8 @@ async fn compact_with<S: ObjectStore, D: ObjectStore>(
-     let encoder = Encoder::new(Vec::new(), header).map_err(CompactError::Encode)?;
-     let key = FileKey::new(level, inputs.range());
+ use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
+@@ -732,7 +731,8 @@
      let created_at = header.fields().timestamp;
--    let mut upload = Checked::begin(dest, &key, created_at)
+     // A compacted file may be written again over itself (a retried
+     // compaction, Go's output for the same range), as Go's are.
+-    let mut upload = Checked::begin(dest, &key, created_at, WriteMode::Replace)
 +    let mut upload = dest
-+        .begin_upload(&key, created_at)
++        .begin_upload(&key, created_at, WriteMode::Replace)
          .await
          .map_err(CompactError::Dest)?;
      let written = write_output(&mut merge, encoder, &header, &mut upload).await;

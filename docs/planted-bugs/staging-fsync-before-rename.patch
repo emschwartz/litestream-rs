@@ -1,10 +1,12 @@
+diff --git a/crates/store-fs/src/lib.rs b/crates/store-fs/src/lib.rs
+index 8c8d9395..7f71c774 100644
 --- a/crates/store-fs/src/lib.rs
 +++ b/crates/store-fs/src/lib.rs
-@@ -506,7 +506,6 @@
+@@ -606,7 +606,6 @@ impl<F: Fs> FsUpload<F> {
          let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
          let result = (|| {
              self.file.set_modified(self.mtime)?;
 -            sync_file(&self.file, &self.scratch)?;
              let size = self.file.metadata()?.len();
              if size != self.written {
-                 return Ok(Err(size));
+                 return Ok(Err(Some(size)));

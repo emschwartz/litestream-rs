@@ -531,6 +531,7 @@ async fn contents_pass<S: ObjectStore>(
         if let Some((key, error)) = dry.fault
             && !key.is_some_and(|key| findings.blamed.contains(&key))
         {
+            mark!(Verify1);
             findings.push(Finding::LatestRestoreFails { key, error });
         }
     }
@@ -742,6 +743,7 @@ impl<'a> Walk<'a> {
     ) -> Result<(), VerifyError> {
         let key = info.key;
         let Some(read) = self.read(store, info).await? else {
+            mark!(World28);
             findings.push(Finding::Vanished { key });
             self.before = None;
             return Ok(());

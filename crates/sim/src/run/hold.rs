@@ -149,9 +149,10 @@ impl ObjectStore for View {
         &self,
         key: &FileKey,
         created_at: Timestamp,
+        mode: lsr_core::WriteMode,
     ) -> Result<Self::Upload, StoreError> {
         self.fail(StoreOp::Upload)?;
-        self.raw.begin_upload(key, created_at).await
+        self.raw.begin_upload(key, created_at, mode).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

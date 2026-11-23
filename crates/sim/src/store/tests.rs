@@ -7,6 +7,7 @@ use lsr_ltx::Timestamp;
 use super::*;
 use crate::exec::{Polls, RunEnd, count_polls, run_until};
 use crate::testkit::{fkey, ltx, origin, put};
+use lsr_core::WriteMode;
 
 fn listed<S: ObjectStore>(store: &S) -> usize {
     block_on(store.list(Level::new(0).unwrap(), None, PageLimit::MAX))
@@ -24,7 +25,11 @@ fn boom() -> StoreError {
 
 async fn upload<S: ObjectStore>(store: &S, n: u64) -> Result<(), StoreError> {
     let mut up = store
-        .begin_upload(&fkey(0, n, n), Timestamp::from_unix_millis(5))
+        .begin_upload(
+            &fkey(0, n, n),
+            Timestamp::from_unix_millis(5),
+            WriteMode::Replace,
+        )
         .await?;
     up.write(&ltx(n, n, 1, 1, None)).await?;
     up.commit().await?;
@@ -114,7 +119,11 @@ fn recorder_records_err_after_publish() {
     let bytes = ltx(1, 1, 1, 1, wal);
     let result = block_on(async {
         let mut up = faults
-            .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5))
+            .begin_upload(
+                &fkey(0, 1, 1),
+                Timestamp::from_unix_millis(5),
+                WriteMode::Replace,
+            )
             .await?;
         up.write(&bytes).await?;
         up.commit().await
@@ -139,7 +148,11 @@ fn short_write(faults: &Faults<MemStore>) -> (Vec<u8>, FileInfo) {
     let bytes = ltx(1, 1, 1, 1, None);
     let info = block_on(async {
         let mut up = faults
-            .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5))
+            .begin_upload(
+                &fkey(0, 1, 1),
+                Timestamp::from_unix_millis(5),
+                WriteMode::Replace,
+            )
             .await?;
         up.write(&bytes).await?;
         up.commit().await
@@ -236,7 +249,11 @@ fn stage_power_loss_drops_or_tears_only_volatile() {
         let fresh = ltx(2, 2, 1, 2, None);
         block_on(async {
             let mut up = volatile
-                .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5))
+                .begin_upload(
+                    &fkey(0, 1, 1),
+                    Timestamp::from_unix_millis(5),
+                    WriteMode::Replace,
+                )
                 .await
                 .unwrap();
             up.write(&durable).await.unwrap();
@@ -289,6 +306,38 @@ fn a_late_error_leaves_the_key_volatile_until_a_later_commit_syncs() {
     assert!(handle.volatile().is_empty());
 }
 
+/// A lagging listing hides a new key and keeps showing a deleted one for a
+/// bounded number of list calls, while reads stay exact; writes past the lag
+/// show at once.
+#[test]
+fn a_lagging_listing_hides_writes_and_deletes_for_a_bounded_while() {
+    let raw = MemStore::new();
+    let store = Faults::new(raw.clone(), Vec::new(), 7).corrupting_through(raw.clone());
+    block_on(upload(&store, 1)).unwrap();
+    store.handle().lag_listings(2, 3);
+    block_on(upload(&store, 2)).unwrap();
+    block_on(store.delete(&[fkey(0, 1, 1)])).unwrap();
+    // Key 2 is hidden and key 1 still shows, for at most three listings.
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let page = block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
+        seen.push(page.files.iter().map(|f| f.key).collect::<Vec<_>>());
+    }
+    assert_eq!(seen.first(), Some(&vec![fkey(0, 1, 1)]), "{seen:?}");
+    assert_eq!(seen.last(), Some(&vec![fkey(0, 2, 2)]), "{seen:?}");
+    assert!(store.handle().stale_listings() >= 1);
+    // Reads are exact throughout.
+    let one = ReadLen::new(1).unwrap();
+    block_on(store.read(&fkey(0, 2, 2), 0, one)).unwrap();
+    assert!(matches!(
+        block_on(store.read(&fkey(0, 1, 1), 0, one)),
+        Err(StoreError::NotFound { .. })
+    ));
+    // The lag hid two writes; the third shows at once.
+    block_on(upload(&store, 3)).unwrap();
+    assert_eq!(listed(&store), 2);
+}
+
 /// The boot's scratch removal reaches the store under every simulator wrapper, with its count
 /// and with no fault drawn.
 #[test]
@@ -324,7 +373,11 @@ fn unlinked_with_no_sync(revert: bool) -> (MemStore, VolatileHandle, Vec<u8>) {
     let bytes = ltx(1, 1, 1, 1, None);
     block_on(async {
         let mut up = volatile
-            .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5))
+            .begin_upload(
+                &fkey(0, 1, 1),
+                Timestamp::from_unix_millis(5),
+                lsr_core::WriteMode::Replace,
+            )
             .await
             .unwrap();
         up.write(&bytes).await.unwrap();

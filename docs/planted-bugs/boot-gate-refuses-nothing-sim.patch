@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index da83672..5a823a2 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2122,7 +2122,7 @@ impl BootGate {
+     fn refuses(self, tip: Txid) -> bool {
+         match self.takeover {
+             Takeover::Off => false,
+-            Takeover::Vouch(record) => !record.is_some_and(|record| record.covers(tip)),
++            Takeover::Vouch(record) => !record.is_some_and(|record| record.covers(tip)) && false,
+         }
+     }
+ }
