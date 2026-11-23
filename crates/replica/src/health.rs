@@ -414,9 +414,8 @@ pub enum AppNotice {
 
 /// What the application changes to stop both: its connections' settings, which a replicator in
 /// another process cannot set.
-const ADVICE: &str = "set wal_autocheckpoint = 0 and SQLITE_FCNTL_PERSIST_WAL on every \
-     connection the application opens (app_connection does both), and tell the replicator \
-     (app_autocheckpoint: None)";
+const ADVICE: &str = "set wal_autocheckpoint = 0 on every connection the application opens \
+     (app_connection does), and tell the replicator (app_autocheckpoint: None)";
 
 impl fmt::Display for AppNotice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
