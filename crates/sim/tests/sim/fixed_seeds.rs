@@ -1449,29 +1449,3 @@ mod short_object_left {
         }
     }
 }
-
-#[cfg(test)]
-mod upload_turns {
-    use lsr_sim::run::run_ops;
-    use lsr_sim::{AfterRestart, ClockLaw, Opts, Seed};
-
-    /// A lagging listing's hold whose last ticks each carry a commit, after a resnapshot
-    /// cleared the upload task's degraded state: every tick's WAL step staged a file and ended
-    /// the tick before the upload step ran, so replication halted while health reported nothing
-    /// (seed 0x593 under its mixed mix, 280 recorded operations). Uploads now take their turn
-    /// after a fair share of such ticks.
-    #[test]
-    fn uploads_take_their_turn_while_a_commit_lands_every_tick_seed_0x593() {
-        let opts = Opts {
-            drawn: true,
-            block_crash_law: true,
-            after_restart: AfterRestart::Busy,
-            clock_law: ClockLaw::PerTick,
-            overlap: true,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(Seed::new(0x593), crate::histories::seed_0x593::OPS, &opts) {
-            panic!("{failure}");
-        }
-    }
-}

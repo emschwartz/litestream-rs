@@ -26,7 +26,6 @@ pub mod seed_0x330;
 pub mod seed_0x46;
 pub mod seed_0x4c;
 pub mod seed_0x585;
-pub mod seed_0x593;
 pub mod seed_0x734;
 pub mod seed_0x753;
 pub mod seed_0x80e;
@@ -58,11 +57,6 @@ pub enum Guard {
 
 /// Every recorded history: its module, the test that runs it, and its guard.
 pub const GUARDS: &[(&str, &str, Guard)] = &[
-    (
-        "seed_0x593",
-        "uploads_take_their_turn_while_a_commit_lands_every_tick_seed_0x593",
-        Guard::Own("uploads-wait-behind-every-sync-sim"),
-    ),
     (
         "seed_0x82",
         "a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82",

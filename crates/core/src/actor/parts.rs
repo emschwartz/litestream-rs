@@ -680,4 +680,8 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
         "witnesses",
         Keep::Derived("witnessed again at boot against the live WAL (crate::witness)"),
     ),
+    (
+        "syncs_ahead",
+        Keep::Ephemeral("a fairness count between two steps; a restart starts it at zero"),
+    ),
 ];

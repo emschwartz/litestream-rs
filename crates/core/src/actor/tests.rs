@@ -2501,3 +2501,51 @@ fn uploads_keep_up_with_an_app_that_commits_every_tick() {
     assert!(uploads >= 3, "uploads starved behind syncs: {seen:?}");
     assert!(actor.replicated() > start, "{seen:?}");
 }
+
+/// A staged file that turns unreadable is dropped and a snapshot takes its place, but nothing
+/// has reached the replica: the upload failures before it still count toward a stall, so a
+/// replica that stays down is reported degraded on time. Before, the drop counted as the
+/// upload task's success and started its count again, and a halt that kept turning up
+/// unreadable files was never reported (simulator seeds 0x446 and 0x593).
+#[test]
+fn a_resnapshot_keeps_the_failed_uploads_toward_a_stall() {
+    let stalled = crate::fault::STALLED_AFTER.get();
+    let (mut rig, mut actor) = caught_up();
+    rig.remote.refuse_uploads.store(true, Ordering::SeqCst);
+    rig.commit(2);
+    let (mut now, mut failures) = (T0 + 1, 0);
+    for _ in 0..40 {
+        if failures == stalled - 3 {
+            break;
+        }
+        if let Some(Event::Retrying { until, .. }) = event(&rig.tick(&mut actor, now)) {
+            failures += 1;
+            now = until.unix_millis();
+        }
+    }
+    assert_eq!(failures, stalled - 3);
+    tear(&rig, 2, truncated);
+    let again = first_bad_read(&mut rig, &mut actor, now);
+    let lost = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&lost),
+        Some(&Event::Resnapshot(
+            SnapshotCause::NewestStagedFileUnreadable
+        ))
+    );
+    let (mut now, mut after) = (again, 0);
+    for _ in 0..40 {
+        if actor.degraded(Task::Upload).is_some() {
+            break;
+        }
+        if let Some(Event::Retrying { until, .. }) = event(&rig.tick(&mut actor, now)) {
+            after += 1;
+            now = until.unix_millis();
+        }
+    }
+    assert!(actor.degraded(Task::Upload).is_some(), "never degraded");
+    assert!(
+        after <= 2,
+        "{after} more failures before the stall was reported"
+    );
+}

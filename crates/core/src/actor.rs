@@ -1867,7 +1867,10 @@ impl Actor {
             staged: from.prev(),
             cause,
         };
-        self.kept.tasks.get_mut(Task::Upload).succeed();
+        // The unreadable files are gone, so the next upload may run at once; but nothing has
+        // reached the replica, so the failures so far still count toward a stall, and a
+        // degraded state stays until an upload goes through.
+        self.kept.tasks.get_mut(Task::Upload).probe();
         self.ran(Event::Resnapshot(cause), now)
     }
 

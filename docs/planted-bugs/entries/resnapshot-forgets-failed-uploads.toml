@@ -1,0 +1,6 @@
+# Dropping a staged file that turned unreadable counted as the upload task's success, so a
+# replica that stayed down was never reported degraded.
+name = "resnapshot-forgets-failed-uploads"
+fix = "FIXSHA2"
+package = "lsr-core"
+tests = ["actor::tests::a_resnapshot_keeps_the_failed_uploads_toward_a_stall"]

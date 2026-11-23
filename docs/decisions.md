@@ -773,7 +773,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Choice:** the fair share. After `FAIR_SHARE` (8) ticks in a row whose WAL step passed over uploads that were ready, the next tick runs the upload step first; any upload step that runs resets the count. The drain does the same. One upload step uploads everything staged by default, so a turn in nine is enough to keep up.
 - **Cost accepted:** with `files_per_tick` set to fewer than 8 files, a writer that commits on every tick can still grow the upload backlog, at most `8 - files_per_tick` files per nine ticks, until its commits slow. Strict alternation would not, but it reorders ticks that short write bursts produce today.
 - **Revisit if:** a deployment sets `files_per_tick` low and commits continuously, or a tick may report more than one event.
-- **Links:** `crates/core/src/actor.rs` (`owed_upload`, `passed_over_uploads`), RUN-29 in `docs/behavior.toml`, seed 0x593 in `crates/sim/tests/sim/histories/`.
+- **Links:** `crates/core/src/actor.rs` (`owed_upload`, `passed_over_uploads`), RUN-29 in `docs/behavior.toml`, core::`uploads_keep_up_with_an_app_that_commits_every_tick`.
 
 ## D75. One module writes to and deletes from the stores (delegated)
 
