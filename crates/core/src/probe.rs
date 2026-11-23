@@ -13,7 +13,7 @@
 //! first of those files, which is the transaction after level `k`'s newest file unless the
 //! level below has a hole there. Both are named. A listing that hides level `k`'s newest
 //! file as well hides the start, so a file above it stays unnamed: that residue is the
-//! "known wrong" row BOOT-31 in `docs/behavior.toml`. A level-0 file that spans several
+//! "known wrong" row BOOT-32 in `docs/behavior.toml`. A level-0 file that spans several
 //! transactions (Go may write one) starts after the listed level-0 files, so it is named
 //! from there too. The keys are read in one batch, so a store that reads side by side asks
 //! for them together.

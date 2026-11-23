@@ -47,7 +47,7 @@
 //! (`probe::Starts`). What they cannot find is such a file when the listing
 //! also hides that level's previous file: its start is then not knowable
 //! without a listing, and a lagging listing that hides it is taken as the
-//! replica's end (BOOT-31 in `docs/behavior.toml`).
+//! replica's end (BOOT-32 in `docs/behavior.toml`).
 //!
 //! Each staged file is streamed through the LTX decoder while it is copied. The
 //! bytes are written to an upload that no listing can see, and the upload is

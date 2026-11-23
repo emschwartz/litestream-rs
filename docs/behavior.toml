@@ -226,7 +226,7 @@ mark = "none: the code trusts a lagging listing; nothing detects the hidden uplo
 circumstance = "The boot's listing lags the bucket and hides the engine's own newest uploads, a snapshot, or a level 1 to 8 file"
 response = "**Read past.** After the listing the engine reads the keys a reader can name for each transaction past the listed newest (its level-0 file, a level-0 file from the first transaction or from where the listed level 0 ends, the level 1 to 8 files from each start the listing implies, the snapshot ending at it; `core/src/probe.rs` `walk` and `Starts`), through the newest staged transaction and then until 3 transactions in a row are missing; with nothing staged, to its cap of 64 transactions (D63). Past the first 4 transactions only the level-0 and snapshot keys are read. A level's starts are the transaction after its newest listed file and the first file of the level below above it, where any compaction into it begins. What the reads find is the replica's newest. Level-0 uploads are conditional, so a key the reads missed is refused by the bucket"
 signal = "none"
-at_risk = "None for the engine's own hidden files, or for a hidden merged file whose level-0 inputs an operator removed while that level's previous file is listed. The case where the lag hides that previous file too is BOOT-31"
+at_risk = "None for the engine's own hidden files, or for a hidden merged file whose level-0 inputs an operator removed while that level's previous file is listed. The case where the lag hides that previous file too is BOOT-32"
 recovery = "None needed"
 detected_by = "core::`a_listing_that_hides_the_newest_uploads_is_corrected_by_reads`, core::`a_snapshot_a_listing_hides_is_found_by_a_read`, core::`a_hidden_level_one_file_past_the_listing_is_found_by_its_level_key`, sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`, sim::`a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4`, core::`with_nothing_staged_the_probe_walks_past_a_wide_hole`, sim::`a_boot_with_staging_wiped_walks_past_a_wide_hole_seed_0x95a`; plant::`listing-trusted-without-probe`, plant::`boot-trusts-a-stale-listing`, plant::`probe-skips-higher-levels`, plant::`probe-skips-higher-levels-sim`, plant::`boot-walk-stops-at-the-gap-with-staging-empty`, plant::`boot-walk-stops-at-the-gap-with-staging-empty-sim`"
 survived_by = "sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`, sim::`a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4`"
@@ -385,7 +385,7 @@ notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and
 
 [[row]]
 table = "Boot"
-id = "BOOT-31"
+id = "BOOT-32"
 mark = "none: the code trusts a lagging listing; nothing detects the hidden upload"
 circumstance = "A lagging listing hides a level 1 to 8 file whose level-0 inputs are gone (an operator removed another writer's file after maintenance merged it) **and** hides that level's previous file, so the listing implies no start for it"
 response = "**Trusted.** No read can name the file: its start is the end of a file the listing does not show. The engine takes the replica as ending below it and uploads its next transactions into ids the hidden file holds"

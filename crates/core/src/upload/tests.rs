@@ -1459,7 +1459,7 @@ fn a_torn_tail_a_higher_level_file_already_holds_is_not_replaced() {
     assert_eq!(read_all(&remote.inner, &key(2)), b"torn");
 }
 
-/// The residue (BOOT-31 in docs/behavior.toml): a listing that hides level 1's previous file as well hides where
+/// The residue (BOOT-32 in docs/behavior.toml): a listing that hides level 1's previous file as well hides where
 /// the next one starts, so a level-1 file with no level-0 input left stays unnamed and the
 /// replica looks as if it ends earlier. Pinned so a change that finds it says so.
 #[test]
