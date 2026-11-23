@@ -173,6 +173,7 @@ classes! {
     EnvWipeStaging = "EnvFault.WipeStaging", Once;
     EnvSource = "EnvFault.Source", Once;
     EnvEvictPageCache = "EnvFault.EvictPageCache", Once;
+    HttpFault = "HttpFault", Once;
     // Undrawn: these EnvFault variants are scenario steps (see their docs in generate.rs).
     // A finding of issue #127 row 42 and others: they never meet another fault by chance.
     EnvShmMidUpdate = "EnvFault.ShmMidUpdate", Undrawn;
@@ -291,6 +292,7 @@ impl Class {
             Op::LyingWalSync => Self::LyingWalSync,
             Op::OurReader { .. } => Self::OurReader,
             Op::AppAutocheckpoint(_) => Self::AppAutocheckpoint,
+            Op::HttpFault(_) => Self::HttpFault,
             Op::Crash(CrashKind::Process) => Self::CrashProcess,
             Op::Crash(CrashKind::Power) => Self::CrashPower,
             Op::ClockJump(_) => Self::ClockJump,

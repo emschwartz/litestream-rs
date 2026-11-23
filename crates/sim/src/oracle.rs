@@ -33,7 +33,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use lsr_core::{Did, FileInfo, FileKey, MemStore, PlanOutcome, RestoreTarget, is_snapshot_start};
+use lsr_core::{Did, FileInfo, FileKey, PlanOutcome, RestoreTarget, is_snapshot_start};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 use lsr_wal::Salts;
 use thiserror::Error;
@@ -180,6 +180,17 @@ pub enum Violation {
         lost: u64,
         /// The forcings in effect.
         window: Vec<crate::forcing::Forcing>,
+    },
+    /// A provider refused a request with an answer an operator fixes one way
+    /// ([`crate::remote::expected_denial`]), and the engine reported no refusal, or another.
+    #[error(
+        "the store refused with what an operator fixes as {expected:?}; the engine reported {got}"
+    )]
+    DenialMisreported {
+        /// The refusal the answer means.
+        expected: lsr_core::Denied,
+        /// What the engine's tasks reported after the tick.
+        got: String,
     },
     /// A running engine listed the replica while another writer's file stood
     /// past its own position, and did not stop.
@@ -797,7 +808,7 @@ impl Default for Ground<'_> {
 pub fn check(
     model: &Model,
     recorder: &RecorderLog,
-    remote: &MemStore,
+    remote: &crate::remote::Bucket,
     acked: &Acked,
 ) -> Result<Checked, Violation> {
     check_with(model, recorder, remote, acked, Ground::default())
@@ -811,7 +822,7 @@ pub fn check(
 pub fn check_with(
     model: &Model,
     recorder: &RecorderLog,
-    remote: &MemStore,
+    remote: &crate::remote::Bucket,
     acked: &Acked,
     ground: Ground<'_>,
 ) -> Result<Checked, Violation> {
@@ -870,11 +881,11 @@ pub fn check_with(
 }
 
 /// The replica's files as the store holds them, ascending by key: read from the store's own
-/// map ([`MemStore::stored`]), never through the engine's listing code (`Inventory::load`, its
+/// objects ([`crate::remote::Bucket::stored`]), never through the engine's listing code (`Inventory::load`, its
 /// paging and its merge), so a listing defect the engine has cannot also hide a file from the
 /// judges.
 #[must_use]
-pub fn replica_files(remote: &MemStore) -> Vec<FileInfo> {
+pub fn replica_files(remote: &crate::remote::Bucket) -> Vec<FileInfo> {
     remote.stored()
 }
 

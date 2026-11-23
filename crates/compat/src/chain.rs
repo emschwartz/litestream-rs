@@ -363,6 +363,7 @@ fn config() -> Result<ActorConfig, CompatError> {
         // A fixture run must fail loudly on any persistent fault, not degrade.
         responses: Responses::STRICT,
         max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
+        destination: None,
     })
 }
 

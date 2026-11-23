@@ -20,8 +20,8 @@ use std::io::ErrorKind;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CreatedAt, Denied, Entropy, FileInfo, FileKey, Inventory, Level, Listing, MemStore,
-    ObjectStore, PageLimit, ReadLen, RestoreError, RestoreTarget, StopCause, StoreError, StoreOp,
+    CreatedAt, Denied, Entropy, FileInfo, FileKey, Inventory, Level, Listing, ObjectStore,
+    PageLimit, ReadLen, RestoreError, RestoreTarget, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -46,8 +46,11 @@ const ALL_OPS: [StoreOp; 4] = [
 const SAMPLED_TXIDS: u64 = 4;
 
 /// Reads of the replica the engine makes under [`Hold::LyingReads`] that return a flipped
-/// byte, at most: one flip scheduled for each of the next this many reads.
-const LYING_ENGINE_READS: u32 = 64;
+/// byte, at most: one flip scheduled for each of the next this many reads. It stands in for
+/// "every read for the whole hold", so it must outlast the hold: the one-byte reads past a
+/// listing take a scheduled flip each without receiving it (they never cover the header
+/// byte), and a boot walks several transactions with several keys each.
+const LYING_ENGINE_READS: u32 = 2048;
 
 /// What a restore through the fault meets.
 #[derive(Clone, Debug)]
@@ -63,7 +66,7 @@ enum Lens {
 /// The raw replica as a restore made during the hold sees it.
 #[derive(Clone, Debug)]
 pub(super) struct View {
-    raw: MemStore,
+    raw: crate::remote::Bucket,
     lens: Lens,
 }
 
@@ -101,7 +104,7 @@ fn held_error(op: StoreOp, auth: bool) -> StoreError {
 }
 
 impl ObjectStore for View {
-    type Upload = <MemStore as ObjectStore>::Upload;
+    type Upload = <crate::remote::Bucket as ObjectStore>::Upload;
 
     /// Forwards to the store it views, with no fault: the simulator's stores leave no scratch.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
@@ -646,6 +649,11 @@ impl Runner {
             }
         };
         let ahead = u8::try_from(rng.below(3)).unwrap_or(0);
-        self.store_fault(target, op, ahead, crate::store::FaultShape::Error(error));
+        self.store_fault(
+            target,
+            op,
+            u16::from(ahead),
+            crate::store::FaultShape::Error(error),
+        );
     }
 }

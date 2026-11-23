@@ -29,6 +29,7 @@ mod compact;
 #[cfg(any(test, feature = "testing"))]
 pub mod conformance;
 mod created_at;
+mod cure;
 mod env;
 mod failstop;
 mod fault;
@@ -101,7 +102,7 @@ pub use layout::{
     ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 /// The ahead-of-WAL verdict [`Actor::ahead`] returns.
-pub use lsr_journal::Ahead;
+pub use lsr_journal::{Ahead, Floor, ReplicaId, Triple};
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
     MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionHold, RetentionMode,
@@ -118,6 +119,7 @@ pub use position::{
     Continuity, LastPage, Position, ReachedEnd, ReadLockHold, SyncedOffset, SyncedThrough,
     WalFileLen,
 };
+pub use probe::{NAMED_KEYS_MAX, Starts, WALK_READS_MAX};
 pub use recover::{
     BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
     RecoverEvent, Recovered, Verdict, WalView, recover_traced,
@@ -146,7 +148,7 @@ pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, s
 pub use takeover::{TakeoverRecord, TakeoverRecordError};
 pub use upload::{
     Did, PROBE_CAP, PROBE_GAP, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
-    fresh_probe_reads, upload_next,
+    capped_probe_reads, fresh_probe_reads, upload_next,
 };
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,

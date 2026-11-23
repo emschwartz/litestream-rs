@@ -125,6 +125,7 @@ mod diff {
             OtherProcessMode::Passive => "PASSIVE",
             OtherProcessMode::Restart => "RESTART",
             OtherProcessMode::Truncate => "TRUNCATE",
+            OtherProcessMode::Full => "FULL",
         };
         show(
             conn.query_row(&format!("PRAGMA wal_checkpoint({name})"), [], |row| {
@@ -403,12 +404,14 @@ mod diff {
     fn op() -> impl Strategy<Value = Op> {
         let mode = prop_oneof![
             Just(CheckpointMode::Passive),
-            Just(CheckpointMode::Truncate)
+            Just(CheckpointMode::Truncate),
+            Just(CheckpointMode::Full)
         ];
         let other = prop_oneof![
             Just(OtherProcessMode::Passive),
             Just(OtherProcessMode::Restart),
-            Just(OtherProcessMode::Truncate)
+            Just(OtherProcessMode::Truncate),
+            Just(OtherProcessMode::Full)
         ];
         prop_oneof![
             6 => (1_u8..16).prop_map(Op::Commit),
@@ -455,5 +458,89 @@ mod diff {
                 prop_assert_eq!(got, want, "model (left), SQLite (right), step {}: {:?}", step, ops[step]);
             }
         }
+    }
+
+    /// Runs `ops` on both sides, holds every answer of the model to SQLite's, and returns
+    /// SQLite's answers.
+    fn agreed(ops: &[Op]) -> Vec<String> {
+        answers(ops, 1)
+            .into_iter()
+            .zip(ops)
+            .map(|((got, want), op)| {
+                assert_eq!(got, want, "model (left), SQLite (right): {op:?}");
+                want.0
+            })
+            .collect()
+    }
+
+    /// The cure after a failed WAL sync (issue #197) counts on this: a FULL checkpoint with no
+    /// reader in the way copies every committed frame and says so (`log == checkpointed`), and
+    /// leaves the WAL as it was, same length and generation, so the frames it copied can still
+    /// be named. The next commit then starts a new generation.
+    #[test]
+    fn a_full_checkpoint_copies_every_frame_and_leaves_the_wal() {
+        use CheckpointMode::Full;
+        let answers = agreed(&[
+            Op::Commit(0b0011),
+            Op::Commit(0b0100),
+            Op::Committed,
+            Op::Len,
+            Op::Checkpoint(Full),
+            Op::Len,
+            Op::Committed,
+            Op::Commit(0b1000),
+            Op::Committed,
+        ]);
+        let [_, _, _, before, run, after, committed, _, next] = answers.as_slice() else {
+            panic!("{answers:?}");
+        };
+        assert_eq!(run, "Ok((false, 3, 3))");
+        assert_eq!(before, after, "the WAL keeps its length");
+        assert_eq!(
+            committed, "Ok((3, 3, (Same, Same)))",
+            "same generation, all copied"
+        );
+        assert_eq!(
+            next, "Ok((1, 0, (PlusOne, Other)))",
+            "the next commit restarts"
+        );
+    }
+
+    /// Behind a reader on an older snapshot, FULL copies the frames that snapshot holds and
+    /// reports busy with `checkpointed < log`: the cure must not take it for a full copy. Once
+    /// the reader ends, FULL copies the rest.
+    #[test]
+    fn a_full_checkpoint_behind_an_older_snapshot_is_busy() {
+        use CheckpointMode::Full;
+        let answers = agreed(&[
+            Op::Commit(0b0001),
+            Op::OtherBegin(0),
+            Op::Commit(0b0010),
+            Op::Checkpoint(Full),
+            Op::OtherEnd(0),
+            Op::Checkpoint(Full),
+        ]);
+        let [_, _, _, held, _, freed] = answers.as_slice() else {
+            panic!("{answers:?}");
+        };
+        assert_eq!(held, "Ok((true, 2, 1))");
+        assert_eq!(freed, "Ok((false, 2, 2))");
+    }
+
+    /// A reader on the newest snapshot is in no FULL checkpoint's way, but holds a TRUNCATE
+    /// back: FULL never restarts the WAL, so it waits only for readers it would overtake.
+    #[test]
+    fn a_reader_on_the_newest_snapshot_holds_back_truncate_but_not_full() {
+        let answers = agreed(&[
+            Op::Commit(0b0001),
+            Op::OtherBegin(0),
+            Op::Checkpoint(CheckpointMode::Full),
+            Op::Checkpoint(CheckpointMode::Truncate),
+        ]);
+        let [_, _, full, truncate] = answers.as_slice() else {
+            panic!("{answers:?}");
+        };
+        assert_eq!(full, "Ok((false, 1, 1))");
+        assert_eq!(truncate, "Ok((true, 1, 1))");
     }
 }

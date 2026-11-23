@@ -27,6 +27,7 @@ pub const LIST_CALLS_PER_TICK: u64 = 24;
 pub struct CheckpointTally {
     passive: Rc<Cell<u32>>,
     truncate: Rc<Cell<u32>>,
+    full: Rc<Cell<u32>>,
 }
 
 impl CheckpointTally {
@@ -36,13 +37,17 @@ impl CheckpointTally {
         match mode {
             CheckpointMode::Passive => self.passive.get(),
             CheckpointMode::Truncate => self.truncate.get(),
+            CheckpointMode::Full => self.full.get(),
         }
     }
 
     /// Every checkpoint asked so far.
     #[must_use]
     pub fn total(&self) -> u32 {
-        self.passive.get().saturating_add(self.truncate.get())
+        self.passive
+            .get()
+            .saturating_add(self.truncate.get())
+            .saturating_add(self.full.get())
     }
 }
 
@@ -74,6 +79,7 @@ impl<C: Checkpointer> Checkpointer for CountingCheckpointer<C> {
         let cell = match mode {
             CheckpointMode::Passive => &self.tally.passive,
             CheckpointMode::Truncate => &self.tally.truncate,
+            CheckpointMode::Full => &self.tally.full,
         };
         cell.set(cell.get().saturating_add(1));
         self.inner.checkpoint(mode)

@@ -237,6 +237,7 @@ pub fn rig_actor_config() -> ActorConfig {
         shutdown_grace: secs(30),
         responses: Responses::STRICT,
         max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
+        destination: Some(lsr_core::ReplicaId::of(b"rig")),
     }
 }
 
@@ -1053,6 +1054,7 @@ impl<B: Backend> Rig<B> {
             .ok_or(RigError::State("judge without a model"))?;
         let copy = MemStore::new();
         block_on(copy_store(&FsStore::new(&self.remote_root), &copy))?;
+        let copy = lsr_sim::remote::Bucket::Mem(copy);
         Ok(lsr_sim::check(model, &self.remote_log, &copy, &self.acked)?)
     }
 

@@ -279,6 +279,7 @@ impl Real {
             OtherProcessMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
             OtherProcessMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
             OtherProcessMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
+            OtherProcessMode::Full => "PRAGMA wal_checkpoint(FULL)",
         };
         let (busy, log, done): (i64, i64, i64) = conn
             .query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
