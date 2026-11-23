@@ -380,7 +380,7 @@ tests = ["maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_i
 name = "maintenance-plans-from-a-lagging-listing"
 fix = "8c7d8ce"
 package = "lsr-core"
-tests = ["maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload"]
+tests = ["the_first_listing_after_a_boot_plans_nothing_while_it_hides_the_confirmed_upload"]
 
 # One failed read of the staged copy takes it as torn and confirms the replica's differing object.
 [[bug]]
@@ -1980,6 +1980,27 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
 
+# The fail-stop commit gate leaked one count of its flag per connection, and replaced an
+# application's commit hook without a word.
+[[bug]]
+name = "gate-leaks-its-flag"
+fix = "70f61c6"
+package = "lsr-sqlite"
+tests = ["gate::tests::the_gate_is_freed_with_its_connection"]
+
+[[bug]]
+name = "gate-hides-a-taken-hook"
+fix = "70f61c6"
+package = "lsr-sqlite"
+tests = ["gate::tests::an_application_hook_set_first_is_reported_not_silently_replaced"]
+
+[[bug]]
+name = "hold-as-of-demands-the-raw-answer-sim"
+fix = "53c6bb7"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e"]
+
 # Blind plant 05 of the recall pilot (issue #127): the uploader took a commit's acknowledged size as
 # given. Its original form (upload.rs restamping the size it wrote) cannot be written any more: the
 # size is checked inside publish before a Published exists. Re-expressed at the check, skipped for
@@ -2012,3 +2033,19 @@ tests = ["maintain::tests::a_rejected_compaction_output_is_deleted_by_the_execut
 # Its sim kill was seed 0x14's verify history, which stopped reaching a rejected compaction output
 # when that test was re-pinned to seed 0xd. An unaided search for another is masked while the
 # swarm fails on a clean tree; add a sim entry once it is clean again.
+
+[[bug]]
+name = "sim-short-object-damage"
+fix = "claude/sim-remote-corrupt"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c"]
+
+# The snapshot maintenance wrote is not watched: a lagging listing that hides it plans it again,
+# and the same level-9 key is written twice with other bytes.
+[[bug]]
+name = "written-snapshot-unwatched"
+fix = "9f205d69"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82"]
