@@ -1532,6 +1532,7 @@ impl Actor {
         let probes = Probes {
             prev: FrameCheck::Miss(Miss::Truncated),
             stale_next: false,
+            rechained: false,
         };
         let source = PositionSource::Running(&position, probes);
         Ok(

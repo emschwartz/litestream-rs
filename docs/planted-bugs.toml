@@ -395,6 +395,47 @@ name = "replica-replaced-on-one-read"
 fix = "34f1694"
 package = "lsr-core"
 tests = ["one_torn_read_of_the_replica_copy_does_not_write_over_it"]
+
+# A position at the start of a generation keeps the chain seed of the header it saw, though
+# SQLite wrote that header again with the same salts and another checkpoint sequence: the first
+# frame fails its checksum and the WAL reads as corrupt for good.
+[[bug]]
+name = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-core"
+tests = [
+    "a_step_from_the_start_follows_a_header_written_again_with_the_same_salts",
+]
+
+[[bug]]
+name = "start-seed-from-old-header-sqlite"
+patch = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "a_header_written_again_with_the_same_salts_replicates_what_follows",
+]
+
+[[bug]]
+name = "start-seed-from-old-header-sim"
+patch = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::a_header_written_again_by_another_connection_is_followed"]
+
+# A running position past the start whose frames were regrown from a header written again
+# (same salts, another seed) continues on the old running checksum; the next scan meets the
+# regrown chain as damage below the committed end.
+[[bug]]
+name = "rechained-before-end-ignored"
+fix = "6305fb48"
+package = "lsr-core"
+tests = [
+    "frames_regrown_from_a_header_written_again_are_a_rewind",
+]
+
 # The witness's page count compared with at least, not exactly: a pending file carrying one page
 # its range never wrote is proven and uploaded. Found by a blind recall pilot, which no layer caught.
 [[bug]]

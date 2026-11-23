@@ -86,6 +86,9 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         Op::Commit { pages, grow } => format!("Op::Commit {{ pages: {pages}, grow: {grow} }}"),
         Op::CommitInTick { pages } => format!("Op::CommitInTick {{ pages: {pages} }}"),
         Op::Spill => "Op::Spill".to_owned(),
+        Op::OtherConnectionCommit { pages } => {
+            format!("Op::OtherConnectionCommit {{ pages: {pages} }}")
+        }
         Op::Rollback => "Op::Rollback".to_owned(),
         Op::Vacuum { page_size } => format!("Op::Vacuum {{ page_size: {} }}", size(*page_size)),
         Op::OtherProcessReader { begin } => format!("Op::OtherProcessReader {{ begin: {begin} }}"),
