@@ -134,8 +134,9 @@ use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
-    Did, Swept, UploadConfig, UploadPlan, UploadState, Uploaded, drop_staged_from, inventory_fault,
-    past_known, plan_upload, probe_past, sweep_staged, upload_next,
+    Did, Guard, Swept, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
+    drop_staged_from, inventory_fault, past_known, plan_upload, probe_past, sweep_staged,
+    upload_next, upload_next_in,
 };
 use crate::verify::LivePages;
 use crate::witness::{LiveDb, Pending, Witnesses, still_holds, witness_pending};
@@ -1875,12 +1876,12 @@ impl Actor {
             let plan = plan_upload(&self.engine.upload, self.staged());
             let bound = self.upload_bound(plan);
             let witnesses = &self.engine.witnesses;
-            let uploaded = upload_next(
+            let uploaded = upload_next_in(
                 self.engine.upload,
                 env.staging,
                 env.remote,
                 bound,
-                witnesses,
+                (witnesses, self.guard()),
             )
             .await;
             match uploaded {
@@ -1891,21 +1892,7 @@ impl Actor {
                     self.set_upload(uploaded.state);
                     last = uploaded.did;
                 }
-                Err(failed) => {
-                    self.set_upload(failed.state);
-                    // One failed read says nothing about the staged bytes: the
-                    // file is dropped only when a read on a later tick fails too.
-                    if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan)
-                        && self.kept.suspect_staged.replace(key) == Some(key)
-                    {
-                        if let Some(tick) = self.vouch_before_drop(Task::Upload, None, now) {
-                            return Some(tick);
-                        }
-                        self.kept.suspect_staged = None;
-                        return Some(self.lose_staged(env, key.range().min(), None, now).await);
-                    }
-                    return Some(self.fault(Task::Upload, failed.fault, now));
-                }
+                Err(failed) => return Some(self.upload_failed(env, failed, plan, now).await),
             }
             if matches!(last, Did::Put(_) | Did::AlreadyPut(_)) {
                 self.kept.suspect_staged = None;
@@ -1924,8 +1911,58 @@ impl Actor {
                 break;
             }
         }
-        self.kept.tasks.get_mut(Task::Upload).succeed();
+        self.upload_succeeded();
         Some(self.ran(Event::Uploaded(last), now))
+    }
+
+    /// The upload task succeeded. Its degraded state goes, unless the store cannot make
+    /// create-only writes: the uploads replace for the rest of the process, so that cause stands
+    /// again whatever other cause the success just cleared (D79). Every success of the upload
+    /// task goes through here.
+    fn upload_succeeded(&mut self) {
+        let upload = self.kept.tasks.get_mut(Task::Upload);
+        upload.succeed();
+        if let Some(since) = self.kept.unguarded {
+            upload.stand(PersistentCause::ConditionalWritesUnsupported, since);
+        }
+    }
+
+    /// How level-0 uploads write: create-only until the store said it cannot (D79).
+    const fn guard(&self) -> Guard {
+        match self.kept.unguarded {
+            Some(_) => Guard::Unguarded,
+            None => Guard::BucketRefuses,
+        }
+    }
+
+    /// An upload step that failed: a staged file read wrong twice is dropped, a store that
+    /// cannot make create-only writes switches the uploads to replacing ones, and the fault is
+    /// routed.
+    async fn upload_failed<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        failed: UploadFailed,
+        plan: UploadPlan,
+        now: Timestamp,
+    ) -> Tick {
+        self.set_upload(failed.state);
+        // One failed read says nothing about the staged bytes: the
+        // file is dropped only when a read on a later tick fails too.
+        if let (Fault::StagedLost, UploadPlan::Upload(key)) = (failed.fault, plan)
+            && self.kept.suspect_staged.replace(key) == Some(key)
+        {
+            if let Some(tick) = self.vouch_before_drop(Task::Upload, None, now) {
+                return tick;
+            }
+            self.kept.suspect_staged = None;
+            return self.lose_staged(env, key.range().min(), None, now).await;
+        }
+        if failed.fault == Fault::CreateOnlyUnsupported {
+            // Raised before any replacing write: `fault` degrades the upload task (or stops),
+            // and only the next put replaces (D79).
+            self.kept.unguarded = self.kept.unguarded.or(Some(now));
+        }
+        self.fault(Task::Upload, failed.fault, now)
     }
 
     /// A listing while running found the replica's object at `from` verifying

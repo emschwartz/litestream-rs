@@ -175,6 +175,7 @@ pub const fn trip(
                 | StopCause::DatabaseAheadOfWal { .. }
                 | StopCause::WalLostCommits { .. }
                 | StopCause::DatabaseAheadOfWalUnchecked
+                | StopCause::ConditionalWritesUnsupported
                 | StopCause::Bug),
             ),
             _,

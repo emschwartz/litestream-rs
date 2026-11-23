@@ -210,6 +210,8 @@ classes! {
     RemoteRollBack = "Remote.RollBack", Once;
     // Undrawn: weight 0 in the default and swarm mixes; `dropped_created_at` draws it.
     RemoteDropCreatedAt = "Remote.DropCreatedAt", Undrawn;
+    // Undrawn as an op: the swarm draws it as Weights::no_create_only, for the whole run.
+    RemoteRefuseCreateOnly = "Remote.RefuseCreateOnly", Undrawn;
     // Undrawn: WalDamage is the drawn form of WAL damage; Wal is the scenarios' step.
     WalTearHeader = "Wal.TearHeader", Undrawn;
     WalTruncateAtFrame = "Wal.TruncateAtFrame", Undrawn;
@@ -425,6 +427,7 @@ impl Class {
             RemoteOp::RemoveUnrecognized => Self::RemoteRemoveUnrecognized,
             RemoteOp::RollBack => Self::RemoteRollBack,
             RemoteOp::DropCreatedAt => Self::RemoteDropCreatedAt,
+            RemoteOp::RefuseCreateOnly => Self::RemoteRefuseCreateOnly,
         }
     }
 

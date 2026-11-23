@@ -14,10 +14,11 @@
 //! - 412 `PreconditionFailed`, as a status or inside a 200's error document:
 //!   the key is taken, [`StoreError::AlreadyExists`]; the upload stays open
 //!   and goes on the orphan list.
-//! - `NotImplemented` (501): the provider has no conditional writes. The
-//!   complete is sent again without the condition (the parts are still
-//!   there), and every later create-only write goes without it too
-//!   ([`crate::WriteStats`] says so).
+//! - `NotImplemented` (501): the provider has no conditional writes.
+//!   [`StoreError::CreateOnlyUnsupported`]: nothing is published, the upload
+//!   goes on the orphan list, and the caller decides whether to write the key
+//!   as a replace (`docs/decisions.md` D79). The store never drops the
+//!   condition itself.
 //! - `NoSuchUpload`: the id is spent, which is what a complete retried after
 //!   it succeeded answers (a retrying proxy or client). A HEAD settles it: the
 //!   object with the size written, the created-at time sent and an ETag that
@@ -159,10 +160,9 @@ impl<T: Transport> Inner<T> {
     ) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
         let precondition = self.precondition(mode);
-        let mut response = self.send_complete(key, id, etags, precondition)?;
+        let response = self.send_complete(key, id, etags, precondition)?;
         if precondition == Precondition::KeyIsFree && is_not_implemented(&response) {
-            self.conditional_unsupported();
-            response = self.send_complete(key, id, etags, self.precondition(mode))?;
+            return Err(StoreError::CreateOnlyUnsupported { op, key: *key });
         }
         if S3Code::from_body(response.body()) == Some(S3Code::NoSuchUpload) {
             return self.settle_spent_upload(key, sent);

@@ -189,6 +189,7 @@ pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::DatabaseAheadOfWal { .. } => verdict_name(AheadKind::AheadOfWal),
         DegradedCause::WalLostCommits { .. } => verdict_name(AheadKind::WalLostCommits),
         DegradedCause::DatabaseAheadOfWalUnchecked => "database_ahead_of_wal_unchecked",
+        DegradedCause::ConditionalWritesUnsupported => "conditional_writes_unsupported",
         DegradedCause::Bug => "bug",
         DegradedCause::Stalled(stall) => stall_name(stall),
     }

@@ -638,6 +638,10 @@ fn responses(settings: ResponseSettings) -> Responses {
         database_page_mismatch: base.database_page_mismatch,
         // Not a config key: the library's `Responses` sets it (docs/decisions.md D103).
         database_ahead_of_wal: base.database_ahead_of_wal,
+        conditional_writes_unsupported: one(
+            settings.conditional_writes_unsupported,
+            base.conditional_writes_unsupported,
+        ),
         bug: one(settings.bug, base.bug),
         other_writer: match settings.other_writer {
             None => base.other_writer,

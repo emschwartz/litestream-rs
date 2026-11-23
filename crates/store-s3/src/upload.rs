@@ -178,11 +178,9 @@ impl<T: Transport> Inner<T> {
         let sent = request.md5();
         let response = self.send(op, request.into_request())?;
         if precondition == Precondition::KeyIsFree && is_not_implemented(&response) {
-            self.conditional_unsupported();
-            return Err(StoreError::Transient {
-                op,
-                kind: io::ErrorKind::Unsupported,
-            });
+            // Nothing published and nothing checked: the caller decides whether to replace
+            // (D79). The store never drops the condition itself.
+            return Err(StoreError::CreateOnlyUnsupported { op, key: *key });
         }
         if response.status() == 412 {
             self.tally_taken();

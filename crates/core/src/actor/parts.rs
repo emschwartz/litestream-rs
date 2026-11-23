@@ -127,6 +127,9 @@ pub(super) struct Kept {
     /// are deleted only when a read on a later tick fails too. Kept across
     /// boots, since boot's sweep is one of the readers.
     pub(super) suspect_staged: Option<FileKey>,
+    /// Since when level-0 uploads replace, because the store cannot make create-only writes:
+    /// `None` (create-only) until the store says so, then for the rest of the process (D79).
+    pub(super) unguarded: Option<Timestamp>,
     /// Snapshots staged since the actor began, per cause: a report.
     pub(super) snapshots: SnapshotCounts,
     /// What the sync steps and checkpoints did since the actor began: a report.
@@ -209,6 +212,7 @@ impl Kept {
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
+            unguarded: None,
             snapshots: SnapshotCounts::default(),
             work: WorkCounts::default(),
             final_snapshot: FinalSnapshot::NotAsked,
@@ -253,6 +257,7 @@ impl Kept {
             snapshot_asked,
             app: _,
             suspect_staged,
+            unguarded,
             snapshots,
             work,
             final_snapshot,
@@ -290,6 +295,9 @@ impl Kept {
             snapshot_asked: *snapshot_asked,
             app: observer,
             suspect_staged: *suspect_staged,
+            // The store does not learn conditional writes from a rebuild: only a new process
+            // asks it again.
+            unguarded: *unguarded,
             snapshots: *snapshots,
             work: *work,
             final_snapshot: *final_snapshot,
@@ -574,6 +582,14 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "app",
         Keep::Ephemeral("what the application's checkpoints did between reads: counts reported"),
+    ),
+    (
+        "unguarded",
+        Keep::Ephemeral(
+            "the replica's store refused a create-only write, so uploads replace: each process \
+             asks the store again at its first level-0 upload and is refused again \
+             (docs/decisions/D079.md)",
+        ),
     ),
     (
         "suspect_staged",
