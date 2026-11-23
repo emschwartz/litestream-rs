@@ -678,6 +678,16 @@ fn the_restore_point_is_kept_for_the_window_across_a_restart() {
     assert_eq!(ahead_recorded(&mut journal), None);
 }
 
+/// The notice the journal holds that an owed check could not be made.
+fn unchecked_recorded(journal: &mut MemJournal) -> Option<lsr_journal::Unchecked> {
+    match JournalWriter::open(journal).1.verdict {
+        lsr_journal::Verdict::Read { journal, .. } => journal.unchecked,
+        lsr_journal::Verdict::Newer { .. }
+        | lsr_journal::Verdict::Missing
+        | lsr_journal::Verdict::Unreadable(_) => None,
+    }
+}
+
 /// The floor the journal holds.
 fn floor_recorded(journal: &mut MemJournal) -> Option<lsr_journal::Floor> {
     match JournalWriter::open(journal).1.verdict {
@@ -686,6 +696,104 @@ fn floor_recorded(journal: &mut MemJournal) -> Option<lsr_journal::Floor> {
         | lsr_journal::Verdict::Missing
         | lsr_journal::Verdict::Unreadable(_) => None,
     }
+}
+
+/// Every object the replica holds is gone: the state at its newest confirmed transaction cannot
+/// be restored, however often it is asked.
+fn wipe_replica(rig: &Rig) {
+    let (_, files) = everything(rig);
+    assert!(!files.is_empty(), "the replica held files");
+    block_on(async {
+        for file in &files {
+            rig.remote.inner.delete(&[file.key]).await.unwrap();
+        }
+    });
+}
+
+/// A boot that owes the check after the replica lost the state it compares against (seed
+/// 0x2dc719's bucket rollback): the first attempt reports the damage, the next gives the check
+/// up and journals the notice, and the cure runs instead of the check retrying for ever (D106).
+#[test]
+fn a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs() {
+    let mut journal = MemJournal::default();
+    let mut rig = lost_after_backfill(&mut journal, &go_like(), false);
+    let mut restarted = Actor::new(go_like());
+    let booted = tick(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
+    assert!(
+        matches!(event(&booted), Some(Event::Booted { .. })),
+        "{booted:?}"
+    );
+    wipe_replica(&rig);
+    let first = tick(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
+    assert!(
+        matches!(
+            event(&first),
+            Some(Event::Degraded {
+                cause: PersistentCause::RemoteCorrupt,
+                ..
+            })
+        ),
+        "{first:?}"
+    );
+    assert_eq!(
+        restarted.ahead_of_wal_unchecked(),
+        None,
+        "one attempt never gives up"
+    );
+    let second = tick(&mut rig, &mut restarted, T0 + 20_000, Some(&mut journal));
+    assert!(
+        matches!(
+            event(&second),
+            Some(Event::Degraded {
+                cause: PersistentCause::DatabaseAheadOfWalUnchecked,
+                ..
+            })
+        ),
+        "{second:?}"
+    );
+    assert_eq!(
+        truncates(&rig),
+        0,
+        "the notice is journalled before the TRUNCATE"
+    );
+    let notice = unchecked_recorded(&mut journal).expect("the notice is journalled");
+    assert_eq!(notice.made, ts(T0 + 20_000));
+    assert_eq!(restarted.ahead_of_wal_unchecked(), Some(notice));
+    assert_eq!(restarted.ahead(), None, "no verdict: nothing was found");
+    rig.commit(5);
+    let seen = settle(&mut rig, &mut restarted, T0 + 30_000, Some(&mut journal));
+    assert_eq!(truncates(&rig), 1, "{seen:?}");
+}
+
+/// The notice stands for seven days from when the check was given up, across a restart, and
+/// then ends with the journal's fact cleared.
+#[test]
+fn the_unchecked_notice_stands_for_the_window_across_a_restart() {
+    let mut journal = MemJournal::default();
+    let mut rig = lost_after_backfill(&mut journal, &go_like(), false);
+    let mut restarted = Actor::new(go_like());
+    tick(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
+    wipe_replica(&rig);
+    tick(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
+    tick(&mut rig, &mut restarted, T0 + 20_000, Some(&mut journal));
+    let notice = restarted.ahead_of_wal_unchecked().expect("given up");
+    // Seven days, stated here rather than read from the code under test.
+    let until = notice.made.unix_millis() + 7 * 24 * 60 * 60 * 1000;
+    let mut later = Actor::new(go_like());
+    let seen = settle(&mut rig, &mut later, until - 1, Some(&mut journal));
+    let reminded = Event::AheadOfWal(AheadNotice::UncheckedStands { until: ts(until) });
+    assert!(
+        seen.iter().any(|t| event(t) == Some(&reminded)),
+        "a boot inside the window says how long the notice stands: {seen:?}"
+    );
+    assert_eq!(later.ahead_of_wal_unchecked(), Some(notice));
+    let ended = tick(&mut rig, &mut later, until, Some(&mut journal));
+    assert_eq!(
+        event(&ended),
+        Some(&Event::AheadOfWal(AheadNotice::UncheckedEnded))
+    );
+    assert_eq!(later.ahead_of_wal_unchecked(), None);
+    assert_eq!(unchecked_recorded(&mut journal), None);
 }
 
 /// The replica's level-0 file ending at `txid`: its length and the FNV-1a 64 digest of its

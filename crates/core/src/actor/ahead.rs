@@ -19,14 +19,29 @@
 //! A second verdict while one stands keeps the older restore point (the newer one sits on the
 //! damaged file) and restarts the window. An engine clock earlier than the verdict's time (a
 //! journal from a clock that ran ahead) restarts the window once, from now.
+//!
+//! The images the check compares against are the replica's state at its newest confirmed
+//! transaction. A replica that cannot give it because a call failed is retried, as any store
+//! fault is. One that cannot because it is damaged (a gap a bucket rollback left, a file that
+//! does not verify) would hold the check, and with it the TRUNCATE, for ever. So damage is
+//! reported as `RemoteCorrupt` once, and when it recurs at a later attempt the check is given up
+//! (`docs/decisions.md` D106):
+//!
+//! 1. The notice is held in `Kept` and journalled as the verdict is, and raised as
+//!    [`StopCause::DatabaseAheadOfWalUnchecked`] through the same response: a stop under `STRICT`, else
+//!    the cure runs unchecked.
+//! 2. It stands for [`AHEAD_KEPT_FOR`] ([`Actor::ahead_of_wal_unchecked`]), and keeps no restore point:
+//!    the state the check would have kept is the one the replica could not give.
+//! 3. A second one while one stands restarts the window.
 
 use std::time::Duration;
 
-use lsr_journal::Ahead;
+use lsr_journal::{Ahead, Unchecked};
 use lsr_ltx::{Timestamp, Txid};
 
 use super::parts::Course;
 use super::{Actor, Env, Stepped};
+use crate::ahead::CheckError;
 use crate::fault::role::Role;
 use crate::fault::{Fault, StopCause};
 use crate::source::{Checkpointer, PageSource, WalSource};
@@ -43,6 +58,9 @@ pub(super) enum AheadCheck {
     No,
     /// A boot restored a debt over the WAL of the newest staged file.
     Owed,
+    /// Owed still, after an attempt found the replica unable to give the images: the next
+    /// attempt that finds the same gives the check up.
+    OwedAgain,
 }
 
 impl Actor {
@@ -60,8 +78,11 @@ impl Actor {
     }
 
     /// Whether the next sync step is the check.
-    pub(super) fn owes_ahead_check(&self) -> bool {
-        self.kept.ahead_check == AheadCheck::Owed
+    pub(super) const fn owes_ahead_check(&self) -> bool {
+        match self.kept.ahead_check {
+            AheadCheck::Owed | AheadCheck::OwedAgain => true,
+            AheadCheck::No => false,
+        }
     }
 
     /// The check, in place of a sync step.
@@ -85,7 +106,7 @@ impl Actor {
                 proof: None,
             });
         };
-        let found = crate::ahead::check(
+        let checked = crate::ahead::check(
             position,
             env.wal,
             env.db,
@@ -93,7 +114,12 @@ impl Actor {
             env.remote,
             self.engine.upload.confirmed(),
         )
-        .await?;
+        .await;
+        let found = match checked {
+            Ok(found) => found,
+            Err(CheckError::Fault(fault)) => return Err(fault),
+            Err(CheckError::Unrestorable) => return self.unrestorable(now),
+        };
         let restore_point = position.txid();
         self.kept.ahead_check = AheadCheck::No;
         let Some(found) = found else {
@@ -117,6 +143,52 @@ impl Actor {
             pages: found.pages,
             first: found.first,
         }))
+    }
+
+    /// The replica could not give the images because it is damaged: reported as such once, and
+    /// the check given up when it recurs.
+    fn unrestorable(&mut self, now: Timestamp) -> Result<Stepped, Fault> {
+        match self.kept.ahead_check {
+            AheadCheck::Owed => {
+                self.kept.ahead_check = AheadCheck::OwedAgain;
+                Err(Fault::RemoteCorrupt)
+            }
+            AheadCheck::OwedAgain | AheadCheck::No => {
+                self.kept.ahead_check = AheadCheck::No;
+                self.kept.unchecked = Some(Unchecked { made: now });
+                Ok(Stepped::Stop(StopCause::DatabaseAheadOfWalUnchecked))
+            }
+        }
+    }
+
+    /// Restores a notice a journal recorded that a check could not be made, keeping the newer
+    /// of two, and tells the operator at the next tick how long it stands.
+    pub(super) fn adopt_unchecked(&mut self, recorded: Option<Unchecked>) {
+        self.kept.unchecked = newer(self.kept.unchecked, recorded);
+        if recorded.is_some()
+            && let Some(unchecked) = self.kept.unchecked
+        {
+            self.kept.ahead_notice = Some(super::AheadNotice::UncheckedStands {
+                until: unchecked_until(unchecked),
+            });
+        }
+    }
+
+    /// Ends a notice whose window has passed; re-dates one made after `now`, once. Returns
+    /// whether it ended.
+    pub(super) fn expire_unchecked(&mut self, now: Timestamp) -> bool {
+        let Some(unchecked) = self.kept.unchecked else {
+            return false;
+        };
+        self.kept.unchecked = stands(unchecked, now);
+        self.kept.unchecked.is_none()
+    }
+
+    /// The standing notice that a boot owed the check for a database file ahead of its WAL and
+    /// could not make it, so the cure ran unchecked (`docs/decisions.md` D106).
+    #[must_use]
+    pub const fn ahead_of_wal_unchecked(&self) -> Option<Unchecked> {
+        self.kept.unchecked
     }
 
     /// Restores a verdict a journal recorded, keeping the older restore point of two, and tells
@@ -187,6 +259,31 @@ pub fn kept_until(ahead: Ahead) -> Timestamp {
     ahead.made.saturating_add(AHEAD_KEPT_FOR)
 }
 
+/// Of a notice held and one read, the newer: a later check given up restarts the window.
+fn newer(held: Option<Unchecked>, read: Option<Unchecked>) -> Option<Unchecked> {
+    match (held, read) {
+        (Some(held), Some(read)) => Some(Unchecked {
+            made: held.made.max(read.made),
+        }),
+        (held, read) => held.or(read),
+    }
+}
+
+/// The notice at `now`: still standing (re-dated to `now` if it was made later, by a clock that
+/// ran ahead), or `None` once its window has passed.
+fn stands(unchecked: Unchecked, now: Timestamp) -> Option<Unchecked> {
+    let unchecked = Unchecked {
+        made: unchecked.made.min(now),
+    };
+    (now < unchecked_until(unchecked)).then_some(unchecked)
+}
+
+/// When a notice that a check could not be made ends.
+#[must_use]
+pub fn unchecked_until(unchecked: Unchecked) -> Timestamp {
+    unchecked.made.saturating_add(AHEAD_KEPT_FOR)
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -235,5 +332,35 @@ mod tests {
         let ahead = verdict(5, 50_000);
         assert_eq!(expired(ahead, at(1_000)), Ok(verdict(5, 1_000)));
         assert_eq!(expired(ahead, at(50_000)), Ok(ahead));
+    }
+
+    fn notice(made: i64) -> Unchecked {
+        Unchecked { made: at(made) }
+    }
+
+    /// Of two notices the newer stands: a later check given up restarts the window.
+    #[test]
+    fn the_newer_notice_wins() {
+        assert_eq!(newer(Some(notice(5)), Some(notice(9))), Some(notice(9)));
+        assert_eq!(newer(Some(notice(9)), Some(notice(5))), Some(notice(9)));
+        assert_eq!(newer(Some(notice(5)), Some(notice(5))), Some(notice(5)));
+        assert_eq!(newer(None, Some(notice(5))), Some(notice(5)));
+        assert_eq!(newer(Some(notice(5)), None), Some(notice(5)));
+        assert_eq!(newer(None, None), None);
+    }
+
+    /// The notice stands until exactly seven days after it was made, and one made after now is
+    /// re-dated to now.
+    #[test]
+    fn the_notice_ends_exactly_seven_days_after_it_was_made() {
+        let window = i64::try_from(AHEAD_KEPT_FOR.as_millis()).unwrap();
+        assert_eq!(stands(notice(1_000), at(1_000)), Some(notice(1_000)));
+        assert_eq!(
+            stands(notice(1_000), at(1_000 + window - 1)),
+            Some(notice(1_000))
+        );
+        assert_eq!(stands(notice(1_000), at(1_000 + window)), None);
+        assert_eq!(stands(notice(5_000), at(2_000)), Some(notice(2_000)));
+        assert_eq!(unchecked_until(notice(1_000)), at(1_000 + window));
     }
 }
