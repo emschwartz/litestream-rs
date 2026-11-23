@@ -1081,14 +1081,22 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5"]
 
-# A boot drop records only through the confirmed transaction, short of a listed tail the
-# listing judged torn.
+# A boot drop records only through the confirmed transaction, short of a tail judged torn.
+# Seed 0x3ed killed it until the boot witness's read of a refused key moved that history; the
+# core test that hides the tail from the listing kills it now.
 [[bug]]
 name = "boot-drop-record-capped-at-confirmed"
 fix = "88577ff"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+package = "lsr-core"
+tests = ["the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides"]
+
+# A boot drop records only through the newest listed key, short of a torn-looking tail a
+# lagging listing leaves out: a later boot refuses the engine's own upload.
+[[bug]]
+name = "boot-drop-record-capped-at-listed"
+fix = "df34d0f9"
+package = "lsr-core"
+tests = ["the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides"]
 
 # An unanswered request for the record asks again at once, forever, instead of waiting.
 [[bug]]
@@ -2092,3 +2100,14 @@ name = "web-identity-before-env-keys"
 fix = "plant"
 package = "lsr-store-s3"
 tests = ["chain::sources_tests::environment_keys_come_before_web_identity_and_web_identity_before_the_host"]
+
+# Boot confirms a torn-looking replica key whose staged copy the witness refused by a listing,
+# not a read: a listing that lags leaves the key out and new content takes the replica's
+# transaction.
+[[bug]]
+name = "witness-refused-key-listed"
+fix = "b7d2a645"
+package = "lsr-core"
+tests = [
+    "a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica",
+]
