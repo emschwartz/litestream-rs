@@ -53,6 +53,21 @@ pub struct GoConfig {
 }
 
 impl GoConfig {
+    /// The config narrowed to the one `path` entry for `path`, as Go's `Config.DBConfig`
+    /// finds it for its single-database commands (`restore`, `ltx`): `dir` entries are not
+    /// scanned and other entries are not built. `None` when no `path` entry names it.
+    #[must_use]
+    pub fn only_database(&self, path: &Path) -> Option<Self> {
+        let db = self
+            .dbs
+            .iter()
+            .find(|db| matches!(db.source(), DbSource::Path(p) if p == path))?;
+        Some(Self {
+            dbs: vec![db.clone()],
+            ..self.clone()
+        })
+    }
+
     /// `addr`: the metrics listener; `None` serves none.
     #[must_use]
     pub fn addr(&self) -> Option<&str> {

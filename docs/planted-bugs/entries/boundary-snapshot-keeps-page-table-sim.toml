@@ -1,4 +1,5 @@
 name = "boundary-snapshot-keeps-page-table-sim"
+patch = "boundary-snapshot-keeps-page-table"
 fix = "claude/boundary-snapshot-pages"
 package = "lsr-sim"
 test_bin = "sim"

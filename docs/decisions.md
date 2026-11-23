@@ -56,6 +56,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D102 | Are the journal's signals a degraded state? | No: a notice in `/healthz` and `lsr_journal_signal`, unwritable included; `/healthz` stays 200 | parent session, names reviewed for the owner | 2026-11-22 | decided |
 | D103 | What does a boot do when it finds a recorded unproven-WAL debt and the database file may hold pages from commits the WAL lost? | Check the file against the last staged state before the TRUNCATE; a proven mix is replicated as served, noticed as `database_ahead_of_wal`, and the state before it kept 7 days, with no operator action; `STRICT` stops | Claude (journal), **delegated**, decided by a Fable review; self-clearing by the owner | 2026-11-22 | open to owner review |
 | D104 | Can the engine's read mark keep other checkpoints from copying unproven WAL frames while the debt stands? | No: the mark cannot be placed at the proven frame, and the cure itself must release it; D103's check is the fix. Two marks plus a WAL rewrite is left as a spike | Claude (journal), **delegated**, decided by a Fable review | 2026-11-22 | decided |
+| D105 | How does the simulator kill a process right after an injected fault? | Drawn last in half the swarm; the first tick in which a store fault or SQLite-side failure fires after a fault operation is followed by a process crash, once per operation | Claude (journal), **delegated** | 2026-11-23 | open to owner review |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D131 | What does the engine defend against? | Accidents, not deliberate forgery | owner | 2026-11-23 | decided |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
@@ -69,12 +70,14 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D45 | Config Go accepts and litestream-rs refuses at load or start (unknown and duplicate keys, values no start could use, schedules core does not run): copy Go under D33? | No: keep refusing, naming the key | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D46 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
-| D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
+| D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks (`restore`, `databases`, `ltx` and `wal` since built) | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
 | D49 | Temporary credentials: refresh before expiry, and a source that answers without keys | Refresh five minutes early; refuse an answer without keys or an STS answer without credentials | Claude (dropin-roles), **delegated** | 2026-11-22 | open to owner review |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
+| D160 | `restore` with Go's arguments: delete the output first, refuse a timestamp past the newest file, let `-if-replica-exists` excuse any missing transaction, as Go does? | No to all three: replace only at publish, restore the newest state, skip only an empty replica | Claude (dropin-commands), **delegated** | 2026-11-23 | open to owner review |
 | D62 | What does the simulator's hold judge require of an as-of restore through a fault? | The as-of bound (G3), not the raw replica's answer | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 | D122 | Run the simulator's histories on real SQLite: how, when the world draws page-level commits of arbitrary bytes? | A backend in lsr-sqlite behind the sim's seam; each drawn page a row, SQLite decides the pages, the world reads back what changed through SQLite | Claude (sim-real-sqlite), **delegated** | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
+| D162 | `databases` with a `dir` entry: print the working directory, as Go does? | No: print the entry's directory, unscanned | Claude (dropin-readonly), **delegated** | 2026-11-23 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -500,6 +503,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** the mix is seen outside the simulator, or the two-mark and rewrite design is shown safe on the real-SQLite rig under the fault VFS (no reset under the held mark, no write past the committed end, the eviction case caught by the verified read).
 - **Links:** D103, `crates/sqlite/src/checkpoint.rs`, `crates/core/src/actor/unproven.rs`, `docs/BEHAVIOR.md` RUN-3 and RUN-22, simulator seed 0x725.
 
+## D105. The kill-after-fault law (delegated)
+
+- **Question:** the obligation ledger needs a law that restarts the process right after a fault, so an obligation held only in memory fails a run (issue #171). When does it kill, and how often?
+- **Choice:** a swarm draw, made last so every other draw keeps its value, on in half the swarm and never in the default mix. A store fault or `EnvFault` operation arms it; the first tick in which a store fault or an injected SQLite-side failure fires is followed at once by a process crash, and the law disarms until the next fault operation. Judges that expect the engine to act within their own ticks stop watching a process the law killed, as they do after a boot.
+- **Options considered:** kill after every tick in which a fault fires (a rate fault fires nearly every tick, so the engine never runs: seed budget exceeded); kill on a fault operation's own tick, before the fault fires (the obligation does not exist yet); a separate operation in the history (shifts every later draw of recorded histories).
+- **Cost accepted:** at most one kill per fault operation, so a fault that recurs is tested across a restart once. Seeds whose mix draws the law behave differently from before, which changed no fixed seed's result.
+- **Revisit if:** a class-C gap is found that needs a kill on a later firing of the same fault.
+- **Links:** `crates/sim/src/run.rs` (`kill_after_fault`), `crates/sim/tests/sim/kill_after_fault.rs`, `crates/core/src/obligations.rs`, `docs/BEHAVIOR.md` CHK-10.
+
 ## D130. The real directory store in the simulator (delegated)
 
 - **Options:** keep `MemStore` with its power-loss bookkeeping as the only staging double; run `FsStore` on a temporary directory of the host (no crash law, no determinism); a filesystem trait in `lsr-store-fs` with an in-memory filesystem in `lsr-sim`.
@@ -692,14 +704,14 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 ## D47. Exit codes of `replicate`: as Go
 
 - **Question:** Go Litestream exits 1 on every error and 0 for literal help (`cmd/litestream/main.go:89-104`). `lsr replicate` exited 1, 2, 3 or 64 by class.
-- **Choice:** `replicate` exits 1 on every failure, as Go, because a script that checks for Go's 1 would otherwise break. One exception stays: 4, when fail-stop holds or stops the application (D19, approved by the owner in D84), a state Go never reaches. `lsr`'s own commands (`verify`, `files`, `config check`) keep a code per class, since no Go script runs them.
+- **Choice:** `replicate` and `restore` exit 1 on every failure, as Go, because a script that checks for Go's 1 would otherwise break (`restore` joined once it took Go's arguments, #177). One exception stays: 4, when fail-stop holds or stops the application (D19, approved by the owner in D84), a state Go never reaches. `lsr`'s own commands (`verify`, `files`, `config check`) keep a code per class, since no Go script runs them.
 - **Cost accepted:** a supervisor can no longer tell a refused config from a missing one by the code; the error line says which.
-- **Not covered:** `lsr restore` does not take Go's `restore` arguments (`-config`, `-o`, a database path), so a Go script fails it before its code matters; tracked in #177. #41 stays open for the codes of `lsr`'s own commands.
+- **Not covered:** #41 stays open for the codes of `lsr`'s own commands.
 - **Links:** `docs/BEHAVIOR.md` CFG-34; `crates/cli/src/main.rs`.
 
 ## D48. Command-line and endpoint surface Go has and `lsr` lacks: a gap to build
 
-- **Question:** comparing Go 041a8c3's commands, flags and endpoints with `lsr` found missing: the commands `databases`, `reset`, `status`, `sync`, `list`, `info`, `ltx`, `wal` and the Windows service commands; Go's `restore` arguments (`lsr restore` has its own); `replicate -once -force-snapshot` and `-once -enforce-retention`; eleven Go `/metrics` series and pprof (CFG-35).
+- **Question:** comparing Go 041a8c3's commands, flags and endpoints with `lsr` found missing: the commands `databases`, `reset`, `status`, `sync`, `list`, `info`, `ltx`, `wal`, `start`, `stop`, `register`, `unregister` (the last six talk to a running daemon over its control socket); Go's `restore` arguments (built since, REST-13, with `-f` follow mode still missing, REST-16); `replicate -once -force-snapshot` and `-once -enforce-retention`; eleven Go `/metrics` series and pprof (CFG-35).
 - **Choice:** not an accepted trade-off. D33 (full drop-in) requires them, and they are tracked as a gap to build in #177, which names the Go code to match and the differential that will prove each. Until then each is refused by name.
 - **Cost until built:** a deployment that runs one of these commands, or graphs one of these series, needs Go Litestream for it.
 - **Evidence of the gap:** `compat::go_and_lsr_read_the_same_replicate_command_lines` accepts the `-once` refusals only by their message, tied here.
@@ -732,6 +744,18 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a night goes red on a key that a longer soak reaches (add a floor per key), or the marks start deriving BEHAVIOR's D, S and R (section 7.3, item 2).
 - **Links:** #127.
 
+## D160. Restore with Go's arguments: three departures (delegated)
+
+- **Question:** `lsr restore` now reads Go's command line and is compared with Go file by file (REST-13). Three of Go's behaviours would lose data or decide on a time the project does not trust.
+- **Choice:**
+  1. **Nothing at the output is removed unless the restore publishes.** Go removes an empty output, or with `-force` any output and its `-wal`, `-shm` and `-journal`, before it restores, so a restore that then fails has already deleted the database it was asked to replace. Here the old file stays until the restored one is complete and checked; then the journal files are removed, the directory fsynced, and the restored file renamed over the old one.
+  2. **A URL restore to a timestamp after the newest file restores the newest state.** Go's URL restore refuses it (`timestamp does not exist`, `CalcRestoreTarget`), deciding on listed modification times, which no reader here decides by (they can lead or lag the writer's clock). Go restores the newest state for the same timestamp through a config, so the refusal is not a guarantee Go keeps.
+  3. **`-if-replica-exists` skips only a replica that holds nothing.** Go exits 0 for any transaction it cannot find, a txid past the newest file or a gap included, and writes no database; an entrypoint script then starts its application on an empty database beside a replica that holds its history.
+- **Delegated:** decided by the agent building #177 for the owner.
+- **Cost if wrong:** (1) a crash after the journal files are removed and before the rename leaves the old database without them (it was being replaced on request; restoring again completes it). (2) a script that relied on the refusal to detect a stale replica sees success. (3) a script that used `-if-replica-exists` to mean "skip whatever cannot be restored" fails where Go went on.
+- **Evidence:** `compat::go_and_lsr_restore_the_same_command_lines` asserts each, not compares it: after Go removed files and litestream-rs did not, litestream-rs's directory must be exactly as it started; a timestamp past the newest file must restore the manifest's newest pages; an `-if-replica-exists` that Go excused must be refused here with the directory untouched. `cli::a_failed_forced_restore_keeps_the_old_database`, `local::journal_removals_are_synced_before_the_rename`.
+- **Links:** `docs/BEHAVIOR.md` REST-2, REST-13 to REST-15; `crates/local/src/lib.rs`, `crates/cli/src/run.rs`.
+
 ## D62. The hold judge holds an as-of answer to the bound
 
 - **The case:** a lagging listing hides a merged level-1 file. An as-of restore through the hold's view plans from the finer level-0 files under it; the raw replica plans from the merged file and, for an instant inside it, takes the earlier state. The two answers differ, and the hold judge failed the run for not matching the raw one (simulator seed 0x80e).
@@ -750,6 +774,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** another crate writes to a store for the engine, or the store trait can be split so that raw writes are unreachable by type.
 - **Links:** issue #171 item 1; D74; `crates/core/src/publish.rs`.
 
+## D162. `databases` prints a `dir` entry's directory (delegated)
+
+- **Question:** Go's `databases` builds each config entry with `NewDBFromConfig`, which expands the entry's `path`. A `dir` entry has none, so Go expands the empty string and prints the working directory as that entry's database. Copy it?
+- **Choice:** no. `lsr databases` prints the `dir` entry's directory, expanded and not scanned, with its replica type, and every `path` entry as Go prints it. It reads the config's entries and never plans them, so a `dir` that holds nothing or does not exist is not refused either, as Go does not refuse it.
+- **Delegated:** decided by the agent building #177 for the owner.
+- **Cost if wrong:** a script that parsed Go's output and relied on the working directory appearing for a `dir` entry sees the directory instead. Scanning the directory and printing each database it holds was the other choice; it can be added later without breaking this one, since a `dir` entry's row then names its directory.
+- **Evidence:** `compat::go_and_lsr_list_the_same_databases_and_files` compares the two outputs with Go's working-directory row mapped to the entry's directory, and every other line byte for byte; `cli::databases_lists_each_entry_without_scanning_a_dir`.
+- **Links:** `docs/BEHAVIOR.md` CFG-44; `crates/cli/src/run.rs` (`databases_command`).
+
 ## Unverified, not recorded
 
 - Who decided D1 to D5 and when: `docs/PLAN.md` says "Decided" with no name or date. Listed as owner, by 2026-11-20.
@@ -764,3 +797,12 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the answer can be behind the writer by the time it is published, which is true of every restore of a live replica. A listing whose lag grows by exactly one file per listing for 64 listings would also end here; no store is known to do that.
 - **Revisit if:** a store shows listings that lag but always show the previously read file.
 - **Links:** #126, `crates/core/src/restore.rs` (`Retries`).
+
+## D151. The `synchronous` level of the replicator's and the application's connections (delegated)
+
+- **Options:** leave both to the build's default; set the replicator's own connections to NORMAL or FULL; set the application's too, or only refuse a level that cannot work.
+- **Choice:** the replicator's two connections set `synchronous = FULL` when they open. `check_app_connection` refuses an application connection at OFF (`SetupError::SynchronousOff`) and accepts NORMAL, FULL and EXTRA; `app_connection` does not change the level.
+- **Why:** the replicator's connections run the checkpoints, and a backfill syncs the database file only at NORMAL or above. Their level came from the compile default, which `LIBSQLITE3_FLAGS` can lower (outside review, issue #197, R3). FULL over NORMAL costs one WAL sync per commit on these connections, which commit only the rare `_litestream_seq` bump. The application's level is its own durability choice, and the engine's barrier (it syncs the WAL before staging) covers NORMAL; OFF syncs nothing, so a power loss takes back commits the replica holds and the application forks history.
+- **Cost accepted:** an application that runs at OFF on purpose fails the check; it must raise the level to replicate.
+- **Revisit if:** the `_litestream_seq` bumps become frequent enough that a sync each costs.
+- **Links:** #197.

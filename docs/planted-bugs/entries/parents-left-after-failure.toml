@@ -1,0 +1,5 @@
+name = "parents-left-after-failure"
+fix = "plant"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["missing_parent_directories_are_created_and_removed_after_a_failure"]

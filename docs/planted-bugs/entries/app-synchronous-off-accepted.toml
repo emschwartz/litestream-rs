@@ -1,0 +1,5 @@
+name = "app-synchronous-off-accepted"
+fix = "claude/sqlite-synchronous"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = ["check_refuses_a_connection_that_never_syncs"]
