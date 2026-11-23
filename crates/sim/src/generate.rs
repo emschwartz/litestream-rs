@@ -413,9 +413,7 @@ pub struct Weights {
     /// [`Op::Heal`].
     pub heal: u32,
     /// [`Op::Meta`] with the steps that replace staged files under a running
-    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`],
-    /// [`MetaOp::ForgeNewest`]), and [`Op::StagingDamage`] with
-    /// [`MetaOp::ForgeNewest`].
+    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`]).
     pub staging_replace_running: u32,
     /// The chance in a thousand that a step is an [`Op::Hold`] instead of
     /// what the history drew there. Not a weight: holds come from a stream of
@@ -897,14 +895,13 @@ fn staging_damage(entropy: &SeededEntropy) -> Op {
     }
 }
 
-/// A staged file replaced under a running engine, by a backup put back or by
-/// another valid file, and now and then the same while it is down.
+/// A staged file replaced under a running engine by a backup put back. Five
+/// slots, as when this also drew forged files (out of scope, see
+/// docs/decisions.md D131), so the draws after it are unchanged.
 fn staging_replace_running(entropy: &SeededEntropy) -> Op {
     match below(entropy, 5) {
-        0 => Op::Meta(MetaOp::Save),
-        1 => Op::Meta(MetaOp::Restore),
-        2 | 3 => Op::Meta(MetaOp::ForgeNewest),
-        _ => Op::StagingDamage(MetaOp::ForgeNewest),
+        0 | 2 => Op::Meta(MetaOp::Save),
+        _ => Op::Meta(MetaOp::Restore),
     }
 }
 

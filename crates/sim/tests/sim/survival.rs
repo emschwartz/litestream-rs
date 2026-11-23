@@ -465,11 +465,20 @@ fn an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd() {
 /// Unaided search seed 0xf45b5 under the error-domain generator, which moved seed 0xd off this
 /// path: a running drop of an unreadable staged copy whose upload published with its answer
 /// lost. With the takeover record capped at the confirmed transaction, a later snapshot took
-/// that transaction's id again ("transaction 21 covers commit 89 and then commit 90").
+/// that transaction's id again ("transaction 21 covers commit 89 and then commit 90"). Its
+/// history is recorded, with the settings the seed's mix draws written out.
 #[test]
 fn a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5() {
+    let opts = lsr_sim::Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: true,
+        after_restart: lsr_sim::AfterRestart::Busy,
+        clock_law: lsr_sim::ClockLaw::PerTick,
+        ..lsr_sim::Opts::default()
+    };
     let seed = lsr_sim::Seed::new(0xf45b5);
-    if let Err(failure) = lsr_sim::run(seed, 300, &lsr_sim::Weights::mixed(seed)) {
+    if let Err(failure) = lsr_sim::run::run_ops(seed, crate::histories::seed_0xf45b5::OPS, &opts) {
         panic!("{failure}");
     }
 }
@@ -483,20 +492,6 @@ fn a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5() {
 fn a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed() {
     let seed = lsr_sim::Seed::new(0x3ed);
     if let Err(failure) = lsr_sim::run(seed, 279, &lsr_sim::Weights::mixed(seed)) {
-        panic!("{failure}");
-    }
-}
-
-/// Unaided search seed 0xf43e5: an operator forged the newest staged file, a power loss later let
-/// the judge take staging as whole again, and bucket rollbacks took the replica's copy of that
-/// key. The next boot still read the replica's old copy (a lagging listing) and refused the
-/// divergence, as it must over a forged staged file; the judge, reading the replica as it stood
-/// after the rollback, saw no divergence and called the refusal causeless. A staged copy the
-/// engine never put is the operator's for as long as it is staged.
-#[test]
-fn a_refusal_over_a_forged_staged_copy_is_expected_after_a_rollback_seed_0xf43e5() {
-    let seed = Seed::new(0xf43e5);
-    if let Err(failure) = run(seed, 300, &Weights::mixed(seed)) {
         panic!("{failure}");
     }
 }

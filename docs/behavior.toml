@@ -52,8 +52,8 @@ response = "continue: each gets a token and is uploaded"
 signal = "none"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`, sim::`a_staging_backup_put_back_while_down_is_refused_at_boot`, core::`frames_past_the_committed_end_prove_no_staged_file`, core::`a_staged_file_whose_bytes_differ_but_still_verify_is_refused`, core::`a_staged_file_replaced_under_a_running_engine_is_never_uploaded`; oracle::`UnwitnessedPut`, plant::`witness-wal-residue`, plant::`witness-byte-digest`, plant::`witness-trailer-compare`"
-recovered_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`, sim::`a_staging_backup_put_back_while_down_is_refused_at_boot`"
+detected_by = "sim::`a_staging_backup_put_back_while_down_is_refused_at_boot`, core::`frames_past_the_committed_end_prove_no_staged_file`, core::`a_staged_file_whose_bytes_differ_but_still_verify_is_refused`, core::`a_staged_file_replaced_under_a_running_engine_is_never_uploaded`; oracle::`UnwitnessedPut`, plant::`witness-wal-residue`, plant::`witness-byte-digest`, plant::`witness-trailer-compare`"
+recovered_by = "sim::`a_staging_backup_put_back_while_down_is_refused_at_boot`"
 
 [[row]]
 table = "Boot"
@@ -164,7 +164,7 @@ response = "At boot: **stop**, `OtherWriter`, before anything is written, unless
 signal = "`other_writer` and the refusal log line; or `newest_staged_file_unreadable`"
 at_risk = "None at a refusal. Otherwise the local commits those staged files held are in the snapshot; their restore points are lost"
 recovery = "Operator (`lsr take-over`, or remove the other writer's file); automatic otherwise"
-detected_by = "core::`a_verifying_listed_key_unlike_the_staged_file_is_never_written_over`, sim::`a_verifying_replica_object_is_not_written_over_seed_0xc6b2`; core::`second_writer::a_running_engine_stops_when_another_writer_took_its_next_id`; plant::`verifying-object-written-over`, plant::`boot-divergence-snapshots-above-another-writer`, sim::`survival::a_refusal_over_a_forged_staged_copy_is_expected_after_a_rollback_seed_0xf43e5`"
+detected_by = "core::`a_verifying_listed_key_unlike_the_staged_file_is_never_written_over`, sim::`a_verifying_replica_object_is_not_written_over_seed_0xc6b2`; core::`second_writer::a_running_engine_stops_when_another_writer_took_its_next_id`; plant::`verifying-object-written-over`, plant::`boot-divergence-snapshots-above-another-writer`"
 recovered_by = "sim::`a_verifying_replica_object_is_not_written_over_seed_0xc6b2`"
 
 [[row]]
@@ -606,8 +606,8 @@ response = "As RUN-16. The upload is aborted before anything is visible"
 signal = "as RUN-16"
 at_risk = "As RUN-16"
 recovery = "Automatic"
-detected_by = "sim::`a_staged_file_forged_under_a_running_engine_is_refused`, sim::`a_staging_backup_put_back_under_a_running_engine_is_refused_by_its_token`, core::`a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible`"
-recovered_by = "sim::`a_staged_file_forged_under_a_running_engine_is_refused`, sim::`a_staging_backup_put_back_under_a_running_engine_is_refused_by_its_token`"
+detected_by = "sim::`a_staging_backup_put_back_under_a_running_engine_is_refused_by_its_token`, core::`a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible`"
+recovered_by = "sim::`a_staging_backup_put_back_under_a_running_engine_is_refused_by_its_token`"
 
 [[row]]
 table = "Running"

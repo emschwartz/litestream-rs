@@ -34,6 +34,7 @@ pub mod seed_0xb6b;
 pub mod seed_0xb9e;
 pub mod seed_0xe9;
 pub mod seed_0xf;
+pub mod seed_0xf45b5;
 pub mod seed_0xf488c;
 
 /// What guards a recorded history against passing for nothing.
@@ -212,6 +213,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0xa4d",
         "seed_0xa4d_does_not_trip",
         Guard::Own("failstop-trip-held-to-zero-age-sim"),
+    ),
+    (
+        "seed_0xf45b5",
+        "a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5",
+        Guard::Own("running-drop-record-capped-at-confirmed"),
     ),
 ];
 

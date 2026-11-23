@@ -893,16 +893,12 @@ impl Runner {
         // With staging intact, everything this engine put on the replica is at
         // or below what staging holds, under the bytes staging holds: a
         // refusal then has no cause. A staged copy that differs from the
-        // replica's object under the same key was edited or forged (an
-        // operation), and the boot refuses that divergence by design. So is
-        // a staged copy the engine never put: the boot may have read the
-        // replica's object before a rollback took it (a lagging listing), so
-        // the replica as it stands now need not show the divergence.
+        // replica's object under the same key was damaged or put back (an
+        // operation), and the boot refuses that divergence by design.
         let key = lsr_core::FileKey::new(lsr_core::Level::ZERO, lsr_ltx::TxidRange::single(tip));
         let read =
             |err: lsr_core::StoreError| bug_fault(format!("reading the stores failed: {err}"));
-        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?
-            || self.w.staged_not_the_engines(key).map_err(read)?;
+        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?;
         if !self.staging_disturbed && !diverged {
             return Err(bug_fault(format!(
                 "a boot refused replica files through {tip} with staging intact and no other writer"

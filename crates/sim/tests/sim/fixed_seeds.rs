@@ -1057,33 +1057,6 @@ mod replaced_staging {
         }
     }
 
-    /// `replace` happens to the newest staged file while its upload waits
-    /// on a failed attempt; the oracle judges every level-0 put against
-    /// what the engine staged and the WAL it booted on.
-    fn pending_then(replace: Op) {
-        let mut ops = vec![commit(), Op::Tick, Op::Tick, Op::Tick];
-        ops.extend([failed_upload(), commit(), Op::Tick, replace]);
-        ops.extend(std::iter::repeat_n(Op::Tick, 12));
-        ops.push(Op::Restore);
-        if let Err(failure) = run_ops(Seed::new(0x5717), &ops, &Opts::default()) {
-            panic!("{}", failure.violation);
-        }
-    }
-
-    /// Replaced under the running engine by another whole, valid file: the
-    /// upload's read does not match the file's witness, so it is refused.
-    #[test]
-    fn a_staged_file_forged_under_a_running_engine_is_refused() {
-        pending_then(Op::Meta(MetaOp::ForgeNewest));
-    }
-
-    /// Replaced while the engine is down: the boot's WAL pass refuses it,
-    /// and the WAL stages its transaction again.
-    #[test]
-    fn a_staged_file_forged_while_down_is_refused_at_boot() {
-        pending_then(Op::StagingDamage(MetaOp::ForgeNewest));
-    }
-
     /// Runs the pending upload's history with `then` after it, the trace on,
     /// and returns the trace from the step `then` ends with.
     fn pending_traced(then: &[Op]) -> Vec<String> {
