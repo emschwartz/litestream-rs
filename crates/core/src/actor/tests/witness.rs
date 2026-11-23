@@ -490,6 +490,21 @@ fn a_full_file_that_neither_follows_nor_starts_the_generation_is_refused() {
     assert_eq!(restored(&rig), 4);
 }
 
+/// A WAL restart is no rewrite: staged files of the old generation that are still in staging
+/// below a newest file that matches the live WAL are not compared with it, so an ordinary boot
+/// takes no snapshot.
+#[test]
+fn staged_files_of_an_earlier_generation_below_a_matching_newest_cost_no_snapshot() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    rig.wal.force_restart();
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 2);
+    assert_eq!(staged(&rig), vec![2, 3]);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 3);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+}
+
 /// The first byte of page `pgno` in the replica's newest state.
 fn restored_page(rig: &Rig, pgno: u32) -> u8 {
     let sink = MemSink::new();

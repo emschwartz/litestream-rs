@@ -305,7 +305,15 @@ impl NewestStagedFile {
     }
 }
 
-/// Whether a staged file below `newest`, made in the generation the live WAL holds, differs from
+/// Adds `key` (keys arrive oldest first) and drops the oldest when more than `cap` are held.
+fn keep_newest(keys: &mut VecDeque<FileKey>, key: FileKey, cap: usize) {
+    keys.push_back(key);
+    if keys.len() > cap {
+        keys.pop_front();
+    }
+}
+
+/// Whether a staged file other than `newest`, made in the generation the live WAL holds, differs from
 /// what the WAL holds in its range (the newest file's comparison, [`NewestStagedFile::checked`]).
 /// The newest [`MAX_WITNESSED`] files below it are read, whole, one at a time; a file that does not
 /// decode is the sweep's and the witness pass's to refuse, not a rewrite.
@@ -324,12 +332,9 @@ async fn rewritten_below<L: Role, R: Read + Seek>(
         for info in page
             .files
             .iter()
-            .filter(|info| info.key.range().max() < newest)
+            .filter(|info| info.key.range().max() != newest)
         {
-            keys.push_back(info.key);
-            if keys.len() > MAX_WITNESSED {
-                keys.pop_front();
-            }
+            keep_newest(&mut keys, info.key, MAX_WITNESSED);
         }
         match at
             .following(page.next)
@@ -343,11 +348,11 @@ async fn rewritten_below<L: Role, R: Read + Seek>(
         let Some(header) = read_header(staging, &key, L::fault).await? else {
             continue;
         };
+        // An older generation is not comparable (`checked` finds no frame for it); skipping it
+        // saves reading the whole file.
         let Some(at) = Origin::of(&header).filter(|at| {
-            key.range().min() == key.range().max() && {
-                let (salt1, salt2) = at.origin.salts();
-                Salts { salt1, salt2 } == live
-            }
+            let (salt1, salt2) = at.origin.salts();
+            Salts { salt1, salt2 } == live
         }) else {
             continue;
         };
