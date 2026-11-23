@@ -60,6 +60,10 @@ struct Counting {
     /// A WAL whose read-lock hold the next upload begun moves, as a checkpoint
     /// by another connection would mid-step.
     moves_epoch: Arc<std::sync::Mutex<Option<FakeWal>>>,
+    /// A WAL whose epoch the next read that finds a key above level 0 moves:
+    /// a checkpoint by another connection that lands while a restore reads the
+    /// replica's compacted files (a boot's probes above level 0 find nothing).
+    moves_epoch_on_read: Arc<std::sync::Mutex<Option<FakeWal>>>,
     /// A WAL the application commits a transaction to (page 1 filled with the byte)
     /// as the next upload begins: a commit that lands after a sync step read
     /// the committed end.
@@ -171,6 +175,7 @@ impl ObjectStore for Counting {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
         self.count();
+        let moves = (key.level() != Level::ZERO).then(|| self.moves_epoch_on_read.clone());
         if offset == 0 {
             self.reads.lock().unwrap().push(*key);
         }
@@ -192,6 +197,9 @@ impl ObjectStore for Counting {
         let read = self.inner.read(key, offset, len);
         async move {
             let mut bytes = read.await?;
+            if let Some(wal) = moves.and_then(|armed| armed.lock().unwrap().take()) {
+                wal.set_epoch(wal.epoch().next());
+            }
             if let Some(other) = other {
                 bytes = other;
             }

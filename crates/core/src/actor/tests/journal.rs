@@ -647,3 +647,30 @@ fn the_restore_point_is_kept_for_the_window_across_a_restart() {
     assert_eq!(later.kept.kept_restore_point(), None);
     assert_eq!(ahead_recorded(&mut journal), None);
 }
+
+/// A brand-new meta directory is one whose journal is missing too: a journal that holds a
+/// record is this engine's past, so the boot over the replica's own state is judged by the
+/// gate's own rule and stops, while a journal file with no record lets the equality check
+/// run and the boot snapshot (`docs/decisions/D170.md`).
+#[test]
+fn a_journal_with_a_record_keeps_the_new_meta_directory_check_off() {
+    let mut rig = super::vouch::redeployed_with_a_new_meta_directory();
+    let mut journal = valid();
+    let mut actor = Actor::new(go_like());
+    let first = tick(&mut rig, &mut actor, T0 + 2, Some(&mut journal));
+    assert_eq!(first, Tick::Stopped(StopCause::OtherWriter));
+    let mut rig = super::vouch::redeployed_with_a_new_meta_directory();
+    let mut missing = MemJournal::default();
+    let mut actor = Actor::new(go_like());
+    let seen = settle(&mut rig, &mut actor, T0 + 2, Some(&mut missing));
+    no_stop(&seen);
+    let booted = seen.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Booted {
+                cause: Some(SnapshotCause::GenerationChanged)
+            })
+        )
+    });
+    assert!(booted, "{seen:?}");
+}
