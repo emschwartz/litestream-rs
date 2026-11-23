@@ -1821,3 +1821,30 @@ fn a_merged_file_still_listed_below_is_not_a_start() {
         &FileKey::new(level_one, range(5, 8))
     ));
 }
+
+/// Staging that holds files, all at or below the listing's end, bounds the probe past the
+/// listing by its gap: only an empty staging leaves nothing to bound it, and only then does
+/// the walk go to its cap.
+#[test]
+fn staged_files_below_the_listing_bound_the_probe_by_its_gap() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    for n in 1..=3 {
+        put_bytes(&remote.inner, key(n), &encode(n));
+    }
+    let inventory = block_on(Inventory::load(&remote.inner)).unwrap();
+    let starts = Starts::of(&inventory);
+    let reads = remote.log().reads;
+    let past = block_on(look_past(
+        &inventory,
+        &staging,
+        &remote,
+        Some(txid(3)),
+        Some(txid(3)),
+    ));
+    assert_eq!(past, Ok(Vec::new()));
+    assert_eq!(
+        u64::from(remote.log().reads - reads),
+        fresh_probe_reads(Some(txid(3)), &starts)
+    );
+}
