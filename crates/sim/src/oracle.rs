@@ -31,8 +31,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use lsr_core::conformance::block_on;
-use lsr_core::{Did, FileKey, Inventory, MemStore, PlanOutcome, RestoreTarget, is_snapshot_start};
+use lsr_core::{Did, FileInfo, FileKey, MemStore, PlanOutcome, RestoreTarget, is_snapshot_start};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 use lsr_wal::Salts;
 use thiserror::Error;
@@ -816,9 +815,8 @@ pub fn check_with(
 ) -> Result<Checked, Violation> {
     let cover = covers(model, recorder, ground)?;
     write_once(model, recorder, ground)?;
-    let inventory = block_on(Inventory::load(remote))
-        .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
-    let files = inventory.files();
+    let held = replica_files(remote);
+    let files = held.as_slice();
     let mut out = Checked::default();
     let judge = as_of::Judge {
         remote,
@@ -836,7 +834,7 @@ pub fn check_with(
         .map(|f| f.key.range().max())
         .min();
     let reach = contract::Reach::over(files, |_| true);
-    let newest = inventory.newest().map_or(0, Txid::get);
+    let newest = newest_of(files).map_or(0, Txid::get);
     for txid in (1..=newest).filter_map(Txid::new) {
         judge.txid(txid, &reach, oldest, &mut out)?;
     }
@@ -849,7 +847,7 @@ pub fn check_with(
             None => Ok(out),
         };
     }
-    let Some(latest) = judge.latest(&reach, inventory.newest(), &mut out)? else {
+    let Some(latest) = judge.latest(&reach, newest_of(files), &mut out)? else {
         return Ok(out);
     };
     if let Some(acked) = acked.binding(ground.lost).filter(|a| *a > latest) {
@@ -867,6 +865,21 @@ pub fn check_with(
     }
     judge.all(latest, &mut out)?;
     Ok(out)
+}
+
+/// The replica's files as the store holds them, ascending by key: read from the store's own
+/// map ([`MemStore::stored`]), never through the engine's listing code (`Inventory::load`, its
+/// paging and its merge), so a listing defect the engine has cannot also hide a file from the
+/// judges.
+#[must_use]
+pub fn replica_files(remote: &MemStore) -> Vec<FileInfo> {
+    remote.stored()
+}
+
+/// The last transaction any of `files` covers.
+#[must_use]
+pub fn newest_of(files: &[FileInfo]) -> Option<Txid> {
+    files.iter().map(|file| file.key.range().max()).max()
 }
 
 mod as_of;
