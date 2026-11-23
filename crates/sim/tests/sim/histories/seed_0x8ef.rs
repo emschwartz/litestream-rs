@@ -1,5 +1,8 @@
 //! Seed 0x8ef's history of 12 operations, as the generator under the seed's own mix drew it before the merge of #188.
 //!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
+//!
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
@@ -18,7 +21,7 @@ pub const OPS: &[Op] = &[
         grow: false,
     },
     Op::CommitInTick { pages: 3 },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::ClockJump(93600000),
     Op::EnvFault(EnvFault::Source(
         SourceOp::ReadPage,

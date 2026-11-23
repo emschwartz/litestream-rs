@@ -1,0 +1,7 @@
+name = "replicate-exit-codes-per-class"
+fix = "claude/dropin-cli"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["go_s_flag_refusals_are_usage_errors"]
+# The simulator finds it once the application acts inside a tick (`Op::AppInTick`,
+# crates/sim/src/sqlite/in_tick.rs); main's swarm kills it on none of seeds 1000001 to 1002000.

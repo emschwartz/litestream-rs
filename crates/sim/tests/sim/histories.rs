@@ -3,10 +3,11 @@
 //!
 //! A recorded history can still stop reaching its bug when the runner or the engine around it
 //! changes, and then it passes for nothing. So every history names, in [`GUARDS`], the planted
-//! bug in `docs/planted-bugs.toml` its test must fail under (`just planted-bugs` runs each one
+//! bug in `docs/planted-bugs/entries/` its test must fail under (`just planted-bugs` runs each one
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
+pub mod seed_0x116;
 pub mod seed_0x126d68ed250e;
 pub mod seed_0x126d68ef1c07;
 pub mod seed_0x126d68ef545f;
@@ -17,24 +18,29 @@ pub mod seed_0x126d68facf74;
 pub mod seed_0x126d68fad061;
 pub mod seed_0x126d68fae16b;
 pub mod seed_0x1919f;
+pub mod seed_0x21;
 pub mod seed_0x25;
+pub mod seed_0x2a8;
 pub mod seed_0x2c;
 pub mod seed_0x2d;
-pub mod seed_0x31c;
+pub mod seed_0x2e7;
 pub mod seed_0x330;
+pub mod seed_0x348;
 pub mod seed_0x46;
 pub mod seed_0x4c;
 pub mod seed_0x585;
+pub mod seed_0x68f;
+pub mod seed_0x734;
 pub mod seed_0x753;
 pub mod seed_0x80e;
 pub mod seed_0x82;
 pub mod seed_0x8ef;
+pub mod seed_0x92d;
 pub mod seed_0x9f9;
 pub mod seed_0xa4d;
+pub mod seed_0xb44;
 pub mod seed_0xb6b;
-pub mod seed_0xb9e;
 pub mod seed_0xe9;
-pub mod seed_0xf;
 pub mod seed_0xf488c;
 
 /// What guards a recorded history against passing for nothing.
@@ -142,9 +148,24 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         Guard::Own("anchor-any-tail"),
     ),
     (
-        "seed_0x31c",
-        "a_stall_ends_with_the_fault_that_caused_it_seed_0x31c",
+        "seed_0x2a8",
+        "a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8",
         Guard::Own("success-keeps-a-stall"),
+    ),
+    (
+        "seed_0xb44",
+        "a_boot_never_builds_on_files_nothing_local_vouches_for_seed_0xb44",
+        Guard::Own("boot-gate-refuses-nothing-sim"),
+    ),
+    (
+        "seed_0x348",
+        "a_running_drop_records_past_an_unconfirmed_upload_seed_0x348",
+        Guard::Own("running-drop-record-capped-at-confirmed"),
+    ),
+    (
+        "seed_0x2e7",
+        "a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7",
+        Guard::Own("takeover-before-drop-skipped-sim"),
     ),
     (
         "seed_0xb6b",
@@ -160,14 +181,9 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         Guard::Own("latest-judged-against-old-nodes-sim"),
     ),
     (
-        "seed_0xf",
-        "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf",
-        Guard::Unguarded(
-            "it passes with journal-debt-not-recorded-sim planted too, so it no longer reaches the \
-             restart that would owe the TRUNCATE: an other-process RESTART checkpoint follows the \
-             failed sync before any crash (histories/seed_0xf.rs lines 284 and 288), which may start a new WAL \
-             generation first; the cause is not yet confirmed",
-        ),
+        "seed_0x21",
+        "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0x21",
+        Guard::Own("journal-debt-not-recorded-sim"),
     ),
     (
         "seed_0x585",
@@ -186,14 +202,35 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         ),
     ),
     (
+        "seed_0x116",
+        "a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116",
+        Guard::Own("journal-debt-not-recorded-sim"),
+    ),
+    (
         "seed_0xf488c",
         "swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage",
         Guard::Own("boundary-snapshot-keeps-page-table-sim"),
     ),
     (
-        "seed_0xb9e",
-        "compaction_takes_a_staging_denial_as_staging_seed_0xb9e",
+        "seed_0x68f",
+        "compaction_takes_a_staging_denial_as_staging_seed_0x68f",
         Guard::Own("compact-local-read-as-remote-sim"),
+    ),
+    (
+        "seed_0x734",
+        "seed_0x734_trips_on_a_snapshot_it_cannot_vouch_for_and_is_excused",
+        Guard::Unguarded(
+            "the history checks a judge exemption, not an engine fix: no engine plant can make \
+             the judge excuse a trip it would otherwise call false",
+        ),
+    ),
+    (
+        "seed_0x92d",
+        "seed_0x92d_trips_on_frames_it_never_read_and_is_excused",
+        Guard::Unguarded(
+            "the history checks a judge exemption, not an engine fix: no engine plant can make \
+             the judge excuse a trip it would otherwise call false",
+        ),
     ),
     (
         "seed_0x9f9",
@@ -223,11 +260,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
 
 /// The ledger's entries, by name, with the test-name substrings each lists.
 fn ledger() -> Vec<(String, Vec<String>)> {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs.toml");
-    let text = std::fs::read_to_string(&path).unwrap();
-    text.split("[[bug]]")
-        .skip(1)
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs/entries");
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
         .map(|entry| {
             let quoted = |line: &str| -> Vec<String> {
                 line.split('"')
@@ -248,7 +285,13 @@ fn ledger() -> Vec<(String, Vec<String>)> {
                 .unwrap_or_default();
             (name, tests)
         })
-        .collect()
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "no ledger entries under {}",
+        dir.display()
+    );
+    entries
 }
 
 #[test]

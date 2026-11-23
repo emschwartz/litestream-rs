@@ -102,6 +102,14 @@ const CHECKSUMMED_FRAME_HEADER_LEN: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReaderId(u32);
 
+impl ReaderId {
+    /// The reader numbered `n`: a backend other than the model numbers its own readers.
+    #[must_use]
+    pub const fn new(n: u32) -> Self {
+        Self(n)
+    }
+}
+
 /// A checkpoint mode as another process can ask for it (core's
 /// [`CheckpointMode`] has no RESTART).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1928,7 +1936,7 @@ impl SimSqlite {
     /// Whether our read transaction is held, on any read mark. A mark above
     /// zero keeps any writer from restarting the WAL; mark zero lets one
     /// generation change through and then blocks every backfill, so no commit
-    /// can go with a generation either way (`lsr_core::recover`, rule 6).
+    /// can go with a generation either way (`lsr_core::recover_traced`, rule 6).
     /// With none held nothing pins the WAL.
     #[must_use]
     pub fn our_reader_pins_wal(&self) -> bool {

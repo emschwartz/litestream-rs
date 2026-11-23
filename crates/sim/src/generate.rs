@@ -322,10 +322,6 @@ pub enum MetaOp {
     /// Deletes every staged file while the engine runs: the staging directory
     /// removed under it, with no restart.
     DeleteAll,
-    /// Rewrites the newest level-0 file as another whole, valid file under
-    /// the same key and header, with page bytes changed: a file replaced by
-    /// one that verifies, which only a witness bound to its bytes refuses.
-    ForgeNewest,
 }
 
 /// A step on the replica from outside the engine. Scenarios only.
@@ -421,9 +417,7 @@ pub struct Weights {
     /// [`Op::Heal`].
     pub heal: u32,
     /// [`Op::Meta`] with the steps that replace staged files under a running
-    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`],
-    /// [`MetaOp::ForgeNewest`]), and [`Op::StagingDamage`] with
-    /// [`MetaOp::ForgeNewest`].
+    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`]).
     pub staging_replace_running: u32,
     /// The chance in a thousand that a step is an [`Op::Hold`] instead of
     /// what the history drew there. Not a weight: holds come from a stream of
@@ -486,6 +480,14 @@ pub struct Weights {
     /// it stands, the WAL regrowths). Not an operation, for the same reason as
     /// `block_crash_law`; drawn last in the swarm mix.
     pub overlap: bool,
+    /// The process dies right after every tick in which an injected fault fired: a store fault,
+    /// or a failure of a SQLite-side call. Whatever the fault left the engine owing must then
+    /// survive a restart, so an obligation held only in memory fails the run
+    /// (`lsr_core::obligations`). Inside a hold it kills only where known defects are counted
+    /// ([`Weights::known_wrong`]): a restart there reaches the open defect D9, as an overlapping
+    /// hold's own restarts do. Not an operation, for the same reason as `block_crash_law`; drawn
+    /// last in the swarm mix.
+    pub kill_after_fault: bool,
     /// [`Op::AppInTick`].
     pub app_in_tick: u32,
     /// [`Op::Verify`].
@@ -582,6 +584,9 @@ impl Default for Weights {
             error_domain: false,
             known_wrong: false,
             overlap: false,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            kill_after_fault: false,
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             app_in_tick: 0,
@@ -689,10 +694,6 @@ impl Weights {
     /// rarely overlap. Drawn from the seed's own stream, so the history's
     /// stream is untouched.
     #[must_use]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one draw per field in the order recorded mixes rely on; a split would hide it"
-    )]
     pub fn swarm(seed: Seed) -> Self {
         let entropy = SeededEntropy::new(seed.stream(12));
         let weight = |keep_always: bool| {
@@ -737,6 +738,7 @@ impl Weights {
             error_domain: false,
             known_wrong: false,
             overlap: false,
+            kill_after_fault: false,
             app_in_tick: 0,
             verify: 0,
             evict_page_cache: 0,
@@ -792,6 +794,8 @@ impl Weights {
         mix.other_connection_commit = weight(false);
         // And after that, for the same reason: page-cache eviction after a failed WAL fsync.
         mix.evict_page_cache = weight(false);
+        // Drawn after that, for the same reason: half each.
+        mix.kill_after_fault = below(&entropy, 2) == 0;
         // And after that: a store without conditional writes in a quarter of the swarm.
         mix.no_create_only = below(&entropy, 4) == 0;
         mix
@@ -923,14 +927,13 @@ fn staging_damage(entropy: &SeededEntropy) -> Op {
     }
 }
 
-/// A staged file replaced under a running engine, by a backup put back or by
-/// another valid file, and now and then the same while it is down.
+/// A staged file replaced under a running engine by a backup put back. Five
+/// slots, as when this also drew forged files (out of scope, see
+/// docs/decisions.md D131), so the draws after it are unchanged.
 fn staging_replace_running(entropy: &SeededEntropy) -> Op {
     match below(entropy, 5) {
-        0 => Op::Meta(MetaOp::Save),
-        1 => Op::Meta(MetaOp::Restore),
-        2 | 3 => Op::Meta(MetaOp::ForgeNewest),
-        _ => Op::StagingDamage(MetaOp::ForgeNewest),
+        0 | 2 => Op::Meta(MetaOp::Save),
+        _ => Op::Meta(MetaOp::Restore),
     }
 }
 

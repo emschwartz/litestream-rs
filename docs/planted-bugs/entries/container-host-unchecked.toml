@@ -1,0 +1,4 @@
+name = "container-host-unchecked"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["chain::sources_tests::container_host_must_be_loopback_or_a_container_address"]

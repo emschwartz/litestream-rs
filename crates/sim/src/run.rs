@@ -22,11 +22,11 @@ use lsr_wal::{Salts, WalOffset};
 
 use crate::clock::ClockLaw;
 use crate::crash_law::CrashLaw;
-use crate::failstop::{FailStopJudge, fired};
+use crate::failstop::{FailStopJudge, Fired, fired};
+use crate::forcing::Forcing;
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
-use crate::liveness::Justifier;
 use crate::oracle::{Bound, Incarnation, Violation, Windows, bug_fault, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
@@ -226,11 +226,16 @@ pub struct Opts {
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
+    /// The process dies right after every tick in which an injected fault fired
+    /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
+    pub kill_after_fault: bool,
     /// The replica's store has no conditional writes ([`Weights::no_create_only`]).
     /// [`run_with`] sets it.
     pub no_create_only: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
+    /// Which SQLite the engine runs against: the rule model by default.
+    pub sqlite: crate::side::SideMaker,
 }
 
 /// Which judges a run consults. Both by default; one alone measures what it catches unaided.
@@ -364,6 +369,13 @@ struct Runner {
     expected: Vec<StopCause>,
     /// A drawn step that has nothing to act on is skipped, not a failure.
     lenient: bool,
+    /// The process dies right after a tick in which an injected fault fired.
+    kill_after_fault: bool,
+    /// A fault operation was applied since the last kill: the law kills once per operation, so
+    /// a fault that keeps firing (a rate) does not keep the engine from ever running.
+    kill_armed: bool,
+    /// A hold is running its ticks: a kill there is a restart inside a hold, which reaches D9.
+    in_hold: bool,
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
@@ -401,8 +413,8 @@ struct Runner {
     /// Every injected store fault has healed and the run is judging
     /// liveness: a stall no longer imposed by the world ends nothing.
     settling: bool,
-    /// The snapshot liveness oracle.
-    liveness: crate::liveness::Liveness,
+    /// The forcings in effect, and the needless-snapshot and lost-restore-point checks.
+    forcings: crate::forcing::Forcings,
     judges: Judges,
     /// What the app does after a restart, and its own log of commits.
     app: after_restart::App,
@@ -435,8 +447,9 @@ const SETTLE_AFTER_RESTART: usize = 8;
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
     fn configured(seed: Seed, opts: &Opts) -> Self {
-        let mut runner = Self::new(seed).with_staging_fs(seed, opts);
+        let mut runner = Self::new(seed, &opts.sqlite).with_staging_fs(seed, opts);
         runner.lenient = opts.drawn;
+        runner.kill_after_fault = opts.kill_after_fault;
         if opts.drawn {
             runner.draw_power_law(seed, opts);
             runner.draw_batch_widths(seed);
@@ -459,9 +472,9 @@ impl Runner {
         runner
     }
 
-    fn new(seed: Seed) -> Self {
+    fn new(seed: Seed, sqlite: &crate::side::SideMaker) -> Self {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
-        let mut w = World::new(seed, page_size, FIRST_DB_PAGES);
+        let mut w = World::over(seed, sqlite.make(seed, page_size, FIRST_DB_PAGES));
         w.start_driver();
         let start = w.clock.now();
         let image = crate::history::image_digest(&w.model.newest_image());
@@ -502,6 +515,9 @@ impl Runner {
             app_before: AppCheckpoints::NONE,
             expected: Vec::new(),
             lenient: false,
+            kill_after_fault: false,
+            kill_armed: false,
+            in_hold: false,
             expected_sizes: Vec::new(),
             life: Incarnation::default(),
             // The database's first content is on no replica yet.
@@ -517,7 +533,7 @@ impl Runner {
             failed_boots: 0,
             regressions: 0,
             settling: false,
-            liveness: crate::liveness::Liveness::new(),
+            forcings: crate::forcing::Forcings::new(),
             judges: Judges::default(),
             app: after_restart::App::new(seed),
             op_began_at: 0,
@@ -551,7 +567,7 @@ impl Runner {
         self.unwatched = true;
         self.degraded = [false; 5];
         self.latest = None;
-        self.liveness.rebooted();
+        self.forcings.rebooted();
     }
 
     fn app_seen(&self) -> AppCheckpoints {
@@ -675,7 +691,7 @@ impl Runner {
 
     fn crashed(&mut self, kind: CrashKind) {
         if kind == CrashKind::Power {
-            self.liveness.note(Justifier::PowerLoss);
+            self.forcings.note(Forcing::PowerLoss);
         }
         self.reboot();
         self.app.restarted(self.op_began_at);
@@ -778,11 +794,12 @@ impl Runner {
         let began = self.now();
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
-        self.liveness_before_tick(booting);
+        self.forcings_before_tick(booting);
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
         self.staging_moved()?;
         let fired0 = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let queued0 = self.w.sqlite.queued_injections();
         let ended = self.run_one(plan);
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
@@ -792,7 +809,7 @@ impl Runner {
         self.judge_stores()?;
         self.judge_unguarded()?;
         let crashed = matches!(ended, TickEnd::Crashed { .. });
-        self.liveness_mid_tick(hits0, crashed)?;
+        self.forcings_mid_tick(hits0, crashed)?;
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
@@ -818,7 +835,7 @@ impl Runner {
                 (Step::Crashed, None)
             }
         };
-        self.liveness_after_tick(self.actor.snapshots(), true, !crashed)?;
+        self.forcings_after_tick(self.actor.snapshots(), true, !crashed)?;
         let stats = TickStats {
             event,
             remote: delta(remote0, self.w.remote_recorder.counts()),
@@ -831,6 +848,7 @@ impl Runner {
         };
         per_tick(&stats, self.limits())?;
         let step = self.after_refusal(step)?;
+        let step = self.kill_after_fault(step, fired0, queued0);
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
         self.verify_ready()?;
         Ok((step, stats))
@@ -903,16 +921,12 @@ impl Runner {
         // With staging intact, everything this engine put on the replica is at
         // or below what staging holds, under the bytes staging holds: a
         // refusal then has no cause. A staged copy that differs from the
-        // replica's object under the same key was edited or forged (an
-        // operation), and the boot refuses that divergence by design. So is
-        // a staged copy the engine never put: the boot may have read the
-        // replica's object before a rollback took it (a lagging listing), so
-        // the replica as it stands now need not show the divergence.
+        // replica's object under the same key was damaged or put back (an
+        // operation), and the boot refuses that divergence by design.
         let key = lsr_core::FileKey::new(lsr_core::Level::ZERO, lsr_ltx::TxidRange::single(tip));
         let read =
             |err: lsr_core::StoreError| bug_fault(format!("reading the stores failed: {err}"));
-        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?
-            || self.w.staged_not_the_engines(key).map_err(read)?;
+        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?;
         if !self.staging_disturbed && !diverged {
             return Err(bug_fault(format!(
                 "a boot refused replica files through {tip} with staging intact and no other writer"
@@ -969,18 +983,18 @@ impl Runner {
         self.judge_staged_durable()
     }
 
-    /// Shows the liveness oracle the WAL before a tick, and, before a boot,
+    /// Shows the forcing checks the WAL before a tick, and, before a boot,
     /// what the boot's witness will find unprovable.
-    fn liveness_before_tick(&mut self, booting: bool) {
-        self.liveness.see_wal(
+    fn forcings_before_tick(&mut self, booting: bool) {
+        self.forcings.see_wal(
             self.w.sqlite.wal_header_salts(),
             self.w.sqlite.our_reader_pins_wal(),
         );
         if booting && let Some(what) = self.w.pending_unprovable() {
-            self.liveness.note(Justifier::PendingUnprovable);
+            self.forcings.note(Forcing::PendingUnprovable);
             self.report
                 .reach
-                .bump(format!("liveness.pending_unprovable.{}", variant(&what)));
+                .bump(format!("pending_unprovable.{}", variant(&what)));
         }
     }
 
@@ -1037,7 +1051,7 @@ impl Runner {
         }
     }
 
-    /// Hands a snapshot the event announces to the liveness oracle, and
+    /// Hands a snapshot the event announces to the forcing checks, and
     /// tells it when a fault failed a step.
     fn judge_snapshot(&mut self, event: &Event) -> Result<(), Violation> {
         // A boot or a step under a wal-index reset ahead of the WAL header
@@ -1046,13 +1060,13 @@ impl Runner {
         if matches!(event, Event::Booted { .. } | Event::Synced { .. })
             && self.w.sqlite.index_reset_ahead()
         {
-            self.liveness.note_in_tick(Justifier::PositionUnproven);
+            self.forcings.note_in_tick(Forcing::PositionUnproven);
         }
         let (cause, at_boot) = match event {
             Event::Booted { cause: Some(cause) } => (cause, true),
             Event::Resnapshot(cause) => (cause, false),
             Event::Degraded { .. } | Event::Retrying { .. } => {
-                self.liveness.note_in_tick(Justifier::PositionUnproven);
+                self.forcings.note_in_tick(Forcing::PositionUnproven);
                 return Ok(());
             }
             Event::Booted { cause: None }
@@ -1065,11 +1079,11 @@ impl Runner {
             | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => return Ok(()),
         };
-        self.liveness
+        self.forcings
             .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
         if matches!(cause, lsr_core::SnapshotCause::BehindRemote { .. }) && at_boot {
             let staged = self.w.staged_level_zero();
-            self.liveness
+            self.forcings
                 .passed_by_replica(&staged, &self.w, &mut self.report.reach)?;
         }
         Ok(())
@@ -1112,30 +1126,30 @@ impl Runner {
         }
     }
 
-    /// Tells the liveness oracle what the tick that just ran did, before its
+    /// Tells the forcing checks what the tick that just ran did, before its
     /// end is taken in. A crashed tick has no event to judge, and ends with
     /// a new engine whose counter starts again: its stores are taken in
     /// first, then what the crash did to the WAL, which came after anything
     /// the tick staged.
-    fn liveness_mid_tick(&mut self, hits0: (u64, u64), crashed: bool) -> Result<(), Violation> {
+    fn forcings_mid_tick(&mut self, hits0: (u64, u64), crashed: bool) -> Result<(), Violation> {
         self.note_tick_faults(hits0);
-        self.liveness_after_tick(self.actor.snapshots(), !crashed, crashed)?;
+        self.forcings_after_tick(self.actor.snapshots(), !crashed, crashed)?;
         let (wal, pinned) = (
             self.w.sqlite.wal_header_salts(),
             self.w.sqlite.our_reader_pins_wal(),
         );
         if crashed {
-            self.liveness.see_wal(wal, pinned);
+            self.forcings.see_wal(wal, pinned);
         } else {
-            self.liveness.see_wal_after_tick(wal, pinned);
+            self.forcings.see_wal_after_tick(wal, pinned);
         }
         Ok(())
     }
 
-    /// Hands the liveness oracle what the tick staged and uploaded, with the
+    /// Hands the forcing checks what the tick staged and uploaded, with the
     /// engine's snapshot counter as the tick left it, when `now`; `ended` is
     /// false for a tick that crashed.
-    fn liveness_after_tick(
+    fn forcings_after_tick(
         &mut self,
         snapshots: lsr_core::SnapshotCounts,
         ended: bool,
@@ -1146,11 +1160,11 @@ impl Runner {
         }
         let staging = self.w.staging_recorder.events();
         let remote = self.w.remote_recorder.events();
-        let world = crate::liveness::WithEngine {
+        let world = crate::forcing::WithEngine {
             world: &self.w,
             staged: self.actor.staged().map(lsr_ltx::Txid::get),
         };
-        self.liveness.after_tick(
+        self.forcings.after_tick(
             (&staging, &remote),
             &world,
             snapshots,
@@ -1169,20 +1183,20 @@ impl Runner {
         (sum(&self.w.staging_faults), sum(&self.w.remote_faults))
     }
 
-    /// Notes for the liveness oracle the faults that hit in the tick that just ran.
+    /// Notes for the forcing checks the faults that hit in the tick that just ran.
     fn note_tick_faults(&mut self, (staging0, remote0): (u64, u64)) {
         let (staging, remote) = self.fault_hits();
         if staging > staging0 {
-            self.liveness.note_in_tick(Justifier::StagingFault);
+            self.forcings.note_in_tick(Forcing::StagingFault);
         }
         if remote > remote0 {
-            self.liveness.note_in_tick(Justifier::RemoteFault);
+            self.forcings.note_in_tick(Forcing::RemoteFault);
         }
     }
 
     fn note_lost(&mut self, lost: &[(lsr_core::FileKey, crate::store::Lost)]) {
         if !lost.is_empty() {
-            self.liveness.note(Justifier::StagedLost);
+            self.forcings.note(Forcing::StagedLost);
         }
         for (_, how) in lost {
             self.report.reach.bump(format!("staged.{}", variant(how)));
@@ -1220,6 +1234,44 @@ impl Runner {
             }
             *was = now;
         }
+    }
+
+    /// The kill-after-fault law ([`Weights::kill_after_fault`]): the first tick in which a store
+    /// fault or an injected SQLite-side failure fires after a fault operation is followed at once
+    /// by a process crash, before anything else can pay what the fault left owing.
+    /// Runs a hold with [`Runner::in_hold`] set for its ticks.
+    fn hold_marked(&mut self, hold: crate::generate::Hold, ticks: u8) -> Result<(), Violation> {
+        self.in_hold = true;
+        let held = self.hold(hold, ticks);
+        self.in_hold = false;
+        if self.trace {
+            self.report.trace.push("    hold ended".to_owned());
+        }
+        held
+    }
+
+    fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), queued0: usize) -> Step {
+        let fired_now = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
+        let source = self.w.sqlite.queued_injections() < queued0;
+        let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
+        // A kill inside a hold is a restart there, which reaches the open defect D9 (retry
+        // counts and degraded states reset at a restart, so a halt that outlasts restarts is never
+        // reported): only where known defects are counted, as the overlapping holds' own restarts.
+        let reaches_d9 = self.in_hold && !self.known_wrong;
+        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) || reaches_d9 {
+            return step;
+        }
+        self.kill_armed = false;
+        let lost = self.w.crash(CrashKind::Process);
+        self.note_lost(&lost);
+        if self.trace {
+            self.report
+                .trace
+                .push(format!("    then killed after a fault, lost: {lost:?}"));
+        }
+        self.crashed(CrashKind::Process);
+        Step::Crashed
     }
 
     fn crash_tick(&mut self, kind: CrashKind) -> Result<(), Violation> {
@@ -1628,6 +1680,12 @@ impl Runner {
                 stopped_here = true;
                 break;
             }
+            // A process the kill-after-fault law ended in this tick owes no stop for it: what it
+            // listed died with it, and the next boot is recovery's to judge.
+            if step == Step::Crashed {
+                watching = false;
+                continue;
+            }
             // A running engine that listed the replica in this tick while the
             // other writer's file stood past its own position holds the proof
             // of another writer: it must stop. A boot's listing is recovery's to
@@ -1773,6 +1831,7 @@ impl Runner {
         ahead: u8,
         shape: crate::FaultShape,
     ) {
+        self.kill_armed = true;
         if target == Target::Remote
             && matches!(
                 shape,
@@ -1852,6 +1911,7 @@ impl Runner {
     }
 
     fn env_fault(&mut self, fault: EnvFault) -> Result<(), Violation> {
+        self.kill_armed = true;
         match fault {
             EnvFault::DeleteWal => {
                 if self.w.sqlite.delete_wal() {
@@ -1895,6 +1955,10 @@ impl Runner {
             // The database SQLite serves now reads the evicted frames' older bytes: the
             // model follows it as damage, and the history judge refuses a restore that gives it.
             EnvFault::EvictPageCache => {
+                // The evicted frames are damage SQLite still counts as committed: the engine
+                // may find the WAL corrupt or cut short, now or once an armed eviction fires.
+                self.expect(StopCause::WalCorrupt);
+                self.expect(StopCause::WalTruncated);
                 let acted = self.w.sqlite.evict_page_cache();
                 self.scenario_bool("EvictPageCache", acted)?;
                 self.w.adopt_evicted();
@@ -2062,7 +2126,6 @@ impl Runner {
                 let half = bytes.len() / 2;
                 bytes.truncate(half);
             }),
-            MetaOp::ForgeNewest => w.forge_newest_staged(),
         };
         self.step_done(&format!("{op:?}"), done)
     }
@@ -2187,12 +2250,12 @@ impl Runner {
         Ok(())
     }
 
-    /// Applies `op`, telling the liveness oracle what it did by itself and
+    /// Applies `op`, telling the forcing checks what it did by itself and
     /// how it left the WAL's header.
     fn apply(&mut self, op: &Op) -> Result<(), Violation> {
         self.fail_stop_outside(op);
-        self.liveness.note_op(op);
-        self.liveness.see_wal(
+        self.forcings.note_op(op);
+        self.forcings.see_wal(
             self.w.sqlite.wal_header_salts(),
             self.w.sqlite.our_reader_pins_wal(),
         );
@@ -2201,8 +2264,8 @@ impl Runner {
         self.marks.end(op);
         // An operation that runs ticks between its edits (another writer's
         // file put, then removed after the engine ran) edits again after them.
-        self.liveness.note_op(op);
-        self.liveness.see_wal(
+        self.forcings.note_op(op);
+        self.forcings.see_wal(
             self.w.sqlite.wal_header_salts(),
             self.w.sqlite.our_reader_pins_wal(),
         );
@@ -2271,7 +2334,7 @@ impl Runner {
                 self.meta(*op)?;
             }
             Op::WalDamage { op, ticks } => self.wal_damage_healed(*op, *ticks)?,
-            Op::Hold { hold, ticks } => self.hold(*hold, *ticks)?,
+            Op::Hold { hold, ticks } => self.hold_marked(*hold, *ticks)?,
             Op::Verify => self.verify()?,
             Op::Heal => self.heal_faults(),
             Op::LaggingListings { writes, window } => self.lag_listings(*writes, *window),
@@ -2404,7 +2467,7 @@ impl Runner {
     /// What a drawn run's power losses keep of the unsynced WAL writes: a
     /// drawn prefix, or the block law's draw; and whether the engine's own
     /// sync of the WAL keeps anything. What those settings make true for the
-    /// liveness oracle is [`crate::liveness::of_opts`]'s to say.
+    /// forcing checks is [`crate::forcing::noted_by_opts`]'s to say.
     fn draw_power_law(&mut self, seed: Seed, opts: &Opts) {
         self.w.sqlite.tear_on_power_loss(seed.stream(14));
         if opts.block_crash_law {
@@ -2419,8 +2482,8 @@ impl Runner {
         if opts.lying_wal_sync {
             self.w.sqlite.lie_on_our_sync();
         }
-        for why in crate::liveness::of_opts(opts) {
-            self.liveness.note(*why);
+        for why in crate::forcing::noted_by_opts(opts) {
+            self.forcings.note(*why);
         }
     }
 
@@ -2435,11 +2498,21 @@ impl Runner {
         }
     }
 
+    /// The model no longer matches SQLite's rules: named as the known defect D103 explains it
+    /// when a failed WAL sync's lost writeback is in play, plainly otherwise.
+    fn model_diverged(&self) -> Violation {
+        bug_fault(if self.w.sqlite.writeback_lost() {
+            crate::oracle::MODEL_DIVERGED_AFTER_LOST_WRITEBACK
+        } else {
+            crate::oracle::MODEL_DIVERGED
+        })
+    }
+
     /// The end of a history: drain, judge the replica, check the resources.
     fn finish(&mut self) -> Result<(), Violation> {
         self.report.trips_in_history = self.report.trips.len();
         if self.lenient && !self.w.model_matches_sqlite() {
-            return Err(bug_fault(crate::oracle::MODEL_DIVERGED));
+            return Err(self.model_diverged());
         }
         // Liveness is judged once every fault has cleared.
         self.rate_active = false;
@@ -2630,6 +2703,7 @@ pub fn run_with(
         error_domain: weights.error_domain,
         known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
+        kill_after_fault: weights.kill_after_fault,
         no_create_only: weights.no_create_only,
         ..opts.clone()
     };
@@ -2671,9 +2745,10 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
             runner.report.trace.push(format!("{step}: {op:?}"));
         }
         if runner.lenient && !runner.w.model_matches_sqlite() {
+            let diverged = runner.model_diverged();
             return Err(Failure {
                 trace: runner.report.trace,
-                ..fail(bug_fault(crate::oracle::MODEL_DIVERGED))
+                ..fail(diverged)
             });
         }
         if let Err(violation) = runner.apply_judged(op) {

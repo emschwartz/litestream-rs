@@ -410,7 +410,7 @@ fn a_persistent_cause_and_its_stop_cause_round_trip() {
 
 /// Every fault, pinned by the match in [`every_fault_has_a_named_policy_test`]'s spirit: the
 /// array's length breaks when a variant is added.
-fn every_fault() -> [Fault; 33] {
+pub(crate) fn every_fault() -> [Fault; 33] {
     [
         Fault::StoreTransient,
         Fault::StoreThrottled { retry_after: None },
@@ -654,6 +654,19 @@ fn no_staging_error_is_blamed_on_the_replica() {
     ];
     for err in errs {
         assert!(!remote_only.contains(&Fault::from_staging(&err)), "{err}");
+    }
+}
+
+/// ENOSPC (and EDQUOT) from a filesystem replica is a full disk, as on staging: the operator's
+/// fix is to free space, and an unnamed transient error would hide that. Go reports the same
+/// `no space left on device` for a full replica directory as for a full database disk.
+#[test]
+fn a_full_replica_disk_is_disk_full() {
+    for op in [StoreOp::Upload, StoreOp::Read, StoreOp::Delete] {
+        for kind in [ErrorKind::StorageFull, ErrorKind::QuotaExceeded] {
+            let err = StoreError::Transient { op, kind };
+            assert_eq!(store_fault(&err), Fault::LocalDiskFull, "{op:?} {kind:?}");
+        }
     }
 }
 

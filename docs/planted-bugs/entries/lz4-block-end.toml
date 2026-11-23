@@ -1,0 +1,8 @@
+name = "lz4-block-end"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::frame_block_end",
+    "corruption::every_byte_change_to_a_small_rust_file_fails_or_aliases",
+]

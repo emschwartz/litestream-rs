@@ -1,0 +1,6 @@
+name = "wal-barrier-sim"
+fix = "plant"
+patch = "wal-barrier"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07"]

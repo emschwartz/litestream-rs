@@ -1,0 +1,6 @@
+name = "boundary-snapshot-keeps-page-table-sim"
+patch = "boundary-snapshot-keeps-page-table"
+fix = "claude/boundary-snapshot-pages"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage"]

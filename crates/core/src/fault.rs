@@ -106,7 +106,8 @@ pub enum Fault {
     /// filesystem; the handling is right either way, since nothing the
     /// replica promised depends on the lost file.
     StagedLost,
-    /// The local disk is full.
+    /// A disk the engine writes to is full: the database's, staging's, or a filesystem
+    /// replica's.
     LocalDiskFull,
     /// A local read or write failed.
     LocalIo,
@@ -954,6 +955,79 @@ pub const fn policy(fault: &Fault) -> Policy {
     }
 }
 
+/// Whether meeting a fault's condition again reports it again (`crate::obligations`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Evidence {
+    /// It does: a retry that succeeds shows the condition has passed, or redoes what it covered.
+    Repeats,
+    /// It is reported once and then gone, so a later success proves nothing about what it
+    /// covered: the fault leaves this obligation, which the actor records and the obligation
+    /// ledger shows journalled, and its policy is never a plain retry.
+    Once(Obligation),
+}
+
+/// What a fault reported once leaves the engine owing. A new one does not build until the actor
+/// records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Obligation {
+    /// A failed WAL sync's debt: a TRUNCATE, then a snapshot (`actor::unproven`).
+    UnprovenWal,
+}
+
+#[cfg(test)]
+impl Obligation {
+    /// The field of the actor's state that holds it, as the obligation ledger names it.
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::UnprovenWal => "unproven",
+        }
+    }
+}
+
+/// What a fault's report is worth on a second look: the class of fault an obligation held only in
+/// memory comes from.
+#[must_use]
+pub const fn evidence(fault: &Fault) -> Evidence {
+    match fault {
+        // The kernel reports a failed writeback once and then calls the pages clean.
+        Fault::WalSyncFailed => Evidence::Once(Obligation::UnprovenWal),
+        // A retried staged write writes its file again from the WAL, and an uncertain commit is
+        // listed before the next write.
+        Fault::LocalFsyncFailed
+        | Fault::LocalIo
+        | Fault::LocalDiskFull
+        | Fault::StagedLost
+        | Fault::UploadAmbiguous
+        | Fault::UploadChecksumMismatch
+        | Fault::StoreTransient
+        | Fault::StoreThrottled { .. }
+        | Fault::StoreDenied(_)
+        | Fault::StoreRefused
+        // A store without conditional writes refuses every create-only write, and each
+        // process asks again at its first one.
+        | Fault::CreateOnlyUnsupported
+        | Fault::RemoteObjectMissing
+        | Fault::RemoteCorrupt
+        | Fault::RemoteAheadOfLocal
+        | Fault::RemoteRegressed
+        | Fault::SqliteBusy
+        | Fault::ReadersHeld
+        | Fault::WalMoved
+        | Fault::WalIndexInconsistent
+        | Fault::WalChangedUnderRead
+        | Fault::NothingToSnapshot
+        | Fault::ReadTxLost
+        | Fault::PageSizeChanged { .. }
+        | Fault::WalCorruptBelowCommitted
+        | Fault::WalTruncatedBelowCommitted
+        | Fault::WalUnlinked
+        | Fault::DatabasePageMismatch { .. }
+        | Fault::ShutdownDeadline
+        | Fault::Bug(_) => Evidence::Repeats,
+    }
+}
+
 /// `interval * 2^(attempt - 1)`, at most [`MAX_BACKOFF`] (Go `replica.go:449-457`).
 /// No jitter, as in Go: one actor retries one thing.
 #[must_use]
@@ -985,6 +1059,12 @@ impl Fault {
     #[must_use]
     fn from_remote(err: &StoreError) -> Self {
         match err {
+            // A filesystem replica out of room: the operator frees space, as for staging and
+            // as Go's `no space left on device` asks, whichever disk it is.
+            StoreError::Transient {
+                kind: io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded,
+                ..
+            } => Self::LocalDiskFull,
             StoreError::Transient { .. } => Self::StoreTransient,
             StoreError::Throttled { retry_after, .. } => Self::StoreThrottled {
                 retry_after: retry_after.filter(|wait| !wait.is_zero()),
@@ -1223,4 +1303,4 @@ pub struct Clamped {
 pub(crate) mod role;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

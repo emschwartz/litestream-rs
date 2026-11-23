@@ -1,0 +1,6 @@
+name = "failstop-carried-outlives-its-file"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "failstop::tests::staged_frames_carry_their_date_until_the_replica_holds_them",
+]

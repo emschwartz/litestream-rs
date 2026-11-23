@@ -34,12 +34,11 @@ use lsr_wal::{
 use std::io::{Read, Seek};
 
 use crate::fault::role::{Role, Staging};
-use crate::fault::{BugSite, Clamped, Fault, SnapshotCause, StopCause};
+use crate::fault::{BugSite, Clamped, Fault, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::publish::Writer;
-use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::{ObjectStore, StoreError, WriteMode};
 use crate::witness::{ByteTally, Witnessed};
@@ -86,23 +85,6 @@ pub enum Step {
         /// Why.
         cause: SnapshotCause,
     },
-}
-
-impl TryFrom<Recovered> for Step {
-    type Error = StopCause;
-
-    fn try_from(recovered: Recovered) -> Result<Self, StopCause> {
-        match recovered {
-            Recovered::Continue(position) => Ok(Self::Incremental(position)),
-            Recovered::WalRestarted(position) => Ok(Self::NewGeneration(position)),
-            Recovered::Snapshot { after, cause } => Ok(Self::Snapshot {
-                after,
-                prev_timestamp: None,
-                cause,
-            }),
-            Recovered::Stop(cause) => Err(cause),
-        }
-    }
 }
 
 /// Where a step ended.
@@ -577,8 +559,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: Role>(
     }
 }
 
-/// The durability barrier: syncs the WAL after the committed read `_after`
-/// was taken and before any frame it counts is staged.
+/// The durability barrier: syncs the WAL after the committed read was taken
+/// and before any frame it counts is staged.
 ///
 /// SQLite under `synchronous = NORMAL` leaves committed frames unsynced until
 /// its next checkpoint. Staging them unsynced would make the replica more
@@ -586,12 +568,12 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: Role>(
 /// the bucket holds, and the application's next commits fork history under
 /// the same salts. A frame is written before the commit that counts it lands
 /// in the wal-index, so one sync after the read covers every frame the read
-/// counts. The read is an argument so the order is the caller's to show.
+/// counts, so callers take the read first and call this before staging.
 ///
 /// # Errors
 /// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing, and no later sync
 /// of that WAL generation is trusted (`actor::unproven`).
-pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W, _after: &CommittedRead) -> Result<(), Fault> {
+pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W) -> Result<(), Fault> {
     wal.sync().map_err(Fault::from_source)
 }
 

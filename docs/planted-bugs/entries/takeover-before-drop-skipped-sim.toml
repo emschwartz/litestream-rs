@@ -1,0 +1,6 @@
+name = "takeover-before-drop-skipped-sim"
+patch = "takeover-before-drop-skipped"
+fix = "88577ff"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7"]

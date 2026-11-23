@@ -194,6 +194,73 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
     );
 }
 
+/// A torn tail behind a listing that lags and leaves its key out, with no forgery: the
+/// application checkpointed the WAL away while the engine was down, so nothing live vouches
+/// for the tail's staged copy and the witness refuses it. Only a read can tell the key is
+/// still on the replica; a listing that left it out freed the key for the transactions
+/// committed since ("transaction 16 covers commit 45 and then commit 57", which the
+/// simulator first found through a forged staged copy).
+#[test]
+fn a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let mut torn = block_on(rig.remote.inner.read(&key, 0, all)).unwrap();
+    torn.truncate(torn.len() / 2);
+    block_on(async {
+        let mut up = rig
+            .remote
+            .inner
+            .begin_upload(&key, ts(T0), crate::store::WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&torn).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    rig.remote.hidden.lock().unwrap().push(key);
+    rig.wal.force_restart();
+    rig.commit(4);
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0 + 2);
+    rig.settle(&mut actor, T0 + 2);
+    assert!(
+        replica_holds(&rig, 3, &torn),
+        "new content took the replica's key"
+    );
+}
+
+/// The takeover kept before the witness drops a refused staged copy covers the replica's
+/// newest key even when a listing that lags leaves it out: reads that came back wrong judged
+/// that tail torn, so it is not the confirmed position, and a record capped at the newest
+/// listed key stopped one short of it. Once reads were honest, a later boot refused the
+/// engine's own upload (seed 0x3ed in the simulator: "a boot refused replica files through
+/// 0x26 with staging intact and no other writer").
+#[test]
+fn the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides() {
+    // Enough wrong reads of the tail that every read the boot makes of it comes back wrong.
+    const FLIPS: usize = 10;
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    rig.remote.hidden.lock().unwrap().push(key);
+    for _ in 0..FLIPS {
+        rig.remote.flip_next_read(key);
+    }
+    rig.wal.force_restart();
+    rig.commit(4);
+    let mut actor = Actor::new(go_like());
+    rig.tick(&mut actor, T0 + 2);
+    rig.settle(&mut actor, T0 + 2);
+    let record = rig.takeover.expect("a takeover was kept before the drop");
+    assert!(
+        record.covers(Txid::new(3).unwrap()),
+        "the record {record:?} stops short of the replica's newest key"
+    );
+}
+
 /// Every staged file's bytes, by transaction.
 fn staged_bytes(rig: &Rig) -> Vec<(u64, Vec<u8>)> {
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
@@ -686,4 +753,43 @@ fn a_pending_file_with_one_page_too_many_is_refused() {
     no_stop(&seen);
     assert!(!replica_holds(&rig, 2, &more));
     assert_eq!(restored(&rig), 2);
+}
+
+/// One read of a pending file that answers with another valid file (a lying read; the stored
+/// bytes are the engine's): the first witness pass refuses the file and the second witnesses
+/// it. Passes that disagree prove nothing, so the boot deletes nothing and retries
+/// (`LocalIo`); the next boot witnesses the stored bytes and uploads them.
+#[test]
+fn witness_passes_that_disagree_retry_the_boot() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let stored = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
+    let other = replace_staged(&rig, 3, 0xEE);
+    put_l0(&rig.staging.inner, 3, &stored);
+    // The boot reads the newest staged file once before it witnesses, so the second read
+    // from its start is the first witness pass's.
+    rig.staging.other_bytes_on_read(key, 2, other);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert!(
+        matches!(
+            event(&boot),
+            Some(Event::Retrying {
+                fault: Fault::LocalIo,
+                ..
+            })
+        ),
+        "{boot:?}"
+    );
+    assert_eq!(
+        rig.staging.reads_of(&key),
+        3,
+        "the boot ran two witness passes"
+    );
+    assert_eq!(staged(&rig), vec![2, 3], "the boot deleted nothing");
+    let seen = rig.settle(&mut actor, T0 + 1_002);
+    no_stop(&seen);
+    assert!(replica_holds(&rig, 3, &stored));
 }

@@ -1,5 +1,8 @@
 //! Seed 0x82's first 60 operations, as the mixed generator drew them.
 //!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
+//!
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
@@ -30,11 +33,11 @@ pub const OPS: &[Op] = &[
     Op::OtherConnectionCommit { pages: 4 },
     Op::Crash(CrashKind::Power),
     Op::Crash(CrashKind::Process),
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Crash(CrashKind::Power),
     Op::Tick,
-    Op::StagingDamage(MetaOp::ForgeNewest),
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::StoreFault {
         target: Target::Staging,
         op: StoreOp::Upload,

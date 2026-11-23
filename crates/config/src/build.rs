@@ -35,27 +35,27 @@ const MIN_HEARTBEAT: GoDuration = GoDuration::from_secs(60);
 const SQLITE_AUTOCHECKPOINT: u32 = 1000;
 
 pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
-    let rust = rust_settings(top.map("litestream-rs"), walk);
+    let rust = rust_settings(top.map("litestream-rs", walk), walk);
     global_checks(top, walk);
     let levels = levels(top, walk);
     let mut dbs = Vec::new();
     let mut seen: Vec<(String, usize)> = Vec::new();
-    if let Listed::Items(items) = top.maps("dbs") {
+    if let Listed::Items(items) = top.maps("dbs", walk) {
         for (index, fields) in items.iter().enumerate() {
             if let Some(db) = db(fields, index, top, rust, &mut seen, env, walk) {
                 dbs.push((index, fields, db));
             }
         }
     }
-    let global = top.map("snapshot");
+    let global = top.map("snapshot", walk);
     let promoted = promote(&dbs, walk);
     let snapshot = Snapshot {
         interval: global
-            .and_then(|s| s.duration("interval"))
+            .and_then(|s| s.duration("interval", walk))
             .or(promoted.interval)
             .unwrap_or(defaults::SNAPSHOT_INTERVAL),
         retention: global
-            .and_then(|s| s.duration("retention"))
+            .and_then(|s| s.duration("retention", walk))
             .or(promoted.retention)
             .unwrap_or(defaults::SNAPSHOT_RETENTION),
     };
@@ -64,33 +64,35 @@ pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
         walk.warn(KeyPath::root(), None, WarningKind::NoTruncateWithoutClaim);
     }
     GoConfig {
-        addr: top.string("addr"),
-        exec: top.string("exec"),
+        addr: top.string("addr", walk),
+        exec: top.string("exec", walk),
         levels,
         snapshot,
         l0_retention: top
-            .duration("l0-retention")
+            .duration("l0-retention", walk)
             .unwrap_or(defaults::L0_RETENTION),
         l0_retention_check_interval: top
-            .duration("l0-retention-check-interval")
+            .duration("l0-retention-check-interval", walk)
             .unwrap_or(defaults::L0_RETENTION_CHECK_INTERVAL),
         retention_enabled: top
-            .map("retention")
-            .and_then(|r| r.boolean("enabled"))
+            .map("retention", walk)
+            .and_then(|r| r.boolean("enabled", walk))
             .unwrap_or(true),
         shutdown_sync_timeout: top
-            .duration("shutdown-sync-timeout")
+            .duration("shutdown-sync-timeout", walk)
             .unwrap_or(defaults::SHUTDOWN_SYNC_TIMEOUT),
-        validation_interval: top.map("validation").and_then(|v| v.duration("interval")),
-        logging: logging(top.map("logging"), env, walk),
+        validation_interval: top
+            .map("validation", walk)
+            .and_then(|v| v.duration("interval", walk)),
+        logging: logging(top.map("logging", walk), env, walk),
         dbs: dbs.into_iter().map(|(_, _, db)| db).collect(),
         rust,
     }
 }
 
 /// A duration that must be above zero, or at least zero.
-fn positive(fields: &Fields, name: &str, walk: &mut Walk) {
-    if let Some(value) = fields.duration(name).filter(|d| d.nanos() <= 0) {
+fn positive(fields: &Fields, name: &'static str, walk: &mut Walk) {
+    if let Some(value) = fields.duration(name, walk).filter(|d| d.nanos() <= 0) {
         walk.problem(
             fields.path.key(name),
             fields.line(name),
@@ -99,8 +101,8 @@ fn positive(fields: &Fields, name: &str, walk: &mut Walk) {
     }
 }
 
-fn not_negative(fields: &Fields, name: &str, walk: &mut Walk) {
-    if let Some(value) = fields.duration(name).filter(|d| d.nanos() < 0) {
+fn not_negative(fields: &Fields, name: &'static str, walk: &mut Walk) {
+    if let Some(value) = fields.duration(name, walk).filter(|d| d.nanos() < 0) {
         walk.problem(
             fields.path.key(name),
             fields.line(name),
@@ -111,7 +113,7 @@ fn not_negative(fields: &Fields, name: &str, walk: &mut Walk) {
 
 /// Go's `Validate` for the top-level durations.
 fn global_checks(top: &Fields, walk: &mut Walk) {
-    if let Some(snapshot) = top.map("snapshot") {
+    if let Some(snapshot) = top.map("snapshot", walk) {
         positive(snapshot, "interval", walk);
         positive(snapshot, "retention", walk);
     }
@@ -120,7 +122,7 @@ fn global_checks(top: &Fields, walk: &mut Walk) {
     not_negative(top, "shutdown-sync-timeout", walk);
     positive(top, "shutdown-sync-interval", walk);
     if let Some(value) = top
-        .duration("heartbeat-interval")
+        .duration("heartbeat-interval", walk)
         .filter(|d| *d < MIN_HEARTBEAT)
     {
         walk.problem(
@@ -132,13 +134,13 @@ fn global_checks(top: &Fields, walk: &mut Walk) {
 }
 
 fn levels(top: &Fields, walk: &mut Walk) -> Vec<GoDuration> {
-    match top.maps("levels") {
+    match top.maps("levels", walk) {
         Listed::Absent => defaults::LEVELS.to_vec(),
         Listed::Null => Vec::new(),
         Listed::Items(items) => items
             .iter()
             .map(|level| {
-                let interval = level.duration("interval").unwrap_or(GoDuration::ZERO);
+                let interval = level.duration("interval", walk).unwrap_or(GoDuration::ZERO);
                 if interval.nanos() <= 0 {
                     let line = level.line("interval");
                     walk.problem(
@@ -184,7 +186,7 @@ fn promote(dbs: &[(usize, &Fields, DbConfig)], walk: &mut Walk) -> SnapshotOverr
             let Some(value) = own else { continue };
             match slot {
                 Some((first, first_value)) if *first_value != value => {
-                    let snapshot = fields.map("snapshot");
+                    let snapshot = fields.map("snapshot", walk);
                     walk.problem(
                         fields.path.key("snapshot").key(name),
                         snapshot.and_then(|s| s.line(name)),
@@ -219,20 +221,20 @@ fn db(
     let at = fields.path.clone();
     let line = fields.line;
     let source = source(fields, index, seen, env, walk)?;
-    if fields.boolean("watch") == Some(true) && !matches!(source, DbSource::Dir(_)) {
+    if fields.boolean("watch", walk) == Some(true) && !matches!(source, DbSource::Dir(_)) {
         walk.problem(at.clone(), line, ProblemKind::WatchWithoutDir);
     }
-    if fields.string("meta-path").is_some() && fields.string("meta-dir").is_some() {
+    if fields.string("meta-path", walk).is_some() && fields.string("meta-dir", walk).is_some() {
         walk.problem(at.clone(), line, ProblemKind::MetaPathAndMetaDir);
     }
-    let snapshot_fields = fields.map("snapshot");
+    let snapshot_fields = fields.map("snapshot", walk);
     if let Some(snapshot) = snapshot_fields {
         positive(snapshot, "interval", walk);
         positive(snapshot, "retention", walk);
     }
     let snapshot = SnapshotOverride {
-        interval: snapshot_fields.and_then(|s| s.duration("interval")),
-        retention: snapshot_fields.and_then(|s| s.duration("retention")),
+        interval: snapshot_fields.and_then(|s| s.duration("interval", walk)),
+        retention: snapshot_fields.and_then(|s| s.duration("retention", walk)),
     };
     if let (Some(interval), Some(retention)) = (snapshot.interval, snapshot.retention) {
         snapshot_checks(
@@ -245,7 +247,7 @@ fn db(
             walk,
         );
     }
-    let truncate_page_n = fields.int("truncate-page-n").filter(|&n| n != 0);
+    let truncate_page_n = fields.int("truncate-page-n", walk).filter(|&n| n != 0);
     if truncate_page_n.is_some() && rust.app_readers != AppReaders::None {
         walk.problem(
             at.key("truncate-page-n"),
@@ -255,14 +257,16 @@ fn db(
     }
     Some(DbConfig {
         source,
-        meta_path: fields.string("meta-path"),
+        meta_path: fields.string("meta-path", walk),
         snapshot,
-        monitor_interval: fields.duration("monitor-interval"),
-        checkpoint_interval: fields.duration("checkpoint-interval"),
-        min_checkpoint_page_count: fields.int("min-checkpoint-page-count"),
+        monitor_interval: fields.duration("monitor-interval", walk),
+        checkpoint_interval: fields.duration("checkpoint-interval", walk),
+        min_checkpoint_page_count: fields.int("min-checkpoint-page-count", walk),
         truncate_page_n,
-        max_sync_wal_bytes: fields.int("max-sync-wal-bytes"),
-        restore_if_db_not_exists: fields.boolean("restore-if-db-not-exists").unwrap_or(false),
+        max_sync_wal_bytes: fields.int("max-sync-wal-bytes", walk),
+        restore_if_db_not_exists: fields
+            .boolean("restore-if-db-not-exists", walk)
+            .unwrap_or(false),
         replica: db_replica(fields, top, walk),
     })
 }
@@ -276,8 +280,8 @@ fn source(
     walk: &mut Walk,
 ) -> Option<DbSource> {
     let (at, line) = (fields.path.clone(), fields.line);
-    let meta_dir = fields.string("meta-dir");
-    match (fields.string("path"), fields.string("dir")) {
+    let meta_dir = fields.string("meta-dir", walk);
+    match (fields.string("path", walk), fields.string("dir", walk)) {
         (Some(_), Some(_)) => {
             walk.problem(at, line, ProblemKind::PathAndDir);
             None
@@ -310,11 +314,11 @@ fn source(
             Some(DbSource::Path(expanded))
         }
         (None, Some(dir)) => {
-            let Some(pattern) = fields.string("pattern") else {
+            let Some(pattern) = fields.string("pattern", walk) else {
                 walk.problem(at, line, ProblemKind::PatternRequired);
                 return None;
             };
-            let recursive = fields.boolean("recursive").unwrap_or(false);
+            let recursive = fields.boolean("recursive", walk).unwrap_or(false);
             Some(DbSource::Dir(DirSource {
                 dir,
                 pattern,
@@ -327,8 +331,8 @@ fn source(
 
 /// `replica`, or the one item of `replicas`.
 fn db_replica(fields: &Fields, top: &Fields, walk: &mut Walk) -> Option<ReplicaConfig> {
-    let single = fields.map("replica");
-    let list = match fields.maps("replicas") {
+    let single = fields.map("replica", walk);
+    let list = match fields.maps("replicas", walk) {
         Listed::Items(items) => items,
         Listed::Absent | Listed::Null => &[],
     };
@@ -371,8 +375,8 @@ fn is_url(text: &str) -> bool {
 
 /// Go's `ReplicaType`: the URL's scheme, else `type`, else `file`.
 fn replica_kind(fields: &Fields, walk: &mut Walk) -> Option<ReplicaKind> {
-    let url = fields.string("url").filter(|u| is_url(u));
-    let (name, key) = match (&url, fields.string("type")) {
+    let url = fields.string("url", walk).filter(|u| is_url(u));
+    let (name, key) = match (&url, fields.string("type", walk)) {
         (Some(url), _) => {
             let scheme = url
                 .split_once("://")
@@ -402,8 +406,16 @@ fn replica_kind(fields: &Fields, walk: &mut Walk) -> Option<ReplicaKind> {
     None
 }
 
+/// A replica's string key, else the top level's (Go copies the global value in).
+fn either(fields: &Fields, top: &Fields, name: &'static str, walk: &mut Walk) -> Option<String> {
+    match fields.string(name, walk) {
+        Some(value) => Some(value),
+        None => top.string(name, walk),
+    }
+}
+
 fn build_replica(fields: &Fields, top: &Fields, walk: &mut Walk) -> Option<ReplicaConfig> {
-    let path = fields.string("path");
+    let path = fields.string("path", walk);
     if path.as_deref().is_some_and(is_url) {
         walk.problem(
             fields.path.key("path"),
@@ -412,35 +424,28 @@ fn build_replica(fields: &Fields, top: &Fields, walk: &mut Walk) -> Option<Repli
         );
     }
     let kind = replica_kind(fields, walk)?;
-    let secret = |name: &str| {
-        fields
-            .string(name)
-            .or_else(|| top.string(name))
-            .map(Secret::new)
-    };
-    let text = |name: &str| fields.string(name).or_else(|| top.string(name));
     Some(ReplicaConfig {
         kind,
-        url: fields.string("url"),
+        url: fields.string("url", walk),
         path,
         sync_interval: fields
-            .duration("sync-interval")
-            .or_else(|| top.duration("sync-interval")),
+            .duration("sync-interval", walk)
+            .or_else(|| top.duration("sync-interval", walk)),
         max_sync_ltx_files: fields
-            .int("max-sync-ltx-files")
-            .or_else(|| top.int("max-sync-ltx-files")),
+            .int("max-sync-ltx-files", walk)
+            .or_else(|| top.int("max-sync-ltx-files", walk)),
         s3: S3Settings {
-            access_key_id: secret("access-key-id"),
-            secret_access_key: secret("secret-access-key"),
-            region: text("region"),
-            bucket: text("bucket"),
-            endpoint: text("endpoint"),
+            access_key_id: either(fields, top, "access-key-id", walk).map(Secret::new),
+            secret_access_key: either(fields, top, "secret-access-key", walk).map(Secret::new),
+            region: either(fields, top, "region", walk),
+            bucket: either(fields, top, "bucket", walk),
+            endpoint: either(fields, top, "endpoint", walk),
             force_path_style: fields
-                .boolean("force-path-style")
-                .or_else(|| top.boolean("force-path-style")),
-            part_size: fields.bytes("part-size"),
+                .boolean("force-path-style", walk)
+                .or_else(|| top.boolean("force-path-style", walk)),
+            part_size: fields.bytes("part-size", walk),
             concurrency: fields
-                .int("concurrency")
+                .int("concurrency", walk)
                 .and_then(|n| u64::try_from(n).ok())
                 .filter(|n| *n > 0),
         },
@@ -451,7 +456,7 @@ fn build_replica(fields: &Fields, top: &Fields, walk: &mut Walk) -> Option<Repli
 fn logging(fields: Option<&Fields>, env: &dyn Env, walk: &mut Walk) -> Logging {
     let path = KeyPath::root().key("logging");
     let from_env = env.var("LOG_LEVEL").filter(|v| !v.is_empty());
-    let written = fields.and_then(|f| f.string("level"));
+    let written = fields.and_then(|f| f.string("level", walk));
     // Go's `InitLog` switches on the upper-cased level and keeps INFO for anything else,
     // and builds a text handler for any type but json and pretty (internal/log.go).
     let level = match from_env.as_ref().or(written.as_ref()) {
@@ -469,7 +474,7 @@ fn logging(fields: Option<&Fields>, env: &dyn Env, walk: &mut Walk) -> Logging {
         }),
     };
     let line = fields.and_then(|f| f.line("type"));
-    let format = match fields.and_then(|f| f.string("type")).as_deref() {
+    let format = match fields.and_then(|f| f.string("type", walk)).as_deref() {
         None | Some("text") => LogFormat::Text,
         Some("json") => LogFormat::Json,
         Some("pretty") => {
@@ -488,7 +493,9 @@ fn logging(fields: Option<&Fields>, env: &dyn Env, walk: &mut Walk) -> Logging {
             LogFormat::Text
         }
     };
-    let stderr = fields.and_then(|f| f.boolean("stderr")).unwrap_or(false);
+    let stderr = fields
+        .and_then(|f| f.boolean("stderr", walk))
+        .unwrap_or(false);
     Logging {
         level,
         format,
@@ -508,7 +515,10 @@ fn parse_level(value: &str) -> Option<LogLevel> {
 }
 
 fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
-    let app_readers = match fields.and_then(|f| f.string("app-readers")).as_deref() {
+    let app_readers = match fields
+        .and_then(|f| f.string("app-readers", walk))
+        .as_deref()
+    {
         None | Some("unknown") => AppReaders::Unknown,
         Some("none") => AppReaders::None,
         Some(other) => {
@@ -520,7 +530,7 @@ fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
         }
     };
     let responses = fields
-        .and_then(|f| f.map("responses"))
+        .and_then(|f| f.map("responses", walk))
         .map(|r| responses(r, walk))
         .unwrap_or_default();
     RustSettings {
@@ -535,7 +545,7 @@ fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
 /// `if-replication-stops` (decisions D13, D14): `hold-start` when absent.
 fn if_replication_stops(fields: Option<&Fields>, walk: &mut Walk) -> IfReplicationStops {
     let name = "if-replication-stops";
-    match fields.and_then(|f| f.string(name)).as_deref() {
+    match fields.and_then(|f| f.string(name, walk)).as_deref() {
         None | Some("hold-start") => IfReplicationStops::HoldStart,
         Some("report") => IfReplicationStops::Report,
         Some("stop-app") => IfReplicationStops::StopApp,
@@ -553,7 +563,7 @@ fn if_replication_stops(fields: Option<&Fields>, walk: &mut Walk) -> IfReplicati
 /// so one retry at the backoff cap always fits inside it.
 fn max_unreplicated_age(fields: Option<&Fields>, walk: &mut Walk) -> MaxUnreplicatedAge {
     let name = "max-unreplicated-age";
-    let Some(value) = fields.and_then(|f| f.duration(name)) else {
+    let Some(value) = fields.and_then(|f| f.duration(name, walk)) else {
         return MaxUnreplicatedAge::DEFAULT;
     };
     if let Some(bound) = value.to_std().and_then(MaxUnreplicatedAge::new) {
@@ -568,7 +578,7 @@ fn max_unreplicated_age(fields: Option<&Fields>, walk: &mut Walk) -> MaxUnreplic
 
 /// `app-autocheckpoint`: frames, or `0` and `off` for none; SQLite's 1000 when absent.
 fn app_autocheckpoint(fields: Option<&Fields>, walk: &mut Walk) -> Option<NonZeroU32> {
-    let Some(text) = fields.and_then(|f| f.string("app-autocheckpoint")) else {
+    let Some(text) = fields.and_then(|f| f.string("app-autocheckpoint", walk)) else {
         return NonZeroU32::new(SQLITE_AUTOCHECKPOINT);
     };
     if text == "off" {
@@ -596,7 +606,7 @@ fn app_autocheckpoint(fields: Option<&Fields>, walk: &mut Walk) -> Option<NonZer
 }
 
 fn responses(fields: &Fields, walk: &mut Walk) -> ResponseSettings {
-    let mut one = |name: &str| match fields.string(name).as_deref() {
+    let mut one = |name: &'static str| match fields.string(name, walk).as_deref() {
         None => None,
         Some("keep-trying") => Some(ResponseSetting::KeepTrying),
         Some("stop") => Some(ResponseSetting::Stop),
@@ -628,7 +638,7 @@ fn responses(fields: &Fields, walk: &mut Walk) -> ResponseSettings {
         bug: one("bug"),
         other_writer: None,
     };
-    settings.other_writer = match fields.string("other-writer").as_deref() {
+    settings.other_writer = match fields.string("other-writer", walk).as_deref() {
         None => None,
         Some("stop") => Some(OtherWriterSetting::Stop),
         Some("continue-and-interleave-histories") => {
@@ -647,3 +657,6 @@ fn responses(fields: &Fields, walk: &mut Walk) -> ResponseSettings {
     };
     settings
 }
+
+#[cfg(test)]
+mod tests;

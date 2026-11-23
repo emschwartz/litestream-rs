@@ -39,7 +39,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize};
 
 use crate::generate::{EnvFault, Target};
-use crate::oracle::{MODEL_DIVERGED, Violation};
+use crate::oracle::{MODEL_DIVERGED_AFTER_LOST_WRITEBACK, Violation};
 
 /// What a history may do with one (operation, error) pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,11 +95,13 @@ impl KnownWrong {
     #[must_use]
     pub fn matches(self, violation: &Violation) -> bool {
         match self {
-            Self::DatabaseAheadOfWal => {
-                matches!(violation, Violation::CorruptionRestored { .. })
-                    || matches!(violation, Violation::BugFault { context } if context == MODEL_DIVERGED)
+            Self::DatabaseAheadOfWal => matches!(
+                violation,
+                Violation::BugFault { context } if context == MODEL_DIVERGED_AFTER_LOST_WRITEBACK
+            ),
+            Self::HaltForgottenAtRestart => {
+                matches!(violation, Violation::HealthBlind { restarts, .. } if *restarts > 0)
             }
-            Self::HaltForgottenAtRestart => matches!(violation, Violation::HealthBlind { .. }),
         }
     }
 
@@ -686,7 +688,8 @@ pub fn draw_store(
 }
 
 /// The known defects a run of `ops` under `weights` could reach: those whose cells `ops` drew,
-/// and D9 when an overlapping hold may restart. A failure counts as known only in such a run.
+/// and D9 when an overlapping hold or the kill-after-fault law may restart inside a hold. A failure
+/// counts as known only in such a run.
 #[must_use]
 pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<KnownWrong> {
     use crate::generate::Op;
@@ -712,7 +715,8 @@ pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<Kn
             Cell::Drawn | Cell::World(_) | Cell::Impossible(_) | Cell::Unmodelled(_) => None,
         })
         .collect();
-    let restarts_in_holds = weights.overlap
+    // A restart inside a hold: an overlapping hold's own, or the kill-after-fault law's.
+    let restarts_in_holds = (weights.overlap || weights.kill_after_fault)
         && weights.known_wrong
         && ops
             .iter()

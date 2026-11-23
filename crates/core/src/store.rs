@@ -239,10 +239,12 @@ pub enum CorruptCause {
         wrote: u64,
         /// Bytes the store reports holding.
         stored: u64,
-        /// Whether the object just committed was deleted (every engine
-        /// commit deletes it, `publish.rs`, as [`crate::Retrying`] does).
-        /// `false` only when that delete itself failed; the caller must then
-        /// not trust a listing of this key.
+        /// Whether the object just committed was deleted. An engine commit
+        /// (`publish.rs`, as [`crate::Retrying`]) deletes it after a
+        /// create-only write only; after a replace it is left, since the key
+        /// may have held an acknowledged object, and `false` is the answer
+        /// then, as when the delete itself failed. The caller must not trust
+        /// a listing of this key on `false`.
         removed: bool,
     },
     /// The store acknowledged bytes whose digest is not the one sent. `None`

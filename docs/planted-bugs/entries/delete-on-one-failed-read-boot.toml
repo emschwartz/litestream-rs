@@ -1,0 +1,6 @@
+name = "delete-on-one-failed-read-boot"
+fix = "8d820b4"
+package = "lsr-core"
+tests = [
+    "one_bad_read_of_a_staged_file_at_boot_drops_nothing",
+]

@@ -99,6 +99,24 @@ fn check_reports_automatic_checkpoints_left_on() {
     ));
 }
 
+/// `synchronous = OFF` syncs nothing, so a power loss can take back commits the replica
+/// already holds; the check refuses it and accepts NORMAL and FULL.
+#[test]
+fn check_refuses_a_connection_that_never_syncs() {
+    let (_dir, path, _app) = fresh();
+    let conn = app(&path);
+    app_connection(&conn).unwrap();
+    conn.pragma_update(None, "synchronous", "OFF").unwrap();
+    assert!(matches!(
+        check_app_connection(&conn),
+        Err(SetupError::SynchronousOff)
+    ));
+    for level in ["NORMAL", "FULL", "EXTRA"] {
+        conn.pragma_update(None, "synchronous", level).unwrap();
+        check_app_connection(&conn).unwrap();
+    }
+}
+
 /// The application's pool: every connection set up and checked. The replicator's connections are
 /// the ones that keep the WAL, so it survives when the pool closes first and is deleted when
 /// the pool closes last (docs/decisions.md D123).
@@ -234,8 +252,11 @@ fn a_checkpoint_blocked_by_readers_reports_busy_in_the_run() {
 /// another file is refused, and a second path to the same file (a hard link) is the same file.
 #[test]
 fn setup_checks_which_file_the_connection_opens() {
-    let (dir, path, _app) = fresh();
+    let (dir, path, original) = fresh();
     let database = DatabaseFile::of(&path).unwrap();
+    // The other name gets its own `-wal` and `-shm`, which SQLite refuses to read beside an
+    // open connection by the first name; closing it leaves one name in use.
+    drop(original);
     let memory = Connection::open_in_memory().unwrap();
     assert!(matches!(
         app_connection_for(&memory, &database),

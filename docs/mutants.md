@@ -421,3 +421,38 @@ three it had not reached, and the tally above counts the second result.
 | `header.rs` `WalHeader::checkpoint_seq` | 1 | Caught: `header_decodes_every_field` decodes a header whose sequence is 7, not only 0. |
 | `frame.rs` `WalOffset`'s Display | 1 | Caught: the same test reads it, since error messages name offsets with it. |
 | `testing.rs` `page` | 6 | Equivalent (escape line): the mixing steps of the test-data generator. A weaker mixer still gives deterministic pages that differ by seed and page number, and changing the generator would change every recorded simulator history. The rest of `testing.rs` (the WAL builder and its checksums) stays mutated, since the simulator builds its WALs with it. |
+
+## store-fs
+
+`cargo mutants -p lsr-store-fs --test-package lsr-store-fs --test-tool nextest --jobs 4 --timeout 240` at commit
+`6f7f909`: 140 mutants, 79 caught, 32 missed, 29 unviable, no timeouts. Adding `--test-package lsr-sim`, whose
+`MemFs` drives the same store, caught 2 more. After the tests below: 105 caught, 5 missed (the equivalents
+below), 30 unviable. No survivor revealed a bug.
+
+One class covers 21 of the survivors: each filesystem call the store tolerates one error kind from (a file
+already gone on delete, abort or scratch removal; a directory already made; a scratch name already taken; a
+hard link the filesystem cannot make) was never failed with that kind or with one it must not tolerate. A
+test-only `Faulty` filesystem (`crates/store-fs/src/tests/faults.rs`) fails one chosen call with one chosen
+kind, and seven table tests drive each call both ways. Two getters (`Meta::is_empty`,
+`DirEntryInfo::is_symlink`) and a journal slot read past the end of the file are read back by new
+assertions.
+
+### Equivalent (5)
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `filesystem.rs` `RealFs::sync_dir`, `File::sync_all` | replaced by `Ok(())` | An fsync that does nothing shows only after a power loss. The crash tests in `docs/planted-bugs.toml` (`delete-without-dir-sync` among them) check that the store makes the call, and the LazyFS rig checks the real syscall. |
+| `engine_journal.rs` `FsJournalFile::sync`, `sync_dir` | replaced by `Ok(())` | The same, for the journal file and its directory. |
+| `engine_journal.rs` `read_slot` | guard `err.kind() == UnexpectedEof` becomes `true` | Besides end of file, a read of an open journal fails only on a device fault no test can produce. |
+
+## store-s3: classify and listing
+
+`LSR_SKIP=minio,toxiproxy,tigris cargo mutants -p lsr-store-s3 --test-package lsr-store-s3 --test-tool nextest
+--jobs 4 --timeout 240 -f crates/store-s3/src/classify.rs -f crates/store-s3/src/list.rs` at commit `db94eb9`:
+85 mutants, 69 caught, 5 missed, 11 unviable, no timeouts. The tests that need MinIO, Toxiproxy or Tigris were
+skipped. After the tests below: 74 caught, 0 missed, 11 unviable. No survivor revealed a bug.
+
+| Where | Mutants | Resolution |
+| --- | --- | --- |
+| `classify.rs` `S3Code::from_name` | 3 (the `AllAccessDisabled`, `InvalidDigest` and `InvalidRange` arms deleted) | Caught: `code_is_read_from_the_body` now reads each of the three names. |
+| `list.rs` `name_bounds` | 2 (returns `None`, or made-up bounds) | Caught: `a_page_s_bounds_span_its_files_and_unrecognized_names`. The bounds are what the listing compares across pages to refuse one that went backwards. |

@@ -1,0 +1,4 @@
+name = "creds-merge-keeps-config-error"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::the_credentials_file_is_merged_over_the_config_file_as_the_sdk_merges"]

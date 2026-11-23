@@ -19,6 +19,7 @@ lsr-replica.workspace = true
 lsr-sidecar.workspace = true
 lsr-store-fs.workspace = true
 lsr-store-s3.workspace = true
+clap.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

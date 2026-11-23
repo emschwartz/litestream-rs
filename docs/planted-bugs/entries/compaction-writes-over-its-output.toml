@@ -1,0 +1,9 @@
+# A compaction writes over an output key that already holds an object, so its rejected commit
+# deletes what was there.
+name = "compaction-writes-over-its-output"
+fix = "40f58942"
+package = "lsr-core"
+tests = [
+    "a_rejected_compaction_never_deletes_an_output_that_was_already_there",
+    "running_a_job_twice_leaves_one_file_at_the_key",
+]

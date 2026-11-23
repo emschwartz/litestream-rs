@@ -20,6 +20,10 @@ mod dropin_creds;
 #[cfg(test)]
 mod dropin_dir;
 #[cfg(test)]
+mod dropin_inspect;
+#[cfg(test)]
+mod dropin_restore;
+#[cfg(test)]
 mod dropin_roles;
 #[cfg(test)]
 mod fixtures;
@@ -34,8 +38,6 @@ mod live_source;
 #[cfg(test)]
 mod matrix;
 #[cfg(test)]
-mod ofd_read_lock;
-#[cfg(test)]
 mod pinned;
 #[cfg(test)]
 mod releases;
@@ -44,7 +46,11 @@ mod rust_chains;
 #[cfg(test)]
 mod s3;
 #[cfg(test)]
+mod seeded;
+#[cfg(test)]
 mod sidecar;
+#[cfg(test)]
+mod tracked_checksums;
 #[cfg(test)]
 mod upstream_test_map;
 #[cfg(test)]

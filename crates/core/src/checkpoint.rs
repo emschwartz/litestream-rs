@@ -496,7 +496,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
         // After the committed read, so the file's created-at time follows every
         // transaction it carries (see `Env::clock`).
         let stamp = self.clock.now();
-        wal_barrier(&mut *self.wal, &committed)?;
+        wal_barrier(&mut *self.wal)?;
         let cfg = SyncConfig {
             cap: None,
             ..self.cfg

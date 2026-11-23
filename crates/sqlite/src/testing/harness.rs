@@ -57,7 +57,7 @@ mod app;
 mod stepper;
 
 pub use app::{APP_DB, CHILD_ENTRY, MARK, Placement, serve_app};
-pub use stepper::{StepDid, Stepper};
+pub use stepper::{StepDid, Stepper, step_after_recovery};
 
 use app::{APP, App};
 
@@ -356,11 +356,33 @@ impl Mirror {
     }
 }
 
-/// SQLite's frame count for the WAL, as the application connection sees it.
+/// How many times [`wal_frames`] asks again while a writer holds the wal-index header.
+const NOOP_TRIES: u32 = 10_000;
+
+/// SQLite's frame count for the WAL, as the application connection sees it. A writer on another
+/// connection can hold the wal-index header mid-update, and then NOOP answers busy with no
+/// count; the rig asks again rather than take that for an empty WAL, which would record the
+/// commits it hides a tick late, after the engine uploaded them.
 fn wal_frames(app: &mut App) -> Result<u32, RigError> {
-    let row = app.query(APP, "PRAGMA wal_checkpoint(NOOP)")?;
-    let log = row.get(1).copied().unwrap_or(0);
-    Ok(u32::try_from(log).unwrap_or(0))
+    for _ in 0..NOOP_TRIES {
+        let row = app.query(APP, "PRAGMA wal_checkpoint(NOOP)")?;
+        if let Some(frames) = settled_frames(&row) {
+            return Ok(frames);
+        }
+        std::thread::yield_now();
+    }
+    Err(RigError::State(
+        "read the WAL's frame count while writers hold its header",
+    ))
+}
+
+/// The frame count in a `PRAGMA wal_checkpoint(NOOP)` row (`busy`, `log`, `checkpointed`), or
+/// `None` when SQLite answered busy and gave no count. Not busy, `-1` means there is no WAL.
+fn settled_frames(row: &[i64]) -> Option<u32> {
+    match row {
+        [0, log, ..] => Some(u32::try_from(*log).unwrap_or(0)),
+        _ => None,
+    }
 }
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {
@@ -1257,4 +1279,18 @@ async fn copy_file(
         upload.write(&bytes).await?;
     }
     upload.commit().await.map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::settled_frames;
+
+    /// The rows SQLite 3.54.1 gave under concurrent writers: busy with no count, then the count.
+    #[test]
+    fn a_busy_noop_gives_no_frame_count() {
+        assert_eq!(settled_frames(&[1, -1, -1]), None);
+        assert_eq!(settled_frames(&[0, 53, 0]), Some(53));
+        assert_eq!(settled_frames(&[0, -1, -1]), Some(0), "no WAL");
+        assert_eq!(settled_frames(&[]), None);
+    }
 }

@@ -389,7 +389,7 @@ pub(super) struct Maintain {
     /// file only when a read on a later maintenance tick fails too.
     pub(super) suspect: Option<FileKey>,
     /// What this process is sure stands on the replica until the next
-    /// listing (`crate::watch`): checked by every maintenance listing.
+    /// listing (`crate::regression_watch`): checked by every maintenance listing.
     pub(super) watch: Option<RegressionWatch>,
     /// A confirmed transaction whose keys reads found gone (the replica went
     /// backwards): listings that end before it are the replica's, so they

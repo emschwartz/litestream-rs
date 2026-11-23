@@ -1,7 +1,9 @@
 use lsr_store_s3::{Provider, UrlStyle};
 
 use super::*;
-use lsr_core::AsOfInside;
+use lsr_core::{AsOfInside, RestoreTarget};
+use lsr_ltx::{Timestamp, Txid};
+use lsr_replica::local::IntegrityCheck;
 
 fn words(line: &str) -> Vec<String> {
     line.split_whitespace().map(str::to_owned).collect()
@@ -23,9 +25,10 @@ fn txid(raw: u64) -> Txid {
 fn restore_latest_is_the_default_target() {
     assert_eq!(
         parsed("restore --replica r --output o"),
-        Ok(Command::Restore(RestoreArgs {
-            replica: Replica::Dir("r".into()),
-            output: "o".into(),
+        Ok(Command::Restore(Box::new(RestoreArgs {
+            from: RestoreFrom::Replica(Replica::Dir("r".into())),
+            output: Some("o".into()),
+            no_expand_env: false,
             target: RestoreTarget::Latest,
             as_of_inside: AsOfInside::Refuse,
             clear_journal_files: false,
@@ -34,7 +37,11 @@ fn restore_latest_is_the_default_target() {
             if_replica_exists: false,
             dry_run: false,
             json: false,
-        }))
+            force: false,
+            parallelism: false,
+            txid_and_timestamp: false,
+            timestamp_given: false,
+        })))
     );
 }
 
@@ -209,50 +216,39 @@ fn missing_value_at_the_end_and_before_another_flag() {
 }
 
 #[test]
-fn missing_required_flag_for_every_required_flag() {
-    let valid = [
-        (CommandName::Restore, "restore --replica r --output o"),
-        (CommandName::Verify, "verify --replica r"),
-        (CommandName::Files, "files --replica r"),
-        (CommandName::TakeOver, "take-over app.db --replica r"),
-    ];
-    let mut checked = 0;
-    for (command, line) in valid {
-        for spec in FLAGS
-            .iter()
-            .filter(|s| s.required && s.commands.contains(&command))
-        {
-            let mut args = words(line);
-            let at = args.iter().position(|a| a == spec.name).unwrap();
-            args.drain(at..=at + 1);
-            assert_eq!(
-                parse(&args),
-                Err(UsageError::MissingFlag {
-                    command: command.word(),
-                    flag: spec.name
-                })
-            );
-            checked += 1;
-        }
+fn missing_required_flag() {
+    for (line, command) in [
+        ("verify", "verify"),
+        ("files --json", "files"),
+        ("take-over app.db", "take-over"),
+    ] {
+        assert_eq!(
+            usage(line),
+            UsageError::MissingFlag {
+                command,
+                flag: "--replica"
+            },
+            "{line}"
+        );
     }
-    assert_eq!(
-        checked,
-        FLAGS
-            .iter()
-            .filter(|s| s.required)
-            .map(|s| s.commands.len())
-            .sum::<usize>()
-    );
+    // restore reads Go's grammar: no source at all is Go's own refusal.
+    assert_eq!(usage("restore --output o"), UsageError::GoSourceMissing);
 }
 
+/// Go refuses a txid and a timestamp together only when it plans or restores, so the parse
+/// keeps both and marks the line; a zero txid is no txid.
 #[test]
 fn two_targets_at_once() {
-    assert_eq!(
-        usage(
-            "restore --replica r --output o --txid 0000000000000001 --timestamp 2026-01-01T00:00:00Z"
-        ),
-        UsageError::ConflictingTargets
-    );
+    let marked = |line: &str| match parsed(line) {
+        Ok(Command::Restore(args)) => args.txid_and_timestamp,
+        other => panic!("{line}: {other:?}"),
+    };
+    assert!(marked(
+        "restore --replica r --output o --txid 0000000000000001 --timestamp 2026-01-01T00:00:00Z"
+    ));
+    assert!(!marked(
+        "restore --replica r --output o --txid 0000000000000000 --timestamp 2026-01-01T00:00:00Z"
+    ));
 }
 
 #[test]
@@ -298,30 +294,37 @@ fn bare_word_where_a_flag_belongs() {
     );
 }
 
+/// Go's `txidVar`: sixteen hex digits in any case, refused as the flag is read; zero is
+/// Go's "latest".
 #[test]
-fn bad_txid() {
+fn txid_as_go_reads_it() {
+    for bad in ["2a", "000000000000002g", "0x0000000000002a"] {
+        let line = format!("restore --replica r --output o --txid {bad}");
+        assert_eq!(
+            usage(&line).to_string(),
+            format!("invalid value {bad:?} for flag -txid: invalid txid format")
+        );
+    }
+    let target = |line: &str| match parsed(line) {
+        Ok(Command::Restore(args)) => args.target,
+        other => panic!("{line}: {other:?}"),
+    };
     assert_eq!(
-        usage("restore --replica r --output o --txid 2a"),
-        UsageError::BadTxid {
-            value: "2a".into(),
-            source: ParseTxidError::Length { found: 2 }
-        }
+        target("restore --replica r --output o -txid 000000000000002A"),
+        RestoreTarget::Txid(txid(42))
     );
-    assert!(matches!(
-        usage("restore --replica r --output o --txid 0000000000000000"),
-        UsageError::BadTxid {
-            source: ParseTxidError::Zero,
-            ..
-        }
-    ));
+    assert_eq!(
+        target("restore --replica r --output o -txid 0000000000000000"),
+        RestoreTarget::Latest
+    );
 }
 
 #[test]
 fn bad_timestamp() {
-    assert!(matches!(
+    assert_eq!(
         usage("restore --replica r --output o --timestamp yesterday"),
-        UsageError::BadTimestamp { .. }
-    ));
+        UsageError::GoTimestamp
+    );
 }
 
 #[test]
@@ -358,15 +361,13 @@ fn bad_integrity_check() {
             usage(&format!(
                 "restore --replica r --output o --integrity-check {word}"
             )),
-            UsageError::BadIntegrityCheck { value: word.into() },
+            UsageError::GoIntegrityCheck { value: word.into() },
             "{word}"
         );
     }
     assert_eq!(
-        usage("restore --replica r --output o --integrity-check"),
-        UsageError::MissingValue {
-            flag: "--integrity-check"
-        }
+        usage("restore --replica r --output o --integrity-check").to_string(),
+        "flag needs an argument: -integrity-check"
     );
     assert!(matches!(
         usage("verify --replica r --integrity-check quick"),
@@ -486,10 +487,12 @@ fn restore_accepts_every_url_the_daemon_accepts() {
             panic!("{url}: not an S3 replica");
         };
         let restore = match parsed(&format!("restore --replica {url} --output o")) {
-            Ok(Command::Restore(RestoreArgs {
-                replica: Replica::S3(config),
-                ..
-            })) => config,
+            Ok(Command::Restore(args)) => match args.from {
+                RestoreFrom::Replica(Replica::S3(config)) => config,
+                other @ (RestoreFrom::Replica(Replica::Dir(_))
+                | RestoreFrom::Url(_)
+                | RestoreFrom::Database { .. }) => panic!("{url}: {other:?}"),
+            },
             other => panic!("{url}: {other:?}"),
         };
         assert_eq!(restore, *daemon, "{url}");
@@ -599,76 +602,16 @@ fn s3_flags_are_taken_by_every_command() {
 }
 
 #[test]
-fn every_flag_in_the_table_is_accepted_by_its_commands() {
-    for spec in FLAGS {
-        for command in spec.commands {
-            let replica = if S3_ONLY_FLAGS.contains(&spec.name) {
-                "s3://b/p"
-            } else {
-                "r"
-            };
-            let base = match command {
-                CommandName::Restore if spec.name == "--allow-earlier" => {
-                    format!(
-                        "restore --replica {replica} --output o --timestamp 2026-01-01T00:00:00Z"
-                    )
-                }
-                CommandName::Restore => format!("restore --replica {replica} --output o"),
-                CommandName::Verify => format!("verify --replica {replica}"),
-                CommandName::Files => format!("files --replica {replica}"),
-                CommandName::TakeOver => format!("take-over app.db --replica {replica}"),
-            };
-            let value = match spec.name {
-                "--endpoint" => "http://h",
-                "--region" => "eu-west-1",
-                "--txid" => "0000000000000001",
-                "--timestamp" => "2026-01-01T00:00:00Z",
-                "--depth" => "names",
-                "--integrity-check" => "full",
-                _ => "x",
-            };
-            let extra = spec.value.map_or(String::new(), |_| format!(" {value}"));
-            let line = if spec.required {
-                base
-            } else {
-                format!("{base} {}{extra}", spec.name)
-            };
-            assert!(parsed(&line).is_ok(), "{line}");
-            let other: Vec<_> = CommandName::ALL
-                .iter()
-                .filter(|c| !spec.commands.contains(c))
-                .collect();
-            for command in other {
-                let db = if *command == CommandName::TakeOver {
-                    " app.db"
-                } else {
-                    ""
-                };
-                let line = format!(
-                    "{}{db} --replica {replica} {}{extra}",
-                    command.word(),
-                    spec.name
-                );
-                assert!(
-                    matches!(usage(&line), UsageError::UnknownFlag { .. }),
-                    "{line}"
-                );
-            }
-        }
-    }
-}
-
-#[test]
 fn help_documents_every_flag_command_and_exit_code() {
     let help = crate::render::help();
-    for spec in FLAGS {
-        assert!(
-            help.contains(spec.name) && help.contains(spec.help),
-            "{}",
-            spec.name
-        );
-    }
     for command in CommandName::ALL {
+        for flag in help_flags(command) {
+            assert!(
+                help.contains(&flag.name) && help.contains(&flag.help),
+                "{}",
+                flag.name
+            );
+        }
         assert!(
             help.contains(&format!("lsr {}", command.word())),
             "{}",
@@ -678,6 +621,15 @@ fn help_documents_every_flag_command_and_exit_code() {
     for exit in crate::run::Exit::ALL {
         assert!(help.contains(&format!("{:<3}{}", exit.code(), exit.meaning())));
     }
+}
+
+/// Go's follow mode is not built: refused by name, never read as a one-shot restore.
+#[test]
+fn follow_mode_is_refused_as_not_built() {
+    for line in ["restore -f -o o s3://b/p", "restore --f=true /data/db"] {
+        assert_eq!(usage(line), UsageError::FollowNotBuilt, "{line}");
+    }
+    assert!(UsageError::FollowNotBuilt.to_string().contains("#177"));
 }
 
 #[test]

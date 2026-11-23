@@ -20,7 +20,7 @@ use lsr_core::{
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::args::{
-    CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, FLAGS,
+    CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, help_flags,
 };
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedTime;
@@ -46,6 +46,14 @@ macro_rules! putln {
 pub fn done(done: &Done) -> String {
     match done {
         Done::Restore(done) => restore(done),
+        Done::Databases { rows, json: false } => databases_text(rows),
+        Done::Databases { rows, json: true } => databases_json(rows),
+        Done::Ltx {
+            files, json: false, ..
+        } => ltx_text(files),
+        Done::Ltx {
+            files, json: true, ..
+        } => ltx_json(files),
         Done::Verified {
             depth,
             report,
@@ -101,8 +109,11 @@ pub fn help() -> String {
         if let Some(positional) = command.positional() {
             put!(usage, " {positional}");
         }
-        for spec in FLAGS.iter().filter(|s| s.commands.contains(&command)) {
-            let value = spec.value.map_or(String::new(), |v| format!(" {v}"));
+        for spec in help_flags(command) {
+            let value = spec
+                .value
+                .as_ref()
+                .map_or(String::new(), |v| format!(" {v}"));
             let flag = format!("{}{value}", spec.name);
             put!(
                 usage,
@@ -115,7 +126,7 @@ pub fn help() -> String {
             );
         }
         putln!(out, "{usage}\n  {}", command.summary());
-        for spec in FLAGS.iter().filter(|s| s.commands.contains(&command)) {
+        for spec in help_flags(command) {
             putln!(out, "  {:<20}{}", spec.name, spec.help);
         }
     }
@@ -206,6 +217,7 @@ fn restore(done: &RestoreDone) -> String {
         source,
         json,
         finished,
+        ..
     } = done;
     match (finished, *json) {
         (
@@ -272,10 +284,18 @@ fn restore(done: &RestoreDone) -> String {
 /// inside a compacted file says so, since its database may lack transactions
 /// committed before the instant.
 pub fn warnings(done: &Done) -> String {
+    if let Done::Ltx { as_wal: true, .. } = done {
+        return "Warning: 'wal' command is deprecated, please use 'ltx' instead\n".to_owned();
+    }
     let Done::Restore(done) = done else {
         return String::new();
     };
-    match &done.finished {
+    let parallelism = if done.parallelism {
+        "warning: -parallelism is deprecated and has no effect; accepted for compatibility only\n"
+    } else {
+        ""
+    };
+    let rest = match &done.finished {
         Finished::Restored { restored, .. } => {
             let mut out = restored.inside_file().map_or_else(String::new, |file| {
                 inside_warning(&file, restored.reached())
@@ -286,7 +306,8 @@ pub fn warnings(done: &Done) -> String {
             out
         }
         Finished::Planned { .. } | Finished::Skipped { .. } => String::new(),
-    }
+    };
+    format!("{parallelism}{rest}")
 }
 
 fn outpaced_warning(reached: Txid) -> String {
@@ -417,8 +438,8 @@ fn plan_row(info: &FileInfo) -> [String; 6] {
 }
 
 /// Left-aligned columns two spaces apart, as Go's tabwriter prints them.
-fn columns(rows: &[[String; 6]]) -> String {
-    let mut widths = [0_usize; 6];
+fn columns<const N: usize>(rows: &[[String; N]]) -> String {
+    let mut widths = [0_usize; N];
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.len());
@@ -568,10 +589,6 @@ const fn depth_name(depth: Depth) -> &'static str {
 }
 
 /// A finding's machine name and its message.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one arm per Finding variant, each a single message; the match must stay exhaustive"
-)]
 fn finding_parts(finding: &Finding) -> (&'static str, String) {
     match finding {
         Finding::NoSnapshot => (
@@ -874,6 +891,105 @@ fn files_text(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> Strin
 
 /// The time a listing gave for a file, and whether it is the exact created-at time or
 /// only the bucket's `LastModified`.
+/// Go's `time.RFC3339`: to the second, UTC as `Z`.
+fn go_rfc3339(at: Timestamp) -> String {
+    let full = at.to_string();
+    match full.rsplit_once('.') {
+        Some((seconds, _)) => format!("{seconds}Z"),
+        None => full,
+    }
+}
+
+/// Go's `encoding/json.MarshalIndent(v, "", "  ")` of a list of flat objects: `[]` when
+/// empty.
+fn indented_objects(objects: &[Vec<(&str, String)>]) -> String {
+    if objects.is_empty() {
+        return "[]\n".to_owned();
+    }
+    let mut out = String::from("[\n");
+    for (i, fields) in objects.iter().enumerate() {
+        out.push_str("  {\n");
+        for (j, (name, value)) in fields.iter().enumerate() {
+            let comma = if j.saturating_add(1) < fields.len() {
+                ","
+            } else {
+                ""
+            };
+            putln!(out, "    {}: {value}{comma}", quote(name));
+        }
+        let comma = if i.saturating_add(1) < objects.len() {
+            ","
+        } else {
+            ""
+        };
+        putln!(out, "  }}{comma}");
+    }
+    out.push_str("]\n");
+    out
+}
+
+/// Go's `databases`, as text.
+fn databases_text(rows: &[(String, &'static str)]) -> String {
+    let mut table = vec![["path".to_owned(), "replica".to_owned()]];
+    table.extend(
+        rows.iter()
+            .map(|(path, kind)| [path.clone(), (*kind).to_owned()]),
+    );
+    columns(&table)
+}
+
+/// Go's `databases -json`.
+fn databases_json(rows: &[(String, &'static str)]) -> String {
+    let objects: Vec<_> = rows
+        .iter()
+        .map(|(path, kind)| vec![("path", quote(path)), ("replica", quote(kind))])
+        .collect();
+    indented_objects(&objects)
+}
+
+/// One `ltx` row: level, min and max txid, size, listed time.
+fn ltx_row(info: &FileInfo) -> [String; 5] {
+    let range = info.key.range();
+    [
+        info.key.level().get().to_string(),
+        range.min().to_string(),
+        range.max().to_string(),
+        info.size.to_string(),
+        go_rfc3339(listed_time(info).0),
+    ]
+}
+
+/// Go's `ltx`, as text.
+fn ltx_text(files: &[FileInfo]) -> String {
+    let mut table = vec![[
+        "level".to_owned(),
+        "min_txid".to_owned(),
+        "max_txid".to_owned(),
+        "size".to_owned(),
+        "created".to_owned(),
+    ]];
+    table.extend(files.iter().map(ltx_row));
+    columns(&table)
+}
+
+/// Go's `ltx -json`.
+fn ltx_json(files: &[FileInfo]) -> String {
+    let objects: Vec<_> = files
+        .iter()
+        .map(|info| {
+            let [level, min, max, size, at] = ltx_row(info);
+            vec![
+                ("level", level),
+                ("min_txid", quote(&min)),
+                ("max_txid", quote(&max)),
+                ("size", size),
+                ("timestamp", quote(&at)),
+            ]
+        })
+        .collect();
+    indented_objects(&objects)
+}
+
 fn listed_time(info: &FileInfo) -> (Timestamp, bool) {
     match info.listed {
         ListedTime::Created(created_at) => (created_at.at(), true),
