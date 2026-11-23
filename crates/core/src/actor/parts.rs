@@ -27,6 +27,7 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
+use crate::counts::WorkCounts;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::journal::{JournalSignal, JournalWriter};
@@ -125,6 +126,8 @@ pub(super) struct Kept {
     pub(super) suspect_staged: Option<FileKey>,
     /// Snapshots staged since the actor began, per cause: a report.
     pub(super) snapshots: SnapshotCounts,
+    /// What the sync steps and checkpoints did since the actor began: a report.
+    pub(super) work: WorkCounts,
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
@@ -190,6 +193,7 @@ impl Kept {
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
             snapshots: SnapshotCounts::default(),
+            work: WorkCounts::default(),
             unproven: Unproven::No,
             takeover: None,
             wanted_takeover: None,
@@ -228,6 +232,7 @@ impl Kept {
             app: _,
             suspect_staged,
             snapshots,
+            work,
             unproven,
             takeover,
             wanted_takeover: _,
@@ -259,6 +264,7 @@ impl Kept {
             app: observer,
             suspect_staged: *suspect_staged,
             snapshots: *snapshots,
+            work: *work,
             unproven: *unproven,
             takeover: *takeover,
             // A rebuilt engine boots again and asks again for what it needs.

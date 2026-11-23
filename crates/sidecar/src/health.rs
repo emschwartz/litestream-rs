@@ -489,6 +489,33 @@ mod tests {
         );
     }
 
+    /// Go's `litestream_wal_size` is the offset the last sync read the WAL to, not the WAL
+    /// file's length, which `lsr_wal_bytes` reports: a WAL SQLite reuses after a restart
+    /// stays long while the synced offset starts again.
+    #[test]
+    fn the_wal_size_is_the_synced_offset_and_not_the_file() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        health.phase = Phase::Running;
+        health.wal_bytes = 4_153_032;
+        health.wal_synced_offset = 4_152;
+        let view = DbView {
+            path: PathBuf::from("/app.db"),
+            replica_type: "file",
+            state: DbState::Running(Box::new(health)),
+        };
+        let metrics = crate::metrics::render(&[view], at);
+        for line in [
+            "litestream_wal_size{db=\"/app.db\"} 4152\n",
+            "lsr_wal_bytes{db=\"/app.db\"} 4153032\n",
+            "litestream_disk_full{db=\"/app.db\"} 0\n",
+            "litestream_checkpoint_count{db=\"/app.db\",mode=\"TRUNCATE\"} 0\n",
+            "litestream_sync_seconds{db=\"/app.db\"} 0.000\n",
+        ] {
+            assert!(metrics.contains(line), "{line}{metrics}");
+        }
+    }
+
     /// Every kind of access refusal reports under a name of its own: one name for
     /// all of them sent operators to rotate keys for a wrong clock or a missing bucket.
     #[test]

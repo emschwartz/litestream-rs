@@ -20,6 +20,8 @@ mod dropin_creds;
 #[cfg(test)]
 mod dropin_dir;
 #[cfg(test)]
+mod dropin_metrics;
+#[cfg(test)]
 mod dropin_roles;
 #[cfg(test)]
 mod fixtures;

@@ -99,6 +99,7 @@ use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
     Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
+use crate::counts::{Counted, WorkCounts};
 use crate::created_at::{ResolvedCreatedAt, resolve};
 use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
@@ -555,6 +556,19 @@ impl Actor {
         self.kept.snapshots
     }
 
+    /// What the engine's sync steps and checkpoints did since the actor began.
+    #[must_use]
+    pub const fn work(&self) -> WorkCounts {
+        self.kept.work
+    }
+
+    /// Where in the WAL the newest staged file ends (Go's `litestream_wal_size`, the offset
+    /// its last sync read to); 0 before the first sync.
+    #[must_use]
+    pub fn synced_wal_offset(&self) -> u64 {
+        self.position().map_or(0, |p| p.synced().offset().get())
+    }
+
     /// Why the next sync is a snapshot, when it is one.
     #[must_use]
     pub fn pending_snapshot(&self) -> Option<SnapshotCause> {
@@ -702,11 +716,39 @@ impl Actor {
                 };
             }
         };
-        let tick = self.tick_at(&mut env, now).await;
+        let tick = self.counted_tick(&mut env, now).await;
         let tick = self.reconcile_journal(env.journal.as_deref_mut(), tick, now);
         self.observe_lag(env.wal, now);
         let tick = self.wake_for_probe(tick);
         self.wake_on_wall(tick)
+    }
+
+    /// [`Self::tick_at`], with the checkpoints it asks SQLite for counted (`crate::counts`).
+    async fn counted_tick<W, P, C, L, R>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Tick
+    where
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    {
+        let mut ck = Counted::new(&mut *env.ck, env.clock);
+        let mut counted = Env {
+            wal: &mut *env.wal,
+            db: &mut *env.db,
+            ck: &mut ck,
+            staging: env.staging,
+            remote: env.remote,
+            clock: env.clock,
+            journal: shorter(&mut env.journal),
+        };
+        let tick = self.tick_at(&mut counted, now).await;
+        self.kept.work.add_checkpoints(ck.totals());
+        tick
     }
 
     /// One unit of work at engine time `now` (`clock`).
@@ -1320,7 +1362,7 @@ impl Actor {
         if self.owes_truncate() && !may_checkpoint {
             return Some(self.owed_in_drain(now));
         }
-        let stepped = self.step(env, now).await;
+        let stepped = self.counted_step(env, now).await;
         let (files, proof) = match self.stepped(stepped, now) {
             Ok(synced) => synced,
             Err(tick) => return Some(tick),
@@ -1385,6 +1427,31 @@ impl Actor {
             Ok(Stepped::Stop(cause)) => Err(self.verdict(Task::Sync, cause, now)),
             Err(fault) => Err(self.fault(Task::Sync, fault, now)),
         }
+    }
+
+    /// [`Self::step`], counted (`crate::counts`).
+    async fn counted_step<W, P, C, L, R>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Result<Stepped, Fault>
+    where
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    {
+        let began = env.clock.now();
+        let from = self.position();
+        let stepped = self.step(env, now).await;
+        let took = env.clock.now().saturating_duration_since(began);
+        let fault = stepped.as_ref().err().copied();
+        let to = self.position();
+        self.kept
+            .work
+            .sync_step(fault, took, from.as_ref(), to.as_ref());
+        stepped
     }
 
     /// One sync step from what recovery says about the WAL now.
@@ -2272,7 +2339,7 @@ impl Actor {
                 now,
             );
         }
-        let stepped = self.step(env, now).await;
+        let stepped = self.counted_step(env, now).await;
         let proof = match self.stepped(stepped, now) {
             Ok((0, Some(proof))) => proof,
             // A reset wal-index gives no proof until the next commit, and
@@ -3044,3 +3111,14 @@ const fn step_of(recovered: Recovered) -> Result<Step, Stepped> {
 
 #[cfg(test)]
 mod tests;
+
+/// The journal for a borrow shorter than the one it was lent for: `Option::as_deref_mut`
+/// keeps the trait object's own lifetime, which ties a reborrowed [`Env`] to the outer one.
+fn shorter<'b>(
+    journal: &'b mut Option<&mut (dyn JournalFile + Send)>,
+) -> Option<&'b mut (dyn JournalFile + Send)> {
+    match journal {
+        Some(journal) => Some(&mut **journal),
+        None => None,
+    }
+}

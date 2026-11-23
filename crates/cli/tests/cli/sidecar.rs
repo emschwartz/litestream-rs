@@ -520,6 +520,14 @@ fn go_s_series_are_there(text: &str, db: &str) {
         ("litestream_replica_operation_total", "counter"),
         ("litestream_replica_operation_bytes", "counter"),
         ("litestream_replica_operation_duration_seconds", "histogram"),
+        ("litestream_wal_size", "gauge"),
+        ("litestream_total_wal_bytes", "counter"),
+        ("litestream_sync_error_count", "counter"),
+        ("litestream_sync_seconds", "counter"),
+        ("litestream_disk_full", "gauge"),
+        ("litestream_checkpoint_count", "counter"),
+        ("litestream_checkpoint_error_count", "counter"),
+        ("litestream_checkpoint_seconds", "counter"),
     ] {
         assert_eq!(types.get(name).map(String::as_str), Some(kind), "{name}");
     }
@@ -527,8 +535,37 @@ fn go_s_series_are_there(text: &str, db: &str) {
         "litestream_db_size",
         "litestream_txid",
         "litestream_sync_count",
+        "litestream_wal_size",
+        "litestream_total_wal_bytes",
+        "litestream_sync_error_count",
+        "litestream_sync_seconds",
+        "litestream_disk_full",
     ] {
         assert_eq!(label_keys(one(&samples, name, &[("db", db)])), ["db"]);
+    }
+    // The write synced: its frames are counted and the WAL read past its header.
+    for name in [
+        "litestream_sync_count",
+        "litestream_total_wal_bytes",
+        "litestream_wal_size",
+    ] {
+        assert!(one(&samples, name, &[("db", db)]).value > 0.0, "{name}");
+    }
+    assert!(
+        one(&samples, "litestream_disk_full", &[("db", db)])
+            .value
+            .abs()
+            < f64::EPSILON
+    );
+    for mode in ["PASSIVE", "TRUNCATE"] {
+        let labels = [("db", db), ("mode", mode)];
+        for name in [
+            "litestream_checkpoint_count",
+            "litestream_checkpoint_error_count",
+            "litestream_checkpoint_seconds",
+        ] {
+            assert_eq!(label_keys(one(&samples, name, &labels)), ["db", "mode"]);
+        }
     }
     let put = [("replica_type", "file"), ("operation", "PUT")];
     let total = one(&samples, "litestream_replica_operation_total", &put);

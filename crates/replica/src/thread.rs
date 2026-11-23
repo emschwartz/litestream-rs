@@ -694,6 +694,8 @@ impl Worker {
         let journal = self.actor.journal();
         let ahead_of_wal = self.actor.ahead().map(AheadOfWal::of);
         let snapshots = self.actor.snapshots();
+        let work = self.actor.work();
+        let wal_synced_offset = self.actor.synced_wal_offset();
         let ran = self.app_ran_total();
         let app = self.app_total();
         let verification = self
@@ -722,8 +724,10 @@ impl Worker {
             health.resnapshot = resnapshot;
             health.app_checkpoints_ran = ran;
             health.app_checkpoints = app;
+            health.wal_synced_offset = wal_synced_offset;
             health.counters = Counters {
                 snapshots,
+                work,
                 ..seen.counters
             };
             health.verification = verification;

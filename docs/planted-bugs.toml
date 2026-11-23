@@ -2092,3 +2092,27 @@ name = "web-identity-before-env-keys"
 fix = "plant"
 package = "lsr-store-s3"
 tests = ["chain::sources_tests::environment_keys_come_before_web_identity_and_web_identity_before_the_host"]
+
+[[bug]]
+name = "failed-sync-step-not-counted"
+fix = "plant"
+package = "lsr-core"
+tests = ["actor::tests::work::a_full_disk_is_reported_until_a_step_stages"]
+
+[[bug]]
+name = "wal-bytes-not-counted"
+fix = "plant"
+package = "lsr-core"
+tests = ["actor::tests::work::a_sync_step_counts_one_call_and_its_frames"]
+
+[[bug]]
+name = "checkpoint-failures-not-counted"
+fix = "plant"
+package = "lsr-core"
+tests = ["actor::tests::work::checkpoints_are_counted_per_mode"]
+
+[[bug]]
+name = "wal-size-is-the-file-size"
+fix = "plant"
+package = "lsr-sidecar"
+tests = ["health::tests::the_wal_size_is_the_synced_offset_and_not_the_file"]

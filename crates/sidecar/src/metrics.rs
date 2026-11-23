@@ -6,8 +6,18 @@
 //! - `litestream_db_size{db}`, gauge: the database file's size (`db.go:1434`).
 //! - `litestream_txid{db}`, gauge: the newest transaction staged locally, Go's position after
 //!   a sync (`db.go:1430`); 0 before the first.
-//! - `litestream_sync_count{db}`, counter: syncs that staged a file. Go counts every sync
-//!   attempt, those that found nothing new included (`db.go:1367`), so the rate is lower.
+//! - `litestream_wal_size{db}`, gauge: the WAL offset the newest staged file ends at, Go's
+//!   offset after a sync (`db.go:1436`); 0 before the first. `lsr_wal_bytes` is the file.
+//! - `litestream_total_wal_bytes{db}`, counter: WAL bytes the sync steps staged (`db.go:2256`).
+//! - `litestream_sync_count{db}`, `litestream_sync_error_count{db}` and
+//!   `litestream_sync_seconds{db}`, counters: sync steps, the ones that failed, and their time
+//!   (`db.go:1365-1376`). The engine steps when the WAL moved or a checkpoint wants proof;
+//!   Go syncs on every one-second poll, so Go's rate is higher on an idle database (D163).
+//! - `litestream_disk_full{db}`, gauge: 1 while the last sync step failed for a full disk.
+//! - `litestream_checkpoint_count{db,mode}`, `litestream_checkpoint_error_count{db,mode}` and
+//!   `litestream_checkpoint_seconds{db,mode}`, counters: the checkpoints the replicator asked
+//!   SQLite for, `PASSIVE` or `TRUNCATE`, the ones that failed, and their time
+//!   (`db.go:2808-2820`). Served for both modes from the start; Go creates each at first use.
 //! - `litestream_replica_operation_total{replica_type,operation}`, counter, and
 //!   `litestream_replica_operation_duration_seconds{replica_type,operation}`, histogram,
 //!   with Go's operation names: `GET` (reads), `PUT` (committed uploads), `DELETE` (delete
@@ -17,18 +27,13 @@
 //!   Go's file client reports none of these; this daemon reports them for both types.
 //! - `litestream_replica_operation_bytes{replica_type,operation="PUT"}`, counter.
 //!
-//! **Go's series not emitted, and why.** `litestream_wal_size` is Go's synced WAL offset,
-//! which the replicator does not report (it reports the file's size: `lsr_wal_bytes`).
-//! `litestream_total_wal_bytes`, `litestream_sync_error_count` and `litestream_sync_seconds`
-//! have no running total in the replicator's health (`lsr_retries_total` and
-//! `lsr_degraded` say what fails). `litestream_checkpoint_count`, `_error_count` and
-//! `_seconds` need a `mode` label the counts do not carry (`lsr_checkpoints_total`).
-//! `litestream_disk_full` is not a cause the replicator distinguishes.
-//! `litestream_replica_operation_errors_total` needs the store's error `code`
-//! (`lsr_replica_operation_errors_total` has the rest). `litestream_l0_retention_files_total`
-//! has no per-pass counts, `litestream_compaction_verify_error_count` no verification pass.
-//! The `litestream_validation_*` series are per compaction level, and the scheduled verify
-//! that replaces Go's validation checks the replica as a whole (`lsr_verify_*` below).
+//! **Go's series not built, and why** (D163). `litestream_replica_operation_errors_total`
+//! counts per-object failures of an S3 batch delete by the response's error code, which the
+//! store does not report (`lsr_replica_operation_errors_total` counts failed calls).
+//! `litestream_l0_retention_files_total` has no per-pass counts, and
+//! `litestream_compaction_verify_error_count` no verification pass. The `litestream_validation_*`
+//! series are per compaction level, and the scheduled verify that replaces Go's validation
+//! checks the replica as a whole (`lsr_verify_*` below).
 //!
 //! **New series** under `lsr_`, for what Go has no series for:
 //! - `lsr_db_state{db,state}` 1, the state `/healthz` names (`booting`, `running`,
@@ -53,6 +58,7 @@
 //!   cause listed, zeros included. Each uploads the whole database: a cause other than
 //!   `first_sync`, `checkpoint_boundary` or `operator_requested` that keeps counting up means
 //!   restarts or faults the replicator cannot see past.
+//! - `lsr_syncs_staged_total{db}`: sync steps that staged a file.
 //! - `lsr_checkpoints_total{db}`, `lsr_checkpoints_busy_total{db}`, `lsr_uploads_total{db}`,
 //!   `lsr_retries_total{db}`, `lsr_panics_total{db}`.
 //! - `lsr_replica_operation_errors_total{replica_type,operation}`.
@@ -67,7 +73,8 @@
 use std::fmt::Display;
 
 use lsr_replica::{
-    Health, Mismatch, OpCounters, Phase, StoreCounters, Task, Timestamp, VerifyFailure,
+    CallTotals, CheckpointMode, Health, Mismatch, OpCounters, Phase, StoreCounters, Task,
+    Timestamp, VerifyFailure,
 };
 
 use crate::health::{
@@ -171,12 +178,100 @@ fn go_db_series(out: &mut Out, dbs: &[(String, &Health)]) {
         out,
         dbs,
         (
+            "litestream_wal_size",
+            "gauge",
+            "The current size of the real WAL",
+        ),
+        |h| h.wal_synced_offset.to_string(),
+    );
+    per_db(
+        out,
+        dbs,
+        (
+            "litestream_total_wal_bytes",
+            "counter",
+            "Total number of bytes written to shadow WAL",
+        ),
+        |h| h.counters.work.wal_bytes().to_string(),
+    );
+    go_sync_series(out, dbs);
+    go_checkpoint_series(out, dbs);
+}
+
+fn go_sync_series(out: &mut Out, dbs: &[(String, &Health)]) {
+    per_db(
+        out,
+        dbs,
+        (
             "litestream_sync_count",
             "counter",
-            "Number of sync operations that staged a file",
+            "Number of sync operations performed",
         ),
-        |h| h.counters.syncs.to_string(),
+        |h| h.counters.work.sync().calls().to_string(),
     );
+    per_db(
+        out,
+        dbs,
+        (
+            "litestream_sync_error_count",
+            "counter",
+            "Number of sync errors that have occurred",
+        ),
+        |h| h.counters.work.sync().errors().to_string(),
+    );
+    per_db(
+        out,
+        dbs,
+        (
+            "litestream_sync_seconds",
+            "counter",
+            "Time spent syncing shadow WAL, in seconds",
+        ),
+        |h| seconds(h.counters.work.sync().millis()),
+    );
+    per_db(
+        out,
+        dbs,
+        (
+            "litestream_disk_full",
+            "gauge",
+            "Whether replication is paused because the local disk is full",
+        ),
+        |h| u8::from(h.counters.work.disk_full()).to_string(),
+    );
+}
+
+/// Go's checkpoint series, per database and mode (Go's `mode` label is SQLite's name).
+fn go_checkpoint_series(out: &mut Out, dbs: &[(String, &Health)]) {
+    let series: [CallSeries; 3] = [
+        (
+            "litestream_checkpoint_count",
+            "Number of checkpoint operations performed",
+            |c| c.calls().to_string(),
+        ),
+        (
+            "litestream_checkpoint_error_count",
+            "Number of checkpoint errors that have occurred",
+            |c| c.errors().to_string(),
+        ),
+        (
+            "litestream_checkpoint_seconds",
+            "Time spent checkpointing WAL, in seconds",
+            |c| seconds(c.millis()),
+        ),
+    ];
+    for (name, help, value) in series {
+        out.family(name, "counter", help);
+        for (db, health) in dbs {
+            for (mode, label) in [
+                (CheckpointMode::Passive, "PASSIVE"),
+                (CheckpointMode::Truncate, "TRUNCATE"),
+            ] {
+                let totals = health.counters.work.checkpoints(mode);
+                out.sample(name, &[("db", db), ("mode", label)], value(totals));
+            }
+        }
+    }
 }
 
 /// Go's operation names and their totals.
@@ -184,6 +279,9 @@ type Ops = [(&'static str, OpCounters); 4];
 
 /// One replica type's totals and bytes uploaded.
 type TypeSum = (&'static str, Ops, u64);
+
+/// A series over one kind of call's totals: name, help, value.
+type CallSeries = (&'static str, &'static str, fn(CallTotals) -> String);
 
 /// A per-database counter: name, help, value.
 type CounterSeries = (&'static str, &'static str, fn(&Health) -> u64);
@@ -425,7 +523,12 @@ fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {
 }
 
 fn counter_series(out: &mut Out, dbs: &[(String, &Health)]) {
-    let series: [CounterSeries; 5] = [
+    let series: [CounterSeries; 6] = [
+        (
+            "lsr_syncs_staged_total",
+            "Sync steps that staged a file",
+            |h| h.counters.syncs,
+        ),
         ("lsr_checkpoints_total", "Checkpoints run", |h| {
             h.counters.checkpoints
         }),

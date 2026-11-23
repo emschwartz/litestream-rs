@@ -1,0 +1,12 @@
+diff --git a/crates/sidecar/src/metrics.rs b/crates/sidecar/src/metrics.rs
+--- a/crates/sidecar/src/metrics.rs
++++ b/crates/sidecar/src/metrics.rs
+@@ -176,7 +176,7 @@
+             "gauge",
+             "The current size of the real WAL",
+         ),
+-        |h| h.wal_synced_offset.to_string(),
++        |h| h.wal_bytes.to_string(),
+     );
+     per_db(
+         out,

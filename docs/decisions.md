@@ -74,6 +74,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D62 | What does the simulator's hold judge require of an as-of restore through a fault? | The as-of bound (G3), not the raw replica's answer | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
+| D163 | Go's `/metrics` series: which to serve, with what meaning | Go's names, types, help and labels for every series the engine can count; four families not built | Claude (dropin-metrics), **delegated** | 2026-11-23 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -736,6 +737,16 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the guard is a scan of the source, not the type system: it reads call names, so a store call written another way (a function pointer, a macro) would pass it, and it covers lsr-core only. Staging and replica still share one store trait and one error type (the next step makes them distinct). A key a read shows already holds our bytes is not yet a `Published`; item 4 of #171 adds it with the proof types that consume it.
 - **Revisit if:** another crate writes to a store for the engine, or the store trait can be split so that raw writes are unreachable by type.
 - **Links:** issue #171 item 1; D74; `crates/core/src/publish.rs`.
+
+## D163. Go's `/metrics` series, served where the engine can count them (delegated)
+
+- **Question:** eleven of Go's `litestream_*` series were missing from `/metrics` (D48). Which can `lsr` serve with Go's meaning, and what does it do about the rest?
+- **Choice:** serve `litestream_wal_size`, `_total_wal_bytes`, `_sync_count`, `_sync_error_count`, `_sync_seconds`, `_disk_full` and `_checkpoint_count`, `_checkpoint_error_count` and `_checkpoint_seconds` (with Go's `mode` label, `PASSIVE` and `TRUNCATE`), under Go's names, types, help text and labels. The engine counts its own sync steps and the checkpoints it asks SQLite for (`crates/core/src/counts.rs`). Not built: `litestream_replica_operation_errors_total` (Go counts per-object failures of an S3 batch delete by the response's error code), `litestream_l0_retention_files_total` (Go's per-pass retention counts), `litestream_compaction_verify_error_count` and the three `litestream_validation_*` series (Go's per-level verification passes; `lsr`'s scheduled verify checks the replica whole and reports under `lsr_verify_*`).
+- **Departures kept:** (1) `litestream_sync_count` counts the engine's sync steps, which run when the WAL moves or a checkpoint wants proof; Go's runs on every one-second poll, so Go's rate is higher on an idle database. It used to count only steps that staged a file; that count moved to `lsr_syncs_staged_total`. (2) `lsr` serves every database's checkpoint series for both modes, zeros included, from the start; Go creates each label set at its first use. (3) A TRUNCATE the replicator refuses because the application holds readers counts as a checkpoint error: the engine asked for it and it did not run.
+- **Delegated:** decided by the agent building #177 for the owner.
+- **Cost if wrong:** a dashboard comparing sync rates across Go and `lsr` sees `lsr` lower; an alert on a not-built family sees no data, as before.
+- **Evidence:** `compat::dropin_metrics::go_and_lsr_serve_the_same_metric_families` scrapes both daemons after a synced write and a checkpoint and compares every `litestream_*` family's type, help text and label names; `actor::tests::work` and `health::tests::the_wal_size_is_the_synced_offset_and_not_the_file` pin the values' meaning.
+- **Links:** #177; D48; `docs/BEHAVIOR.md` CFG-35; `crates/sidecar/src/metrics.rs`.
 
 ## Unverified, not recorded
 
