@@ -2395,13 +2395,7 @@ impl Actor {
 
     /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row ended
     /// in the WAL step; it runs only when uploads are ready, and resets the count when it does.
-    async fn owed_upload<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn owed_upload<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
