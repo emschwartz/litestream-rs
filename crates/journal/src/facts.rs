@@ -1,5 +1,7 @@
-//! The four facts. Each is a lower bound, a debt, a count or a self-validating proof, so an older
-//! record is always safe to read (docs/journal.md).
+//! The five facts. Each is a lower bound, a debt, a count, a self-validating proof or a dated
+//! verdict, so an older record is always safe to read (docs/journal.md).
+
+use std::num::NonZeroU32;
 
 use lsr_ltx::{FileChecksum, Timestamp, Txid};
 
@@ -149,7 +151,23 @@ pub struct Proof {
     pub wal: WalChecksum,
 }
 
-/// The four facts.
+/// A boot found the database file ahead of its WAL: pages no recovered WAL frame covers differ
+/// from their images at the newest staged transaction, so a checkpoint copied frames a failed WAL
+/// sync covered and the WAL then lost them (`docs/decisions.md` D103). The engine keeps
+/// `restore_point` restorable until a fixed window after `made` has passed.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Ahead {
+    /// The newest staged transaction at the check: the last state before the damage.
+    pub restore_point: Txid,
+    /// How many pages differed.
+    pub pages: NonZeroU32,
+    /// The lowest page that differed.
+    pub first: NonZeroU32,
+    /// When the verdict was made, on the engine's clock.
+    pub made: Timestamp,
+}
+
+/// The five facts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Journal {
     /// The floor, if any.
@@ -160,6 +178,8 @@ pub struct Journal {
     pub budget: Option<StoredBudget>,
     /// The pending proof, if any.
     pub pending: Option<Proof>,
+    /// A database file found ahead of its WAL, while its restore point is kept.
+    pub ahead: Option<Ahead>,
 }
 
 /// Why a record may not follow another (docs/journal.md, "Writing", rule 5).
@@ -179,15 +199,26 @@ pub enum Lowered {
         /// The debt asked for.
         to: Unproven,
     },
+    /// A later verdict would move the kept restore point forward, onto a state the earlier
+    /// verdict found damaged.
+    #[error("the kept restore point would move from {from} to {to}")]
+    AheadRestorePoint {
+        /// The restore point held.
+        from: Txid,
+        /// The restore point asked for.
+        to: Txid,
+    },
 }
 
 impl Journal {
-    /// What an absent journal means: no floor, no debt known, a full budget, no proof.
+    /// What an absent journal means: no floor, no debt known, a full budget, no proof, no
+    /// verdict.
     pub const ABSENT: Self = Self {
         floor: None,
         unproven: Unproven::No,
         budget: None,
         pending: None,
+        ahead: None,
     };
 
     /// Whether `new` may follow `self` in consecutive records.
@@ -203,13 +234,22 @@ impl Journal {
             (Some(_), None) => return Err(Lowered::FloorDropped),
             (None, _) => {}
         }
-        if new.unproven.may_follow(self.unproven) {
-            Ok(())
-        } else {
-            Err(Lowered::Debt {
+        if !new.unproven.may_follow(self.unproven) {
+            return Err(Lowered::Debt {
                 from: self.unproven,
                 to: new.unproven,
-            })
+            });
+        }
+        // A verdict ends when its window passes, which this record cannot see; while two stand,
+        // the older restore point is the one before any damage.
+        match (self.ahead, new.ahead) {
+            (Some(old), Some(ahead)) if ahead.restore_point > old.restore_point => {
+                Err(Lowered::AheadRestorePoint {
+                    from: old.restore_point,
+                    to: ahead.restore_point,
+                })
+            }
+            (Some(_) | None, Some(_) | None) => Ok(()),
         }
     }
 }

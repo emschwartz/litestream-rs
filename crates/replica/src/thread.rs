@@ -52,7 +52,7 @@ use lsr_store_fs::{FsJournalFile, FsStore};
 use crate::config::Config;
 use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
-use crate::health::{Counters, FailStop, Gone, Phase, Stopped};
+use crate::health::{AheadOfWal, Counters, FailStop, Gone, Phase, Stopped};
 use crate::meta::{MetaLock, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
@@ -502,7 +502,8 @@ impl Worker {
             | EngineEvent::Idle
             | EngineEvent::Degraded { .. }
             | EngineEvent::Retrying { .. }
-            | EngineEvent::Clamped(_) => false,
+            | EngineEvent::Clamped(_)
+            | EngineEvent::AheadOfWal(_) => false,
         };
         if !idle {
             self.emit(&Event::Engine(event));
@@ -557,6 +558,7 @@ impl Worker {
             | EngineEvent::Idle
             | EngineEvent::Resnapshot(_)
             | EngineEvent::Clamped(_)
+            | EngineEvent::AheadOfWal(_)
             | EngineEvent::TakeoverWanted(_) => {}
         }
     }
@@ -690,6 +692,7 @@ impl Worker {
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
         let journal = self.actor.journal();
+        let ahead_of_wal = self.actor.ahead().map(AheadOfWal::of);
         let snapshots = self.actor.snapshots();
         let ran = self.app_ran_total();
         let app = self.app_total();
@@ -725,6 +728,7 @@ impl Worker {
             };
             health.verification = verification;
             health.journal = journal;
+            health.ahead_of_wal = ahead_of_wal;
             state.left = parts.left;
         });
     }
