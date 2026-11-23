@@ -39,7 +39,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize};
 
 use crate::generate::{EnvFault, Target};
-use crate::oracle::{MODEL_DIVERGED, Violation};
+use crate::oracle::{MODEL_DIVERGED_AFTER_LOST_WRITEBACK, Violation};
 
 /// What a history may do with one (operation, error) pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,20 +95,22 @@ impl KnownWrong {
     #[must_use]
     pub fn matches(self, violation: &Violation) -> bool {
         match self {
-            // Before the boot check the mixed file was staged as a commit, and the model check or
-            // a restore caught it; with the check the engine raises its verdict, which the
-            // simulator does not yet expect, since its world does not adopt the mixed file.
+            // Before the boot check the model diverged; with it the engine raises its own
+            // verdict for the same file, which the simulator does not yet adopt.
             Self::DatabaseAheadOfWal => {
-                matches!(violation, Violation::CorruptionRestored { .. })
-                    || matches!(violation, Violation::BugFault { context } if context == MODEL_DIVERGED)
-                    || matches!(
-                        violation,
-                        Violation::UnexpectedDegraded {
-                            cause: lsr_core::PersistentCause::DatabaseAheadOfWal { .. }
-                        }
-                    )
+                matches!(
+                    violation,
+                    Violation::BugFault { context } if context == MODEL_DIVERGED_AFTER_LOST_WRITEBACK
+                ) || matches!(
+                    violation,
+                    Violation::UnexpectedDegraded {
+                        cause: lsr_core::PersistentCause::DatabaseAheadOfWal { .. }
+                    }
+                )
             }
-            Self::HaltForgottenAtRestart => matches!(violation, Violation::HealthBlind { .. }),
+            Self::HaltForgottenAtRestart => {
+                matches!(violation, Violation::HealthBlind { restarts, .. } if *restarts > 0)
+            }
         }
     }
 
