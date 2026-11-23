@@ -212,7 +212,15 @@ impl NewestStagedFile {
         // the application written other pages into them: the same comparison runs over the
         // staged files below it that are still in staging and in the live WAL.
         let rewritten = match wal {
-            Some(mut wal) => rewritten_below(staging, &mut wal, newest.key.range().max()).await?,
+            Some(mut wal) => {
+                rewritten_below(
+                    staging,
+                    &mut wal,
+                    newest.key.range().max(),
+                    origin.origin.offset(),
+                )
+                .await?
+            }
             None => false,
         };
         Ok(Some(match view {
@@ -321,6 +329,7 @@ async fn rewritten_below<L: Role, R: Read + Seek>(
     staging: &L,
     wal: &mut BootWal<'_, R>,
     newest: Txid,
+    mut starts: u64,
 ) -> Result<bool, Fault> {
     let live = wal.reader.header().salts();
     let (mut at, mut keys) = (ListAt::first(Level::ZERO), VecDeque::new());
@@ -344,18 +353,20 @@ async fn rewritten_below<L: Role, R: Read + Seek>(
             None => break,
         }
     }
-    for key in keys {
+    // Newest first, while each file ends where the one above it starts in the live generation: a
+    // file the chain does not reach (a snapshot was taken above it) is history the snapshot
+    // already answered, and comparing it would raise the same alarm at every boot.
+    for key in keys.into_iter().rev() {
         let Some(header) = read_header(staging, &key, L::fault).await? else {
-            continue;
+            break;
         };
-        // An older generation is not comparable (`checked` finds no frame for it); skipping it
-        // saves reading the whole file.
         let Some(at) = Origin::of(&header).filter(|at| {
             let (salt1, salt2) = at.origin.salts();
-            Salts { salt1, salt2 } == live
+            Salts { salt1, salt2 } == live && at.end.get() == starts
         }) else {
-            continue;
+            break;
         };
+        starts = at.origin.offset();
         let file = NewestStagedFileSource {
             store: staging,
             key,
