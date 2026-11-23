@@ -58,7 +58,7 @@ const STEPS: u32 = 300;
 /// regression through (by a rewind the engine reported, by the driver's excuse, and excused
 /// steps the engine never reported), and how many staged files an undone unlink brought back,
 /// summed over the passing runs.
-const REACHED: [&str; 11] = [
+const REACHED: [&str; 13] = [
     "app.redo",
     "app.redo_after_loss",
     "app.redo_past_lost_end",
@@ -70,6 +70,8 @@ const REACHED: [&str; 11] = [
     "history.excused",
     "history.excused.unreported",
     "staged.Restored",
+    "failstop.excused.unread_wal",
+    "failstop.excused.unvouched_snapshot",
 ];
 
 fn env(name: &str, default: u64) -> u64 {

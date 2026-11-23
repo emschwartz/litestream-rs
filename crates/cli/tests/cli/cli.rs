@@ -1294,3 +1294,77 @@ fn a_database_path_restores_beside_a_dir_entry_that_holds_nothing() {
         "restore beside an empty dir entry",
     );
 }
+
+/// Go's `databases`: each config entry with its replica type, a `dir` entry by its directory,
+/// unscanned (Go prints the working directory for it; docs/decisions.md D162).
+#[test]
+fn databases_lists_each_entry_without_scanning_a_dir() {
+    let (staged, _) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("app.db");
+    let config = config_for(dir.path(), &db, &staged);
+    let scan = dir.path().join("scan");
+    let mut text = fs::read_to_string(&config).expect("read");
+    text.push_str(&format!(
+        "  - dir: {}\n    pattern: \"*.db\"\n    replica:\n      url: file://{}\n",
+        scan.display(),
+        dir.path().join("scan-replica").display()
+    ));
+    fs::write(&config, text).expect("write");
+    let run = lsr(&["databases", "-config", path_str(&config)]);
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{}", run.stdout);
+    let rows: Vec<Vec<&str>> = run
+        .stdout
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            vec!["path", "replica"],
+            vec![path_str(&db), "file"],
+            vec![path_str(&scan), "file"]
+        ]
+    );
+    let printed = lsr(&["databases", "-json", "-config", path_str(&config)]);
+    let json: Value = serde_json::from_str(&printed.stdout).expect("Go's indented JSON");
+    assert_eq!(json[0], json!({"path": path_str(&db), "replica": "file"}));
+}
+
+/// Go's `ltx`: level 0 unless `-level` says otherwise, `all` for every level; `wal` is the
+/// same after a deprecation warning on standard error.
+#[test]
+fn ltx_lists_one_level_by_default_and_wal_warns() {
+    let (staged, _) = small_fixture();
+    let url = format!("file://{}", staged.replica().display());
+    let levels = |args: &[&str]| -> Vec<String> {
+        let run = lsr(args);
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        run.stdout
+            .lines()
+            .skip(1)
+            .map(|l| l.split_whitespace().next().unwrap_or_default().to_owned())
+            .collect()
+    };
+    assert!(levels(&["ltx", &url]).iter().all(|l| l == "0"));
+    let all = levels(&["ltx", "-level", "all", &url]);
+    assert!(
+        all.iter().any(|l| l == "0") && all.iter().any(|l| l == "9"),
+        "{all:?}"
+    );
+    assert!(levels(&["ltx", "-level=9", &url]).iter().all(|l| l == "9"));
+    let wal = lsr(&["wal", &url]);
+    assert_eq!(wal.code, 0, "{}", wal.stderr);
+    assert!(
+        wal.stderr.contains("'wal' command is deprecated"),
+        "{}",
+        wal.stderr
+    );
+    let bad = lsr(&["ltx", "-level", "10", &url]);
+    assert_eq!((bad.code, bad.stdout.as_str()), (1, ""));
+    assert!(
+        bad.stderr.contains("level must be between 0 and 9"),
+        "{}",
+        bad.stderr
+    );
+}

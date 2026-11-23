@@ -26,10 +26,12 @@ pub mod seed_0x330;
 pub mod seed_0x46;
 pub mod seed_0x4c;
 pub mod seed_0x585;
+pub mod seed_0x734;
 pub mod seed_0x753;
 pub mod seed_0x80e;
 pub mod seed_0x82;
 pub mod seed_0x8ef;
+pub mod seed_0x92d;
 pub mod seed_0x95a;
 pub mod seed_0x9f9;
 pub mod seed_0xa4d;
@@ -209,6 +211,22 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         Guard::Unguarded(
             "it pins an open defect (KnownWrong::ProbeStopsInAHole) and passes only while main \
              fails with it, so no plant can be judged by it",
+        ),
+    ),
+    (
+        "seed_0x734",
+        "seed_0x734_trips_on_a_snapshot_it_cannot_vouch_for_and_is_excused",
+        Guard::Unguarded(
+            "the history checks a judge exemption, not an engine fix: no engine plant can make \
+             the judge excuse a trip it would otherwise call false",
+        ),
+    ),
+    (
+        "seed_0x92d",
+        "seed_0x92d_trips_on_frames_it_never_read_and_is_excused",
+        Guard::Unguarded(
+            "the history checks a judge exemption, not an engine fix: no engine plant can make \
+             the judge excuse a trip it would otherwise call false",
         ),
     ),
     (

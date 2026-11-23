@@ -229,3 +229,51 @@ impl<T: Transport> Inner<T> {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use lsr_core::{FileKey, Level};
+    use lsr_ltx::{Timestamp, Txid, TxidRange};
+
+    use super::*;
+
+    fn listed(min: u64, max: u64) -> ListedFile {
+        let range = TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap();
+        ListedFile {
+            key: FileKey::new(Level::ZERO, range),
+            size: 1,
+            last_modified: Timestamp::from_unix_millis(0),
+        }
+    }
+
+    /// A page's bounds span its files and its unrecognized names together: the next page must
+    /// start above the highest of either, or the listing went backwards.
+    #[test]
+    fn a_page_s_bounds_span_its_files_and_unrecognized_names() {
+        let page = ListPage {
+            files: vec![listed(2, 2), listed(3, 4)],
+            unrecognized: vec!["0000000000000001-zz.ltx".to_owned(), "zzz".to_owned()],
+            next_token: None,
+        };
+        let low = "0000000000000001-zz.ltx".to_owned();
+        assert_eq!(name_bounds(&page), Some((low, "zzz".to_owned())));
+        let files_only = ListPage {
+            files: vec![listed(2, 2), listed(3, 4)],
+            unrecognized: vec![],
+            next_token: None,
+        };
+        assert_eq!(
+            name_bounds(&files_only),
+            Some((
+                file_name(listed(2, 2).key.range()),
+                file_name(listed(3, 4).key.range())
+            ))
+        );
+        let empty = ListPage {
+            files: vec![],
+            unrecognized: vec![],
+            next_token: None,
+        };
+        assert_eq!(name_bounds(&empty), None);
+    }
+}
