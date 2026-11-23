@@ -4,7 +4,7 @@
 //! and runs this test with output shown, under the seed's mix
 //! (`Weights::mixed`), as the fixed and rotating sets run it, with the overrides of
 //! `unaided::weights` (`LSR_SIM_BLOCK_LAW`, `LSR_SIM_AFTER_RESTART`, `LSR_SIM_SWARM`,
-//! `LSR_SIM_HOLD`, `LSR_SIM_KNOWN_WRONG`, which the rotating set's replay lines carry), or under
+//! `LSR_SIM_HOLD`, `LSR_SIM_NIGHTLY_LAWS`, which the rotating set's replay lines carry), or under
 //! the default mix with `LSR_SIM_WEIGHTS=default` (what the unit
 //! tests in `run` draw from). Without `LSR_SIM_SEED` the test does nothing, so `just test`
 //! stays quiet.

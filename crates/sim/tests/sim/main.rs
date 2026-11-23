@@ -31,8 +31,6 @@ mod histories;
 #[cfg(test)]
 mod kill_after_fault;
 #[cfg(test)]
-mod known_wrong;
-#[cfg(test)]
 mod marks;
 #[cfg(test)]
 mod needless_snapshot;

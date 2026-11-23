@@ -529,10 +529,6 @@ pub struct Weights {
     /// nine operations), so recorded histories keep their draws. Not an operation, for the
     /// same reason as `block_crash_law`.
     pub error_domain: bool,
-    /// With `error_domain`, the cells that reach an open engine defect are drawn too
-    /// ([`crate::domain::KnownWrong`]). Never drawn by a mix: the nightly and the campaigns set
-    /// it, and count the defect's failures as known; the per-push fixed seeds leave it unset.
-    pub known_wrong: bool,
     /// Faults overlap: a hold runs a drawn sub-history (commits and ticks, a process crash, a
     /// power loss, a shutdown, one-shot store faults) instead of committing and ticking, so it
     /// spans restarts and other faults; holds last up to 200 ticks; and the hold kinds that
@@ -543,10 +539,8 @@ pub struct Weights {
     /// The process dies right after every tick in which an injected fault fired: a store fault,
     /// or a failure of a SQLite-side call. Whatever the fault left the engine owing must then
     /// be found again by the restarted engine, so an obligation held only in memory fails the
-    /// run. Inside a hold it kills only where known defects are counted
-    /// ([`Weights::known_wrong`]): a restart there reaches the open defect D9, as an overlapping
-    /// hold's own restarts do. Not an operation, for the same reason as `block_crash_law`; drawn
-    /// last in the swarm mix.
+    /// run. Not an operation, for the same reason as `block_crash_law`; drawn last in the swarm
+    /// mix.
     pub kill_after_fault: bool,
     /// [`Op::AppInTick`].
     pub app_in_tick: u32,
@@ -643,7 +637,6 @@ impl Default for Weights {
             remote_s3: false,
             no_create_only: false,
             error_domain: false,
-            known_wrong: false,
             overlap: false,
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
@@ -790,7 +783,6 @@ impl Weights {
             remote_s3: false,
             no_create_only: false,
             error_domain: false,
-            known_wrong: false,
             overlap: false,
             kill_after_fault: false,
             app_in_tick: 0,
@@ -855,9 +847,8 @@ impl Weights {
         mix
     }
 
-    /// The nightly's settings on top of this mix: the known-wrong cells, and the laws no mix
-    /// draws, from the seed's own stream (so a replay line with `LSR_SIM_KNOWN_WRONG` set gets
-    /// them too): with even odds, a TRUNCATE threshold of 2 to 8 frames, with other processes'
+    /// The nightly's settings on top of this mix: the laws no mix draws, from the seed's own
+    /// stream (so a replay line with `LSR_SIM_NIGHTLY_LAWS` set gets them too): with even odds, a TRUNCATE threshold of 2 to 8 frames, with other processes'
     /// readers drawn at least at weight 10. The engine truncates only after a PASSIVE at the
     /// threshold that a reader held off, so the readers are what make the low threshold reach
     /// its TRUNCATE: over seeds 1 to 300 of the mixed set, the engine's TRUNCATE ran in 8 seeds
@@ -865,7 +856,6 @@ impl Weights {
     #[must_use]
     pub fn with_nightly_laws(mut self, seed: Seed) -> Self {
         let entropy = SeededEntropy::new(seed.stream(25));
-        self.known_wrong = true;
         let frames = u32::try_from(below(&entropy, 7).saturating_add(2)).unwrap_or(2);
         self.truncate_pages = (below(&entropy, 2) == 0)
             .then_some(frames)
@@ -988,7 +978,7 @@ fn store_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
     )
     .unwrap_or(StoreOp::Upload);
     let error = if weights.error_domain {
-        crate::domain::draw_store(entropy, target, op, weights.known_wrong)
+        crate::domain::draw_store(entropy, target, op)
     } else {
         crate::domain::possible_store(target, op, store_error(entropy, op))
     };
@@ -1097,9 +1087,8 @@ fn hold(entropy: &SeededEntropy, overlap: bool) -> Op {
     } else {
         hold
     };
-    // A lying disk loses power in the middle of its hold: a restart inside the hold, which
-    // overlapping holds draw only where known defects are counted (D9), so it keeps the short
-    // length; the draw is made either way, so the history keeps its shape.
+    // A lying disk loses power in the middle of its hold, so it keeps the short length; the
+    // draw is made either way, so the history keeps its shape.
     let long = overlap
         .then(|| u8::try_from(below(entropy, 199).saturating_add(2)).unwrap_or(u8::MAX))
         .filter(|_| hold != Hold::LyingDisk);
@@ -1111,8 +1100,7 @@ fn env_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
     let fault = match below(entropy, 4) {
         0 => EnvFault::DeleteWal,
         1 => EnvFault::WipeStaging,
-        _ if weights.error_domain => match crate::domain::draw_source(entropy, weights.known_wrong)
-        {
+        _ if weights.error_domain => match crate::domain::draw_source(entropy) {
             crate::domain::SourceDraw::Inject(op, err) => EnvFault::Source(op, err),
             crate::domain::SourceDraw::World(fault) => fault,
         },

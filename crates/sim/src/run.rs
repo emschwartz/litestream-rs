@@ -226,9 +226,6 @@ pub struct Opts {
     /// One-shot store faults drawn inside an overlapping hold come from the whole error domain
     /// ([`Weights::error_domain`]). [`run_with`] sets it.
     pub error_domain: bool,
-    /// Draws that reach an open engine defect are made ([`Weights::known_wrong`]): inside an
-    /// overlapping hold, the restarts that reach D9. [`run_with`] sets it.
-    pub known_wrong: bool,
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
@@ -329,8 +326,6 @@ struct Runner {
     error_domain: bool,
     // The engine's TRUNCATE threshold, when the run sets one ([`Opts::truncate_pages`]).
     truncate_pages: Option<NonZeroU32>,
-    // Whether an overlapping hold draws restarts, which reach the open defect D9.
-    known_wrong: bool,
     spilled: Vec<(PageNo, Vec<u8>)>,
     /// A freshly started driver has not seen the WAL yet, so it ticks once more
     /// before it believes a wait on a WAL change.
@@ -391,8 +386,6 @@ struct Runner {
     /// A fault operation was applied since the last kill: the law kills once per operation, so
     /// a fault that keeps firing (a rate) does not keep the engine from ever running.
     kill_armed: bool,
-    /// A hold is running its ticks: a kill there is a restart inside a hold, which reaches D9.
-    in_hold: bool,
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
@@ -482,7 +475,6 @@ impl Runner {
         runner.overlap = opts.overlap.then(|| SeededEntropy::new(seed.stream(21)));
         runner.error_domain = opts.error_domain;
         runner.truncate_pages = opts.truncate_pages;
-        runner.known_wrong = opts.known_wrong;
         if opts.no_create_only {
             runner.refuse_create_only();
         }
@@ -507,7 +499,6 @@ impl Runner {
             overlap: None,
             error_domain: false,
             truncate_pages: None,
-            known_wrong: false,
             spilled: Vec::new(),
             unwatched: true,
             readers: Vec::new(),
@@ -537,7 +528,6 @@ impl Runner {
             lenient: false,
             kill_after_fault: false,
             kill_armed: false,
-            in_hold: false,
             expected_sizes: Vec::new(),
             booted: false,
             // The database's first content is on no replica yet.
@@ -1258,14 +1248,9 @@ impl Runner {
         }
     }
 
-    /// The kill-after-fault law ([`Weights::kill_after_fault`]): the first tick in which a store
-    /// fault or an injected SQLite-side failure fires after a fault operation is followed at once
-    /// by a process crash, before anything else can pay what the fault left owing.
-    /// Runs a hold with [`Runner::in_hold`] set for its ticks.
+    /// Runs a hold and marks its end in the trace.
     fn hold_marked(&mut self, hold: crate::generate::Hold, ticks: u8) -> Result<(), Violation> {
-        self.in_hold = true;
         let held = self.hold(hold, ticks);
-        self.in_hold = false;
         if self.trace {
             self.report.trace.push("    hold ended".to_owned());
         }
@@ -1277,11 +1262,7 @@ impl Runner {
         let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
         let source = self.w.sqlite.taken_injections().len() > taken0;
         let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
-        // A kill inside a hold is a restart there, which reaches the open defect D9 (retry
-        // counts and degraded states reset at a restart, so a halt that outlasts restarts is never
-        // reported): only where known defects are counted, as the overlapping holds' own restarts.
-        let reaches_d9 = self.in_hold && !self.known_wrong;
-        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) || reaches_d9 {
+        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) {
             return step;
         }
         self.kill_armed = false;
@@ -2736,7 +2717,6 @@ pub fn run_with(
         clock_law: weights.clock_law,
         overlap: weights.overlap,
         error_domain: weights.error_domain,
-        known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
         truncate_pages: weights.truncate_pages,
         kill_after_fault: weights.kill_after_fault,

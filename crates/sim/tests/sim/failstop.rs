@@ -302,7 +302,6 @@ fn seed_0x330_does_not_trip() {
         after_restart: lsr_sim::AfterRestart::Busy,
         clock_law: lsr_sim::ClockLaw::PerTick,
         staging_fs: true,
-        known_wrong: true,
         ..Opts::default()
     };
     runs_clean(0x330, crate::histories::seed_0x330::OPS, &opts);
@@ -315,7 +314,6 @@ fn seed_0x8ef_does_not_trip() {
         drawn: true,
         after_restart: lsr_sim::AfterRestart::Nothing,
         clock_law: lsr_sim::ClockLaw::EachRead,
-        known_wrong: true,
         ..Opts::default()
     };
     runs_clean(0x8ef, crate::histories::seed_0x8ef::OPS, &opts);
@@ -330,7 +328,6 @@ fn seed_0xa4d_does_not_trip() {
         after_restart: lsr_sim::AfterRestart::Busy,
         clock_law: lsr_sim::ClockLaw::EachRead,
         staging_fs: true,
-        known_wrong: true,
         ..Opts::default()
     };
     runs_clean(0xa4d, crate::histories::seed_0xa4d::OPS, &opts);

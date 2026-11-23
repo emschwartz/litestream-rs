@@ -14,13 +14,6 @@
 //! - [`Cell::Unmodelled`]: real, but the simulator's model of SQLite cannot follow it yet, so it
 //!   is not drawn; the reason names the seeds that showed the model losing track. These are
 //!   gaps in the checker, listed so they are not mistaken for coverage.
-//! - [`Cell::KnownWrong`]: drawn, and the draw reaches an engine defect that is open and
-//!   tracked ([`KnownWrong`]). The per-push fixed seeds leave these cells out, so they stay
-//!   green; the nightly and the campaigns draw them ([`crate::Weights::known_wrong`]) and count
-//!   a failure that matches the defect's signature as known instead of failing the run, so every
-//!   other failure in those seeds stays visible. Each defect has a pinned seed that must still
-//!   fail (`tests/sim/known_wrong.rs`): when its fix lands that test fails, and the cell becomes
-//!   [`Cell::Drawn`].
 //!
 //! The tables are matches with no wildcard arm, so a new operation or error variant breaks the
 //! build here until someone decides its cells. Histories draw from the table only when the run's
@@ -39,7 +32,6 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize};
 
 use crate::generate::{EnvFault, Target};
-use crate::oracle::Violation;
 
 /// What a history may do with one (operation, error) pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,50 +44,6 @@ pub enum Cell {
     Impossible(&'static str),
     /// Real, but the simulator's model cannot follow it yet, so no history draws it.
     Unmodelled(&'static str),
-    /// Drawn only where known failures are counted: the draw reaches an open engine defect.
-    KnownWrong(KnownWrong),
-}
-
-/// An open engine defect that a cell of the error domain reaches. Every variant names its
-/// tracking item and the signature its failures have.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum KnownWrong {
-    /// Retry counts and degraded states reset at a restart, so a halt that outlasts restarts
-    /// is never reported degraded (BEHAVIOR's D9). Reached by a restart inside an overlapping
-    /// hold ([`crate::Weights::overlap`]), not by a cell of the tables.
-    HaltForgottenAtRestart,
-}
-
-impl KnownWrong {
-    /// Every known defect.
-    pub const ALL: [Self; 1] = [Self::HaltForgottenAtRestart];
-
-    /// Where the defect is tracked and who fixes it.
-    #[must_use]
-    pub const fn tracking(self) -> &'static str {
-        match self {
-            Self::HaltForgottenAtRestart => {
-                "#99 (D9); open: retry counts, waits and degraded states must survive a restart"
-            }
-        }
-    }
-
-    /// Whether `violation` is this defect's failure.
-    #[must_use]
-    pub fn matches(self, violation: &Violation) -> bool {
-        match self {
-            Self::HaltForgottenAtRestart => {
-                matches!(violation, Violation::HealthBlind { restarts, .. } if *restarts > 0)
-            }
-        }
-    }
-
-    /// The known defect `violation` is the failure of, among those whose cells `drawn` says the
-    /// run drew.
-    #[must_use]
-    pub fn of(violation: &Violation, drawn: &[Self]) -> Option<Self> {
-        drawn.iter().copied().find(|known| known.matches(violation))
-    }
 }
 
 /// The classes of [`SourceError`], without their payloads.
@@ -379,20 +327,18 @@ pub enum SourceDraw {
     World(EnvFault),
 }
 
-/// Whether a history draws `cell`: a drawn or world cell always, a known-wrong one only where
-/// known failures are counted (`known_wrong`).
+/// Whether a history draws `cell`: a drawn or world cell.
 #[must_use]
-pub const fn drawable(cell: Cell, known_wrong: bool) -> bool {
+pub const fn drawable(cell: Cell) -> bool {
     match cell {
         Cell::Drawn | Cell::World(_) => true,
-        Cell::KnownWrong(_) => known_wrong,
         Cell::Impossible(_) | Cell::Unmodelled(_) => false,
     }
 }
 
 /// One cell of the source table, uniform over the cells a history draws ([`drawable`]).
 #[must_use]
-pub fn draw_source(entropy: &SeededEntropy, known_wrong: bool) -> SourceDraw {
+pub fn draw_source(entropy: &SeededEntropy) -> SourceDraw {
     let cells: Vec<(SourceOp, SourceClass, Cell)> = SOURCE_OPS
         .iter()
         .flat_map(|op| {
@@ -400,7 +346,7 @@ pub fn draw_source(entropy: &SeededEntropy, known_wrong: bool) -> SourceDraw {
                 .iter()
                 .map(move |class| (*op, *class, source_cell(*op, *class)))
         })
-        .filter(|(_, _, cell)| drawable(*cell, known_wrong))
+        .filter(|(_, _, cell)| drawable(*cell))
         .collect();
     match pick_ref(entropy, &cells) {
         Some((_, _, Cell::World(fault))) => SourceDraw::World(*fault),
@@ -415,7 +361,7 @@ pub fn draw_source(entropy: &SeededEntropy, known_wrong: bool) -> SourceDraw {
 /// values.
 #[must_use]
 pub const fn possible_source(op: SourceOp, err: SourceError) -> SourceError {
-    if drawable(source_cell(op, source_class(err)), false) {
+    if drawable(source_cell(op, source_class(err))) {
         err
     } else {
         SourceError::Io(ErrorKind::Other)
@@ -426,7 +372,7 @@ pub const fn possible_source(op: SourceOp, err: SourceError) -> SourceError {
 /// same operation: what the older subset draws in place of a filesystem asking to slow down.
 #[must_use]
 pub fn possible_store(target: Target, op: StoreOp, err: StoreError) -> StoreError {
-    if drawable(store_cell(target, op, store_class(&err)), false) {
+    if drawable(store_cell(target, op, store_class(&err))) {
         err
     } else {
         StoreError::Transient {
@@ -687,63 +633,16 @@ fn placeholder_error(op: StoreOp, class: StoreClass) -> StoreError {
 
 /// An error for `op` on `target`, uniform over the classes a history draws ([`drawable`]).
 #[must_use]
-pub fn draw_store(
-    entropy: &SeededEntropy,
-    target: Target,
-    op: StoreOp,
-    known_wrong: bool,
-) -> StoreError {
+pub fn draw_store(entropy: &SeededEntropy, target: Target, op: StoreOp) -> StoreError {
     let classes: Vec<StoreClass> = STORE_CLASSES
         .iter()
         .copied()
-        .filter(|class| drawable(store_cell(target, op, *class), known_wrong))
+        .filter(|class| drawable(store_cell(target, op, *class)))
         .collect();
     let class = pick_ref(entropy, &classes)
         .copied()
         .unwrap_or(StoreClass::Transient);
     store_error(entropy, target, op, class)
-}
-
-/// The known defects a run of `ops` under `weights` could reach: those whose cells `ops` drew,
-/// and D9 when an overlapping hold or the kill-after-fault law may restart inside a hold. A failure
-/// counts as known only in such a run.
-#[must_use]
-pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<KnownWrong> {
-    use crate::generate::Op;
-    let mut known: Vec<KnownWrong> = ops
-        .iter()
-        .filter_map(|op| {
-            // Only the two fault operations draw from the domain; every other operation is
-            // left out on purpose, so a new one needs no arm here.
-            if let Op::EnvFault(EnvFault::Source(source, err)) = op {
-                return Some(source_cell(*source, source_class(*err)));
-            }
-            if let Op::StoreFault {
-                target, op, shape, ..
-            } = op
-            {
-                return crate::run::shape_error(shape)
-                    .map(|err| store_cell(*target, *op, store_class(err)));
-            }
-            None
-        })
-        .filter_map(|cell| match cell {
-            Cell::KnownWrong(known) => Some(known),
-            Cell::Drawn | Cell::World(_) | Cell::Impossible(_) | Cell::Unmodelled(_) => None,
-        })
-        .collect();
-    // A restart inside a hold: an overlapping hold's own, or the kill-after-fault law's.
-    let restarts_in_holds = (weights.overlap || weights.kill_after_fault)
-        && weights.known_wrong
-        && ops
-            .iter()
-            .any(|op| matches!(op, crate::generate::Op::Hold { .. }));
-    if restarts_in_holds {
-        known.push(KnownWrong::HaltForgottenAtRestart);
-    }
-    known.sort_unstable();
-    known.dedup();
-    known
 }
 
 /// Whether an error says the request was not carried out, so it may not follow a publish:

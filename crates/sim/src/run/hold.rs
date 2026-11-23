@@ -230,6 +230,14 @@ impl Runner {
         if !halted || retries < threshold || !self.actor.booted() {
             return Ok(());
         }
+        // A halt that outlasts a restart is forgotten with the retry counts: an accepted limit
+        // (`docs/decisions/D174.md`), so only a halt inside one process is owed a report.
+        if now.boots > before.boots {
+            self.report
+                .reach
+                .bump(format!("hold.{}.halted_across_restart", name(hold)));
+            return Ok(());
+        }
         self.report
             .reach
             .bump(format!("hold.{}.halted", name(hold)));
@@ -242,7 +250,6 @@ impl Runner {
         Err(Violation::HealthBlind {
             hold: name(hold),
             retries,
-            restarts: now.boots.saturating_sub(before.boots),
         })
     }
 
@@ -503,15 +510,6 @@ impl Runner {
         let Some(draw) = self.overlap.as_ref().map(|rng| rng.below(100)) else {
             return Ok(());
         };
-        // A restart inside a hold reaches the open defect D9 (retry counts and degraded states
-        // reset at a restart, so a halt that outlasts restarts is never reported): drawn only
-        // where known defects are counted ([`crate::domain::KnownWrong`]). Elsewhere the step
-        // commits instead.
-        let draw = if !self.known_wrong && (70..=87).contains(&draw) {
-            0
-        } else {
-            draw
-        };
         match draw {
             0..=59 => {
                 let pages = u8::try_from(small(&self.rng, 3).saturating_add(1)).unwrap_or(1);
@@ -563,7 +561,7 @@ impl Runner {
             .copied()
             .unwrap_or(StoreOp::Upload);
         let error = if self.error_domain {
-            crate::domain::draw_store(rng, target, op, false)
+            crate::domain::draw_store(rng, target, op)
         } else {
             StoreError::Transient {
                 op,

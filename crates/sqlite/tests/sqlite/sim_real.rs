@@ -10,9 +10,8 @@ mod swarm {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use lsr_ltx::PageSize;
-    use lsr_sim::domain::{KnownWrong, known_in};
     use lsr_sim::side::{SideMaker, SqliteSide};
-    use lsr_sim::{Failure, Opts, Seed, Weights, history, replay_line, run_with};
+    use lsr_sim::{Failure, Opts, Seed, Weights, replay_line, run_with};
     use lsr_sqlite::testing::RealSide;
     use tempfile::TempDir;
 
@@ -78,8 +77,7 @@ mod swarm {
 
     /// Seeds to the first failure with the engine on real SQLite, as `lsr-sim`'s
     /// `unaided::seeds_to_first_failure` counts them on the model: the mixed weights, 300 steps,
-    /// `LSR_SIM_BASE_SEED` and `LSR_SIM_SEEDS`, every failing seed with `LSR_SIM_ALL`. A failure
-    /// whose signature matches an open defect its history drew is counted as known.
+    /// `LSR_SIM_BASE_SEED` and `LSR_SIM_SEEDS`, every failing seed with `LSR_SIM_ALL`.
     #[test]
     #[ignore = "runs LSR_SIM_SEEDS seeds on real SQLite"]
     fn real_seeds_to_first_failure() {
@@ -96,11 +94,6 @@ mod swarm {
             let Err(failure) = run(&root, seed, 300, &weights) else {
                 continue;
             };
-            let drawn = known_in(&history(seed, 300, &weights), &weights);
-            if let Some(defect) = KnownWrong::of(&failure.violation, &drawn) {
-                println!("KNOWN {defect:?}: {failure}");
-                continue;
-            }
             println!("FAILED after {} seeds: {failure}", n - base + 1);
             println!("{}", replay_line(seed, Some(failure.steps)));
             failed.push(n);

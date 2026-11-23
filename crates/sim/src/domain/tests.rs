@@ -39,19 +39,15 @@ fn the_operation_and_class_lists_hold_every_variant_once_in_order() {
     assert_eq!(distinct.len(), STORE_CLASSES.len());
 }
 
-/// How many cells of each kind a table holds: drawn (or world), known wrong, unmodelled.
-fn tally(cells: impl Iterator<Item = (String, Cell)>) -> [usize; 3] {
-    let mut counts = [0_usize; 3];
+/// How many cells of each kind a table holds: drawn (or world), unmodelled.
+fn tally(cells: impl Iterator<Item = (String, Cell)>) -> [usize; 2] {
+    let mut counts = [0_usize; 2];
     for (name, cell) in cells {
         let at = match cell {
             Cell::Drawn | Cell::World(_) => 0,
-            Cell::KnownWrong(known) => {
-                assert!(known.tracking().starts_with("#99"), "{name}: {known:?}");
-                1
-            }
             Cell::Unmodelled(why) => {
                 assert!(why.len() > 20, "{name}: {why}");
-                2
+                1
             }
             Cell::Impossible(why) => {
                 assert!(why.len() > 20, "{name}: {why}");
@@ -88,128 +84,59 @@ fn store_cells() -> impl Iterator<Item = (String, Cell)> {
 
 #[test]
 fn every_cell_is_drawn_or_says_why_not() {
-    // Drawn, known wrong, unmodelled. A move in these numbers is a change to the domain: say
+    // Drawn, unmodelled. A move in these numbers is a change to the domain: say
     // it in the pull request.
-    assert_eq!(tally(source_cells()), [22, 0, 4], "source cells");
-    assert_eq!(tally(store_cells()), [41, 0, 0], "store cells");
-    // Each SQLite call fails at least one way where known failures are counted, but the sync of
+    assert_eq!(tally(source_cells()), [22, 4], "source cells");
+    assert_eq!(tally(store_cells()), [41, 0], "store cells");
+    // Each SQLite call fails at least one way, but the sync of
     // the WAL: a failed sync is modelled by its scenarios, not drawn (`docs/decisions/D173.md`).
     for op in SOURCE_OPS.into_iter().filter(|op| *op != SourceOp::Sync) {
         assert!(
             SOURCE_CLASSES
                 .iter()
-                .any(|class| drawable(source_cell(op, *class), true)),
+                .any(|class| drawable(source_cell(op, *class))),
             "{op:?} is never failed"
-        );
-    }
-    // Every known defect is reached by some cell, but D9, which a restart inside an
-    // overlapping hold reaches.
-    for known in KnownWrong::ALL
-        .into_iter()
-        .filter(|known| !matches!(known, KnownWrong::HaltForgottenAtRestart))
-    {
-        assert!(
-            source_cells()
-                .chain(store_cells())
-                .any(|(_, cell)| cell == Cell::KnownWrong(known)),
-            "{known:?} has no cell"
         );
     }
 }
 
 #[test]
 fn the_source_draw_reaches_every_drawable_cell_and_no_other() {
-    for known_wrong in [false, true] {
-        let rng = entropy(7);
-        let mut seen = BTreeSet::new();
-        for _ in 0..20_000 {
-            match draw_source(&rng, known_wrong) {
-                SourceDraw::Inject(op, err) => {
-                    let cell = source_cell(op, source_class(err));
-                    assert!(drawable(cell, known_wrong), "{op:?} {err:?}: {cell:?}");
-                    seen.insert(format!("{op:?} {:?}", source_class(err)));
-                }
-                SourceDraw::World(fault) => panic!("no world cell is drawn today: {fault:?}"),
+    let rng = entropy(7);
+    let mut seen = BTreeSet::new();
+    for _ in 0..20_000 {
+        match draw_source(&rng) {
+            SourceDraw::Inject(op, err) => {
+                let cell = source_cell(op, source_class(err));
+                assert!(drawable(cell), "{op:?} {err:?}: {cell:?}");
+                seen.insert(format!("{op:?} {:?}", source_class(err)));
             }
+            SourceDraw::World(fault) => panic!("no world cell is drawn today: {fault:?}"),
         }
-        let want = source_cells()
-            .filter(|(_, cell)| drawable(*cell, known_wrong))
-            .count();
-        assert_eq!(seen.len(), want, "known_wrong {known_wrong}: {seen:?}");
     }
+    let want = source_cells().filter(|(_, cell)| drawable(*cell)).count();
+    assert_eq!(seen.len(), want, "{seen:?}");
 }
 
 #[test]
 fn the_store_draw_reaches_every_drawable_class_and_no_other() {
-    for known_wrong in [false, true] {
-        let rng = entropy(11);
-        for target in TARGETS {
-            for op in STORE_OPS {
-                let mut seen = BTreeSet::new();
-                for _ in 0..2_000 {
-                    let err = draw_store(&rng, target, op, known_wrong);
-                    let cell = store_cell(target, op, store_class(&err));
-                    assert!(drawable(cell, known_wrong), "{target:?} {err:?}: {cell:?}");
-                    seen.insert(format!("{:?}", store_class(&err)));
-                }
-                let want = STORE_CLASSES
-                    .iter()
-                    .filter(|class| drawable(store_cell(target, op, **class), known_wrong))
-                    .count();
-                assert_eq!(seen.len(), want, "{target:?} {op:?}: {seen:?}");
+    let rng = entropy(11);
+    for target in TARGETS {
+        for op in STORE_OPS {
+            let mut seen = BTreeSet::new();
+            for _ in 0..2_000 {
+                let err = draw_store(&rng, target, op);
+                let cell = store_cell(target, op, store_class(&err));
+                assert!(drawable(cell), "{target:?} {err:?}: {cell:?}");
+                seen.insert(format!("{:?}", store_class(&err)));
             }
+            let want = STORE_CLASSES
+                .iter()
+                .filter(|class| drawable(store_cell(target, op, **class)))
+                .count();
+            assert_eq!(seen.len(), want, "{target:?} {op:?}: {seen:?}");
         }
     }
-}
-
-#[test]
-fn a_known_defect_matches_only_its_own_failure() {
-    let forgotten = Violation::HealthBlind {
-        hold: "DiskFull".to_owned(),
-        retries: 40,
-        restarts: 1,
-    };
-    // Too broad before: any divergence of the model, any corrupt restore and any halt health
-    // missed counted as known, so a new defect of the same shape went unreported.
-    let plain_divergence = crate::oracle::bug_fault(crate::oracle::MODEL_DIVERGED);
-    let restored = Violation::CorruptionRestored {
-        target: lsr_core::RestoreTarget::Latest,
-    };
-    let blind_without_restart = Violation::HealthBlind {
-        hold: "DiskFull".to_owned(),
-        retries: 40,
-        restarts: 0,
-    };
-    let staged = Violation::StagedNotDurable {
-        key: "0000/1-1.ltx".to_owned(),
-    };
-    let other = Violation::UnexpectedDegraded {
-        cause: lsr_core::PersistentCause::StoreDenied(Denied::Permission),
-    };
-    assert_eq!(
-        KnownWrong::of(&forgotten, &KnownWrong::ALL),
-        Some(KnownWrong::HaltForgottenAtRestart)
-    );
-    let another_bug = crate::oracle::bug_fault("something else");
-    for unknown in [
-        &staged,
-        &other,
-        &another_bug,
-        &plain_divergence,
-        &restored,
-        &blind_without_restart,
-    ] {
-        assert_eq!(
-            KnownWrong::of(unknown, &KnownWrong::ALL),
-            None,
-            "{unknown:?}"
-        );
-    }
-    assert_eq!(
-        KnownWrong::of(&forgotten, &[]),
-        None,
-        "only defects the run drew"
-    );
 }
 
 #[test]

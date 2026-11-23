@@ -33,7 +33,6 @@ pub mod seed_0x9f9;
 pub mod seed_0xa4d;
 pub mod seed_0xb44;
 pub mod seed_0xb6b;
-pub mod seed_0xe9;
 pub mod seed_0xf488c;
 
 /// What guards a recorded history against passing for nothing.
@@ -175,14 +174,6 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         Guard::Unguarded(
             "the defect's regression is the direct test of the ledger entry latest-judged-against-old-nodes; this \
              recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0xe9",
-        "a_halt_across_restarts_still_goes_unreported_seed_0xe9",
-        Guard::Unguarded(
-            "it pins an open defect (KnownWrong::HaltForgottenAtRestart) and passes only while \
-             main fails with it, so no plant can be judged by it",
         ),
     ),
     (

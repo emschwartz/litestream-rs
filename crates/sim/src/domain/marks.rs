@@ -5,8 +5,7 @@
 //! the class count is high, so each cell gets two keys of its own, `cell.<seam>.<Op>.<Class>`
 //! followed by `.drawn` (a history held it) and `.hit` (a call returned it):
 //!
-//! - [`Cell::Drawn`] and [`Cell::KnownWrong`] cells must be hit. The soak draws known-wrong cells
-//!   too ([`crate::Weights::known_wrong`]), so a cell whose defect has no draw left is a zero.
+//! - [`Cell::Drawn`] cells must be hit.
 //! - [`Cell::Impossible`] and [`Cell::Unmodelled`] cells must stay undrawn: a draw of one means
 //!   the generator stopped reading the table. The older subset that runs without
 //!   [`crate::Weights::error_domain`] draw from passes each draw through the table too
@@ -138,13 +137,13 @@ pub fn cells() -> Vec<(String, Cell)> {
     source.chain(store).collect()
 }
 
-/// The `.hit` keys the gate requires above zero: every drawn and known-wrong cell.
+/// The `.hit` keys the gate requires above zero: every drawn cell.
 #[must_use]
 pub fn required_keys() -> Vec<String> {
     cells()
         .into_iter()
         .filter(|(_, cell)| match cell {
-            Cell::Drawn | Cell::KnownWrong(_) => true,
+            Cell::Drawn => true,
             Cell::World(_) | Cell::Impossible(_) | Cell::Unmodelled(_) => false,
         })
         .map(|(key, _)| format!("{key}.hit"))
@@ -158,7 +157,7 @@ pub fn undrawn_keys() -> Vec<String> {
         .into_iter()
         .filter(|(_, cell)| match cell {
             Cell::Impossible(_) | Cell::Unmodelled(_) => true,
-            Cell::Drawn | Cell::KnownWrong(_) | Cell::World(_) => false,
+            Cell::Drawn | Cell::World(_) => false,
         })
         .map(|(key, _)| format!("{key}.drawn"))
         .collect()
