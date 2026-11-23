@@ -123,7 +123,6 @@ fn the_scenario_only_steps_are_drawn_too() {
     let ops = history(seed(4), 20_000, &Weights::default());
     let has = |f: fn(&Op) -> bool| ops.iter().any(f);
     assert!(has(|op| matches!(op, Op::Shrink { .. })));
-    assert!(has(|op| matches!(op, Op::Remote(RemoteOp::RollBack))));
     assert!(has(|op| matches!(op, Op::WalDamage { .. })));
     assert!(has(|op| matches!(op, Op::StagingDamage(_))));
     assert!(has(|op| matches!(op, Op::Heal)));

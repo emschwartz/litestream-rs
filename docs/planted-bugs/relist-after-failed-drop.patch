@@ -1,7 +1,6 @@
-diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1842,7 +1842,6 @@
+@@ -2065,7 +2065,6 @@
          let vouched = self
              .staged()
              .map(|staged| cap.map_or(staged, |cap| staged.min(cap)));
@@ -9,9 +8,9 @@ diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
          if let Err(fault) = drop_staged_from(env.staging, from).await {
              // The staged files from `from` on are still there, and the next
              // upload would take the one after the confirmed transaction as
-@@ -1850,7 +1849,6 @@
+@@ -2073,7 +2072,6 @@
              // judges the divergence again and this runs again before anything
-             // is uploaded; the acknowledged mark is kept apart.
+             // is uploaded.
              let confirmed = self.engine.upload.confirmed().min(from.prev());
 -            self.set_upload(UploadState::ListFirst { confirmed });
              return self.fault(Task::Upload, fault, now);

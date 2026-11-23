@@ -285,7 +285,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
             second_writer_survives_restart,
             super::foreign_file_while_down_stops,
         ],
-        FaultKind::RemoteRegressed => &[bucket_rolled_back, bucket_rolled_back_unseen],
+        FaultKind::RemoteRegressed => &[bucket_rolled_back, bucket_rolled_back_while_idle],
         FaultKind::StagedLost => &[staged_byte_flip_before_upload, meta_dir_deleted_mid_run],
         FaultKind::LocalDiskFull => &[disk_full_on_staging],
         FaultKind::LocalIo => &[eio_on_wal_read],
@@ -962,21 +962,21 @@ pub fn bucket_rolled_back() -> Scenario {
     s
 }
 
-/// The replica loses its newest files while the engine runs, with no failed
-/// commit to make the uploader list: the engine goes on uploading above the
-/// hole until a maintenance listing, which must see the loss and report it.
+/// The replica loses its newest file while the engine is idle, after its upload and before
+/// the maintenance listing that follows it: the listing ends below what the engine confirmed,
+/// the regression is reported and, as configured, replication goes on. The staged copy is
+/// still there, so the engine sends it again, and a restore finds the replica whole.
 #[must_use]
-pub fn bucket_rolled_back_unseen() -> Scenario {
+pub fn bucket_rolled_back_while_idle() -> Scenario {
     build(
-        "bucket_rolled_back_unseen",
+        "bucket_rolled_back_while_idle",
         vec![
             live(),
-            vec![commit(2, false), Op::Tick, Op::Tick],
-            ticks(SETTLE),
             vec![
-                Op::Remote(RemoteOp::RollBack),
-                Op::Remote(RemoteOp::RollBack),
                 commit(2, false),
+                Op::Tick,
+                Op::Tick,
+                Op::Remote(RemoteOp::RollBack),
             ],
             ticks(SETTLE),
             vec![Op::Restore],

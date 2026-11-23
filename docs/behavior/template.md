@@ -66,7 +66,7 @@ Each guarantee is stated as something an outside observer can check, the conditi
 | Guarantee | Open on main | Counted against it |
 |---|---|---|
 | G0 a restore of the latest state succeeds and is not older than what health reported | Yes | UP-11 (unseen case), MAINT-11, D2 (narrowed to the journal's residue) |
-| G1 a successful restore is a committed state | Hazards, none with a test that fails on main in the gate | BOOT-19 (expected-fail test, ignored), BOOT-18 (shown on #96's tree only), RUN-12 under the default response |
+| G1 a successful restore is a committed state | Hazards, none with a test that fails on main in the gate | BOOT-19 (accepted, as Go does it, D173), BOOT-18 (shown on #96's tree only), RUN-12 under the default response |
 | G2 latest does not go backwards unreported | None shown on main | The exceptions' signals can be missing after a bucket rollback (D17, CHK-4) |
 | G3 as-of returns nothing begun after the instant | None since #98 | Checked by the simulator's per-read clock since C7 was fixed (RUN-25, RUN-26) |
 | G4 lag | No tested bound | N1 |
@@ -84,7 +84,7 @@ Version 0.0.0: these are what the code is built to deliver.
 | A4 | One replicator process writes to a replica prefix, and one process uses a staging directory | Staging: enforced for engines of this port on one host with the meta directory on a local filesystem, by an exclusive lock on `<meta>/lsr-lock` (CFG-36, WORLD-1); not across NFS, SMB or FUSE mounts, and not against a Go process. Prefix: not enforced | A second writer on the prefix is detected from a listing, late (UP-10, UP-14), and at boot whenever its files are above this database's position and neither the live WAL nor a takeover record vouches for them (BOOT-22). Two processes on one staging directory outside the lock's reach are not detected (WORLD-1) |
 | A5 | The store returns the bytes it acknowledged, or bytes that fail to decode | Checked per file | Content-MD5 on every PUT and part, and a full LTX decode on every read. A different valid file under the same key is not caught (L1) |
 | A6 | Every listing shows every object the bucket holds. This covers the engine's listings and the one listing a restore makes | **Unsupported where false**: a store whose listings lag is outside the supported set (D173), and the consistency probe (release bar R9) is the gate | Engine side: a transaction id can be reused for other content (BOOT-18). Restore side: an older state can be returned as "latest" with exit 0 (WORLD-4) |
-| A7 | The bucket is never replaced by an older copy of itself while the engine is down | **Not detected on main** | The older bucket is taken as the bucket (BOOT-19) |
+| A7 | The bucket is never replaced by an older copy of itself while the engine is down | **Not detected** (a documented limit, D173) | The older bucket is taken as the bucket (BOOT-19) |
 | A8 | The database, WAL and staging directory are never together replaced by an older copy (a VM or volume snapshot put back) | Detected: the boot refuses the replica's newer files (`other_writer`, BOOT-22) until an operator runs `lsr take-over` or `lsr restore`; not prevented | None until the operator chooses. After `lsr take-over` the latest state goes back to the snapshot's state (WORLD-3), a G2 exception the operator asked for |
 | A9 | 64-bit checksums do not collide; a WAL `salt2` (32 random bits) does not repeat across the restarts being compared | Accepted risk | Not testable |
 | A10 | The application runs `synchronous=NORMAL` or `FULL` | Not checked | Under `OFF` SQLite does not sync before a checkpoint and the engine's fsync of the WAL is the only barrier. **unknown** |
@@ -96,7 +96,7 @@ Version 0.0.0: these are what the code is built to deliver.
 **What makes a violation silent.** When the replica holds a chain of files that each verify and together are wrong, `restore` cannot tell (REST-9): it returns exit 0. So G1 is kept or lost by the engine at upload time, never recovered at restore time.
 
 **Counted against G1.**
-- BOOT-19: across a restart after a bucket rollback, one transaction id is put twice with different bytes. Held by an expected-fail test, sim `a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed_0x484`, which is `#[ignore]` pending a durable record of what was confirmed. Its shrunk trace also needs a staging copy put back, so it is a double fault. No restore has been shown wrong from it.
+- BOOT-19: across a restart after a bucket rollback, one transaction id is put twice with different bytes. Not defended: Go does not notice a rollback either, and the next snapshot makes the replica whole (`docs/decisions/D173.md`). No restore has been shown wrong from it.
 - RUN-12: under the default response a page no commit wrote is shipped. Deliberate, reported while it lasts, and still a restore that is not a committed state.
 - WORLD-1 and WORLD-5 are suspected, not shown.
 
@@ -128,7 +128,7 @@ Version 0.0.0: these are what the code is built to deliver.
 | The local database rewound below what the replica held: power loss on a disk that lied about fsync, a WAL cut by another program, or routine loss under a failed barrier | Snapshot cause `local_rewound`; `RecoverEvent::LocalRewound` | Yes, when the regrown WAL is byte-identical in the staged range. Then nothing differs either |
 | Database, WAL and staging were all put back from an older copy (VM or volume snapshot; WORLD-3) | Stop `other_writer`, with the error line "replicate refused: the replica holds transactions up to {txid} ..." (`Event::Refused`) | No: another writer's files at boot give the same stop (BOOT-22). The line names both ways out. A wiped staging directory no longer raises it when the WAL vouches for the replica (BOOT-6) |
 | The WAL was lost and the database file is older than the replica (an operator restored the file; a WAL deleted before its frames were checkpointed) | Snapshot cause `wal_missing` or `generation_changed` | No, but these causes are also routine and harmless, so they do not identify a regression |
-| Something removed the replica's newest files while the engine ran | Degraded cause `remote_regressed`, only if an ambiguous commit makes the uploader list (UP-11). Otherwise a retention hold, `ListingBehind`, which is not a degraded state | Yes (D17) |
+| Something removed the replica's newest files while the engine ran | Degraded cause `remote_regressed` when a listing ends below what the engine confirmed (UP-11): the uploader's, at boot and after an ambiguous commit, or maintenance's. A hole below the newest file is not watched, and restore reports it | Yes (D17) |
 | The restore's own listing lagged (WORLD-4) | None. The engine is not involved | Always |
 
 After a rewind the replica still holds the lost branch. Its transactions stay restorable by id or instant until retention removes them.
@@ -138,7 +138,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 **Engine-level evidence.** The same runs as G1, judged by judge `WentBackwards` (through oracle `History`) and oracle `LatestLostAck`.
 
 **What that evidence does not show.**
-- That every exception was reported. The simulator's history judge now requires the engine's own loss report before a recorded rewind explains a regression (CHK-3). A regression the driver excused (a bucket rollback) is a debt the engine must pay with a report later; about one in four is never paid, which is D17 (only an uploader listing raises `remote_regressed`). That is counted, not fatal (CHK-4). The real-engine history rig does not require the signal.
+- That every exception was reported. The simulator's history judge now requires the engine's own loss report before a recorded rewind explains a regression (CHK-3). A regression the driver excused (a bucket rollback) is a debt the engine must pay with a report later; some are never paid, which is D17 (only a listing that ends below what the engine confirmed raises `remote_regressed`). That is counted, not fatal (CHK-4). The real-engine history rig does not require the signal.
 - `LatestLostAck` keeps acknowledgements across power loss now (CHK-2); a rollback voids those from the lowest id it uncovered.
 - v1 cited history `a_recorded_rewind_explains_going_back_and_the_lost_branch_is_ahead` and `a_rewind_explains_nothing_below_its_target` here. Those feed a hand-built log to the judge. They show the checker can say no. They are not evidence about the engine.
 
@@ -176,7 +176,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 **Statement.** At any moment after the first upload, `restore` of the latest state succeeds, and the state it returns contains every commit up to the `replicated_txid` that health last reported. Exceptions: the G2 exceptions, and a store that is unreachable to the restore itself.
 
 **Counted against G0.**
-- UP-11, unseen case, and MAINT-11: after files are removed from the replica while the engine runs, a restore of the latest state refuses with `Gap` until the next scheduled snapshot, up to 24 hours, behind `/healthz` 200. No expected-fail test.
+- UP-11 (a hole below the newest file) and MAINT-11: after files are removed from the replica while the engine runs, a restore of the latest state refuses with `Gap` until the next scheduled snapshot, up to 24 hours, behind `/healthz` 200. A documented limit of D173, not an expected-fail test.
 - D2, narrowed: the engine journal (`docs/journal.md`) records a failed WAL fsync in the tick that met it, and a restart before the TRUNCATE still owes it (RUN-3; sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`, both now passing). What remains: a kill inside that one tick, after the failed fsync and before the journal's write; a journal that cannot be written (`JournalUnwritable`), where the debt lives in the process only; and a journal deleted or damaged between the failure and the restart. In those cases frames that never reached disk can still be uploaded.
 
 **Evidence.** Oracle `LatestLostAck` (the latest restore is not older than the newest transaction the engine acknowledged) and oracle `RestoreRefused` on the simulator runs listed under G1. Acknowledgements survive power loss (CHK-2, which fixed C2).
@@ -288,7 +288,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | An object rots in the bucket | In, for the files the engine reads | BOOT-14, MAINT-3, MAINT-4, REST-5 | sim `remote_bitrot_on_list_read`, `corrupt_l0..l9_publish_then_power_loss` |
 | Credentials revoked, a policy refusing, a missing bucket, a failed TLS check | In | UP-4 | sim `creds_revoked_mid_run`, `permission_revoked_mid_run`, `bucket_deleted_mid_run`, `tls_fails_mid_run` |
 | Objects deleted by someone else (an operator, a lifecycle rule) | In for the newest files, partly for the middle | UP-11, UP-12, MAINT-11 | sim `remote_file_deleted_externally`, `bucket_rolled_back` |
-| Bucket rolled back to an earlier version | Partly while running (seen only at an uploader listing). **known wrong** across a restart | UP-11, BOOT-19 | sim `Op::Remote(RollBack)` |
+| Bucket rolled back to an earlier version | Seen while running when a listing ends below what the engine confirmed. Not seen across a restart, as Go | UP-11, BOOT-19 | sim `bucket_rolled_back`, `bucket_rolled_back_while_idle` |
 | A second writer on the same prefix | In, detected late while running; at boot when it wrote while this engine was down | UP-10, UP-14, BOOT-22 | sim `second_writer_mid_run`, `maintenance_stops_on_another_writer_seed_0x50c`, `foreign_file_while_down_stops` |
 | Listings that lag the bucket | Not modelled: a store whose listings lag is unsupported (D173) | Not handled (BOOT-18, MAINT-12) | `consistency_probe` on MinIO: 0 stale results in 1000 rounds. Tigris and R2 not measured |
 | Multipart quirks: 200 with an error body, a retried Complete answered `NoSuchUpload`, ETags not in MD5 form | Partly | UP-13 | store-s3 fault transport. Fixed on #96 |
@@ -381,7 +381,7 @@ Every policy written "retry" below also stalls: from the 8th failure in a row on
 | `StoreRefused` | keep trying | Retries the same step | The step succeeds |
 | `RemoteCorrupt` | keep trying | Retries the same step | The object verifies, or is repaired (MAINT-4) |
 | `OtherWriter` | **stop** | With `ContinueAndInterleaveHistories`: drops all engine state, boots again, and snapshots after the other writer's newest transaction | n/a under the default |
-| `RemoteRegressed` | keep trying | Forgets what the replica was known to hold, lists it again, continues from what it holds now | The relist succeeds |
+| `RemoteRegressed` | keep trying | Lists the replica again, continues from what it holds now, and sends again the staged files it lacks | The relist succeeds |
 | `WalCorrupt` | keep trying | Rescans. Nothing is staged past the bad frame | The frame verifies, or the WAL starts a new generation |
 | `WalTruncated` | keep trying | Rescans | The WAL covers its committed end again, or a new generation |
 | `WalUnlinked` | keep trying | Retries | Never by itself: the file is gone. An operator restarts the application and the replicator |
@@ -500,7 +500,7 @@ Under the default responses only two causes stop the engine: `OtherWriter` and `
 | `StoreDenied(Denied)` | No | Not unsafe. Stopping makes an access failure loud for an orchestrator | Fix what the kind names (the keys, the policy, the host clock, the bucket name, the TLS trust); restart |
 | `StoreRefused` | No | Not unsafe | Read the status in the log; fix the request's cause; restart |
 | `RemoteCorrupt` | No | Building on a corrupt object would make files that depend on it | Remove or replace the object named in the log; restart. A snapshot follows if the chain is broken |
-| `RemoteRegressed` | No | The replica lost files it had acknowledged. Continuing accepts that loss and may reuse the vacated range | Decide whether the rollback was intended. Restart to continue from what the replica holds |
+| `RemoteRegressed` | No | The replica lost files it had confirmed. Continuing accepts that loss and may reuse the vacated range | Decide whether the rollback was intended. Restart to continue from what the replica holds |
 | `WalCorrupt` | No | Nothing past the bad frame can be trusted | Run `PRAGMA integrity_check`; checkpoint from the application so the WAL restarts; restart. A snapshot follows |
 | `WalTruncated` | No | Same | Same |
 | `WalUnlinked` | No | The file the engine reads is no longer the database's WAL | Restart the application's connections and the replicator |
@@ -529,7 +529,7 @@ Three other ways replication ends that are not a `StopCause`:
 |---|---|---|---|
 | D1 | A crash loop takes one full snapshot per boot with no ceiling; maintenance and retention never run while processes die young; scratch files and open multipart uploads accumulate | BOOT-20, UP-15, MAINT-13 | #97 fixes scratch files and maintenance starvation. The snapshot per boot has no branch |
 | D2 | Narrowed by the engine journal: a failed WAL fsync is recorded in the tick that met it and survives a restart (sim `wal_fsync_fails_then_restart`, sqlite `a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`, now passing). Still forgotten by a kill inside that tick before the journal's write, while the journal is unwritable (`JournalUnwritable`), or when the journal is deleted or damaged before the restart | RUN-3, BOOT-21 | The residue is the journal design's "Does not fix" (`docs/journal.md`). Issue #99 |
-| D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Expected-fail test: sim `a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed_0x484` (ignored) | BOOT-19, G1 | None open. Issue #99 |
+| D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Accepted as a documented limit (`docs/decisions/D173.md`) | BOOT-19, G1 | None open. Issue #99 |
 | D4 | **Closed by #98.** A restore as of an instant could return a state committed up to one tick's read after the instant | G3 | Merged |
 | D5 | **Closed by scope.** A boot or relist listing that lags the bucket is trusted; a store that lags is unsupported (D173) | BOOT-18, MAINT-12 | `docs/decisions/D173.md` |
 | D6 | No conditional writes: a second writer or a reused id replaces an object instead of being refused. Two writers in step replace each other indefinitely and neither stops (expected-fail test core::`failover_with_the_old_host_alive_never_publishes_one_id_twice` (`#[ignore]` until #96)) | UP-14, GO-9, WORLD-5 | #96, with UP-17 on `claude/second-writer` |
@@ -541,7 +541,7 @@ Three other ways replication ends that are not a `StopCause`:
 | D14 | **Closed.** A boot that dropped an unreadable staged file snapshotted even when the WAL could regenerate it. It now continues when recovery does. The running twin (RUN-16) still snapshots | BOOT-5 | Closed |
 | D15 | A staged snapshot of a rewound database is deleted by the next boot if the process died before uploading it, and taken again | BOOT-9 | #89 |
 | D16 | **Closed.** A missing bucket and a TLS failure were reported as `credentials`. Each is now its own kind (N4) | UP-4 | Closed |
-| D17 | **Closed for a running engine.** A bucket rolled back while the engine runs was recognised as `remote_regressed` only if an ambiguous commit made the uploader list. Each maintenance listing now checks what the engine watched since the last one, and a read decides lag from loss. Open: a loss between a boot and its first maintenance listing that removes only what the boot listed | UP-11, G2 | `claude/second-writer` |
+| D17 | **Decided (D173).** A bucket rolled back while the engine runs is recognised as `remote_regressed` when a listing ends below what the engine confirmed: the uploader's, or maintenance's. A hole below the newest file is not watched; restore and the scheduled verify report it | UP-11, G2 | `claude/second-writer` |
 
 ### Defects found by the review of version 1
 
@@ -656,7 +656,7 @@ The index tables for `Fault`, `PersistentCause`, `SnapshotCause` and `StopCause`
 4. **Staleness.** The file records `read_at`. The gate fails unless `read_at` is `origin/main`, or no commit since touches a cited symbol or test.
 5. **Derived columns equal the code.** `response` equals `policy` and the default `Responses`; `signal` equals `cause_name`, `snapshot_name`, `stop_name`.
 6. **Marks have owners.** A no-test mark needs an issue number. An `in_review` tag whose PR merged fails until the row is updated. This version would have failed that check on the tag for #98.
-7. **Known wrong is an expected failure.** A known-wrong row names a test that fails on main, or carries "(no failing test)", which the gate counts and prints. Today two rows have such a test (BOOT-19, and RUN-3's restart half) and six rows or half-rows do not.
+7. **Known wrong is an expected failure.** A known-wrong row names a test that fails on main, or carries "(no failing test)", which the gate counts and prints. Today one row has such a test (RUN-3's restart half) and six rows or half-rows do not.
 8. **Every citation can fail (nightly).** Each cited test is linked to a planted bug that it kills. The plant must change the function the row's detection names, or the response path; a patch elsewhere that happens to fail the test does not count.
 9. **The cited test reaches the detecting branch (nightly).** Region coverage of the branch, not the function: every test reaches `policy` and `Actor::tick`.
 10. **Sections 1 and 6 are generated.** The table at the top of section 1 and the tally below come from the data, so a sentence like "three of four have an open violation" cannot go stale by itself.

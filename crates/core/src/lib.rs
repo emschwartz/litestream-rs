@@ -50,7 +50,6 @@ mod plan;
 mod position;
 mod publish;
 mod recover;
-mod regression_watch;
 mod restore;
 mod retry;
 mod snapshot;
@@ -104,7 +103,7 @@ pub use layout::{
     ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 /// The ahead-of-WAL verdict [`Actor::ahead`] returns.
-pub use lsr_journal::{Ahead, AheadKind, Floor, ReplicaId, Triple, Unchecked};
+pub use lsr_journal::{Ahead, AheadKind, Unchecked};
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
     MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionHold, RetentionMode,

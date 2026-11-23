@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
+use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
@@ -150,17 +150,10 @@ pub(super) struct Kept {
     /// A takeover the engine needs durable before it deletes staged files the
     /// replica holds: the driver writes it and hands it back.
     pub(super) wanted_takeover: Option<TakeoverRecord>,
-    /// A takeover this engine spent by publishing a transaction it covers: the
-    /// driver deletes the durable record and hands it back
-    /// ([`super::Actor::forget_takeover`]). Kept across a rebuild, so the record
-    /// cannot come back at the next start.
+    /// A takeover this engine spent by confirming a put above it: the driver deletes the
+    /// durable record and hands it back ([`super::Actor::forget_takeover`]). Kept across a
+    /// rebuild, so the record cannot come back at the next start.
     pub(super) spent_takeover: Option<TakeoverRecord>,
-    /// This engine saw the replica hold less than the held takeover covers (a listing
-    /// below the record, the relist after a regression included): its next publish of a covered transaction
-    /// spends the record. Without that evidence a covered publish is a put again of an
-    /// unconfirmed upload, and the record still describes the replica. In memory only:
-    /// each boot's listing finds the evidence again.
-    pub(super) takeover_armed: bool,
     /// The replica's newest transaction when a boot refused to build on files
     /// nothing vouched for: what the stop reports.
     pub(super) refused_through: Option<Txid>,
@@ -206,8 +199,6 @@ pub(super) struct Kept {
     pub(super) unchecked: Option<lsr_journal::Unchecked>,
     /// What the next tick tells the operator about the verdict, before anything else runs.
     pub(super) ahead_notice: Option<super::AheadNotice>,
-    /// The confirmed floor for the configured destination, journalled (`super::floor`).
-    pub(super) floor: Option<lsr_journal::Floor>,
     /// The WAL's committed end that the cure's FULL checkpoint copied and its read-back proved
     /// (`crate::cure`), while the TRUNCATE that empties it is still owed: the TRUNCATE then runs
     /// without scanning frames the kernel may have evicted since.
@@ -236,7 +227,6 @@ impl Kept {
             takeover: None,
             wanted_takeover: None,
             spent_takeover: None,
-            takeover_armed: false,
             refused_through: None,
             lag: Lag::default(),
             listed: false,
@@ -254,7 +244,6 @@ impl Kept {
             ahead: None,
             unchecked: None,
             ahead_notice: None,
-            floor: None,
             verified: None,
         }
     }
@@ -284,7 +273,6 @@ impl Kept {
             takeover,
             wanted_takeover: _,
             spent_takeover,
-            takeover_armed,
             refused_through,
             lag,
             listed,
@@ -302,7 +290,6 @@ impl Kept {
             ahead,
             unchecked,
             ahead_notice,
-            floor,
             verified,
         } = self;
         Self {
@@ -328,7 +315,6 @@ impl Kept {
             // A rebuilt engine boots again and asks again for what it needs.
             wanted_takeover: None,
             spent_takeover: *spent_takeover,
-            takeover_armed: *takeover_armed,
             refused_through: *refused_through,
             lag: *lag,
             listed: *listed,
@@ -347,7 +333,6 @@ impl Kept {
             ahead: *ahead,
             unchecked: *unchecked,
             ahead_notice: *ahead_notice,
-            floor: *floor,
             verified: *verified,
         }
     }
@@ -503,11 +488,6 @@ pub(super) struct Engine {
     pub(super) maintain: Maintain,
     /// Staged level-0 files through this transaction were pruned (W3).
     pub(super) pruned: Option<Txid>,
-    /// The newest transaction any listing or commit of this engine
-    /// confirmed on the replica. Never lowered, not even by a relist after the
-    /// replica went backwards: an acknowledged id is never taken again for
-    /// other pages, so a snapshot always goes above it.
-    pub(super) acknowledged: Option<Txid>,
     /// The newest transaction a running drop of this engine's own staged
     /// files vouched for, through the takeover record it kept first: the
     /// replica may hold those files unconfirmed (an upload whose answer was
@@ -515,12 +495,6 @@ pub(super) struct Engine {
     /// them confirms them, and the snapshot goes above them. Only this
     /// engine's own drops set it, never an operator's or a boot's record.
     pub(super) dropped_through: Option<Txid>,
-    /// Acknowledged ids whose staged copies a running drop removed, with the
-    /// snapshot staged above them. The replica lost them (a rollback) and
-    /// they are never taken again, so an upload planned at one moves past
-    /// them; a listing that confirms less than they reach would otherwise
-    /// leave the uploader asking for files staging no longer has.
-    pub(super) dropped_acknowledged: Option<TxidRange>,
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
@@ -549,9 +523,7 @@ impl Engine {
             upload: UploadState::Unknown,
             maintain: Maintain::default(),
             pruned: None,
-            acknowledged: None,
             dropped_through: None,
-            dropped_acknowledged: None,
             witnesses: Witnesses::new(),
             attempted: None,
             syncs_ahead: 0,
@@ -673,13 +645,9 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         "spent_takeover",
         Keep::Ephemeral(
             "the driver deletes the record in the tick it is handed out; a restart before then \
-             reads the record as it stood before the publish, and spends it again once that \
-             boot's listing arms it",
+             reads the record as it stood before the put, and spends it again when a put above \
+             it is confirmed again",
         ),
-    ),
-    (
-        "takeover_armed",
-        Keep::Derived("each boot's listing finds again the replica below the held record"),
     ),
     (
         "refused_through",
@@ -767,14 +735,6 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         ),
     ),
     (
-        "floor",
-        Keep::Journalled(
-            Record::EngineJournal,
-            "the confirmed floor for the configured destination: every id at or below it is \
-             taken, and its anchor names the bytes confirmed there (issue #171, item 4)",
-        ),
-    ),
-    (
         "verified",
         Keep::Ephemeral(
             "the cure's proof of what its checkpoint copied; a restart proves it again; cost: a \
@@ -821,15 +781,6 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
         Keep::Derived("what staging still holds tells the next boot what was pruned"),
     ),
     (
-        "acknowledged",
-        Keep::Owed(
-            "never lowered while the process lives, but set at boot from the replica's listing: \
-             a replica that went backwards before a restart lets a snapshot take an \
-             acknowledged id again. The mark is journalled (Kept.floor); the boot rule that \
-             reads it back into this field is the rest of issue #171, item 4",
-        ),
-    ),
-    (
         "witnesses",
         Keep::Derived("witnessed again at boot against the live WAL (crate::witness)"),
     ),
@@ -843,13 +794,6 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
     (
         "syncs_ahead",
         Keep::Ephemeral("a fairness count between two steps; a restart starts it at zero"),
-    ),
-    (
-        "dropped_acknowledged",
-        Keep::Derived(
-            "a boot confirms from the replica's listing and acknowledges nothing above it, \
-             so no acknowledged id lacks its staged copy",
-        ),
     ),
     (
         "dropped_through",
