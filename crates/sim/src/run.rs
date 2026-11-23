@@ -1926,6 +1926,11 @@ impl Runner {
                 let acted = self.w.sqlite.evict_page_cache();
                 self.scenario_bool("EvictPageCache", acted)?;
                 self.w.adopt_evicted();
+                if acted {
+                    // An evicted frame reads as the disk's older bytes and fails its checksum: a
+                    // checked read of the WAL finds it corrupt below the committed end, truthfully.
+                    self.expect(StopCause::WalCorrupt);
+                }
             }
             EnvFault::FlipDatabasePage(pgno) => {
                 let flipped = self.w.sqlite.flip_db_page(pgno);
