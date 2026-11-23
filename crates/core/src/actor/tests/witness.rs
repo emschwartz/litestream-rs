@@ -231,6 +231,36 @@ fn a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_repli
     );
 }
 
+/// The takeover kept before the witness drops a refused staged copy covers the replica's
+/// newest key even when a listing that lags leaves it out: reads that came back wrong judged
+/// that tail torn, so it is not the confirmed position, and a record capped at the newest
+/// listed key stopped one short of it. Once reads were honest, a later boot refused the
+/// engine's own upload (seed 0x3ed in the simulator: "a boot refused replica files through
+/// 0x26 with staging intact and no other writer").
+#[test]
+fn the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides() {
+    // Enough wrong reads of the tail that every read the boot makes of it comes back wrong.
+    const FLIPS: usize = 10;
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    rig.remote.hidden.lock().unwrap().push(key);
+    for _ in 0..FLIPS {
+        rig.remote.flip_next_read(key);
+    }
+    rig.wal.force_restart();
+    rig.commit(4);
+    let mut actor = Actor::new(go_like());
+    rig.tick(&mut actor, T0 + 2);
+    rig.settle(&mut actor, T0 + 2);
+    let record = rig.takeover.expect("a takeover was kept before the drop");
+    assert!(
+        record.covers(Txid::new(3).unwrap()),
+        "the record {record:?} stops short of the replica's newest key"
+    );
+}
+
 /// Every staged file's bytes, by transaction.
 fn staged_bytes(rig: &Rig) -> Vec<(u64, Vec<u8>)> {
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();

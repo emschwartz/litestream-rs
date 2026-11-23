@@ -2494,9 +2494,10 @@ impl BootGate {
     /// Before the boot drops staged files: the takeover that keeps what
     /// staging vouched for once they are gone, unless the held record covers
     /// it already. That is `local`, capped at the replica's newest key: the
-    /// confirmed `tip`, or a newer level-0 key the listing judged torn (it may
-    /// be this engine's own upload, read wrong). Pending files above every
-    /// replica key vouch for nothing there, so a forged one never raises it.
+    /// confirmed `tip`, or a newer level-0 key judged torn (it may be this
+    /// engine's own upload, read wrong), listed or found by a read past a
+    /// listing that lags. Pending files above every replica key vouch for
+    /// nothing there, so a forged one never raises it.
     async fn vouch<R: ObjectStore>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
         let Takeover::Vouch(record) = self.takeover else {
             return Ok(());
@@ -2505,8 +2506,16 @@ impl BootGate {
         let Some(local) = self.local.filter(|local| !covers(*local)) else {
             return Ok(());
         };
-        let listed = newest_replica_level_zero(remote).await?;
-        let replica = tip.max(listed.map(|info| info.key.range().max()));
+        let listed = newest_replica_level_zero(remote)
+            .await?
+            .map(|info| info.key.range().max());
+        // A listing may lag the replica's writes: keys past it are read for, through the
+        // staged position (any staged file may be on the replica), as boot reads past every
+        // listing. A record capped short of a key the listing hid refuses this engine's own
+        // upload at a later boot.
+        let past = probe_past(remote, listed, tip, Some(local)).await?;
+        let found = past.last().map(|key| key.range().max());
+        let replica = tip.max(listed).max(found);
         match replica.map(|replica| replica.min(local)) {
             Some(through) if !covers(through) => {
                 Err(BootStep::Vouch(TakeoverRecord::through(through)))
