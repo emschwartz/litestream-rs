@@ -122,6 +122,11 @@ struct WalState {
     /// a writer committing mid-tick.
     armed: Option<(u32, Armed)>,
     injections: Injections,
+    /// The pages backfills copied into the database file, read from the WAL's bytes as they
+    /// stood at the copy (an evicted frame's older bytes included), and the size the last copied
+    /// commit gave it. A [`FakeDb`] linked to this WAL reads them.
+    copied: BTreeMap<u32, Vec<u8>>,
+    copied_size: u32,
 }
 
 /// A transaction armed to commit at a later read.
@@ -232,8 +237,38 @@ impl WalState {
         let safe = self
             .read_mark
             .map_or(self.mx_frame, |mark| mark.min(self.mx_frame));
-        self.backfilled = self.backfilled.max(upto.min(safe));
+        let new = self.backfilled.max(upto.min(safe));
+        for index in self.backfilled..new {
+            self.copy_frame(index);
+        }
+        self.backfilled = new;
         self.backfilled
+    }
+
+    /// Copies frame `index` (0-based) into the database file as SQLite's backfill does: the
+    /// page as the WAL's bytes hold it now, unverified.
+    fn copy_frame(&mut self, index: u32) {
+        let at = byte_pos(WalOffset::from_frame_index(index, self.page_size));
+        let page_at = at.saturating_add(FRAME_HEADER_LEN);
+        let header = self.bytes.get(at..page_at);
+        let word = |n: usize| {
+            header
+                .and_then(|h| h.get(n..n.saturating_add(4)))
+                .and_then(|w| <[u8; 4]>::try_from(w).ok())
+                .map_or(0, u32::from_be_bytes)
+        };
+        let (pgno, commit) = (word(0), word(4));
+        let page = self
+            .bytes
+            .get(page_at..page_at.saturating_add(self.page_size.bytes()))
+            .map(<[u8]>::to_vec);
+        if let Some(page) = page {
+            self.copied.insert(pgno, page);
+        }
+        if commit != 0 {
+            self.copied.retain(|n, _| *n <= commit);
+            self.copied_size = commit;
+        }
     }
 
     fn take_read_lock(&mut self) {
@@ -279,6 +314,8 @@ impl FakeWal {
             forced: None,
             armed: None,
             injections: Injections::default(),
+            copied: BTreeMap::new(),
+            copied_size: 0,
         };
         state.write_header();
         Self {
@@ -709,13 +746,15 @@ impl Checkpointer for FakeCheckpointer {
     }
 }
 
-/// An in-memory database file.
+/// An in-memory database file. Linked to a [`FakeWal`] ([`FakeDb::link`]), it also holds what
+/// that WAL's checkpoints copied: a page written here after a copy wins until the next copy.
 #[derive(Debug)]
 pub struct FakeDb {
     page_size: PageSize,
     pages: BTreeMap<u32, Vec<u8>>,
     count: u32,
     injections: Injections,
+    wal: Option<FakeWal>,
 }
 
 impl FakeDb {
@@ -727,21 +766,44 @@ impl FakeDb {
             pages: BTreeMap::new(),
             count: 0,
             injections: Injections(Vec::new()),
+            wal: None,
         }
+    }
+
+    /// Makes `wal`'s checkpoints write into this file, as SQLite's write into the database.
+    pub fn link(&mut self, wal: &FakeWal) {
+        self.wal = Some(wal.clone());
     }
 
     /// Writes a page (zero-padded or cut to the page size) and grows the file to hold it.
     pub fn write_page(&mut self, pgno: PageNo, data: &[u8]) {
         let mut page = data.to_vec();
         page.resize(self.page_size.bytes(), 0);
+        if let Some(wal) = &self.wal {
+            lock(&wal.state).copied.remove(&pgno.get());
+        }
         self.pages.insert(pgno.get(), page);
         self.count = self.count.max(pgno.get());
+    }
+
+    /// The page count, with the size the linked WAL's last copied commit gave the file.
+    fn count(&self) -> u32 {
+        let copied = self
+            .wal
+            .as_ref()
+            .map_or(0, |wal| lock(&wal.state).copied_size);
+        self.count.max(copied)
     }
 
     /// Cuts or extends the file to `count` pages; pages above are dropped.
     pub fn set_page_count(&mut self, count: u32) {
         self.pages.retain(|pgno, _| *pgno <= count);
         self.count = count;
+        if let Some(wal) = &self.wal {
+            let mut state = lock(&wal.state);
+            state.copied.retain(|pgno, _| *pgno <= count);
+            state.copied_size = state.copied_size.min(count);
+        }
     }
 
     /// Fails the next call of `op` with `err`, once.
@@ -753,15 +815,19 @@ impl FakeDb {
 impl PageSource for FakeDb {
     fn page_count(&mut self) -> Result<DbPages, SourceError> {
         self.injections.take(SourceOp::PageCount)?;
-        Ok(DbPages::new(self.count))
+        Ok(DbPages::new(self.count()))
     }
 
     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
         self.injections.take(SourceOp::ReadPage)?;
-        if pgno.get() > self.count || buf.len() != self.page_size.bytes() {
+        if pgno.get() > self.count() || buf.len() != self.page_size.bytes() {
             return Err(SourceError::Short { pgno });
         }
-        match self.pages.get(&pgno.get()) {
+        let copied = self
+            .wal
+            .as_ref()
+            .and_then(|wal| lock(&wal.state).copied.get(&pgno.get()).cloned());
+        match copied.as_ref().or_else(|| self.pages.get(&pgno.get())) {
             Some(page) => buf.copy_from_slice(page),
             None => buf.fill(0),
         }

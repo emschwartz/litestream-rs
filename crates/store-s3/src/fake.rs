@@ -69,6 +69,8 @@ struct State {
     uploads: BTreeMap<String, Pending>,
     next_upload: u64,
     denied_deletes: BTreeSet<String>,
+    /// Keys a DeleteObjects was refused for, as it refused them.
+    refused_deletes: u64,
     /// Answers a conditional write with 501, as a provider without them.
     no_conditional_writes: bool,
 }
@@ -193,6 +195,17 @@ impl FakeS3 {
     /// provider without conditional writes does.
     pub fn refuse_conditional_writes(&self) {
         self.state().no_conditional_writes = true;
+    }
+
+    /// Lifts every [`FakeS3::deny_delete`].
+    pub fn allow_deletes(&self) {
+        self.state().denied_deletes.clear();
+    }
+
+    /// How many keys a DeleteObjects was refused for so far.
+    #[must_use]
+    pub fn refused_deletes(&self) -> u64 {
+        self.state().refused_deletes
     }
 
     /// Makes DeleteObjects report `AccessDenied` for `key` and leave it in place.
@@ -677,6 +690,7 @@ fn delete_objects(state: &mut State, request: &HttpRequest) -> HttpResponse {
         let key = xml_unescape(raw);
         let shown = xml_escape(&key);
         if state.denied_deletes.contains(&key) {
+            state.refused_deletes = state.refused_deletes.saturating_add(1);
             xml.push_str(&format!(
                 "<Error><Key>{shown}</Key><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>"
             ));

@@ -382,6 +382,18 @@ impl FaultHandle {
         state.lag.window = window.max(1);
     }
 
+    /// Whether listings still show `key` as it was before a lagged write or
+    /// delete, not as the store holds it now: a listing made now does not show
+    /// what is under the key.
+    #[must_use]
+    pub fn hides(&self, key: FileKey) -> bool {
+        lock(&self.state)
+            .lag
+            .stale
+            .iter()
+            .any(|stale| stale.key == key)
+    }
+
     /// Listings a lag changed.
     #[must_use]
     pub fn stale_listings(&self) -> u32 {
@@ -1052,6 +1064,8 @@ pub enum RecorderEvent {
     Put {
         /// The object.
         key: FileKey,
+        /// Whether the code under test asked for a create-only write or a replace.
+        mode: WriteMode,
         /// Its header, `None` when the first bytes written are not a valid one.
         header: Option<Header>,
         /// The WAL range its pages came from, from the header.
@@ -1294,6 +1308,7 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
         Ok(TapUpload {
             inner,
             key: *key,
+            mode,
             created_at,
             head: Vec::new(),
             wrote: 0,
@@ -1339,6 +1354,7 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
 pub struct TapUpload<S: ObjectStore> {
     inner: S::Upload,
     key: FileKey,
+    mode: WriteMode,
     created_at: Timestamp,
     head: Vec<u8>,
     wrote: u64,
@@ -1404,6 +1420,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
         let Self {
             inner,
             key,
+            mode,
             created_at,
             head,
             wrote,
@@ -1432,6 +1449,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
                 let (at, high) = s.times();
                 s.events.push(RecorderEvent::Put {
                     key,
+                    mode,
                     header,
                     origin: header.and_then(|h| h.fields().wal),
                     created_at,

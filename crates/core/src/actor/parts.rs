@@ -17,12 +17,13 @@
 
 use std::collections::BTreeSet;
 
-use lsr_ltx::{PageSize, Timestamp, Txid};
+use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
 use super::ahead::AheadCheck;
 use super::clock::EngineClock;
+use super::once::FinalSnapshot;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
@@ -125,8 +126,13 @@ pub(super) struct Kept {
     /// are deleted only when a read on a later tick fails too. Kept across
     /// boots, since boot's sweep is one of the readers.
     pub(super) suspect_staged: Option<FileKey>,
+    /// Since when level-0 uploads replace, because the store cannot make create-only writes:
+    /// `None` (create-only) until the store says so, then for the rest of the process (D79).
+    pub(super) unguarded: Option<Timestamp>,
     /// Snapshots staged since the actor began, per cause: a report.
     pub(super) snapshots: SnapshotCounts,
+    /// The snapshot a drain was asked to end with (`once`): a request of this process.
+    pub(super) final_snapshot: FinalSnapshot,
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
@@ -188,8 +194,17 @@ pub(super) struct Kept {
     pub(super) ahead_check: AheadCheck,
     /// The standing ahead-of-WAL verdict, journalled, while its restore point is kept.
     pub(super) ahead: Option<lsr_journal::Ahead>,
+    /// The standing notice that an owed ahead-of-WAL check could not be made, journalled, for
+    /// its window (`docs/decisions.md` D106).
+    pub(super) unchecked: Option<lsr_journal::Unchecked>,
     /// What the next tick tells the operator about the verdict, before anything else runs.
     pub(super) ahead_notice: Option<super::AheadNotice>,
+    /// The confirmed floor for the configured destination, journalled (`super::floor`).
+    pub(super) floor: Option<lsr_journal::Floor>,
+    /// The WAL's committed end that the cure's FULL checkpoint copied and its read-back proved
+    /// (`crate::cure`), while the TRUNCATE that empties it is still owed: the TRUNCATE then runs
+    /// without scanning frames the kernel may have evicted since.
+    pub(super) verified: Option<lsr_wal::CommittedEnd>,
 }
 
 impl Kept {
@@ -205,7 +220,9 @@ impl Kept {
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
+            unguarded: None,
             snapshots: SnapshotCounts::default(),
+            final_snapshot: FinalSnapshot::NotAsked,
             unproven: Unproven::No,
             takeover: None,
             wanted_takeover: None,
@@ -226,7 +243,10 @@ impl Kept {
             read_lock_violations: 0,
             ahead_check: AheadCheck::No,
             ahead: None,
+            unchecked: None,
             ahead_notice: None,
+            floor: None,
+            verified: None,
         }
     }
 
@@ -246,7 +266,9 @@ impl Kept {
             snapshot_asked,
             app: _,
             suspect_staged,
+            unguarded,
             snapshots,
+            final_snapshot,
             unproven,
             takeover,
             wanted_takeover: _,
@@ -267,7 +289,10 @@ impl Kept {
             read_lock_violations,
             ahead_check,
             ahead,
+            unchecked,
             ahead_notice,
+            floor,
+            verified,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -280,7 +305,11 @@ impl Kept {
             snapshot_asked: *snapshot_asked,
             app: observer,
             suspect_staged: *suspect_staged,
+            // The store does not learn conditional writes from a rebuild: only a new process
+            // asks it again.
+            unguarded: *unguarded,
             snapshots: *snapshots,
+            final_snapshot: *final_snapshot,
             unproven: *unproven,
             takeover: *takeover,
             // A rebuilt engine boots again and asks again for what it needs.
@@ -303,7 +332,10 @@ impl Kept {
             read_lock_violations: *read_lock_violations,
             ahead_check: *ahead_check,
             ahead: *ahead,
+            unchecked: *unchecked,
             ahead_notice: *ahead_notice,
+            floor: *floor,
+            verified: *verified,
         }
     }
 
@@ -470,6 +502,12 @@ pub(super) struct Engine {
     /// them confirms them, and the snapshot goes above them. Only this
     /// engine's own drops set it, never an operator's or a boot's record.
     pub(super) dropped_through: Option<Txid>,
+    /// Acknowledged ids whose staged copies a running drop removed, with the
+    /// snapshot staged above them. The replica lost them (a rollback) and
+    /// they are never taken again, so an upload planned at one moves past
+    /// them; a listing that confirms less than they reach would otherwise
+    /// leave the uploader asking for files staging no longer has.
+    pub(super) dropped_acknowledged: Option<TxidRange>,
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
@@ -478,6 +516,11 @@ pub(super) struct Engine {
     /// boot's listing showed everything earlier processes put. So a takeover record before
     /// a running drop vouches for no id past this one.
     pub(super) attempted: Option<Txid>,
+    /// Ticks in a row that ended in the WAL step since the upload step last ran; at
+    /// [`super::state::FAIR_SHARE`] the upload step runs first. An app that commits before
+    /// every tick keeps the WAL step busy on each one, and the upload step that follows it
+    /// would otherwise never run.
+    pub(super) syncs_ahead: u32,
 }
 
 impl Engine {
@@ -495,8 +538,10 @@ impl Engine {
             pruned: None,
             acknowledged: None,
             dropped_through: None,
+            dropped_acknowledged: None,
             witnesses: Witnesses::new(),
             attempted: None,
+            syncs_ahead: 0,
         }
     }
 }
@@ -556,6 +601,14 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         Keep::Ephemeral("what the application's checkpoints did between reads: counts reported"),
     ),
     (
+        "unguarded",
+        Keep::Ephemeral(
+            "the replica's store refused a create-only write, so uploads replace: each process \
+             asks the store again at its first level-0 upload and is refused again \
+             (docs/decisions/D079.md)",
+        ),
+    ),
+    (
         "suspect_staged",
         Keep::Ephemeral(
             "one failed read says nothing about the stored bytes; the next boot's sweep reads the \
@@ -565,6 +618,12 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "snapshots",
         Keep::Ephemeral("snapshots staged since the process began: a report"),
+    ),
+    (
+        "final_snapshot",
+        Keep::Ephemeral(
+            "a -once request of this process: a restart is a new run, which asks again or not",
+        ),
     ),
     (
         "unproven",
@@ -676,6 +735,30 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         "ahead_notice",
         Keep::Ephemeral("what the next tick says; a boot that finds the verdict says it again"),
     ),
+    (
+        "unchecked",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "an owed ahead-of-WAL check given up: the notice stands for its window across \
+             restarts (docs/decisions.md D106)",
+        ),
+    ),
+    (
+        "floor",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "the confirmed floor for the configured destination: every id at or below it is \
+             taken, and its anchor names the bytes confirmed there (issue #171, item 4)",
+        ),
+    ),
+    (
+        "verified",
+        Keep::Ephemeral(
+            "the cure's proof of what its checkpoint copied; a restart proves it again; cost: a \
+             frame evicted after the proof reads as WAL corruption until the generation moves \
+             (docs/decisions/D108.md)",
+        ),
+    ),
 ];
 
 /// What each field of [`Engine`] is to a restart: a rebuild replaces the engine whole, so most
@@ -719,8 +802,8 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
         Keep::Owed(
             "never lowered while the process lives, but set at boot from the replica's listing: \
              a replica that went backwards before a restart lets a snapshot take an \
-             acknowledged id again until the confirmed high-water mark is journalled \
-             (issue #171, item 4)",
+             acknowledged id again. The mark is journalled (Kept.floor); the boot rule that \
+             reads it back into this field is the rest of issue #171, item 4",
         ),
     ),
     (
@@ -732,6 +815,17 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
         Keep::Derived(
             "a boot's listing shows every put an earlier process made, so a new engine has sent \
              none past it",
+        ),
+    ),
+    (
+        "syncs_ahead",
+        Keep::Ephemeral("a fairness count between two steps; a restart starts it at zero"),
+    ),
+    (
+        "dropped_acknowledged",
+        Keep::Derived(
+            "a boot confirms from the replica's listing and acknowledges nothing above it, \
+             so no acknowledged id lacks its staged copy",
         ),
     ),
     (

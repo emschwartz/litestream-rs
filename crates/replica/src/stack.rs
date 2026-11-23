@@ -49,8 +49,8 @@ use std::thread::{Builder, JoinHandle};
 pub const ENGINE_STACK: usize = 512 * 1024;
 
 /// The stack of a thread that only waits and wakes another (signals, a child's exit, a
-/// final sync's answer) or answers a small HTTP request.
-pub const WAIT_STACK: usize = 64 * 1024;
+/// final sync's answer) or answers a small HTTP request: 64 KiB.
+pub const WAIT_STACK: usize = 65_536;
 
 /// Starts a thread named `name` with a `stack` of the given bytes.
 ///

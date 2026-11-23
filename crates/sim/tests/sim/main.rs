@@ -6,19 +6,26 @@
 #[cfg(test)]
 mod after_restart;
 #[cfg(test)]
+mod ahead_unchecked;
+#[cfg(test)]
 mod clock_reads;
 #[cfg(test)]
 mod crash_law;
 #[cfg(test)]
+mod create_only;
+#[cfg(test)]
 mod differential;
 #[cfg(test)]
 mod dropped_created_at;
+#[cfg(test)]
+mod evicted_cure;
 #[cfg(test)]
 mod evicted_wal;
 #[cfg(test)]
 mod failstop;
 #[cfg(test)]
 mod faults;
+mod final_snapshot;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]

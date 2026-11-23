@@ -495,16 +495,41 @@ pub async fn restore_with<S: ObjectStore, K: DatabaseSink>(
 /// listing is checking those files, so no read past it is made ([listed_past]).
 pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     store: &S,
+    listed: Option<&Inventory>,
+    target: RestoreTarget,
+    options: RestoreOptions,
+    sink: K,
+) -> Result<Restored, RestoreError> {
+    restore_within(store, listed, target, options, sink, MAX_ATTEMPTS).await
+}
+
+/// [restore_from] over a fresh listing that plans once: a planned file gone, a gap, or a
+/// listing behind a read ends it at the first attempt, with the error the last attempt would
+/// give. For a caller that retries on a later tick itself, so one tick spends one listing of the
+/// replica, not [MAX_ATTEMPTS] of them.
+pub(crate) async fn restore_one_plan<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
+    target: RestoreTarget,
+    options: RestoreOptions,
+    sink: K,
+) -> Result<Restored, RestoreError> {
+    restore_within(store, None, target, options, sink, 1).await
+}
+
+/// [restore_from], with each reason to list again allowed `limit` attempts.
+async fn restore_within<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
     mut listed: Option<&Inventory>,
     target: RestoreTarget,
     options: RestoreOptions,
     mut sink: K,
+    limit: u8,
 ) -> Result<Restored, RestoreError> {
     let mut attempt = 1_u8;
     let mut bytes_read = 0_u64;
     let mut created_at_read = 0_u64;
     let probe = listed.is_none();
-    let mut retries = Retries::default();
+    let mut retries = Retries::new(limit);
     loop {
         let probe = probe && !retries.trusting;
         let source = listed.take().map_or(Source::List { probe }, Source::Given);
@@ -556,8 +581,10 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
 const MAX_CHASE: u8 = 64;
 
 /// Why a restore listed again, counted toward the limits on each reason.
-#[derive(Default)]
 struct Retries {
+    /// Attempts each reason is allowed: [MAX_ATTEMPTS], or one for a caller that retries
+    /// itself.
+    limit: u8,
     /// Attempts that found a planned file gone.
     vanished: u8,
     /// Attempts whose listing planned a gap.
@@ -573,6 +600,17 @@ struct Retries {
 }
 
 impl Retries {
+    const fn new(limit: u8) -> Self {
+        Self {
+            limit,
+            vanished: 0,
+            gaps: 0,
+            lagged: 0,
+            chased: None,
+            trusting: false,
+        }
+    }
+
     /// Counts `abort`, made by attempt `attempt`, or fails when its reason is exhausted.
     ///
     /// A file found past a listing is a lagging listing or a writer that put it after the
@@ -584,7 +622,7 @@ impl Retries {
             Abort::Fatal(err) => Err(err),
             Abort::Vanished(missing) => {
                 self.vanished = self.vanished.saturating_add(1);
-                if self.vanished >= MAX_ATTEMPTS {
+                if self.vanished >= self.limit {
                     return Err(RestoreError::Unstable {
                         attempts: attempt,
                         missing,
@@ -594,7 +632,7 @@ impl Retries {
             }
             Abort::Gap(outcome) => {
                 self.gaps = self.gaps.saturating_add(1);
-                if self.gaps >= MAX_ATTEMPTS {
+                if self.gaps >= self.limit {
                     return Err(RestoreError::NoPlan(NoPlan(outcome)));
                 }
                 Ok(())
@@ -611,7 +649,7 @@ impl Retries {
                 // round that caught up remains, and the restore stops reading past the
                 // listing; the last term only bounds the loop if that reasoning is wrong.
                 let exhausted = attempt >= MAX_CHASE.saturating_add(MAX_ATTEMPTS);
-                if self.lagged >= MAX_ATTEMPTS || exhausted {
+                if self.lagged >= self.limit || exhausted {
                     return Err(RestoreError::ListingBehind {
                         attempts: attempt,
                         found,
@@ -697,10 +735,12 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     Ok((chain, last, inside_file))
 }
 
-/// A file a read finds past the newest transaction `inventory` lists, if any: one of the keys
-/// a reader can name without a listing for the next transaction (the first transaction, for an
-/// empty listing), as the engine's own probe reads them (`crate::probe`). A listing that lags
-/// the store's writes is told from a whole one this way, as far as a reader can name keys.
+/// A file a read finds past the newest transaction `inventory` lists, if any: the keys a reader
+/// can name without a listing (`crate::probe`), looked for from the next transaction (the
+/// first, for an empty listing) as the engine's own probe walks them, until more than
+/// `PROBE_GAP` transactions in a row are missing. A listing that lags the store's writes is
+/// told from a whole one this way, as far as a reader can name keys; a hole in the replica
+/// wider than that gap right after the listing's end is beyond it (`docs/BEHAVIOR.md`).
 ///
 /// # Errors
 /// [RestoreError::Store] for a read that fails other than as not found.
@@ -708,16 +748,15 @@ pub async fn listed_past<S: ObjectStore>(
     store: &S,
     inventory: &Inventory,
 ) -> Result<Option<FileKey>, RestoreError> {
-    let next = match inventory.newest() {
+    let first = match inventory.newest() {
         Some(newest) => newest.next(),
         None => Txid::new(1),
     };
-    let Some(next) = next else {
-        return Ok(None);
-    };
-    crate::probe::holder(store, next)
+    let starts = crate::probe::Starts::of(inventory);
+    let found = crate::probe::walk(store, first, None, &starts, true)
         .await
-        .map_err(RestoreError::Store)
+        .map_err(RestoreError::Store)?;
+    Ok(found.first().copied())
 }
 
 /// The plan for [target]: an instant asks for the created-at times it needs, counted

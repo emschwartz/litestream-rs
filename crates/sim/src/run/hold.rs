@@ -46,8 +46,11 @@ const ALL_OPS: [StoreOp; 4] = [
 const SAMPLED_TXIDS: u64 = 4;
 
 /// Reads of the replica the engine makes under [`Hold::LyingReads`] that return a flipped
-/// byte, at most: one flip scheduled for each of the next this many reads.
-const LYING_ENGINE_READS: u32 = 64;
+/// byte, at most: one flip scheduled for each of the next this many reads. It stands in for
+/// "every read for the whole hold", so it must outlast the hold: the one-byte reads past a
+/// listing take a scheduled flip each without receiving it (they never cover the header
+/// byte), and a boot walks several transactions with several keys each.
+const LYING_ENGINE_READS: u32 = 2048;
 
 /// What a restore through the fault meets.
 #[derive(Clone, Debug)]
@@ -646,6 +649,11 @@ impl Runner {
             }
         };
         let ahead = u8::try_from(rng.below(3)).unwrap_or(0);
-        self.store_fault(target, op, ahead, crate::store::FaultShape::Error(error));
+        self.store_fault(
+            target,
+            op,
+            u16::from(ahead),
+            crate::store::FaultShape::Error(error),
+        );
     }
 }

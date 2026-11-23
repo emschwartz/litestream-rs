@@ -24,16 +24,24 @@
 //!   simulator writes (a level-1 compaction first reads each input's trailer
 //!   from the replica to compare it with the staged copy, then the whole
 //!   input from one of the two); a boot reads back the newest file of each level and
-//!   the replica's newest level-0 file, a header first then the file, and
-//!   its listing is followed by reads of the missing level-0 keys past it
-//!   ([`PROBE_READS`]). So replica reads are at most two per compaction
-//!   input, plus [`READS_PER_BOOT`] per boot, plus one per fault that failed
-//!   a call (each such failure is retried) and [`PROBE_READS`] more for the
-//!   listing that may follow it, plus [`READS_PER_DEGRADED_RETRY`] per retry
-//!   of a degraded task (a retry of a persistent cause such as a page size
-//!   change compares the replica's newest file again; the doubling wait
-//!   bounds how often). A key a lag hid and a probe found is a listing the
-//!   lag changed, counted as a fault hit.
+//!   the replica's newest level-0 file, a header first then the file. So replica reads
+//!   are at most two per compaction input, plus [`READS_PER_BOOT`] per boot, plus one per
+//!   fault that failed a call (each such failure is retried), plus
+//!   [`READS_PER_DEGRADED_RETRY`] per retry of a degraded task (a retry of a persistent
+//!   cause such as a page size change compares the replica's newest file again; the
+//!   doubling wait bounds how often), plus the probes past each listing ([`Walked`]).
+//! - Every listing (a boot's, a relist's, maintenance's, a restore's) lists each level,
+//!   so a tick's listing calls over the level count, rounded up, bound the probes past a
+//!   listing it made. Each probe looks for transactions from the one after its listing's
+//!   newest, through the newest that staging or the replica holds and a gap past that, or
+//!   up to its cap when nothing is staged to bound it; never more than the cap. So it looks
+//!   for at most the reach the simulator sees around the tick plus the gap, capped. For each
+//!   transaction in its gap window it names the level-0 file, the level-0 file from the
+//!   first transaction and from where the listed level 0 ends, the snapshot, and two starts
+//!   for each level 1 to 8; past the window, the level-1 to 8 starts go. Only a level the
+//!   replica was ever written at can have a start, so the levels counted are those a put
+//!   or another writer reached, over the whole run. A key a lag hid and a probe found is a
+//!   listing the lag changed, counted as a fault hit.
 //! - Each file needs one commit; a failed or ambiguous commit is retried. So
 //!   replica commits are at most two per distinct key put plus one per
 //!   fault hit and crash. A listing a lag changed counts as a fault hit: what
@@ -51,18 +59,68 @@ use crate::store::{RecorderCounts, RecorderEvent};
 /// compressor's framing.
 pub const PER_FILE: u64 = 1024;
 
-/// Reads one boot may make of the replica: a header and a body for the
+/// Reads one boot may make of the replica besides its probe: a header and a body for the
 /// newest file of each of the ten levels, and the upload lane's read-back.
-pub const READS_PER_BOOT: u64 = 24 + PROBE_READS;
+pub const READS_PER_BOOT: u64 = 24;
 
-/// The most reads that end a probe past a listing: the keys named for each
-/// missing transaction it reads past before it stops, three per transaction
-/// (`lsr_core::fresh_probe_reads` is the exact count).
-#[expect(
-    clippy::as_conversions,
-    reason = "a u32 widens to a u64 losslessly; `From` is not const"
-)]
-pub const PROBE_READS: u64 = 3 * (lsr_core::PROBE_GAP as u64 + 1);
+/// Keys a probe names for each transaction whatever the replica holds: the level-0 file, the
+/// level-0 file from the first transaction, the level-0 file from where the listed level 0
+/// ends, and the snapshot.
+pub const KEYS_PER_TRANSACTION: u64 = 4;
+
+/// Keys a probe names inside its gap window for each level 1 to 8 the replica holds: the
+/// start after the level's newest file and the start of the level below's run above it.
+pub const KEYS_PER_LEVEL: u64 = 2;
+
+/// Transactions the probes past a run's listings may have looked for, split at each probe's
+/// gap window: inside it every start is named, past it only the level-0 and snapshot keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Walked {
+    /// Transactions inside a gap window.
+    pub window: u64,
+    /// Transactions past one.
+    pub rest: u64,
+}
+
+impl Walked {
+    /// The most transactions one probe looks for.
+    #[expect(
+        clippy::as_conversions,
+        reason = "a u32 widens to a u64 losslessly; `From` is not const"
+    )]
+    pub const CAP: u64 = lsr_core::PROBE_CAP as u64;
+
+    /// Transactions a probe looks for inside its gap window: the first one past the listing
+    /// and the gap after it.
+    #[expect(
+        clippy::as_conversions,
+        reason = "a u32 widens to a u64 losslessly; `From` is not const"
+    )]
+    pub const WINDOW: u64 = lsr_core::PROBE_GAP as u64 + 1;
+
+    /// Adds a tick that made `lists` listing calls, each probe reaching at most `reach`, the
+    /// newest transaction staging or the replica held around the tick ([`Self::CAP`] when
+    /// nothing was staged).
+    pub fn add(&mut self, lists: u64, reach: u64) {
+        let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
+        let probes = lists.div_ceil(levels);
+        let looked = reach.saturating_add(Self::WINDOW).min(Self::CAP);
+        let window = looked.min(Self::WINDOW);
+        self.window = self.window.saturating_add(probes.saturating_mul(window));
+        self.rest = self
+            .rest
+            .saturating_add(probes.saturating_mul(looked.saturating_sub(window)));
+    }
+
+    /// The most reads these probes made, with `levels` of levels 1 to 8 ever written.
+    #[must_use]
+    pub fn reads(self, levels: u64) -> u64 {
+        let in_window = KEYS_PER_TRANSACTION.saturating_add(KEYS_PER_LEVEL.saturating_mul(levels));
+        self.window
+            .saturating_mul(in_window)
+            .saturating_add(self.rest.saturating_mul(KEYS_PER_TRANSACTION))
+    }
+}
 
 /// Reads one retry of a degraded task may make of the replica: a header and
 /// the newest file it names.
@@ -80,6 +138,8 @@ pub struct Spent {
     pub fault_hits: u64,
     /// Ticks that reported a task degraded: each is one retry.
     pub degraded_retries: u64,
+    /// The probes past the run's listings.
+    pub walked: Walked,
 }
 
 /// Judges the run's replica costs.
@@ -114,7 +174,8 @@ pub fn check(
     let reads = inputs
         .saturating_mul(2)
         .saturating_add(spent.boots.saturating_add(1).saturating_mul(READS_PER_BOOT))
-        .saturating_add(spent.fault_hits.saturating_mul(1 + PROBE_READS))
+        .saturating_add(spent.fault_hits)
+        .saturating_add(spent.walked.reads(merged_levels(&sized)))
         .saturating_add(
             spent
                 .degraded_retries
@@ -127,6 +188,16 @@ pub fn check(
         .saturating_add(spent.fault_hits)
         .saturating_add(spent.boots);
     within(Bound::CommitCalls, counts.commits, commits)
+}
+
+/// The levels 1 to 8 any file in `sized` was written at.
+fn merged_levels(sized: &BTreeMap<FileKey, u64>) -> u64 {
+    let levels: BTreeSet<u8> = sized
+        .keys()
+        .map(|key| key.level().get())
+        .filter(|level| (1..=8).contains(level))
+        .collect();
+    u64::try_from(levels.len()).unwrap_or(u64::MAX)
 }
 
 /// Each compaction level holds at most the bytes of the level below plus one
@@ -216,6 +287,7 @@ mod tests {
     fn put(key: FileKey, size: u64) -> RecorderEvent {
         RecorderEvent::Put {
             key,
+            mode: lsr_core::WriteMode::New,
             header: None,
             origin: None,
             created_at: Timestamp::from_unix_millis(0),
@@ -257,5 +329,75 @@ mod tests {
         let lost = BTreeSet::from([Txid::new(1).unwrap()]);
         let counts = RecorderCounts::default();
         assert_eq!(check(&events, counts, Spent::default(), &lost, &[]), Ok(()));
+    }
+
+    /// One listing lists every level, so a tick's listing calls over the level count, rounded
+    /// up, are the probes it made.
+    #[test]
+    fn listing_calls_count_one_probe_per_listing_of_every_level() {
+        let levels = u64::try_from(Level::ALL.len()).unwrap();
+        let mut one = Walked::default();
+        one.add(levels, 0);
+        let mut two = Walked::default();
+        two.add(levels + 1, 0);
+        assert_eq!(two.window, 2 * one.window);
+        let mut none = Walked::default();
+        none.add(0, Walked::CAP);
+        assert_eq!(none, Walked::default());
+    }
+
+    /// With nothing staged, nothing bounds the walk: a probe is charged its cap, every key in
+    /// its gap window and the level-0 and snapshot keys past it.
+    #[test]
+    fn a_probe_with_nothing_staged_is_charged_to_the_cap() {
+        let levels = u64::try_from(Level::ALL.len()).unwrap();
+        let mut walked = Walked::default();
+        walked.add(levels, Walked::CAP);
+        assert_eq!(walked.window, Walked::WINDOW);
+        assert_eq!(walked.rest, Walked::CAP - Walked::WINDOW);
+        assert_eq!(walked.reads(0), Walked::CAP * KEYS_PER_TRANSACTION);
+        assert_eq!(
+            walked.reads(2),
+            Walked::CAP * KEYS_PER_TRANSACTION + Walked::WINDOW * 2 * KEYS_PER_LEVEL
+        );
+    }
+
+    /// Behind a staged backlog a probe reads through the newest staged transaction and its
+    /// gap, never past the cap: the charge follows the backlog, not the worst case.
+    #[test]
+    fn a_probe_behind_a_backlog_is_charged_through_the_backlog_and_its_gap() {
+        let levels = u64::try_from(Level::ALL.len()).unwrap();
+        let mut short = Walked::default();
+        short.add(levels, 10);
+        assert_eq!(short.window + short.rest, 10 + Walked::WINDOW);
+        let mut long = Walked::default();
+        long.add(levels, Walked::CAP * 2);
+        assert_eq!(long.window + long.rest, Walked::CAP);
+    }
+
+    /// Boots that fail one after another each list and walk their backlog. Reads within what
+    /// those listings allow pass; twice as many, a walk repeated per listing, fail.
+    #[test]
+    fn repeated_boots_walking_their_backlog_pass_and_a_doubled_walk_fails() {
+        let levels = u64::try_from(Level::ALL.len()).unwrap();
+        let boots = 5;
+        let mut walked = Walked::default();
+        for _ in 0..boots {
+            walked.add(levels, 40);
+        }
+        let spent = Spent {
+            boots,
+            walked,
+            ..Spent::default()
+        };
+        let allowed = (boots + 1) * READS_PER_BOOT + walked.reads(0);
+        let lost = BTreeSet::new();
+        let at = |reads| RecorderCounts {
+            reads,
+            ..RecorderCounts::default()
+        };
+        assert_eq!(check(&[], at(allowed), spent, &lost, &[]), Ok(()));
+        let doubled = allowed + walked.reads(0);
+        assert!(check(&[], at(doubled), spent, &lost, &[]).is_err());
     }
 }

@@ -1,9 +1,9 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 4252581..46268c2 100644
+index 8eb785b1..ea9af638 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -237,7 +237,7 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
-                 TailVerdict::Sound => newest,
+@@ -315,7 +315,7 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
+                 }
                  TailVerdict::Replace => tail.prev().max(confirmed),
                  TailVerdict::Diverged => {
 -                    return Ok(diverged(tail, tail));

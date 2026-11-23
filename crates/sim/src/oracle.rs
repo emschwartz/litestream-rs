@@ -181,6 +181,17 @@ pub enum Violation {
         /// The forcings in effect.
         window: Vec<crate::forcing::Forcing>,
     },
+    /// A provider refused a request with an answer an operator fixes one way
+    /// ([`crate::remote::expected_denial`]), and the engine reported no refusal, or another.
+    #[error(
+        "the store refused with what an operator fixes as {expected:?}; the engine reported {got}"
+    )]
+    DenialMisreported {
+        /// The refusal the answer means.
+        expected: lsr_core::Denied,
+        /// What the engine's tasks reported after the tick.
+        got: String,
+    },
     /// A running engine listed the replica while another writer's file stood
     /// past its own position, and did not stop.
     #[error("the engine listed {key}, another writer's file past its position, and kept going")]
@@ -339,6 +350,14 @@ pub enum Violation {
         key: String,
         /// What happened to it.
         how: String,
+    },
+    /// On a store without conditional writes, a level-0 file was written as a replace while
+    /// health called uploads healthy: a second writer under the same key would go unrefused and
+    /// unreported (`docs/decisions.md` D79).
+    #[error("{key} was replaced with nothing reporting that the store cannot refuse a taken key")]
+    UnguardedReplace {
+        /// The file.
+        key: String,
     },
     /// After every injected fault healed and the app let go, a task was
     /// still stalled on a retried fault the world no longer imposes: the

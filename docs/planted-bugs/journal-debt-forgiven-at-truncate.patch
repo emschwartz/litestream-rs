@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/actor/unproven.rs b/crates/core/src/actor/unproven.rs
-index 4b37495..8d0222a 100644
+index 7be0fef0..c65cf73a 100644
 --- a/crates/core/src/actor/unproven.rs
 +++ b/crates/core/src/actor/unproven.rs
-@@ -119,7 +119,7 @@ impl Actor {
-             }
-             Err(err) => return Err(Fault::from_source(err)),
-         }
+@@ -163,7 +163,7 @@ impl Actor {
+         self.kept.app.ours(env.wal.committed().ok(), run.ok());
+         cured(run)?;
+         self.kept.verified = None;
 -        self.kept.unproven = Unproven::Snapshot;
 +        self.kept.unproven = Unproven::No;
          Ok(Stepped::Resnapshot(SnapshotCause::WalSyncFailed))

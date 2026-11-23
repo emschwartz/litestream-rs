@@ -51,3 +51,19 @@ filesystem\.rs:.*for RealFs>::sync_dir -> .* with Ok\(\(\)\)
 filesystem\.rs:.*for File>::sync_all -> .* with Ok\(\(\)\)
 # store-fs engine_journal.rs read_slot: besides end of file, a read of an open journal fails only on a device fault no test can produce.
 replace match guard err.kind\(\) == ErrorKind::UnexpectedEof with true in <impl JournalFile for FsJournalFile>::read_slot
+# replica local.rs fsync wrappers: replacing an fsync with Ok(()) shows only after a power loss; the crash-consistency tests of the publish and replace orders check the calls are made in order.
+local\.rs:.*<impl (ReplaceFs|PublishFs) for FileSink>::sync_(scratch|dir) -> .* with Ok\(\(\)\)
+local\.rs:.* replace sync_dir -> io::Result<\(\)> with Ok\(\(\)\)
+# replica thread.rs connection: the path naming another file between the open and the check needs a rename inside one call; the swap before the open is tested.
+replace match guard opened == self.shared.database with true in Worker::connection
+# replica thread.rs Progress::advance: committed WAL bytes past the synced position, with the engine able to measure, exist only between two steps of one turn, which no health snapshot a test can wait for shows.
+replace > with < in Progress::advance
+# replica thread.rs ran: the engine never answers an idle tick with "run again now"; the guard keeps the thread from spinning if it ever did.
+replace match guard !idle with true in Worker::ran
+# replica thread.rs count: a sync event with no files comes only from a maintenance step that neither reached the committed end nor found a reset WAL, which no deterministic test produces.
+replace match guard \*files > 0 with true in Worker::count
+replace > with >= in Worker::count
+# replica scheduled.rs kept_restore_point: what the engine keeps from retention shows only as files retention leaves days later; the engine's keeping is tested in lsr-core.
+replace Scheduled::kept_restore_point -> Option<Txid> with None
+# replica stack.rs spawn: the test-only half-stack gate doubled instead of halved still passes every suite; it only loses the headroom margin.
+replace / with \* in spawn

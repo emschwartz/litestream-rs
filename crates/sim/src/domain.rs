@@ -428,6 +428,33 @@ pub fn draw_source(entropy: &SeededEntropy, known_wrong: bool) -> SourceDraw {
     }
 }
 
+/// `err` for `op` if the table lets a history draw it, else an I/O error: what the older subset
+/// (runs without [`crate::Weights::error_domain`]) draws in place of a busy answer from a call
+/// that takes no lock. The subset's entropy is spent as before, so its other draws keep their
+/// values.
+#[must_use]
+pub const fn possible_source(op: SourceOp, err: SourceError) -> SourceError {
+    if drawable(source_cell(op, source_class(err)), false) {
+        err
+    } else {
+        SourceError::Io(ErrorKind::Other)
+    }
+}
+
+/// `err` for `op` on `target` if the table lets a history draw it, else a transient error of the
+/// same operation: what the older subset draws in place of a filesystem asking to slow down.
+#[must_use]
+pub fn possible_store(target: Target, op: StoreOp, err: StoreError) -> StoreError {
+    if drawable(store_cell(target, op, store_class(&err)), false) {
+        err
+    } else {
+        StoreError::Transient {
+            op,
+            kind: ErrorKind::Other,
+        }
+    }
+}
+
 /// The stop a source error legitimately causes under the default responses, if any: written
 /// from the engine's contract (BEHAVIOR's stop conditions), not taken from its policy.
 #[must_use]
@@ -461,6 +488,8 @@ pub enum StoreClass {
     ScratchExhausted,
     /// [`StoreError::Corrupt`].
     Corrupt,
+    /// [`StoreError::CreateOnlyUnsupported`].
+    CreateOnlyUnsupported,
     /// [`StoreError::Refused`].
     Refused,
 }
@@ -474,7 +503,7 @@ pub const STORE_OPS: [StoreOp; 4] = [
 ];
 
 /// Every store error class, every denial kind among them ([`store_class`] checks it).
-pub const STORE_CLASSES: [StoreClass; 12] = [
+pub const STORE_CLASSES: [StoreClass; 13] = [
     StoreClass::Transient,
     StoreClass::Throttled,
     StoreClass::Denied(Denied::Credentials),
@@ -486,6 +515,7 @@ pub const STORE_CLASSES: [StoreClass; 12] = [
     StoreClass::AlreadyExists,
     StoreClass::ScratchExhausted,
     StoreClass::Corrupt,
+    StoreClass::CreateOnlyUnsupported,
     StoreClass::Refused,
 ];
 
@@ -520,6 +550,7 @@ pub const fn store_class(err: &StoreError) -> StoreClass {
         StoreError::AlreadyExists { .. } => StoreClass::AlreadyExists,
         StoreError::ScratchExhausted { .. } => StoreClass::ScratchExhausted,
         StoreError::Corrupt { .. } => StoreClass::Corrupt,
+        StoreError::CreateOnlyUnsupported { .. } => StoreClass::CreateOnlyUnsupported,
         StoreError::Refused { .. } => StoreClass::Refused,
     }
 }
@@ -533,6 +564,9 @@ const NOT_FOUND_IS_STALE: &str = "a NotFound for an object the store holds is a 
 const TAKEN_IS_WORLD: &str = "a taken key is a fact about the store: a create-only upload is \
                               answered from what the key holds, an earlier ambiguous commit or \
                               another writer, each drawn elsewhere";
+const NO_CREATE_ONLY_IS_WORLD: &str = "a store without create-only writes is a fact about the \
+                                       store for the whole run: drawn as the world's \
+                                       Weights::no_create_only, every create-only commit refused";
 const NOT_FOUND_NEVER: &str = "neither store reports NotFound here: a listing of nothing is empty, a delete of nothing succeeds";
 
 /// The cell of `op` and `class` on `target`: the staging store against `store-fs`, the replica
@@ -566,6 +600,15 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
             }
         },
         StoreClass::Corrupt => Cell::Impossible(CORRUPT_IS_WORLD),
+        StoreClass::CreateOnlyUnsupported => match (target, op) {
+            (Target::Remote, StoreOp::Upload) => Cell::Impossible(NO_CREATE_ONLY_IS_WORLD),
+            (Target::Staging, StoreOp::Upload) => Cell::Impossible(
+                "the engine's staging writes replace; it never asks for create-only",
+            ),
+            (_, StoreOp::List | StoreOp::Read | StoreOp::Delete) => {
+                Cell::Impossible("only a create-only upload can be refused for lack of the check")
+            }
+        },
         StoreClass::Refused => match target {
             Target::Remote => Cell::Drawn,
             Target::Staging => Cell::Impossible("store-fs has no status codes and refuses nothing"),
@@ -628,7 +671,8 @@ fn store_error(
         StoreClass::NotFound
         | StoreClass::AlreadyExists
         | StoreClass::ScratchExhausted
-        | StoreClass::Corrupt => {
+        | StoreClass::Corrupt
+        | StoreClass::CreateOnlyUnsupported => {
             // NotFound, AlreadyExists and Corrupt are never drawn. A scratch exhaustion names a key the
             // engine only reports, never acts on.
             placeholder_error(op, class)
@@ -655,6 +699,7 @@ fn placeholder_error(op: StoreOp, class: StoreClass) -> StoreError {
         | StoreClass::Denied(_)
         | StoreClass::NotFound
         | StoreClass::AlreadyExists
+        | StoreClass::CreateOnlyUnsupported
         | StoreClass::Refused => transient,
     }
 }
@@ -725,7 +770,10 @@ pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<Kn
 #[must_use]
 pub const fn refused_before_acting(err: &StoreError) -> bool {
     match store_class(err) {
-        StoreClass::Denied(_) | StoreClass::Refused | StoreClass::ScratchExhausted => true,
+        StoreClass::Denied(_)
+        | StoreClass::Refused
+        | StoreClass::ScratchExhausted
+        | StoreClass::CreateOnlyUnsupported => true,
         StoreClass::Transient
         | StoreClass::Throttled
         | StoreClass::NotFound
@@ -742,6 +790,9 @@ pub const fn store_stop(target: Target, err: &StoreError) -> Option<StopCause> {
         (Target::Remote, StoreClass::Denied(why)) => Some(StopCause::StoreDenied(why)),
         (Target::Remote, StoreClass::Refused) => Some(StopCause::StoreRefused),
         (Target::Remote, StoreClass::Corrupt) => Some(StopCause::RemoteCorrupt),
+        (Target::Remote, StoreClass::CreateOnlyUnsupported) => {
+            Some(StopCause::ConditionalWritesUnsupported)
+        }
         (
             Target::Remote,
             StoreClass::Transient
@@ -767,6 +818,9 @@ fn pick_ref<'a, T>(entropy: &SeededEntropy, from: &'a [T]) -> Option<&'a T> {
     let at = usize::try_from(below(entropy, u64::try_from(from.len()).ok()?)).ok()?;
     from.get(at)
 }
+
+pub mod marks;
+pub mod points;
 
 #[cfg(test)]
 mod tests;

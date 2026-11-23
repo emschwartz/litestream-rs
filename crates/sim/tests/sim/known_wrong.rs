@@ -123,3 +123,67 @@ fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
         KnownWrong::HaltForgottenAtRestart,
     );
 }
+
+/// Fixed: bucket rollbacks leave a hole below the engine's newest upload, staging is wiped, and
+/// lagging listings hide what changed. The boot's read past its listing used to stop in the hole
+/// (at most three missing transactions), stage transactions the replica already held above it,
+/// and leave a latest state that went back to an older one with no stop (BOOT-18). With nothing
+/// staged the walk now runs to its cap, so this must pass.
+///
+/// Shrunk by hand from the survival campaign's seed 0x95a (83 operations) to these 22, each
+/// needed to reach the defect: the replica takes transactions 1, 4 and 5 under lagging listings;
+/// five rollbacks take it back to 1; the engine, not noticing (D17), uploads 6; staging is wiped
+/// and a boot under a lagging listing stages 4 and 5 again.
+#[test]
+fn a_hole_wider_than_the_probe_below_a_hidden_upload_is_walked_past() {
+    use lsr_core::{SourceError, SourceOp};
+    use lsr_sim::EnvFault;
+    use lsr_sim::generate::{Hold, RemoteOp};
+    let commit = |pages| Op::Commit { pages, grow: false };
+    let rollback = || Op::Remote(RemoteOp::RollBack);
+    let ops = [
+        Op::LaggingListings {
+            writes: 2,
+            window: 40,
+        },
+        commit(2),
+        Op::EnvFault(EnvFault::Source(SourceOp::Checkpoint, SourceError::Busy)),
+        Op::Shutdown,
+        Op::CommitInTick { pages: 4 },
+        Op::CommitInTick { pages: 2 },
+        commit(4),
+        Op::CommitInTick { pages: 2 },
+        Op::Shutdown,
+        Op::LaggingListings {
+            writes: 5,
+            window: 24,
+        },
+        Op::Shutdown,
+        rollback(),
+        Op::Tick,
+        rollback(),
+        Op::OtherProcessReader { begin: true },
+        rollback(),
+        rollback(),
+        rollback(),
+        Op::Shutdown,
+        Op::EnvFault(EnvFault::WipeStaging),
+        Op::CommitInTick { pages: 1 },
+        Op::Hold {
+            hold: Hold::LaggingListing,
+            ticks: 8,
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        after_restart: AfterRestart::Retry,
+        clock_law: ClockLaw::PerTick,
+        error_domain: true,
+        known_wrong: true,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x95a), &ops, &opts) {
+        panic!("{failure}");
+    }
+}

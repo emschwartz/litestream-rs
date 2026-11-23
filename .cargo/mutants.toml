@@ -11,4 +11,7 @@ exclude_globs = [
     "crates/core/src/source/fake.rs",
     "crates/core/src/source/fake/**",
     "crates/core/src/restore/mem_sink.rs",
+    # How a test waits on a replicator that runs on the fake clock (`lsr_replica::waiting`): a
+    # mutant there weakens a test's wait, which then fails or passes the test by its own bounds.
+    "crates/replica/src/waiting.rs",
 ]
