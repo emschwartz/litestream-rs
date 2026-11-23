@@ -10,6 +10,15 @@ use crate::recover::BootWal;
 use crate::source::{CommittedRead, FakeWal};
 use crate::store::WriteMode;
 
+/// The decision alone: these tests judge verdicts, and the events have tests of their own.
+fn recover(
+    source: Option<PositionSource<'_>>,
+    wal: &crate::recover::WalView,
+    remote: Option<lsr_ltx::Txid>,
+) -> Recovered {
+    crate::recover::recover_traced(source, wal, remote).recovered
+}
+
 const PS: PageSize = PageSize::MIN;
 
 pub(super) fn pg(n: u32) -> PageNo {

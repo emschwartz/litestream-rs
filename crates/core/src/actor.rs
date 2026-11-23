@@ -114,8 +114,8 @@ use crate::maintain::{
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
 use crate::recover::{
-    BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView,
-    newest_level_zero, newest_replica_level_zero, read_header, recover,
+    BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent, Recovered,
+    Verdict, WalView, newest_level_zero, newest_replica_level_zero, read_header, recover_traced,
 };
 use crate::regression_watch::RegressionWatch;
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
@@ -494,6 +494,27 @@ impl Actor {
             Err(kind) => Some(JournalSignal::Unwritable(kind)),
             Ok(()) => self.kept.journal,
         }
+    }
+
+    /// Counts the event a recovery verdict names, and hands on its decision.
+    fn noted(&mut self, verdict: Verdict) -> Recovered {
+        match verdict.event {
+            Some(RecoverEvent::ReadLockViolated { .. }) => {
+                self.kept.read_lock_violations = self.kept.read_lock_violations.saturating_add(1);
+            }
+            // Its snapshot cause carries what it found.
+            Some(RecoverEvent::LocalRewound { .. }) | None => {}
+        }
+        verdict.recovered
+    }
+
+    /// How many recoveries found a commit abandoned after the read lock was taken
+    /// (`RecoverEvent::ReadLockViolated`): a broken lock or a bug in the continuity proof.
+    /// The snapshot each one takes is named `GenerationChanged`, so this count is the only
+    /// place the violation shows.
+    #[must_use]
+    pub const fn read_lock_violations(&self) -> u64 {
+        self.kept.read_lock_violations
     }
 
     /// The task's degraded state, if a persistent failure left it in one.
@@ -1399,7 +1420,7 @@ impl Actor {
     }
 
     fn plan_step<W: WalSource>(
-        &self,
+        &mut self,
         wal: &mut W,
         reader: &mut WalReader<W::Wal>,
         committed: CommittedRead,
@@ -1430,7 +1451,7 @@ impl Actor {
 
     /// What recovery makes of the WAL past a running position.
     fn recovered<W: WalSource>(
-        &self,
+        &mut self,
         wal: &mut W,
         reader: &mut WalReader<W::Wal>,
         committed: CommittedRead,
@@ -1439,11 +1460,8 @@ impl Actor {
         let probes = Probes::read_against(reader, position, &committed)?;
         let view = wal_view(wal, Some(&*reader), committed)?;
         let source = PositionSource::Running(position, probes);
-        Ok(step_of(recover(
-            Some(source),
-            &view,
-            self.engine.upload.confirmed(),
-        )))
+        let verdict = recover_traced(Some(source), &view, self.engine.upload.confirmed());
+        Ok(step_of(self.noted(verdict)))
     }
 
     /// The WAL a step reads, with the wal-index read and the read-lock hold it
@@ -1462,7 +1480,7 @@ impl Actor {
         reason = "a private step's two exits: the opened WAL, or the verdict that ends it"
     )]
     fn open_wal<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
-        &self,
+        &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
     ) -> Result<Result<(WalReader<W::Wal>, CommittedRead), Stepped>, Fault> {
         let committed = env.wal.committed().map_err(Fault::from_source)?;
@@ -1480,7 +1498,7 @@ impl Actor {
 
     /// No readable WAL and no snapshot pending: recovery classifies the loss.
     fn without_wal<W: WalSource>(
-        &self,
+        &mut self,
         wal: &mut W,
         committed: CommittedRead,
     ) -> Result<Stepped, Fault> {
@@ -1496,7 +1514,11 @@ impl Actor {
         };
         let source = PositionSource::Running(&position, probes);
         Ok(
-            match step_of(recover(Some(source), &view, self.engine.upload.confirmed())) {
+            match step_of(self.noted(recover_traced(
+                Some(source),
+                &view,
+                self.engine.upload.confirmed(),
+            ))) {
                 Ok(_) => Stepped::Resnapshot(SnapshotCause::WalMissing),
                 Err(verdict) => verdict,
             },
@@ -2825,8 +2847,11 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
     };
     let view = wal_view(env.wal, reader.as_deref(), committed)?;
     let vouched = tip_file.as_ref().is_some_and(|file| {
-        let verdict = recover(Some(PositionSource::Boot(file)), &view, confirmed);
-        matches!(verdict, Recovered::Continue(_) | Recovered::WalRestarted(_))
+        let verdict = recover_traced(Some(PositionSource::Boot(file)), &view, confirmed);
+        matches!(
+            verdict.recovered,
+            Recovered::Continue(_) | Recovered::WalRestarted(_)
+        )
     });
     let unvouched = confirmed.filter(|tip| !vouched && gate.above(*tip));
     let newest_staged = if vouched {
@@ -2846,11 +2871,16 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
             Recovered::Stop(StopCause::PageSizeChanged { was, now })
         }
         (None, Some(_)) => Recovered::Stop(StopCause::OtherWriter),
-        (None, None) => recover(
-            newest_staged.as_ref().map(PositionSource::Boot),
-            &view,
-            confirmed,
-        ),
+        // A boot position holds no read lock, so no verdict here names a broken one; a
+        // rewound WAL's event repeats what its snapshot cause carries.
+        (None, None) => {
+            recover_traced(
+                newest_staged.as_ref().map(PositionSource::Boot),
+                &view,
+                confirmed,
+            )
+            .recovered
+        }
     };
     Ok(Booted {
         newest_staged,

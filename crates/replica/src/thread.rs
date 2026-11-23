@@ -691,6 +691,7 @@ impl Worker {
         let resnapshot = self.actor.pending_snapshot();
         let journal = self.actor.journal();
         let snapshots = self.actor.snapshots();
+        let read_lock_violations = self.actor.read_lock_violations();
         let ran = self.app_ran_total();
         let app = self.app_total();
         let verification = self
@@ -721,6 +722,7 @@ impl Worker {
             health.app_checkpoints = app;
             health.counters = Counters {
                 snapshots,
+                read_lock_violations,
                 ..seen.counters
             };
             health.verification = verification;

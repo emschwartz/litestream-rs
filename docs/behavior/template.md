@@ -323,6 +323,7 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 | `lsr_app_notice`, `lsr_app_checkpoints_total` | `replica/src/health.rs` | The application ran checkpoints of its own. A notice, not a failure |
 | `Health.journal`, `/healthz` `journal` and `journal_detail`, `lsr_journal_signal{signal}` | `replica/src/health.rs`, `sidecar/src/health.rs` | What the engine journal says: `missing`, `unreadable`, `newer_version`, `slot_unreadable` (boot read it so, until the next boot; BOOT-25 to BOOT-29) or `unwritable` (it lags what the engine holds; RUN-27). A notice, not a failure: `/healthz` stays 200 |
 | `lsr_panics_total` | `replica/src/health.rs` | Panics caught at the thread boundary |
+| `lsr_read_lock_violations_total` | `replica/src/health.rs` | Recoveries that found a commit abandoned after the read lock was taken: a broken lock or a bug |
 
 There is no per-cause count of snapshots taken on main. It is on #86 (`lsr_snapshots_total{db,cause}`).
 

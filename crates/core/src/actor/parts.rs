@@ -163,6 +163,9 @@ pub(super) struct Kept {
     pub(super) journal_read: Option<Journal>,
     /// How the last journal write ended: an error is `JournalUnwritable` until one succeeds.
     pub(super) journal_write: Result<(), ErrorKind>,
+    /// Recoveries that found a commit abandoned after the read lock was taken: a report,
+    /// kept across rebuilds, since the snapshot that follows names only the generation change.
+    pub(super) read_lock_violations: u64,
 }
 
 impl Kept {
@@ -193,6 +196,7 @@ impl Kept {
             writer: None,
             journal_read: None,
             journal_write: Ok(()),
+            read_lock_violations: 0,
         }
     }
 
@@ -227,6 +231,7 @@ impl Kept {
             writer,
             journal_read,
             journal_write,
+            read_lock_violations,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -256,6 +261,7 @@ impl Kept {
             writer: writer.clone(),
             journal_read: *journal_read,
             journal_write: *journal_write,
+            read_lock_violations: *read_lock_violations,
         }
     }
 

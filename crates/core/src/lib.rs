@@ -118,7 +118,7 @@ pub use position::{
 };
 pub use recover::{
     BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
-    RecoverEvent, Recovered, Verdict, WalView, recover, recover_traced,
+    RecoverEvent, Recovered, Verdict, WalView, recover_traced,
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
