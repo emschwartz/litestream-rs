@@ -153,6 +153,10 @@ pub enum Fault {
         /// The page.
         pgno: PageNo,
     },
+    /// The replica's store cannot make a create-only write (an S3 provider without conditional
+    /// writes): the level-0 upload published nothing, and from now on uploads replace as Go's
+    /// do, with nothing to refuse another writer's file under the same key (D79).
+    CreateOnlyUnsupported,
     /// The shutdown deadline arrived mid-work.
     ShutdownDeadline,
     /// A condition the code rules out, and where it was met. A property test
@@ -469,6 +473,8 @@ pub enum StopCause {
         /// The lowest page that differs.
         first: NonZeroU32,
     },
+    /// The replica's store cannot make a create-only write, and the response is to stop.
+    ConditionalWritesUnsupported,
     /// The shutdown deadline arrived.
     Shutdown,
     /// A bug in this program.
@@ -519,6 +525,10 @@ pub enum PersistentCause {
         /// The lowest page that differs.
         first: NonZeroU32,
     },
+    /// The replica's store cannot make a create-only write: uploads replace, as Go's do, and a
+    /// second writer under the same key is no longer refused by the bucket. Stands until the
+    /// process restarts, whatever succeeds after it (D79).
+    ConditionalWritesUnsupported,
     /// A bug in this program.
     Bug,
     /// A fault whose policy is to retry failed [`STALLED_AFTER`] times in a row on one task:
@@ -605,6 +615,7 @@ impl Stall {
             | Fault::WalUnlinked
             | Fault::WalSyncFailed
             | Fault::DatabasePageMismatch { .. }
+            | Fault::CreateOnlyUnsupported
             | Fault::ShutdownDeadline
             | Fault::Bug(_) => None,
         }
@@ -631,6 +642,7 @@ impl PersistentCause {
             StopCause::DatabaseAheadOfWal { pages, first } => {
                 Some(Self::DatabaseAheadOfWal { pages, first })
             }
+            StopCause::ConditionalWritesUnsupported => Some(Self::ConditionalWritesUnsupported),
             StopCause::Bug => Some(Self::Bug),
             StopCause::Shutdown => None,
         }
@@ -657,6 +669,7 @@ impl PersistentCause {
             Self::DatabaseAheadOfWal { pages, first } => {
                 StopCause::DatabaseAheadOfWal { pages, first }
             }
+            Self::ConditionalWritesUnsupported => StopCause::ConditionalWritesUnsupported,
             Self::Bug => StopCause::Bug,
             Self::Stalled(_) => return None,
         })
@@ -731,6 +744,9 @@ pub struct Responses {
     /// Keeping trying replicates the file as the application serves it, keeps the state before
     /// it restorable for a fixed window, and reports it; nothing an operator does ends it.
     pub database_ahead_of_wal: Response,
+    /// The replica's store cannot make a create-only write. Keeping trying uploads by replacing,
+    /// as Go does, with the upload task degraded until the process restarts (D79).
+    pub conditional_writes_unsupported: Response,
     /// A condition the code rules out happened. Keeping trying rebuilds the
     /// engine and boots again after the wait; it never continues from the
     /// state the failure left.
@@ -758,6 +774,7 @@ impl Responses {
         page_size_changed: Response::KeepTrying,
         database_page_mismatch: Response::KeepTrying,
         database_ahead_of_wal: Response::KeepTrying,
+        conditional_writes_unsupported: Response::KeepTrying,
         bug: Response::KeepTrying,
         other_writer: OtherWriter::Stop,
     };
@@ -779,6 +796,7 @@ impl Responses {
         page_size_changed: Response::Stop,
         database_page_mismatch: Response::Stop,
         database_ahead_of_wal: Response::Stop,
+        conditional_writes_unsupported: Response::Stop,
         bug: Response::Stop,
         other_writer: OtherWriter::Stop,
     };
@@ -816,6 +834,7 @@ impl Responses {
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
             PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
             PersistentCause::DatabaseAheadOfWal { .. } => self.database_ahead_of_wal,
+            PersistentCause::ConditionalWritesUnsupported => self.conditional_writes_unsupported,
             PersistentCause::Stalled(_) => return Action::Retry,
             PersistentCause::RemoteRegressed => {
                 return match self.remote_regressed {
@@ -927,6 +946,9 @@ pub const fn policy(fault: &Fault) -> Policy {
         Fault::DatabasePageMismatch { pgno } => {
             Policy::Persistent(PersistentCause::DatabasePageMismatch { pgno: *pgno })
         }
+        Fault::CreateOnlyUnsupported => {
+            Policy::Persistent(PersistentCause::ConditionalWritesUnsupported)
+        }
         Fault::ShutdownDeadline => Policy::Shutdown,
         Fault::Bug(_) => Policy::Persistent(PersistentCause::Bug),
     }
@@ -974,6 +996,7 @@ impl Fault {
             // else the key holds something the caller did not expect: list.
             StoreError::AlreadyExists { .. } => Self::UploadAmbiguous,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
+            StoreError::CreateOnlyUnsupported { .. } => Self::CreateOnlyUnsupported,
             StoreError::Corrupt { cause, .. } => match cause {
                 CorruptCause::CommitSizeMismatch { .. } => Self::UploadAmbiguous,
                 CorruptCause::ChecksumMismatch { .. } => Self::UploadChecksumMismatch,
@@ -1002,6 +1025,7 @@ impl Fault {
             | StoreError::Throttled { .. }
             | StoreError::Denied { .. }
             | StoreError::AlreadyExists { .. }
+            | StoreError::CreateOnlyUnsupported { .. }
             | StoreError::Refused { .. } => Self::LocalIo,
             StoreError::NotFound { .. } => Self::StagedLost,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,
@@ -1146,6 +1170,7 @@ impl Fault {
             | Self::WalTruncatedBelowCommitted
             | Self::WalUnlinked
             | Self::DatabasePageMismatch { .. }
+            | Self::CreateOnlyUnsupported
             | Self::ShutdownDeadline
             | Self::Bug(_) => false,
         }

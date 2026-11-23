@@ -176,6 +176,7 @@ pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::PageSizeChanged { .. } => "page_size_changed",
         DegradedCause::DatabasePageMismatch { .. } => "database_page_mismatch",
         DegradedCause::DatabaseAheadOfWal { .. } => "database_ahead_of_wal",
+        DegradedCause::ConditionalWritesUnsupported => "conditional_writes_unsupported",
         DegradedCause::Bug => "bug",
         DegradedCause::Stalled(stall) => stall_name(stall),
     }

@@ -62,6 +62,7 @@ pub fn classify(err: &StoreError) -> Class {
         StoreError::NotFound { .. } => Class::Missing,
         StoreError::Denied { .. }
         | StoreError::AlreadyExists { .. }
+        | StoreError::CreateOnlyUnsupported { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::Corrupt { .. }
         | StoreError::Refused { .. } => Class::Permanent,

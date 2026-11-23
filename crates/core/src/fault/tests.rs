@@ -197,6 +197,11 @@ policy_is!(
     persistent(PersistentCause::DatabasePageMismatch { pgno: page_two() })
 );
 policy_is!(
+    a_store_without_create_only_writes_is_persistent,
+    Fault::CreateOnlyUnsupported,
+    persistent(PersistentCause::ConditionalWritesUnsupported)
+);
+policy_is!(
     bug_is_persistent,
     Fault::Bug(BugSite::PageMap),
     persistent(PersistentCause::Bug)
@@ -233,6 +238,7 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::WalUnlinked
         | Fault::WalSyncFailed
         | Fault::DatabasePageMismatch { .. }
+        | Fault::CreateOnlyUnsupported
         | Fault::ShutdownDeadline
         | Fault::Bug(_) => true,
     };
@@ -243,7 +249,7 @@ fn page_two() -> PageNo {
     PageNo::new(2, PageSize::MIN).unwrap()
 }
 
-fn every_persistent_cause() -> [PersistentCause; 17] {
+fn every_persistent_cause() -> [PersistentCause; 18] {
     [
         PersistentCause::StoreDenied(Denied::Credentials),
         PersistentCause::StoreDenied(Denied::Permission),
@@ -267,6 +273,7 @@ fn every_persistent_cause() -> [PersistentCause; 17] {
             pages: NonZeroU32::MIN,
             first: NonZeroU32::MIN.saturating_add(1),
         },
+        PersistentCause::ConditionalWritesUnsupported,
         PersistentCause::Bug,
     ]
 }
@@ -293,6 +300,7 @@ fn every_persistent_cause_is_listed() {
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::DatabasePageMismatch { .. }
         | PersistentCause::DatabaseAheadOfWal { .. }
+        | PersistentCause::ConditionalWritesUnsupported
         | PersistentCause::Bug => true,
         // Not configurable: `every_retried_fault_stalls_and_no_stall_stops` covers it.
         PersistentCause::Stalled(_) => false,
@@ -342,6 +350,7 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
             | PersistentCause::DatabaseAheadOfWal { .. }
+            | PersistentCause::ConditionalWritesUnsupported
             | PersistentCause::Stalled(_) => Action::Retry,
         };
         assert_eq!(all.action(cause), want, "{cause:?}");
@@ -377,6 +386,9 @@ fn each_field_names_one_cause() {
             }
             PersistentCause::DatabaseAheadOfWal { .. } => {
                 one.database_ahead_of_wal = Response::Stop;
+            }
+            PersistentCause::ConditionalWritesUnsupported => {
+                one.conditional_writes_unsupported = Response::Stop;
             }
             PersistentCause::Bug => one.bug = Response::Stop,
             PersistentCause::Stalled(_) => {}
@@ -521,6 +533,17 @@ fn from_remote_already_exists_is_an_ambiguous_upload() {
     assert_eq!(store_fault(&err), Fault::UploadAmbiguous);
 }
 
+/// A store that cannot make a create-only write published nothing and checked nothing: the
+/// uploader's fault for switching to replacing writes under a standing cause (D79).
+#[test]
+fn from_remote_create_only_unsupported_is_its_own_fault() {
+    let err = StoreError::CreateOnlyUnsupported {
+        op: StoreOp::Upload,
+        key: key(),
+    };
+    assert_eq!(store_fault(&err), Fault::CreateOnlyUnsupported);
+}
+
 #[test]
 fn from_remote_not_found_is_missing() {
     let err = StoreError::NotFound { key: key() };
@@ -562,6 +585,13 @@ fn from_staging_names_the_local_fault_for_every_store_error() {
         ),
         (StoreError::NotFound { key: key() }, Fault::StagedLost),
         (StoreError::AlreadyExists { key: key() }, Fault::LocalIo),
+        (
+            StoreError::CreateOnlyUnsupported {
+                op: StoreOp::Upload,
+                key: key(),
+            },
+            Fault::LocalIo,
+        ),
         (
             StoreError::ScratchExhausted { key: key() },
             Fault::LocalDiskFull,

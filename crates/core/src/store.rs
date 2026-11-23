@@ -17,8 +17,9 @@
 //!   [`StoreError::AlreadyExists`] and leaves that object as it was. The
 //!   bucket, not a listing, then says the key is taken, so a stale listing
 //!   cannot hide it. A store that cannot make the check (an S3 provider
-//!   without conditional writes) replaces instead, as [`WriteMode::Replace`]
-//!   does, and says so through its own reporting.
+//!   without conditional writes) fails the commit with
+//!   [`StoreError::CreateOnlyUnsupported`] and publishes nothing; it never
+//!   replaces in its place (`docs/decisions.md` D79).
 //! - When `commit` returns an error the object may or may not be visible: a
 //!   response can be lost after the write landed, on S3 as on a disk whose
 //!   directory sync failed after the rename. The caller's only safe move is to
@@ -345,6 +346,17 @@ pub enum StoreError {
         key: Option<FileKey>,
         /// What is wrong.
         cause: CorruptCause,
+    },
+    /// A [`WriteMode::New`] commit the store cannot make create-only (an S3
+    /// provider that answers the condition with `NotImplemented`): nothing was
+    /// published, and the key was not checked. The caller decides whether to
+    /// write it as a replace (D79).
+    #[error("{op} of {key}: the store cannot make a create-only write")]
+    CreateOnlyUnsupported {
+        /// What was being done.
+        op: StoreOp,
+        /// The key being written.
+        key: FileKey,
     },
     /// The backend refused a request that retrying cannot fix and that is not
     /// an authorization failure: a 4xx outside the mapped codes, 501, or an

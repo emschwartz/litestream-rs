@@ -524,6 +524,9 @@ pub struct ResponseSettings {
     pub wal_sync_failed: Option<ResponseSetting>,
     /// `page-size-changed`.
     pub page_size_changed: Option<ResponseSetting>,
+    /// `conditional-writes-unsupported`: the replica's store cannot make create-only writes
+    /// (`docs/decisions.md` D79).
+    pub conditional_writes_unsupported: Option<ResponseSetting>,
     /// `bug`.
     pub bug: Option<ResponseSetting>,
     /// `other-writer`.

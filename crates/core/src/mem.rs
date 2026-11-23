@@ -59,6 +59,9 @@ struct State {
     faults: VecDeque<(StoreOp, StoreError)>,
     /// Errors for commits that publish first and then fail.
     late_commit_faults: VecDeque<StoreError>,
+    /// The store cannot make create-only writes, as an S3 provider without conditional writes:
+    /// every [`WriteMode::New`] commit fails and publishes nothing ([`MemStore::refuse_create_only`]).
+    no_create_only: bool,
 }
 
 impl State {
@@ -153,6 +156,14 @@ impl MemStore {
     /// Makes the next call of `op` fail with `err`.
     pub fn inject_failure(&self, op: StoreOp, err: StoreError) {
         self.lock().faults.push_back((op, err));
+    }
+
+    /// From now on every [`WriteMode::New`] commit fails with
+    /// [`StoreError::CreateOnlyUnsupported`] and publishes nothing, as on an S3 provider that
+    /// answers the condition with `NotImplemented` (`docs/decisions.md` D79). Replacing writes
+    /// go on as before.
+    pub fn refuse_create_only(&self) {
+        self.lock().no_create_only = true;
     }
 
     /// Makes the next commit publish its object and then return `err`, as a
@@ -331,7 +342,14 @@ impl Upload for MemUpload {
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
         let mut state = self.store.lock();
         let taken = self.mode == WriteMode::New && state.objects.contains_key(&self.key);
+        let unchecked = self.mode == WriteMode::New && state.no_create_only;
         let published = state.take_fault(StoreOp::Upload).and_then(|()| {
+            if unchecked {
+                return Err(StoreError::CreateOnlyUnsupported {
+                    op: StoreOp::Upload,
+                    key: self.key,
+                });
+            }
             if taken {
                 return Err(StoreError::AlreadyExists { key: self.key });
             }

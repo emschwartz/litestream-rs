@@ -75,11 +75,13 @@ pub struct Degraded {
     pub retries: u32,
 }
 
-/// Whether the cause is a database page that did not match: the one
-/// degradation a task's success does not end.
-const fn is_page_mismatch(cause: PersistentCause) -> bool {
+/// Whether the cause is one a task's success does not end: a database page that did not match
+/// (until a frame rewrites it), or a store that cannot make create-only writes (until the
+/// process restarts, D79): every later success is a replacing write.
+const fn outlasts_success(cause: PersistentCause) -> bool {
     match cause {
-        PersistentCause::DatabasePageMismatch { .. } => true,
+        PersistentCause::DatabasePageMismatch { .. }
+        | PersistentCause::ConditionalWritesUnsupported => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
@@ -161,6 +163,19 @@ impl Retry {
         since
     }
 
+    /// Puts back a cause that stands whatever succeeds (a store without create-only writes),
+    /// dated from when it was first raised, when nothing else degrades the task now: another
+    /// cause's success just cleared it, and the standing one must show again.
+    pub(super) fn stand(&mut self, cause: PersistentCause, since: Timestamp) {
+        if self.degraded.is_none() {
+            self.degraded = Some(Degraded {
+                cause,
+                since,
+                retries: 1,
+            });
+        }
+    }
+
     /// The task's degraded state, if it has one. Its count is never below
     /// the task's own: a failure that only retries counts too.
     pub(super) fn degraded(&self) -> Option<Degraded> {
@@ -179,13 +194,14 @@ impl Retry {
 
     /// A success: the next failure starts from the first attempt, and the
     /// task is no longer degraded, unless by a database page that did not
-    /// match: shipping the file's bytes is the success, and the page stays
-    /// reported until the table no longer holds it as mismatched
-    /// ([`Tasks::page_matches_again`]).
+    /// match (shipping the file's bytes is the success, and the page stays
+    /// reported until the table no longer holds it as mismatched,
+    /// [`Tasks::page_matches_again`]) or by a store without create-only writes
+    /// (every later success is a replacing write, until the process restarts).
     pub(super) fn succeed(&mut self) {
         let kept = self
             .degraded
-            .filter(|was| is_page_mismatch(was.cause))
+            .filter(|was| outlasts_success(was.cause))
             .map(|was| Degraded { retries: 1, ..was });
         *self = Self {
             degraded: kept,
@@ -242,10 +258,9 @@ impl Tasks {
     pub(super) fn page_matches_again(&mut self) {
         for task in Task::ALL {
             let retry = self.get_mut(task);
-            if retry
-                .degraded
-                .is_some_and(|was| is_page_mismatch(was.cause))
-            {
+            if retry.degraded.is_some_and(|was| {
+                matches!(was.cause, PersistentCause::DatabasePageMismatch { .. })
+            }) {
                 retry.degraded = None;
             }
         }

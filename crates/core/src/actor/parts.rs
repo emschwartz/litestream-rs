@@ -123,6 +123,9 @@ pub(super) struct Kept {
     /// are deleted only when a read on a later tick fails too. Kept across
     /// boots, since boot's sweep is one of the readers.
     pub(super) suspect_staged: Option<FileKey>,
+    /// Since when level-0 uploads replace, because the store cannot make create-only writes:
+    /// `None` (create-only) until the store says so, then for the rest of the process (D79).
+    pub(super) unguarded: Option<Timestamp>,
     /// Snapshots staged since the actor began, per cause: a report.
     pub(super) snapshots: SnapshotCounts,
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
@@ -189,6 +192,7 @@ impl Kept {
             snapshot_asked: false,
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
+            unguarded: None,
             snapshots: SnapshotCounts::default(),
             unproven: Unproven::No,
             takeover: None,
@@ -227,6 +231,7 @@ impl Kept {
             snapshot_asked,
             app: _,
             suspect_staged,
+            unguarded,
             snapshots,
             unproven,
             takeover,
@@ -258,6 +263,9 @@ impl Kept {
             snapshot_asked: *snapshot_asked,
             app: observer,
             suspect_staged: *suspect_staged,
+            // The store does not learn conditional writes from a rebuild: only a new process
+            // asks it again.
+            unguarded: *unguarded,
             snapshots: *snapshots,
             unproven: *unproven,
             takeover: *takeover,

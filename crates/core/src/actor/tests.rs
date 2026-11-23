@@ -2161,6 +2161,7 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
 }
 
 mod checkpoint_failed;
+mod create_only;
 mod degraded;
 mod index_reset;
 mod lag;

@@ -804,6 +804,7 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
         | StoreError::NotFound { .. }
         | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
+        | StoreError::CreateOnlyUnsupported { .. }
         | StoreError::Refused { .. } => false,
     }
 }

@@ -150,6 +150,29 @@ pub enum UploadPlan {
     Upload(FileKey),
 }
 
+/// Whether a level-0 upload asks the bucket to refuse a key that is taken (D79). A store that
+/// cannot make that check fails the write with `CreateOnlyUnsupported`; the actor then raises
+/// the cause and uploads [`Guard::Unguarded`] for the rest of the process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum Guard {
+    /// A create-only write: the bucket refuses a taken key ([`WriteMode::New`]).
+    #[default]
+    BucketRefuses,
+    /// A replacing write, as Go's are ([`WriteMode::Replace`]): nothing refuses another
+    /// writer's file under the key, which the standing cause reports.
+    Unguarded,
+}
+
+impl Guard {
+    /// The write mode a level-0 upload takes.
+    const fn mode(self) -> WriteMode {
+        match self {
+            Self::BucketRefuses => WriteMode::New,
+            Self::Unguarded => WriteMode::Replace,
+        }
+    }
+}
+
 /// Upload limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct UploadConfig {
@@ -254,18 +277,18 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
         &Staging(staging),
         &Replica(remote),
         newest_staged,
-        witnesses,
+        (witnesses, Guard::BucketRefuses),
     )
     .await
 }
 
-/// [`upload_next`] with each store as its role.
+/// [`upload_next`] with each store as its role, and level-0 writes as `guard` says.
 pub(crate) async fn upload_next_in<L: Role, S: Role>(
     state: UploadState,
     staging: &L,
     remote: &S,
     newest_staged: Option<Txid>,
-    witnesses: &Witnesses,
+    (witnesses, guard): (&Witnesses, Guard),
 ) -> Result<Uploaded, UploadFailed> {
     match plan_upload(&state, newest_staged) {
         UploadPlan::Idle => Ok(Uploaded {
@@ -274,7 +297,7 @@ pub(crate) async fn upload_next_in<L: Role, S: Role>(
         }),
         UploadPlan::List => list_step(state, staging, remote, newest_staged).await,
         UploadPlan::Upload(key) => match witnesses.get(&key) {
-            Some(token) => put_step(state, staging, remote, token, newest_staged).await,
+            Some(token) => put_step(state, (staging, remote), token, newest_staged, guard).await,
             // No witness: the file is refused unread, as a lost one is.
             None => Err(fail(state, Fault::StagedLost)),
         },
@@ -799,13 +822,13 @@ enum PutError {
 
 async fn put_step<L: Role, S: Role>(
     state: UploadState,
-    staging: &L,
-    remote: &S,
+    (staging, remote): (&L, &S),
     token: &Witnessed,
     newest_staged: Option<Txid>,
+    guard: Guard,
 ) -> Result<Uploaded, UploadFailed> {
     let key = token.key();
-    match put_staged(staging, remote, token, WriteMode::New).await {
+    match put_staged(staging, remote, token, guard.mode()).await {
         Err(PutError::Taken) => taken(state, staging, remote, token, newest_staged).await,
         outcome => settle_put(state, remote, key, outcome).await,
     }
