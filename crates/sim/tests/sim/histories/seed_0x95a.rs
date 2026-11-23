@@ -1,5 +1,8 @@
 //! Seed 0x95a's history under its mixed mix, shrunk to the operations that still fail: bucket rollbacks leave a hole wider than the probe's gap, and a boot with staging wiped behind a lagging listing took the hole as the replica's end and uploaded below what the replica held, so the latest state went back.
 //!
+//! Its forged staged and meta files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left
+//! the fault model (`docs/decisions.md` D131); the history still fails with its plant.
+//!
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
@@ -18,13 +21,13 @@ pub const OPS: &[Op] = &[
     Op::Shutdown,
     Op::CommitInTick { pages: 4 },
     Op::CommitInTick { pages: 2 },
-    Op::Meta(MetaOp::ForgeNewest),
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Shutdown,
     Op::Shutdown,
     Op::Remote(RemoteOp::RollBack),
     Op::Tick,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Remote(RemoteOp::RollBack),
     Op::Remote(RemoteOp::RollBack),
     Op::LaggingListings {
