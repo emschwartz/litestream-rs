@@ -16,27 +16,11 @@ pub const OPS: &[Op] = &[
     Op::Restore,
     Op::SecondWriter { ticks: 4 },
     Op::Heal,
-    Op::LaggingListings {
-        writes: 6,
-        window: 11,
-    },
     Op::Shutdown,
     Op::Heal,
     Op::Restore,
     Op::Heal,
-    Op::LaggingListings {
-        writes: 2,
-        window: 37,
-    },
     Op::Shutdown,
-    Op::LaggingListings {
-        writes: 8,
-        window: 28,
-    },
-    Op::LaggingListings {
-        writes: 3,
-        window: 34,
-    },
     Op::OtherProcessReader { begin: false },
     Op::Commit {
         pages: 2,
@@ -46,10 +30,6 @@ pub const OPS: &[Op] = &[
     Op::Restore,
     Op::SecondWriter { ticks: 3 },
     Op::Shutdown,
-    Op::LaggingListings {
-        writes: 7,
-        window: 22,
-    },
     Op::Heal,
     Op::Shutdown,
     Op::Heal,

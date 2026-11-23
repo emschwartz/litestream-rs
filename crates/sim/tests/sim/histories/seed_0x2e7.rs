@@ -30,10 +30,6 @@ pub const OPS: &[Op] = &[
     Op::Rollback,
     Op::Crash(CrashKind::Process),
     Op::Restore,
-    Op::LaggingListings {
-        writes: 2,
-        window: 4,
-    },
     Op::Rollback,
     Op::Meta(MetaOp::Restore),
     Op::Rollback,
@@ -45,10 +41,6 @@ pub const OPS: &[Op] = &[
     },
     Op::Meta(MetaOp::Restore),
     Op::StagingDamage(MetaOp::FlipNewestByte),
-    Op::LaggingListings {
-        writes: 3,
-        window: 8,
-    },
     Op::Remote(RemoteOp::RollBack),
     Op::EnvFault(EnvFault::Source(SourceOp::Open, SourceError::Busy)),
     Op::Rollback,
@@ -56,10 +48,6 @@ pub const OPS: &[Op] = &[
     Op::Meta(MetaOp::Restore),
     Op::Verify,
     Op::Meta(MetaOp::FlipNewestByte),
-    Op::LaggingListings {
-        writes: 6,
-        window: 36,
-    },
     Op::Hold {
         hold: Hold::DiskFull,
         ticks: 5,
@@ -95,15 +83,7 @@ pub const OPS: &[Op] = &[
     Op::Restore,
     Op::Restore,
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 8,
-        window: 37,
-    },
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 7,
-        window: 18,
-    },
     Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Verify,
     Op::StagingDamage(MetaOp::FlipNewestByte),
@@ -116,29 +96,13 @@ pub const OPS: &[Op] = &[
     Op::Crash(CrashKind::Power),
     Op::Crash(CrashKind::Process),
     Op::Rollback,
-    Op::LaggingListings {
-        writes: 4,
-        window: 11,
-    },
     Op::Verify,
     Op::Tick,
     Op::StagingDamage(MetaOp::StripNewestOrigin),
     Op::EnvFault(EnvFault::WipeStaging),
-    Op::LaggingListings {
-        writes: 6,
-        window: 30,
-    },
     Op::Meta(MetaOp::Restore),
-    Op::LaggingListings {
-        writes: 1,
-        window: 14,
-    },
     Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Rollback,
-    Op::LaggingListings {
-        writes: 2,
-        window: 7,
-    },
     Op::Commit {
         pages: 2,
         grow: true,
@@ -163,19 +127,11 @@ pub const OPS: &[Op] = &[
         grow: false,
     },
     Op::Rollback,
-    Op::LaggingListings {
-        writes: 4,
-        window: 37,
-    },
     Op::Meta(MetaOp::FlipNewestByte),
     Op::Rollback,
     Op::Restore,
     Op::StagingDamage(MetaOp::StripNewestOrigin),
     Op::Crash(CrashKind::Process),
-    Op::LaggingListings {
-        writes: 2,
-        window: 19,
-    },
     Op::Crash(CrashKind::Power),
     Op::Shutdown,
     Op::Hold {
@@ -213,10 +169,6 @@ pub const OPS: &[Op] = &[
         hold: Hold::DiskFull,
         ticks: 6,
     },
-    Op::LaggingListings {
-        writes: 3,
-        window: 20,
-    },
     Op::Rollback,
     Op::Remote(RemoteOp::RollBack),
     Op::Restore,
@@ -245,10 +197,6 @@ pub const OPS: &[Op] = &[
     },
     Op::Verify,
     Op::Rollback,
-    Op::LaggingListings {
-        writes: 8,
-        window: 26,
-    },
     Op::Crash(CrashKind::Power),
     Op::Shutdown,
     Op::EnvFault(EnvFault::DeleteWal),
@@ -258,18 +206,10 @@ pub const OPS: &[Op] = &[
     Op::Meta(MetaOp::DeleteAll),
     Op::Rollback,
     Op::Heal,
-    Op::LaggingListings {
-        writes: 7,
-        window: 30,
-    },
     Op::Spill,
     Op::Hold {
         hold: Hold::ReadersHeld,
         ticks: 8,
-    },
-    Op::LaggingListings {
-        writes: 3,
-        window: 38,
     },
     Op::Commit {
         pages: 1,
@@ -281,10 +221,6 @@ pub const OPS: &[Op] = &[
         op: AppOp::DeleteWal,
     },
     Op::Rollback,
-    Op::LaggingListings {
-        writes: 1,
-        window: 19,
-    },
     Op::Commit {
         pages: 2,
         grow: false,
@@ -347,10 +283,6 @@ pub const OPS: &[Op] = &[
         ticks: 1,
     },
     Op::Restore,
-    Op::LaggingListings {
-        writes: 7,
-        window: 36,
-    },
     Op::EnvFault(EnvFault::DeleteWal),
     Op::Crash(CrashKind::Process),
     Op::Hold {

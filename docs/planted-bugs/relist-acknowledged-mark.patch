@@ -1,12 +1,10 @@
-diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index f42c833f..d2b80670 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1272,7 +1272,6 @@ impl Actor {
+@@ -1490,7 +1490,6 @@
      /// Takes the upload state a step left, raising the acknowledged mark.
      fn set_upload(&mut self, state: UploadState) {
          self.engine.upload = state;
 -        self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
          self.raise_floor(state.confirmed());
          self.engine.witnesses.confirmed(state.confirmed());
-     }
+         // Only a position the uploader stands on passes the dropped ids; a

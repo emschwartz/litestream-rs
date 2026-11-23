@@ -20,10 +20,6 @@ pub const OPS: &[Op] = &[
     Op::CommitInTick { pages: 2 },
     Op::Shutdown,
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 1,
-        window: 22,
-    },
     Op::ClockJump(93600000),
     Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
     Op::EnvFault(EnvFault::Source(SourceOp::BumpSeq, SourceError::Busy)),
@@ -34,10 +30,6 @@ pub const OPS: &[Op] = &[
     },
     Op::Vacuum { page_size: None },
     Op::Verify,
-    Op::LaggingListings {
-        writes: 1,
-        window: 7,
-    },
     Op::ClockJump(51133),
     Op::ClockJump(3828),
     Op::EnvFault(EnvFault::WipeStaging),
@@ -63,20 +55,8 @@ pub const OPS: &[Op] = &[
     Op::Spill,
     Op::Spill,
     Op::Shutdown,
-    Op::LaggingListings {
-        writes: 3,
-        window: 38,
-    },
     Op::Shutdown,
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
-    Op::LaggingListings {
-        writes: 8,
-        window: 8,
-    },
-    Op::LaggingListings {
-        writes: 6,
-        window: 14,
-    },
     Op::EnvFault(EnvFault::Source(
         SourceOp::Checkpoint,
         SourceError::ReadTxLost,
@@ -91,15 +71,7 @@ pub const OPS: &[Op] = &[
     Op::RequestSnapshot,
     Op::Spill,
     Op::ClockJump(-22351),
-    Op::LaggingListings {
-        writes: 1,
-        window: 18,
-    },
     Op::SecondWriter { ticks: 5 },
-    Op::LaggingListings {
-        writes: 8,
-        window: 8,
-    },
     Op::CommitInTick { pages: 4 },
     Op::CommitInTick { pages: 3 },
     Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
@@ -113,10 +85,6 @@ pub const OPS: &[Op] = &[
     Op::Tick,
     Op::CommitInTick { pages: 2 },
     Op::EnvFault(EnvFault::DeleteWal),
-    Op::LaggingListings {
-        writes: 5,
-        window: 37,
-    },
     Op::ClockJump(46099),
     Op::CommitInTick { pages: 3 },
     Op::Spill,
@@ -130,16 +98,8 @@ pub const OPS: &[Op] = &[
         op: AppOp::Checkpoint(OtherProcessMode::Restart),
     },
     Op::OtherProcessReader { begin: true },
-    Op::LaggingListings {
-        writes: 6,
-        window: 40,
-    },
     Op::EnvFault(EnvFault::DeleteWal),
     Op::EnvFault(EnvFault::Source(SourceOp::BumpSeq, SourceError::DiskFull)),
-    Op::LaggingListings {
-        writes: 3,
-        window: 6,
-    },
     Op::StoreFault {
         target: Target::Remote,
         op: StoreOp::Upload,
@@ -159,10 +119,6 @@ pub const OPS: &[Op] = &[
             op: StoreOp::Upload,
             why: Denied::Permission,
         }),
-    },
-    Op::LaggingListings {
-        writes: 3,
-        window: 36,
     },
     Op::EnvFault(EnvFault::DeleteWal),
     Op::ClockJump(93600000),

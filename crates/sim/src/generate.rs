@@ -275,17 +275,6 @@ pub enum Op {
     StagingDamage(MetaOp),
     /// Every store fault that fails at a rate stops failing.
     Heal,
-    /// The replica's listings start to lag behind the bucket: each of the
-    /// next `writes` commits and deletes on it stays out of listings (a
-    /// deleted key stays in, as it was) for 1 to `window` list calls. Reads
-    /// stay exact, as on S3 behind an eventually consistent listing or a
-    /// cache in front of one.
-    LaggingListings {
-        /// Writes and deletes the lag hides.
-        writes: u8,
-        /// The most list calls one stays hidden.
-        window: u8,
-    },
     /// The WAL is damaged, the engine runs this many ticks, and then the app
     /// heals it as an application would: its connections let go, another
     /// process truncates the WAL, and it commits again (a flipped bit is
@@ -327,9 +316,6 @@ pub enum Hold {
     /// Every staging upload fails as the disk is full (`ENOSPC`, which the
     /// directory store reports as a transient `StorageFull`).
     DiskFull,
-    /// The replica's listings, as a restore sees them, show the bucket as it
-    /// was when the hold began: objects put since are hidden.
-    LaggingListing,
     /// Every read of the replica returns one byte flipped (a middlebox, or a
     /// store that returns bytes it never stored): a restore's, in the middle of
     /// what it read, and the engine's next reads, in the LTX header.
@@ -504,8 +490,6 @@ pub struct Weights {
     /// their own and replace the drawn step, so a run that draws no hold is
     /// the run it was, and every other step of one that does is unchanged.
     pub hold: u32,
-    /// [`Op::LaggingListings`].
-    pub lagging_listings: u32,
     /// Whether a vacuum may change the page size. A replica prefix holds one
     /// page size, so after a resize the engine's next boot stops, or keeps
     /// retrying in a degraded state, on `PageSizeChanged`, and the states
@@ -661,7 +645,6 @@ impl Default for Weights {
             // shape; swarm mixes draw it, and `tests/sim/survival.rs` turns
             // it on.
             hold: 0,
-            lagging_listings: 0,
             vacuum_resizes: true,
             block_crash_law: false,
             lying_wal_sync: false,
@@ -718,14 +701,13 @@ enum Kind {
     StagingReplaceRunning,
     AppInTick,
     Verify,
-    LaggingListings,
     OtherConnectionCommit,
     EvictPageCache,
     HttpFault,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 29] {
+    fn table(&self) -> [(Kind, u32); 28] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -752,7 +734,6 @@ impl Weights {
             (Kind::StagingReplaceRunning, self.staging_replace_running),
             (Kind::AppInTick, self.app_in_tick),
             (Kind::Verify, self.verify),
-            (Kind::LaggingListings, self.lagging_listings),
             (Kind::OtherConnectionCommit, self.other_connection_commit),
             (Kind::EvictPageCache, self.evict_page_cache),
             (Kind::HttpFault, self.http_fault),
@@ -822,7 +803,6 @@ impl Weights {
             heal: weight(false),
             staging_replace_running: 0,
             hold: 0,
-            lagging_listings: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
             lying_wal_sync: false,
@@ -885,8 +865,6 @@ impl Weights {
         mix.app_in_tick = weight(false);
         // Drawn after that, for the same reason.
         mix.verify = weight(false);
-        // And lagging listings after that.
-        mix.lagging_listings = weight(false);
         // And after that, for the same reason: a second application connection that commits,
         // with its own checkpoint count (a WAL header written again with the same salts).
         mix.other_connection_commit = weight(false);
@@ -1118,7 +1096,7 @@ fn staging_replace_running(entropy: &SeededEntropy) -> Op {
 /// A lasting fault, held for up to 11 ticks, or up to 200 with `overlap`, when a third of the
 /// holds are of the kinds only overlapping faults draw.
 fn hold(entropy: &SeededEntropy, overlap: bool) -> Op {
-    let hold = match below(entropy, 8) {
+    let hold = match below(entropy, 7) {
         0 => Hold::StoreDown(
             choose(
                 entropy,
@@ -1133,10 +1111,9 @@ fn hold(entropy: &SeededEntropy, overlap: bool) -> Op {
         ),
         1 => Hold::CredentialsRevoked,
         2 => Hold::DiskFull,
-        3 => Hold::LaggingListing,
-        4 => Hold::LyingReads,
-        5 => Hold::ReadersHeld,
-        6 => match below(entropy, 3) {
+        3 => Hold::LyingReads,
+        4 => Hold::ReadersHeld,
+        5 => match below(entropy, 3) {
             0 => Hold::Wal(WalOp::TearHeader),
             1 => Hold::Wal(WalOp::TruncateAtFrame(
                 u32::try_from(below(entropy, 4)).unwrap_or(0),
@@ -1279,10 +1256,6 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::StagingReplaceRunning => staging_replace_running(entropy),
         Kind::AppInTick => app_in_tick(entropy),
         Kind::Verify => Op::Verify,
-        Kind::LaggingListings => Op::LaggingListings {
-            writes: small(entropy, 8).saturating_add(1),
-            window: small(entropy, 40).saturating_add(1),
-        },
     }
 }
 

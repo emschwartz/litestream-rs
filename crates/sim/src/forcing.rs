@@ -146,7 +146,6 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
             crate::generate::Hold::StoreDown(_)
             | crate::generate::Hold::StoreDownAll
             | crate::generate::Hold::CredentialsRevoked
-            | crate::generate::Hold::LaggingListing
             | crate::generate::Hold::LyingReads => &[Forcing::RemoteFault],
             crate::generate::Hold::DiskFull => &[Forcing::StagingFault],
             crate::generate::Hold::Wal(_) => &[Forcing::WalDamaged],
@@ -157,9 +156,7 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         Op::OurReader { begin: false } => &[Forcing::ReadLockLapsed],
         Op::RequestSnapshot => &[Forcing::SnapshotRequested],
         Op::LyingWalSync => &[Forcing::LyingDisk],
-        // The engine reads past a lagging listing, so a lag alone forces no snapshot.
-        Op::LaggingListings { .. }
-        | Op::Commit { .. }
+        Op::Commit { .. }
         | Op::CommitInTick { .. }
         | Op::OtherConnectionCommit { .. }
         | Op::AppInTick { .. }

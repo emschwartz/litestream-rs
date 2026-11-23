@@ -1,9 +1,8 @@
-diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2441,7 +2441,6 @@
-     suspect: &mut Option<FileKey>,
+@@ -2940,7 +2940,6 @@
      takeover: Takeover,
+     no_journal: bool,
  ) -> Result<Listed, BootStep> {
 -    remove_scratch(staging, remote).await?;
      // Where staging stood before this boot dropped anything of its own: the

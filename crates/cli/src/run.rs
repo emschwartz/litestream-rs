@@ -33,8 +33,7 @@ use lsr_config::{
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
     MAX_ATTEMPTS, ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions,
-    RestoreTarget, Restored, Severity, VerifyError, listed_past, plan, resolve, restore_with,
-    verify,
+    RestoreTarget, Restored, Severity, VerifyError, plan, resolve, restore_with, verify,
 };
 use lsr_replica::local::{
     ClearError, CreateError, Existing, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
@@ -428,7 +427,6 @@ impl From<RestoreError> for CliError {
             | RestoreError::Store(_)
             | RestoreError::File { .. }
             | RestoreError::Unstable { .. }
-            | RestoreError::ListingBehind { .. }
             | RestoreError::DatabaseChecksum { .. }
             | RestoreError::CreatedAtRepeated { .. }
             | RestoreError::Sink { .. }) => Self::Restore(other),
@@ -535,7 +533,6 @@ pub fn exit_for_error(error: &CliError) -> Exit {
             RestoreError::Inventory(_)
             | RestoreError::Store(_)
             | RestoreError::Unstable { .. }
-            | RestoreError::ListingBehind { .. }
             | RestoreError::CreatedAtRepeated { .. }
             | RestoreError::Sink { .. }
             | RestoreError::Publish { .. } => Exit::Environment,
@@ -1068,28 +1065,14 @@ async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<F
     // directory read can miss the new file and see a later one), so the plan is made again
     // on a fresh listing, and a gap every listing shows is the answer.
     let mut attempt = 1_u8;
-    let (inventory, outcome, created_at_read) = loop {
+    let (outcome, created_at_read) = loop {
         let inventory = Inventory::load(store).await?;
         let (outcome, created_at_read) = plan_target(store, &inventory, how.target).await?;
         if !matches!(outcome, PlanOutcome::Gap { .. }) || attempt >= MAX_ATTEMPTS {
-            break (inventory, outcome, created_at_read);
+            break (outcome, created_at_read);
         }
         attempt = attempt.saturating_add(1);
     };
-    // The real restore reads past the listing before it trusts it for the newest state, or an
-    // empty one for any target; a plan printed from a lagging listing would name an older chain
-    // as the answer, or skip a replica that exists.
-    let empty = inventory.newest().is_none();
-    if (empty || !matches!(how.target, RestoreTarget::Txid(_)))
-        && let Some(found) = listed_past(store, &inventory)
-            .await
-            .map_err(CliError::Restore)?
-    {
-        return Err(CliError::Restore(RestoreError::ListingBehind {
-            attempts: 1,
-            found,
-        }));
-    }
     match outcome {
         PlanOutcome::AsOfInsideFile { chain, .. }
             if how.as_of_inside == AsOfInside::TakeEarlier =>

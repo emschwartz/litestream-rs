@@ -7,10 +7,7 @@
 //! no fault or yield ever touches a check.
 //!
 //! - [`Faults`] fails calls on a schedule. Faults live here so the raw store
-//!   stays clean. It can also make listings lag behind the bucket
-//!   ([`FaultHandle::lag_listings`]): a write stays out of them, a deleted key
-//!   stays in them, for a bounded number of list calls, as an eventually
-//!   consistent listing (or a cache in front of one) does. Reads stay exact. It also says how wide a batch may be, so callers take
+//!   stays clean. It also says how wide a batch may be, so callers take
 //!   their batched paths, and runs each batch one item at a time, last item
 //!   first, results in order: out of order as a concurrent store would be,
 //!   and the same order every run.
@@ -151,73 +148,9 @@ struct FaultState {
     widths: [NonZeroUsize; 3],
     // Batch calls that held more than one item.
     batched: u32,
-    lag: Lag,
-}
-
-/// Listings that lag behind the bucket.
-#[derive(Debug, Default)]
-struct Lag {
-    /// Writes and deletes still to be hidden from listings.
-    writes_left: u32,
-    /// The most list calls one stays hidden.
-    window: u32,
-    /// What listings show instead of the truth, key by key.
-    stale: Vec<Stale>,
-    /// Listings it changed.
-    changed: u32,
-}
-
-/// One key a listing shows as it was, not as it is.
-#[derive(Debug)]
-struct Stale {
-    key: FileKey,
-    /// What a listing shows for it: the object before the write or the
-    /// delete, `None` when there was none.
-    shown: Option<FileInfo>,
-    /// How many more list calls see it so.
-    lists_left: u32,
 }
 
 impl FaultState {
-    /// Hides a write or a delete of `key` from listings for a while, when
-    /// listings lag and writes are left to hide. `before` is what the key held.
-    fn lag_write(&mut self, key: FileKey, before: Option<FileInfo>) {
-        let Self { lag, rng, .. } = self;
-        if lag.writes_left == 0 {
-            return;
-        }
-        lag.writes_left = lag.writes_left.saturating_sub(1);
-        let lists = u32::try_from(rng.below(u64::from(lag.window.max(1))))
-            .unwrap_or(0)
-            .saturating_add(1);
-        match lag.stale.iter_mut().find(|stale| stale.key == key) {
-            // Still showing an older state: keep it, for the longer time.
-            Some(stale) => stale.lists_left = stale.lists_left.max(lists),
-            None => lag.stale.push(Stale {
-                key,
-                shown: before,
-                lists_left: lists,
-            }),
-        }
-    }
-
-    /// The stale keys of `level` for this list call, and one call counted
-    /// against every stale key.
-    fn stale_for(&mut self, level: Level) -> Vec<(FileKey, Option<FileInfo>)> {
-        let here = self
-            .lag
-            .stale
-            .iter()
-            .filter(|stale| stale.key.level() == level)
-            .map(|stale| (stale.key, stale.shown))
-            .collect();
-        for stale in &mut self.lag.stale {
-            stale.lists_left = stale.lists_left.saturating_sub(1);
-        }
-        self.lag.stale.retain(|stale| stale.lists_left > 0);
-        here
-    }
-
     fn count(&mut self, op: StoreOp) -> &mut u32 {
         match op {
             StoreOp::List => &mut self.lists,
@@ -371,43 +304,6 @@ impl FaultHandle {
         lock(&self.state).batched
     }
 
-    /// Makes listings lag: each of the next `writes` commits and deletes
-    /// stays out of listings (a deleted key stays in, as it was) for 1 to
-    /// `window` list calls, drawn from the seed. Needs
-    /// [`Faults::corrupting_through`], whose handle on the store under the
-    /// wrappers is what a stale listing is built from.
-    pub fn lag_listings(&self, writes: u32, window: u32) {
-        let mut state = lock(&self.state);
-        state.lag.writes_left = state.lag.writes_left.saturating_add(writes);
-        state.lag.window = window.max(1);
-    }
-
-    /// Whether listings still show `key` as it was before a lagged write or
-    /// delete, not as the store holds it now: a listing made now does not show
-    /// what is under the key.
-    #[must_use]
-    pub fn hides(&self, key: FileKey) -> bool {
-        lock(&self.state)
-            .lag
-            .stale
-            .iter()
-            .any(|stale| stale.key == key)
-    }
-
-    /// Listings a lag changed.
-    #[must_use]
-    pub fn stale_listings(&self) -> u32 {
-        lock(&self.state).lag.changed
-    }
-
-    /// Ends the lag: writes from now on show at once, and stale keys show as
-    /// they are.
-    pub fn end_lag(&self) {
-        let mut state = lock(&self.state);
-        state.lag.writes_left = 0;
-        state.lag.stale.clear();
-    }
-
     /// Makes every call of `op` from the next one on fail with `err`, until
     /// [`Self::release`] is given the returned id: a fault that lasts.
     pub fn hold(&self, op: StoreOp, err: StoreError) -> HeldFault {
@@ -496,7 +392,6 @@ impl<S> Faults<S> {
             rejected: Vec::new(),
             widths: [NonZeroUsize::MIN; 3],
             batched: 0,
-            lag: Lag::default(),
         };
         Self {
             inner,
@@ -576,19 +471,7 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             return Err(err);
         }
         let listing = self.inner.list(level, after, limit).await?;
-        let stale = lock(&self.state).stale_for(level);
-        match (&self.raw, stale.is_empty()) {
-            (Some(raw), false) => {
-                let shown =
-                    stale_listing(raw, level, &stale, after, limit, listing.skipped).await?;
-                if shown != listing {
-                    let mut state = lock(&self.state);
-                    state.lag.changed = state.lag.changed.saturating_add(1);
-                }
-                Ok(shown)
-            }
-            (Some(_) | None, _) => Ok(listing),
-        }
+        Ok(listing)
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
@@ -665,12 +548,6 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             state.damaged.extend(kept);
             return Err(err);
         }
-        let mut before = Vec::new();
-        if let Some(raw) = &self.raw {
-            for key in keys {
-                before.push((*key, info_of(raw, key).await?));
-            }
-        }
         if let Err(err) = self.inner.delete(keys).await {
             // The store under the fault layer failed it (an S3 store's request met a provider
             // fault): a short object it was asked to remove is damage it may keep.
@@ -685,11 +562,6 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         }
         let mut state = lock(&self.state);
         state.short.retain(|key| !keys.contains(key));
-        for (key, info) in before {
-            if info.is_some() {
-                state.lag_write(key, info);
-            }
-        }
         Ok(())
     }
 
@@ -765,53 +637,6 @@ fn checksum_mismatch(key: FileKey) -> StoreError {
     }
 }
 
-/// What `raw` holds under `key`, as a listing shows it.
-async fn info_of(
-    raw: &crate::remote::Bucket,
-    key: &FileKey,
-) -> Result<Option<FileInfo>, StoreError> {
-    Ok(level_files(raw, key.level())
-        .await?
-        .into_iter()
-        .find(|info| info.key == *key))
-}
-
-/// Every file `raw` holds in `level`.
-async fn level_files(
-    raw: &crate::remote::Bucket,
-    level: Level,
-) -> Result<Vec<FileInfo>, StoreError> {
-    let mut files = Vec::new();
-    let mut at = ListAt::first(level);
-    loop {
-        let page = raw.list(at.level, at.after, PageLimit::MAX).await?;
-        files.extend(page.files);
-        match at.following(page.next) {
-            Ok(Some(next)) => at = next,
-            Ok(None) | Err(_) => return Ok(files),
-        }
-    }
-}
-
-/// The page a lagging listing shows: the level as `raw` holds it, with each
-/// stale key as it was instead.
-async fn stale_listing(
-    raw: &crate::remote::Bucket,
-    level: Level,
-    stale: &[(FileKey, Option<FileInfo>)],
-    after: Option<TxidRange>,
-    limit: PageLimit,
-    skipped: usize,
-) -> Result<Listing, StoreError> {
-    let mut files = level_files(raw, level).await?;
-    files.retain(|info| stale.iter().all(|(key, _)| *key != info.key));
-    files.extend(stale.iter().filter_map(|(_, shown)| *shown));
-    Ok(Listing {
-        skipped,
-        ..lsr_core::build_listing(files, &[], after, limit)
-    })
-}
-
 /// Changes one byte in the middle of the published object, keeping its size
 /// and its created-at time.
 async fn damage(raw: &crate::remote::Bucket, info: &FileInfo) -> Result<(), StoreError> {
@@ -863,20 +688,7 @@ impl<U: Upload> Upload for FaultsUpload<U> {
     }
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        let before = match &self.raw {
-            Some(raw) => Some(info_of(raw, &self.key).await?),
-            None => None,
-        };
-        let state = Arc::clone(&self.state);
-        let (key, raw) = (self.key, self.raw.clone());
-        let outcome = self.commit_inner().await;
-        // Whatever the answer, a write that landed is what a lagging listing hides.
-        if let (Some(before), Some(raw)) = (before, raw)
-            && info_of(&raw, &key).await? != before
-        {
-            lock(&state).lag_write(key, before);
-        }
-        outcome
+        self.commit_inner().await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

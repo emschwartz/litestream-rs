@@ -48,7 +48,6 @@ pub mod obligations;
 mod pages;
 mod plan;
 mod position;
-mod probe;
 mod publish;
 mod recover;
 mod regression_watch;
@@ -122,14 +121,13 @@ pub use position::{
     Continuity, LastPage, Position, ReachedEnd, ReadLockHold, SyncedOffset, SyncedThrough,
     WalFileLen,
 };
-pub use probe::{NAMED_KEYS_MAX, Starts, WALK_READS_MAX};
 pub use recover::{
     BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
     RecoverEvent, Recovered, Verdict, WalView, recover_traced,
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,
-    RestoreError, RestoreOptions, Restored, SinkOp, listed_past, restore, restore_with,
+    RestoreError, RestoreOptions, Restored, SinkOp, restore, restore_with,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemPublishError, MemSink};
@@ -149,10 +147,7 @@ pub use store::{
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use takeover::{TakeoverRecord, TakeoverRecordError};
-pub use upload::{
-    Did, PROBE_CAP, PROBE_GAP, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
-    capped_probe_reads, fresh_probe_reads, upload_next,
-};
+pub use upload::{Did, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, upload_next};
 pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,

@@ -727,7 +727,7 @@ pub(crate) async fn run_compact<L: Role, R: Role>(
     replica: &R,
 ) -> Outcome {
     let output = job.output_key();
-    match crate::probe::exists(replica, &output).await {
+    match crate::store::exists(replica, &output).await {
         Ok(true) => return Outcome::Replan { key: output },
         Ok(false) => {}
         Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),

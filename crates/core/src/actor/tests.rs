@@ -78,9 +78,6 @@ struct Counting {
     /// bytes that read returns instead of the stored ones: one read that
     /// answered with another valid file, the stored bytes untouched.
     other_bytes_on_read: Arc<std::sync::Mutex<Option<OtherBytes>>>,
-    /// Keys every listing leaves out while reads still find them: a listing
-    /// that lags the bucket.
-    unlisted: Arc<std::sync::Mutex<Vec<FileKey>>>,
     /// Files every listing shows that the store does not hold, as a listing
     /// that lags a delete does.
     ghosts: Arc<std::sync::Mutex<Vec<FileInfo>>>,
@@ -157,12 +154,10 @@ impl ObjectStore for Counting {
             .copied()
             .collect();
         let hidden = self.hidden.lock().unwrap().clone();
-        let unlisted = self.unlisted.lock().unwrap().clone();
         let listed = self.inner.list(level, after, limit);
         async move {
             let mut page = listed.await?;
-            page.files
-                .retain(|info| !hidden.contains(&info.key) && !unlisted.contains(&info.key));
+            page.files.retain(|info| !hidden.contains(&info.key));
             if page.next.is_none() {
                 page.files.extend(ghosts);
                 page.files.sort_by_key(|info| info.key);
@@ -491,22 +486,13 @@ fn boot_lists_then_recovers_then_uploads() {
 }
 
 /// An empty replica names no page size, so boot asks it nothing more: one
-/// listing per level, no second pass, and the probe's reads of the keys a
-/// lagging listing could have left out, to its cap since nothing is staged.
+/// listing per level and no second pass.
 #[test]
 fn a_first_boot_lists_each_level_once() {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     rig.tick(&mut actor, T0);
-    let probe = u32::try_from(crate::upload::capped_probe_reads(
-        None,
-        &crate::probe::Starts::default(),
-    ))
-    .unwrap();
-    assert_eq!(
-        rig.remote.calls(),
-        u32::try_from(Level::ALL.len()).unwrap() + probe
-    );
+    assert_eq!(rig.remote.calls(), u32::try_from(Level::ALL.len()).unwrap());
     assert_eq!(rig.remote.lists(), u32::try_from(Level::ALL.len()).unwrap());
 }
 
@@ -2331,35 +2317,14 @@ fn one_bad_read_while_uploading(held: bool) {
     assert_eq!(restored(&rig), 2);
 }
 
-/// A listing that lags a delete shows a file that is gone. Past the
-/// engine's position it would mean another writer, but only a read proves
-/// that: maintenance plans nothing from the listing and lists again later.
-/// A file a read finds there still stops the engine.
+/// A file past the engine's position that a maintenance listing shows is another writer's:
+/// maintenance plans nothing from that listing and the engine stops.
 #[test]
-fn maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it() {
+fn maintenance_stops_on_a_file_past_its_position() {
     let (mut rig, mut actor) = caught_up();
-    rig.remote.ghosts.lock().unwrap().push(FileInfo {
-        key: l0(5),
-        size: 100,
-        listed: crate::layout::ListedTime::LastModified(ts(T0)),
-    });
     rig.commit(2);
     let seen = rig.follow(&mut actor, T0 + 10, 40);
-    assert!(
-        seen.iter().all(|tick| !matches!(tick, Tick::Stopped(_))),
-        "{seen:?}"
-    );
-    assert!(
-        seen.iter().any(|tick| matches!(
-            event(tick),
-            Some(Event::Maintained {
-                event: MaintainedEvent::Waiting { .. },
-                ..
-            })
-        )),
-        "{seen:?}"
-    );
-    rig.remote.ghosts.lock().unwrap().clear();
+    no_stop(&seen);
     block_on(async {
         let mut up = rig
             .remote
@@ -2377,76 +2342,6 @@ fn maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it() {
         Some(&Tick::Stopped(StopCause::OtherWriter)),
         "{seen:?}"
     );
-}
-
-/// A listing that lags the engine's own newest upload ends before what the
-/// engine confirmed. Planned from, it would snapshot or compact a shorter run
-/// and write the longer one again later; a read finds the confirmed key, so
-/// maintenance plans nothing and lists again. Once the listing shows the
-/// file, maintenance plans from it.
-#[test]
-fn maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload() {
-    let (mut rig, mut actor) = caught_up();
-    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
-    rig.remote.hidden.lock().unwrap().push(l0(2));
-    rig.commit(3);
-    rig.settle(&mut actor, T0 + 2);
-    rig.remote.hidden.lock().unwrap().push(l0(3));
-    let planned = |seen: &[Tick]| {
-        seen.iter().any(|tick| {
-            matches!(
-                event(tick),
-                Some(Event::Maintained {
-                    event: MaintainedEvent::Compacted(_)
-                        | MaintainedEvent::Snapshot(_)
-                        | MaintainedEvent::Deleted(_),
-                    ..
-                })
-            )
-        })
-    };
-    let seen = rig.follow(&mut actor, T0 + 40_000, 40);
-    assert!(!planned(&seen), "{seen:?}");
-    rig.remote.hidden.lock().unwrap().clear();
-    let seen = rig.follow(&mut actor, T0 + 100_000, 40);
-    no_stop(&seen);
-    assert!(planned(&seen), "{seen:?}");
-}
-
-/// The first maintenance listing after a boot has no regression watch to check it against:
-/// the boot confirmed the replica's newest file, and a listing that hides it ends before that.
-/// Planned from, it would compact or snapshot a shorter run; a read finds the confirmed key,
-/// so maintenance plans nothing and lists again, and plans once the listing shows the file.
-#[test]
-fn the_first_listing_after_a_boot_plans_nothing_while_it_hides_the_confirmed_upload() {
-    let (mut rig, mut actor) = caught_up();
-    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
-    let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
-    assert!(
-        matches!(event(&boot), Some(Event::Booted { cause: None })),
-        "{boot:?}"
-    );
-    rig.remote.hidden.lock().unwrap().push(l0(2));
-    let planned = |seen: &[Tick]| {
-        seen.iter().any(|tick| {
-            matches!(
-                event(tick),
-                Some(Event::Maintained {
-                    event: MaintainedEvent::Compacted(_)
-                        | MaintainedEvent::Snapshot(_)
-                        | MaintainedEvent::Deleted(_),
-                    ..
-                })
-            )
-        })
-    };
-    let seen = rig.follow(&mut actor, T0 + 40_000, 40);
-    assert!(!planned(&seen), "{seen:?}");
-    rig.remote.hidden.lock().unwrap().clear();
-    let seen = rig.follow(&mut actor, T0 + 100_000, 40);
-    no_stop(&seen);
-    assert!(planned(&seen), "{seen:?}");
 }
 
 /// A boot removes what killed uploads left, in staging and in the replica, before it reads

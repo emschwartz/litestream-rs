@@ -7,27 +7,25 @@
 //! - by both judges over the raw replica, as every [`Op::Restore`](crate::Op::Restore) judges
 //!   it: the files the engine left while the fault held must restore committed states, in
 //!   order, and the newest must not be behind what the engine acknowledged;
-//! - for the faults a restore itself meets (a store that is down or refuses, a listing that
-//!   lags, reads that return other bytes), by restores made through that fault ([`View`]).
+//! - for the faults a restore itself meets (a store that is down or refuses, reads that
+//!   return other bytes), by restores made through that fault ([`View`]).
 //!   Each must publish exactly the database the raw replica gives for the same target, or fail
 //!   with an error the fault explains. Another database, or an error the fault does not
 //!   explain, is [`Violation::HeldRestore`].
 //!
 //! Then the fault is lifted, and the run goes on to judge recovery as it always has.
 
-use std::collections::BTreeSet;
 use std::io::ErrorKind;
 
-use lsr_core::conformance::block_on;
 use lsr_core::{
-    CreatedAt, Denied, Entropy, FileInfo, FileKey, Inventory, Level, Listing, ObjectStore,
-    PageLimit, ReadLen, RestoreError, RestoreTarget, StopCause, StoreError, StoreOp,
+    CreatedAt, Denied, Entropy, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen,
+    RestoreError, RestoreTarget, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::generate::{Hold, WalOp};
 use crate::history::restored_digest;
-use crate::oracle::{Violation, bug_fault};
+use crate::oracle::Violation;
 use crate::reach::variant;
 use crate::sqlite::{CrashKind, ReaderId};
 use crate::store::HeldFault;
@@ -47,9 +45,8 @@ const SAMPLED_TXIDS: u64 = 4;
 
 /// Reads of the replica the engine makes under [`Hold::LyingReads`] that return a flipped
 /// byte, at most: one flip scheduled for each of the next this many reads. It stands in for
-/// "every read for the whole hold", so it must outlast the hold: the one-byte reads past a
-/// listing take a scheduled flip each without receiving it (they never cover the header
-/// byte), and a boot walks several transactions with several keys each.
+/// "every read for the whole hold", so it must outlast the hold: the one-byte existence reads
+/// take a scheduled flip each without receiving it (they never cover the header byte).
 const LYING_ENGINE_READS: u32 = 2048;
 
 /// What a restore through the fault meets.
@@ -57,8 +54,6 @@ const LYING_ENGINE_READS: u32 = 2048;
 enum Lens {
     /// Every call fails with the error its operation maps to.
     Down { ops: Vec<StoreOp>, auth: bool },
-    /// Listings show only these keys: the bucket as it stood when the hold began.
-    Lagging(BTreeSet<FileKey>),
     /// Every read returns one byte flipped.
     Lying,
 }
@@ -74,7 +69,7 @@ impl View {
     fn fail(&self, op: StoreOp) -> Result<(), StoreError> {
         match &self.lens {
             Lens::Down { ops, auth } if ops.contains(&op) => Err(held_error(op, *auth)),
-            Lens::Down { .. } | Lens::Lagging(_) | Lens::Lying => Ok(()),
+            Lens::Down { .. } | Lens::Lying => Ok(()),
         }
     }
 
@@ -118,11 +113,7 @@ impl ObjectStore for View {
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
         self.fail(StoreOp::List)?;
-        let mut listing = self.raw.list(level, after, limit).await?;
-        if let Lens::Lagging(seen) = &self.lens {
-            listing.files.retain(|file| seen.contains(&file.key));
-        }
-        Ok(listing)
+        self.raw.list(level, after, limit).await
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
@@ -179,7 +170,6 @@ fn name(hold: Hold) -> String {
         Hold::Wal(op) => format!("wal.{}", variant(&op)),
         Hold::CredentialsRevoked
         | Hold::DiskFull
-        | Hold::LaggingListing
         | Hold::LyingReads
         | Hold::ReadersHeld
         | Hold::LyingDisk
@@ -194,13 +184,6 @@ fn explained(hold: Hold, err: &RestoreError) -> bool {
         Hold::StoreDown(_) | Hold::StoreDownAll | Hold::CredentialsRevoked => {
             matches!(err, RestoreError::Inventory(_) | RestoreError::Store(_))
         }
-        // A lagging listing hides files: a gap, or files that vanish under it.
-        Hold::LaggingListing => matches!(
-            err,
-            RestoreError::NoPlan(_)
-                | RestoreError::Unstable { .. }
-                | RestoreError::ListingBehind { .. }
-        ),
         Hold::LyingReads => matches!(err, RestoreError::File { .. }),
         Hold::DiskFull
         | Hold::ReadersHeld
@@ -331,11 +314,6 @@ impl Runner {
                 ops: ALL_OPS.to_vec(),
                 auth: false,
             },
-            Hold::LaggingListing => {
-                let inventory = block_on(Inventory::load(&self.w.remote_raw))
-                    .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
-                Lens::Lagging(inventory.files().iter().map(|f| f.key).collect())
-            }
             Hold::LyingReads => Lens::Lying,
             Hold::DiskFull
             | Hold::ReadersHeld
@@ -416,7 +394,7 @@ impl Runner {
             }
             // The engine never lists through a restore's lens; a second writer's file is the
             // fault itself, placed by its own step.
-            Hold::LaggingListing | Hold::Wal(_) | Hold::SecondWriter => None,
+            Hold::Wal(_) | Hold::SecondWriter => None,
         }
     }
 
@@ -482,31 +460,8 @@ impl Runner {
                 self.report.reach.bump(format!("hold.{}.same", name(hold)));
                 Ok(())
             }
-            // As of an instant, the bound is the promise, not the raw replica's answer: a view
-            // that hides a merged file plans from the finer files under it and may answer newer
-            // than the raw replica's earlier-taken state, and both meet the bound.
-            (Ok((got, _)), Ok(_)) => match target {
-                RestoreTarget::AsOf(instant) => {
-                    self.w
-                        .history
-                        .judge_as_of(instant.unix_millis(), got)
-                        .map_err(|anomaly| {
-                            wrong(format!("an answer past the as-of bound: {anomaly}"))
-                        })?;
-                    self.report
-                        .reach
-                        .bump(format!("hold.{}.as_of_within_bound", name(hold)));
-                    Ok(())
-                }
-                RestoreTarget::Latest | RestoreTarget::Txid(_) => {
-                    Err(wrong("another database than the replica holds".into()))
-                }
-            },
-            (Ok((got, reached)), Err(err)) => {
-                if hold == Hold::LaggingListing && self.behind_a_hole(&err, got, reached)? {
-                    self.report.reach.bump("hold.LaggingListing.past_hole");
-                    return Ok(());
-                }
+            (Ok(_), Ok(_)) => Err(wrong("another database than the replica holds".into())),
+            (Ok((got, _)), Err(err)) => {
                 // The raw replica stops on an object the store damaged as it published it, so
                 // it has no answer to hold this one to; the most a restore can promise then is
                 // a state the application committed.
@@ -543,30 +498,6 @@ impl Runner {
             }
             (Err(err), Ok(_)) => Err(wrong(format!("an error the fault does not explain: {err}"))),
         }
-    }
-
-    /// Whether a restore through a lagging listing that reached `reached` with `got` stopped
-    /// short of a hole the raw replica has (`err` is its gap): the raw replica's own answer
-    /// for `reached` is `got`, and the hole is past it. The files past the hole are known only
-    /// to a listing, and no read can name them, so the lag hides them as it hides any file; a
-    /// listing whole up to the hole gives the same chain.
-    fn behind_a_hole(
-        &self,
-        err: &RestoreError,
-        got: lsr_history::Digest,
-        reached: Txid,
-    ) -> Result<bool, Violation> {
-        let RestoreError::NoPlan(no) = err else {
-            return Ok(false);
-        };
-        let lsr_core::PlanOutcome::Gap { have_through, .. } = no.outcome() else {
-            return Ok(false);
-        };
-        if reached > *have_through {
-            return Ok(false);
-        }
-        let raw = restored_digest(&self.w.remote_raw, RestoreTarget::Txid(reached))?;
-        Ok(matches!(raw, Ok((want, _)) if want == got))
     }
 
     /// WAL damage held for `ticks` ticks, judged in the middle and at the end, then healed.

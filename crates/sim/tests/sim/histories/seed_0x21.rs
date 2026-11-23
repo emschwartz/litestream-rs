@@ -14,10 +14,6 @@ pub const OPS: &[Op] = &[
         ticks: 11,
     },
     Op::Tick,
-    Op::LaggingListings {
-        writes: 5,
-        window: 3,
-    },
     Op::SecondWriter { ticks: 1 },
     Op::AppInTick {
         at: AppAt::Before(SourceOp::Open),
@@ -49,10 +45,6 @@ pub const OPS: &[Op] = &[
         op: AppOp::DeleteWal,
     },
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 5,
-        window: 27,
-    },
     Op::Commit {
         pages: 3,
         grow: false,
@@ -105,10 +97,6 @@ pub const OPS: &[Op] = &[
         pages: 2,
         grow: true,
     },
-    Op::LaggingListings {
-        writes: 8,
-        window: 4,
-    },
     Op::AppInTick {
         at: AppAt::Before(SourceOp::Len),
         op: AppOp::Commit {
@@ -133,10 +121,6 @@ pub const OPS: &[Op] = &[
     Op::Meta(MetaOp::FlipNewestByte),
     Op::Spill,
     Op::Spill,
-    Op::LaggingListings {
-        writes: 8,
-        window: 7,
-    },
     Op::Heal,
     Op::Remote(RemoteOp::RollBack),
     Op::Tick,
@@ -168,19 +152,11 @@ pub const OPS: &[Op] = &[
     Op::Verify,
     Op::EnvFault(EnvFault::DeleteWal),
     Op::Restore,
-    Op::LaggingListings {
-        writes: 2,
-        window: 16,
-    },
     Op::Restore,
     Op::Heal,
     Op::AppInTick {
         at: AppAt::Before(SourceOp::PageCount),
         op: AppOp::ReaderEnd,
-    },
-    Op::LaggingListings {
-        writes: 3,
-        window: 16,
     },
     Op::Heal,
     Op::Commit {
@@ -204,10 +180,6 @@ pub const OPS: &[Op] = &[
     Op::Verify,
     Op::Meta(MetaOp::Restore),
     Op::Crash(CrashKind::Power),
-    Op::LaggingListings {
-        writes: 7,
-        window: 27,
-    },
     Op::Meta(MetaOp::Save),
     Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
     Op::Restore,
@@ -217,20 +189,12 @@ pub const OPS: &[Op] = &[
     },
     Op::Heal,
     Op::Meta(MetaOp::FlipNewestByte),
-    Op::LaggingListings {
-        writes: 6,
-        window: 33,
-    },
     Op::Heal,
     Op::Commit {
         pages: 4,
         grow: true,
     },
     Op::Restore,
-    Op::LaggingListings {
-        writes: 2,
-        window: 37,
-    },
     Op::Crash(CrashKind::Power),
     Op::Restore,
     Op::Crash(CrashKind::Power),
@@ -239,10 +203,6 @@ pub const OPS: &[Op] = &[
         ticks: 4,
     },
     Op::Meta(MetaOp::FlipNewestByte),
-    Op::LaggingListings {
-        writes: 7,
-        window: 35,
-    },
     Op::Remote(RemoteOp::RollBack),
     Op::Remote(RemoteOp::RollBack),
     Op::Spill,
@@ -260,10 +220,6 @@ pub const OPS: &[Op] = &[
         SourceOp::BeginBarrier,
         SourceError::Io(ErrorKind::PermissionDenied),
     )),
-    Op::LaggingListings {
-        writes: 6,
-        window: 24,
-    },
     Op::Heal,
     Op::Commit {
         pages: 1,
@@ -287,10 +243,6 @@ pub const OPS: &[Op] = &[
     Op::Meta(MetaOp::DeleteAll),
     Op::Meta(MetaOp::Save),
     Op::Heal,
-    Op::LaggingListings {
-        writes: 6,
-        window: 8,
-    },
     Op::Heal,
     Op::AppInTick {
         at: AppAt::Call(0),

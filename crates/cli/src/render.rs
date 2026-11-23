@@ -297,24 +297,13 @@ pub fn warnings(done: &Done) -> String {
     };
     let rest = match &done.finished {
         Finished::Restored { restored, .. } => {
-            let mut out = restored.inside_file().map_or_else(String::new, |file| {
+            restored.inside_file().map_or_else(String::new, |file| {
                 inside_warning(&file, restored.reached())
-            });
-            if restored.writer_outpaced() {
-                out.push_str(&outpaced_warning(restored.reached()));
-            }
-            out
+            })
         }
         Finished::Planned { .. } | Finished::Skipped { .. } => String::new(),
     };
     format!("{parallelism}{rest}")
-}
-
-fn outpaced_warning(reached: Txid) -> String {
-    format!(
-        "warning: a writer kept adding files while the replica was listed; restored the state at \
-         transaction {reached}, which is committed but may be behind the writer by now\n"
-    )
 }
 
 fn inside_warning(file: &FileKey, reached: Txid) -> String {
@@ -384,9 +373,6 @@ fn restored_json(
     });
     if let Some(file) = restored.inside_file() {
         add(&mut out, "inside_file", key_path(&file));
-    }
-    if restored.writer_outpaced() {
-        add(&mut out, "writer_outpaced", true);
     }
     line(&out)
 }

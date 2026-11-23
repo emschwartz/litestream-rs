@@ -24,9 +24,6 @@ pub(crate) struct Wrapped {
     /// Files the next listing of their level leaves out, as a directory read that races
     /// a writer's rename can (POSIX leaves a file added during a `readdir` unspecified).
     pub(crate) hide_once: Mutex<BTreeSet<FileKey>>,
-    /// Files every listing leaves out, as a store whose listings lag its writes does; reads
-    /// still find them.
-    pub(crate) unlisted: BTreeSet<FileKey>,
     /// Files a concurrent writer puts, one right after each listing of level 0 returns: the
     /// next listing shows it, and a read made in between already finds it.
     pub(crate) put_after_list: Mutex<VecDeque<(FileKey, Vec<u8>)>>,
@@ -52,7 +49,6 @@ impl Wrapped {
             zero_sizes: false,
             reads: AtomicUsize::new(0),
             hide_once: Mutex::new(BTreeSet::new()),
-            unlisted: BTreeSet::new(),
             put_after_list: Mutex::new(VecDeque::new()),
             put_after_miss: Mutex::new(None),
         }
@@ -84,9 +80,6 @@ impl ObjectStore for Wrapped {
             let mut hidden = self.hide_once.lock().unwrap();
             listing.files.retain(|file| !hidden.remove(&file.key));
         }
-        listing
-            .files
-            .retain(|file| !self.unlisted.contains(&file.key));
         if self.zero_sizes {
             for file in &mut listing.files {
                 file.size = 0;

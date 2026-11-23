@@ -176,19 +176,8 @@ fn restore_through_the_retry_layer_reads_side_by_side() {
     let restored = block_on(restore(&store, RestoreTarget::Latest, MemSink::new())).unwrap();
     assert_eq!(restored.files(), 1);
     let chunks = size.div_ceil(RESTORE_CHUNK);
-    // One-byte reads of the keys named past the listing for each transaction the walk
-    // looks at (the retry layer reads them one at a time), then one read per chunk.
-    let past = usize::try_from(lsr_core::fresh_probe_reads(
-        Txid::new(1),
-        &lsr_core::Starts::default(),
-    ))
-    .unwrap();
-    assert_eq!(
-        reads.load(Ordering::SeqCst),
-        chunks + past,
-        "one read per chunk"
-    );
-    let bound = chunks.div_ceil(WIDTH) + past;
+    assert_eq!(reads.load(Ordering::SeqCst), chunks, "one read per chunk");
+    let bound = chunks.div_ceil(WIDTH);
     let seen = rounds.load(Ordering::SeqCst);
     assert!(
         seen <= bound,

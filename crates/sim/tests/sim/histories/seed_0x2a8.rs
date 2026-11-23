@@ -46,10 +46,6 @@ pub const OPS: &[Op] = &[
         ticks: 2,
     },
     Op::SecondWriter { ticks: 1 },
-    Op::LaggingListings {
-        writes: 6,
-        window: 39,
-    },
     Op::WalDamage {
         op: WalOp::RegrowWithoutCommitMarks(17943048436701537665),
         ticks: 6,
@@ -58,23 +54,11 @@ pub const OPS: &[Op] = &[
         pages: 1,
         grow: false,
     },
-    Op::LaggingListings {
-        writes: 4,
-        window: 11,
-    },
     Op::RequestSnapshot,
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::Tick,
-    Op::LaggingListings {
-        writes: 3,
-        window: 36,
-    },
     Op::OtherProcessReader { begin: true },
     Op::Verify,
-    Op::LaggingListings {
-        writes: 1,
-        window: 31,
-    },
     Op::Crash(CrashKind::Process),
     Op::Vacuum { page_size: None },
     Op::SecondWriter { ticks: 1 },
@@ -98,10 +82,6 @@ pub const OPS: &[Op] = &[
         op: WalOp::RegrowWithoutCommitMarks(1557612545750706773),
         ticks: 0,
     },
-    Op::LaggingListings {
-        writes: 4,
-        window: 27,
-    },
     Op::WalDamage {
         op: WalOp::TearHeader,
         ticks: 1,
@@ -110,17 +90,9 @@ pub const OPS: &[Op] = &[
         pages: 3,
         grow: false,
     },
-    Op::LaggingListings {
-        writes: 5,
-        window: 21,
-    },
     Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
     Op::Crash(CrashKind::Process),
     Op::Tick,
-    Op::LaggingListings {
-        writes: 8,
-        window: 27,
-    },
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::Tick,
     Op::EnvFault(EnvFault::DeleteWal),
@@ -161,16 +133,8 @@ pub const OPS: &[Op] = &[
         hold: Hold::CredentialsRevoked,
         ticks: 27,
     },
-    Op::LaggingListings {
-        writes: 4,
-        window: 15,
-    },
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::RequestSnapshot,
-    Op::LaggingListings {
-        writes: 5,
-        window: 2,
-    },
     Op::AppInTick {
         at: AppAt::Before(SourceOp::Sync),
         op: AppOp::Checkpoint(OtherProcessMode::Truncate),
@@ -192,15 +156,7 @@ pub const OPS: &[Op] = &[
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::Tick,
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 8,
-        window: 21,
-    },
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 3,
-        window: 24,
-    },
     Op::Commit {
         pages: 3,
         grow: false,
@@ -223,10 +179,6 @@ pub const OPS: &[Op] = &[
     },
     Op::RequestSnapshot,
     Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
-    Op::LaggingListings {
-        writes: 6,
-        window: 3,
-    },
     Op::Remote(RemoteOp::RollBack),
     Op::WalDamage {
         op: WalOp::RegrowSameSalts(2334720686157421887),
@@ -234,10 +186,6 @@ pub const OPS: &[Op] = &[
     },
     Op::Remote(RemoteOp::RollBack),
     Op::Tick,
-    Op::LaggingListings {
-        writes: 5,
-        window: 9,
-    },
     Op::RequestSnapshot,
     Op::SecondWriter { ticks: 5 },
     Op::AppInTick {
@@ -249,10 +197,6 @@ pub const OPS: &[Op] = &[
     Op::Remote(RemoteOp::RollBack),
     Op::OtherProcessReader { begin: false },
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 1,
-        window: 10,
-    },
     Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
     Op::Tick,
     Op::OtherProcessReader { begin: true },
@@ -270,18 +214,10 @@ pub const OPS: &[Op] = &[
         grow: false,
     },
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 2,
-        window: 21,
-    },
     Op::RequestSnapshot,
     Op::Tick,
     Op::Tick,
     Op::Tick,
-    Op::LaggingListings {
-        writes: 3,
-        window: 24,
-    },
     Op::SecondWriter { ticks: 0 },
     Op::Crash(CrashKind::Process),
     Op::Remote(RemoteOp::RollBack),
@@ -349,23 +285,11 @@ pub const OPS: &[Op] = &[
     Op::Tick,
     Op::OtherProcessReader { begin: false },
     Op::RequestSnapshot,
-    Op::LaggingListings {
-        writes: 8,
-        window: 23,
-    },
     Op::WalDamage {
         op: WalOp::RegrowWithoutCommitMarks(17024353250194112411),
         ticks: 5,
     },
-    Op::LaggingListings {
-        writes: 3,
-        window: 10,
-    },
     Op::Crash(CrashKind::Process),
-    Op::LaggingListings {
-        writes: 6,
-        window: 13,
-    },
     Op::Remote(RemoteOp::RollBack),
     Op::EnvFault(EnvFault::Source(SourceOp::PageCount, SourceError::Busy)),
     Op::WalDamage {
@@ -423,15 +347,7 @@ pub const OPS: &[Op] = &[
     Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
     Op::OtherProcessReader { begin: true },
     Op::Verify,
-    Op::LaggingListings {
-        writes: 4,
-        window: 17,
-    },
     Op::EnvFault(EnvFault::Source(SourceOp::BeginBarrier, SourceError::Busy)),
-    Op::LaggingListings {
-        writes: 4,
-        window: 23,
-    },
     Op::OtherProcessReader { begin: false },
     Op::Tick,
     Op::Remote(RemoteOp::RollBack),
@@ -462,10 +378,6 @@ pub const OPS: &[Op] = &[
     },
     Op::Verify,
     Op::OtherProcessReader { begin: false },
-    Op::LaggingListings {
-        writes: 2,
-        window: 6,
-    },
     Op::Verify,
     Op::Vacuum { page_size: None },
     Op::OtherProcessReader { begin: false },
@@ -475,10 +387,6 @@ pub const OPS: &[Op] = &[
     },
     Op::Remote(RemoteOp::RollBack),
     Op::RequestSnapshot,
-    Op::LaggingListings {
-        writes: 1,
-        window: 15,
-    },
     Op::WalDamage {
         op: WalOp::RegrowWithoutCommitMarks(6038452481541450658),
         ticks: 4,
@@ -494,10 +402,6 @@ pub const OPS: &[Op] = &[
         grow: false,
     },
     Op::Crash(CrashKind::Process),
-    Op::LaggingListings {
-        writes: 3,
-        window: 16,
-    },
     Op::WalDamage {
         op: WalOp::FlipLastFrameBit,
         ticks: 4,
@@ -510,10 +414,6 @@ pub const OPS: &[Op] = &[
     Op::Commit {
         pages: 3,
         grow: false,
-    },
-    Op::LaggingListings {
-        writes: 4,
-        window: 34,
     },
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::Hold {
@@ -560,10 +460,6 @@ pub const OPS: &[Op] = &[
     Op::Tick,
     Op::RequestSnapshot,
     Op::RequestSnapshot,
-    Op::LaggingListings {
-        writes: 7,
-        window: 36,
-    },
     Op::Vacuum { page_size: None },
     Op::Verify,
     Op::WalDamage {
@@ -593,23 +489,7 @@ pub const OPS: &[Op] = &[
         grow: false,
     },
     Op::Verify,
-    Op::LaggingListings {
-        writes: 5,
-        window: 7,
-    },
     Op::Tick,
-    Op::LaggingListings {
-        writes: 2,
-        window: 6,
-    },
     Op::Remote(RemoteOp::RollBack),
     Op::Remote(RemoteOp::RollBack),
-    Op::LaggingListings {
-        writes: 6,
-        window: 32,
-    },
-    Op::LaggingListings {
-        writes: 2,
-        window: 12,
-    },
 ];

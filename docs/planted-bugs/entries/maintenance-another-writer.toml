@@ -2,4 +2,4 @@
 name = "maintenance-another-writer"
 fix = "bc34b37"
 package = "lsr-core"
-tests = ["actor::tests::maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it"]
+tests = ["actor::tests::maintenance_stops_on_a_file_past_its_position"]
