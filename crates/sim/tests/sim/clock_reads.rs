@@ -68,7 +68,7 @@ fn a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552() {
         Op::EnvFault(EnvFault::Source(SourceOp::BumpSeq, SourceError::Busy)),
         Op::Restore,
         Op::Rollback,
-        Op::StagingDamage(MetaOp::ForgeNewest),
+        Op::StagingDamage(MetaOp::FlipNewestByte),
         Op::Commit {
             pages: 2,
             grow: false,

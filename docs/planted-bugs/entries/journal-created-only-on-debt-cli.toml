@@ -1,4 +1,5 @@
 name = "journal-created-only-on-debt-cli"
+patch = "journal-created-only-on-debt"
 fix = "6f700f9a"
 package = "lsr-cli"
 test_bin = "cli"

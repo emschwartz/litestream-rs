@@ -1,11 +1,11 @@
 //! The fail-stop judge's place in the run loop (`crate::failstop`): after every tick it learns
 //! what fired, whether the replica now holds everything, and judges the engine's trip.
 
-use lsr_core::{Did, Event, RestoreTarget, Tick};
+use lsr_core::{Did, Event, RestoreTarget, SnapshotCause, Tick};
 use lsr_ltx::Timestamp;
 
 use super::Runner;
-use crate::failstop::{Fired, TickSeen, data_path, fired};
+use crate::failstop::{Excused, Fired, TickSeen, data_path, fired};
 use crate::generate::Op;
 use crate::history::{image_digest, restored_digest};
 use crate::oracle::Violation;
@@ -45,6 +45,23 @@ impl Runner {
             fault_fired: remote.all > fired0.0.all || staging.all > fired0.1.all,
             reported_failure,
             refusal_fired: remote.refused > fired0.0.refused,
+            read_wal: matches!(
+                ended,
+                TickEnd::Done(Tick::Ran {
+                    event: Event::Booted { .. }
+                        | Event::Synced { .. }
+                        | Event::Resnapshot(_)
+                        | Event::Checkpointed { .. },
+                    ..
+                })
+            ),
+            unvouched_boot: matches!(
+                ended,
+                TickEnd::Done(Tick::Ran {
+                    event: Event::Booted { cause: Some(cause) },
+                    ..
+                }) if breaks_continuity(*cause)
+            ),
         };
         self.fail_stop.saw(tick);
         let believed = matches!(
@@ -63,7 +80,28 @@ impl Runner {
         }
         let bound = self.actor_bound();
         let booted = self.life.boot_salts.is_some();
-        self.fail_stop.judge(trip, tick, bound, booted)
+        let excused = self.fail_stop.excused();
+        let unstaged_only = matches!(trip, Some(lsr_core::Trip::UnreplicatedTooLong { .. }))
+            && self.w.sqlite.mx_frame() > 0
+            && self.nothing_staged_waits();
+        let judged = self
+            .fail_stop
+            .judge(trip, tick, bound, booted, unstaged_only);
+        self.count_excused(excused);
+        judged
+    }
+
+    /// Counts each exemption the judge used since it had excused `was`, under its own key.
+    fn count_excused(&mut self, was: Excused) {
+        let now = self.fail_stop.excused();
+        if now.unread_wal > was.unread_wal {
+            self.report.reach.bump("failstop.excused.unread_wal");
+        }
+        if now.unvouched_snapshot > was.unvouched_snapshot {
+            self.report
+                .reach
+                .bump("failstop.excused.unvouched_snapshot");
+        }
     }
 
     /// When the replica changed while the judge thinks something is off it, restores
@@ -82,6 +120,21 @@ impl Runner {
             self.fail_stop.caught_up(want);
         }
         Ok(())
+    }
+
+    /// Whether every level-0 file in staging ends at or before the replica's newest
+    /// transaction: nothing staged waits to be uploaded (a staging put back from an older
+    /// backup is behind it). A store that cannot be listed says nothing waits not.
+    fn nothing_staged_waits(&self) -> bool {
+        let staged = match self.w.newest_staged() {
+            Ok(staged) => staged.map(|info| info.key.range().max().get()),
+            Err(_) => return false,
+        };
+        staged.is_none_or(|staged| {
+            self.w
+                .remote_newest()
+                .is_some_and(|remote| staged <= remote)
+        })
     }
 
     /// Something outside the engine is about to change the replica: the judge cannot tell
@@ -116,5 +169,25 @@ impl Runner {
     /// The bound the engines of this run are built with.
     fn actor_bound(&self) -> std::time::Duration {
         lsr_core::MaxUnreplicatedAge::DEFAULT.get()
+    }
+}
+
+/// Whether a boot's logged snapshot cause says continuity broke, so the snapshot may hold
+/// commits that were never staged and the engine has nothing to compare it with.
+const fn breaks_continuity(cause: SnapshotCause) -> bool {
+    match cause {
+        SnapshotCause::StagedUnverified { .. } | SnapshotCause::LocalRewound { .. } => true,
+        // No replica yet, or one ahead of us (D81 keeps it out); a checkpoint or a failed WAL
+        // sync is a mid-run cause; the rest the engine never counts as lag.
+        SnapshotCause::FirstSync
+        | SnapshotCause::BehindRemote { .. }
+        | SnapshotCause::CheckpointBoundary
+        | SnapshotCause::WalSyncFailed
+        | SnapshotCause::OperatorRequested
+        | SnapshotCause::GenerationChanged
+        | SnapshotCause::WalMissing
+        | SnapshotCause::PrevFrameMismatch
+        | SnapshotCause::LastPageMismatch
+        | SnapshotCause::NewestStagedFileUnreadable => false,
     }
 }

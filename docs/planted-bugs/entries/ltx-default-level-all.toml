@@ -1,0 +1,5 @@
+name = "ltx-default-level-all"
+fix = "plant"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["ltx_lists_one_level_by_default_and_wal_warns"]

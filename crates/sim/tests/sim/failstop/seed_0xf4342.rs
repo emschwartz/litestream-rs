@@ -1,6 +1,7 @@
 //! The history of seed 0xf4342 from the error-domain swarm, unshrunk: a pending staged file,
 //! the clock stepped a day forward, and the newest staged file rewritten under the running
-//! engine. The engine tripped for age with every commit on the replica: a checkpoint staged
+//! engine (found as a forged file; a flipped byte since forgery left scope, `docs/decisions.md`
+//! D131). The engine tripped for age with every commit on the replica: a checkpoint staged
 //! the frame that moves the WAL past a restart, which changes no page, and the clock counted
 //! it as a commit (`docs/decisions.md` D81). Since the runner changes merged with #188 this
 //! history no longer reaches the trip even on the old engine; `seed_0x8ef_does_not_trip` and
@@ -29,7 +30,7 @@ fn ops() -> Vec<Op> {
         Op::RequestSnapshot,
         Op::Rollback,
         Op::Crash(CrashKind::Process),
-        Op::StagingDamage(MetaOp::ForgeNewest),
+        Op::StagingDamage(MetaOp::FlipNewestByte),
         Op::Remote(RemoteOp::RollBack),
         Op::Crash(CrashKind::Process),
         Op::StoreFault {
@@ -46,7 +47,7 @@ fn ops() -> Vec<Op> {
         },
         Op::EnvFault(EnvFault::DeleteWal),
         Op::CommitInTick { pages: 2 },
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::Rollback,
         Op::ClockJump(114823),
         Op::StoreFault {
@@ -64,9 +65,9 @@ fn ops() -> Vec<Op> {
         },
         Op::CommitInTick { pages: 2 },
         Op::Remote(RemoteOp::RollBack),
-        Op::StagingDamage(MetaOp::ForgeNewest),
+        Op::StagingDamage(MetaOp::FlipNewestByte),
         Op::Crash(CrashKind::Process),
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::RequestSnapshot,
         Op::RequestSnapshot,
         Op::Remote(RemoteOp::RollBack),
@@ -82,7 +83,7 @@ fn ops() -> Vec<Op> {
                 why: Denied::Tls,
             }),
         },
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::ClockJump(119979),
         Op::ClockJump(60261),
         Op::ClockJump(33648),
@@ -103,9 +104,9 @@ fn ops() -> Vec<Op> {
         Op::ClockJump(78937),
         Op::ClockJump(51525),
         Op::RequestSnapshot,
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::StagingDamage(MetaOp::FlipNewestByte),
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::Shutdown,
         Op::StagingDamage(MetaOp::FlipNewestByte),
         Op::Tick,
@@ -121,7 +122,7 @@ fn ops() -> Vec<Op> {
         Op::EnvFault(EnvFault::WipeStaging),
         Op::Shutdown,
         Op::Tick,
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::RequestSnapshot,
         Op::Tick,
         Op::StagingDamage(MetaOp::Restore),
@@ -129,7 +130,7 @@ fn ops() -> Vec<Op> {
         Op::Crash(CrashKind::Power),
         Op::Crash(CrashKind::Power),
         Op::RequestSnapshot,
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::RequestSnapshot,
         Op::RequestSnapshot,
         Op::RequestSnapshot,
@@ -156,10 +157,10 @@ fn ops() -> Vec<Op> {
                 },
             },
         },
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::OtherProcessReader { begin: true },
         Op::Rollback,
-        Op::StagingDamage(MetaOp::ForgeNewest),
+        Op::StagingDamage(MetaOp::FlipNewestByte),
         Op::Commit {
             pages: 2,
             grow: false,
@@ -169,7 +170,7 @@ fn ops() -> Vec<Op> {
             pages: 1,
             grow: false,
         },
-        Op::StagingDamage(MetaOp::ForgeNewest),
+        Op::StagingDamage(MetaOp::FlipNewestByte),
         Op::Remote(RemoteOp::RollBack),
         Op::OtherProcessReader { begin: true },
         Op::CommitInTick { pages: 3 },
@@ -201,15 +202,15 @@ fn ops() -> Vec<Op> {
         )),
         Op::ClockJump(45684),
         Op::Crash(CrashKind::Process),
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::StagingDamage(MetaOp::TruncateNewest),
         Op::StagingDamage(MetaOp::StripNewestOrigin),
-        Op::StagingDamage(MetaOp::ForgeNewest),
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::StagingDamage(MetaOp::FlipNewestByte),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::Remote(RemoteOp::RollBack),
         Op::Tick,
         Op::ClockJump(30657),
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::RequestSnapshot,
         Op::StagingDamage(MetaOp::Restore),
         Op::ClockJump(93600000),
@@ -221,7 +222,7 @@ fn ops() -> Vec<Op> {
         Op::StagingDamage(MetaOp::TruncateNewest),
         Op::ClockJump(119172),
         Op::Tick,
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::Commit {
             pages: 2,
             grow: false,
@@ -237,7 +238,7 @@ fn ops() -> Vec<Op> {
         Op::ClockJump(82932),
         Op::RequestSnapshot,
         Op::Remote(RemoteOp::RollBack),
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::EnvFault(EnvFault::WipeStaging),
         Op::Meta(MetaOp::Save),
         Op::Rollback,
@@ -246,7 +247,7 @@ fn ops() -> Vec<Op> {
             pages: 1,
             grow: false,
         },
-        Op::StagingDamage(MetaOp::ForgeNewest),
+        Op::StagingDamage(MetaOp::FlipNewestByte),
         Op::OtherProcessReader { begin: false },
         Op::Meta(MetaOp::DeleteAll),
         Op::RequestSnapshot,
@@ -274,11 +275,11 @@ fn ops() -> Vec<Op> {
         Op::Tick,
         Op::ClockJump(50187),
         Op::RequestSnapshot,
-        Op::StagingDamage(MetaOp::ForgeNewest),
+        Op::StagingDamage(MetaOp::FlipNewestByte),
         Op::Tick,
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::Tick,
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::Remote(RemoteOp::RollBack),
         Op::ClockJump(35594),
         Op::ClockJump(100741),
@@ -302,14 +303,14 @@ fn ops() -> Vec<Op> {
         Op::RequestSnapshot,
         Op::CommitInTick { pages: 1 },
         Op::ClockJump(93600000),
-        Op::Meta(MetaOp::ForgeNewest),
+        Op::Meta(MetaOp::FlipNewestByte),
         Op::Tick,
     ]
 }
 
 /// The history runs to the end with no violation, the judge of every tick included.
 #[test]
-fn a_forged_staged_file_after_a_day_long_step_does_not_trip_seed_0xf4342() {
+fn a_flipped_staged_byte_after_a_day_long_step_does_not_trip_seed_0xf4342() {
     let opts = Opts {
         drawn: true,
         block_crash_law: true,
