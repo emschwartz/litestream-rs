@@ -1,5 +1,0 @@
-name = "regrown-wal-one-commit-sim"
-fix = "a8092ab"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_file_staged_from_a_regrown_wal_is_judged_by_the_regrown_commit_seed_0x2b2"]
