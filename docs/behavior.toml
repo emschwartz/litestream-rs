@@ -231,7 +231,7 @@ recovery = "None needed; the open case: none"
 detected_by = "core::`a_listing_that_hides_the_newest_uploads_is_corrected_by_reads`, core::`a_snapshot_a_listing_hides_is_found_by_a_read`, sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`; plant::`listing-trusted-without-probe`, plant::`boot-trusts-a-stale-listing`"
 survived_by = "sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`"
 no_test = "open case: known wrong"
-notes = "Case (1) is pinned as known wrong: sim::`a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back_seed_0x95a` (`KnownWrong::ProbeStopsInAHole`); the fix belongs to the probe walk. It was documented as ending in a false `OtherWriter` stop; seed 0x95a of the survival campaign ends silently wrong instead. Case (2) needs a writer that merges another writer's level-0 file: the engine does so only under `ContinueAndInterleaveHistories`, which the simulator never runs (its other-writer judge assumes the default response), and no simulated second writer compacts, so it is unmodelled (#99, #127 item J)"
+notes = "Case (1) is pinned as known wrong: sim::`a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back` (`KnownWrong::ProbeStopsInAHole`), 22 operations shrunk from the survival campaign's seed 0x95a; the fix belongs to the probe walk. It was documented as ending in a false `OtherWriter` stop; that history ends silently wrong instead. Case (2) needs a writer that merges another writer's level-0 file: the engine does so only under `ContinueAndInterleaveHistories`, which the simulator never runs (its other-writer judge assumes the default response), and no simulated second writer compacts, so it is unmodelled (#99, #127 item J)"
 
 [[row]]
 table = "Boot"

@@ -32,7 +32,6 @@ pub mod seed_0x80e;
 pub mod seed_0x82;
 pub mod seed_0x8ef;
 pub mod seed_0x92d;
-pub mod seed_0x95a;
 pub mod seed_0x9f9;
 pub mod seed_0xa4d;
 pub mod seed_0xb6b;
@@ -204,14 +203,6 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0xb9e",
         "compaction_takes_a_staging_denial_as_staging_seed_0xb9e",
         Guard::Own("compact-local-read-as-remote-sim"),
-    ),
-    (
-        "seed_0x95a",
-        "a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back_seed_0x95a",
-        Guard::Unguarded(
-            "it pins an open defect (KnownWrong::ProbeStopsInAHole) and passes only while main \
-             fails with it, so no plant can be judged by it",
-        ),
     ),
     (
         "seed_0x734",

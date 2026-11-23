@@ -120,16 +120,61 @@ fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
     );
 }
 
-/// Bucket rollbacks leave a hole below the engine's newest upload, staging is wiped, and a
-/// lagging listing hides that upload: the boot's read past its listing stops in the hole, the
-/// engine uploads a new transaction under the hidden one, and the latest state restores an
-/// older one with no stop (survival campaign, swarm mix with holds at 20; BOOT-18).
+/// Bucket rollbacks leave a hole below the engine's newest upload, staging is wiped, and lagging
+/// listings hide what changed: the boot's read past its listing stops in the hole (at most
+/// three missing transactions, `PROBE_GAP`), the engine stages transactions the replica
+/// already holds above the hole, and a restore of the latest state then applies the old upload
+/// on top of the new ones and goes back to an older state, with no stop (BOOT-18).
+///
+/// Shrunk by hand from the survival campaign's seed 0x95a (83 operations) to these 22, each
+/// needed: the replica takes transactions 1, 4 and 5 under lagging listings; five rollbacks
+/// take it back to 1; the engine, not noticing (D17), uploads 6; staging is wiped and a boot
+/// under a lagging listing stages 4 and 5 again. With `PROBE_GAP` raised to 30 it passes, so
+/// the probe's gap is what fails. Kept as a recording, as D164 allows while the cause is not
+/// fully stated: which keys the lagging listing still shows the boot is not yet worked out,
+/// and the runner's own draws matter (other seeds fail as a wrong restore or pass).
 #[test]
-fn a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back_seed_0x95a() {
+fn a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back() {
+    use lsr_core::{SourceError, SourceOp};
+    use lsr_sim::EnvFault;
+    use lsr_sim::generate::{Hold, RemoteOp};
+    let commit = |pages| Op::Commit { pages, grow: false };
+    let rollback = || Op::Remote(RemoteOp::RollBack);
+    let ops = [
+        Op::LaggingListings {
+            writes: 2,
+            window: 40,
+        },
+        commit(2),
+        Op::EnvFault(EnvFault::Source(SourceOp::Checkpoint, SourceError::Busy)),
+        Op::Shutdown,
+        Op::CommitInTick { pages: 4 },
+        Op::CommitInTick { pages: 2 },
+        commit(4),
+        Op::CommitInTick { pages: 2 },
+        Op::Shutdown,
+        Op::LaggingListings {
+            writes: 5,
+            window: 24,
+        },
+        Op::Shutdown,
+        rollback(),
+        Op::Tick,
+        rollback(),
+        Op::OtherProcessReader { begin: true },
+        rollback(),
+        rollback(),
+        rollback(),
+        Op::Shutdown,
+        Op::EnvFault(EnvFault::WipeStaging),
+        Op::CommitInTick { pages: 1 },
+        Op::Hold {
+            hold: Hold::LaggingListing,
+            ticks: 8,
+        },
+    ];
     let opts = Opts {
         drawn: true,
-        block_crash_law: false,
-        lying_wal_sync: false,
         after_restart: AfterRestart::Retry,
         clock_law: ClockLaw::PerTick,
         error_domain: true,
@@ -137,10 +182,5 @@ fn a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back_seed_0x95
         staging_fs: true,
         ..Opts::default()
     };
-    still_fails(
-        0x95a,
-        crate::histories::seed_0x95a::OPS,
-        &opts,
-        KnownWrong::ProbeStopsInAHole,
-    );
+    still_fails(0x95a, &ops, &opts, KnownWrong::ProbeStopsInAHole);
 }
