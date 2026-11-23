@@ -37,8 +37,8 @@ use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
 use lsr_replica::{
     Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
-    IfReplicationStops, Replicator, RestoreError, Runtime, Stopped, Trip, record_takeover,
-    restore_if_missing,
+    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, Stopped, Trip,
+    record_takeover, restore_if_missing,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{CredentialChain, CredentialError, S3Store};
@@ -143,6 +143,8 @@ struct Slot {
 struct Failure {
     msg: &'static str,
     error: String,
+    /// Whether the cause can pass by itself, so the start is tried again as Go's next sync does.
+    transient: bool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -271,7 +273,14 @@ impl Daemon {
         if slot.store.is_some() {
             match self.try_start(&slot, true) {
                 Ok(state) => slot.state = state,
-                Err(failure) => self.failed(&mut slot, failure, false),
+                Err(failure) => {
+                    // The waiter retries a slot that is waiting, as it does a file that
+                    // appears mid-creation.
+                    if failure.transient {
+                        slot.state = State::Waiting;
+                    }
+                    self.failed(&mut slot, failure, false);
+                }
             }
         }
         slot
@@ -310,12 +319,14 @@ impl Daemon {
             Err(error) => Err(Failure {
                 msg: "cannot start database",
                 error: error.to_string(),
+                transient: is_busy(&error),
             }),
         }
     }
 
     /// Logs a failed start, once per distinct error for a database that is retried.
     fn failed(&self, slot: &mut Slot, failure: Failure, retried: bool) {
+        let retried = retried || failure.transient;
         if slot.last_error.as_ref() == Some(&failure.error) {
             return;
         }
@@ -375,6 +386,7 @@ impl Daemon {
                     record_takeover(&meta, through).map_err(|error| Failure {
                         msg: "restore completed but the takeover record could not be written",
                         error: error.to_string(),
+                        transient: false,
                     })?;
                 }
                 let msg = format!("takeover recorded through {through}");
@@ -394,6 +406,7 @@ impl Daemon {
                 return Err(Failure {
                     msg: "restore failed",
                     error: error.to_string(),
+                    transient: false,
                 });
             }
         }
@@ -434,23 +447,29 @@ impl Daemon {
                 Err(RecvTimeoutError::Timeout) => {}
                 Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
             }
-            let mut slots = lock(&self.slots);
-            let mut left = false;
-            for (index, slot) in slots.iter_mut().enumerate() {
-                if matches!(slot.state, State::Waiting) {
-                    // A file that appears mid-creation may not open yet: retry, as Go does.
-                    match self.try_start(slot, false) {
-                        Ok(state) => slot.state = state,
-                        Err(failure) => self.failed(slot, failure, true),
-                    }
-                    self.board.set(index, slot.state.entry());
-                    left |= matches!(slot.state, State::Waiting);
-                }
-            }
-            if !left {
+            if !self.retry_waiting() {
                 return;
             }
         }
+    }
+
+    /// One pass over the waiting databases; whether any still wait.
+    fn retry_waiting(&self) -> bool {
+        let mut slots = lock(&self.slots);
+        let mut left = false;
+        for (index, slot) in slots.iter_mut().enumerate() {
+            if matches!(slot.state, State::Waiting) {
+                // A file that appears mid-creation may not open yet, nor one the application
+                // holds locked: retry, as Go does.
+                match self.try_start(slot, false) {
+                    Ok(state) => slot.state = state,
+                    Err(failure) => self.failed(slot, failure, true),
+                }
+                self.board.set(index, slot.state.entry());
+                left |= matches!(slot.state, State::Waiting);
+            }
+        }
+        left
     }
 
     /// Drains every running database within what is left of the one deadline begun at
@@ -648,6 +667,12 @@ enum OpenStoreError {
 
 /// The store for a replica; S3 credentials are resolved now, from the file or the
 /// environment and shared files (Go copies `LITESTREAM_*` to `AWS_*`; the chain reads both).
+/// Whether the start failed because another connection held a lock SQLite would not wait for
+/// (the application writing while the database opens), which passes by itself.
+fn is_busy(error: &StartError) -> bool {
+    matches!(error, StartError::Sqlite { code } if matches!(code & 0xff, 5 | 6))
+}
+
 fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreError> {
     match replica {
         ReplicaPlan::File(dir) => Ok(Arc::new(FsStore::new(dir))),
@@ -748,6 +773,43 @@ mod tests {
             Box::new(io::sink()),
         ));
         Daemon::start(&plan, false, log, started.clone(), Board::default())
+    }
+
+    /// An application holding the write lock while the database opens makes the start busy.
+    /// The database is retried by the waiter, not left failed for good, and runs once the
+    /// application commits (Go sets up its schema again on every sync until it can).
+    #[test]
+    fn a_start_that_meets_the_application_writing_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("app.db");
+        let app = rusqlite::Connection::open(&db).unwrap();
+        app.pragma_update(None, "journal_mode", "wal").unwrap();
+        app.execute_batch("CREATE TABLE t (x);").unwrap();
+        app.execute_batch("BEGIN IMMEDIATE; INSERT INTO t VALUES (1);")
+            .unwrap();
+        let text = format!(
+            "dbs:\n  - path: {}\n    replica:\n      url: file://{}\n",
+            db.display(),
+            dir.path().join("replica").display(),
+        );
+        let loaded = GoConfig::parse(&text, Expand::Off, &ProcessEnv).unwrap();
+        let plan = lsr_config::plan(&loaded.config, &ProcessEnv).unwrap();
+        let log = Arc::new(Logger::to(
+            lsr_config::LogLevel::Error,
+            lsr_config::LogFormat::Text,
+            Runtime::system().clock,
+            Box::new(io::sink()),
+        ));
+        let board = Board::default();
+        let started = Started::default();
+        let daemon = Daemon::start(&plan, false, log, started, board.clone());
+        let state = |board: &Board| board.views().remove(0).state;
+        assert!(matches!(state(&board), DbState::Waiting));
+        assert!(daemon.retry_waiting(), "still locked: still waiting");
+        app.execute_batch("COMMIT").unwrap();
+        assert!(!daemon.retry_waiting());
+        assert!(matches!(state(&board), DbState::Running(_)));
+        drop(daemon.stop(None, daemon.now(), false, false));
     }
 
     /// A cut is a state: after a second signal, every drain the stop asks for gets nothing,
