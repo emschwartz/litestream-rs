@@ -30,8 +30,8 @@ use std::task::{Context, Poll};
 
 use lsr_core::WriteMode;
 use lsr_core::{
-    BatchKind, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt, Listing, MemStore,
-    ObjectStore, PageLimit, ReadAt, ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
+    BatchKind, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore,
+    PageLimit, ReadAt, ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
 };
 use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_ltx::{HEADER_LEN, Header, Timestamp, TxidRange, WalOrigin};
@@ -452,7 +452,7 @@ pub struct Faults<S> {
     inner: S,
     state: Arc<Mutex<FaultState>>,
     volatile: Option<VolatileHandle>,
-    raw: Option<MemStore>,
+    raw: Option<crate::remote::Bucket>,
 }
 
 impl<S> Faults<S> {
@@ -496,7 +496,7 @@ impl<S> Faults<S> {
     /// Lets [`FaultShape::CorruptPublish`] change the bytes of an object it
     /// published, through a handle to the store under the wrappers.
     #[must_use]
-    pub fn corrupting_through(mut self, raw: MemStore) -> Self {
+    pub fn corrupting_through(mut self, raw: crate::remote::Bucket) -> Self {
         self.raw = Some(raw);
         self
     }
@@ -728,7 +728,7 @@ pub struct FaultsUpload<U> {
     wrote: u64,
     state: Arc<Mutex<FaultState>>,
     volatile: Option<VolatileHandle>,
-    raw: Option<MemStore>,
+    raw: Option<crate::remote::Bucket>,
 }
 
 fn checksum_mismatch(key: FileKey) -> StoreError {
@@ -739,7 +739,10 @@ fn checksum_mismatch(key: FileKey) -> StoreError {
 }
 
 /// What `raw` holds under `key`, as a listing shows it.
-async fn info_of(raw: &MemStore, key: &FileKey) -> Result<Option<FileInfo>, StoreError> {
+async fn info_of(
+    raw: &crate::remote::Bucket,
+    key: &FileKey,
+) -> Result<Option<FileInfo>, StoreError> {
     Ok(level_files(raw, key.level())
         .await?
         .into_iter()
@@ -747,7 +750,10 @@ async fn info_of(raw: &MemStore, key: &FileKey) -> Result<Option<FileInfo>, Stor
 }
 
 /// Every file `raw` holds in `level`.
-async fn level_files(raw: &MemStore, level: Level) -> Result<Vec<FileInfo>, StoreError> {
+async fn level_files(
+    raw: &crate::remote::Bucket,
+    level: Level,
+) -> Result<Vec<FileInfo>, StoreError> {
     let mut files = Vec::new();
     let mut at = ListAt::first(level);
     loop {
@@ -763,7 +769,7 @@ async fn level_files(raw: &MemStore, level: Level) -> Result<Vec<FileInfo>, Stor
 /// The page a lagging listing shows: the level as `raw` holds it, with each
 /// stale key as it was instead.
 async fn stale_listing(
-    raw: &MemStore,
+    raw: &crate::remote::Bucket,
     level: Level,
     stale: &[(FileKey, Option<FileInfo>)],
     after: Option<TxidRange>,
@@ -781,7 +787,7 @@ async fn stale_listing(
 
 /// Changes one byte in the middle of the published object, keeping its size
 /// and its created-at time.
-async fn damage(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
+async fn damage(raw: &crate::remote::Bucket, info: &FileInfo) -> Result<(), StoreError> {
     rewrite(raw, info, |bytes| {
         let middle = bytes.len() / 2;
         if let Some(byte) = bytes.get_mut(middle) {
@@ -792,7 +798,7 @@ async fn damage(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
 }
 
 /// Drops the published object's last byte, keeping its created-at time.
-async fn truncate(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
+async fn truncate(raw: &crate::remote::Bucket, info: &FileInfo) -> Result<(), StoreError> {
     rewrite(raw, info, |bytes| {
         bytes.pop();
     })
@@ -802,7 +808,7 @@ async fn truncate(raw: &MemStore, info: &FileInfo) -> Result<(), StoreError> {
 /// Puts the published object back through `edit`, keeping its created-at
 /// time.
 async fn rewrite(
-    raw: &MemStore,
+    raw: &crate::remote::Bucket,
     info: &FileInfo,
     edit: impl FnOnce(&mut Vec<u8>),
 ) -> Result<(), StoreError> {
@@ -1092,11 +1098,26 @@ impl HighWater {
     }
 }
 
-#[derive(Debug, Default)]
+/// What the bucket under a store holds at a key now: the [`content_digest`] of the object,
+/// `None` when there is none. Read beneath the store, never through it.
+pub type Landed = Arc<dyn Fn(&FileKey) -> Option<u64> + Send + Sync>;
+
+#[derive(Default)]
 struct TapState {
     events: Vec<RecorderEvent>,
     counts: RecorderCounts,
     clock: Option<(Arc<FakeClock>, HighWater)>,
+    landed: Option<Landed>,
+}
+
+impl std::fmt::Debug for TapState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TapState")
+            .field("events", &self.events.len())
+            .field("counts", &self.counts)
+            .field("landed", &self.landed.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl TapState {
@@ -1177,6 +1198,16 @@ impl<S> Recorder<S> {
         self
     }
 
+    /// Asks `landed` about a commit or a delete that failed: a store whose failure can come
+    /// after the bucket took the request (an S3 store losing the reply) may have published the
+    /// object or removed the keys all the same, and what landed is recorded as if it had
+    /// succeeded, as a fault above the recorder that fails a commit after publishing is.
+    #[must_use]
+    pub fn landed_through(self, landed: Landed) -> Self {
+        self.log.with(|s| s.landed = Some(landed));
+        self
+    }
+
     /// The log; clones share it.
     #[must_use]
     pub fn log(&self) -> RecorderLog {
@@ -1238,16 +1269,28 @@ impl<S: ObjectStore> ObjectStore for Recorder<S> {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.log.with(|s| bump(&mut s.counts.deletes));
 
-        self.inner.delete(keys).await?;
+        let outcome = self.inner.delete(keys).await;
         self.log.with(|s| {
-            let (at, high) = s.times();
-            s.events.push(RecorderEvent::Delete {
-                keys: keys.to_vec(),
-                at,
-                high,
-            });
+            // A failed delete removed the keys the bucket no longer holds, when it says so.
+            let gone: Vec<FileKey> = match (&outcome, &s.landed) {
+                (Ok(()), _) => keys.to_vec(),
+                (Err(_), Some(probe)) => keys
+                    .iter()
+                    .filter(|key| probe(key).is_none())
+                    .copied()
+                    .collect(),
+                (Err(_), None) => Vec::new(),
+            };
+            if !gone.is_empty() {
+                let (at, high) = s.times();
+                s.events.push(RecorderEvent::Delete {
+                    keys: gone,
+                    at,
+                    high,
+                });
+            }
         });
-        Ok(())
+        outcome
     }
 
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
@@ -1335,9 +1378,14 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
         let outcome = inner.commit().await;
         log.with(|s| {
             bump(&mut s.counts.commits);
-            // Only an object the store accepted is recorded: the recorder sits below
-            // `Faults`, so a commit it sees fail never published.
-            if outcome.is_ok() {
+            // An object the store accepted is recorded. The recorder sits below `Faults`, so a
+            // commit it sees fail published only if the store failed after the bucket took it,
+            // which the bucket itself says (`Recorder::landed_through`).
+            let landed = outcome.is_ok()
+                || s.landed
+                    .as_ref()
+                    .is_some_and(|probe| probe(&key) == Some(digest));
+            if landed {
                 let (at, high) = s.times();
                 s.events.push(RecorderEvent::Put {
                     key,

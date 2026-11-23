@@ -226,6 +226,9 @@ pub struct Opts {
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
+    /// The replica is the S3 store over its in-memory bucket ([`Weights::remote_s3`]).
+    /// [`run_with`] sets it.
+    pub remote_s3: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
@@ -432,7 +435,9 @@ const SETTLE_AFTER_RESTART: usize = 8;
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
     fn configured(seed: Seed, opts: &Opts) -> Self {
-        let mut runner = Self::new(seed, &opts.sqlite).with_staging_fs(seed, opts);
+        let mut runner = Self::new(seed, &opts.sqlite)
+            .with_staging_fs(seed, opts)
+            .with_remote_s3(opts);
         runner.lenient = opts.drawn;
         if opts.drawn {
             runner.draw_power_law(seed, opts);
@@ -1700,12 +1705,14 @@ impl Runner {
 
     /// How many replica reads a scheduled fault has failed or changed so far.
     fn remote_read_faults(&self) -> u32 {
-        self.w
+        let object = self
+            .w
             .remote_faults
             .hits()
             .iter()
             .filter(|(op, _, _)| *op == lsr_core::StoreOp::Read)
-            .fold(0, |sum, (_, _, hits)| sum.saturating_add(*hits))
+            .fold(0_u32, |sum, (_, _, hits)| sum.saturating_add(*hits));
+        object.saturating_add(self.http_read_faults())
     }
 
     /// The operator removes the other writer's newest file if it still holds
@@ -2246,6 +2253,7 @@ impl Runner {
             Op::Meta(op) => self.meta(*op)?,
             Op::Wal(op) => self.wal_damage(*op)?,
             Op::Remote(op) => self.remote(*op)?,
+            Op::HttpFault(fault) => self.http_fault(*fault)?,
             Op::AppAutocheckpoint(frames) => {
                 self.w.sqlite.set_app_autocheckpoint(*frames);
                 self.app_autocheckpoint = frames.and_then(NonZeroU32::new);
@@ -2506,7 +2514,9 @@ impl Runner {
     /// Counts, at the end of a run, what the stores really did: puts per
     /// level, deletes, and every scheduled fault that hit a call.
     fn tally_stores(&mut self) {
+        let unmet = u64::try_from(self.http_faults_pending()).unwrap_or(u64::MAX);
         let reach = &mut self.report.reach;
+        reach.add("http_fault.unmet", unmet);
         let (kept, cut) = self.w.sqlite.torn_losses();
         reach.add("power.kept_unsynced_wal", u64::from(kept));
         reach.add("power.kept_cut_frame", u64::from(cut));
@@ -2518,6 +2528,7 @@ impl Runner {
             u64::from(self.w.sqlite.db_torn_losses()),
         );
         reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
+
         reach.add(
             "batch.remote_calls",
             u64::from(self.w.remote_faults.batched()),
@@ -2617,6 +2628,7 @@ pub fn run_with(
         error_domain: weights.error_domain,
         known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
+        remote_s3: weights.remote_s3,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -2809,6 +2821,7 @@ const fn still_imposed(stall: lsr_core::Stall) -> bool {
     }
 }
 
+mod remote_s3;
 mod staging_fs;
 #[cfg(test)]
 mod tests;

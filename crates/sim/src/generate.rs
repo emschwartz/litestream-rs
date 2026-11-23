@@ -70,6 +70,47 @@ pub enum EnvFault {
     EvictPageCache,
 }
 
+/// The request an [`HttpFault`] waits for: the shapes the S3 store sends for the simulator's
+/// files, all of them small enough for a single PUT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpShape {
+    /// ListObjectsV2.
+    List,
+    /// HEAD of one object (a created-at time).
+    Head,
+    /// GET of one object, or a range of it.
+    Get,
+    /// A single PUT.
+    Put,
+    /// DeleteObjects.
+    DeleteObjects,
+    /// ListMultipartUploads (the boot's sweep of abandoned uploads).
+    ListUploads,
+}
+
+/// A provider behaviour the S3 store's fault layer answers the next request of a shape with
+/// (`lsr_store_s3::Fault`). Applies only with the replica on S3 ([`Weights::remote_s3`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpFault {
+    /// 503 `SlowDown`: a throttle.
+    SlowDown(HttpShape),
+    /// 429 with `Retry-After: 1`.
+    TooManyRequests(HttpShape),
+    /// 500 `InternalError`, the request never reaching the bucket.
+    Internal(HttpShape),
+    /// 408 `RequestTimeout`: Tigris shedding load.
+    RequestTimeout(HttpShape),
+    /// The request lands, and the caller sees 500: a lost acknowledgement.
+    AfterPublish(HttpShape),
+    /// The response body ends after 16 bytes, before its `Content-Length`.
+    TruncateBody(HttpShape),
+    /// The ETag answered belongs to other bytes: a provider that accepted a digest it did not
+    /// verify.
+    WrongEtag(HttpShape),
+    /// No response: the connection is reset.
+    ConnectionReset(HttpShape),
+}
+
 /// One step of a history.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -176,6 +217,9 @@ pub enum Op {
     /// The app's `wal_autocheckpoint` becomes this many frames (`None`: 0, the model's
     /// default), and the engine is told so. Scenarios only.
     AppAutocheckpoint(Option<u32>),
+    /// The S3 store's fault layer answers a request with a provider fault. Skipped with the
+    /// replica on `MemStore`.
+    HttpFault(HttpFault),
     /// The app shrinks the database by up to this many pages (it keeps at
     /// least one): a commit of page 1 with a smaller size.
     Shrink {
@@ -460,6 +504,10 @@ pub struct Weights {
     /// store's own syncs and renames. Not an operation, for the same reason as
     /// `block_crash_law`.
     pub staging_fs: bool,
+    /// Whether the replica is the real S3 store (`lsr-store-s3`) over its in-memory bucket and
+    /// recorded-fault layer ([`crate::remote`]) instead of `MemStore`. Not an operation, for
+    /// the same reason as `block_crash_law`; drawn last in the swarm mix.
+    pub remote_s3: bool,
     /// Store and SQLite-side faults draw their error from the whole error domain
     /// ([`crate::domain`]): every operation, every error an implementation can return from
     /// it. When unset they draw from the older subset (two store errors, two SQLite errors on
@@ -484,6 +532,8 @@ pub struct Weights {
     /// [`EnvFault::EvictPageCache`]: a step that does anything only after a failed fsync of
     /// the WAL, in its generation.
     pub evict_page_cache: u32,
+    /// [`Op::HttpFault`]: a step that does anything only with the replica on S3.
+    pub http_fault: u32,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -569,6 +619,7 @@ impl Default for Weights {
             // keep their shape; swarm mixes draw the law.
             clock_law: ClockLaw::PerTick,
             staging_fs: false,
+            remote_s3: false,
             error_domain: false,
             known_wrong: false,
             overlap: false,
@@ -579,6 +630,7 @@ impl Default for Weights {
             // shape; swarm mixes draw it.
             verify: 0,
             evict_page_cache: 0,
+            http_fault: 0,
         }
     }
 }
@@ -613,10 +665,11 @@ enum Kind {
     LaggingListings,
     OtherConnectionCommit,
     EvictPageCache,
+    HttpFault,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 28] {
+    fn table(&self) -> [(Kind, u32); 29] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -646,6 +699,7 @@ impl Weights {
             (Kind::LaggingListings, self.lagging_listings),
             (Kind::OtherConnectionCommit, self.other_connection_commit),
             (Kind::EvictPageCache, self.evict_page_cache),
+            (Kind::HttpFault, self.http_fault),
         ]
     }
 
@@ -723,12 +777,14 @@ impl Weights {
             after_restart: AfterRestart::Nothing,
             clock_law: ClockLaw::PerTick,
             staging_fs: false,
+            remote_s3: false,
             error_domain: false,
             known_wrong: false,
             overlap: false,
             app_in_tick: 0,
             verify: 0,
             evict_page_cache: 0,
+            http_fault: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -781,6 +837,10 @@ impl Weights {
         mix.other_connection_commit = weight(false);
         // And after that, for the same reason: page-cache eviction after a failed WAL fsync.
         mix.evict_page_cache = weight(false);
+        // And after that, for the same reason: the replica on the real S3 store in half the
+        // swarm, and provider faults on its requests.
+        mix.remote_s3 = below(&entropy, 2) == 0;
+        mix.http_fault = weight(false);
         mix
     }
 
@@ -802,6 +862,36 @@ fn below(entropy: &SeededEntropy, upper: u64) -> u64 {
 
 fn small(entropy: &SeededEntropy, upper: u64) -> u8 {
     u8::try_from(below(entropy, upper)).unwrap_or(u8::MAX)
+}
+
+fn http_fault(entropy: &SeededEntropy) -> HttpFault {
+    let shape = choose(
+        entropy,
+        &[
+            HttpShape::List,
+            HttpShape::Head,
+            HttpShape::Get,
+            HttpShape::Put,
+            HttpShape::DeleteObjects,
+            HttpShape::ListUploads,
+        ],
+    )
+    .unwrap_or(HttpShape::Put);
+    let make = choose(
+        entropy,
+        &[
+            HttpFault::SlowDown,
+            HttpFault::TooManyRequests,
+            HttpFault::Internal,
+            HttpFault::RequestTimeout,
+            HttpFault::AfterPublish,
+            HttpFault::TruncateBody,
+            HttpFault::WrongEtag,
+            HttpFault::ConnectionReset,
+        ],
+    )
+    .unwrap_or(HttpFault::Internal);
+    make(shape)
 }
 
 fn choose<T: Copy>(entropy: &SeededEntropy, from: &[T]) -> Option<T> {
@@ -1044,6 +1134,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
             pages: small(entropy, 4).saturating_add(1),
         },
         Kind::EvictPageCache => Op::EnvFault(EnvFault::EvictPageCache),
+        Kind::HttpFault => Op::HttpFault(http_fault(entropy)),
         Kind::Vacuum => vacuum(entropy, weights.vacuum_resizes),
         Kind::OtherProcessReader => Op::OtherProcessReader {
             begin: below(entropy, 2) == 0,

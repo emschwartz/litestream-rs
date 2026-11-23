@@ -169,7 +169,7 @@ fn a_size_mismatch_publishes_a_byte_short_and_acknowledges_what_it_holds() {
         vec![(StoreOp::Upload, 0, FaultShape::SizeMismatch)],
         1,
     )
-    .corrupting_through(raw.clone());
+    .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
     let (bytes, info) = short_write(&faults);
     let held = block_on(read_all(&raw, &info.key)).unwrap();
     assert_eq!(held.as_slice(), bytes.split_last().unwrap().1);
@@ -194,7 +194,7 @@ fn a_short_object_whose_delete_fails_is_damage_the_store_keeps() {
         ],
         1,
     )
-    .corrupting_through(raw.clone());
+    .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
     let (_, info) = short_write(&faults);
     assert!(faults.handle().damaged().is_empty());
     assert!(block_on(faults.delete(&[info.key])).is_err());
@@ -312,7 +312,8 @@ fn a_late_error_leaves_the_key_volatile_until_a_later_commit_syncs() {
 #[test]
 fn a_lagging_listing_hides_writes_and_deletes_for_a_bounded_while() {
     let raw = MemStore::new();
-    let store = Faults::new(raw.clone(), Vec::new(), 7).corrupting_through(raw.clone());
+    let store = Faults::new(raw.clone(), Vec::new(), 7)
+        .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
     block_on(upload(&store, 1)).unwrap();
     store.handle().lag_listings(2, 3);
     block_on(upload(&store, 2)).unwrap();

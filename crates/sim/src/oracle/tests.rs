@@ -50,7 +50,12 @@ fn fixture() -> Fixture {
 }
 
 fn run(f: &Fixture, acked: &Acked) -> Result<Checked, Violation> {
-    check(&f.model, &f.recorder, &f.raw, acked)
+    check(
+        &f.model,
+        &f.recorder,
+        &crate::remote::Bucket::Mem(f.raw.clone()),
+        acked,
+    )
 }
 
 #[test]
@@ -232,7 +237,13 @@ fn oracle_pairs_a_reissued_snapshot_with_its_newest_note() {
     model.note_snapshot(txid(1), lost, false, recorder.len());
     model.note_snapshot(txid(1), kept, false, recorder.len());
     put(&store, 0, 1, 1, &ltx(1, 1, 1, 20, None));
-    let done = check(&model, &recorder, &raw, &Acked::new()).unwrap();
+    let done = check(
+        &model,
+        &recorder,
+        &crate::remote::Bucket::Mem(raw.clone()),
+        &Acked::new(),
+    )
+    .unwrap();
     assert_eq!(done.restored, 1);
     assert_eq!(done.latest, Some(txid(1)));
 }

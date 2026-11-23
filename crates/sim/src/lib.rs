@@ -38,6 +38,7 @@ pub mod oracle;
 pub mod reach;
 pub mod record;
 pub mod recovery;
+pub mod remote;
 pub mod resources;
 pub mod run;
 pub mod scenario;

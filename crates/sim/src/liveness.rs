@@ -279,6 +279,8 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         }
         Op::EnvFault(_) | Op::Wal(_) | Op::WalDamage { .. } => &[Justifier::WalDamaged],
         Op::Remote(_) | Op::SecondWriter { .. } => &[Justifier::RemoteEdited],
+        // A provider fault on one request, noted as a store fault that hit is.
+        Op::HttpFault(_) => &[Justifier::RemoteFault],
         // A lasting fault, noted as it begins and again as it is lifted.
         Op::Hold { hold, .. } => match hold {
             crate::generate::Hold::StoreDown(_)
@@ -357,6 +359,8 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,
+        // The replica on S3: its provider faults are noted as they are drawn.
+        remote_s3: _,
         // Which SQLite the engine runs against: each backend's faults are drawn and noted
         // as the model's are.
         sqlite: _,
