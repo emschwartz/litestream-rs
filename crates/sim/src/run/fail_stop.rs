@@ -45,6 +45,16 @@ impl Runner {
             fault_fired: remote.all > fired0.0.all || staging.all > fired0.1.all,
             reported_failure,
             refusal_fired: remote.refused > fired0.0.refused,
+            read_wal: matches!(
+                ended,
+                TickEnd::Done(Tick::Ran {
+                    event: Event::Booted { .. }
+                        | Event::Synced { .. }
+                        | Event::Resnapshot(_)
+                        | Event::Checkpointed { .. },
+                    ..
+                })
+            ),
         };
         self.fail_stop.saw(tick);
         let believed = matches!(
@@ -63,7 +73,17 @@ impl Runner {
         }
         let bound = self.actor_bound();
         let booted = self.life.boot_salts.is_some();
-        self.fail_stop.judge(trip, tick, bound, booted)
+        let excused = self.fail_stop.excused();
+        let unstaged_only = matches!(trip, Some(lsr_core::Trip::UnreplicatedTooLong { .. }))
+            && self.w.sqlite.mx_frame() > 0
+            && self.nothing_staged_waits();
+        let judged = self
+            .fail_stop
+            .judge(trip, tick, bound, booted, unstaged_only);
+        if self.fail_stop.excused() > excused {
+            self.report.reach.bump("failstop.excused.unread_wal");
+        }
+        judged
     }
 
     /// When the replica changed while the judge thinks something is off it, restores
@@ -82,6 +102,21 @@ impl Runner {
             self.fail_stop.caught_up(want);
         }
         Ok(())
+    }
+
+    /// Whether every level-0 file in staging ends at or before the replica's newest
+    /// transaction: nothing staged waits to be uploaded (a staging put back from an older
+    /// backup is behind it). A store that cannot be listed says nothing waits not.
+    fn nothing_staged_waits(&self) -> bool {
+        let staged = match self.w.newest_staged() {
+            Ok(staged) => staged.map(|info| info.key.range().max().get()),
+            Err(_) => return false,
+        };
+        staged.is_none_or(|staged| {
+            self.w
+                .remote_newest()
+                .is_some_and(|remote| staged <= remote)
+        })
     }
 
     /// Something outside the engine is about to change the replica: the judge cannot tell
