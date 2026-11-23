@@ -1123,6 +1123,95 @@ mod replaced_staging {
 }
 
 #[cfg(test)]
+mod wal_regrown {
+    use lsr_sim::generate::{RemoteOp, WalOp};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{CrashKind, Hold, Op, Opts, Seed, Weights};
+
+    /// The WAL generation is regrown with the same salts: its frames get new bytes, its
+    /// commit marks stay, and one more commit follows. Before it, a bucket rollback and a
+    /// power loss left the engine's position at the start of the generation, so it staged the
+    /// next file from the regrown frames, up to a regrown commit mark. The model knew only the
+    /// regrown generation's last commit, so the oracle took that file for the commit made
+    /// there before the regrowth, whose pages the WAL no longer holds, and failed a restore
+    /// the replica answered right (seed 0x2b2 under its mixed mix, 64 operations of its
+    /// history). The model now records a commit at every regrown commit mark.
+    #[test]
+    fn a_file_staged_from_a_regrown_wal_is_judged_by_the_regrown_commit_seed_0x2b2() {
+        let seed = Seed::new(0x2b2);
+        let weights = Weights::mixed(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, &history(), &opts) {
+            panic!("{failure}");
+        }
+    }
+
+    /// `p` a process crash, `w` a power loss, `v` a vacuum in place, `s` a spill.
+    fn simple(code: &str) -> Vec<Op> {
+        code.chars()
+            .map(|c| match c {
+                'p' => Op::Crash(CrashKind::Process),
+                'w' => Op::Crash(CrashKind::Power),
+                'v' => Op::Vacuum { page_size: None },
+                _ => Op::Spill,
+            })
+            .collect()
+    }
+
+    /// The 64 operations of seed 0x2b2's drawn history that still fail without the fix.
+    fn history() -> Vec<Op> {
+        let mut ops = Vec::new();
+        ops.extend(simple("vvvvpspw"));
+        ops.push(Op::Commit {
+            pages: 3,
+            grow: true,
+        });
+        ops.extend(simple("wpvppp"));
+        ops.push(Op::WalDamage {
+            op: WalOp::RegrowWithoutCommitMarks(2844455044579060045),
+            ticks: 2,
+        });
+        ops.extend(simple("vp"));
+        ops.push(Op::WalDamage {
+            op: WalOp::RegrowSameSalts(11569191237653921190),
+            ticks: 4,
+        });
+        ops.extend(simple("ppppppppwppwppppppvw"));
+        ops.push(Op::WalDamage {
+            op: WalOp::TruncateAtFrame(32),
+            ticks: 5,
+        });
+        ops.extend(simple("p"));
+        ops.push(Op::Commit {
+            pages: 3,
+            grow: true,
+        });
+        ops.push(Op::Hold {
+            hold: Hold::LyingDisk,
+            ticks: 11,
+        });
+        ops.extend(simple("pwppwpppppppppppw"));
+        ops.push(Op::Hold {
+            hold: Hold::LyingDisk,
+            ticks: 9,
+        });
+        ops.push(Op::Remote(RemoteOp::RollBack));
+        ops.extend(simple("w"));
+        ops.push(Op::WalDamage {
+            op: WalOp::RegrowSameSalts(6923337998852091411),
+            ticks: 6,
+        });
+        ops
+    }
+}
+
+#[cfg(test)]
 mod lagging_listings {
     use lsr_core::{StopCause, StoreError, StoreOp};
     use lsr_sim::generate::WalOp;
