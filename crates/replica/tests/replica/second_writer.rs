@@ -405,14 +405,21 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
     let lost = staged.files.last().unwrap().key;
     block_on(staging.delete(&[lost])).unwrap();
     assert!(!meta_of(&site).join("lsr-takeover").exists());
+    // The record is on disk before the engine deletes the lost file, while uploads still fail.
+    let path = meta_of(&site).join("lsr-takeover");
+    common::moved_until(&replicator, &clock, (poll, 240), |_| path.exists());
+    let record = std::fs::read(&path).unwrap();
+    lsr_replica::TakeoverRecord::decode(&record).unwrap();
     faulty
         .fail_uploads
         .store(false, std::sync::atomic::Ordering::SeqCst);
     common::moved_until(&replicator, &clock, (poll, 240), |h| {
         caught_up(h) && h.synced > full.synced
     });
-    let record = std::fs::read(meta_of(&site).join("lsr-takeover")).unwrap();
-    lsr_replica::TakeoverRecord::decode(&record).unwrap();
+    // Once the engine has put the transaction the record covers again, after a listing that
+    // ended below it, the record is spent and the replicator deletes it
+    // (docs/decisions/D170.md).
+    assert!(!path.exists());
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
