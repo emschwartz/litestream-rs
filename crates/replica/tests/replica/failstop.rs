@@ -122,11 +122,12 @@ fn an_unsafe_stop_while_running_refuses_commits_only_under_stop_app() {
 /// Health's lag survives a restart: a commit staged and never uploaded keeps its age when the
 /// replicator starts again, where it used to count from the new start (issue #115).
 ///
-/// The age it keeps is the staged file's: when the thread staged it, `synced`'s time. Before
-/// the restart health may date the commit a tick earlier, from the observation that first saw
-/// its WAL frames (if it landed while a tick ran and the clock moved before the next); that
-/// sighting is this process's alone and does not survive (`docs/decisions.md` D80, D85), so
-/// comparing with it failed under load.
+/// The age it keeps is the staged file's: the clock's reading when the engine staged it. No
+/// time health reports before the restart is that reading. `synced` carries the time the
+/// tick began, which is earlier when the clock moves while the tick runs, and the first
+/// sighting of the commit's WAL frames is earlier still and is this process's alone
+/// (`docs/decisions.md` D80, D85). Comparing with either failed under load, so the bound is
+/// the clock itself: the file was staged before the first replicator went away.
 #[test]
 fn a_restart_keeps_the_age_of_a_commit_off_the_replica() {
     let site = Site::new();
@@ -139,19 +140,19 @@ fn a_restart_keeps_the_age_of_a_commit_off_the_replica() {
     wait(&replicator, |h| h.phase == Phase::Running);
     site.commit(1);
     clock.advance(POLL);
-    let lagging = wait(&replicator, |h| {
+    wait(&replicator, |h| {
         h.unreplicated_since.is_some() && h.synced > h.replicated
     });
-    let staged_at = lagging.synced.map(|(_, at)| at).unwrap();
     drop(replicator);
+    let stopped_at = clock.now();
     clock.advance(Duration::from_secs(120));
     let again = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     let after = wait(&again, |h| {
         h.phase == Phase::Running && h.unreplicated_since.is_some()
     });
     assert!(
-        after.unreplicated_since.unwrap() <= staged_at,
-        "staged at {staged_at:?}, dated {:?} after the restart",
+        after.unreplicated_since.unwrap() <= stopped_at,
+        "stopped at {stopped_at:?}, dated {:?} after the restart",
         after.unreplicated_since
     );
 }
