@@ -41,6 +41,8 @@ dry_run\.rs:.*DigestSink.*::reset .* with Ok
 dry_run\.rs:.*Counting.*::delete .* with Ok
 # core actor.rs prune_unit: a whole page taken implies a next page, since the newest staged file is listed above the bound; past one page the mutant costs one extra listing.
 replace && with \|\| in Actor::prune_unit
+# core actor.rs arm_takeover_below: a listing ending at the record's transaction confirms everything the record covers, so arming then reaches no publish (docs/mutants.md, takeover spend).
+replace < with <= in Actor::arm_takeover_below
 # wal testing.rs page: the test-data generator's splitmix64 mixing steps; a weaker mixer still gives deterministic pages that differ by seed and page number, and changing it would change every recorded simulator history.
 wal/src/testing\.rs:.* in page$
 # store-fs fsync wrappers: replacing an fsync with Ok(()) shows only after a power loss; the crash tests in docs/planted-bugs.toml check the store makes these calls, and the LazyFS rig checks the real syscalls.

@@ -408,6 +408,12 @@ three it had not reached, and the tally above counts the second result.
 | `pages.rs` `seeded` | `min() > from` becomes `>=` | The extra file it calls pending is the confirmed one; a quiet mark at or below the confirmed transaction is trimmed in `Actor::observe_lag` before any read. |
 | `actor/lag.rs` `Actor::observe_lag` | `retain(txid > replicated)` becomes `>=` | `only_quiet_pending` reads the marks from the transaction after the replicated one, so a kept mark equal to it is never read. |
 
+### Takeover spend (D53): equivalent survivors of `just mutants-diff`
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `actor.rs` `Actor::arm_takeover_below` | `newest < Some(held)` becomes `<=` | Arming matters only to a later publish of a transaction the record covers. A listing that ends exactly at the record's transaction confirms every id up to it, so nothing the record covers is left to put, and an id the replica later loses comes back only through a relist, which arms again on its own listing. |
+
 ## wal
 
 `cargo mutants -p lsr-wal --test-package lsr-wal --test-tool nextest --jobs 4 --timeout 240` at commit

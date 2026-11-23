@@ -143,7 +143,7 @@ pub(super) struct Kept {
     /// cannot come back at the next start.
     pub(super) spent_takeover: Option<TakeoverRecord>,
     /// This engine saw the replica hold less than the held takeover covers (a listing
-    /// below the record, or a regression): its next publish of a covered transaction
+    /// below the record, the relist after a regression included): its next publish of a covered transaction
     /// spends the record. Without that evidence a covered publish is a put again of an
     /// unconfirmed upload, and the record still describes the replica. In memory only:
     /// each boot's listing finds the evidence again.

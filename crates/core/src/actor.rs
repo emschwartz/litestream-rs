@@ -924,9 +924,6 @@ impl Actor {
         backoff: Backoff,
         now: Timestamp,
     ) -> Tick {
-        if cause == PersistentCause::RemoteRegressed {
-            self.kept.takeover_armed = true;
-        }
         let action = self.kept.cfg.responses.action(cause);
         if let (Action::Stop, Some(stop)) = (action, cause.stop()) {
             return self.stop(stop);
