@@ -6,27 +6,30 @@
 //! With the defect "a success keeps a stall" planted
 //! (`docs/planted-bugs/success-keeps-a-stall.patch`), 2 of seeds 1 to 3000 failed on it unaided
 //! (0xa2 first, then 0x31c). With the engine reading past its listings (#96) seed 0xa2 no longer
-//! reaches the stall, so this test runs 0x31c, which still does. Its history is recorded, with the
-//! settings its mix drew written out, so no change to the generator can lose the kill.
+//! reached the stall, and on the tree that also stops at another writer neither did 0x31c. Seed
+//! 0x2a8 of the fixed set does; its history is recorded, with the settings its mix drew written
+//! out, so no change to the generator can lose the kill.
 
 use lsr_sim::run::run_ops;
 use lsr_sim::{AfterRestart, ClockLaw, Opts, Seed};
 
-// BATCH-3: on the merged tree (the takeover handshake and the read-past listings together)
-// neither 0x31c nor 0xf434c fails under plant success-keeps-a-stall, and no seed of 6000 swarm
-// seeds from 1000001 does either: find a seed that reaches the stall, or a scenario.
+/// Seed 0x2a8 of the fixed set's mix, recorded: a stall on a retried fault outlasts every
+/// injected fault. With a task's success leaving its stall in place (the plant
+/// `success-keeps-a-stall`), the run ends with "the Sync task is still stalled on WalMoved after
+/// 1 failures with nothing causing it".
 #[test]
-fn a_stall_ends_with_the_fault_that_caused_it_seed_0x31c() {
+fn a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8() {
     let opts = Opts {
         drawn: true,
         block_crash_law: false,
-        lying_wal_sync: true,
+        lying_wal_sync: false,
         after_restart: AfterRestart::Nothing,
-        clock_law: ClockLaw::PerTick,
-        staging_fs: false,
+        clock_law: ClockLaw::EachRead,
+        overlap: true,
+        staging_fs: true,
         ..Opts::default()
     };
-    if let Err(failure) = run_ops(Seed::new(0x31c), crate::histories::seed_0x31c::OPS, &opts) {
+    if let Err(failure) = run_ops(Seed::new(0x2a8), crate::histories::seed_0x2a8::OPS, &opts) {
         panic!("{failure}");
     }
 }

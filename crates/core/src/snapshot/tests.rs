@@ -9,10 +9,12 @@ use proptest::prelude::*;
 use super::*;
 use crate::conformance::block_on;
 use crate::fault::SnapshotCause;
+use crate::fault::role::Replica;
 use crate::layout::Level;
 use crate::mem::MemStore;
 use crate::position::Position;
 use crate::source::{FakeDb, FakeWal, SourceError, SourceOp};
+use crate::store::ObjectStore;
 use crate::store::{PageLimit, ReadLen, StoreError, StoreOp};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
 
@@ -156,7 +158,7 @@ impl Rig {
             &mut self.wal,
             db,
             &mut PageChecksumTable::new(),
-            &self.remote,
+            &Replica(&self.remote),
             ts(now),
         ))
     }

@@ -6,6 +6,7 @@ use lsr_wal::{FrameCursor, FrameRef, Salts, ScanLimit, TxOutcome, WalReader};
 use proptest::prelude::*;
 
 use super::*;
+use crate::fault::role::Staging;
 use crate::recover::BootWal;
 use crate::source::{CommittedRead, FakeWal};
 use crate::store::WriteMode;
@@ -1491,7 +1492,7 @@ fn the_header_read_is_one_header_long() {
 #[test]
 fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(crate::MemStore::new());
-    let got = crate::conformance::block_on(newest_level_zero(&staging));
+    let got = crate::conformance::block_on(newest_level_zero(&Staging(&staging)));
     assert_eq!(got, Err(Fault::LocalIo));
 }
 

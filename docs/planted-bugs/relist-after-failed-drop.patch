@@ -1,19 +1,19 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1845,7 +1845,6 @@
-         from: Txid,
-         now: Timestamp,
-     ) -> Tick {
+@@ -1842,7 +1842,6 @@
+         let vouched = self
+             .staged()
+             .map(|staged| cap.map_or(staged, |cap| staged.min(cap)));
 -        self.engine.witnesses.drop_from(from);
          if let Err(fault) = drop_staged_from(env.staging, from).await {
              // The staged files from `from` on are still there, and the next
              // upload would take the one after the confirmed transaction as
-@@ -1853,7 +1852,6 @@
+@@ -1850,7 +1849,6 @@
              // judges the divergence again and this runs again before anything
              // is uploaded; the acknowledged mark is kept apart.
              let confirmed = self.engine.upload.confirmed().min(from.prev());
 -            self.set_upload(UploadState::ListFirst { confirmed });
              return self.fault(Task::Upload, fault, now);
          }
-         // Acknowledged ids from `from` on that the replica lost (a rollback)
+         self.engine.dropped_through = self.engine.dropped_through.max(vouched);

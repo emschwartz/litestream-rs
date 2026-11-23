@@ -18,10 +18,16 @@
 //! (a longer one is answered 431, so memory per connection never grows), with a
 //! [`DEADLINE`] on each read and write; the body, if any, is never read. Only `GET` of
 //! `/metrics` and `/healthz` is served, a query string ignored; another method on them is
-//! 405, any other path 404, a request line that is not HTTP/1 is 400. Every response closes
-//! the connection.
+//! 405, any other path 404, a request line that is not HTTP/1 is 400. Go's `/debug/pprof`
+//! paths are 404 too, with a body naming the decision not to serve them (D161), so an operator
+//! who reaches for Go's profiler learns why it is absent. Every response closes the connection.
 
 use lsr_replica::stack;
+
+/// What every `/debug/pprof` path answers: Go serves its profiler there, and litestream-rs
+/// does not, by the owner's decision.
+pub const PPROF_NOT_SERVED: &str =
+    "not found: /debug/pprof is not served by litestream-rs (docs/decisions.md D161)\n";
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -305,6 +311,9 @@ fn handle(mut stream: TcpStream, board: &Board, clock: &dyn Clock) {
         return refuse(&mut stream, 400, "only HTTP/1 is served\n");
     }
     let path = target.split_once('?').map_or(target, |(path, _)| path);
+    if path == "/debug/pprof" || path.starts_with("/debug/pprof/") {
+        return refuse(&mut stream, 404, PPROF_NOT_SERVED);
+    }
     if path != "/metrics" && path != "/healthz" {
         return refuse(
             &mut stream,

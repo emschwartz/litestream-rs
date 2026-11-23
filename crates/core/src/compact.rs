@@ -28,11 +28,11 @@
 //! failed abort never replaces the original error. A commit that fails after
 //! the object became visible is reported as [CompactError::Dest]: the caller
 //! lists before it trusts the destination. Exception: the output's commit is
-//! checked against the bytes written (`checked`), so a `Dest` error holding
-//! `Corrupt { cause: CommitSizeMismatch { removed: true, .. } }` means the
-//! store acknowledged a short object and it was deleted: the destination holds
-//! nothing new. With `removed: false` the caller must not trust a listing of
-//! the output key.
+//! checked against the bytes written (`crate::publish`), so a `Dest` error
+//! holding `Corrupt { cause: CommitSizeMismatch { .. } }` means the store
+//! acknowledged a short object. The output is a replace, so it is left under
+//! its key (`removed: false`): the caller must not trust a listing of the
+//! output key, and removes it under a reason of its own.
 //!
 //! A page whose newest copy sits in an input that a later input shrank below
 //! was not written by SQLite, which writes every page it grows into. Go's
@@ -54,6 +54,7 @@ use lsr_ltx::{
 };
 use thiserror::Error;
 
+use crate::fault::role::{Replica, Role};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 use crate::publish::Writer;
@@ -369,7 +370,7 @@ impl Reader {
 
     /// Advances to the next header, page or verified end, copying a page's
     /// bytes into `page`. Bytes read are added to `bytes_read` as they arrive.
-    async fn step<S: ObjectStore>(
+    async fn step<S: Role>(
         &mut self,
         source: &S,
         bytes_read: &mut u64,
@@ -397,7 +398,7 @@ impl Reader {
             Err(ReadFault::Store(StoreError::NotFound { key })) => {
                 Err(CompactError::InputVanished { key })
             }
-            Err(ReadFault::Store(err)) => Err(CompactError::Source(err)),
+            Err(ReadFault::Store(err)) => Err(S::compact_input(err)),
             Err(ReadFault::Decode(err)) => Err(self.fault(InputFault::Decode(err))),
             Err(ReadFault::Rejected(never)) => match never {},
         }
@@ -424,7 +425,7 @@ impl Input {
 
     /// Reads the header. A decoder that yields anything else first has
     /// skipped it, which no valid decoder does; it is reported as poisoned.
-    async fn open<S: ObjectStore>(
+    async fn open<S: Role>(
         source: &S,
         budget: Budget,
         key: FileKey,
@@ -447,7 +448,7 @@ impl Input {
     }
 
     /// Fills the waiting page, or records the verified end.
-    async fn fill<S: ObjectStore>(
+    async fn fill<S: Role>(
         &mut self,
         source: &S,
         bytes_read: &mut u64,
@@ -481,7 +482,7 @@ struct Merge<'a, S> {
     peak: usize,
 }
 
-impl<'a, S: ObjectStore> Merge<'a, S> {
+impl<'a, S: Role> Merge<'a, S> {
     /// Opens every input and checks every header before anything is written.
     async fn open(
         source: &'a S,
@@ -660,7 +661,7 @@ fn check_range(input: &Input) -> Result<(), CompactError> {
 
 /// Merges, encodes and uploads every page, then writes the tail. Returns the
 /// output trailer and page count; nothing is committed yet.
-async fn write_output<S: ObjectStore, D: ObjectStore>(
+async fn write_output<S: Role, D: ObjectStore>(
     merge: &mut Merge<'_, S>,
     mut encoder: Encoder<Vec<u8>>,
     header: &Header,
@@ -707,10 +708,21 @@ pub async fn compact<S: ObjectStore, D: ObjectStore>(
     inputs: &CompactionInputs,
     level: Level,
 ) -> Result<Compacted, CompactError> {
+    compact_in(&Replica(source), dest, inputs, level).await
+}
+
+/// [`compact`] reading its inputs from `source` as its role: an input read
+/// that fails is that store's error ([`Role::compact_input`]).
+pub(crate) async fn compact_in<S: Role, D: ObjectStore>(
+    source: &S,
+    dest: &D,
+    inputs: &CompactionInputs,
+    level: Level,
+) -> Result<Compacted, CompactError> {
     compact_with(source, dest, inputs, level, Budget::standard()).await
 }
 
-async fn compact_with<S: ObjectStore, D: ObjectStore>(
+async fn compact_with<S: Role, D: ObjectStore>(
     source: &S,
     dest: &D,
     inputs: &CompactionInputs,
