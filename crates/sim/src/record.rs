@@ -188,6 +188,7 @@ const fn checkpoint(mode: OtherProcessMode) -> &'static str {
         OtherProcessMode::Passive => "OtherProcessMode::Passive",
         OtherProcessMode::Restart => "OtherProcessMode::Restart",
         OtherProcessMode::Truncate => "OtherProcessMode::Truncate",
+        OtherProcessMode::Full => "OtherProcessMode::Full",
     }
 }
 
