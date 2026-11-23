@@ -2500,6 +2500,15 @@ fn uploads_keep_up_with_an_app_that_commits_every_tick() {
         .count();
     assert!(uploads >= 3, "uploads starved behind syncs: {seen:?}");
     assert!(actor.replicated() > start, "{seen:?}");
+    // The share is exact: the tick after `FAIR_SHARE` syncs in a row is the upload's.
+    let first = seen
+        .iter()
+        .position(|t| matches!(event(t), Some(Event::Uploaded(_))));
+    assert_eq!(
+        first,
+        Some(usize::try_from(state::FAIR_SHARE).unwrap()),
+        "{seen:?}"
+    );
 }
 
 /// A staged file that turns unreadable is dropped and a snapshot takes its place, but nothing

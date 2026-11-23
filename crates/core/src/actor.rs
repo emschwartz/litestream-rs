@@ -1144,7 +1144,7 @@ impl Actor {
             return tick;
         }
         if let Some(tick) = self.wal_unit(env, now, true).await {
-            return self.passed_over_uploads(tick, now);
+            return self.passed_over_uploads(tick);
         }
         if self.fair_turn() {
             if let Some(tick) = self.prune_unit(env, now).await {
@@ -1186,7 +1186,7 @@ impl Actor {
             return tick;
         }
         if let Some(tick) = self.wal_unit(env, now, false).await {
-            return self.passed_over_uploads(tick, now);
+            return self.passed_over_uploads(tick);
         }
         if let Some(tick) = self.upload_unit(env, now).await {
             return tick;
@@ -2408,8 +2408,8 @@ impl Actor {
         self.kept.tasks.ready(Task::Upload, now) && !self.uploads_idle()
     }
 
-    /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row
-    /// had their WAL step pass over uploads that were ready.
+    /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row ended
+    /// in the WAL step; it runs only when uploads are ready, and resets the count when it does.
     async fn owed_upload<
         W: WalSource,
         P: PageSource,
@@ -2428,13 +2428,9 @@ impl Actor {
         self.upload_unit(env, now).await
     }
 
-    /// `tick`, from the WAL step, counting it when it passed over uploads that were ready.
-    fn passed_over_uploads(&mut self, tick: Tick, now: Timestamp) -> Tick {
-        self.engine.syncs_ahead = if self.booted() && self.upload_ready(now) {
-            self.engine.syncs_ahead.saturating_add(1)
-        } else {
-            0
-        };
+    /// `tick`, from the WAL step, counted: the upload step resets the count when it runs.
+    fn passed_over_uploads(&mut self, tick: Tick) -> Tick {
+        self.engine.syncs_ahead = self.engine.syncs_ahead.saturating_add(1);
         tick
     }
 
