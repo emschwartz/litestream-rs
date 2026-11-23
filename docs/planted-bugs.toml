@@ -587,6 +587,19 @@ package = "lsr-sqlite"
 test_bin = "sqlite"
 tests = ["a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage"]
 
+# `app_connection` turned SQLITE_FCNTL_PERSIST_WAL on, so a connection that left WAL mode kept
+# the WAL and a page-size change made then read back as a corrupt database (docs/decisions.md D123).
+[[bug]]
+name = "app-connection-persists-wal"
+fix = "claude/persist-wal-vacuum"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "a_page_size_change_outside_wal_mode_leaves_a_sound_database",
+    "leaving_wal_mode_removes_the_wal",
+    "a_page_size_change_after_the_replicator_closed_last_leaves_a_sound_database",
+]
+
 [[bug]]
 name = "stamp-before-committed-read"
 fix = "847521a"
@@ -1297,7 +1310,10 @@ tests = ["swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss
 name = "rejected-replace-deletes"
 fix = "40f58942"
 package = "lsr-core"
-tests = ["a_rejected_write_over_an_object_that_was_there_deletes_nothing"]
+tests = [
+    "a_rejected_write_over_an_object_that_was_there_deletes_nothing",
+    "publish::tests::only_a_rejected_create_only_write_hands_back_its_object",
+]
 
 # A compaction writes over an output key that already holds an object, so its rejected commit
 # deletes what was there.
@@ -1605,12 +1621,16 @@ tests = [
 # The compactor took its output's commit acknowledgement as given: a store that acknowledged
 # the output short left a truncated level-N file, maintenance reported it compacted, and a later
 # restore of the latest state could not decode it. Every engine commit is now checked
-# (crates/core/src/checked.rs); this patch opens the compactor's upload around the check.
+# (crates/core/src/publish.rs); this patch opens the compactor's upload raw, around the check, which
+# the source guard also catches.
 [[bug]]
 name = "compact-commit-unchecked"
 fix = "claude/commit-size"
 package = "lsr-core"
-tests = ["compact::tests::an_output_acknowledged_short_is_deleted_and_reported"]
+tests = [
+    "compact::tests::an_output_acknowledged_short_is_deleted_and_reported",
+    "publish::guard::no_engine_module_calls_a_store_write_or_delete_outside_publish",
+]
 
 [[bug]]
 name = "compact-commit-unchecked-sim"
@@ -1627,7 +1647,7 @@ name = "short-commit-object-kept"
 fix = "claude/commit-size"
 package = "lsr-core"
 tests = [
-    "checked::tests::a_commit_acknowledged_short_is_deleted_and_reported",
+    "publish::tests::a_commit_acknowledged_short_is_deleted_and_reported",
     "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
 ]
 
@@ -1959,3 +1979,50 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
+
+[[bug]]
+name = "hold-as-of-demands-the-raw-answer-sim"
+fix = "53c6bb7"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e"]
+
+# Blind plant 05 of the recall pilot (issue #127): the uploader took a commit's acknowledged size as
+# given. Its original form (upload.rs restamping the size it wrote) cannot be written any more: the
+# size is checked inside publish before a Published exists. Re-expressed at the check, skipped for
+# the uploader's create-only writes.
+[[bug]]
+name = "upload-commit-size-unchecked"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed",
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
+]
+
+[[bug]]
+name = "upload-commit-size-unchecked-sim"
+fix = "plant"
+package = "lsr-sim"
+patch = "upload-commit-size-unchecked"
+tests = ["short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets"]
+
+# Blind plant 10 of the recall pilot (issue #127): a compaction output the store took and then
+# rejected (a digest that does not match) is not deleted, so a listing shows an object that does
+# not decode.
+[[bug]]
+name = "compact-rejected-output-kept"
+fix = "plant"
+package = "lsr-core"
+tests = ["maintain::tests::a_rejected_compaction_output_is_deleted_by_the_executor"]
+
+# Its sim kill was seed 0x14's verify history, which stopped reaching a rejected compaction output
+# when that test was re-pinned to seed 0xd. An unaided search for another is masked while the
+# swarm fails on a clean tree; add a sim entry once it is clean again.
+
+[[bug]]
+name = "sim-short-object-damage"
+fix = "claude/sim-remote-corrupt"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c"]

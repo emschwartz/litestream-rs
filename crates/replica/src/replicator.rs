@@ -493,7 +493,7 @@ impl Replicator {
         &self.shared.database
     }
 
-    /// Sets `SQLITE_FCNTL_PERSIST_WAL` on and `wal_autocheckpoint = 0` on one of the application's
+    /// Sets `wal_autocheckpoint = 0` on one of the application's
     /// connections, after checking that it opens this replicator's database (device and
     /// inode). Call it on every connection the application opens, pooled ones included.
     ///

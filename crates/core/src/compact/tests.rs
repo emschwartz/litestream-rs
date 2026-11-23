@@ -17,6 +17,7 @@ use crate::layout::ListedTime;
 use crate::mem::{MemStore, MemUpload};
 use crate::plan::RestoreTarget;
 use crate::restore::{Database, MemSink, restore};
+use crate::store::Upload;
 use crate::store::{Listing, PageLimit, StoreOp};
 
 fn txid(n: u64) -> Txid {

@@ -17,6 +17,7 @@ use super::*;
 use crate::conformance::block_on;
 use crate::mem::MemStore;
 use crate::source::{FakeDb, FakeWal, SourceError};
+use crate::store::Upload;
 use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError, StoreOp};
 
 const PS: PageSize = PageSize::MIN;
@@ -852,24 +853,13 @@ fn the_default_cap_is_go_s_64_mib() {
     assert_eq!(SyncConfig::default().cap, NonZeroU64::new(64 * 1024 * 1024));
 }
 
-/// An upload that keeps each chunk it is given and publishes nothing.
+/// A sink that keeps each chunk it is given.
 #[derive(Default)]
 struct Chunks(Vec<Vec<u8>>);
 
-impl Upload for Chunks {
+impl FileSink for Chunks {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
         self.0.push(chunk.to_vec());
-        std::future::ready(Ok(()))
-    }
-
-    fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
-        std::future::ready(Err(StoreError::Transient {
-            op: StoreOp::Upload,
-            kind: io::ErrorKind::Other,
-        }))
-    }
-
-    fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send {
         std::future::ready(Ok(()))
     }
 }

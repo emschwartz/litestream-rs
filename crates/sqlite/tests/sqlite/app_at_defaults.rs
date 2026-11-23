@@ -4,7 +4,7 @@
 //! connection settings").
 //!
 //! The application runs in a child process (`Placement::SeparateProcess`): automatic checkpoints
-//! every 1000 frames, no `PERSIST_WAL`, busy timeout zero. The read lock, the actor, the stores and
+//! every 1000 frames, busy timeout zero. The read lock, the actor, the stores and
 //! the oracle are in this process, as a sidecar's are. A case whose answer differs from an application
 //! set up as replication asks runs in both placements and states both answers.
 //!
@@ -164,26 +164,23 @@ fn the_apps_restarts_after_the_replicators_checkpoints_are_followed_without_a_sn
     assert_eq!(checked.latest, rig.acked(), "{checked:?}");
 }
 
-/// What the application's last close does while the replicator is down, by placement and by whether
-/// the application writes before the replicator boots: set up as replication asks (`PERSIST_WAL`
-/// on), SQLite checkpoints but keeps the WAL, and the next boot continues; at SQLite's
-/// defaults it checkpoints and deletes the WAL, and the next boot snapshots: `WalMissing`
-/// when it finds no WAL, `GenerationChanged` when the application's write already began a new one.
-const fn close_while_down_answers(
-    placement: Placement,
-    app_first: bool,
-) -> (bool, Option<SnapshotCause>) {
-    match (placement, app_first) {
-        (Placement::InProcess, _) => (true, None),
-        (Placement::SeparateProcess, false) => (false, Some(SnapshotCause::WalMissing)),
-        (Placement::SeparateProcess, true) => (false, Some(SnapshotCause::GenerationChanged)),
+/// What the application's last close does while the replicator is down, by whether the application
+/// writes before the replicator boots. Set up as replication asks or at SQLite's defaults, the
+/// answer is the same, since neither sets `PERSIST_WAL` (docs/decisions.md D123): SQLite
+/// checkpoints and deletes the WAL, and the next boot snapshots: `WalMissing` when it finds
+/// no WAL, `GenerationChanged` when the application's write already began a new one.
+const fn close_while_down_answer(app_first: bool) -> SnapshotCause {
+    if app_first {
+        SnapshotCause::GenerationChanged
+    } else {
+        SnapshotCause::WalMissing
     }
 }
 
 /// The application's last connection closing while the replicator is down (see
-/// `close_while_down_answers`); the oracle restores every transaction either way.
+/// `close_while_down_answer`); the oracle restores every transaction either way.
 #[test]
-fn the_apps_last_close_while_the_replicator_is_down_keeps_or_deletes_the_wal() {
+fn the_apps_last_close_while_the_replicator_is_down_deletes_the_wal() {
     for placement in Placement::ALL {
         for app_first in [false, true] {
             close_while_down(placement, app_first);
@@ -201,8 +198,8 @@ fn close_while_down(placement: Placement, app_first: bool) {
     }
     rig.stop_replicator();
     rig.close_app().unwrap();
-    let (kept, cause) = close_while_down_answers(placement, app_first);
-    assert_eq!(rig.wal().exists(), kept, "{at}: the WAL file");
+    let cause = close_while_down_answer(app_first);
+    assert!(!rig.wal().exists(), "{at}: the WAL file");
     rig.open_app().unwrap();
     if app_first {
         rig.insert(1500).unwrap();
@@ -217,7 +214,7 @@ fn close_while_down(placement: Placement, app_first: bool) {
     rig.settle().unwrap();
     assert_eq!(
         boots_and_snapshots(&rig, from),
-        vec![cause],
+        vec![Some(cause)],
         "{at}: the boot"
     );
     rig.check().unwrap();

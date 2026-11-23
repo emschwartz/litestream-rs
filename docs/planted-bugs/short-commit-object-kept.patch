@@ -1,8 +1,8 @@
-diff --git a/crates/core/src/checked.rs b/crates/core/src/checked.rs
-index 138e8bf5..e28caed5 100644
---- a/crates/core/src/checked.rs
-+++ b/crates/core/src/checked.rs
-@@ -89,7 +89,7 @@ where
+diff --git a/crates/core/src/publish.rs b/crates/core/src/publish.rs
+index 8989cfff..53a736eb 100644
+--- a/crates/core/src/publish.rs
++++ b/crates/core/src/publish.rs
+@@ -294,7 +294,7 @@ where
      }
      // Safe to delete: the caller still holds what it wrote until a later
      // verified listing, so the cost of a wrong delete is a rewrite.
