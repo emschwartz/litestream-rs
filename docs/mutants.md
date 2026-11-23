@@ -296,8 +296,7 @@ The survivors fell into a few classes, each fixed as a class:
 
 - **Text nothing read.** Debug and Display output and failure messages (`Env`'s Debug, `ReadLockHold`'s Debug,
   `SinkOp` and `PublishLeft` in restore errors, the fix hint of a missing test resource). Where the text is a
-  contract (an operator's message, a trace that must print the same from run to run) a test now reads it;
-  a test now reads `Env`'s Debug, which must not print the journal it lends.
+  contract (an operator's message, a trace that must print the same from run to run) a test now reads it.
 - **Guards a caller or a contract already implies.** Checks that a caller's own filter, the planner's
   contract or an earlier gate makes always true: `extend`'s reach check before `push`, `inside_file`'s end
   check, `pending_at_boot`'s preference, the frame-index-0 special cases in boot recovery, `match_last_page`'s

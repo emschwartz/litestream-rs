@@ -63,5 +63,5 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 ## What `main` does today for the rows marked †
 
 - **S3 replica with no path:** refused at load.
-- **WAL write fails:** the engine remembers the failure in a journal and runs a verified repair.
+- **WAL write fails:** as Go does, the engine syncs again and goes on, and keeps nothing across a restart (D173). After a power loss it snapshots if the database fell behind what it staged.
 - **Two replicators on one working folder:** the second refuses to start.
