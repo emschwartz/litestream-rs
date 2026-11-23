@@ -1,20 +1,20 @@
 diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
-index 01ad1745..477e2c23 100644
+index 38d8502a..4c9eedc1 100644
 --- a/crates/cli/src/run.rs
 +++ b/crates/cli/src/run.rs
-@@ -719,8 +719,13 @@ fn resolve_from(
-                 .config
-                 .only_database(&want)
-                 .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
--            let plan = lsr_config::plan(&narrowed, &ProcessEnv).map_err(CliError::Plan)?;
--            let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
-+            let plan = lsr_config::plan(&loaded.config, &ProcessEnv).map_err(CliError::Plan)?;
-+            drop(narrowed);
-+            let db = plan
-+                .dbs()
-+                .iter()
-+                .find(|db| !db.from_dir() && db.path() == want)
-+                .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
-             let output = output.unwrap_or_else(|| db.path().to_path_buf());
-             Ok(Resolution::Open(Opening::of_plan(db.replica()), output))
-         }
+@@ -758,8 +758,13 @@ fn config_replica(
+         .config
+         .only_database(&want)
+         .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
+-    let plan = lsr_config::plan(&narrowed, &ProcessEnv).map_err(CliError::Plan)?;
+-    let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
++    let plan = lsr_config::plan(&loaded.config, &ProcessEnv).map_err(CliError::Plan)?;
++    drop(narrowed);
++    let db = plan
++        .dbs()
++        .iter()
++        .find(|db| !db.from_dir() && db.path() == want)
++        .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
+     Ok((Opening::of_plan(db.replica()), db.path().to_path_buf()))
+ }
+ 

@@ -1,0 +1,4 @@
+name = "read-lock-violation-dropped"
+fix = "claude/review-197-fixes"
+package = "lsr-core"
+tests = ["an_abandoned_commit_after_a_restart_is_counted_as_a_read_lock_violation"]
