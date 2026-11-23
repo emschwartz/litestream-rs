@@ -92,6 +92,23 @@ impl MemStore {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Every stored object as a listing would show it, read straight from the store's map:
+    /// no paging, no merge across pages and no injected fault, so a checker can hold what an
+    /// engine listed to what the store holds without sharing the engine's listing code.
+    #[must_use]
+    pub fn stored(&self) -> Vec<FileInfo> {
+        let state = self.lock();
+        state
+            .objects
+            .iter()
+            .map(|(key, object)| FileInfo {
+                key: *key,
+                size: u64::try_from(object.bytes.len()).unwrap_or(u64::MAX),
+                listed: object.listed(state.lazy),
+            })
+            .collect()
+    }
+
     /// A store whose listings carry `LastModified`, as S3's do, so a reader
     /// must ask for the exact created-at time. The last-modified time is the store's
     /// clock (one logical millisecond per commit), which is not the created-at time.
