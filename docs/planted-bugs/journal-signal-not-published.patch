@@ -9,5 +9,5 @@ index 00b2a584..e6b7b927 100644
 -            health.journal = journal;
 +            health.journal = journal.filter(|_| false);
              health.ahead_of_wal = ahead_of_wal;
-             health.ahead_unchecked = ahead_unchecked;
+             health.ahead_of_wal_unchecked = ahead_of_wal_unchecked;
              state.left = parts.left;

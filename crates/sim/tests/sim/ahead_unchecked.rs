@@ -46,7 +46,7 @@ fn a_gap_below_the_confirmed_state_does_not_hold_back_the_cure_seed_0x2dc719() {
             .unwrap_or_else(|| panic!("no {event}:\n{trace}"))
     };
     let damaged = at("cause: RemoteCorrupt");
-    let given_up = at("cause: AheadOfWalUnchecked");
+    let given_up = at("cause: DatabaseAheadOfWalUnchecked");
     let cured = at("Resnapshot(WalSyncFailed)");
     assert!(damaged < given_up && given_up < cured, "{trace}");
 }

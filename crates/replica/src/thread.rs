@@ -52,7 +52,7 @@ use lsr_store_fs::{FsJournalFile, FsStore};
 use crate::config::Config;
 use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
-use crate::health::{AheadOfWal, AheadUnchecked, Counters, FailStop, Gone, Phase, Stopped};
+use crate::health::{AheadOfWal, AheadOfWalUnchecked, Counters, FailStop, Gone, Phase, Stopped};
 use crate::meta::{MetaLock, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
@@ -693,7 +693,10 @@ impl Worker {
         let resnapshot = self.actor.pending_snapshot();
         let journal = self.actor.journal();
         let ahead_of_wal = self.actor.ahead().map(AheadOfWal::of);
-        let ahead_unchecked = self.actor.ahead_unchecked().map(AheadUnchecked::of);
+        let ahead_of_wal_unchecked = self
+            .actor
+            .ahead_of_wal_unchecked()
+            .map(AheadOfWalUnchecked::of);
         let snapshots = self.actor.snapshots();
         let ran = self.app_ran_total();
         let app = self.app_total();
@@ -730,7 +733,7 @@ impl Worker {
             health.verification = verification;
             health.journal = journal;
             health.ahead_of_wal = ahead_of_wal;
-            health.ahead_unchecked = ahead_unchecked;
+            health.ahead_of_wal_unchecked = ahead_of_wal_unchecked;
             state.left = parts.left;
         });
     }

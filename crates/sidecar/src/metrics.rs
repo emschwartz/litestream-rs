@@ -542,7 +542,7 @@ pub(crate) fn render(views: &[DbView], now: Timestamp) -> String {
             "gauge",
             "1 while a check for a database file ahead of its WAL could not be made and the WAL was checkpointed unchecked",
         ),
-        |h| u8::from(h.ahead_unchecked.is_some()).to_string(),
+        |h| u8::from(h.ahead_of_wal_unchecked.is_some()).to_string(),
     );
     out.0
 }

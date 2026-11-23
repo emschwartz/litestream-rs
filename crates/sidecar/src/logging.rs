@@ -420,7 +420,7 @@ fn ahead_line(notice: AheadNotice) -> Line {
 fn degraded_line(task: Task, cause: DegradedCause, until: Timestamp) -> Line {
     match cause {
         DegradedCause::DatabaseAheadOfWal { pages, first } => found_ahead_line(pages, first, until),
-        DegradedCause::AheadOfWalUnchecked => unchecked_line(until),
+        DegradedCause::DatabaseAheadOfWalUnchecked => unchecked_line(until),
         DegradedCause::StoreDenied(_)
         | DegradedCause::StoreRefused
         | DegradedCause::RemoteCorrupt

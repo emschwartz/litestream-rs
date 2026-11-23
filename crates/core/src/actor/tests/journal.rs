@@ -696,7 +696,7 @@ fn a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs() {
         "{first:?}"
     );
     assert_eq!(
-        restarted.ahead_unchecked(),
+        restarted.ahead_of_wal_unchecked(),
         None,
         "one attempt never gives up"
     );
@@ -705,7 +705,7 @@ fn a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs() {
         matches!(
             event(&second),
             Some(Event::Degraded {
-                cause: PersistentCause::AheadOfWalUnchecked,
+                cause: PersistentCause::DatabaseAheadOfWalUnchecked,
                 ..
             })
         ),
@@ -718,7 +718,7 @@ fn a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs() {
     );
     let notice = unchecked_recorded(&mut journal).expect("the notice is journalled");
     assert_eq!(notice.made, ts(T0 + 20_000));
-    assert_eq!(restarted.ahead_unchecked(), Some(notice));
+    assert_eq!(restarted.ahead_of_wal_unchecked(), Some(notice));
     assert_eq!(restarted.ahead(), None, "no verdict: nothing was found");
     rig.commit(5);
     let seen = settle(&mut rig, &mut restarted, T0 + 30_000, Some(&mut journal));
@@ -736,7 +736,7 @@ fn the_unchecked_notice_stands_for_the_window_across_a_restart() {
     wipe_replica(&rig);
     tick(&mut rig, &mut restarted, T0 + 10_000, Some(&mut journal));
     tick(&mut rig, &mut restarted, T0 + 20_000, Some(&mut journal));
-    let notice = restarted.ahead_unchecked().expect("given up");
+    let notice = restarted.ahead_of_wal_unchecked().expect("given up");
     // Seven days, stated here rather than read from the code under test.
     let until = notice.made.unix_millis() + 7 * 24 * 60 * 60 * 1000;
     let mut later = Actor::new(go_like());
@@ -746,12 +746,12 @@ fn the_unchecked_notice_stands_for_the_window_across_a_restart() {
         seen.iter().any(|t| event(t) == Some(&reminded)),
         "a boot inside the window says how long the notice stands: {seen:?}"
     );
-    assert_eq!(later.ahead_unchecked(), Some(notice));
+    assert_eq!(later.ahead_of_wal_unchecked(), Some(notice));
     let ended = tick(&mut rig, &mut later, until, Some(&mut journal));
     assert_eq!(
         event(&ended),
         Some(&Event::AheadOfWal(AheadNotice::UncheckedEnded))
     );
-    assert_eq!(later.ahead_unchecked(), None);
+    assert_eq!(later.ahead_of_wal_unchecked(), None);
     assert_eq!(unchecked_recorded(&mut journal), None);
 }

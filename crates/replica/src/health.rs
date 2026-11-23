@@ -190,25 +190,25 @@ pub struct Health {
     /// could not make it, because the replica could not give its own newest confirmed state, so
     /// the WAL was checkpointed unchecked. Stands for a fixed window, then ends on its own
     /// (`docs/decisions.md` D106).
-    pub ahead_unchecked: Option<AheadUnchecked>,
+    pub ahead_of_wal_unchecked: Option<AheadOfWalUnchecked>,
 }
 
 /// An owed check for a database file ahead of its WAL that could not be made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AheadUnchecked {
+pub struct AheadOfWalUnchecked {
     /// When the check was given up.
     pub since: Timestamp,
     /// When this ends.
-    pub until: Timestamp,
+    pub kept_until: Timestamp,
 }
 
-impl AheadUnchecked {
+impl AheadOfWalUnchecked {
     /// The report of a notice the engine holds.
     #[must_use]
     pub fn of(unchecked: lsr_core::Unchecked) -> Self {
         Self {
             since: unchecked.made,
-            until: unchecked.made.saturating_add(lsr_core::AHEAD_KEPT_FOR),
+            kept_until: unchecked.made.saturating_add(lsr_core::AHEAD_KEPT_FOR),
         }
     }
 }
@@ -388,7 +388,7 @@ impl Health {
             },
             journal: None,
             ahead_of_wal: None,
-            ahead_unchecked: None,
+            ahead_of_wal_unchecked: None,
         }
     }
 

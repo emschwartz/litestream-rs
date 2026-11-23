@@ -176,7 +176,7 @@ pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::PageSizeChanged { .. } => "page_size_changed",
         DegradedCause::DatabasePageMismatch { .. } => "database_page_mismatch",
         DegradedCause::DatabaseAheadOfWal { .. } => "database_ahead_of_wal",
-        DegradedCause::AheadOfWalUnchecked => "database_ahead_of_wal_unchecked",
+        DegradedCause::DatabaseAheadOfWalUnchecked => "database_ahead_of_wal_unchecked",
         DegradedCause::Bug => "bug",
         DegradedCause::Stalled(stall) => stall_name(stall),
     }
@@ -323,12 +323,12 @@ fn ahead_json(health: &Health) -> String {
 }
 
 fn unchecked_json(health: &Health) -> String {
-    let Some(unchecked) = health.ahead_unchecked else {
+    let Some(unchecked) = health.ahead_of_wal_unchecked else {
         return "null".to_owned();
     };
     let mut o = Object::new();
     o.text("since", &unchecked.since.to_string());
-    o.text("until", &unchecked.until.to_string());
+    o.text("kept_until", &unchecked.kept_until.to_string());
     o.end()
 }
 
@@ -471,15 +471,16 @@ mod tests {
             replica_type: "file",
             state: DbState::Running(Box::new(health.clone())),
         };
-        health.ahead_unchecked = Some(lsr_replica::AheadUnchecked::of(lsr_core::Unchecked {
-            made: at,
-        }));
+        health.ahead_of_wal_unchecked =
+            Some(lsr_replica::AheadOfWalUnchecked::of(lsr_core::Unchecked {
+                made: at,
+            }));
         let (up, body) = healthz(&[view(&health)], at);
         assert!(up, "{body}");
         let until = at.saturating_add(lsr_core::AHEAD_KEPT_FOR);
         assert!(
             body.contains(&format!(
-                "\"database_ahead_of_wal_unchecked\":{{\"since\":\"{at}\",\"until\":\"{until}\"}}"
+                "\"database_ahead_of_wal_unchecked\":{{\"since\":\"{at}\",\"kept_until\":\"{until}\"}}"
             )),
             "{body}"
         );
@@ -493,7 +494,7 @@ mod tests {
             metrics.contains("lsr_database_ahead_of_wal{db=\"/app.db\"} 0"),
             "{metrics}"
         );
-        health.ahead_unchecked = None;
+        health.ahead_of_wal_unchecked = None;
         let (_, body) = healthz(&[view(&health)], at);
         assert!(
             body.contains("\"database_ahead_of_wal_unchecked\":null"),

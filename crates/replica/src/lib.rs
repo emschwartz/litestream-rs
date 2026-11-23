@@ -71,7 +71,7 @@ pub use error::{RestoreError, StartError, TakeOverError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink, TakeoverUnusable};
 pub use exec::block_on;
 pub use health::{
-    AheadOfWal, AheadUnchecked, AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch,
+    AheadOfWal, AheadOfWalUnchecked, AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch,
     OpCounters, Phase, Stopped, StoreCounters, Verification, VerifyFailure, VerifyOutcome,
     VerifyRuns,
 };

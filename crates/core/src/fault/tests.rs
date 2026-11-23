@@ -267,7 +267,7 @@ fn every_persistent_cause() -> [PersistentCause; 18] {
             pages: NonZeroU32::MIN,
             first: NonZeroU32::MIN.saturating_add(1),
         },
-        PersistentCause::AheadOfWalUnchecked,
+        PersistentCause::DatabaseAheadOfWalUnchecked,
         PersistentCause::Bug,
     ]
 }
@@ -294,7 +294,7 @@ fn every_persistent_cause_is_listed() {
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::DatabasePageMismatch { .. }
         | PersistentCause::DatabaseAheadOfWal { .. }
-        | PersistentCause::AheadOfWalUnchecked
+        | PersistentCause::DatabaseAheadOfWalUnchecked
         | PersistentCause::Bug => true,
         // Not configurable: `every_retried_fault_stalls_and_no_stall_stops` covers it.
         PersistentCause::Stalled(_) => false,
@@ -344,7 +344,7 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
             | PersistentCause::DatabaseAheadOfWal { .. }
-            | PersistentCause::AheadOfWalUnchecked
+            | PersistentCause::DatabaseAheadOfWalUnchecked
             | PersistentCause::Stalled(_) => Action::Retry,
         };
         assert_eq!(all.action(cause), want, "{cause:?}");
@@ -378,7 +378,8 @@ fn each_field_names_one_cause() {
             PersistentCause::DatabasePageMismatch { .. } => {
                 one.database_page_mismatch = Response::Stop;
             }
-            PersistentCause::DatabaseAheadOfWal { .. } | PersistentCause::AheadOfWalUnchecked => {
+            PersistentCause::DatabaseAheadOfWal { .. }
+            | PersistentCause::DatabaseAheadOfWalUnchecked => {
                 one.database_ahead_of_wal = Response::Stop;
             }
             PersistentCause::Bug => one.bug = Response::Stop,
@@ -1010,6 +1011,6 @@ fn snapshot_counts_keep_each_cause_apart() {
 const fn ahead_of_wal(cause: PersistentCause) -> bool {
     matches!(
         cause,
-        PersistentCause::DatabaseAheadOfWal { .. } | PersistentCause::AheadOfWalUnchecked
+        PersistentCause::DatabaseAheadOfWal { .. } | PersistentCause::DatabaseAheadOfWalUnchecked
     )
 }

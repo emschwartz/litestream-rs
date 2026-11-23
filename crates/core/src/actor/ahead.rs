@@ -28,9 +28,9 @@
 //! (`docs/decisions.md` D106):
 //!
 //! 1. The notice is held in `Kept` and journalled as the verdict is, and raised as
-//!    [`StopCause::AheadOfWalUnchecked`] through the same response: a stop under `STRICT`, else
+//!    [`StopCause::DatabaseAheadOfWalUnchecked`] through the same response: a stop under `STRICT`, else
 //!    the cure runs unchecked.
-//! 2. It stands for [`AHEAD_KEPT_FOR`] ([`Actor::ahead_unchecked`]), and keeps no restore point:
+//! 2. It stands for [`AHEAD_KEPT_FOR`] ([`Actor::ahead_of_wal_unchecked`]), and keeps no restore point:
 //!    the state the check would have kept is the one the replica could not give.
 //! 3. A second one while one stands restarts the window.
 
@@ -156,7 +156,7 @@ impl Actor {
             AheadCheck::OwedAgain | AheadCheck::No => {
                 self.kept.ahead_check = AheadCheck::No;
                 self.kept.unchecked = Some(Unchecked { made: now });
-                Ok(Stepped::Stop(StopCause::AheadOfWalUnchecked))
+                Ok(Stepped::Stop(StopCause::DatabaseAheadOfWalUnchecked))
             }
         }
     }
@@ -187,7 +187,7 @@ impl Actor {
     /// The standing notice that a boot owed the check for a database file ahead of its WAL and
     /// could not make it, so the cure ran unchecked (`docs/decisions.md` D106).
     #[must_use]
-    pub const fn ahead_unchecked(&self) -> Option<Unchecked> {
+    pub const fn ahead_of_wal_unchecked(&self) -> Option<Unchecked> {
         self.kept.unchecked
     }
 
