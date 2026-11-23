@@ -154,7 +154,7 @@ After a rewind the replica still holds the lost branch. Its transactions stay re
 - An instant inside a merged file whose finer inputs are gone refuses with `AsOfInsideFile`; `--allow-earlier` returns the newest state provably before it.
 - The times are the host's wall clock, never below its highest reading within one process (RUN-19), not across a restart (WORLD-13). A forward jump is believed; restores as of instants in that window are off by up to the jump. **untested**.
 
-**Engine-level evidence.** oracle `AsOfTooNew`, `NotLatest`, `WrongCreatedAt` on the simulator runs listed under G1; sim `as_of_never_takes_an_upload_time_for_a_commit_time`; plants `time-provenance`, `time-provenance-sim`. The history rig restores at two instants per judged moment and applies judge `AsOfTooNew`.
+**Engine-level evidence.** oracle `AsOfTooNew`, `NotLatest`, `WrongCreatedAt` on the simulator runs listed under G1; sim `as_of_never_takes_an_upload_time_for_a_commit_time`; plant `time-provenance`. The history rig restores at two instants per judged moment and applies judge `AsOfTooNew`.
 
 **What that evidence does not show.** Under its per-read clock law the simulator reaches the window #98 fixed and kills the re-planted defect unaided (RUN-25, RUN-26; C7). v1 cited history `as_of_is_never_newer_than_the_instant` and `as_of_within_a_bound_is_the_node_live_then`; those test the judge on a hand-built log, not the engine.
 

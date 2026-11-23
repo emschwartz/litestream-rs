@@ -348,7 +348,7 @@ response = "It asks the driver for a takeover record through what staging vouche
 signal = "`TakeoverWanted`; `TakeoverNotRecorded` when the write fails"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`, sim::`survival::a_running_drop_records_past_an_unconfirmed_upload_seed_0x348`, sim::`survival::a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7`, core::`the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides`; plant::`takeover-before-drop-skipped`, plant::`takeover-before-drop-skipped-sim`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-listed`, plant::`takeover-ask-spins`"
+detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`, sim::`survival::a_running_drop_records_past_an_unconfirmed_upload_seed_0x348`, sim::`survival::a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7`, core::`the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides`; plant::`takeover-before-drop-skipped`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-listed`, plant::`takeover-ask-spins`"
 recovered_by = "sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`"
 notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and waits its backoff, and nothing is deleted unrecorded. Pending files above every replica key vouch for nothing there, so one put back from a backup never raises the record"
 
@@ -690,7 +690,7 @@ response = "continue. The seal is stamped after the barrier is held, so the comm
 signal = "None"
 at_risk = "None"
 recovery = "None needed"
-detected_by = "core::`a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed`, sim::`a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552`; plant::`seal-stamped-at-checkpoint-start`, plant::`seal-stamped-at-checkpoint-start-sim`"
+detected_by = "core::`a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed`, sim::`a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552`; plant::`seal-stamped-at-checkpoint-start`"
 notes = "As RUN-25, under the per-read clock law"
 
 [[row]]
