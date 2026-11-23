@@ -218,6 +218,9 @@ pub enum Op {
     /// The operator stops the engine as `replicate -once -force-snapshot` does: it drains and
     /// ends with a level-9 snapshot, then a fresh one boots later. Scenarios only.
     ShutdownWithSnapshot,
+    /// The operator stops the engine as `replicate -once -enforce-retention` does: it drains
+    /// and ends with a retention pass, then a fresh one boots later. Scenarios only.
+    ShutdownWithRetention,
     /// The operator asks for a snapshot.
     RequestSnapshot,
     /// The oracle restores every transaction and `Latest` and judges them.

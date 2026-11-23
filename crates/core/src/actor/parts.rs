@@ -24,6 +24,7 @@ use super::ActorConfig;
 use super::ahead::AheadCheck;
 use super::clock::EngineClock;
 use super::once::FinalSnapshot;
+use super::once_retention::FinalRetention;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
@@ -136,6 +137,9 @@ pub(super) struct Kept {
     pub(super) work: WorkCounts,
     /// The snapshot a drain was asked to end with (`once`): a request of this process.
     pub(super) final_snapshot: FinalSnapshot,
+    /// The retention pass a drain was asked to end with (`once_retention`): a request of this
+    /// process.
+    pub(super) final_retention: FinalRetention,
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
@@ -227,6 +231,7 @@ impl Kept {
             snapshots: SnapshotCounts::default(),
             work: WorkCounts::default(),
             final_snapshot: FinalSnapshot::NotAsked,
+            final_retention: FinalRetention::NotAsked,
             unproven: Unproven::No,
             takeover: None,
             wanted_takeover: None,
@@ -274,6 +279,7 @@ impl Kept {
             snapshots,
             work,
             final_snapshot,
+            final_retention,
             unproven,
             takeover,
             wanted_takeover: _,
@@ -316,6 +322,7 @@ impl Kept {
             snapshots: *snapshots,
             work: *work,
             final_snapshot: *final_snapshot,
+            final_retention: final_retention.clone(),
             unproven: *unproven,
             takeover: *takeover,
             // A rebuilt engine boots again and asks again for what it needs.
@@ -631,6 +638,12 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     ),
     (
         "final_snapshot",
+        Keep::Ephemeral(
+            "a -once request of this process: a restart is a new run, which asks again or not",
+        ),
+    ),
+    (
+        "final_retention",
         Keep::Ephemeral(
             "a -once request of this process: a restart is a new run, which asks again or not",
         ),

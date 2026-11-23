@@ -36,8 +36,9 @@ use std::time::Duration;
 use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
 use lsr_replica::{
-    Config, DynStore, FinalSnapshot, FinalSnapshotFailure, Gate, IfReplicationStops, Replicator,
-    RestoreError, Runtime, Stopped, Trip, record_takeover, restore_if_missing,
+    Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
+    IfReplicationStops, Replicator, RestoreError, Runtime, Stopped, Trip, record_takeover,
+    restore_if_missing,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{CredentialChain, CredentialError, S3Store};
@@ -63,6 +64,14 @@ pub enum End {
         txid: Option<lsr_ltx::Txid>,
         /// Why not.
         why: FinalSnapshotFailure,
+    },
+    /// It drained, through `txid`, but the retention pass `-enforce-retention` asked for did not
+    /// finish: how it ended instead.
+    RetentionNotEnforced {
+        /// The newest transaction on the replica.
+        txid: Option<lsr_ltx::Txid>,
+        /// How the pass ended.
+        ended: FinalRetention,
     },
 }
 
@@ -90,7 +99,8 @@ impl Finished {
                 Stopped::DeadlineReached { .. } | Stopped::Stopped(_) | Stopped::Gone(_),
             )
             | End::DidNotStart
-            | End::SnapshotNotWritten { .. } => false,
+            | End::SnapshotNotWritten { .. }
+            | End::RetentionNotEnforced { .. } => false,
         });
         dbs && self.child.is_none_or(ChildEnd::clean)
     }
@@ -446,13 +456,14 @@ impl Daemon {
     /// Drains every running database within what is left of the one deadline begun at
     /// `begun` (the signal, the child's exit, or now), and reports each.
     #[must_use]
-    /// Drains every database; with `snapshot`, each running one ends with a level-9 snapshot
-    /// (`-once -force-snapshot`).
+    /// Drains every database; each running one ends, as asked, with a level-9 snapshot
+    /// (`-once -force-snapshot`) and then a retention pass (`-once -enforce-retention`).
     pub(crate) fn stop(
         &self,
         waiter: Option<Waiter>,
         begun: lsr_ltx::Timestamp,
         snapshot: bool,
+        retention: bool,
     ) -> Finished {
         if let Some(waiter) = waiter {
             waiter.end();
@@ -465,6 +476,9 @@ impl Daemon {
                     if snapshot {
                         replicator.request_final_snapshot();
                     }
+                    if retention {
+                        replicator.request_final_retention();
+                    }
                     Some(replicator.stop(self.left(begun)))
                 }
                 State::Waiting | State::Failed => None,
@@ -475,7 +489,8 @@ impl Daemon {
             let path = slot.plan.path().to_owned();
             let end = match (sync, &slot.state) {
                 (Some(sync), State::Running(replicator)) => {
-                    ending(sync.wait(), replicator.health().final_snapshot)
+                    let health = replicator.health();
+                    ending(sync.wait(), health.final_snapshot, health.final_retention)
                 }
                 (Some(sync), State::Waiting | State::Failed) => End::Stopped(sync.wait()),
                 (None, State::Waiting) => End::NeverAppeared,
@@ -567,6 +582,16 @@ impl Daemon {
                 self.log
                     .error("database drained, snapshot not written", &fields);
             }
+            End::RetentionNotEnforced { txid, ended } => {
+                let txid = txid.map_or_else(|| "none".to_owned(), |t| t.to_string());
+                let fields = [
+                    at,
+                    ("txid", txid.into()),
+                    ("error", retention_text(ended).into()),
+                ];
+                self.log
+                    .error("database drained, retention not enforced", &fields);
+            }
             End::DidNotStart => self.log.error("database did not start", &[at]),
             End::NeverAppeared => self.log.info("database never appeared", &[at]),
         }
@@ -643,20 +668,56 @@ fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreError
     }
 }
 
-/// A drained database's end, with the snapshot it was asked to end with: a drain whose
-/// snapshot failed is not clean.
-fn ending(stopped: Stopped, snapshot: FinalSnapshot) -> End {
-    match (stopped, snapshot) {
-        (Stopped::Drained { txid }, FinalSnapshot::Failed(why)) => {
+/// A drained database's end, with the snapshot and the retention pass it was asked to end
+/// with: a snapshot that failed, or a pass that did not finish, is not clean. Retention
+/// switched off finishes, as in Go; a pass skipped for a failed snapshot is the snapshot's end.
+fn ending(stopped: Stopped, snapshot: FinalSnapshot, retention: FinalRetention) -> End {
+    match (stopped, snapshot, retention) {
+        (Stopped::Drained { txid }, FinalSnapshot::Failed(why), _) => {
             End::SnapshotNotWritten { txid, why }
         }
+        (
+            Stopped::Drained { txid },
+            FinalSnapshot::NotAsked | FinalSnapshot::Asked { .. } | FinalSnapshot::Written(_),
+            ended @ (FinalRetention::Held { .. }
+            | FinalRetention::Failed { .. }
+            | FinalRetention::Stuck { .. }),
+        ) => End::RetentionNotEnforced { txid, ended },
         (
             stopped,
             FinalSnapshot::NotAsked
             | FinalSnapshot::Asked { .. }
             | FinalSnapshot::Written(_)
             | FinalSnapshot::Failed(_),
+            FinalRetention::NotAsked
+            | FinalRetention::Asked { .. }
+            | FinalRetention::Done { .. }
+            | FinalRetention::Off
+            | FinalRetention::Skipped
+            | FinalRetention::Held { .. }
+            | FinalRetention::Failed { .. }
+            | FinalRetention::Stuck { .. },
         ) => End::Stopped(stopped),
+    }
+}
+
+/// Why a retention pass did not finish, for the log.
+fn retention_text(ended: &FinalRetention) -> String {
+    match ended {
+        FinalRetention::Held { deleted, hold } => {
+            format!("deletions refused after {deleted} keys: {hold}")
+        }
+        FinalRetention::Failed { deleted, fault } => {
+            format!("failed after {deleted} keys: {fault:?}")
+        }
+        FinalRetention::Stuck { deleted, key } => format!(
+            "stopped after {deleted} keys: the listing kept showing {key} after it was deleted"
+        ),
+        FinalRetention::NotAsked
+        | FinalRetention::Asked { .. }
+        | FinalRetention::Done { .. }
+        | FinalRetention::Off
+        | FinalRetention::Skipped => "none".to_owned(),
     }
 }
 

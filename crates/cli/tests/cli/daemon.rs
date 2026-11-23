@@ -172,8 +172,8 @@ fn a_second_signal_cuts_the_drain() {
 }
 
 /// `-once`: every database synced and uploaded, then exit. `-once -force-snapshot` ends each
-/// with one level-9 file of the whole database (docs/decisions.md D167). `-enforce-retention`
-/// is refused (no one-off retention pass yet).
+/// with one level-9 file of the whole database, and `-once -enforce-retention` with a retention
+/// pass, which on a fresh replica has nothing to delete (docs/decisions/D167.md).
 #[test]
 fn once_replicates_everything_committed_and_exits() {
     let dir = TempDir::new().unwrap();
@@ -195,11 +195,11 @@ fn once_replicates_everything_committed_and_exits() {
     assert_eq!(snapshots.len(), 1, "{out}");
     let again = TempDir::new().unwrap();
     restores_to(again.path(), &replica, &app);
-    let out = lsr()
-        .args(["replicate", "-once", "-enforce-retention", "-config", cfg])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    write(&app, 17);
+    let (status, out) = finish(start(&["-once", "-enforce-retention", "-config", cfg]));
+    assert_eq!(status.code(), Some(0), "{out}");
+    let last = TempDir::new().unwrap();
+    restores_to(last.path(), &replica, &app);
 }
 
 #[test]

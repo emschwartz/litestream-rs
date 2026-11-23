@@ -79,6 +79,7 @@ mod clock;
 mod floor;
 mod lag;
 mod once;
+mod once_retention;
 mod parts;
 mod state;
 mod unproven;
@@ -94,6 +95,7 @@ use lsr_wal::{CommittedEnd, OpenError, WalReader};
 pub use ahead::AHEAD_KEPT_FOR;
 use clock::EngineClock;
 pub use once::{FinalSnapshot, FinalSnapshotFailure};
+pub use once_retention::FinalRetention;
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
 pub use state::{Degraded, Phase, Task};
 use state::{Gate, Live};
@@ -1352,14 +1354,11 @@ impl Actor {
         now: Timestamp,
         deadline: Timestamp,
     ) -> Tick {
-        // A snapshot the drain was asked to end with is not cut by the deadline once
-        // everything is uploaded (`once`).
+        // A retention pass the drain was asked to end with is not cut by the deadline once
+        // everything is uploaded (`once_retention`).
         if now >= deadline {
             return if self.settled(env.wal) {
-                match self.final_snapshot_unit(env, now).await {
-                    Some(tick) => tick,
-                    None => self.drained(),
-                }
+                self.drain_ends(env, now).await
             } else {
                 self.missed(env, now).await
             };
@@ -1373,10 +1372,36 @@ impl Actor {
         if let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
-        if !self.settled(env.wal) {
-            return self.ran(Event::Idle, now);
+        if self.settled(env.wal) {
+            self.drain_ends(env, now).await
+        } else {
+            self.ran(Event::Idle, now)
         }
-        match self.final_snapshot_unit(env, now).await {
+    }
+
+    /// Everything is uploaded: the work the drain was asked to end with, then the end.
+    async fn drain_ends<W, P, C, L, R>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Tick
+    where
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: Role,
+        R: Role,
+    {
+        // The snapshot first, as Go takes it before retention; a snapshot that was not written
+        // skips this database's retention, as Go returns before it.
+        let snapshot = self.final_snapshot_unit(env, now).await;
+        if matches!(self.kept.final_snapshot, FinalSnapshot::Failed(_)) {
+            self.skip_final_retention();
+        }
+        if let Some(tick) = snapshot {
+            return tick;
+        }
+        match self.final_retention_unit(env, now).await {
             Some(tick) => tick,
             None => self.drained(),
         }

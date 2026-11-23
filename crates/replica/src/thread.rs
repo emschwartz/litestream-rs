@@ -338,6 +338,9 @@ impl Worker {
         if commands.snapshot {
             actor.request_snapshot();
         }
+        if commands.final_retention {
+            actor.request_final_retention();
+        }
         if commands.final_snapshot {
             actor.request_final_snapshot();
         }
@@ -710,6 +713,7 @@ impl Worker {
             .ahead_of_wal_unchecked()
             .map(AheadOfWalUnchecked::of);
         let snapshots = self.actor.snapshots();
+        let final_retention = self.actor.final_retention();
         let work = self.actor.work();
         let wal_synced_offset = self.actor.synced_wal_offset();
         let final_snapshot = self.actor.final_snapshot();
@@ -749,6 +753,7 @@ impl Worker {
                 read_lock_violations,
                 ..seen.counters
             };
+            health.final_retention = final_retention;
             health.final_snapshot = final_snapshot;
             health.verification = verification;
             health.journal = journal;

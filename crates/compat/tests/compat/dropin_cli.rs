@@ -161,7 +161,6 @@ fn compare(go: &Path, lsr: &Path, tokens: &[&str]) -> Result<(), TestCaseError> 
     let (args, (go_code, go_err, go_out), (lsr_code, lsr_err, lsr_out)) = answers(go, lsr, tokens);
     let go_outcome = outcome(go_code, &go_err, &go_out);
     let lsr_outcome = outcome(lsr_code, &lsr_err, &lsr_out);
-    // `-once -enforce-retention` is not built yet (D48, D167, #177):
     // refused by name where Go, having accepted the flags, goes on to build the database.
     if lsr_err.contains("is not in this build yet") {
         prop_assert!(

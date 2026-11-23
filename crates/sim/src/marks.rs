@@ -338,7 +338,7 @@ impl Class {
             Op::OtherProcessReader { .. } => Self::OtherProcessReader,
             Op::OtherProcessCheckpoint(_) => Self::OtherProcessCheckpoint,
             Op::Tick => Self::Tick,
-            Op::Shutdown | Op::ShutdownWithSnapshot => Self::Shutdown,
+            Op::Shutdown | Op::ShutdownWithSnapshot | Op::ShutdownWithRetention => Self::Shutdown,
             Op::RequestSnapshot => Self::RequestSnapshot,
             Op::Restore => Self::Restore,
             Op::Heal => Self::Heal,

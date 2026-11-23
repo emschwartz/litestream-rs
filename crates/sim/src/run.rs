@@ -139,6 +139,9 @@ pub struct RunReport {
     /// How each drain asked to end with a level-9 snapshot (`Op::ShutdownWithSnapshot`)
     /// ended it, in order.
     pub final_snapshots: Vec<lsr_core::FinalSnapshot>,
+    /// How each drain asked to end with a retention pass (`Op::ShutdownWithRetention`) ended
+    /// it, in order.
+    pub final_retentions: Vec<lsr_core::FinalRetention>,
     /// Commits the app made inside a tick, before a checkpoint's barrier.
     pub commits_in_tick: u32,
     /// Oracle restores of the whole replica.
@@ -2098,11 +2101,16 @@ impl Runner {
     /// After a drain that finished: `Latest` is the local head, unless a bucket rollback
     /// took files the engine had already confirmed.
     /// The operator stops the engine, with the snapshot `-once -force-snapshot` ends with when
-    /// `snapshot`; a fresh engine boots later.
-    fn shutdown(&mut self, snapshot: bool) -> Result<(), Violation> {
+    /// `snapshot` and then the retention pass `-once -enforce-retention` ends with when
+    /// `retention`; a fresh engine boots later. The history judge runs as the drain ends, after
+    /// both; how each ended is the report's.
+    fn shutdown(&mut self, snapshot: bool, retention: bool) -> Result<(), Violation> {
         self.report.shutdowns = self.report.shutdowns.saturating_add(1);
         if snapshot {
             self.actor.request_final_snapshot();
+        }
+        if retention {
+            self.actor.request_final_retention();
         }
         self.drain()?;
         if snapshot {
@@ -2110,6 +2118,11 @@ impl Runner {
             self.report
                 .final_snapshots
                 .push(self.actor.final_snapshot());
+        }
+        if retention {
+            self.report
+                .final_retentions
+                .push(self.actor.final_retention());
         }
         self.reboot();
         self.app.restarted(self.op_began_at);
@@ -2431,8 +2444,9 @@ impl Runner {
             Op::EnvFault(fault) => self.env_fault(*fault)?,
             Op::ClockJump(millis) => self.clock_jump(*millis),
             Op::Tick => self.tick()?,
-            Op::Shutdown => self.shutdown(false)?,
-            Op::ShutdownWithSnapshot => self.shutdown(true)?,
+            Op::Shutdown => self.shutdown(false, false)?,
+            Op::ShutdownWithSnapshot => self.shutdown(true, false)?,
+            Op::ShutdownWithRetention => self.shutdown(false, true)?,
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),
