@@ -369,6 +369,8 @@ struct Runner {
     /// A fault operation was applied since the last kill: the law kills once per operation, so
     /// a fault that keeps firing (a rate) does not keep the engine from ever running.
     kill_armed: bool,
+    /// A hold is running its ticks: a kill there is a restart inside a hold, which reaches D9.
+    in_hold: bool,
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
@@ -506,6 +508,7 @@ impl Runner {
             lenient: false,
             kill_after_fault: false,
             kill_armed: false,
+            in_hold: false,
             expected_sizes: Vec::new(),
             life: Incarnation::default(),
             // The database's first content is on no replica yet.
@@ -1226,12 +1229,27 @@ impl Runner {
     /// The kill-after-fault law ([`Weights::kill_after_fault`]): the first tick in which a store
     /// fault or an injected SQLite-side failure fires after a fault operation is followed at once
     /// by a process crash, before anything else can pay what the fault left owing.
+    /// Runs a hold with [`Runner::in_hold`] set for its ticks.
+    fn hold_marked(&mut self, hold: crate::generate::Hold, ticks: u8) -> Result<(), Violation> {
+        self.in_hold = true;
+        let held = self.hold(hold, ticks);
+        self.in_hold = false;
+        if self.trace {
+            self.report.trace.push("    hold ended".to_owned());
+        }
+        held
+    }
+
     fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), queued0: usize) -> Step {
         let fired_now = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
         let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
         let source = self.w.sqlite.queued_injections() < queued0;
         let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
-        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) {
+        // A kill inside a hold is a restart there, which reaches the open defect D9 (retry
+        // counts and degraded states reset at a restart, so a halt that outlasts restarts is never
+        // reported): only where known defects are counted, as the overlapping holds' own restarts.
+        let reaches_d9 = self.in_hold && !self.known_wrong;
+        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) || reaches_d9 {
             return step;
         }
         self.kill_armed = false;
@@ -2298,7 +2316,7 @@ impl Runner {
                 self.meta(*op)?;
             }
             Op::WalDamage { op, ticks } => self.wal_damage_healed(*op, *ticks)?,
-            Op::Hold { hold, ticks } => self.hold(*hold, *ticks)?,
+            Op::Hold { hold, ticks } => self.hold_marked(*hold, *ticks)?,
             Op::Verify => self.verify()?,
             Op::Heal => self.heal_faults(),
             Op::LaggingListings { writes, window } => self.lag_listings(*writes, *window),
