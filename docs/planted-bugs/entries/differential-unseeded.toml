@@ -1,0 +1,5 @@
+# The shared differential runner draws unseeded cases, so a run differs every time and a floor can fall short by chance.
+name = "differential-unseeded"
+fix = "plant"
+package = "lsr-compat"
+tests = ["differential::tests::a_run_draws_the_same_cases_every_time"]

@@ -325,6 +325,7 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 | `Health.journal`, `/healthz` `journal` and `journal_detail`, `lsr_journal_signal{signal}` | `replica/src/health.rs`, `sidecar/src/health.rs` | What the engine journal says: `missing`, `unreadable`, `newer_version`, `slot_unreadable` (boot read it so, until the next boot; BOOT-25 to BOOT-29) or `unwritable` (it lags what the engine holds; RUN-27). A notice, not a failure: `/healthz` stays 200 |
 | `Health.ahead_of_wal`, `/healthz` `database_ahead_of_wal` (`pages`, `first_page`, `restore_point`, `kept_until`), `lsr_database_ahead_of_wal` | `replica/src/health.rs`, `sidecar/src/health.rs` | A boot after a failed WAL sync found the database file ahead of its WAL; the state before it is kept until `kept_until` (BOOT-31). A notice, not a failure: `/healthz` stays 200 and it ends on its own |
 | `lsr_panics_total` | `replica/src/health.rs` | Panics caught at the thread boundary |
+| `lsr_read_lock_violations_total` | `replica/src/health.rs` | Recoveries that found commits lost to a WAL restart the read lock should have prevented: a broken lock or a bug |
 
 There is no per-cause count of snapshots taken on main. It is on #86 (`lsr_snapshots_total{db,cause}`).
 

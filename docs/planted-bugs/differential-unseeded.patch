@@ -1,0 +1,12 @@
+diff --git a/crates/compat/src/differential.rs b/crates/compat/src/differential.rs
+--- a/crates/compat/src/differential.rs
++++ b/crates/compat/src/differential.rs
+@@ -155,7 +155,7 @@
+         let mut runner = TestRunner::new(Config {
+             cases,
+             failure_persistence: None,
+-            rng_seed: RngSeed::Fixed(seed(self.name, part)),
++            rng_seed: RngSeed::Random,
+             ..Config::default()
+         });
+         runner
