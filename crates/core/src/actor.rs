@@ -111,7 +111,6 @@ use crate::fault::{
 };
 use crate::identity;
 use crate::inventory::Inventory;
-use crate::journal::{JournalFile, JournalSignal, JournalWriter, judge};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
     Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due, listing_after_upload,
@@ -157,10 +156,6 @@ pub struct Env<'a, W, P, C, L, R> {
     /// So a stamp is read here, after the committed read that bounds the
     /// file: every transaction the file carries committed before it.
     pub clock: &'a dyn Clock,
-    /// The engine journal (`docs/journal.md`), or `None` to run without one. Boot reads it and
-    /// reports what it found ([`Actor::journal`]); every verdict, the worst included, leaves the
-    /// engine doing exactly what it does with `None`.
-    pub journal: Option<&'a mut (dyn JournalFile + Send + 'static)>,
 }
 
 impl<
@@ -178,7 +173,6 @@ impl<
             .field("ck", &self.ck)
             .field("staging", &self.staging)
             .field("remote", &self.remote)
-            .field("journal", &self.journal.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -511,13 +505,6 @@ impl Actor {
         self.kept.stop.phase(self.booted())
     }
 
-    /// What the last boot's read of the journal reported, if anything: `None` with no journal,
-    /// a readable one, or none on a first run.
-    #[must_use]
-    pub const fn journal(&self) -> Option<JournalSignal> {
-        self.kept.journal
-    }
-
     /// Counts the event a recovery verdict names, and hands on its decision.
     fn noted(&mut self, verdict: Verdict) -> Recovered {
         match verdict.event {
@@ -711,11 +698,7 @@ impl Actor {
     }
 
     /// Runs at most one unit of work.
-    pub async fn tick<W, P, C, L, R>(
-        &mut self,
-        mut env: Env<'_, W, P, C, L, R>,
-        now: Timestamp,
-    ) -> Tick
+    pub async fn tick<W, P, C, L, R>(&mut self, env: Env<'_, W, P, C, L, R>, now: Timestamp) -> Tick
     where
         W: WalSource,
         P: PageSource,
@@ -747,7 +730,6 @@ impl Actor {
             staging: &staging,
             remote: &remote,
             clock: env.clock,
-            journal: env.journal.as_deref_mut(),
         };
         // Boxed: the tick's state machine is the largest future the replicator thread polls,
         // and on the heap it is not part of every poll frame below `block_on`, which in a
@@ -1154,7 +1136,6 @@ impl Actor {
             return self.ran(Event::Idle, now);
         }
         let takeover = self.boot_takeover();
-        let journal = read_journal(env.journal.as_deref_mut());
         let doubted = self.kept.suspect_staged;
         let suspect = &mut self.kept.suspect_staged;
         let listed = boot_listing(env.staging, env.remote, suspect, takeover).await;
@@ -1197,8 +1178,6 @@ impl Actor {
                 return self.verdict(Task::Sync, cause, now);
             }
         };
-        // A boot that fails later reads the journal again.
-        self.adopt_journal(journal, newest_staged.as_ref(), &upload);
         let cause = boot_cause(dropped, refused, from.err());
         let staged = newest_staged.map(|newest_staged| newest_staged.txid());
         let course = boot_course(from, cause, self.kept.asked(), staged);
@@ -2654,28 +2633,6 @@ enum Dropped {
     /// The staged files from the replica's newest level-0 transaction on:
     /// the replica holds another verifying file under that key.
     Diverged(Txid),
-}
-
-/// The journal as boot reads it, with the writer that continues from it, or `None` with no
-/// journal lent.
-fn read_journal(
-    file: Option<&mut (dyn JournalFile + Send + '_)>,
-) -> Option<(JournalWriter, lsr_journal::Parsed)> {
-    file.map(JournalWriter::open)
-}
-
-impl Actor {
-    /// Takes what boot read of the journal: the report (a missing journal is a first run, and
-    /// reports nothing, only while staging and the replica are both empty).
-    fn adopt_journal(
-        &mut self,
-        journal: Option<(JournalWriter, lsr_journal::Parsed)>,
-        newest_staged: Option<&NewestStagedFile>,
-        upload: &UploadState,
-    ) {
-        let fresh = newest_staged.is_none() && upload.confirmed().is_none();
-        self.kept.journal = journal.and_then(|(_, parsed)| judge(&parsed, fresh));
-    }
 }
 
 /// Boot's scratch removal, listing and staging sweep: the upload state to start from, and

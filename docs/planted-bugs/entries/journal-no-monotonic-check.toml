@@ -1,6 +1,0 @@
-name = "journal-no-monotonic-check"
-fix = "a64cc50"
-package = "lsr-core"
-tests = [
-    "journal_model::a_non_monotonic_record_is_refused_as_a_bug",
-]

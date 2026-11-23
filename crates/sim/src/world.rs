@@ -253,8 +253,6 @@ pub struct World {
     pub remote_faults: FaultHandle,
     /// Staging's power-loss bookkeeping.
     pub volatile: VolatileHandle,
-    /// The engine journal, on the same disk as staging.
-    pub journal: crate::journal::SimJournal,
     /// What the database really was.
     pub model: Model,
     /// What the engine has acknowledged.
@@ -376,7 +374,6 @@ impl World {
             staging_recorder: staging_recorder_log,
             remote_recorder: remote_recorder_log,
             volatile: volatile_handle,
-            journal: crate::journal::SimJournal::default(),
             model,
             acked: Acked::new(),
             history,
@@ -693,7 +690,6 @@ impl World {
         match kind {
             CrashKind::Process => Vec::new(),
             CrashKind::Power => {
-                self.journal.power_loss();
                 let lost = block_on(
                     self.staging_raw
                         .power_loss(&self.volatile, &self.crash_entropy),

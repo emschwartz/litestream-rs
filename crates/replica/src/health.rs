@@ -10,8 +10,8 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, FinalRetention, FinalSnapshot, Gate, JournalSignal,
-    PersistentCause, Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, WorkCounts,
+    AppCheckpoint, AppCheckpoints, Degraded, FinalRetention, FinalSnapshot, Gate, PersistentCause,
+    Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, WorkCounts,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -183,10 +183,6 @@ pub struct Health {
     pub counters: Counters,
     /// What the scheduled verify found (`Config::verify_interval`); all empty while it is off.
     pub verification: Verification,
-    /// What the engine journal (`docs/journal.md`) says, when it says something an operator
-    /// should see: what boot read of it, or that the debt of a failed WAL sync is held only in
-    /// memory because the journal cannot be written. `None` while it is read and written.
-    pub journal: Option<JournalSignal>,
     /// Fail-stop (`Config::if_replication_stops`): whether replication has tripped, and what
     /// that does to the application.
     pub held_by: FailStop,
@@ -348,7 +344,6 @@ impl Health {
                     incomplete: 0,
                 },
             },
-            journal: None,
             final_retention: FinalRetention::NotAsked,
             final_snapshot: FinalSnapshot::NotAsked,
         }

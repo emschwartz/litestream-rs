@@ -48,9 +48,6 @@
 //! - `lsr_app_checkpoints_total{db,kind}` (`backfilled`, `restarted`, `stalled`) and
 //!   `lsr_app_notice{db,kind}` 1 while the application-checkpoint notice stands.
 //! - `lsr_resnapshot_pending{db,cause}` 1 when the next sync is a snapshot.
-//! - `lsr_journal_signal{db,signal}` 1 while the engine journal reports something
-//!   (`missing`, `unreadable`, `newer_version`, `slot_unreadable`,
-//!   `unwritable`; `docs/journal.md`).
 //! - `lsr_snapshots_total{db,cause}`: snapshots staged since the replicator started, every
 //!   cause listed, zeros included. Each uploads the whole database: a cause other than
 //!   `first_sync`, `checkpoint_boundary` or `operator_requested` that keeps counting up means
@@ -78,8 +75,8 @@ use lsr_replica::{
 };
 
 use crate::health::{
-    DbState, DbView, cause_name, journal_name, notice_name, snapshot_kind_name, snapshot_name,
-    stop_name, task_name,
+    DbState, DbView, cause_name, notice_name, snapshot_kind_name, snapshot_name, stop_name,
+    task_name,
 };
 
 /// The rendered text.
@@ -501,17 +498,6 @@ fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {
     for (db, health) in dbs {
         if let Some(cause) = health.resnapshot {
             out.sample(name, &[("db", db), ("cause", snapshot_name(cause))], 1);
-        }
-    }
-    let name = "lsr_journal_signal";
-    out.family(
-        name,
-        "gauge",
-        "1 while the engine journal is missing, unreadable, from a newer version or unwritable, by signal",
-    );
-    for (db, health) in dbs {
-        if let Some(signal) = health.journal {
-            out.sample(name, &[("db", db), ("signal", journal_name(signal))], 1);
         }
     }
     let name = "lsr_snapshots_total";

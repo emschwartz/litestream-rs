@@ -85,7 +85,7 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CallTotals, CheckpointConfig, CheckpointMode, Clock,
     Degraded, Denied, Depth, Entropy, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
-    IfReplicationStops, JournalSignal, L0Retention, Maintenance, MaxUnreplicatedAge, OtherWriter,
+    IfReplicationStops, L0Retention, Maintenance, MaxUnreplicatedAge, OtherWriter,
     PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
     Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause,
     TakeoverRecord, Task, Trip, WorkCounts,

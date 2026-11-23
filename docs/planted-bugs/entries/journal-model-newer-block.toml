@@ -1,6 +1,0 @@
-name = "journal-model-newer-block"
-fix = "270f55e"
-package = "lsr-core"
-tests = [
-    "journal_model::the_writer_matches_the_model_under_the_block_law",
-]

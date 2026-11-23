@@ -198,11 +198,6 @@ pub enum BugSite {
     WalPageRead,
     /// The page map was fed out of the order one scan produces.
     PageMap,
-    /// The engine asked the journal for a record that is not monotonic over the one before it:
-    /// a floor that falls or is dropped for the same destination, or a debt that moves backward.
-    JournalNotMonotonic,
-    /// The journal's writer reached a record write with no sequence number to follow.
-    JournalSequence,
 }
 
 impl BugSite {

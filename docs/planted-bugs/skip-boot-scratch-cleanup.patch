@@ -1,8 +1,10 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 9c0c170f..696276bd 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2940,7 +2940,6 @@
+@@ -2655,7 +2655,6 @@ async fn boot_listing<L: Role, R: Role>(
+     suspect: &mut Option<FileKey>,
      takeover: Takeover,
-     no_journal: bool,
  ) -> Result<Listed, BootStep> {
 -    remove_scratch(staging, remote).await?;
      // Where staging stood before this boot dropped anything of its own: the

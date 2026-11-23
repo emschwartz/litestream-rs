@@ -17,5 +17,4 @@
 
 #![forbid(unsafe_code)]
 
-pub mod journal;
 pub mod restore_plan;

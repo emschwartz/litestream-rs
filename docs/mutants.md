@@ -434,16 +434,13 @@ already gone on delete, abort or scratch removal; a directory already made; a sc
 hard link the filesystem cannot make) was never failed with that kind or with one it must not tolerate. A
 test-only `Faulty` filesystem (`crates/store-fs/src/tests/faults.rs`) fails one chosen call with one chosen
 kind, and seven table tests drive each call both ways. Two getters (`Meta::is_empty`,
-`DirEntryInfo::is_symlink`) and a journal slot read past the end of the file are read back by new
-assertions.
+`DirEntryInfo::is_symlink`) are read back by new assertions.
 
-### Equivalent (5)
+### Equivalent (3)
 
 | Where | Mutation | Why |
 | --- | --- | --- |
 | `filesystem.rs` `RealFs::sync_dir`, `File::sync_all` | replaced by `Ok(())` | An fsync that does nothing shows only after a power loss. The crash tests in `docs/planted-bugs.toml` (`delete-without-dir-sync` among them) check that the store makes the call, and the LazyFS rig checks the real syscall. |
-| `engine_journal.rs` `FsJournalFile::sync`, `sync_dir` | replaced by `Ok(())` | The same, for the journal file and its directory. |
-| `engine_journal.rs` `read_slot` | guard `err.kind() == UnexpectedEof` becomes `true` | Besides end of file, a read of an open journal fails only on a device fault no test can produce. |
 
 ## replica
 

@@ -1,9 +1,0 @@
-name = "journal-unwritable-sticky"
-fix = "9a3ea61a"
-package = "lsr-core"
-tests = [
-    "actor::tests::journal::an_unwritable_journal_stops_lagging_once_the_debt_is_paid",
-]
-# The recorded regression histories (crates/sim/tests/sim/histories.rs) whose own defect has no
-# plant: each is run against a plant on the path its history takes, so a history that stops
-# running that path goes red. The same defects as the entries they reuse, against the simulator.

@@ -17,7 +17,6 @@ lsr-compat = { path = "crates/compat" }
 lsr-config = { path = "crates/config" }
 lsr-core = { path = "crates/core" }
 lsr-history = { path = "crates/history" }
-lsr-journal = { path = "crates/journal" }
 lsr-replica = { path = "crates/replica" }
 lsr-sidecar = { path = "crates/sidecar" }
 lsr-ltx = { path = "crates/ltx" }
@@ -150,10 +149,6 @@ opt-level = 3
 
 # The codec decodes a million-page database in the lock-page restore test.
 [profile.dev.package.lsr-ltx]
-opt-level = 3
-
-# The journal model's exhaustive walks expand a million states in the default test run.
-[profile.dev.package.lsr-spec]
 opt-level = 3
 
 [profile.dev]

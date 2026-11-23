@@ -20,12 +20,6 @@ use crate::store::WriteMode;
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 mod audit;
-#[expect(
-    clippy::unwrap_in_result,
-    clippy::arithmetic_side_effects,
-    reason = "an in-memory journal file: offsets and lengths within one 8192-byte file"
-)]
-mod journal;
 
 const PS: PageSize = PageSize::MIN;
 const T0: i64 = 1_000_000;
@@ -311,7 +305,6 @@ impl Rig {
             staging: &self.staging,
             remote: &self.remote,
             clock: &FakeClock::new(ts(now)),
-            journal: None,
         };
         let tick = block_on(actor.tick(env, ts(now)));
         // The rig is the driver: it keeps the takeover the actor asked for
@@ -2248,7 +2241,6 @@ mod create_only;
 mod degraded;
 mod index_reset;
 mod lag;
-mod ledger;
 mod listing;
 mod live;
 mod newest_replica_file;
@@ -2424,9 +2416,9 @@ fn a_passive_checkpoint_counts_no_boundary_snapshot() {
     );
 }
 
-/// An engine's Env prints its sources and stores, and whether a journal is lent, not the journal.
+/// An engine's Env prints its sources and stores.
 #[test]
-fn an_env_prints_its_parts_and_whether_it_has_a_journal() {
+fn an_env_prints_its_parts() {
     let mut rig = Rig::new();
     let clock = FakeClock::new(ts(T0));
     let env = Env {
@@ -2436,17 +2428,10 @@ fn an_env_prints_its_parts_and_whether_it_has_a_journal() {
         staging: &rig.staging,
         remote: &rig.remote,
         clock: &clock,
-        journal: None,
     };
     let text = format!("{env:?}");
     assert!(text.starts_with("Env { wal: "), "{text}");
-    for part in [
-        "db: ",
-        "ck: ",
-        "staging: ",
-        "remote: ",
-        "journal: false, .. }",
-    ] {
+    for part in ["db: ", "ck: ", "staging: ", "remote: ", ".. }"] {
         assert!(text.contains(part), "{part} in {text}");
     }
 }

@@ -251,7 +251,6 @@ fn a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits() {
             staging: &rig.staging,
             remote: &rig.remote,
             clock: &FakeClock::new(ts(now)),
-            journal: None,
         };
         // No driver: nothing is handed back.
         let tick = block_on(actor.tick(env, ts(now)));
@@ -462,7 +461,7 @@ fn uploads_resume_with_a_snapshot_after_a_rollback_took_confirmed_ids() {
 }
 
 /// A redeploy that keeps the database but not the meta directory: staging is empty, there is
-/// no journal and no takeover record, and the application's last close checkpointed the WAL
+/// no takeover record, and the application's last close checkpointed the WAL
 /// into the database file and restarted it, so the WAL cannot vouch for the replica's newest
 /// transaction. The replica holds 1 to 3, and the database file holds exactly its state at 3
 /// (page 1 written by transaction 3, pages 2 and 3 from the start). Returns that rig.

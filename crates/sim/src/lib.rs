@@ -30,7 +30,6 @@ pub mod failstop;
 pub mod forcing;
 pub mod generate;
 pub mod history;
-pub mod journal;
 pub mod marks;
 pub mod memfs;
 pub mod model;

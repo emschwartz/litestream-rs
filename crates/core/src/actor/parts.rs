@@ -30,10 +30,7 @@ use crate::checkpoint::CheckpointState;
 use crate::counts::WorkCounts;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
-use crate::journal::JournalSignal;
 use crate::layout::FileKey;
-#[cfg(test)]
-use crate::obligations::{Keep, Record};
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::store::Denied;
@@ -170,9 +167,6 @@ pub(super) struct Kept {
     /// Where the WAL ended when a snapshot owed for a doubt alone was first observed, with
     /// every staged file on the replica: frames up to it are not lag (`actor::lag`).
     pub(super) doubt_baseline: Option<WalMark>,
-    /// What the last boot's read of the journal reported. A report, not engine state: nothing
-    /// decides on it.
-    pub(super) journal: Option<JournalSignal>,
     /// Recoveries that found a commit abandoned after the read lock was taken: a report,
     /// kept across rebuilds, since the snapshot that follows names only the generation change.
     pub(super) read_lock_violations: u64,
@@ -207,7 +201,6 @@ impl Kept {
             sync_failed_after_listing: false,
             quiet: BTreeSet::new(),
             doubt_baseline: None,
-            journal: None,
             read_lock_violations: 0,
         }
     }
@@ -244,7 +237,6 @@ impl Kept {
             sync_failed_after_listing,
             quiet: _,
             doubt_baseline: _,
-            journal,
             read_lock_violations,
         } = self;
         Self {
@@ -278,7 +270,6 @@ impl Kept {
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),
             doubt_baseline: None,
-            journal: *journal,
             read_lock_violations: *read_lock_violations,
         }
     }
@@ -470,219 +461,3 @@ impl Engine {
         }
     }
 }
-
-/// What each field of [`Kept`] is to a restart of the process (`crate::obligations`).
-#[cfg(test)]
-pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
-    (
-        "cfg",
-        Keep::Derived("the caller's configuration, given to every start"),
-    ),
-    (
-        "stop",
-        Keep::Ephemeral(
-            "a stop holds until a person restarts the process: the restart is the way out \
-             (docs/BEHAVIOR.md section 5)",
-        ),
-    ),
-    (
-        "tasks",
-        Keep::Ephemeral(
-            "retry waits and degraded reports; a restarted engine tries every task at once and \
-             meets a failure that persists again",
-        ),
-    ),
-    (
-        "clock",
-        Keep::Ephemeral(
-            "engine time follows the wall clock from each start; nothing journalled is dated by it",
-        ),
-    ),
-    (
-        "task_restore_point",
-        Keep::Ephemeral(
-            "pinned while a task is degraded and pinned again when the failure is met again; \
-             cost: a retention pass that runs before a restarted engine meets the failure keeps \
-             only the newest restore point",
-        ),
-    ),
-    (
-        "verify_restore_point",
-        Keep::Derived("asked for again by the replica thread after every tick, from its verify"),
-    ),
-    (
-        "live",
-        Keep::Ephemeral("a verify's read of the live pages in flight; the verify asks again"),
-    ),
-    (
-        "snapshot_asked",
-        Keep::Ephemeral(
-            "an operator's request to this process; cost: a restart before it is staged drops it",
-        ),
-    ),
-    (
-        "app",
-        Keep::Ephemeral("what the application's checkpoints did between reads: counts reported"),
-    ),
-    (
-        "unguarded",
-        Keep::Ephemeral(
-            "the replica's store refused a create-only write, so uploads replace: each process \
-             asks the store again at its first level-0 upload and is refused again \
-             (docs/decisions/D079.md)",
-        ),
-    ),
-    (
-        "suspect_staged",
-        Keep::Ephemeral(
-            "one failed read says nothing about the stored bytes; the next boot's sweep reads the \
-             file again",
-        ),
-    ),
-    (
-        "snapshots",
-        Keep::Ephemeral("snapshots staged since the process began: a report"),
-    ),
-    (
-        "work",
-        Keep::Ephemeral("sync steps and checkpoints since the process began: a report"),
-    ),
-    (
-        "final_snapshot",
-        Keep::Ephemeral(
-            "a -once request of this process: a restart is a new run, which asks again or not",
-        ),
-    ),
-    (
-        "final_retention",
-        Keep::Ephemeral(
-            "a -once request of this process: a restart is a new run, which asks again or not",
-        ),
-    ),
-    (
-        "takeover",
-        Keep::Journalled(
-            Record::TakeoverRecord,
-            "read from the meta directory by the driver and handed in at every start",
-        ),
-    ),
-    (
-        "wanted_takeover",
-        Keep::Ephemeral(
-            "nothing is deleted until the driver hands it back durable; a restart asks again",
-        ),
-    ),
-    (
-        "spent_takeover",
-        Keep::Ephemeral(
-            "the driver deletes the record in the tick it is handed out; a restart before then \
-             reads the record as it stood before the put, and spends it again when a put above \
-             it is confirmed again",
-        ),
-    ),
-    (
-        "refused_through",
-        Keep::Ephemeral("what a boot's refusal reports; a restarted boot refuses again"),
-    ),
-    (
-        "lag",
-        Keep::Derived(
-            "the fail-stop clock, started again at boot from the pending staged files \
-             (docs/decisions.md D80)",
-        ),
-    ),
-    (
-        "listed",
-        Keep::Ephemeral("fail-stop's refusal at boot is about this process, not the database"),
-    ),
-    (
-        "refused_at_boot",
-        Keep::Ephemeral("fail-stop's refusal at boot is about this process, not the database"),
-    ),
-    (
-        "boot_failed",
-        Keep::Ephemeral("fail-stop's judgement of this process's boot"),
-    ),
-    (
-        "sync_failed_after_listing",
-        Keep::Ephemeral("fail-stop's judgement of this process's boot"),
-    ),
-    (
-        "quiet",
-        Keep::Derived("judged again by boot from the pending staged files"),
-    ),
-    (
-        "doubt_baseline",
-        Keep::Ephemeral(
-            "lag accounting for this process; cost: frames before a restart count as lag \
-             (docs/decisions.md D80)",
-        ),
-    ),
-    (
-        "journal",
-        Keep::Ephemeral("what the last boot read of the journal: the next boot reads again"),
-    ),
-    (
-        "read_lock_violations",
-        Keep::Ephemeral("read-lock violations recovery found since the process began: a report"),
-    ),
-];
-
-/// What each field of [`Engine`] is to a restart: a rebuild replaces the engine whole, so most
-/// of it is derived at boot.
-#[cfg(test)]
-pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
-    (
-        "course",
-        Keep::Derived("recovered at every boot from the newest staged file and the WAL"),
-    ),
-    (
-        "page_size",
-        Keep::Derived("read from the replica, staging and the WAL"),
-    ),
-    (
-        "pages",
-        Keep::Derived("seeded at boot from the staged files after the replica's newest"),
-    ),
-    (
-        "checkpoint",
-        Keep::Ephemeral("the checkpoint schedule, which starts again at boot"),
-    ),
-    (
-        "gate",
-        Keep::Ephemeral("when to ask about a checkpoint next; asked again after a restart"),
-    ),
-    (
-        "upload",
-        Keep::Derived("listed from the replica at every boot"),
-    ),
-    (
-        "maintain",
-        Keep::Ephemeral("the maintenance schedule and backoffs; the next listing rebuilds it"),
-    ),
-    (
-        "pruned",
-        Keep::Derived("what staging still holds tells the next boot what was pruned"),
-    ),
-    (
-        "witnesses",
-        Keep::Derived("witnessed again at boot against the live WAL (crate::witness)"),
-    ),
-    (
-        "attempted",
-        Keep::Derived(
-            "a boot's listing shows every put an earlier process made, so a new engine has sent \
-             none past it",
-        ),
-    ),
-    (
-        "syncs_ahead",
-        Keep::Ephemeral("a fairness count between two steps; a restart starts it at zero"),
-    ),
-    (
-        "dropped_through",
-        Keep::Derived(
-            "the takeover record kept before the drop vouches for the same ids at the next boot",
-        ),
-    ),
-];

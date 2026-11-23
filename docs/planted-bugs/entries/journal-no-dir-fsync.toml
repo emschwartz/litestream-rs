@@ -1,8 +1,0 @@
-# The engine journal's rules (docs/journal.md): each is a rule of the writer, the codec or the
-# model, not a fix of a shipped defect; `fix` is the commit that introduced it.
-name = "journal-no-dir-fsync"
-fix = "a64cc50"
-package = "lsr-core"
-tests = [
-    "journal_model::the_writer_matches_the_model_under_the_block_law",
-]

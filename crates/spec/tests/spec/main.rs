@@ -3,10 +3,6 @@
 // `cfg(test)` is always set here; it marks the helpers as test code, so clippy.toml's
 // allow-*-in-tests cover them as they cover #[test] fns.
 #[cfg(test)]
-mod journal;
-#[cfg(test)]
-mod journal_scenarios;
-#[cfg(test)]
 mod manifest;
 #[cfg(test)]
 #[expect(

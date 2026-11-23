@@ -1,7 +1,6 @@
 //! The kill-after-fault law (`Weights::kill_after_fault`): the process dies right after the first
 //! tick in which an injected fault fires, so whatever the fault left the engine owing must
-//! survive a restart. It is the proof of the obligation ledger (`lsr_core::obligations`): with a
-//! journalled field's journalling planted out, the law fails runs the swarm without it passes.
+//! be found again by the restarted engine: an obligation held only in memory fails the run.
 
 use lsr_sim::{Seed, Weights};
 

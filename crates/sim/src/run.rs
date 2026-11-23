@@ -616,7 +616,6 @@ impl Runner {
         self.w.high.note(now);
         self.marks.ticked();
         let actor = &mut self.actor;
-        let mut journal = self.w.journal.clone();
         let fut = async {
             let env = Env {
                 wal: &mut wal,
@@ -625,7 +624,6 @@ impl Runner {
                 staging: &staging,
                 remote: &remote,
                 clock: clock.as_ref(),
-                journal: Some(&mut journal),
             };
             actor.tick(env, now).await
         };
@@ -2521,10 +2519,6 @@ impl Runner {
             self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
             // The same disk holds the staging directory: its unsynced unlinks may come back.
             self.w.volatile.revert_unsynced_entries();
-            // And the journal: its own stream, so no earlier draw moves.
-            self.w
-                .journal
-                .crash_by_law(CrashLaw::drawn(seed.stream(23)));
         }
         if opts.lying_wal_sync {
             self.w.sqlite.lie_on_our_sync();

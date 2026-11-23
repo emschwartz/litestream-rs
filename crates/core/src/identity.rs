@@ -2,7 +2,7 @@
 //! directory makes before it builds on replica files nothing else vouches for
 //! (`docs/decisions/D170.md`).
 //!
-//! A deployment that does not keep the meta directory boots with no staged file, no journal
+//! A deployment that does not keep the meta directory boots with no staged file
 //! and no takeover record. Once the WAL has restarted it cannot vouch for the replica's newest
 //! transaction T, and the boot gate (`crate::takeover`) would stop for another writer on every
 //! redeploy. Equality settles it without an operator: when every page of the local committed

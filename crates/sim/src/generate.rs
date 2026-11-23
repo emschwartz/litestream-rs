@@ -542,8 +542,8 @@ pub struct Weights {
     pub overlap: bool,
     /// The process dies right after every tick in which an injected fault fired: a store fault,
     /// or a failure of a SQLite-side call. Whatever the fault left the engine owing must then
-    /// survive a restart, so an obligation held only in memory fails the run
-    /// (`lsr_core::obligations`). Inside a hold it kills only where known defects are counted
+    /// be found again by the restarted engine, so an obligation held only in memory fails the
+    /// run. Inside a hold it kills only where known defects are counted
     /// ([`Weights::known_wrong`]): a restart there reaches the open defect D9, as an overlapping
     /// hold's own restarts do. Not an operation, for the same reason as `block_crash_law`; drawn
     /// last in the swarm mix.

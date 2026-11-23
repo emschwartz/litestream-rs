@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_replica::{
-    AppNotice, DegradedCause, Denied, Gone, Health, JournalSignal, Phase, Replicator,
-    SnapshotCause, SnapshotCauseKind, Stall, StopCause, Task, Timestamp,
+    AppNotice, DegradedCause, Denied, Gone, Health, Phase, Replicator, SnapshotCause,
+    SnapshotCauseKind, Stall, StopCause, Task, Timestamp,
 };
 
 use serde_json::{Map, Value};
@@ -231,18 +231,6 @@ pub(crate) fn snapshot_name(cause: SnapshotCause) -> &'static str {
     snapshot_kind_name(SnapshotCauseKind::from(&cause))
 }
 
-/// A journal signal's name in `/healthz` and metrics, without its payload.
-#[must_use]
-pub(crate) const fn journal_name(signal: JournalSignal) -> &'static str {
-    match signal {
-        JournalSignal::Missing => "missing",
-        JournalSignal::Unreadable(_) => "unreadable",
-        JournalSignal::Newer { .. } => "newer_version",
-        JournalSignal::SlotUnreadable => "slot_unreadable",
-        JournalSignal::Unwritable(_) => "unwritable",
-    }
-}
-
 /// A snapshot cause's name, without its payload.
 #[must_use]
 pub(crate) const fn snapshot_kind_name(kind: SnapshotCauseKind) -> &'static str {
@@ -348,11 +336,6 @@ fn running_json(o: &mut Object, health: &Health) {
         health.resnapshot.map(|c| snapshot_name(c).to_owned()),
     );
     o.maybe("app_notice", health.app_notice().map(|n| n.to_string()));
-    o.maybe(
-        "journal",
-        health.journal.map(|s| journal_name(s).to_owned()),
-    );
-    o.maybe("journal_detail", health.journal.map(|s| format!("{s:?}")));
     o.maybe(
         "held_by",
         health
@@ -497,27 +480,5 @@ mod tests {
             .collect();
         assert_eq!(names.len(), all.len(), "{names:?}");
         assert!(names.contains("credentials"));
-    }
-
-    /// Each journal signal has the owner-approved name, one per variant: an operator acts
-    /// differently on a lost journal and on one that cannot be written.
-    #[test]
-    fn each_journal_signal_has_its_approved_name() {
-        let named = [
-            (JournalSignal::Missing, "missing"),
-            (
-                JournalSignal::Unreadable(lsr_journal::Why::Tie),
-                "unreadable",
-            ),
-            (JournalSignal::Newer { version: 2 }, "newer_version"),
-            (JournalSignal::SlotUnreadable, "slot_unreadable"),
-            (
-                JournalSignal::Unwritable(std::io::ErrorKind::StorageFull),
-                "unwritable",
-            ),
-        ];
-        for (signal, name) in named {
-            assert_eq!(journal_name(signal), name, "{signal:?}");
-        }
     }
 }
