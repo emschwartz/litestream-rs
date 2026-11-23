@@ -226,6 +226,9 @@ pub struct Opts {
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
+    /// The engine's TRUNCATE threshold, when not the usual ([`Weights::truncate_pages`]).
+    /// [`run_with`] sets it.
+    pub truncate_pages: Option<NonZeroU32>,
     /// The process dies right after every tick in which an injected fault fired
     /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
     pub kill_after_fault: bool,
@@ -317,6 +320,8 @@ struct Runner {
     overlap: Option<SeededEntropy>,
     // Whether the one-shot store faults of an overlapping hold draw from the whole domain.
     error_domain: bool,
+    // The engine's TRUNCATE threshold, when the run sets one ([`Opts::truncate_pages`]).
+    truncate_pages: Option<NonZeroU32>,
     // Whether an overlapping hold draws restarts, which reach the open defect D9.
     known_wrong: bool,
     spilled: Vec<(PageNo, Vec<u8>)>,
@@ -469,6 +474,7 @@ impl Runner {
         runner.w.set_clock_law(opts.clock_law);
         runner.overlap = opts.overlap.then(|| SeededEntropy::new(seed.stream(21)));
         runner.error_domain = opts.error_domain;
+        runner.truncate_pages = opts.truncate_pages;
         runner.known_wrong = opts.known_wrong;
         runner.reboot();
         runner
@@ -490,6 +496,7 @@ impl Runner {
             slew: None,
             overlap: None,
             error_domain: false,
+            truncate_pages: None,
             known_wrong: false,
             spilled: Vec::new(),
             unwatched: true,
@@ -560,6 +567,10 @@ impl Runner {
             responses: self.responses,
             max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
             maintenance: base.maintenance.clone().with_retention(self.retention),
+            checkpoint: CheckpointConfig {
+                truncate_pages: self.truncate_pages.or(base.checkpoint.truncate_pages),
+                ..base.checkpoint
+            },
             ..base
         });
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
@@ -801,7 +812,7 @@ impl Runner {
         let commits = self.w.model.commits().len();
         self.staging_moved()?;
         let fired0 = (self.remote_fired(), fired(&self.w.staging_faults));
-        let queued0 = self.w.sqlite.queued_injections();
+        let taken0 = self.w.sqlite.taken_injections().len();
         self.denials_baseline();
         let ended = self.run_one(plan);
         if matches!(ended, TickEnd::Done(_)) {
@@ -851,7 +862,7 @@ impl Runner {
         };
         per_tick(&stats, self.limits())?;
         let step = self.after_refusal(step)?;
-        let step = self.kill_after_fault(step, fired0, queued0);
+        let step = self.kill_after_fault(step, fired0, taken0);
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
         self.verify_ready()?;
         Ok((step, stats))
@@ -1263,10 +1274,10 @@ impl Runner {
         held
     }
 
-    fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), queued0: usize) -> Step {
+    fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), taken0: usize) -> Step {
         let fired_now = (self.remote_fired(), fired(&self.w.staging_faults));
         let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
-        let source = self.w.sqlite.queued_injections() < queued0;
+        let source = self.w.sqlite.taken_injections().len() > taken0;
         let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
         // A kill inside a hold is a restart there, which reaches the open defect D9 (retry
         // counts and degraded states reset at a restart, so a halt that outlasts restarts is never
@@ -2729,6 +2740,7 @@ pub fn run_with(
         error_domain: weights.error_domain,
         known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
+        truncate_pages: weights.truncate_pages,
         kill_after_fault: weights.kill_after_fault,
         remote_s3: weights.remote_s3,
         ..opts.clone()

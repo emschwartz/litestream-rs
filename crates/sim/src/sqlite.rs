@@ -241,6 +241,8 @@ struct Overwrite {
 #[derive(Debug, Default)]
 struct Faults {
     injections: Vec<(SourceOp, SourceError)>,
+    // Injected failures a call took, in order, for the error domain's coverage marks.
+    taken: Vec<(SourceOp, SourceError)>,
     shm_busy: bool,
     // The forced read and how many reads still see it: the loop's own check
     // of the WAL comes before the step that scans it.
@@ -257,7 +259,11 @@ struct Faults {
 impl Faults {
     fn take(&mut self, op: SourceOp) -> Result<(), SourceError> {
         match self.injections.iter().position(|(queued, _)| *queued == op) {
-            Some(at) => Err(self.injections.remove(at).1),
+            Some(at) => {
+                let taken = self.injections.remove(at);
+                self.taken.push(taken);
+                Err(taken.1)
+            }
             None => Ok(()),
         }
     }
@@ -1743,9 +1749,9 @@ impl SimSqlite {
         self.with(|state| state.faults.injections.push((op, err)));
     }
 
-    /// Injected failures no call has taken yet.
-    pub fn queued_injections(&self) -> usize {
-        self.with(|state| state.faults.injections.len())
+    /// Injected failures a call took, in order.
+    pub fn taken_injections(&self) -> Vec<(SourceOp, SourceError)> {
+        self.with(|state| state.faults.taken.clone())
     }
 
     /// From now on a power loss keeps a prefix of the unsynced WAL writes,
