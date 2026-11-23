@@ -273,3 +273,65 @@ fn seeding_finds_the_pending_files_that_change_nothing() {
     let quiet: Vec<u64> = seeded.quiet.iter().map(|txid| txid.get()).collect();
     assert_eq!(quiet, vec![2]);
 }
+
+/// An untracked file of `pages` (page, fill) whose frames came from the WAL of salts `(1, 1)`
+/// between `offset` and `end`.
+fn file_from_wal(n: u64, pages: &[(u32, u8)], offset: u64, end: u64) -> (FileKey, Vec<u8>) {
+    use lsr_ltx::{Encoder, Header, HeaderFields, Timestamp, TxidRange, WalOrigin};
+    let txid = Txid::new(n).unwrap();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: PageSize::MIN,
+        commit: 3,
+        txids: TxidRange::single(txid),
+        timestamp: Timestamp::from_unix_millis(1),
+        pre_apply: None,
+        wal: WalOrigin::new(offset, end.saturating_sub(offset), 1, 1),
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for (n, fill) in pages {
+        encoder.write_page(pg(*n), &page(*fill)).unwrap();
+    }
+    let key = FileKey::new(Level::ZERO, TxidRange::single(txid));
+    (key, encoder.finish(None).unwrap().0)
+}
+
+/// A pending file whose WAL span ends where the replica's newest file's ended holds no commit
+/// the replica lacks, though it rewrites pages the table seeded from that file never saw (a
+/// snapshot staged for a doubt on a quiet WAL). Without this a restarted engine dates the file
+/// by its stamp and, after a long pause, trips for age over a replica that holds everything.
+#[test]
+fn a_pending_file_that_ends_where_the_replicas_newest_ended_in_the_wal_is_quiet() {
+    use crate::store::Upload;
+    let staging = crate::MemStore::new();
+    let files = [
+        // The replica's newest: one page, WAL bytes 100 to 200.
+        file_from_wal(2, &[(1, 2)], 100, 200),
+        // Pending: every page again, the WAL from its start to the same end.
+        file_from_wal(3, &[(1, 2), (2, 1), (3, 1)], 32, 200),
+        // Pending: the same again, ending where the quiet one did.
+        file_from_wal(4, &[(1, 2), (2, 1), (3, 1)], 32, 200),
+        // Pending: frames past the end, other bytes: a commit.
+        file_from_wal(5, &[(1, 3)], 200, 300),
+    ];
+    for (key, bytes) in files {
+        crate::conformance::block_on(async {
+            let mut up = staging
+                .begin_upload(
+                    &key,
+                    lsr_ltx::Timestamp::from_unix_millis(1),
+                    crate::store::WriteMode::Replace,
+                )
+                .await
+                .unwrap();
+            up.write(&bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
+    let seeded =
+        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
+    let quiet: Vec<u64> = seeded.quiet.iter().map(|txid| txid.get()).collect();
+    assert_eq!(quiet, vec![3, 4]);
+}
