@@ -147,11 +147,13 @@ pub enum SetupError {
     /// The connection opens another file than the replicated database.
     #[error("the connection opens another database than the one replicated")]
     OtherDatabase,
-    /// The connection already had a commit hook, which the fail-stop gate replaced: SQLite
-    /// keeps one per connection and returns only the old one's argument, so it cannot be kept
-    /// or put back. Set the gate up before setting any commit hook of the application's.
-    #[error("the connection had a commit hook of its own, which the fail-stop gate replaced")]
-    CommitHookTaken,
+    /// The connection already had a commit hook that was not ours; SQLite holds one per
+    /// connection and cannot hand the old one back, so it is gone and the gate is installed.
+    #[error(
+        "the connection's own commit hook was replaced by the fail-stop gate; call app_connection \
+         before setting a commit hook"
+    )]
+    CommitHookReplaced,
 }
 
 /// Sorts a SQLite result code (primary or extended) the way a sync loop needs it.

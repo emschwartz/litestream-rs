@@ -499,15 +499,20 @@ impl Replicator {
     ///
     /// # Errors
     /// [`lsr_sqlite::SetupError`]: the connection has no file or opens another one, or a
-    /// setting failed; `CommitHookTaken` when the connection already had a commit hook, which
-    /// SQLite cannot keep beside the gate's (set the application's own hooks after this call
-    /// and they replace the gate instead, with nothing to report it).
+    /// setting failed; `CommitHookReplaced` when the connection already had a commit hook,
+    /// which SQLite cannot keep beside the gate's.
     ///
     /// It also installs a commit hook (`sqlite3_commit_hook`) that refuses every commit while fail-stop holds the application
     /// ([`crate::Health::held_by`], `Config::if_replication_stops`): SQLite rolls the
     /// transaction back and the application's COMMIT fails with
     /// `SQLITE_CONSTRAINT_COMMITHOOK`. Reads go on. Connections not set up here are not
     /// covered; an application on another binding reads the gate from [`Self::health`].
+    ///
+    /// A known limit: a commit hook the application sets on the connection after this call
+    /// silently removes the gate, and fail-stop's refusal of commits no longer holds there.
+    /// SQLite allows one commit hook per connection and offers no way to read it back, so
+    /// nothing can notice. Set the application's own hooks, if any, before this call (which
+    /// then fails with `CommitHookReplaced`) or not at all.
     #[cfg(feature = "rusqlite")]
     pub fn app_connection(
         &self,

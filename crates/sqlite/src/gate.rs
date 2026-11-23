@@ -13,7 +13,7 @@
 //! SQLite keeps one commit hook per connection, and installing returns only the previous hook's
 //! argument, never its function: the gate cannot call or put back a hook the application set.
 //! So it does not pretend to: when the hook it replaced was not its own, setup fails with
-//! [`SetupError::CommitHookTaken`], loudly, instead of the application's hook going quiet. A
+//! [`SetupError::CommitHookReplaced`], loudly, instead of the application's hook going quiet. A
 //! hook the application sets afterwards replaces the gate the same way; nothing can see that.
 
 use std::ffi::{CStr, c_int, c_void};
@@ -55,7 +55,7 @@ extern "C" fn release(flag: *mut c_void) {
 /// Installs the gate on `conn`: from now on its commits fail while `refused` is set.
 ///
 /// # Errors
-/// [`SetupError::CommitHookTaken`] when the commit hook it replaced was not its own (the
+/// [`SetupError::CommitHookReplaced`] when the commit hook it replaced was not its own (the
 /// gate is installed, the application's hook is gone); [`SetupError::Sqlite`] when SQLite
 /// could not store the flag (out of memory; nothing is changed).
 pub fn refuse_commits_while(
@@ -102,7 +102,7 @@ pub fn refuse_commits_while(
     // client data that owns it. The previous argument returned is not ours to free.
     let previous = unsafe { ffi::sqlite3_commit_hook(db, Some(refuse_while_set), arg) };
     if !previous.is_null() && previous != ours {
-        return Err(SetupError::CommitHookTaken);
+        return Err(SetupError::CommitHookReplaced);
     }
     Ok(())
 }
@@ -149,7 +149,7 @@ mod tests {
         conn.commit_hook(Some(|| false)).unwrap();
         let refused = Arc::new(AtomicBool::new(true));
         let err = refuse_commits_while(&conn, &refused).unwrap_err();
-        assert!(matches!(err, SetupError::CommitHookTaken), "{err}");
+        assert!(matches!(err, SetupError::CommitHookReplaced), "{err}");
         let refusal = conn.execute("INSERT INTO t VALUES (1)", []).unwrap_err();
         assert_eq!(
             refusal.sqlite_error().map(|e| e.extended_code),
