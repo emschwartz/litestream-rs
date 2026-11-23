@@ -424,6 +424,11 @@ fn db_page_flipped_under_sync() {
 }
 
 #[test]
+fn create_only_refused_mid_run() {
+    run(scenario::create_only_refused_mid_run);
+}
+
+#[test]
 fn sigterm_during_upload() {
     run(scenario::sigterm_during_upload);
 }

@@ -120,6 +120,8 @@ pub enum OtherProcessMode {
     Restart,
     /// `PRAGMA wal_checkpoint(TRUNCATE)`.
     Truncate,
+    /// `PRAGMA wal_checkpoint(FULL)`: copies everything, waiting for readers, and leaves the WAL.
+    Full,
 }
 
 impl From<CheckpointMode> for OtherProcessMode {
@@ -127,6 +129,7 @@ impl From<CheckpointMode> for OtherProcessMode {
         match mode {
             CheckpointMode::Passive => Self::Passive,
             CheckpointMode::Truncate => Self::Truncate,
+            CheckpointMode::Full => Self::Full,
         }
     }
 }
@@ -238,6 +241,8 @@ struct Overwrite {
 #[derive(Debug, Default)]
 struct Faults {
     injections: Vec<(SourceOp, SourceError)>,
+    // Injected failures a call took, in order, for the error domain's coverage marks.
+    taken: Vec<(SourceOp, SourceError)>,
     shm_busy: bool,
     // The forced read and how many reads still see it: the loop's own check
     // of the WAL comes before the step that scans it.
@@ -254,7 +259,11 @@ struct Faults {
 impl Faults {
     fn take(&mut self, op: SourceOp) -> Result<(), SourceError> {
         match self.injections.iter().position(|(queued, _)| *queued == op) {
-            Some(at) => Err(self.injections.remove(at).1),
+            Some(at) => {
+                let taken = self.injections.remove(at);
+                self.taken.push(taken);
+                Err(taken.1)
+            }
             None => Ok(()),
         }
     }
@@ -788,7 +797,12 @@ impl State {
         let mut busy = degraded;
         self.backfill();
         if !degraded && mode != OtherProcessMode::Passive {
-            if self.index.backfilled < self.index.mx_frame || self.slot_held_by_other(by) {
+            // FULL waits only until every frame is copied; RESTART and TRUNCATE also wait for the
+            // readers to leave the WAL, so the next writer may start it again.
+            let restarts = mode != OtherProcessMode::Full;
+            if self.index.backfilled < self.index.mx_frame
+                || (restarts && self.slot_held_by_other(by))
+            {
                 busy = true;
             } else if mode == OtherProcessMode::Truncate {
                 self.restart(by);
@@ -1735,9 +1749,9 @@ impl SimSqlite {
         self.with(|state| state.faults.injections.push((op, err)));
     }
 
-    /// Injected failures no call has taken yet.
-    pub fn queued_injections(&self) -> usize {
-        self.with(|state| state.faults.injections.len())
+    /// Injected failures a call took, in order.
+    pub fn taken_injections(&self) -> Vec<(SourceOp, SourceError)> {
+        self.with(|state| state.faults.taken.clone())
     }
 
     /// From now on a power loss keeps a prefix of the unsynced WAL writes,

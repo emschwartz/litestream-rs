@@ -337,8 +337,8 @@ side! {
     fn writeback_lost(&self) -> bool;
     /// The next call of `op` fails with `err`.
     fn inject(&self, op: SourceOp, err: SourceError);
-    /// Injected source errors not yet taken.
-    fn queued_injections(&self) -> usize;
+    /// Injected source errors a call took, in order.
+    fn taken_injections(&self) -> Vec<(SourceOp, SourceError)>;
     /// A power loss keeps a drawn prefix of the unsynced WAL writes.
     fn tear_on_power_loss(&self, seed: u64);
     /// A power loss keeps what the crash law draws.

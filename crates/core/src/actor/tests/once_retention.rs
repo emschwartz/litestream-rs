@@ -216,3 +216,56 @@ fn a_listing_that_keeps_a_deleted_key_stops_the_pass() {
         actor.final_retention()
     );
 }
+
+/// With both asked, a snapshot that is not written skips the retention pass, as Go returns
+/// before retention when its snapshot fails: nothing is deleted.
+#[test]
+fn a_snapshot_not_written_skips_the_pass() {
+    let (mut rig, mut actor) = four_snapshots(RetentionMode::Enforce);
+    let before = snapshot_ends(&rig);
+    let at = T0 + 6 * HOUR + 60_000;
+    actor.request_final_snapshot();
+    actor.request_final_retention();
+    actor.begin_shutdown(actor.shutdown_deadline(ts(at)));
+    let boot = rig.tick(&mut actor, at);
+    assert!(
+        matches!(event(&boot), Some(Event::Booted { .. })),
+        "{boot:?}"
+    );
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    let seen = rig.follow(&mut actor, at, 200);
+    assert!(
+        matches!(seen.last(), Some(Tick::Drained { .. })),
+        "{seen:?}"
+    );
+    assert!(
+        matches!(
+            actor.final_snapshot(),
+            crate::actor::FinalSnapshot::Failed(_)
+        ),
+        "{:?}",
+        actor.final_snapshot()
+    );
+    assert_eq!(actor.final_retention(), FinalRetention::Skipped);
+    assert_eq!(snapshot_ends(&rig), before);
+}
+
+/// With both asked and the snapshot written, the pass runs after it.
+#[test]
+fn a_written_snapshot_is_followed_by_the_pass() {
+    let (mut rig, mut actor) = four_snapshots(RetentionMode::Enforce);
+    actor.request_final_snapshot();
+    actor.request_final_retention();
+    drain_with_retention(&mut rig, &mut actor, T0 + 6 * HOUR + 60_000);
+    assert!(matches!(
+        actor.final_snapshot(),
+        crate::actor::FinalSnapshot::Written(_)
+    ));
+    assert!(
+        matches!(actor.final_retention(), FinalRetention::Done { deleted } if deleted >= 1),
+        "{:?}",
+        actor.final_retention()
+    );
+}

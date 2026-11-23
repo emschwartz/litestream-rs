@@ -1052,3 +1052,30 @@ fn an_empty_meta_path_is_the_current_directory_as_go() {
     let db = one(&db_with("    meta-path: ~\n"));
     assert_eq!(db.meta_dir(), Path::new("/data/.app.db-litestream"));
 }
+
+/// The engine journal's floor names its replica: the same replica gives the same destination,
+/// another place gives another, and the credentials it is reached with do not count.
+#[test]
+fn each_replica_plan_names_its_destination_for_the_journal() {
+    let destination = |replica: &str| {
+        let text = format!("dbs:\n  - path: /data/app.db\n    replica:\n{replica}");
+        let db = one(&text);
+        let named = db.config().destination;
+        assert_eq!(named, Some(db.replica().destination()), "{replica}");
+        named
+    };
+    let backup = destination("      path: /backup\n");
+    assert_eq!(backup, destination("      path: /backup\n"));
+    assert_ne!(backup, destination("      path: /elsewhere\n"));
+    let bucket = destination("      url: s3://bucket/app\n");
+    assert_ne!(bucket, backup);
+    assert_ne!(bucket, destination("      url: s3://bucket/other\n"));
+    assert_ne!(bucket, destination("      url: s3://another/app\n"));
+    assert_eq!(
+        bucket,
+        destination(
+            "      url: s3://bucket/app\n      access-key-id: AKIDEXAMPLE\n      secret-access-key: example\n"
+        ),
+        "credentials change how it is reached, not which replica it is"
+    );
+}

@@ -28,12 +28,17 @@ fn with_staging_gone_boot_continues_from_the_replicas_newest_staged_file() {
     let reads_before = rig.remote.reads_of(&newest_staged_file_key());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    let calls = rig.remote.calls() - before;
     // The upload task's listing (one page per level), the probe's reads past
     // it and its read-back of the newest file, then one
     // read of that file as the newest staged file, from byte 0.
+    // Level 1 holds transaction 1, so the probe also names level-1 files from 2; staging is
+    // gone, so it walks to its cap.
     let levels = u32::try_from(Level::ALL.len()).unwrap();
-    let probe = u32::try_from(crate::upload::fresh_probe_reads(Txid::new(2))).unwrap();
-    assert_eq!(rig.remote.calls() - before, levels + probe + 2);
+    let listed = block_on(crate::Inventory::load(&rig.remote.inner)).unwrap();
+    let starts = crate::probe::Starts::of(&listed);
+    let probe = u32::try_from(crate::upload::capped_probe_reads(Txid::new(2), &starts)).unwrap();
+    assert_eq!(calls, levels + probe + 2);
     assert_eq!(
         rig.remote.reads_of(&newest_staged_file_key()) - reads_before,
         2
@@ -54,8 +59,10 @@ fn with_staging_gone_and_level_zero_retained_away_boot_is_a_first_sync() {
     let newest_staged = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
     block_on(rig.remote.inner.delete(&[newest_staged])).unwrap();
     rig.staging = Counting::default();
-    // No level-0 file for the WAL to vouch for: nothing local tells these
-    // files from another writer's, so the boot stops.
+    // No level-0 file for the WAL to vouch for, and the database is not the
+    // replica's state (page 2 changed while nothing replicated): nothing
+    // local tells these files from another writer's, so the boot stops.
+    rig.db.write_page(pg(2), &vec![9; PS.bytes()]);
     let mut actor = Actor::new(cfg());
     assert_eq!(
         rig.tick(&mut actor, T0 + 2),

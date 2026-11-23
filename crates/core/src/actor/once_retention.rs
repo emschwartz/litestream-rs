@@ -56,6 +56,9 @@ pub enum FinalRetention {
     },
     /// Retention is switched off: nothing was deleted.
     Off,
+    /// The snapshot asked to come first was not written, so the pass did not run, as Go
+    /// returns before retention when its snapshot fails.
+    Skipped,
     /// The planner refused to delete from the listing.
     Held {
         /// Keys deleted before the hold.
@@ -90,6 +93,13 @@ impl Actor {
                 behind: 0,
                 repeated: None,
             };
+        }
+    }
+
+    /// A pass still owed does not run: the snapshot asked to come first was not written.
+    pub(super) fn skip_final_retention(&mut self) {
+        if matches!(self.kept.final_retention, FinalRetention::Asked { .. }) {
+            self.kept.final_retention = FinalRetention::Skipped;
         }
     }
 

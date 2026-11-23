@@ -68,6 +68,7 @@ pub(crate) struct Commands {
     pub(crate) stop: Option<Timestamp>,
     pub(crate) snapshot: bool,
     pub(crate) final_retention: bool,
+    pub(crate) final_snapshot: bool,
     pub(crate) accept_pages: bool,
     pub(crate) sink: Option<Box<dyn EventSink>>,
 }
@@ -474,6 +475,15 @@ impl Replicator {
             .command(|commands| commands.final_retention = true);
     }
 
+    /// Makes the next stop end with a level-9 snapshot of the whole database once everything
+    /// committed is uploaded, as Go's `replicate -once -force-snapshot` does. It is written
+    /// even when the stop's deadline has passed, and is not retried: [`Health::final_snapshot`]
+    /// says whether it was written. Ask before calling [`Replicator::stop`].
+    pub fn request_final_snapshot(&self) {
+        self.shared
+            .command(|commands| commands.final_snapshot = true);
+    }
+
     /// An operator accepts the database file as it is: every page the page checksum table
     /// found changed without a WAL frame (the degraded cause
     /// `DegradedCause::DatabasePageMismatch`) is trusted with the bytes it now holds, and the
@@ -556,9 +566,8 @@ fn boot_answer(state: &State, died: bool) -> Option<Booted> {
     match state.outcome {
         Some(Stopped::Gone(gone)) => return Some(Booted::Gone(gone)),
         Some(Stopped::Stopped(cause)) => return Some(Booted::Stopped(cause)),
-        Some(Stopped::Drained { .. } | Stopped::DeadlineReached { .. }) if !state.booted => {
-            return Some(Booted::Stopped(StopCause::Shutdown));
-        }
+        // A drain before the first boot finished is answered by the phase below, which the
+        // outcome set to `Stopped(Shutdown)` under the same lock.
         Some(Stopped::Drained { .. } | Stopped::DeadlineReached { .. }) | None => {}
     }
     if state.booted {
@@ -676,5 +685,81 @@ impl Future for FinalSync {
             }
         }
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(millis: i64) -> Timestamp {
+        Timestamp::from_unix_millis(millis)
+    }
+
+    fn ticking_since(began: Timestamp) -> State {
+        State {
+            health: Health::new(at(0)),
+            booted: true,
+            outcome: None,
+            tick_began: Some(began),
+            left: Unfinished {
+                unsynced_wal_bytes: 7,
+                staged_not_uploaded: 2,
+            },
+            stopping: true,
+        }
+    }
+
+    /// A handle carried into a forked child answers every call as gone, without a thread to
+    /// ask: the thread did not survive the fork.
+    #[test]
+    fn a_handle_in_a_forked_child_reports_the_replicator_gone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("db");
+        std::fs::write(&path, b"").unwrap();
+        let handle = |pid_offset: u32| {
+            let file = DatabaseFile::of(&path).unwrap();
+            let mut shared = Shared::new(file, &Config::default(), &Runtime::system());
+            shared.pid = shared.pid.wrapping_add(pid_offset);
+            let shared = Arc::new(shared);
+            Replicator {
+                _last: Arc::new(LastHandle {
+                    shared: Arc::clone(&shared),
+                }),
+                shared,
+            }
+        };
+        assert_eq!(handle(0).health().phase, Phase::Booting);
+        let forked = handle(1);
+        assert_eq!(forked.health().phase, Phase::Gone(Gone::Forked));
+        assert_eq!(
+            forked.wait_booted(Duration::from_secs(60)),
+            Booted::Gone(Gone::Forked)
+        );
+        assert_eq!(forked.wait_until(Duration::from_secs(60), |_| true), None);
+        assert_eq!(
+            forked.stop(Duration::from_secs(60)).wait(),
+            Stopped::Gone(Gone::Forked)
+        );
+    }
+
+    /// Only a tick that began before the deadline is inside a request the deadline cuts off;
+    /// one that began at or after it ends on its own.
+    #[test]
+    fn a_stop_is_cut_off_only_by_a_tick_from_before_its_deadline() {
+        let deadline = at(1_000);
+        let cut = Some(Stopped::DeadlineReached {
+            unsynced_wal_bytes: 7,
+            staged_not_uploaded: 2,
+        });
+        let early = ticking_since(at(999));
+        assert_eq!(stop_answer(&early, false, deadline, deadline), cut);
+        assert_eq!(stop_answer(&early, false, at(999), deadline), None);
+        for began in [deadline, at(1_001)] {
+            assert_eq!(
+                stop_answer(&ticking_since(began), false, at(2_000), deadline),
+                None
+            );
+        }
     }
 }

@@ -1,5 +1,0 @@
-name = "compact-commit-unchecked-sim"
-fix = "claude/commit-size"
-package = "lsr-sim"
-patch = "compact-commit-unchecked"
-tests = ["fixed_seeds::fixed::a_torn_staged_file_is_dropped_seed_0x46"]

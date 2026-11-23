@@ -17,17 +17,18 @@
 //!
 //! `-once` starts every database and drains it at once: everything committed is
 //! synced and uploaded, as Go's `runOnce` syncs the database and then the replica.
+//! With `-force-snapshot` each drain then ends with one level-9 file of the whole
+//! database (`Replicator::request_final_snapshot`, docs/decisions/D167.md); a database
+//! whose snapshot was not written ends the run unclean.
 //!
 //! With `-enforce-retention` each drain then ends with a retention pass
 //! (`Replicator::request_final_retention`, docs/decisions/D167.md): the retention rules with
 //! level-0 deletion off, until nothing more is to be deleted; a pass that is refused, fails or
 //! cannot finish ends the run unclean.
 //!
-//! What this build refuses rather than ignores, since ignoring would change what
-//! runs: `-force-snapshot` (Go writes a level-9 snapshot; the replicator's API can
-//! only make the next sync start from page 1 at level 0). An `exec` line Go
-//! would run differently from what it says, and an `addr` Go cannot bind, are
-//! refused before any database is touched.
+//! What this build refuses rather than ignores, since ignoring would change what runs: an
+//! `exec` line Go would run differently from what it says, and an `addr` Go cannot bind,
+//! before any database is touched.
 //!
 //! Lines are logged in Go's slog formats ([`logging`]). Nothing in this crate
 //! opens a database file: replicators open theirs through SQLite, and the
@@ -105,7 +106,6 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
         config.logging().stderr(),
         Runtime::system().clock,
     ));
-    refuse_unbuilt(&flags)?;
     // The daemon stops at the first refusal; the plan's lists every problem of its own.
     let Prepared {
         command,
@@ -126,7 +126,12 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
         board,
     ));
     let finished = if flags.once {
-        daemon.stop(None, daemon.now(), flags.enforce_retention)
+        daemon.stop(
+            None,
+            daemon.now(),
+            flags.force_snapshot,
+            flags.enforce_retention,
+        )
     } else {
         supervise::supervise(&daemon, command.as_ref(), &control, &wake)
     };
@@ -226,16 +231,6 @@ fn prepare(exec_flag: Option<&str>, once: bool, config: &GoConfig) -> Result<Pre
         (Ok(_), Err(first), plan) => Err(refused(first, [plan.err(), None])),
         (Ok(_), Ok(_), Err(first)) => Err(refused(first, [None, None])),
     }
-}
-
-fn refuse_unbuilt(flags: &Flags) -> Result<(), SidecarError> {
-    if flags.force_snapshot {
-        return Err(SidecarError::NotBuilt {
-            what: "-force-snapshot",
-            instead: "a snapshot is taken on the configured snapshot interval",
-        });
-    }
-    Ok(())
 }
 
 /// `-exec`, else the `exec` key (Go: the flag overrides the key when set, `replicate.go:242`),

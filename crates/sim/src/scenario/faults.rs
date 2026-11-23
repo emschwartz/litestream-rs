@@ -90,6 +90,8 @@ pub enum FaultKind {
     WalSyncFailed,
     /// [`Fault::DatabasePageMismatch`].
     DatabasePageMismatch,
+    /// [`Fault::CreateOnlyUnsupported`].
+    CreateOnlyUnsupported,
     /// [`Fault::ShutdownDeadline`].
     ShutdownDeadline,
     /// [`Fault::Bug`].
@@ -98,7 +100,7 @@ pub enum FaultKind {
 
 impl FaultKind {
     /// Every fault, in the order of [`Fault`].
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::StoreTransient,
         Self::StoreThrottled,
         Self::StoreCredentials,
@@ -130,6 +132,7 @@ impl FaultKind {
         Self::WalUnlinked,
         Self::WalSyncFailed,
         Self::DatabasePageMismatch,
+        Self::CreateOnlyUnsupported,
         Self::ShutdownDeadline,
         Self::Bug,
     ];
@@ -179,6 +182,7 @@ impl From<&Fault> for FaultKind {
             Fault::WalUnlinked => Self::WalUnlinked,
             Fault::WalSyncFailed => Self::WalSyncFailed,
             Fault::DatabasePageMismatch { .. } => Self::DatabasePageMismatch,
+            Fault::CreateOnlyUnsupported => Self::CreateOnlyUnsupported,
             Fault::ShutdownDeadline => Self::ShutdownDeadline,
             Fault::Bug(_) => Self::Bug,
         }
@@ -216,6 +220,7 @@ pub fn stop_of(kind: FaultKind) -> Option<StopCause> {
         FaultKind::DatabasePageMismatch => {
             lsr_ltx::PageNo::new(1, page).map(|pgno| StopCause::DatabasePageMismatch { pgno })
         }
+        FaultKind::CreateOnlyUnsupported => Some(StopCause::ConditionalWritesUnsupported),
         FaultKind::ShutdownDeadline => Some(StopCause::Shutdown),
         FaultKind::Bug => Some(StopCause::Bug),
         FaultKind::StoreTransient
@@ -301,6 +306,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
         FaultKind::WalSyncFailed => &[wal_fsync_fails, wal_fsync_fails_then_restart],
         FaultKind::DatabasePageMismatch => &[db_page_flipped_under_sync],
+        FaultKind::CreateOnlyUnsupported => &[create_only_refused_mid_run],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
         FaultKind::Bug => &[],
     }
@@ -360,13 +366,22 @@ pub fn window_scenarios() -> &'static [fn() -> Scenario] {
     ]
 }
 
-/// The reads a boot's probe past its listing makes on a replica it lists
-/// whole, as a fault's count of calls ahead.
-fn probe_reads() -> u8 {
-    u8::try_from(lsr_core::fresh_probe_reads(Some(lsr_ltx::Txid::MIN))).unwrap_or(u8::MAX)
+/// The reads a boot's probe past its listing makes on a replica it lists whole, as a fault's
+/// count of calls ahead. These scenarios boot on a replica whose transaction 1 sits at levels
+/// 0, 1 and 9, so the probe also names a level-1 key from 2 and a level-2 key from 1. With
+/// `staged` the staging directory still holds files and the walk stops at its gap; without, it
+/// walks to its cap.
+fn probe_reads(staged: bool) -> u16 {
+    use lsr_core::Level;
+    let levels = [
+        Level::ZERO,
+        Level::new(1).unwrap_or(Level::ZERO),
+        Level::SNAPSHOT,
+    ];
+    u16::try_from(super::probe_reads_past(&levels, staged)).unwrap_or(u16::MAX)
 }
 
-fn remote_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {
+fn remote_fault(op: StoreOp, ahead: u16, shape: FaultShape) -> Op {
     Op::StoreFault {
         target: Target::Remote,
         op,
@@ -375,7 +390,7 @@ fn remote_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {
     }
 }
 
-fn staging_fault(op: StoreOp, ahead: u8, shape: FaultShape) -> Op {
+fn staging_fault(op: StoreOp, ahead: u16, shape: FaultShape) -> Op {
     Op::StoreFault {
         target: Target::Staging,
         op,
@@ -694,7 +709,7 @@ pub fn remote_file_deleted_externally() -> Scenario {
             vec![
                 remote_fault(
                     StoreOp::Read,
-                    probe_reads(),
+                    probe_reads(true),
                     FaultShape::Error(StoreError::NotFound { key: some_key() }),
                 ),
                 Op::Restart,
@@ -803,7 +818,7 @@ pub fn remote_bitrot_on_list_read() -> Scenario {
             vec![
                 remote_fault(
                     StoreOp::Read,
-                    probe_reads(),
+                    probe_reads(false),
                     FaultShape::FlipByteOnRead { at: 100 },
                 ),
                 Op::EnvFault(EnvFault::WipeStaging),
@@ -1488,6 +1503,29 @@ pub fn db_page_flipped_under_sync() -> Scenario {
             Op::RequestSnapshot,
         ],
         vec![Expect::Stopped(flipped)],
+    )
+}
+
+/// The replica's store turns out to have no conditional writes: the next level-0 upload is
+/// refused with nothing published, and under responses that stop the engine stops on it; under
+/// keep-trying responses uploads replace from then on, with the upload task degraded (D79).
+#[must_use]
+pub fn create_only_refused_mid_run() -> Scenario {
+    build(
+        "create_only_refused_mid_run",
+        vec![
+            live(),
+            vec![
+                Op::Remote(RemoteOp::RefuseCreateOnly),
+                commit(2, false),
+                Op::Tick,
+            ],
+            ticks(SETTLE),
+        ],
+        vec![
+            Expect::Stopped(StopCause::ConditionalWritesUnsupported),
+            Expect::Oracle,
+        ],
     )
 }
 

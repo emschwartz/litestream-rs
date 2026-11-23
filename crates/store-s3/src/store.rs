@@ -61,11 +61,6 @@ pub struct ListStats {
 /// event layer (this crate emits no events).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct WriteStats {
-    /// The provider answered `If-None-Match: *` with `NotImplemented`: it has
-    /// no conditional writes, so create-only writes now replace, as Go's do.
-    pub conditional_unsupported: bool,
-    /// Create-only writes sent without the condition since then.
-    pub unconditional_new: u64,
     /// Writes the bucket refused because the key was taken (412).
     pub refused_taken: u64,
 }
@@ -385,28 +380,13 @@ impl<T: Transport> Inner<T> {
     }
 
     /// The condition a write in `mode` carries: `If-None-Match: *` for a
-    /// create-only write, unless the provider refused it before, when the
-    /// write goes without and is counted.
-    pub(crate) fn precondition(&self, mode: WriteMode) -> Precondition {
+    /// create-only write, always. A provider without conditional writes fails
+    /// it with [`StoreError::CreateOnlyUnsupported`] (D79).
+    pub(crate) const fn precondition(&self, mode: WriteMode) -> Precondition {
         match mode {
             WriteMode::Replace => Precondition::None,
-            WriteMode::New => {
-                let mut precondition = Precondition::KeyIsFree;
-                self.writes(|stats| {
-                    if stats.conditional_unsupported {
-                        stats.unconditional_new = stats.unconditional_new.saturating_add(1);
-                        precondition = Precondition::None;
-                    }
-                });
-                precondition
-            }
+            WriteMode::New => Precondition::KeyIsFree,
         }
-    }
-
-    /// The provider has no conditional writes: later create-only writes go
-    /// without the condition.
-    pub(crate) fn conditional_unsupported(&self) {
-        self.writes(|stats| stats.conditional_unsupported = true);
     }
 
     /// Counts a write the bucket refused because the key was taken.

@@ -340,6 +340,7 @@ pub(crate) const RESPONSE_KEYS: &[&str] = &[
     "wal-unlinked",
     "wal-sync-failed",
     "page-size-changed",
+    "conditional-writes-unsupported",
     "bug",
     "other-writer",
 ];
@@ -358,6 +359,7 @@ const RESPONSES: &[Key] = &[
     key("wal-unlinked", Str, Implemented),
     key("wal-sync-failed", Str, Implemented),
     key("page-size-changed", Str, Implemented),
+    key("conditional-writes-unsupported", Str, Implemented),
     key("bug", Str, Implemented),
     key("other-writer", Str, Implemented),
 ];

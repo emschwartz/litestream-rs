@@ -173,6 +173,7 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::ClockJump(_)
         | Op::Tick
         | Op::Shutdown
+        | Op::ShutdownWithSnapshot
         | Op::ShutdownWithRetention
         | Op::Restore
         | Op::Restart
@@ -220,6 +221,8 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,
+        // The engine's own configuration.
+        truncate_pages: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
         // The replica on S3: its provider faults are noted as they are drawn.
@@ -227,6 +230,9 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         // Which SQLite the engine runs against: each backend's faults are drawn and noted
         // as the model's are.
         sqlite: _,
+        // A store without conditional writes refuses the first create-only upload of each
+        // process, which publishes nothing and is retried as a replace: no snapshot follows.
+        no_create_only: _,
         lying_wal_sync,
     } = opts;
     if *lying_wal_sync {
@@ -608,6 +614,7 @@ mod tests {
                 lsr_core::Level::ZERO,
                 lsr_ltx::TxidRange::single(lsr_ltx::Txid::new(txid).unwrap()),
             ),
+            mode: lsr_core::WriteMode::New,
             header: None,
             origin: None,
             created_at: zero,

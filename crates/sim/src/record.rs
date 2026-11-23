@@ -75,6 +75,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
         &[
             "AppAt",
             "AppOp",
+            "DenialCode",
             "EnvFault",
             "Hold",
             "HttpFault",
@@ -123,6 +124,7 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         Op::ClockJump(millis) => format!("Op::ClockJump({millis})"),
         Op::Tick => "Op::Tick".to_owned(),
         Op::Shutdown => "Op::Shutdown".to_owned(),
+        Op::ShutdownWithSnapshot => "Op::ShutdownWithSnapshot".to_owned(),
         Op::ShutdownWithRetention => "Op::ShutdownWithRetention".to_owned(),
         Op::RequestSnapshot => "Op::RequestSnapshot".to_owned(),
         Op::Restore => "Op::Restore".to_owned(),
@@ -189,6 +191,7 @@ const fn checkpoint(mode: OtherProcessMode) -> &'static str {
         OtherProcessMode::Passive => "OtherProcessMode::Passive",
         OtherProcessMode::Restart => "OtherProcessMode::Restart",
         OtherProcessMode::Truncate => "OtherProcessMode::Truncate",
+        OtherProcessMode::Full => "OtherProcessMode::Full",
     }
 }
 
@@ -257,6 +260,7 @@ fn store_error(err: &StoreError) -> Result<String, Unprintable> {
         StoreError::NotFound { .. }
         | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
+        | StoreError::CreateOnlyUnsupported { .. }
         | StoreError::Corrupt { .. } => Err(Unprintable(format!("{err:?}"))),
     }
 }
@@ -310,6 +314,10 @@ fn http_fault(fault: HttpFault) -> String {
         HttpFault::TruncateBody(shape) => ("TruncateBody", shape),
         HttpFault::WrongEtag(shape) => ("WrongEtag", shape),
         HttpFault::ConnectionReset(shape) => ("ConnectionReset", shape),
+        HttpFault::Denied(shape, code) => {
+            return format!("HttpFault::Denied(HttpShape::{shape:?}, DenialCode::{code:?})");
+        }
+        HttpFault::DenyDeletes => return "HttpFault::DenyDeletes".to_owned(),
     };
     format!("HttpFault::{name}(HttpShape::{shape:?})")
 }
@@ -397,6 +405,7 @@ const fn remote(remote: RemoteOp) -> &'static str {
         RemoteOp::RemoveUnrecognized => "RemoteOp::RemoveUnrecognized",
         RemoteOp::RollBack => "RemoteOp::RollBack",
         RemoteOp::DropCreatedAt => "RemoteOp::DropCreatedAt",
+        RemoteOp::RefuseCreateOnly => "RemoteOp::RefuseCreateOnly",
     }
 }
 

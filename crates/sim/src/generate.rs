@@ -109,6 +109,36 @@ pub enum HttpFault {
     WrongEtag(HttpShape),
     /// No response: the connection is reset.
     ConnectionReset(HttpShape),
+    /// The provider refuses the request with `code`'s status and S3 error code.
+    Denied(HttpShape, DenialCode),
+    /// A bucket policy refuses deleting each object the replica holds now, key by key inside a
+    /// DeleteObjects that otherwise succeeds, until the next heal.
+    DenyDeletes,
+}
+
+/// An S3 refusal, as a provider answers it: AWS's error codes, and a bare 401.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenialCode {
+    /// 403 `AccessDenied`.
+    AccessDenied,
+    /// 403 `AllAccessDisabled`.
+    AllAccessDisabled,
+    /// 403 `InvalidAccessKeyId`.
+    InvalidAccessKeyId,
+    /// 403 `SignatureDoesNotMatch`.
+    SignatureDoesNotMatch,
+    /// 400 `ExpiredToken`.
+    ExpiredToken,
+    /// 401 with no code.
+    Unauthorized,
+    /// 403 `RequestTimeTooSkewed`.
+    RequestTimeTooSkewed,
+    /// 404 `NoSuchBucket`.
+    NoSuchBucket,
+    /// 400 `KMS.DisabledException`: the object's KMS key is disabled.
+    KmsDisabled,
+    /// 400 `KMS.NotFoundException`: the object's KMS key is gone.
+    KmsNotFound,
 }
 
 /// One step of a history.
@@ -173,7 +203,7 @@ pub enum Op {
         /// Which operation.
         op: StoreOp,
         /// How many calls of it pass first.
-        ahead: u8,
+        ahead: u16,
         /// What the failure looks like.
         shape: FaultShape,
     },
@@ -185,6 +215,9 @@ pub enum Op {
     Tick,
     /// The operator stops the engine: it drains, then a fresh one boots later.
     Shutdown,
+    /// The operator stops the engine as `replicate -once -force-snapshot` does: it drains and
+    /// ends with a level-9 snapshot, then a fresh one boots later. Scenarios only.
+    ShutdownWithSnapshot,
     /// The operator stops the engine as `replicate -once -enforce-retention` does: it drains
     /// and ends with a retention pass, then a fresh one boots later. Scenarios only.
     ShutdownWithRetention,
@@ -374,6 +407,10 @@ pub enum MetaOp {
 /// A step on the replica from outside the engine. Scenarios only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteOp {
+    /// The replica's store turns out to have no conditional writes, as an S3 provider that
+    /// answers `If-None-Match` with `NotImplemented`: from now on every create-only commit is
+    /// refused with nothing published (`docs/decisions.md` D79).
+    RefuseCreateOnly,
     /// Another writer puts a level-0 file one transaction past the newest:
     /// the newest file's pages under the next transaction.
     PutUnrecognized,
@@ -505,6 +542,11 @@ pub struct Weights {
     /// recorded-fault layer ([`crate::remote`]) instead of `MemStore`. Not an operation, for
     /// the same reason as `block_crash_law`; drawn last in the swarm mix.
     pub remote_s3: bool,
+    /// Whether the replica's store has no conditional writes for the whole run, as an S3
+    /// provider that answers `If-None-Match` with `NotImplemented`: every create-only commit is
+    /// refused (`docs/decisions.md` D79). Not an operation, for the same reason as
+    /// `block_crash_law`.
+    pub no_create_only: bool,
     /// Store and SQLite-side faults draw their error from the whole error domain
     /// ([`crate::domain`]): every operation, every error an implementation can return from
     /// it. When unset they draw from the older subset (two store errors, two SQLite errors on
@@ -534,6 +576,10 @@ pub struct Weights {
     pub app_in_tick: u32,
     /// [`Op::Verify`].
     pub verify: u32,
+    /// The engine checkpoints TRUNCATE at this many synced frames instead of the simulator's
+    /// usual 32, so its TRUNCATE and the snapshot it takes under the write lock (CKPT-4) are
+    /// reached in short runs. Never drawn by a mix: the nightly sets it.
+    pub truncate_pages: Option<std::num::NonZeroU32>,
     /// [`EnvFault::EvictPageCache`]: a step that does anything only after a failed fsync of
     /// the WAL, in its generation.
     pub evict_page_cache: u32,
@@ -625,6 +671,7 @@ impl Default for Weights {
             clock_law: ClockLaw::PerTick,
             staging_fs: false,
             remote_s3: false,
+            no_create_only: false,
             error_domain: false,
             known_wrong: false,
             overlap: false,
@@ -637,6 +684,7 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             verify: 0,
+            truncate_pages: None,
             evict_page_cache: 0,
             http_fault: 0,
         }
@@ -782,12 +830,14 @@ impl Weights {
             clock_law: ClockLaw::PerTick,
             staging_fs: false,
             remote_s3: false,
+            no_create_only: false,
             error_domain: false,
             known_wrong: false,
             overlap: false,
             kill_after_fault: false,
             app_in_tick: 0,
             verify: 0,
+            truncate_pages: None,
             evict_page_cache: 0,
             http_fault: 0,
         };
@@ -848,7 +898,30 @@ impl Weights {
         // swarm, and provider faults on its requests.
         mix.remote_s3 = below(&entropy, 2) == 0;
         mix.http_fault = weight(false);
+        // And after that: a store without conditional writes in a quarter of the swarm.
+        mix.no_create_only = below(&entropy, 4) == 0;
         mix
+    }
+
+    /// The nightly's settings on top of this mix: the known-wrong cells, and the laws no mix
+    /// draws, from the seed's own stream (so a replay line with `LSR_SIM_KNOWN_WRONG` set gets
+    /// them too): with even odds, a TRUNCATE threshold of 2 to 8 frames, with other processes'
+    /// readers drawn at least at weight 10. The engine truncates only after a PASSIVE at the
+    /// threshold that a reader held off, so the readers are what make the low threshold reach
+    /// its TRUNCATE: over seeds 1 to 300 of the mixed set, the engine's TRUNCATE ran in 8 seeds
+    /// as drawn, 25 at a threshold of 4, and 36 at a threshold of 2 with the readers.
+    #[must_use]
+    pub fn with_nightly_laws(mut self, seed: Seed) -> Self {
+        let entropy = SeededEntropy::new(seed.stream(25));
+        self.known_wrong = true;
+        let frames = u32::try_from(below(&entropy, 7).saturating_add(2)).unwrap_or(2);
+        self.truncate_pages = (below(&entropy, 2) == 0)
+            .then_some(frames)
+            .and_then(std::num::NonZeroU32::new);
+        if self.truncate_pages.is_some() {
+            self.other_process_reader = self.other_process_reader.max(10);
+        }
+        self
     }
 
     /// What the rotating seed sets run: the default mix for half the seeds
@@ -898,7 +971,32 @@ fn http_fault(entropy: &SeededEntropy) -> HttpFault {
         ],
     )
     .unwrap_or(HttpFault::Internal);
-    make(shape)
+    match below(entropy, 4) {
+        // A refused DeleteObjects comes from `DenyDeletes`: a whole one refused may be the
+        // store's own best-effort cleanup, whose failure it rightly does not report.
+        0 if shape != HttpShape::DeleteObjects => HttpFault::Denied(shape, denial(entropy)),
+        1 if below(entropy, 4) == 0 => HttpFault::DenyDeletes,
+        _ => make(shape),
+    }
+}
+
+fn denial(entropy: &SeededEntropy) -> DenialCode {
+    choose(
+        entropy,
+        &[
+            DenialCode::AccessDenied,
+            DenialCode::AllAccessDisabled,
+            DenialCode::InvalidAccessKeyId,
+            DenialCode::SignatureDoesNotMatch,
+            DenialCode::ExpiredToken,
+            DenialCode::Unauthorized,
+            DenialCode::RequestTimeTooSkewed,
+            DenialCode::NoSuchBucket,
+            DenialCode::KmsDisabled,
+            DenialCode::KmsNotFound,
+        ],
+    )
+    .unwrap_or(DenialCode::AccessDenied)
 }
 
 fn choose<T: Copy>(entropy: &SeededEntropy, from: &[T]) -> Option<T> {
@@ -940,12 +1038,12 @@ fn store_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
     let error = if weights.error_domain {
         crate::domain::draw_store(entropy, target, op, weights.known_wrong)
     } else {
-        store_error(entropy, op)
+        crate::domain::possible_store(target, op, store_error(entropy, op))
     };
     Op::StoreFault {
         target,
         op,
-        ahead: small(entropy, 4),
+        ahead: u16::from(small(entropy, 4)),
         shape: shape(entropy, op, error),
     }
 }
@@ -1098,7 +1196,7 @@ fn env_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
             } else {
                 SourceError::Io(ErrorKind::Other)
             };
-            EnvFault::Source(op, err)
+            EnvFault::Source(op, crate::domain::possible_source(op, err))
         }
     };
     Op::EnvFault(fault)

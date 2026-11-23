@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::io::ErrorKind;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use lsr_ltx::{PageNo, PageSize, ReadDecoder, TxidRange};
 use lsr_wal::Salts;
@@ -60,10 +60,17 @@ struct Counting {
     /// A WAL whose read-lock hold the next upload begun moves, as a checkpoint
     /// by another connection would mid-step.
     moves_epoch: Arc<std::sync::Mutex<Option<FakeWal>>>,
+    /// A WAL whose epoch the next read that finds a key above level 0 moves:
+    /// a checkpoint by another connection that lands while a restore reads the
+    /// replica's compacted files (a boot's probes above level 0 find nothing).
+    moves_epoch_on_read: Arc<std::sync::Mutex<Option<FakeWal>>>,
     /// A WAL the application commits a transaction to (page 1 filled with the byte)
     /// as the next upload begins: a commit that lands after a sync step read
     /// the committed end.
     commits_on_upload: Arc<std::sync::Mutex<Option<(FakeWal, u8)>>>,
+    /// While set, every upload begun is refused as a dropped connection: a replica that
+    /// keeps the engine's staged files from leaving.
+    refuse_uploads: Arc<AtomicBool>,
     /// Keys whose next read returns its bytes with the middle one flipped,
     /// the stored bytes untouched: one bad read.
     flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
@@ -171,6 +178,7 @@ impl ObjectStore for Counting {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
         self.count();
+        let moves = (key.level() != Level::ZERO).then(|| self.moves_epoch_on_read.clone());
         if offset == 0 {
             self.reads.lock().unwrap().push(*key);
         }
@@ -192,6 +200,9 @@ impl ObjectStore for Counting {
         let read = self.inner.read(key, offset, len);
         async move {
             let mut bytes = read.await?;
+            if let Some(wal) = moves.and_then(|armed| armed.lock().unwrap().take()) {
+                wal.set_epoch(wal.epoch().next());
+            }
             if let Some(other) = other {
                 bytes = other;
             }
@@ -234,7 +245,17 @@ impl ObjectStore for Counting {
         if let Some((wal, n)) = self.commits_on_upload.lock().unwrap().take() {
             wal.append_tx(&[(pg(1), vec![n; PS.bytes()])], nz(3));
         }
-        self.inner.begin_upload(key, created_at, mode)
+        let refused = self.refuse_uploads.load(Ordering::SeqCst);
+        let begun = self.inner.begin_upload(key, created_at, mode);
+        async move {
+            if refused {
+                return Err(StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: ErrorKind::ConnectionReset,
+                });
+            }
+            begun.await
+        }
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
@@ -269,6 +290,7 @@ impl Rig {
         for n in 1..=3 {
             db.write_page(pg(n), &vec![u8::try_from(n).unwrap(); PS.bytes()]);
         }
+        db.link(&wal);
         let ck = FakeCheckpointer::new(wal.clone());
         let rig = Self {
             wal,
@@ -386,6 +408,7 @@ fn cfg() -> ActorConfig {
         // The tests written before the configurable responses expect a stop.
         responses: Responses::STRICT,
         max_unreplicated_age: crate::failstop::MaxUnreplicatedAge::DEFAULT,
+        destination: Some(lsr_journal::ReplicaId::of(b"test")),
     }
 }
 
@@ -469,13 +492,17 @@ fn boot_lists_then_recovers_then_uploads() {
 
 /// An empty replica names no page size, so boot asks it nothing more: one
 /// listing per level, no second pass, and the probe's reads of the keys a
-/// lagging listing could have left out.
+/// lagging listing could have left out, to its cap since nothing is staged.
 #[test]
 fn a_first_boot_lists_each_level_once() {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     rig.tick(&mut actor, T0);
-    let probe = u32::try_from(crate::upload::fresh_probe_reads(None)).unwrap();
+    let probe = u32::try_from(crate::upload::capped_probe_reads(
+        None,
+        &crate::probe::Starts::default(),
+    ))
+    .unwrap();
     assert_eq!(
         rig.remote.calls(),
         u32::try_from(Level::ALL.len()).unwrap() + probe
@@ -555,11 +582,15 @@ fn backlog(last: u8, at: i64) -> Rig {
         commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
     }
     assert_eq!(level_one_max(&rig), Some(1));
-    // Each commit is staged by the tick after it, which then syncs again before any upload.
+    // The replica refuses uploads meanwhile, so each commit is staged and stays there. A
+    // tick that gave the refused uploads their turn stages two commits in the next file, so
+    // the newest transaction can be below `last`.
+    rig.remote.refuse_uploads.store(true, Ordering::SeqCst);
     for n in 6..=last {
         rig.commit(n);
         rig.tick(&mut actor, at);
     }
+    rig.remote.refuse_uploads.store(false, Ordering::SeqCst);
     let backlog = staged(&rig).len();
     assert!(
         backlog > usize::from(last).saturating_sub(10),
@@ -606,7 +637,7 @@ fn maintenance_gets_its_share_while_a_backlog_uploads() {
         .count();
     assert!(uploads >= 8, "uploads starved: {seen:?}");
     // Uploads still had work when maintenance ran.
-    assert!(actor.replicated() < Some(Txid::new(30).unwrap()));
+    assert!(actor.replicated() < newest_staged(&rig));
 }
 
 /// A snapshot due while the backlog uploads waits for idle uploads, so its last
@@ -617,6 +648,7 @@ fn a_snapshot_due_during_a_backlog_waits_for_idle_uploads() {
     // the snapshot.
     let now = T0 + 25 * 3_600_000;
     let mut rig = backlog(80, now);
+    let newest = newest_staged(&rig);
     let level9 = |rig: &Rig| -> Vec<u64> {
         Rig::files(&rig.remote, Level::SNAPSHOT)
             .iter()
@@ -629,7 +661,7 @@ fn a_snapshot_due_during_a_backlog_waits_for_idle_uploads() {
     let mut actor = Actor::new(config);
     let now = now + 1;
     let mut seen = Vec::new();
-    while actor.replicated() < Some(Txid::new(80).unwrap()) {
+    while actor.replicated() < newest {
         assert!(seen.len() < 400, "never caught up: {seen:?}");
         seen.push(rig.tick(&mut actor, now));
         assert_eq!(
@@ -1520,6 +1552,11 @@ fn checkpoint_call_is_recorded() {
 }
 
 /// The last transaction of every staged level-0 file, oldest first.
+/// The newest transaction in staging.
+fn newest_staged(rig: &Rig) -> Option<Txid> {
+    staged(rig).last().and_then(|n| Txid::new(*n))
+}
+
 fn staged(rig: &Rig) -> Vec<u64> {
     Rig::files(&rig.staging, Level::ZERO)
         .iter()
@@ -2186,6 +2223,7 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
 }
 
 mod checkpoint_failed;
+mod create_only;
 mod degraded;
 mod index_reset;
 mod lag;
@@ -2194,6 +2232,7 @@ mod listing;
 mod live;
 mod newest_replica_file;
 mod no_wal_yet;
+mod once;
 mod once_retention;
 mod pages;
 mod rejected_snapshot;
@@ -2479,6 +2518,87 @@ fn an_env_prints_its_parts_and_whether_it_has_a_journal() {
     ] {
         assert!(text.contains(part), "{part} in {text}");
     }
+}
+
+/// An application that commits before every tick keeps the sync step busy on each one, and
+/// a sync that staged files used to end the tick before the upload step ran: uploads never
+/// ran, replication halted with no failure for health to report (simulator seed 0x593, under
+/// a lagging listing's hold). Uploads now take a turn ahead of the sync after
+/// [`state::FAIR_SHARE`] ticks in a row that passed them over.
+#[test]
+fn uploads_keep_up_with_an_app_that_commits_every_tick() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.settle(&mut actor, T0);
+    let start = actor.replicated();
+    let mut seen = Vec::new();
+    for n in 0..u8::try_from(4 * state::FAIR_SHARE).unwrap() {
+        rig.commit(n.wrapping_add(2));
+        seen.push(rig.tick(&mut actor, T0 + i64::from(n) + 1));
+    }
+    let uploads = seen
+        .iter()
+        .filter(|t| matches!(event(t), Some(Event::Uploaded(_))))
+        .count();
+    assert!(uploads >= 3, "uploads starved behind syncs: {seen:?}");
+    assert!(actor.replicated() > start, "{seen:?}");
+    // The share is exact: the tick after `FAIR_SHARE` syncs in a row is the upload's.
+    let first = seen
+        .iter()
+        .position(|t| matches!(event(t), Some(Event::Uploaded(_))));
+    assert_eq!(
+        first,
+        Some(usize::try_from(state::FAIR_SHARE).unwrap()),
+        "{seen:?}"
+    );
+}
+
+/// A staged file that turns unreadable is dropped and a snapshot takes its place, but nothing
+/// has reached the replica: the upload failures before it still count toward a stall, so a
+/// replica that stays down is reported degraded on time. Before, the drop counted as the
+/// upload task's success and started its count again, and a halt that kept turning up
+/// unreadable files was never reported (simulator seeds 0x446 and 0x593).
+#[test]
+fn a_resnapshot_keeps_the_failed_uploads_toward_a_stall() {
+    let stalled = crate::fault::STALLED_AFTER.get();
+    let (mut rig, mut actor) = caught_up();
+    rig.remote.refuse_uploads.store(true, Ordering::SeqCst);
+    rig.commit(2);
+    let (mut now, mut failures) = (T0 + 1, 0);
+    for _ in 0..40 {
+        if failures == stalled - 3 {
+            break;
+        }
+        if let Some(Event::Retrying { until, .. }) = event(&rig.tick(&mut actor, now)) {
+            failures += 1;
+            now = until.unix_millis();
+        }
+    }
+    assert_eq!(failures, stalled - 3);
+    tear(&rig, 2, truncated);
+    let again = first_bad_read(&mut rig, &mut actor, now);
+    let lost = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&lost),
+        Some(&Event::Resnapshot(
+            SnapshotCause::NewestStagedFileUnreadable
+        ))
+    );
+    let (mut now, mut after) = (again, 0);
+    for _ in 0..40 {
+        if actor.degraded(Task::Upload).is_some() {
+            break;
+        }
+        if let Some(Event::Retrying { until, .. }) = event(&rig.tick(&mut actor, now)) {
+            after += 1;
+            now = until.unix_millis();
+        }
+    }
+    assert!(actor.degraded(Task::Upload).is_some(), "never degraded");
+    assert!(
+        after <= 2,
+        "{after} more failures before the stall was reported"
+    );
 }
 
 /// A commit after the synced position that a WAL restart then abandoned breaks the read lock
