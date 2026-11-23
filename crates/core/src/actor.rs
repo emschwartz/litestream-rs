@@ -1119,8 +1119,11 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if let Some(tick) = self.wal_unit(env, now, true).await {
+        if let Some(tick) = self.owed_upload(env, now).await {
             return tick;
+        }
+        if let Some(tick) = self.wal_unit(env, now, true).await {
+            return self.passed_over_uploads(tick, now);
         }
         if self.fair_turn() {
             if let Some(tick) = self.prune_unit(env, now).await {
@@ -1158,8 +1161,11 @@ impl Actor {
                 self.missed(env, now).await
             };
         }
-        if let Some(tick) = self.wal_unit(env, now, false).await {
+        if let Some(tick) = self.owed_upload(env, now).await {
             return tick;
+        }
+        if let Some(tick) = self.wal_unit(env, now, false).await {
+            return self.passed_over_uploads(tick, now);
         }
         if let Some(tick) = self.upload_unit(env, now).await {
             return tick;
@@ -1705,6 +1711,7 @@ impl Actor {
         if !self.upload_ready(now) {
             return None;
         }
+        self.engine.syncs_ahead = 0;
         let limit = self
             .kept
             .cfg
@@ -2374,6 +2381,36 @@ impl Actor {
     /// one statement of it: the task's unit and the next wake both ask here.
     fn upload_ready(&self, now: Timestamp) -> bool {
         self.kept.tasks.ready(Task::Upload, now) && !self.uploads_idle()
+    }
+
+    /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row
+    /// had their WAL step pass over uploads that were ready.
+    async fn owed_upload<
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: ObjectStore,
+        R: ObjectStore,
+    >(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        if self.engine.syncs_ahead < state::FAIR_SHARE {
+            return None;
+        }
+        mark!(Run29);
+        self.upload_unit(env, now).await
+    }
+
+    /// `tick`, from the WAL step, counting it when it passed over uploads that were ready.
+    fn passed_over_uploads(&mut self, tick: Tick, now: Timestamp) -> Tick {
+        self.engine.syncs_ahead = if self.booted() && self.upload_ready(now) {
+            self.engine.syncs_ahead.saturating_add(1)
+        } else {
+            0
+        };
+        tick
     }
 
     /// The transaction the prune task may delete through, when it may run.

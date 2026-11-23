@@ -1,0 +1,7 @@
+# The same defect planted against seed 0x593's recorded history.
+name = "uploads-wait-behind-every-sync-sim"
+patch = "uploads-wait-behind-every-sync"
+fix = "FIXSHA"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["uploads_take_their_turn_while_a_commit_lands_every_tick_seed_0x593"]

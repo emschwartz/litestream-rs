@@ -443,6 +443,11 @@ pub(super) struct Engine {
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
+    /// Ticks in a row whose WAL step ended the tick while uploads were ready; at
+    /// [`super::state::FAIR_SHARE`] the upload step runs first. An app that commits before
+    /// every tick keeps the WAL step busy on each one, and the upload step that follows it
+    /// would otherwise never run.
+    pub(super) syncs_ahead: u32,
 }
 
 impl Engine {
@@ -460,6 +465,7 @@ impl Engine {
             pruned: None,
             acknowledged: None,
             witnesses: Witnesses::new(),
+            syncs_ahead: 0,
         }
     }
 }

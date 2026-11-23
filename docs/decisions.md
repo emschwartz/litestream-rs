@@ -75,6 +75,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D160 | `restore` with Go's arguments: delete the output first, refuse a timestamp past the newest file, let `-if-replica-exists` excuse any missing transaction, as Go does? | No to all three: replace only at publish, restore the newest state, skip only an empty replica | Claude (dropin-commands), **delegated** | 2026-11-23 | open to owner review |
 | D62 | What does the simulator's hold judge require of an as-of restore through a fault? | The as-of bound (G3), not the raw replica's answer | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
+| D65 | When the WAL step has work on every tick, when do uploads run? | After 8 ticks in a row that passed them over, ahead of the WAL step | Claude, **delegated** (route from the parent session) | 2026-11-23 | open to owner review |
 | D122 | Run the simulator's histories on real SQLite: how, when the world draws page-level commits of arbitrary bytes? | A backend in lsr-sqlite behind the sim's seam; each drawn page a row, SQLite decides the pages, the world reads back what changed through SQLite | Claude (sim-real-sqlite), **delegated** | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
 | D162 | `databases` with a `dir` entry: print the working directory, as Go does? | No: print the entry's directory, unscanned | Claude (dropin-readonly), **delegated** | 2026-11-23 | open to owner review |
@@ -764,6 +765,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** a view that answered as of an instant with a state too old for its own files is not caught by this judge; the history judge's lag checks are where staleness is bounded. Under a backward clock step the history judge checks only that the answer is a state of the history (its untimed path), so the pinned 0x80e history exercises that path.
 - **Revisit if:** the as-of guarantee gains a lower bound (an answer at least as new as the newest file before the instant).
 - **Links:** `crates/sim/src/run/hold.rs` (`judge_through`), `crates/sim/src/history.rs` (`judge_as_of`), G3 in `docs/BEHAVIOR.md`.
+
+## D65. Uploads take a turn ahead of a busy WAL step
+
+- **The case:** a tick runs the WAL step first, and a WAL step that staged files ends the tick there. An application that commits before every tick keeps that step busy on each one, so the upload step never ran: replication halted with no failure, and health had nothing to report (simulator seed 0x593, in the last ticks of a lagging listing's hold, after a resnapshot had cleared the upload task's degraded state).
+- **Options:** run the upload step in the same tick after a sync (a tick then reports two events, or one hides the other); strict alternation once both have work; a fair share, as prune and maintenance already get from uploads.
+- **Choice:** the fair share. After `FAIR_SHARE` (8) ticks in a row whose WAL step passed over uploads that were ready, the next tick runs the upload step first; any upload step that runs resets the count. The drain does the same. One upload step uploads everything staged by default, so a turn in nine is enough to keep up.
+- **Cost accepted:** with `files_per_tick` set to fewer than 8 files, a writer that commits on every tick can still grow the upload backlog, at most `8 - files_per_tick` files per nine ticks, until its commits slow. Strict alternation would not, but it reorders ticks that short write bursts produce today.
+- **Revisit if:** a deployment sets `files_per_tick` low and commits continuously, or a tick may report more than one event.
+- **Links:** `crates/core/src/actor.rs` (`owed_upload`, `passed_over_uploads`), RUN-29 in `docs/behavior.toml`, seed 0x593 in `crates/sim/tests/sim/histories/`.
 
 ## D75. One module writes to and deletes from the stores (delegated)
 

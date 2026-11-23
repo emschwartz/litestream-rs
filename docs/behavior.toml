@@ -742,6 +742,18 @@ detected_by = "core::`a_step_from_the_start_follows_a_header_written_again_with_
 notes = "Before the fix the old seed failed the first frame's checksum under unchanged salts, which read as `WalCorrupt` for good (Go v0.5.18 killed at its WAL restart, then the application's next commit)"
 
 [[row]]
+table = "Running"
+id = "RUN-29"
+mark = "site"
+circumstance = "The application commits before every tick, so the WAL step finds new frames and stages them on each one, while uploads are ready"
+response = "After 8 ticks in a row (the fair share prune and maintenance also get) whose WAL step passed over ready uploads, the next tick's upload step runs first. One upload step uploads everything staged, or `files_per_tick` files, so with the default no backlog builds"
+signal = "None"
+at_risk = "None"
+recovery = "None needed"
+detected_by = "core::`uploads_keep_up_with_an_app_that_commits_every_tick`; plant::`uploads-wait-behind-every-sync`"
+notes = "Before the fix a WAL step that staged files ended the tick before the upload step, so uploads never ran while commits kept coming: replication halted with no failure, and health had nothing to report (simulator seed 0x593, the last ticks of a lagging listing's hold, after a resnapshot cleared the upload task's degraded state)"
+
+[[row]]
 table = "Checkpoint"
 id = "CKPT-1"
 mark = "site"

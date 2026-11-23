@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index cb236e5b..d0ebaf07 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2396,7 +2396,7 @@ impl Actor {
+         env: &mut Env<'_, W, P, C, L, R>,
+         now: Timestamp,
+     ) -> Option<Tick> {
+-        if self.engine.syncs_ahead < state::FAIR_SHARE {
++        if self.engine.syncs_ahead < u32::MAX {
+             return None;
+         }
+         mark!(Run29);
