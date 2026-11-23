@@ -229,6 +229,9 @@ pub struct Opts {
     /// The process dies right after every tick in which an injected fault fired
     /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
     pub kill_after_fault: bool,
+    /// The replica is the S3 store over its in-memory bucket ([`Weights::remote_s3`]).
+    /// [`run_with`] sets it.
+    pub remote_s3: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
@@ -442,7 +445,9 @@ const SETTLE_AFTER_RESTART: usize = 8;
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
     fn configured(seed: Seed, opts: &Opts) -> Self {
-        let mut runner = Self::new(seed, &opts.sqlite).with_staging_fs(seed, opts);
+        let mut runner = Self::new(seed, &opts.sqlite)
+            .with_staging_fs(seed, opts)
+            .with_remote_s3(opts);
         runner.lenient = opts.drawn;
         runner.kill_after_fault = opts.kill_after_fault;
         if opts.drawn {
@@ -789,7 +794,7 @@ impl Runner {
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
         self.staging_moved()?;
-        let fired0 = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let fired0 = (self.remote_fired(), fired(&self.w.staging_faults));
         let queued0 = self.w.sqlite.queued_injections();
         let ended = self.run_one(plan);
         if matches!(ended, TickEnd::Done(_)) {
@@ -1052,6 +1057,12 @@ impl Runner {
         {
             self.forcings.note_in_tick(Forcing::PositionUnproven);
         }
+        // A boot that continues short of the committed end (a commit it never staged) holds a
+        // position no read transaction pinned, so a restart before its first sync is a change
+        // it cannot follow.
+        if matches!(event, Event::Booted { cause: None }) && self.w.staging_behind_newest_commit() {
+            self.forcings.note_in_tick(Forcing::PositionUnproven);
+        }
         let (cause, at_boot) = match event {
             Event::Booted { cause: Some(cause) } => (cause, true),
             Event::Resnapshot(cause) => (cause, false),
@@ -1241,7 +1252,7 @@ impl Runner {
     }
 
     fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), queued0: usize) -> Step {
-        let fired_now = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let fired_now = (self.remote_fired(), fired(&self.w.staging_faults));
         let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
         let source = self.w.sqlite.queued_injections() < queued0;
         let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
@@ -1756,12 +1767,14 @@ impl Runner {
 
     /// How many replica reads a scheduled fault has failed or changed so far.
     fn remote_read_faults(&self) -> u32 {
-        self.w
+        let object = self
+            .w
             .remote_faults
             .hits()
             .iter()
             .filter(|(op, _, _)| *op == lsr_core::StoreOp::Read)
-            .fold(0, |sum, (_, _, hits)| sum.saturating_add(*hits))
+            .fold(0_u32, |sum, (_, _, hits)| sum.saturating_add(*hits));
+        object.saturating_add(self.http_read_faults())
     }
 
     /// The operator removes the other writer's newest file if it still holds
@@ -2307,6 +2320,7 @@ impl Runner {
             Op::Meta(op) => self.meta(*op)?,
             Op::Wal(op) => self.wal_damage(*op)?,
             Op::Remote(op) => self.remote(*op)?,
+            Op::HttpFault(fault) => self.http_fault(*fault)?,
             Op::AppAutocheckpoint(frames) => {
                 self.w.sqlite.set_app_autocheckpoint(*frames);
                 self.app_autocheckpoint = frames.and_then(NonZeroU32::new);
@@ -2577,7 +2591,9 @@ impl Runner {
     /// Counts, at the end of a run, what the stores really did: puts per
     /// level, deletes, and every scheduled fault that hit a call.
     fn tally_stores(&mut self) {
+        let unmet = u64::try_from(self.http_faults_pending()).unwrap_or(u64::MAX);
         let reach = &mut self.report.reach;
+        reach.add("http_fault.unmet", unmet);
         let (kept, cut) = self.w.sqlite.torn_losses();
         reach.add("power.kept_unsynced_wal", u64::from(kept));
         reach.add("power.kept_cut_frame", u64::from(cut));
@@ -2589,6 +2605,7 @@ impl Runner {
             u64::from(self.w.sqlite.db_torn_losses()),
         );
         reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
+
         reach.add(
             "batch.remote_calls",
             u64::from(self.w.remote_faults.batched()),
@@ -2689,6 +2706,7 @@ pub fn run_with(
         known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
         kill_after_fault: weights.kill_after_fault,
+        remote_s3: weights.remote_s3,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -2759,6 +2777,10 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         runner.report.staging_events = runner.w.staging_recorder.events();
         runner.report.remote_damaged = runner.w.remote_faults.damaged();
         runner.report.remote_rejected = runner.w.remote_faults.rejected();
+        runner
+            .report
+            .remote_rejected
+            .extend(runner.w.remote_recorder.rejected());
     }
     Ok(runner.report)
 }
@@ -2882,6 +2904,7 @@ const fn still_imposed(stall: lsr_core::Stall) -> bool {
     }
 }
 
+mod remote_s3;
 mod staging_fs;
 #[cfg(test)]
 mod tests;

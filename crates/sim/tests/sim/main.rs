@@ -32,6 +32,8 @@ mod marks;
 #[cfg(test)]
 mod needless_snapshot;
 #[cfg(test)]
+mod remote_s3;
+#[cfg(test)]
 mod replay;
 #[cfg(test)]
 mod restored_staging;

@@ -20,8 +20,8 @@ use std::io::ErrorKind;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CreatedAt, Denied, Entropy, FileInfo, FileKey, Inventory, Level, Listing, MemStore,
-    ObjectStore, PageLimit, ReadLen, RestoreError, RestoreTarget, StopCause, StoreError, StoreOp,
+    CreatedAt, Denied, Entropy, FileInfo, FileKey, Inventory, Level, Listing, ObjectStore,
+    PageLimit, ReadLen, RestoreError, RestoreTarget, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -66,7 +66,7 @@ enum Lens {
 /// The raw replica as a restore made during the hold sees it.
 #[derive(Clone, Debug)]
 pub(super) struct View {
-    raw: MemStore,
+    raw: crate::remote::Bucket,
     lens: Lens,
 }
 
@@ -104,7 +104,7 @@ fn held_error(op: StoreOp, auth: bool) -> StoreError {
 }
 
 impl ObjectStore for View {
-    type Upload = <MemStore as ObjectStore>::Upload;
+    type Upload = <crate::remote::Bucket as ObjectStore>::Upload;
 
     /// Forwards to the store it views, with no fault: the simulator's stores leave no scratch.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {

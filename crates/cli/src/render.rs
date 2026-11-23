@@ -1,8 +1,8 @@
 //! Text and JSON output, and the one-line error text.
 //!
-//! JSON is written by hand: keys are fixed and values are numbers, booleans,
-//! hex transaction ids, RFC 3339 times, paths and messages, so a ten-line
-//! escaper is all the format needs. Tests parse it back with `serde_json`.
+//! JSON is built with `serde_json` (`preserve_order`, so the keys come out in the order
+//! written here): keys are fixed and values are numbers, booleans, hex transaction ids,
+//! RFC 3339 times, paths and messages. Tests parse it back with `serde_json`.
 //!
 //! Restore's JSON and its dry-run text keep Go's keys and layout
 //! (cmd/litestream/restore.go: `RestoreResult`, `RestorePlan`,
@@ -25,7 +25,7 @@ use crate::args::{
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedTime;
 use lsr_replica::local::IntegrityCheck;
-use lsr_sidecar::json_string as quote;
+use serde_json::{Value, json};
 
 /// Appends formatted text to a `String`, which cannot fail.
 macro_rules! put {
@@ -341,12 +341,23 @@ const fn skip_word(skip: Skip) -> &'static str {
     }
 }
 
-fn path_array(paths: &[PathBuf]) -> String {
-    let items: Vec<String> = paths
+fn path_array(paths: &[PathBuf]) -> Value {
+    paths
         .iter()
-        .map(|path| quote(&path.display().to_string()))
-        .collect();
-    array(&items)
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+/// Appends a key to a JSON object.
+fn add(object: &mut Value, key: &str, value: impl Into<Value>) {
+    if let Value::Object(map) = object {
+        map.insert(key.to_owned(), value.into());
+    }
+}
+
+/// One JSON value on a line of its own.
+fn line(value: &Value) -> String {
+    format!("{value}\n")
 }
 
 fn restored_json(
@@ -357,32 +368,27 @@ fn restored_json(
     integrity_check: IntegrityCheck,
     elapsed: Duration,
 ) -> String {
-    let mut fields = vec![
-        ("db_path", quote(&output.display().to_string())),
-        ("replica", quote(source.kind().word())),
-        ("txid", quote(&restored.reached().to_string())),
-        ("duration_ms", elapsed.as_millis().to_string()),
-        ("integrity_check", quote(integrity_word(integrity_check))),
-        ("page_size", restored.page_size().get().to_string()),
-        ("pages", restored.commit().to_string()),
-        ("files", restored.files().to_string()),
-        ("bytes_read", restored.bytes_read().to_string()),
-        ("created_at_read", restored.created_at_read().to_string()),
-        (
-            "checksum_verified",
-            restored.post_apply().is_some().to_string(),
-        ),
-        ("journal_files_removed", path_array(cleared)),
-    ];
+    let mut out = json!({
+        "db_path": output.display().to_string(),
+        "replica": source.kind().word(),
+        "txid": restored.reached().to_string(),
+        "duration_ms": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        "integrity_check": integrity_word(integrity_check),
+        "page_size": restored.page_size().get(),
+        "pages": restored.commit().get(),
+        "files": restored.files(),
+        "bytes_read": restored.bytes_read(),
+        "created_at_read": restored.created_at_read(),
+        "checksum_verified": restored.post_apply().is_some(),
+        "journal_files_removed": path_array(cleared),
+    });
     if let Some(file) = restored.inside_file() {
-        fields.push(("inside_file", quote(&key_path(&file))));
+        add(&mut out, "inside_file", key_path(&file));
     }
     if restored.writer_outpaced() {
-        fields.push(("writer_outpaced", "true".to_owned()));
+        add(&mut out, "writer_outpaced", true);
     }
-    let mut out = object(&fields);
-    out.push('\n');
-    out
+    line(&out)
 }
 
 fn skipped_text(output: &Path, source: &Source, skip: Skip, cleared: &[PathBuf]) -> String {
@@ -412,14 +418,12 @@ fn skipped_text(output: &Path, source: &Source, skip: Skip, cleared: &[PathBuf])
 }
 
 fn skipped_json(output: &Path, source: &Source, skip: Skip, cleared: &[PathBuf]) -> String {
-    let mut out = object(&[
-        ("skipped", quote(skip_word(skip))),
-        ("db_path", quote(&output.display().to_string())),
-        ("replica", quote(source.kind().word())),
-        ("journal_files_removed", path_array(cleared)),
-    ]);
-    out.push('\n');
-    out
+    line(&json!({
+        "skipped": skip_word(skip),
+        "db_path": output.display().to_string(),
+        "replica": source.kind().word(),
+        "journal_files_removed": path_array(cleared),
+    }))
 }
 
 /// One row of Go's dry-run table: level, file, min_txid, max_txid, size, timestamp.
@@ -490,18 +494,18 @@ fn plan_text(
     out
 }
 
-fn plan_file_json(info: &FileInfo) -> String {
+fn plan_file_json(info: &FileInfo) -> Value {
     let range = info.key.range();
     let (time, exact) = listed_time(info);
-    object(&[
-        ("level", info.key.level().get().to_string()),
-        ("name", quote(&info.key.file_name())),
-        ("min_txid", quote(&range.min().to_string())),
-        ("max_txid", quote(&range.max().to_string())),
-        ("size", info.size.to_string()),
-        ("timestamp", quote(&time.to_string())),
-        ("created_at_exact", exact.to_string()),
-    ])
+    json!({
+        "level": info.key.level().get(),
+        "name": info.key.file_name(),
+        "min_txid": range.min().to_string(),
+        "max_txid": range.max().to_string(),
+        "size": info.size,
+        "timestamp": time.to_string(),
+        "created_at_exact": exact,
+    })
 }
 
 fn plan_json(
@@ -511,25 +515,17 @@ fn plan_json(
     created_at_read: u64,
     journal_files_to_remove: &[PathBuf],
 ) -> String {
-    let files: Vec<String> = chain.files().iter().map(plan_file_json).collect();
-    let mut out = object(&[
-        ("source", quote(source.name())),
-        ("target_path", quote(&output.display().to_string())),
-        ("replica", quote(source.kind().word())),
-        (
-            "min_txid",
-            quote(&chain.snapshot().key.range().min().to_string()),
-        ),
-        ("max_txid", quote(&chain.reaches().to_string())),
-        ("files", array(&files)),
-        ("created_at_read", created_at_read.to_string()),
-        (
-            "journal_files_to_remove",
-            path_array(journal_files_to_remove),
-        ),
-    ]);
-    out.push('\n');
-    out
+    let files: Vec<Value> = chain.files().iter().map(plan_file_json).collect();
+    line(&json!({
+        "source": source.name(),
+        "target_path": output.display().to_string(),
+        "replica": source.kind().word(),
+        "min_txid": chain.snapshot().key.range().min().to_string(),
+        "max_txid": chain.reaches().to_string(),
+        "files": files,
+        "created_at_read": created_at_read,
+        "journal_files_to_remove": path_array(journal_files_to_remove),
+    }))
 }
 
 fn restored_text(
@@ -794,41 +790,29 @@ fn verify_text(report: &Report, depth: Depth) -> String {
     out
 }
 
-fn object(fields: &[(&str, String)]) -> String {
-    let body: Vec<String> = fields
-        .iter()
-        .map(|(key, value)| format!("{}:{value}", quote(key)))
-        .collect();
-    format!("{{{}}}", body.join(","))
+fn hex_or_null(txid: Option<Txid>) -> Value {
+    txid.map_or(Value::Null, |txid| txid.to_string().into())
 }
 
-fn array(items: &[String]) -> String {
-    format!("[{}]", items.join(","))
-}
-
-fn hex_or_null(txid: Option<Txid>) -> String {
-    txid.map_or("null".to_owned(), |txid| quote(&txid.to_string()))
-}
-
-fn level_json(level: Level, summary: &LevelSummary) -> String {
+fn level_json(level: Level, summary: &LevelSummary) -> Value {
     let range = level_range(summary);
-    object(&[
-        ("level", level.get().to_string()),
-        ("files", summary.files().to_string()),
-        ("bytes", summary.bytes().to_string()),
-        ("first", hex_or_null(range.map(TxidRange::min))),
-        ("last", hex_or_null(range.map(TxidRange::max))),
-        ("unrecognized_names", summary.skipped().to_string()),
-    ])
+    json!({
+        "level": level.get(),
+        "files": summary.files(),
+        "bytes": summary.bytes(),
+        "first": hex_or_null(range.map(TxidRange::min)),
+        "last": hex_or_null(range.map(TxidRange::max)),
+        "unrecognized_names": summary.skipped(),
+    })
 }
 
-fn finding_json(finding: &Finding) -> String {
+fn finding_json(finding: &Finding) -> Value {
     let (kind, message) = finding_parts(finding);
-    object(&[
-        ("kind", quote(kind)),
-        ("severity", quote(severity_name(finding.severity()))),
-        ("message", quote(&message)),
-    ])
+    json!({
+        "kind": kind,
+        "severity": severity_name(finding.severity()),
+        "message": message,
+    })
 }
 
 fn verify_json(report: &Report, depth: Depth) -> String {
@@ -842,31 +826,25 @@ fn verify_json(report: &Report, depth: Depth) -> String {
         | PlanOutcome::InsideFile { .. }
         | PlanOutcome::MalformedSnapshot { .. } => None,
     };
-    let latest = object(&[
-        ("restorable", reaches.is_some().to_string()),
-        ("reaches", hex_or_null(reaches)),
-        ("description", quote(&plan_outcome(report.latest()))),
-    ]);
-    let levels: Vec<String> = Level::ALL
+    let levels: Vec<Value> = Level::ALL
         .iter()
         .zip(report.levels())
         .map(|(level, summary)| level_json(*level, summary))
         .collect();
-    let findings: Vec<String> = report.findings().iter().map(finding_json).collect();
-    let worst = report
-        .worst()
-        .map_or("null".to_owned(), |severity| quote(severity_name(severity)));
-    let mut out = object(&[
-        ("depth", quote(depth_name(depth))),
-        ("worst", worst),
-        ("files_read", report.files_read().to_string()),
-        ("bytes_read", report.bytes_read().to_string()),
-        ("latest", latest),
-        ("levels", array(&levels)),
-        ("findings", array(&findings)),
-    ]);
-    out.push('\n');
-    out
+    let findings: Vec<Value> = report.findings().iter().map(finding_json).collect();
+    line(&json!({
+        "depth": depth_name(depth),
+        "worst": report.worst().map(severity_name),
+        "files_read": report.files_read(),
+        "bytes_read": report.bytes_read(),
+        "latest": {
+            "restorable": reaches.is_some(),
+            "reaches": hex_or_null(reaches),
+            "description": plan_outcome(report.latest()),
+        },
+        "levels": levels,
+        "findings": findings,
+    }))
 }
 
 fn files_text(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> String {
@@ -900,31 +878,10 @@ fn go_rfc3339(at: Timestamp) -> String {
     }
 }
 
-/// Go's `encoding/json.MarshalIndent(v, "", "  ")` of a list of flat objects: `[]` when
-/// empty.
-fn indented_objects(objects: &[Vec<(&str, String)>]) -> String {
-    if objects.is_empty() {
-        return "[]\n".to_owned();
-    }
-    let mut out = String::from("[\n");
-    for (i, fields) in objects.iter().enumerate() {
-        out.push_str("  {\n");
-        for (j, (name, value)) in fields.iter().enumerate() {
-            let comma = if j.saturating_add(1) < fields.len() {
-                ","
-            } else {
-                ""
-            };
-            putln!(out, "    {}: {value}{comma}", quote(name));
-        }
-        let comma = if i.saturating_add(1) < objects.len() {
-            ","
-        } else {
-            ""
-        };
-        putln!(out, "  }}{comma}");
-    }
-    out.push_str("]\n");
+/// Go's `encoding/json.MarshalIndent(v, "", "  ")` of a list of objects: `[]` when empty.
+fn indented(objects: Vec<Value>) -> String {
+    let mut out = serde_json::to_string_pretty(&Value::Array(objects)).unwrap_or_default();
+    out.push('\n');
     out
 }
 
@@ -940,11 +897,11 @@ fn databases_text(rows: &[(String, &'static str)]) -> String {
 
 /// Go's `databases -json`.
 fn databases_json(rows: &[(String, &'static str)]) -> String {
-    let objects: Vec<_> = rows
-        .iter()
-        .map(|(path, kind)| vec![("path", quote(path)), ("replica", quote(kind))])
-        .collect();
-    indented_objects(&objects)
+    indented(
+        rows.iter()
+            .map(|(path, kind)| json!({ "path": path, "replica": kind }))
+            .collect(),
+    )
 }
 
 /// One `ltx` row: level, min and max txid, size, listed time.
@@ -974,20 +931,21 @@ fn ltx_text(files: &[FileInfo]) -> String {
 
 /// Go's `ltx -json`.
 fn ltx_json(files: &[FileInfo]) -> String {
-    let objects: Vec<_> = files
-        .iter()
-        .map(|info| {
-            let [level, min, max, size, at] = ltx_row(info);
-            vec![
-                ("level", level),
-                ("min_txid", quote(&min)),
-                ("max_txid", quote(&max)),
-                ("size", size),
-                ("timestamp", quote(&at)),
-            ]
-        })
-        .collect();
-    indented_objects(&objects)
+    indented(
+        files
+            .iter()
+            .map(|info| {
+                let range = info.key.range();
+                json!({
+                    "level": info.key.level().get(),
+                    "min_txid": range.min().to_string(),
+                    "max_txid": range.max().to_string(),
+                    "size": info.size,
+                    "timestamp": go_rfc3339(listed_time(info).0),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn listed_time(info: &FileInfo) -> (Timestamp, bool) {
@@ -997,38 +955,50 @@ fn listed_time(info: &FileInfo) -> (Timestamp, bool) {
     }
 }
 
-fn file_json(info: &FileInfo) -> String {
+fn file_json(info: &FileInfo) -> Value {
     let range = info.key.range();
     let (created, exact) = listed_time(info);
-    object(&[
-        ("level", info.key.level().get().to_string()),
-        ("key", quote(&key_path(&info.key))),
-        ("min", quote(&range.min().to_string())),
-        ("max", quote(&range.max().to_string())),
-        ("size", info.size.to_string()),
-        ("created_at", quote(&created.to_string())),
-        ("created_at_ms", created.unix_millis().to_string()),
-        ("created_at_exact", exact.to_string()),
-    ])
+    json!({
+        "level": info.key.level().get(),
+        "key": key_path(&info.key),
+        "min": range.min().to_string(),
+        "max": range.max().to_string(),
+        "size": info.size,
+        "created_at": created.to_string(),
+        "created_at_ms": created.unix_millis(),
+        "created_at_exact": exact,
+    })
 }
 
 fn files_json(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> String {
-    let files: Vec<String> = inventory.files().iter().map(file_json).collect();
-    let mut fields = vec![
-        ("files", array(&files)),
-        ("unrecognized_names", inventory.skipped_total().to_string()),
-    ];
+    let files: Vec<Value> = inventory.files().iter().map(file_json).collect();
+    let mut out = json!({
+        "files": files,
+        "unrecognized_names": inventory.skipped_total(),
+    });
     if let Some(count) = created_at_fallbacks {
-        fields.push(("created_at_from_last_modified", count.to_string()));
+        add(&mut out, "created_at_from_last_modified", count);
     }
-    let mut out = object(&fields);
-    out.push('\n');
-    out
+    line(&out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LEVEL_HEADERS, levels_table};
+    use super::{LEVEL_HEADERS, databases_json, levels_table};
+
+    /// Go's `databases -json` layout: indented two spaces, `[]` when empty, a quote escaped.
+    #[test]
+    fn databases_json_is_pinned_byte_for_byte() {
+        assert_eq!(databases_json(&[]), "[]\n");
+        let rows = [
+            ("/a b.db".to_owned(), "file"),
+            ("/q\"x.db".to_owned(), "s3"),
+        ];
+        assert_eq!(
+            databases_json(&rows),
+            "[\n  {\n    \"path\": \"/a b.db\",\n    \"replica\": \"file\"\n  },\n  {\n    \"path\": \"/q\\\"x.db\",\n    \"replica\": \"s3\"\n  }\n]\n"
+        );
+    }
 
     fn row(cells: [&str; 6]) -> [String; 6] {
         cells.map(str::to_owned)
