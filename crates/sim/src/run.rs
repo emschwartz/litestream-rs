@@ -1462,7 +1462,12 @@ impl Runner {
             return now == self.w.sqlite.page_size()
                 && (remembered || self.replica_page_size().ok().flatten() == Some(was));
         }
+        // An object a size mismatch left short and a delete could not remove
+        // is real damage in the replica, as a corrupted publish is.
+        let damaged =
+            cause == StopCause::RemoteCorrupt && !self.w.remote_faults.damaged().is_empty();
         self.allow_stop
+            || damaged
             || self
                 .expected
                 .iter()
@@ -2082,11 +2087,12 @@ impl Runner {
             // A flipped bit is no commit: the model follows it, and no restore may give it.
             (WalOp::FlipLastFrameBit, Heal::No) => self.w.adopt_corrupt_state(),
             (WalOp::FlipLastFrameBit, Heal::Yes) => self.w.adopt_local_state(),
+            // A regrowth that kept its commit marks made a commit at each of them.
+            (WalOp::RegrowSameSalts(_), _) => self.w.adopt_regrown(),
             (
                 WalOp::TearHeader
                 | WalOp::TruncateAtFrame(_)
                 | WalOp::RewriteSameLength(_)
-                | WalOp::RegrowSameSalts(_)
                 | WalOp::RegrowWithoutCommitMarks(_),
                 _,
             ) => self.w.adopt_local_state(),

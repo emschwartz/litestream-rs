@@ -297,6 +297,8 @@ side! {
     fn crash(&self, kind: CrashKind);
     /// The database as a new reader sees it.
     fn image(&self) -> Vec<u8>;
+    /// The database at each commit mark of the WAL's generation, ascending, with its frame end.
+    fn commit_images(&self) -> Vec<(u32, Vec<u8>)>;
     /// The database file's bytes.
     fn db_file(&self) -> Vec<u8>;
     /// The WAL file's bytes, if there is a file.

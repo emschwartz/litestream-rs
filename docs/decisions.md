@@ -50,6 +50,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D84 | Fail-stop's user-visible names | As approved, with `refused_at_start`, `held_by` and `allowed` | owner, after a Fable review | 2026-11-22 | decided |
 | D85 | How does the fail-stop clock date lag? | Each kind on its own date, never the start of an unbroken run; a date that cannot be kept exactly moves later | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D86 | When does a trip for age clear? | Once the commits it tripped on reach the replica, not at zero age | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D87 | How big is an engine thread's stack, and what keeps it big enough? | 512 KiB, about twice the measured debug peak and eight times the release peak; every suite runs at half of it | parent session; numbers and gate by Claude (fail-stop) | 2026-11-23 | decided |
 | D100 | How does the journal hold the unproven-WAL debt, and when is it written? | Written at the end of the tick that changes it; a new failure may raise it at any step; `JournalUnwritable` while the journal lags | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
 | D101 | Does a run with nothing to record still create the journal? | Yes: a process that neither read nor wrote a record writes one, so `JournalMissing` means the journal was lost | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
 | D102 | Are the journal's signals a degraded state? | No: a notice in `/healthz` and `lsr_journal_signal`, unwritable included; `/healthz` stays 200 | parent session, names reviewed for the owner | 2026-11-22 | decided |
@@ -71,6 +72,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D60 | Find a merged file that a lagging listing hides, whose level-0 inputs are gone? | Read its level key from the starts the listing implies; the case with no start left stays known-wrong | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 | D61 | A lagging listing hides everything above a wide hole: keep a marker object in the replica? | Yes, in the smallest form: `newest-snapshot`, written once per snapshot and believed only when a read finds the snapshot it names. No newest-transaction marker. Amends D6 and D8 | Fable, **delegated** | 2026-11-22 | open question (owner), issue #169 |
+| D62 | What does the simulator's hold judge require of an as-of restore through a fault? | The as-of bound (G3), not the raw replica's answer | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 | D63 | A boot with nothing staged behind a listing that may lag, or a torn tail a higher level already holds: guess the end or stop? | Walk to the cap with nothing staged; stop rather than end below a file the listing shows | Claude, **delegated** (route from the parent session) | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
 
@@ -556,8 +558,8 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 ## D82. When the boot is judged, and how the library refuses writes (delegated)
 
 - **Question:** under `hold-start` the application is held only before it is released. When may it be released, and how does the library refuse a write?
-- **Choice:** the boot is judged once the replica was listed and the snapshot the boot asked for, if any, was staged or its step failed (a stop that snapshot finds is a stop at boot); or once a boot attempt failed for anything but a refusal (a store that times out does not hold the start). Until then the gate is `Pending`: an `-exec` child waits, library writes are not refused, nothing is released. The library refuses through a commit hook `app_connection` installs with the C API in `lsr-sqlite` (rusqlite's own needs a mutable connection, and `app_connection` takes a shared one); the hook's flag is one `Arc` count per connection, never freed. An application on another binding reads the gate from health.
-- **Cost accepted:** the hook replaces any commit hook the application set. A library application that writes before the first boot is judged is not refused even if the boot then stops; `wait_booted` is there for one that must not.
+- **Choice:** the boot is judged once the replica was listed and the snapshot the boot asked for, if any, was staged or its step failed (a stop that snapshot finds is a stop at boot); or once a boot attempt failed for anything but a refusal (a store that times out does not hold the start). Until then the gate is `Pending`: an `-exec` child waits, library writes are not refused, nothing is released. The library refuses through a commit hook `app_connection` installs with the C API in `lsr-sqlite` (rusqlite's own needs a mutable connection, and `app_connection` takes a shared one); the hook's flag is one `Arc` count per connection, kept in the connection's client data and released when it closes. An application on another binding reads the gate from health.
+- **Cost accepted:** SQLite keeps one commit hook per connection and returns only the old one's argument, so the gate cannot keep or restore a hook the application set: `app_connection` fails with `CommitHookReplaced` when it replaced one, and a hook the application sets afterwards silently removes the gate, so fail-stop's refusal of that connection's commits no longer holds. That is a known limit: SQLite allows one commit hook per connection and offers no way to read it back, so nothing can notice. More broadly, commits are refused only on connections `app_connection` set up: a connection the application never set up, another SQLite library linked into the process, and another process writing the database (a second program, the `sqlite3` shell, another binding) are not stopped, and nothing reports them. `check_app_connection` cannot close this: it could see that the gate was installed, never that its hook is still the one in place. The sidecar's `stop-app` stops its `-exec` child and every connection of it, but not a process it did not start. A library application that writes before the first boot is judged is not refused even if the boot then stops; `wait_booted` is there for one that must not.
 - **Revisit if:** applications need their own commit hook, or ask for writes refused while pending.
 - **Links:** #115, `crates/sqlite/src/gate.rs`, `crates/replica/src/thread.rs` (`Worker::fail_stop`).
 
@@ -599,6 +601,17 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** after a long outage heals, a new trip can follow as soon as newer lag reaches the bound and fails again, without the age touching zero in between.
 - **Revisit if:** operators see a trip clear and come back within one bound.
 - **Links:** `crates/core/src/failstop.rs` (`Lag::observe`), core::`failstop::tests::a_trip_for_age_clears_once_its_commits_land`.
+
+## D87. The engine thread's stack and its headroom gate
+
+- **Question:** an outside review (#197) found the 512 KiB engine stack sized from one debug measurement. A stack overflow is a SIGSEGV that `catch_unwind` cannot catch, so it would take the application down. What size, and what keeps it right as the code grows?
+- **Measured** (2026-11-23, x86-64 Linux, main 079ceb3; the replica, sidecar and CLI suites at each size): debug passes at 240 KiB and fails at 232; release passes at 64 KiB and fails at 48. The first measurement had passed debug at 192, so the code grew about 48 KiB deeper. The depth is ordinary frames, not large futures (the engine's tick is 4.4 KiB) and not recursion, so there is nothing to remove.
+- **Choice:** keep 512 KiB, about twice the debug peak and eight times the release peak, with an HTTPS request's 48 KiB on top of either. Every suite runs at half the shipped size under the `test-half-stack` feature, which `just check`'s `--all-features` turns on, so a path that grows past the margin fails a test before it can overflow in the field. The feature refuses to compile without debug assertions.
+- **Cost accepted:** the debug peak sits 16 KiB under the gate's half, so the gate will trip as the code grows; that is when to measure again. A path no suite reaches is not covered.
+- **Options considered:** a runtime setting for the stack (`Runtime`), which tests would set: a public name to approve and wider churn. Sizing far larger: address space per thread for a process with thousands of databases.
+- **Revisit if:** the gate trips, or an HTTPS store path is added to the suites.
+- **Links:** #197, `crates/replica/src/stack.rs`.
+
 ## D42. A lone `access-key-id` or `secret-access-key` (delegated)
 
 - **Question:** Go builds static credentials only when the config file gives both keys; with one, it ignores it and signs with whatever the AWS SDK's default chain finds (environment, shared files, the instance role). litestream-rs refuses the file. D33 asks for Go's behaviour unless Go is wrong.
@@ -747,6 +760,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
   - The engine can still upload above a hole without a snapshot after its fix, or the owner wants a restore to refuse a replica that lost its newest files. Either reopens B1.
 - **Status:** the owner keeps this as an open question, tracked in issue #169. Nothing is built.
 - **Links:** issue #169; `crates/core/src/probe.rs` and `crates/core/src/restore.rs` (`listed_past`) on `claude/merged-level-probe`; seed 0x7f8 on `claude/overlapping-faults`; D2, D6, D8, D33, D34; https://developers.cloudflare.com/r2/reference/consistency/; https://www.tigrisdata.com/docs/concepts/consistency/.
+
+## D62. The hold judge holds an as-of answer to the bound
+
+- **The case:** a lagging listing hides a merged level-1 file. An as-of restore through the hold's view plans from the finer level-0 files under it; the raw replica plans from the merged file and, for an instant inside it, takes the earlier state. The two answers differ, and the hold judge failed the run for not matching the raw one (simulator seed 0x80e).
+- **Options:** (a) the judge demands equality with the raw replica for every target, as before; (b) the as-of planner prefers the finest files so both answers agree; (c) the judge holds an as-of answer that differs from the raw one to the as-of bound.
+- **Choice:** (c). G3 in `docs/BEHAVIOR.md` promises only that an as-of answer holds no commit begun after the instant, and says any older state meets it. Both answers do, so the judge was wrong, not the planner. `Latest` and a transaction id keep the equality check: their answer is fixed by the replica.
+- **Cost accepted:** a view that answered as of an instant with a state too old for its own files is not caught by this judge; the history judge's lag checks are where staleness is bounded. Under a backward clock step the history judge checks only that the answer is a state of the history (its untimed path), so the pinned 0x80e history exercises that path.
+- **Revisit if:** the as-of guarantee gains a lower bound (an answer at least as new as the newest file before the instant).
+- **Links:** `crates/sim/src/run/hold.rs` (`judge_through`), `crates/sim/src/history.rs` (`judge_as_of`), G3 in `docs/BEHAVIOR.md`.
 
 ## D63. A boot never guesses the replica's end
 
