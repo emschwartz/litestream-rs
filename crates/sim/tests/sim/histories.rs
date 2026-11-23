@@ -17,6 +17,7 @@ pub mod seed_0x126d68facf21;
 pub mod seed_0x126d68facf74;
 pub mod seed_0x126d68fad061;
 pub mod seed_0x126d68fae16b;
+pub mod seed_0x148;
 pub mod seed_0x1919f;
 pub mod seed_0x25;
 pub mod seed_0x2c;
@@ -188,6 +189,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
             "it pins an open defect (KnownWrong::HaltForgottenAtRestart) and passes only while \
              main fails with it, so no plant can be judged by it",
         ),
+    ),
+    (
+        "seed_0x148",
+        "the_law_kills_inside_a_hold_only_where_known_defects_are_counted_seed_0x148",
+        Guard::Own("law-kills-inside-holds"),
     ),
     (
         "seed_0x116",

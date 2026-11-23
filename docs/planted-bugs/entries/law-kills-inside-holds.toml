@@ -1,0 +1,7 @@
+# The kill-after-fault law kills inside a hold whether or not known defects are counted, so runs
+# that leave the known-wrong cells out reach D9 (a restart inside a hold forgets the halt).
+name = "law-kills-inside-holds"
+fix = "claude/law-respects-d9"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["kill_after_fault::the_law_kills_inside_a_hold_only_where_known_defects_are_counted_seed_0x148"]
