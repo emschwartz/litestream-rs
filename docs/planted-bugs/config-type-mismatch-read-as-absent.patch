@@ -1,0 +1,13 @@
+diff --git a/crates/config/src/walk.rs b/crates/config/src/walk.rs
+index c41866f7..320cda98 100644
+--- a/crates/config/src/walk.rs
++++ b/crates/config/src/walk.rs
+@@ -75,7 +75,7 @@ impl Fields {
+             return None;
+         }
+         let got = want(value);
+-        if got.is_none() {
++        if got.is_none() && false {
+             let kind = ProblemKind::FieldType {
+                 key: name,
+                 expected,

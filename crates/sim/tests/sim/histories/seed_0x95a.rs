@@ -1,4 +1,7 @@
 //! Seed 0x95a's first 83 operations, as the live generator under the seed's swarm mix with holds at 20 in a thousand drew them (the survival campaign).
+//!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
 
 use lsr_core::{SourceError, SourceOp};
 use lsr_ltx::{PageNo, PageSize};
@@ -43,7 +46,7 @@ pub const OPS: &[Op] = &[
     Op::Verify,
     Op::CommitInTick { pages: 4 },
     Op::CommitInTick { pages: 2 },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Tick,
     Op::CommitInTick { pages: 3 },
     Op::Commit {
@@ -52,13 +55,13 @@ pub const OPS: &[Op] = &[
     },
     Op::CommitInTick { pages: 2 },
     Op::Meta(MetaOp::Restore),
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Shrink { pages: 3 },
     Op::SecondWriter { ticks: 2 },
     Op::Shutdown,
     Op::ClockJump(47489),
     Op::Restore,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::LaggingListings {
         writes: 5,
         window: 24,
@@ -80,7 +83,7 @@ pub const OPS: &[Op] = &[
     Op::ClockJump(93600000),
     Op::OtherProcessReader { begin: false },
     Op::Tick,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::LaggingListings {
         writes: 1,
         window: 21,
@@ -95,7 +98,7 @@ pub const OPS: &[Op] = &[
     },
     Op::Shrink { pages: 1 },
     Op::CommitInTick { pages: 2 },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Meta(MetaOp::Save),
     Op::CommitInTick { pages: 1 },
     Op::Shrink { pages: 3 },

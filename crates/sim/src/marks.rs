@@ -198,7 +198,6 @@ classes! {
     MetaTruncateNewest = "Meta.TruncateNewest", Undrawn;
     MetaStripNewestOrigin = "Meta.StripNewestOrigin", Undrawn;
     MetaDeleteAll = "Meta.DeleteAll", Once;
-    MetaForgeNewest = "Meta.ForgeNewest", Once;
     // Undrawn: a copy saved while down changes nothing; the generator saves while running.
     DamageSave = "StagingDamage.Save", Undrawn;
     DamageRestore = "StagingDamage.Restore", Once;
@@ -208,7 +207,6 @@ classes! {
     DamageStripNewestOrigin = "StagingDamage.StripNewestOrigin", Once;
     // Undrawn: EnvFault.WipeStaging is the drawn form of this.
     DamageDeleteAll = "StagingDamage.DeleteAll", Undrawn;
-    DamageForgeNewest = "StagingDamage.ForgeNewest", Once;
     // Undrawn: SecondWriter is the drawn form of these two.
     RemotePutUnrecognized = "Remote.PutUnrecognized", Undrawn;
     RemoteRemoveUnrecognized = "Remote.RemoveUnrecognized", Undrawn;
@@ -449,7 +447,6 @@ impl Class {
             MetaOp::TruncateNewest => Self::MetaTruncateNewest,
             MetaOp::StripNewestOrigin => Self::MetaStripNewestOrigin,
             MetaOp::DeleteAll => Self::MetaDeleteAll,
-            MetaOp::ForgeNewest => Self::MetaForgeNewest,
         }
     }
 
@@ -462,7 +459,6 @@ impl Class {
             MetaOp::TruncateNewest => Self::DamageTruncateNewest,
             MetaOp::StripNewestOrigin => Self::DamageStripNewestOrigin,
             MetaOp::DeleteAll => Self::DamageDeleteAll,
-            MetaOp::ForgeNewest => Self::DamageForgeNewest,
         }
     }
 

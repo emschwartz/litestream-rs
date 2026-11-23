@@ -1,5 +1,8 @@
 //! Seed 0xf488c's history of 299 operations, as the live generator under the seed's own mix drew it before the overlapping-fault draw moved the mix.
 //!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
+//!
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
@@ -62,7 +65,7 @@ pub const OPS: &[Op] = &[
     Op::SecondWriter { ticks: 7 },
     Op::Remote(RemoteOp::RollBack),
     Op::SecondWriter { ticks: 7 },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::AppInTick {
         at: AppAt::Call(12),
         op: AppOp::ReaderBegin,
@@ -127,7 +130,7 @@ pub const OPS: &[Op] = &[
     Op::Spill,
     Op::Tick,
     Op::Spill,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Commit {
         pages: 2,
         grow: false,
@@ -252,7 +255,7 @@ pub const OPS: &[Op] = &[
     },
     Op::Shutdown,
     Op::Restore,
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::StoreFault {
         target: Target::Remote,
         op: StoreOp::List,

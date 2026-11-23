@@ -1,4 +1,5 @@
 name = "boot-gate-refuses-nothing-sim"
+patch = "boot-gate-refuses-nothing"
 fix = "aa1165d"
 package = "lsr-sim"
 test_bin = "sim"

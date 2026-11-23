@@ -359,6 +359,8 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         staging_fs: _,
         // The engine's own configuration.
         truncate_pages: _,
+        // The law's process crashes are noted as they happen, as a crash operation's are.
+        kill_after_fault: _,
         // Which SQLite the engine runs against: each backend's faults are drawn and noted
         // as the model's are.
         sqlite: _,
