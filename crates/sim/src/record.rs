@@ -360,7 +360,6 @@ const fn meta(meta: MetaOp) -> &'static str {
         MetaOp::TruncateNewest => "MetaOp::TruncateNewest",
         MetaOp::StripNewestOrigin => "MetaOp::StripNewestOrigin",
         MetaOp::DeleteAll => "MetaOp::DeleteAll",
-        MetaOp::ForgeNewest => "MetaOp::ForgeNewest",
     }
 }
 
