@@ -16,8 +16,7 @@
 //!   `app-readers: none` claim) and the run crosses checkpoints, WAL restarts and TRUNCATEs
 //!   on both.
 //!
-//! Metrics are not compared: the daemon does not serve `addr` yet (it warns that the listener
-//! is not served), so there is no `/metrics` to scrape.
+//! Metrics are compared in `dropin_metrics`.
 
 #![expect(
     clippy::arithmetic_side_effects,

@@ -2242,6 +2242,7 @@ mod tasks;
 mod vouch;
 mod wal_barrier;
 mod witness;
+mod work;
 
 /// Ticks at `now` onto a staged file that fails verification for the first
 /// time: one failed read deletes nothing and the task retries. Returns when

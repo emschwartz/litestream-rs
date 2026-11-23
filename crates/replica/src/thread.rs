@@ -703,6 +703,8 @@ impl Worker {
             .ahead_of_wal_unchecked()
             .map(AheadOfWalUnchecked::of);
         let snapshots = self.actor.snapshots();
+        let work = self.actor.work();
+        let wal_synced_offset = self.actor.synced_wal_offset();
         let final_snapshot = self.actor.final_snapshot();
         let read_lock_violations = self.actor.read_lock_violations();
         let ran = self.app_ran_total();
@@ -733,8 +735,10 @@ impl Worker {
             health.resnapshot = resnapshot;
             health.app_checkpoints_ran = ran;
             health.app_checkpoints = app;
+            health.wal_synced_offset = wal_synced_offset;
             health.counters = Counters {
                 snapshots,
+                work,
                 read_lock_violations,
                 ..seen.counters
             };

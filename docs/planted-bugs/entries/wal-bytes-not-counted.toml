@@ -1,0 +1,4 @@
+name = "wal-bytes-not-counted"
+fix = "plant"
+package = "lsr-core"
+tests = ["actor::tests::work::a_sync_step_counts_one_call_and_its_frames"]

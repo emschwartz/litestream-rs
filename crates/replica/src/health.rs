@@ -12,7 +12,7 @@ use std::num::NonZeroU32;
 
 use lsr_core::{
     AppCheckpoint, AppCheckpoints, Degraded, FinalSnapshot, Gate, JournalSignal, PersistentCause,
-    Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip,
+    Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, WorkCounts,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -138,6 +138,8 @@ pub struct Counters {
     /// Snapshots staged, per cause: each one uploads the whole database, so
     /// a cause that keeps counting up is a cost to look into.
     pub snapshots: SnapshotCounts,
+    /// What the engine's sync steps and the checkpoints it asked SQLite for did.
+    pub work: WorkCounts,
     /// Recoveries that found commits lost to a WAL restart the read lock should have
     /// prevented: a broken lock or a bug in the continuity proof. Each takes a snapshot, counted
     /// as `generation_changed`; any count above zero is worth a report.
@@ -166,6 +168,9 @@ pub struct Health {
     pub unreplicated_since: Option<Timestamp>,
     /// The WAL file's size: a WAL the read lock holds while uploads are degraded fills the disk.
     pub wal_bytes: u64,
+    /// Where in the WAL the newest staged file ends: the offset the last sync read to (Go's
+    /// `litestream_wal_size`). 0 before the first sync.
+    pub wal_synced_offset: u64,
     /// The database file's size.
     pub db_bytes: u64,
     /// Why the next sync is a snapshot, when it is one.
@@ -354,6 +359,7 @@ impl Health {
             replicated: None,
             unreplicated_since: None,
             wal_bytes: 0,
+            wal_synced_offset: 0,
             db_bytes: 0,
             resnapshot: None,
             app_checkpoints_ran: 0,
@@ -380,6 +386,7 @@ impl Health {
                     bytes_uploaded: 0,
                 },
                 snapshots: SnapshotCounts::ZERO,
+                work: WorkCounts::ZERO,
             },
             held_by: FailStop {
                 trip: None,
