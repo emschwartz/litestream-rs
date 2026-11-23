@@ -2880,7 +2880,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let refused = unvouched.filter(|tip| gate.refuses(*tip));
     let resized = page_size.zip(now).filter(|(was, now)| was != now);
     let refused_through = match refused {
-        Some(tip) if gate.fresh() => {
+        Some(tip) if resized.is_none() && gate.fresh() => {
             let same =
                 identity::local_is_replica(env.wal, reader, committed, env.db, remote, tip).await?;
             (!same).then_some(tip)

@@ -27,7 +27,7 @@ use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::inventory::InventoryError;
 use crate::plan::RestoreTarget;
-use crate::restore::{RestoreError, RestoreOptions, restore_from};
+use crate::restore::{RestoreError, RestoreOptions, restore_once};
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::StoreError;
 use crate::sync::scan_whole;
@@ -88,9 +88,8 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
 ) -> Result<bool, Fault> {
     let mut image = BTreeMap::new();
     let sink = DigestSink { pages: &mut image };
-    let restored = restore_from(
+    let restored = restore_once(
         remote,
-        None,
         RestoreTarget::Txid(tip),
         RestoreOptions::default(),
         sink,
@@ -106,7 +105,7 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
     let page_size = restored.page_size();
     let same = match reader {
         Some(reader) if reader.header().page_size() != page_size => false,
-        Some(reader) => {
+        Some(reader) if committed.end().offset().frame_index() > 0 => {
             let covered = scan_whole(reader, committed)?;
             let size = match covered.commit() {
                 Some(size) => size.get(),
@@ -118,7 +117,7 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
             };
             size == restored.commit().get() && local.matches(&image, size, page_size)?
         }
-        None => {
+        Some(_) | None => {
             let size = db.page_count().map_err(Fault::from_source)?.get();
             let local: Local<'_, '_, W::Wal, P> = Local { reader: None, db };
             size == restored.commit().get() && local.matches(&image, size, page_size)?

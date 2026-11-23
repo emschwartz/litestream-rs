@@ -459,6 +459,18 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     restore_within(store, listed, target, options, sink, MAX_ATTEMPTS).await
 }
 
+/// [restore_from] for a caller that retries itself: one attempt, so a replica that does not plan
+/// or a file that vanishes is an error at once, not a listing again. The boot's identity check is
+/// one: its refusal stands and the next boot checks afresh.
+pub(crate) async fn restore_once<S: ObjectStore, K: DatabaseSink>(
+    store: &S,
+    target: RestoreTarget,
+    options: RestoreOptions,
+    sink: K,
+) -> Result<Restored, RestoreError> {
+    restore_within(store, None, target, options, sink, 1).await
+}
+
 /// [restore_from], with each reason to list again allowed `limit` attempts.
 async fn restore_within<S: ObjectStore, K: DatabaseSink>(
     store: &S,
