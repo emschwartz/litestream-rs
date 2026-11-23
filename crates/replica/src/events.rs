@@ -54,7 +54,7 @@ pub enum Event {
         /// What the file system said.
         kind: std::io::ErrorKind,
     },
-    /// The engine spent its takeover record by publishing a transaction it covers
+    /// The engine spent its takeover record by confirming a put above it
     /// (`lsr_core::Actor::takeover_spent`), and the record could not be deleted from the meta
     /// directory. Deleting it is retried every turn; a restart before it succeeds reads the
     /// stale record back.

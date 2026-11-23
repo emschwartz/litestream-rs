@@ -234,10 +234,7 @@ fn no_journal_a_boot_can_find_changes_what_the_engine_does() {
 #[test]
 fn a_restart_after_a_run_with_no_debt_reports_nothing() {
     // No destination, so no floor: the run holds no fact at all, and still writes a record.
-    let nothing = ActorConfig {
-        destination: None,
-        ..cfg()
-    };
+    let nothing = ActorConfig { ..cfg() };
     let mut journal = MemJournal::default();
     let mut rig = Rig::new();
     settle(
@@ -359,10 +356,7 @@ fn failed_sync_with(journal: &mut MemJournal, config: ActorConfig) -> (Rig, Acto
 #[test]
 fn a_failed_wal_sync_is_recorded_in_the_tick_that_met_it() {
     // No destination, so no floor: the first run holds no fact, and still writes a record.
-    let nothing = ActorConfig {
-        destination: None,
-        ..go_like()
-    };
+    let nothing = ActorConfig { ..go_like() };
     let mut journal = MemJournal::default();
     let mut rig = Rig::new();
     settle(
@@ -486,10 +480,7 @@ fn an_unwritable_journal_stops_lagging_once_the_debt_is_paid() {
         ..valid()
     };
     // No destination, so no floor: the debt is the one fact this test owes.
-    let no_floor = ActorConfig {
-        destination: None,
-        ..go_like()
-    };
+    let no_floor = ActorConfig { ..go_like() };
     let (mut rig, mut actor, until) = failed_sync_with(&mut journal, no_floor);
     assert_eq!(
         actor.journal(),
@@ -690,16 +681,6 @@ fn unchecked_recorded(journal: &mut MemJournal) -> Option<lsr_journal::Unchecked
     }
 }
 
-/// The floor the journal holds.
-fn floor_recorded(journal: &mut MemJournal) -> Option<lsr_journal::Floor> {
-    match JournalWriter::open(journal).1.verdict {
-        lsr_journal::Verdict::Read { journal, .. } => journal.floor,
-        lsr_journal::Verdict::Newer { .. }
-        | lsr_journal::Verdict::Missing
-        | lsr_journal::Verdict::Unreadable(_) => None,
-    }
-}
-
 /// Every object the replica holds is gone: the state at its newest confirmed transaction cannot
 /// be restored, however often it is asked.
 fn wipe_replica(rig: &Rig) {
@@ -796,242 +777,6 @@ fn the_unchecked_notice_stands_for_the_window_across_a_restart() {
     );
     assert_eq!(later.ahead_of_wal_unchecked(), None);
     assert_eq!(unchecked_recorded(&mut journal), None);
-}
-
-/// The replica's level-0 file ending at `txid`: its length and the FNV-1a 64 digest of its
-/// bytes, computed here rather than by the code under test.
-fn replica_bytes_at(rig: &Rig, txid: Txid) -> (u64, u64) {
-    let inventory = block_on(Inventory::load(&rig.remote.inner)).unwrap();
-    let file = inventory
-        .level(Level::ZERO)
-        .iter()
-        .find(|file| file.key.range().max() == txid)
-        .copied()
-        .expect("the replica holds a level-0 file ending at the floor");
-    let bytes = block_on(rig.remote.inner.read(&file.key, 0, ReadLen::CHUNK)).unwrap();
-    let digest = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
-    });
-    (u64::try_from(bytes.len()).unwrap(), digest)
-}
-
-/// Deletes every replica file ending at the newest transaction, as a bucket put back to an
-/// older version does; returns the newest it removed.
-fn roll_back_replica(rig: &Rig) -> Txid {
-    let all = block_on(Inventory::load(&rig.remote.inner)).unwrap();
-    let newest = all.newest().unwrap();
-    let gone: Vec<FileKey> = all
-        .files()
-        .iter()
-        .map(|info| info.key)
-        .filter(|key| key.range().max() == newest)
-        .collect();
-    block_on(rig.remote.inner.delete(&gone)).unwrap();
-    newest
-}
-
-fn destination() -> lsr_journal::ReplicaId {
-    lsr_journal::ReplicaId::of(b"test")
-}
-
-/// Each confirmed upload raises the floor to its transaction, anchored on the bytes it put, and
-/// the end of the tick journals it (issue #171, item 4).
-#[test]
-fn a_confirmed_upload_raises_the_floor_anchored_on_the_bytes_it_put() {
-    let mut journal = MemJournal::default();
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(go_like());
-    rig.commit(2);
-    settle(&mut rig, &mut actor, T0, Some(&mut journal));
-    let floor = actor.floor().expect("a confirmed upload sets the floor");
-    let newest = block_on(Inventory::load(&rig.remote.inner))
-        .unwrap()
-        .newest()
-        .unwrap();
-    assert_eq!((floor.replica(), floor.bound()), (destination(), newest));
-    let anchor = floor
-        .anchor()
-        .expect("this process put the file, so it knows its bytes");
-    assert_eq!((anchor.len, anchor.digest), replica_bytes_at(&rig, newest));
-    assert_eq!(floor_recorded(&mut journal), Some(floor));
-}
-
-/// A restart reads the floor back for its destination, and a replica rolled back before the
-/// boot lowers neither the floor held nor the one recorded: the ids stay taken.
-#[test]
-fn the_floor_is_read_back_and_a_rollback_before_the_boot_does_not_lower_it() {
-    let mut journal = MemJournal::default();
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(go_like());
-    rig.commit(2);
-    settle(&mut rig, &mut actor, T0, Some(&mut journal));
-    let floor = actor.floor().expect("a floor");
-    let lost = roll_back_replica(&rig);
-    assert_eq!(lost, floor.bound());
-    let mut restarted = Actor::new(go_like());
-    tick(&mut rig, &mut restarted, T0 + 10, Some(&mut journal));
-    assert_eq!(restarted.floor(), Some(floor), "read back, not lowered");
-    assert_eq!(floor_recorded(&mut journal), Some(floor));
-}
-
-/// A floor recorded for another destination is not this engine's: it is not adopted, and it
-/// stays in the record until this engine has a floor of its own, since none is ever dropped.
-#[test]
-fn another_destination_s_floor_is_kept_in_the_record_but_not_adopted() {
-    let theirs = lsr_journal::Floor::new(
-        lsr_journal::ReplicaId::of(b"elsewhere"),
-        Txid::new(99).unwrap(),
-        None,
-    );
-    let mut bytes = encode(
-        &Journal {
-            floor: Some(theirs),
-            ..Journal::ABSENT
-        },
-        Seq::FIRST,
-    )
-    .to_vec();
-    bytes.extend([0; SLOT]);
-    let mut journal = MemJournal {
-        bytes: Some(bytes),
-        ..MemJournal::default()
-    };
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(go_like());
-    tick(&mut rig, &mut actor, T0, Some(&mut journal));
-    assert_eq!(
-        actor.floor(),
-        None,
-        "another destination's floor is not adopted"
-    );
-    assert_eq!(floor_recorded(&mut journal), Some(theirs));
-    rig.commit(2);
-    settle(&mut rig, &mut actor, T0, Some(&mut journal));
-    let ours = actor.floor().expect("this destination's own floor");
-    assert_eq!(ours.replica(), destination());
-    assert_eq!(floor_recorded(&mut journal), Some(ours));
-}
-
-/// With no destination named the engine keeps no floor and leaves a recorded one as it is.
-#[test]
-fn no_destination_keeps_no_floor_and_leaves_the_record_s() {
-    let mut journal = MemJournal::default();
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(go_like());
-    rig.commit(2);
-    settle(&mut rig, &mut actor, T0, Some(&mut journal));
-    let recorded = floor_recorded(&mut journal).expect("a floor");
-    let no_floor = ActorConfig {
-        destination: None,
-        ..go_like()
-    };
-    let mut restarted = Actor::new(no_floor);
-    rig.commit(3);
-    settle(&mut rig, &mut restarted, T0 + 10, Some(&mut journal));
-    assert_eq!(restarted.floor(), None);
-    assert_eq!(
-        floor_recorded(&mut journal),
-        Some(recorded),
-        "passed through untouched"
-    );
-}
-
-/// A rollback the running engine sees withdraws the floor's anchor, since the replica no longer
-/// holds what it names, and keeps its bound: the ids stay taken.
-#[test]
-fn a_rollback_seen_while_running_withdraws_the_anchor_and_keeps_the_bound() {
-    let mut journal = MemJournal::default();
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(go_like());
-    rig.commit(2);
-    settle(&mut rig, &mut actor, T0, Some(&mut journal));
-    rig.commit(3);
-    settle(&mut rig, &mut actor, T0 + 10, Some(&mut journal));
-    let lost = roll_back_replica(&rig);
-    rig.commit(4);
-    let mut now = T0 + 20;
-    let mut regressed = false;
-    for _ in 0..200 {
-        let seen = tick(&mut rig, &mut actor, now, Some(&mut journal));
-        regressed |= matches!(
-            event(&seen),
-            Some(Event::Degraded {
-                cause: PersistentCause::RemoteRegressed,
-                ..
-            })
-        );
-        if regressed {
-            break;
-        }
-        now += 1_000;
-    }
-    assert!(regressed, "the rollback is seen");
-    let floor = actor.floor().expect("a floor");
-    assert!(floor.bound() >= lost, "{floor:?} fell below {lost}");
-    assert_eq!(floor.anchor(), None);
-    assert_eq!(floor_recorded(&mut journal), Some(floor));
-}
-
-/// A floor the journal cannot record is owed: an unwritable journal keeps reporting while the
-/// floor is held in this process only, and the report clears once a write takes it.
-#[test]
-fn an_unwritable_journal_reports_a_floor_it_does_not_hold() {
-    let mut journal = MemJournal {
-        writes_fail: true,
-        ..valid()
-    };
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(go_like());
-    rig.commit(2);
-    settle(&mut rig, &mut actor, T0, Some(&mut journal));
-    assert!(actor.floor().is_some());
-    assert_eq!(
-        actor.journal(),
-        Some(JournalSignal::Unwritable(ErrorKind::StorageFull))
-    );
-    journal.writes_fail = false;
-    tick(&mut rig, &mut actor, T0 + 1, Some(&mut journal));
-    assert_eq!(actor.journal(), None);
-    assert_eq!(floor_recorded(&mut journal), actor.floor());
-}
-
-/// A rebuilt engine boots beside the floor it held, which a journal that cannot be written lags:
-/// the boot keeps the floor it held, never the lower one recorded.
-#[test]
-fn a_rebuild_keeps_the_floor_a_lagging_journal_does_not_hold() {
-    let mut journal = MemJournal::default();
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(go_like());
-    rig.commit(2);
-    settle(&mut rig, &mut actor, T0, Some(&mut journal));
-    let recorded = floor_recorded(&mut journal).expect("a floor");
-    journal.writes_fail = true;
-    rig.commit(3);
-    settle(&mut rig, &mut actor, T0 + 10, Some(&mut journal));
-    let held = actor.floor().expect("a floor");
-    assert!(held.bound() > recorded.bound(), "{held:?} {recorded:?}");
-    assert_eq!(
-        floor_recorded(&mut journal),
-        Some(recorded),
-        "the journal lags"
-    );
-    actor.fault(
-        Task::Upload,
-        Fault::Bug(crate::fault::BugSite::PageMap),
-        ts(T0 + 20),
-    );
-    let mut now = T0 + 20;
-    let mut booted = false;
-    for _ in 0..50 {
-        let seen = tick(&mut rig, &mut actor, now, Some(&mut journal));
-        booted |= matches!(event(&seen), Some(Event::Booted { .. }));
-        if booted {
-            break;
-        }
-        now += 1_000;
-    }
-    assert!(booted, "the rebuilt engine boots");
-    assert_eq!(actor.floor(), Some(held), "the held floor stands");
 }
 
 /// A brand-new meta directory is one whose journal is missing too: a journal that holds a

@@ -115,8 +115,8 @@ pub(crate) fn write_takeover(meta: &Path, record: TakeoverRecord) -> io::Result<
     replace(meta, TAKEOVER_FILE, TAKEOVER_SCRATCH, &record.encode())
 }
 
-/// Deletes the takeover record, synced: the engine spent it by publishing a transaction it
-/// covers (`lsr_core::Actor::takeover_spent`), and a restart must not hand it back. A record
+/// Deletes the takeover record, synced: the engine spent it by confirming a put above it
+/// (`lsr_core::Actor::takeover_spent`), and a restart must not hand it back. A record
 /// already gone is no error.
 ///
 /// # Errors

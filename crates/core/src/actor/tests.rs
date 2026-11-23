@@ -403,7 +403,6 @@ fn cfg() -> ActorConfig {
         // The tests written before the configurable responses expect a stop.
         responses: Responses::STRICT,
         max_unreplicated_age: crate::failstop::MaxUnreplicatedAge::DEFAULT,
-        destination: Some(lsr_journal::ReplicaId::of(b"test")),
     }
 }
 
@@ -952,8 +951,7 @@ fn a_replica_ahead_of_staging_names_the_page_size() {
 /// snapshot above 2. When that delete failed, the uploader had already taken
 /// 2 as confirmed and uploaded the staged 3, built on the staged 2, onto the
 /// other object (seed 0xd79).
-#[test]
-fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
+fn a_divergence_at_two_whose_drop_fails() -> (Rig, Vec<Tick>) {
     let two = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
     let other_two = |n: u8| {
         let (mut other, mut writer) = caught_up();
@@ -993,6 +991,12 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
         .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
     rig.commit(3);
     let ticks = rig.follow(&mut actor, now, 60);
+    (rig, ticks)
+}
+
+#[test]
+fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
+    let (_rig, ticks) = a_divergence_at_two_whose_drop_fails();
     let put_three = ticks.iter().position(|tick| {
         matches!(event(tick), Some(Event::Uploaded(Did::Put(info))) if info.key.range().max() == Txid::new(3).unwrap())
     });
@@ -1003,6 +1007,37 @@ fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
         panic!("{ticks:?}");
     };
     assert!(resnapshot < put_three, "{ticks:?}");
+}
+
+/// The same divergence, with the listing that follows the failed drop: no snapshot of this
+/// engine takes the id the divergence started from (the replica's object there may be compacted
+/// into higher levels already), so no id holds two contents.
+#[test]
+fn a_failed_drop_after_a_divergence_takes_no_snapshot_at_the_diverged_id() {
+    let (rig, ticks) = a_divergence_at_two_whose_drop_fails();
+    let put_max = |tick: &Tick| match event(tick) {
+        Some(Event::Uploaded(Did::Put(info))) => Some(info.key.range().max()),
+        _ => None,
+    };
+    let two = Txid::new(2).unwrap();
+    assert!(
+        ticks.iter().filter_map(put_max).all(|put| put > two),
+        "{ticks:?}"
+    );
+    assert!(
+        ticks
+            .iter()
+            .any(|tick| matches!(event(tick), Some(Event::Resnapshot(_)))),
+        "{ticks:?}"
+    );
+    let staged: Vec<Txid> = Rig::files(&rig.staging, Level::ZERO)
+        .iter()
+        .map(|info| info.key.range().max())
+        .collect();
+    assert!(
+        !staged.contains(&two),
+        "no snapshot took the diverged id: {staged:?}"
+    );
 }
 
 /// BOOT-21 and BOOT-22 (D9 in `docs/BEHAVIOR.md`). A running engine whose ambiguous commit makes

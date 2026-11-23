@@ -76,7 +76,6 @@
 
 mod ahead;
 mod clock;
-mod floor;
 mod lag;
 mod once;
 mod once_retention;
@@ -129,7 +128,6 @@ use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent, Recovered,
     Verdict, WalView, newest_level_zero, newest_replica_level_zero, read_header, recover_traced,
 };
-use crate::regression_watch::RegressionWatch;
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
 use crate::store::{ObjectStore, PageLimit};
@@ -212,10 +210,6 @@ pub struct ActorConfig {
     /// How long a commit may stay off the replica before fail-stop trips for it
     /// (`crate::failstop`), and when the probe at the bound runs.
     pub max_unreplicated_age: MaxUnreplicatedAge,
-    /// The replica's destination, as the engine journal names it (`lsr_journal::ReplicaId::of`
-    /// over its canonical name): the confirmed floor is read back for this destination only.
-    /// `None` keeps no floor.
-    pub destination: Option<lsr_journal::ReplicaId>,
 }
 
 /// What a maintenance tick did.
@@ -512,12 +506,12 @@ impl Actor {
         self.kept.wanted_takeover
     }
 
-    /// A takeover record this engine spent: it published a transaction the
-    /// record covers, so the record no longer describes the replica (a
-    /// rollback may have taken the files it was written for) and must not
-    /// vouch for a file another writer puts at one of its ids. The driver
-    /// deletes the durable record, then hands it back with
-    /// [`Actor::forget_takeover`]; until then it asks again every tick.
+    /// A takeover record this engine spent: a put above the record's
+    /// transaction is confirmed on the replica (the boot's snapshot is the
+    /// first), so the record has done its work and must not vouch for a file
+    /// another writer puts at one of its ids later. The driver deletes the
+    /// durable record, then hands it back with [`Actor::forget_takeover`];
+    /// until then it asks again every tick.
     #[must_use]
     pub const fn takeover_spent(&self) -> Option<TakeoverRecord> {
         self.kept.spent_takeover
@@ -993,12 +987,11 @@ impl Actor {
                 // retry lists it and continues from what it holds now. Every
                 // fact taken from a listing goes with it (level 1's cover,
                 // which bounds the staged files a prune may delete, and the
-                // next maintenance listing is owed now); the acknowledged
-                // mark stays, so no snapshot takes an acknowledged id again.
+                // next maintenance listing is owed now). What staging still
+                // holds above what the listing shows is sent again.
                 self.engine.upload = UploadState::ListFirst { confirmed: None };
                 self.engine.maintain.level_one = None;
                 self.engine.maintain.stale = true;
-                self.engine.maintain.watch = None;
                 waiter
             }
             Action::Rebuild => {
@@ -1115,32 +1108,17 @@ impl Actor {
         }
     }
 
-    /// This engine published `txid`: a held takeover that covers it is spent, once the
-    /// engine has seen the replica hold less than the record covers (`takeover_armed`).
-    /// The spend rests on the engine's own commit; a listing only arms it, and a listing
-    /// that lags arms it early at worst, which costs no more than spending on every
-    /// covered publish.
+    /// This engine's put of `txid` is confirmed: a held takeover below it is spent. The
+    /// record vouches only for replica files through its transaction, and the replica now
+    /// holds this engine's own file above it (the snapshot a boot over the record takes is
+    /// the first), so the record has nothing left to vouch for, and kept it would vouch for
+    /// a file another writer puts at one of its ids after a rollback. A put of a covered
+    /// transaction (an upload sent again) spends nothing: the record still describes the
+    /// replica there, and an ordinary power-loss boot may still need it.
     fn spend_takeover(&mut self, txid: Txid) {
-        if !self.kept.takeover_armed {
-            return;
-        }
-        if let Some(held) = self.kept.takeover.filter(|held| held.covers(txid)) {
+        if let Some(held) = self.kept.takeover.filter(|held| txid > held.txid()) {
             self.kept.takeover = None;
             self.kept.spent_takeover = Some(held);
-            self.kept.takeover_armed = false;
-        }
-    }
-
-    /// A listing showed the replica ending at `newest`: below the held takeover's
-    /// transaction, the replica lost files the record was written for, and the next
-    /// covered publish spends it.
-    fn arm_takeover_below(&mut self, newest: Option<Txid>) {
-        if self
-            .kept
-            .takeover
-            .is_some_and(|held| newest < Some(held.txid()))
-        {
-            self.kept.takeover_armed = true;
         }
     }
 
@@ -1149,15 +1127,10 @@ impl Actor {
     fn after_upload_step(&mut self, did: &Did, now: Timestamp) -> bool {
         match *did {
             Did::Nothing | Did::Diverged { .. } => return false,
-            Did::Listed { newest } => {
-                self.engine.maintain.stale = true;
-                self.arm_takeover_below(newest);
-            }
+            Did::Listed { .. } => self.engine.maintain.stale = true,
             Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
                 let at = listing_after_upload(now, &self.kept.cfg.maintenance);
                 self.engine.maintain.list_by(at);
-                let watch = self.engine.maintain.watch;
-                self.engine.maintain.watch = RegressionWatch::put(watch, key);
                 self.spend_takeover(key.range().max());
             }
         }
@@ -1253,7 +1226,6 @@ impl Actor {
             Ok(listed) => listed,
             Err(step) => return self.boot_step(step, now),
         };
-        self.arm_takeover_below(upload.confirmed());
         let Judged {
             pending: Pending { tokens, refused },
             upload,
@@ -1303,7 +1275,6 @@ impl Actor {
             page_size,
             pages,
             upload,
-            acknowledged: upload.confirmed(),
             checkpoint: CheckpointState::boot(now),
             witnesses: tokens.into_iter().collect(),
             ..Engine::fresh()
@@ -1481,27 +1452,13 @@ impl Actor {
 
     /// The newest transaction anything has, or had: a snapshot follows it.
     fn snapshot_after(&self) -> Option<Txid> {
-        self.staged()
-            .max(self.engine.upload.confirmed())
-            .max(self.engine.acknowledged)
+        self.staged().max(self.engine.upload.confirmed())
     }
 
-    /// Takes the upload state a step left, raising the acknowledged mark.
+    /// Takes the upload state a step left.
     fn set_upload(&mut self, state: UploadState) {
         self.engine.upload = state;
-        self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
-        self.raise_floor(state.confirmed());
         self.engine.witnesses.confirmed(state.confirmed());
-        // Only a position the uploader stands on passes the dropped ids; a
-        // listing still owed keeps them, since it may confirm less.
-        if let UploadState::At(confirmed) = state
-            && self
-                .engine
-                .dropped_acknowledged
-                .is_some_and(|dropped| Some(dropped.max()) <= confirmed)
-        {
-            self.engine.dropped_acknowledged = None;
-        }
     }
 
     /// The checkpoint the policy wants now, when its task and the sync task
@@ -1930,26 +1887,6 @@ impl Actor {
         position
     }
 
-    /// Moves the upload past acknowledged ids a drop removed from staging.
-    ///
-    /// A drop after a rollback places the snapshot above the acknowledged
-    /// ids, which are never taken again. A listing afterwards confirms only
-    /// what the replica still holds, so the next planned id can be one of
-    /// those: it has no staged file, and planning it would fail every upload
-    /// with `StagedLost` until a restart. Their pages are in the snapshot
-    /// above, so the upload resumes there.
-    fn pass_dropped_acknowledged(&mut self) {
-        let (Some(dropped), UploadState::At(confirmed)) =
-            (self.engine.dropped_acknowledged, self.engine.upload)
-        else {
-            return;
-        };
-        let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
-        if next.is_some_and(|next| dropped.contains(next)) {
-            self.engine.upload = UploadState::At(Some(dropped.max()));
-        }
-    }
-
     /// The newest id an upload step may treat as this engine's own.
     ///
     /// A listing judges the replica against everything this engine put
@@ -1957,10 +1894,7 @@ impl Actor {
     /// (files the replica may hold unconfirmed). Other plans ignore drops.
     fn upload_bound(&self, plan: UploadPlan) -> Option<Txid> {
         match plan {
-            UploadPlan::List => self
-                .staged()
-                .max(self.engine.dropped_through)
-                .max(self.engine.acknowledged),
+            UploadPlan::List => self.staged().max(self.engine.dropped_through),
             UploadPlan::Idle | UploadPlan::Upload(_) => self.staged(),
         }
     }
@@ -1983,7 +1917,6 @@ impl Actor {
             .map_or(u32::MAX, NonZeroU32::get);
         let mut last = Did::Nothing;
         for _ in 0..limit {
-            self.pass_dropped_acknowledged();
             let plan = plan_upload(&self.engine.upload, self.staged());
             self.note_attempt(plan);
             let bound = self.upload_bound(plan);
@@ -2073,8 +2006,7 @@ impl Actor {
     /// A listing while running found the replica's object at `from` verifying
     /// and other than the staged file. If the staged file is still the bytes
     /// this process witnessed, the object is another writer's: this process
-    /// uploads a key only from its witnessed copy and never takes an
-    /// acknowledged id again, so nothing it wrote can differ from that copy.
+    /// uploads a key only from its witnessed copy, so nothing it wrote can differ from that copy.
     /// That is the stop for another writer, never a snapshot above its file,
     /// which would interleave the two histories; the stop's record leaves the
     /// contested id out, so a restart stops again while the object stands.
@@ -2139,20 +2071,12 @@ impl Actor {
             // upload would take the one after the confirmed transaction as
             // following it. List first, from below `from`, so the listing
             // judges the divergence again and this runs again before anything
-            // is uploaded; the acknowledged mark is kept apart.
+            // is uploaded.
             let confirmed = self.engine.upload.confirmed().min(from.prev());
             self.set_upload(UploadState::ListFirst { confirmed });
             return self.fault(Task::Upload, fault, now);
         }
         self.engine.dropped_through = self.engine.dropped_through.max(vouched);
-        // Acknowledged ids from `from` on that the replica lost (a rollback)
-        // are gone with their staged copies: they are never taken again, so
-        // the uploads resume with the snapshot above them.
-        let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
-        self.engine.dropped_acknowledged = acknowledged.and_then(|ack| TxidRange::new(from, ack));
-        if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload) {
-            self.engine.upload = UploadState::At(confirmed.max(Some(ack)));
-        }
         // Files the drop vouched for may be on the replica unconfirmed (an
         // upload whose answer was lost): list first, so the listing confirms
         // those it finds and the snapshot goes above them, before maintenance
@@ -2258,7 +2182,7 @@ impl Actor {
         if let Some(tick) = self.listing_untrusted(&inventory, now) {
             return Some(tick);
         }
-        if let Some(tick) = self.watch_unit(&inventory, now) {
+        if let Some(tick) = self.listing_regressed(&inventory, now) {
             return Some(tick);
         }
         if self.engine.maintain.read_back_owed
@@ -2323,20 +2247,14 @@ impl Actor {
         }
     }
 
-    /// Everything this engine watched since its last maintenance listing must
-    /// be listed (`crate::regression_watch`). One that is not means the replica
-    /// lost files this process confirmed, and the uploader lists again (or
-    /// the engine stops, as configured). With nothing missing the watch moves to
-    /// this listing.
-    fn watch_unit(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
-        let watch = self.engine.maintain.watch;
-        if watch.and_then(|watch| watch.missing(inventory)).is_none() {
-            let published = self.engine.upload.confirmed();
-            self.engine.maintain.watch = RegressionWatch::after_listing(inventory, published);
-            return None;
-        }
-        self.floor_regressed();
-        Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
+    /// A listing that ends below the transaction this engine confirmed: the replica lost
+    /// its newest files (a bucket rolled back, files deleted by hand). Reported as
+    /// `RemoteRegressed`, whose configured response relists and goes on. The same
+    /// comparison the uploader's own listing makes, with nothing remembered: a hole below
+    /// the newest file is not seen here, and restore reports it.
+    fn listing_regressed(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
+        (inventory.newest() < self.engine.upload.confirmed())
+            .then(|| self.fault(Task::Upload, Fault::RemoteRegressed, now))
     }
 
     /// The read-back a boot owes (see `maintain::audit`). `None` when every
@@ -2365,8 +2283,6 @@ impl Actor {
         if !covered {
             return Some(self.fault(Task::Maintenance, Fault::RemoteCorrupt, now));
         }
-        // Watched no more, whether the delete goes through or not.
-        self.engine.maintain.watch = RegressionWatch::forget(self.engine.maintain.watch, key);
         if let Err(err) = crate::publish::remove_one(remote, key, Why::RottenCovered).await {
             return Some(self.fault(Task::Maintenance, R::fault(&err), now));
         }
@@ -2464,11 +2380,9 @@ impl Actor {
         }
     }
 
-    /// A snapshot the store took: the next listing must show it, so a listing that hides it
-    /// plans nothing (`crate::regression_watch`), and no second snapshot takes its key.
+    /// A snapshot the store took.
     fn snapshot_written(&mut self, info: FileInfo, now: Timestamp, created_at_read: u64) -> Tick {
         self.maintained(now);
-        self.engine.maintain.watch = RegressionWatch::made(self.engine.maintain.watch, info.key);
         let event = MaintainedEvent::Snapshot(info);
         self.ran(
             Event::Maintained {
@@ -2856,9 +2770,7 @@ impl Actor {
             self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
             self.adopt_ahead(read.ahead);
             self.adopt_unchecked(read.unchecked);
-            self.adopt_floor(read.floor);
         }
-        self.raise_floor(upload.confirmed());
         self.kept.writer = Some(writer);
     }
 
@@ -2889,12 +2801,8 @@ impl Actor {
             self.kept.unproven.recorded(),
             self.kept.ahead,
             self.kept.unchecked,
-            // A floor is never dropped, another destination's included: the record keeps its
-            // own until this engine has one (`floor`).
-            self.kept.floor.or(held.and_then(|held| held.floor)),
         );
-        if held.map(|held| (held.unproven, held.ahead, held.unchecked, held.floor)) == Some(wanted)
-        {
+        if held.map(|held| (held.unproven, held.ahead, held.unchecked)) == Some(wanted) {
             // Nothing the engine holds is missing from the journal: nothing lags it.
             self.kept.journal_write = Ok(());
             return tick;
@@ -2903,7 +2811,6 @@ impl Actor {
             unproven: wanted.0,
             ahead: wanted.1,
             unchecked: wanted.2,
-            floor: wanted.3,
             ..held.unwrap_or(lsr_journal::Journal::ABSENT)
         };
         let Some(writer) = self.kept.writer.as_mut() else {

@@ -168,24 +168,30 @@ fn regressed(seen: &[Tick]) -> bool {
     })
 }
 
-/// The defect: a replica that lost files while the engine ran went unseen
-/// unless a commit failed and the uploader listed, so the engine uploaded
-/// above the hole. Maintenance's next listing now misses a file this process
-/// watched, a read finds it gone, and the regression is reported.
+/// A replica that lost its newest file while the engine ran: the next maintenance listing ends
+/// below what the engine confirmed, the regression is reported, and replication goes on. The
+/// staged copy of the lost file is still there, so the listing's relist sends it again, and the
+/// replica holds it once more. A hole below the newest file is not watched here (restore reports
+/// it, `docs/decisions/D173.md`).
 #[test]
 fn a_rollback_while_running_is_seen_by_the_next_maintenance_listing() {
     let mut rig = Rig::new();
     let mut actor = go_like_actor();
     rig.settle(&mut actor, T0);
     rig.commit(2);
-    rig.follow(&mut actor, T0 + 10, 50);
+    // Settled when the upload is in and the next listing is scheduled.
+    rig.settle(&mut actor, T0 + 10);
     let lost = roll_back(&rig);
-    rig.commit(3);
-    let seen = rig.follow(&mut actor, T0 + 20, 100);
+    let seen = rig.follow(&mut actor, super::listing_due(T0 + 10), 100);
     assert!(regressed(&seen), "{seen:?}");
     assert!(
-        newest_l0(&rig) > Some(lost),
-        "the upload above the hole came first: {seen:?}"
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(
+        newest_l0(&rig),
+        Some(lost),
+        "the staged copy is sent again: {seen:?}"
     );
 }
 
