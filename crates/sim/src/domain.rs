@@ -419,6 +419,33 @@ pub fn draw_source(entropy: &SeededEntropy, known_wrong: bool) -> SourceDraw {
     }
 }
 
+/// `err` for `op` if the table lets a history draw it, else an I/O error: what the older subset
+/// (runs without [`crate::Weights::error_domain`]) draws in place of a busy answer from a call
+/// that takes no lock. The subset's entropy is spent as before, so its other draws keep their
+/// values.
+#[must_use]
+pub const fn possible_source(op: SourceOp, err: SourceError) -> SourceError {
+    if drawable(source_cell(op, source_class(err)), false) {
+        err
+    } else {
+        SourceError::Io(ErrorKind::Other)
+    }
+}
+
+/// `err` for `op` on `target` if the table lets a history draw it, else a transient error of the
+/// same operation: what the older subset draws in place of a filesystem asking to slow down.
+#[must_use]
+pub fn possible_store(target: Target, op: StoreOp, err: StoreError) -> StoreError {
+    if drawable(store_cell(target, op, store_class(&err)), false) {
+        err
+    } else {
+        StoreError::Transient {
+            op,
+            kind: ErrorKind::Other,
+        }
+    }
+}
+
 /// The stop a source error legitimately causes under the default responses, if any: written
 /// from the engine's contract (BEHAVIOR's stop conditions), not taken from its policy.
 #[must_use]
@@ -782,6 +809,9 @@ fn pick_ref<'a, T>(entropy: &SeededEntropy, from: &'a [T]) -> Option<&'a T> {
     let at = usize::try_from(below(entropy, u64::try_from(from.len()).ok()?)).ok()?;
     from.get(at)
 }
+
+pub mod marks;
+pub mod points;
 
 #[cfg(test)]
 mod tests;

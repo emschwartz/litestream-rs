@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use lsr_journal::{Ahead, Floor, Journal, Lowered, ReplicaId, Unproven, WouldLower};
+use lsr_journal::{Ahead, AheadKind, Floor, Journal, Lowered, ReplicaId, Unproven, WouldLower};
 use lsr_ltx::{Timestamp, Txid};
 
 fn floor(replica: u8, bound: u64) -> Option<Floor> {
@@ -80,6 +80,7 @@ fn withdrawing_the_anchor_keeps_the_bound() {
 fn ahead(restore_point: u64) -> Journal {
     Journal {
         ahead: Some(Ahead {
+            kind: AheadKind::AheadOfWal,
             restore_point: Txid::new(restore_point).unwrap(),
             pages: NonZeroU32::new(1).unwrap(),
             first: NonZeroU32::new(2).unwrap(),

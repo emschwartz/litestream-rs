@@ -52,7 +52,7 @@ use lsr_store_fs::{FsJournalFile, FsStore};
 use crate::config::Config;
 use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
-use crate::health::{AheadOfWal, Counters, FailStop, Gone, Phase, Stopped};
+use crate::health::{AheadOfWal, AheadOfWalUnchecked, Counters, FailStop, Gone, Phase, Stopped};
 use crate::meta::{MetaLock, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
@@ -131,7 +131,9 @@ impl Progress {
         if self.replicated.map(|(txid, _)| txid) != replicated {
             self.replicated = replicated.map(|txid| (txid, now));
         }
-        let behind = left.unsynced_wal_bytes > 0 || staged > replicated;
+        // Only what is not staged: a staged file the replica lacks is the engine's own lag
+        // clock, dated from that file, which is never later than this reading.
+        let behind = left.unsynced_wal_bytes > 0;
         self.unreplicated_since = if behind {
             self.unreplicated_since.or(Some(now))
         } else {
@@ -328,6 +330,9 @@ impl Worker {
         let actor = &mut self.actor;
         if commands.snapshot {
             actor.request_snapshot();
+        }
+        if commands.final_snapshot {
+            actor.request_final_snapshot();
         }
         if commands.accept_pages {
             actor.accept_database_pages();
@@ -693,7 +698,12 @@ impl Worker {
         let resnapshot = self.actor.pending_snapshot();
         let journal = self.actor.journal();
         let ahead_of_wal = self.actor.ahead().map(AheadOfWal::of);
+        let ahead_of_wal_unchecked = self
+            .actor
+            .ahead_of_wal_unchecked()
+            .map(AheadOfWalUnchecked::of);
         let snapshots = self.actor.snapshots();
+        let final_snapshot = self.actor.final_snapshot();
         let read_lock_violations = self.actor.read_lock_violations();
         let ran = self.app_ran_total();
         let app = self.app_total();
@@ -728,9 +738,11 @@ impl Worker {
                 read_lock_violations,
                 ..seen.counters
             };
+            health.final_snapshot = final_snapshot;
             health.verification = verification;
             health.journal = journal;
             health.ahead_of_wal = ahead_of_wal;
+            health.ahead_of_wal_unchecked = ahead_of_wal_unchecked;
             state.left = parts.left;
         });
     }

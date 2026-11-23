@@ -173,6 +173,8 @@ pub const fn trip(
                 | StopCause::PageSizeChanged { .. }
                 | StopCause::DatabasePageMismatch { .. }
                 | StopCause::DatabaseAheadOfWal { .. }
+                | StopCause::WalLostCommits { .. }
+                | StopCause::DatabaseAheadOfWalUnchecked
                 | StopCause::ConditionalWritesUnsupported
                 | StopCause::Bug),
             ),

@@ -562,3 +562,39 @@ fn a_failed_restore_leaves_no_target_and_no_scratch() {
     assert!(matches!(result, Err(RestoreError::File { .. })));
     assert!(names(&dir).is_empty());
 }
+
+/// A target named with no directory syncs the current one; the empty parent is not a path.
+/// A named directory is the one synced, so one that does not exist fails.
+#[test]
+fn a_bare_target_name_syncs_the_current_directory() {
+    sync_dir(Path::new("bare.db")).unwrap();
+    let dir = TempDir::new().unwrap();
+    sync_dir(&dir.path().join("missing").join("db")).unwrap_err();
+}
+
+/// A restore that starts over leaves nothing of the first attempt in the scratch.
+#[test]
+fn a_reset_empties_the_scratch() {
+    let dir = TempDir::new().unwrap();
+    let mut sink = FileSink::create(&dir.path().join("db")).unwrap();
+    sink.write_page(page(1, &[7; 512])).unwrap();
+    sink.reset().unwrap();
+    assert_eq!(fs::metadata(sink.scratch_path()).unwrap().len(), 0);
+}
+
+/// Only a missing file counts as absent: any other answer about the target or a journal file
+/// (here a path under a regular file, a name too long, a journal that is a directory) stops the
+/// restore rather than let it publish over something it could not look at.
+#[test]
+fn only_a_missing_file_counts_as_absent() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("file");
+    fs::write(&file, b"x").unwrap();
+    blocking(&file.join("db"), Existing::Refuse).unwrap_err();
+    let too_long = dir.path().join("j".repeat(300));
+    exists(&too_long).unwrap_err();
+    let target = dir.path().join("db");
+    let sink = FileSink::create_over(&target, Existing::Any).unwrap();
+    fs::create_dir(suffixed(&target, "-wal")).unwrap();
+    ReplaceFs::remove_journals(&sink).unwrap_err();
+}

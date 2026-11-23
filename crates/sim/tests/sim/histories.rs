@@ -104,7 +104,10 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x126d68ef1c07",
         "page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07",
-        Guard::OnPath("wal-barrier-sim"),
+        Guard::Unguarded(
+            "the defect's regression is the direct test of the ledger entry wal-barrier; this \
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x126d68ed250e",
@@ -122,7 +125,10 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x1919f",
         "a_restored_staging_backup_is_not_uploaded_seed_0x1919f",
-        Guard::OnPath("inside-file-sole-base-sim"),
+        Guard::Unguarded(
+            "the defect's regression is the direct test of the ledger entry inside-file-sole-base; this \
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x126d68fac4b6",
@@ -195,7 +201,10 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x2e7",
         "a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7",
-        Guard::Own("takeover-before-drop-skipped-sim"),
+        Guard::Unguarded(
+            "the defect's regression is the direct test of the ledger entry takeover-before-drop-skipped; this \
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0xb6b",
@@ -208,7 +217,10 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x753",
         "swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss",
-        Guard::Own("latest-judged-against-old-nodes-sim"),
+        Guard::Unguarded(
+            "the defect's regression is the direct test of the ledger entry latest-judged-against-old-nodes; this \
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x21",
@@ -239,12 +251,18 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0xf488c",
         "swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage",
-        Guard::Own("boundary-snapshot-keeps-page-table-sim"),
+        Guard::Unguarded(
+            "the defect's regression is the direct test of the ledger entry boundary-snapshot-keeps-page-table; this \
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x68f",
         "compaction_takes_a_staging_denial_as_staging_seed_0x68f",
-        Guard::Own("compact-local-read-as-remote-sim"),
+        Guard::Unguarded(
+            "the defect's regression is the direct test of the ledger entry compact-local-read-as-remote; this \
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x734",
@@ -274,7 +292,10 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x330",
         "seed_0x330_does_not_trip",
-        Guard::Own("failstop-dates-the-run-sim"),
+        Guard::Unguarded(
+            "the defect's regression is the direct test of the ledger entry failstop-dates-the-run; this \
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x8ef",
@@ -284,7 +305,10 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0xa4d",
         "seed_0xa4d_does_not_trip",
-        Guard::Own("failstop-trip-held-to-zero-age-sim"),
+        Guard::Unguarded(
+            "the defect's regression is the direct test of the ledger entry failstop-trip-held-to-zero-age; this \
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
 ];
 

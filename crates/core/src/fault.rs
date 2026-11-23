@@ -477,6 +477,20 @@ pub enum StopCause {
         /// The lowest page that differs.
         first: NonZeroU32,
     },
+    /// The cure after a failed WAL sync read pages back from the database file after its FULL
+    /// checkpoint and found them unlike the WAL frames it had verified: the kernel evicted those
+    /// frames and a checkpoint copied the disk's older bytes, so commits are lost (`crate::cure`).
+    WalLostCommits {
+        /// How many pages differ.
+        pages: NonZeroU32,
+        /// The lowest page that differs.
+        first: NonZeroU32,
+    },
+    /// A boot after a failed WAL sync owed the check for a database file ahead of its WAL and
+    /// could not make it: the replica could not give its state at its newest confirmed
+    /// transaction on two attempts in a row, so the cure runs unchecked (`crate::ahead`,
+    /// `docs/decisions.md` D106).
+    DatabaseAheadOfWalUnchecked,
     /// The replica's store cannot make a create-only write, and the response is to stop.
     ConditionalWritesUnsupported,
     /// The shutdown deadline arrived.
@@ -529,6 +543,20 @@ pub enum PersistentCause {
         /// The lowest page that differs.
         first: NonZeroU32,
     },
+    /// The cure after a failed WAL sync read pages back from the database file after its FULL
+    /// checkpoint and found them unlike the WAL frames it had verified: the kernel evicted those
+    /// frames and a checkpoint copied the disk's older bytes, so commits are lost (`crate::cure`).
+    WalLostCommits {
+        /// How many pages differ.
+        pages: NonZeroU32,
+        /// The lowest page that differs.
+        first: NonZeroU32,
+    },
+    /// A boot after a failed WAL sync owed the check for a database file ahead of its WAL and
+    /// could not make it: the replica could not give its state at its newest confirmed
+    /// transaction on two attempts in a row, so the cure runs unchecked (`crate::ahead`,
+    /// `docs/decisions.md` D106).
+    DatabaseAheadOfWalUnchecked,
     /// The replica's store cannot make a create-only write: uploads replace, as Go's do, and a
     /// second writer under the same key is no longer refused by the bucket. Stands until the
     /// process restarts, whatever succeeds after it (D79).
@@ -646,6 +674,10 @@ impl PersistentCause {
             StopCause::DatabaseAheadOfWal { pages, first } => {
                 Some(Self::DatabaseAheadOfWal { pages, first })
             }
+            StopCause::WalLostCommits { pages, first } => {
+                Some(Self::WalLostCommits { pages, first })
+            }
+            StopCause::DatabaseAheadOfWalUnchecked => Some(Self::DatabaseAheadOfWalUnchecked),
             StopCause::ConditionalWritesUnsupported => Some(Self::ConditionalWritesUnsupported),
             StopCause::Bug => Some(Self::Bug),
             StopCause::Shutdown => None,
@@ -673,6 +705,8 @@ impl PersistentCause {
             Self::DatabaseAheadOfWal { pages, first } => {
                 StopCause::DatabaseAheadOfWal { pages, first }
             }
+            Self::WalLostCommits { pages, first } => StopCause::WalLostCommits { pages, first },
+            Self::DatabaseAheadOfWalUnchecked => StopCause::DatabaseAheadOfWalUnchecked,
             Self::ConditionalWritesUnsupported => StopCause::ConditionalWritesUnsupported,
             Self::Bug => StopCause::Bug,
             Self::Stalled(_) => return None,
@@ -746,7 +780,9 @@ pub struct Responses {
     pub database_page_mismatch: Response,
     /// A boot after a failed WAL sync found the database file ahead of its WAL (`crate::ahead`).
     /// Keeping trying replicates the file as the application serves it, keeps the state before
-    /// it restorable for a fixed window, and reports it; nothing an operator does ends it.
+    /// it restorable for a fixed window, and reports it; nothing an operator does ends it. It
+    /// also answers a check that could not be made (`PersistentCause::DatabaseAheadOfWalUnchecked`):
+    /// keeping trying runs the cure unchecked and reports that for the same window.
     pub database_ahead_of_wal: Response,
     /// The replica's store cannot make a create-only write. Keeping trying uploads by replacing,
     /// as Go does, with the upload task degraded until the process restarts (D79).
@@ -837,7 +873,12 @@ impl Responses {
             PersistentCause::WalSyncFailed => self.wal_sync_failed,
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
             PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
-            PersistentCause::DatabaseAheadOfWal { .. } => self.database_ahead_of_wal,
+            // A check that could not be made is answered as one that found the file ahead: under
+            // `STRICT` the engine stops before the cure, else the cure runs (D106). Commits a
+            // checkpoint lost are the same damage, found by the cure instead of a boot (D108).
+            PersistentCause::DatabaseAheadOfWal { .. }
+            | PersistentCause::WalLostCommits { .. }
+            | PersistentCause::DatabaseAheadOfWalUnchecked => self.database_ahead_of_wal,
             PersistentCause::ConditionalWritesUnsupported => self.conditional_writes_unsupported,
             PersistentCause::Stalled(_) => return Action::Retry,
             PersistentCause::RemoteRegressed => {

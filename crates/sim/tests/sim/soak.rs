@@ -70,8 +70,7 @@ fn rotating_seeds() {
         }
         let seed = Seed::new(n);
         println!("{}", replay(seed, STEPS));
-        let mut weights = Weights::mixed(seed);
-        weights.known_wrong = true;
+        let weights = Weights::mixed(seed).with_nightly_laws(seed);
         let outcome = run(seed, STEPS, &weights);
         if let Ok(report) = &outcome {
             reach.merge(&report.reach);

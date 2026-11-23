@@ -72,6 +72,18 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
         rebuilt.unreplicated_since, staged.unreplicated_since,
         "{rebuilt:?}"
     );
+    // The next rebuild panics too: the same cause, so the degraded state keeps its start.
+    let first = rebuilt.task(Task::Sync).unwrap();
+    // Short of the wait, the fresh engine has not booted, so it has not panicked again.
+    clock.advance(POLL);
+    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|h| h.counters.panics > 1);
+    assert!(parked.unwrap().is_none(), "the fresh engine booted early");
+    clock.advance(retry.saturating_mul(2));
+    let again = wait(&replicator, |h| h.counters.panics == 2);
+    let second = again.task(Task::Sync).unwrap();
+    assert_eq!(second.cause, DegradedCause::Bug, "{again:?}");
+    assert_eq!(second.since, first.since, "{again:?}");
+    assert!(second.retries > first.retries, "{again:?}");
     let stop = replicator.stop(Duration::from_secs(5));
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
@@ -83,6 +95,60 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
         panic!("{stopped:?}");
     };
     assert!(staged_not_uploaded >= 1, "{stopped:?}");
+}
+
+/// The deadline report while a fresh engine waits counts every staged file past the
+/// newest transaction the replica held, the one staged in the tick that panicked among
+/// them, and none the replica already holds.
+#[test]
+fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
+    use lsr_core::{Level, ObjectStore as _, PageLimit};
+    let site = Site::new();
+    let faulty = site.faulty();
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let retry = Duration::from_secs(60);
+    let replicator =
+        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let held = moved_until(&replicator, &clock, (POLL, 240), caught_up).replicated;
+    faulty.fail_uploads.store(true, Ordering::SeqCst);
+    site.commit(1);
+    clock.advance(POLL);
+    wait(&replicator, |h| h.synced > held && h.counters.retries > 0);
+    // The retry stages this commit, then its upload panics.
+    site.commit(1);
+    faulty.panic_always.store(true, Ordering::SeqCst);
+    clock.advance(retry);
+    wait(&replicator, |h| h.counters.panics == 1);
+    let meta = config().meta_dir_for(&site.db).unwrap();
+    let listed = lsr_replica::block_on(lsr_store_fs::FsStore::new(&meta).list(
+        Level::ZERO,
+        None,
+        PageLimit::MAX,
+    ))
+    .unwrap();
+    let held = held.map(|(txid, _)| txid);
+    let past = listed
+        .files
+        .iter()
+        .filter(|info| Some(info.key.range().max()) > held)
+        .count();
+    assert!(past >= 2, "{listed:?}");
+    assert!(
+        listed.files.len() > past,
+        "nothing the replica holds is staged"
+    );
+    let stop = replicator.stop(Duration::from_secs(5));
+    clock.advance(Duration::from_secs(5));
+    let stopped = ended(stop);
+    let Some(Stopped::DeadlineReached {
+        staged_not_uploaded,
+        ..
+    }) = stopped
+    else {
+        panic!("{stopped:?}");
+    };
+    assert_eq!(usize::try_from(staged_not_uploaded).unwrap(), past);
 }
 
 /// A panic in a drain does not wait out the rebuild's wait: the stop ends at its deadline.
@@ -217,7 +283,6 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     faulty.panic_always.store(true, Ordering::SeqCst);
     clock.release();
     let rebuilt = wait(&replicator, |h| h.counters.panics >= 1);
-    clock.hold();
     assert_eq!(
         rebuilt.task(Task::Upload),
         degraded.task(Task::Upload),
@@ -296,6 +361,35 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
         later.task(Task::Sync).map(|d| d.cause),
         Some(DegradedCause::WalUnlinked)
     );
+    assert!(matches!(
+        replicator.stop(Duration::ZERO).wait(),
+        Stopped::DeadlineReached { .. }
+    ));
+}
+
+/// A database deleted after the panic is gone as a replaced one is: not reopened, and reported
+/// as the WAL unlinked, not retried as a failure to open.
+#[test]
+fn a_database_deleted_after_a_panic_is_degraded_and_not_reopened() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.panics.store(1, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    wait(&replicator, |h| h.counters.panics == 1);
+    std::fs::remove_file(&site.db).unwrap();
+    clock.advance(POLL);
+    let health = wait(&replicator, |h| {
+        h.phase == Phase::Running
+            || h.task(Task::Sync).map(|d| d.cause) == Some(DegradedCause::WalUnlinked)
+    });
+    assert_eq!(
+        health.task(Task::Sync).map(|d| d.cause),
+        Some(DegradedCause::WalUnlinked),
+        "{health:?}"
+    );
+    assert!(!site.db.exists(), "not reopened, which would create it");
     assert!(matches!(
         replicator.stop(Duration::ZERO).wait(),
         Stopped::DeadlineReached { .. }

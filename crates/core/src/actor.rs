@@ -78,6 +78,7 @@ mod ahead;
 mod clock;
 mod floor;
 mod lag;
+mod once;
 mod parts;
 mod state;
 mod unproven;
@@ -86,11 +87,13 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use lsr_journal::AheadKind;
 use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 pub use ahead::AHEAD_KEPT_FOR;
 use clock::EngineClock;
+pub use once::{FinalSnapshot, FinalSnapshotFailure};
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
 pub use state::{Degraded, Phase, Task};
 use state::{Gate, Live};
@@ -305,11 +308,13 @@ pub enum Event {
     AheadOfWal(AheadNotice),
 }
 
-/// What an operator is told about a standing ahead-of-WAL verdict besides its first report.
+/// What an operator is told about a standing verdict besides its first report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AheadNotice {
     /// A boot found the verdict recorded: the state before the damage is kept until `until`.
     Kept {
+        /// What the verdict found.
+        kind: AheadKind,
         /// The kept restore point.
         restore_point: Txid,
         /// When it goes back to normal retention.
@@ -317,9 +322,19 @@ pub enum AheadNotice {
     },
     /// The window passed: the restore point is back under normal retention.
     Released {
+        /// What the verdict had found.
+        kind: AheadKind,
         /// The restore point no longer kept.
         restore_point: Txid,
     },
+    /// A boot found recorded that an owed check could not be made (`docs/decisions.md` D106):
+    /// the notice stands until `until`.
+    UncheckedStands {
+        /// When the notice ends.
+        until: Timestamp,
+    },
+    /// The window of a check that could not be made passed: the notice ends.
+    UncheckedEnded,
 }
 
 /// How a tick ended.
@@ -767,8 +782,12 @@ impl Actor {
             // The verdict's restore point goes back to retention, which may now delete its chain.
             self.engine.maintain.stale = true;
             self.kept.ahead_notice = Some(AheadNotice::Released {
-                restore_point: released,
+                kind: released.kind,
+                restore_point: released.restore_point,
             });
+        }
+        if self.expire_unchecked(now) {
+            self.kept.ahead_notice = Some(AheadNotice::UncheckedEnded);
         }
         if let Some(notice) = self.kept.ahead_notice.take() {
             return Tick::Ran {
@@ -1193,8 +1212,11 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if let Some(tick) = self.wal_unit(env, now, true).await {
+        if let Some(tick) = self.owed_upload(env, now).await {
             return tick;
+        }
+        if let Some(tick) = self.wal_unit(env, now, true).await {
+            return self.passed_over_uploads(tick);
         }
         if self.fair_turn() {
             if let Some(tick) = self.prune_unit(env, now).await {
@@ -1225,23 +1247,33 @@ impl Actor {
         now: Timestamp,
         deadline: Timestamp,
     ) -> Tick {
+        // A snapshot the drain was asked to end with is not cut by the deadline once
+        // everything is uploaded (`once`).
         if now >= deadline {
             return if self.settled(env.wal) {
-                self.drained()
+                match self.final_snapshot_unit(env, now).await {
+                    Some(tick) => tick,
+                    None => self.drained(),
+                }
             } else {
                 self.missed(env, now).await
             };
         }
-        if let Some(tick) = self.wal_unit(env, now, false).await {
+        if let Some(tick) = self.owed_upload(env, now).await {
             return tick;
+        }
+        if let Some(tick) = self.wal_unit(env, now, false).await {
+            return self.passed_over_uploads(tick);
         }
         if let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
-        if self.settled(env.wal) {
-            self.drained()
-        } else {
-            self.ran(Event::Idle, now)
+        if !self.settled(env.wal) {
+            return self.ran(Event::Idle, now);
+        }
+        match self.final_snapshot_unit(env, now).await {
+            Some(tick) => tick,
+            None => self.drained(),
         }
     }
 
@@ -1332,6 +1364,16 @@ impl Actor {
         self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
         self.raise_floor(state.confirmed());
         self.engine.witnesses.confirmed(state.confirmed());
+        // Only a position the uploader stands on passes the dropped ids; a
+        // listing still owed keeps them, since it may confirm less.
+        if let UploadState::At(confirmed) = state
+            && self
+                .engine
+                .dropped_acknowledged
+                .is_some_and(|dropped| Some(dropped.max()) <= confirmed)
+        {
+            self.engine.dropped_acknowledged = None;
+        }
     }
 
     /// The checkpoint the policy wants now, when its task and the sync task
@@ -1454,7 +1496,7 @@ impl Actor {
             return self.check_ahead(env, now).await;
         }
         if self.owes_truncate() {
-            return self.unprove(env);
+            return self.unprove(env, now);
         }
         if !self.staging_has_room() {
             // Marked as a step cut short, so the sync runs again when room
@@ -1736,6 +1778,26 @@ impl Actor {
         position
     }
 
+    /// Moves the upload past acknowledged ids a drop removed from staging.
+    ///
+    /// A drop after a rollback places the snapshot above the acknowledged
+    /// ids, which are never taken again. A listing afterwards confirms only
+    /// what the replica still holds, so the next planned id can be one of
+    /// those: it has no staged file, and planning it would fail every upload
+    /// with `StagedLost` until a restart. Their pages are in the snapshot
+    /// above, so the upload resumes there.
+    fn pass_dropped_acknowledged(&mut self) {
+        let (Some(dropped), UploadState::At(confirmed)) =
+            (self.engine.dropped_acknowledged, self.engine.upload)
+        else {
+            return;
+        };
+        let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
+        if next.is_some_and(|next| dropped.contains(next)) {
+            self.engine.upload = UploadState::At(Some(dropped.max()));
+        }
+    }
+
     /// The newest id an upload step may treat as this engine's own.
     ///
     /// A listing judges the replica against everything this engine put
@@ -1760,6 +1822,7 @@ impl Actor {
         if !self.upload_ready(now) {
             return None;
         }
+        self.engine.syncs_ahead = 0;
         let limit = self
             .kept
             .cfg
@@ -1768,6 +1831,7 @@ impl Actor {
             .map_or(u32::MAX, NonZeroU32::get);
         let mut last = Did::Nothing;
         for _ in 0..limit {
+            self.pass_dropped_acknowledged();
             let plan = plan_upload(&self.engine.upload, self.staged());
             let bound = self.upload_bound(plan);
             let witnesses = &self.engine.witnesses;
@@ -1939,6 +2003,7 @@ impl Actor {
         // are gone with their staged copies: they are never taken again, so
         // the uploads resume with the snapshot above them.
         let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
+        self.engine.dropped_acknowledged = acknowledged.and_then(|ack| TxidRange::new(from, ack));
         if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload) {
             self.engine.upload = UploadState::At(confirmed.max(Some(ack)));
         }
@@ -1956,7 +2021,10 @@ impl Actor {
             staged: from.prev(),
             cause,
         };
-        self.upload_succeeded();
+        // The unreadable files are gone, so the next upload may run at once; but nothing has
+        // reached the replica, so the failures so far still count toward a stall, and a
+        // degraded state stays until an upload goes through.
+        self.kept.tasks.get_mut(Task::Upload).probe();
         self.ran(Event::Resnapshot(cause), now)
     }
 
@@ -2451,6 +2519,25 @@ impl Actor {
         self.kept.tasks.ready(Task::Upload, now) && !self.uploads_idle()
     }
 
+    /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row ended
+    /// in the WAL step; it runs only when uploads are ready, and resets the count when it does.
+    async fn owed_upload<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        if self.engine.syncs_ahead < state::FAIR_SHARE {
+            return None;
+        }
+        self.upload_unit(env, now).await
+    }
+
+    /// `tick`, from the WAL step, counted: the upload step resets the count when it runs.
+    fn passed_over_uploads(&mut self, tick: Tick) -> Tick {
+        self.engine.syncs_ahead = self.engine.syncs_ahead.saturating_add(1);
+        tick
+    }
+
     /// The transaction the prune task may delete through, when it may run.
     fn prune_ready(&self, now: Timestamp) -> Option<Txid> {
         self.prune_bound()
@@ -2488,6 +2575,7 @@ impl Actor {
             self.engine.gate.until(),
             self.engine.maintain.until,
             self.kept.ahead.map(ahead::kept_until),
+            self.kept.unchecked.map(ahead::unchecked_until),
         ];
         [task(Task::Sync), task(Task::Upload), deadline]
             .into_iter()
@@ -2680,6 +2768,7 @@ impl Actor {
         if let Some(read) = self.kept.journal_read {
             self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
             self.adopt_ahead(read.ahead);
+            self.adopt_unchecked(read.unchecked);
             self.adopt_floor(read.floor);
         }
         self.raise_floor(upload.confirmed());
@@ -2712,11 +2801,13 @@ impl Actor {
         let wanted = (
             self.kept.unproven.recorded(),
             self.kept.ahead,
+            self.kept.unchecked,
             // A floor is never dropped, another destination's included: the record keeps its
             // own until this engine has one (`floor`).
             self.kept.floor.or(held.and_then(|held| held.floor)),
         );
-        if held.map(|held| (held.unproven, held.ahead, held.floor)) == Some(wanted) {
+        if held.map(|held| (held.unproven, held.ahead, held.unchecked, held.floor)) == Some(wanted)
+        {
             // Nothing the engine holds is missing from the journal: nothing lags it.
             self.kept.journal_write = Ok(());
             return tick;
@@ -2724,7 +2815,8 @@ impl Actor {
         let record = lsr_journal::Journal {
             unproven: wanted.0,
             ahead: wanted.1,
-            floor: wanted.2,
+            unchecked: wanted.2,
+            floor: wanted.3,
             ..held.unwrap_or(lsr_journal::Journal::ABSENT)
         };
         let Some(writer) = self.kept.writer.as_mut() else {

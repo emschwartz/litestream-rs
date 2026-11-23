@@ -136,6 +136,9 @@ pub struct RunReport {
     pub power_losses: u32,
     /// Drains the operator asked for.
     pub shutdowns: u32,
+    /// How each drain asked to end with a level-9 snapshot (`Op::ShutdownWithSnapshot`)
+    /// ended it, in order.
+    pub final_snapshots: Vec<lsr_core::FinalSnapshot>,
     /// Commits the app made inside a tick, before a checkpoint's barrier.
     pub commits_in_tick: u32,
     /// Oracle restores of the whole replica.
@@ -226,6 +229,9 @@ pub struct Opts {
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
+    /// The engine's TRUNCATE threshold, when not the usual ([`Weights::truncate_pages`]).
+    /// [`run_with`] sets it.
+    pub truncate_pages: Option<NonZeroU32>,
     /// The process dies right after every tick in which an injected fault fired
     /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
     pub kill_after_fault: bool,
@@ -320,6 +326,8 @@ struct Runner {
     overlap: Option<SeededEntropy>,
     // Whether the one-shot store faults of an overlapping hold draw from the whole domain.
     error_domain: bool,
+    // The engine's TRUNCATE threshold, when the run sets one ([`Opts::truncate_pages`]).
+    truncate_pages: Option<NonZeroU32>,
     // Whether an overlapping hold draws restarts, which reach the open defect D9.
     known_wrong: bool,
     spilled: Vec<(PageNo, Vec<u8>)>,
@@ -474,6 +482,7 @@ impl Runner {
         runner.w.set_clock_law(opts.clock_law);
         runner.overlap = opts.overlap.then(|| SeededEntropy::new(seed.stream(21)));
         runner.error_domain = opts.error_domain;
+        runner.truncate_pages = opts.truncate_pages;
         runner.known_wrong = opts.known_wrong;
         if opts.no_create_only {
             runner.refuse_create_only();
@@ -498,6 +507,7 @@ impl Runner {
             slew: None,
             overlap: None,
             error_domain: false,
+            truncate_pages: None,
             known_wrong: false,
             spilled: Vec::new(),
             unwatched: true,
@@ -569,6 +579,10 @@ impl Runner {
             responses: self.responses,
             max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
             maintenance: base.maintenance.clone().with_retention(self.retention),
+            checkpoint: CheckpointConfig {
+                truncate_pages: self.truncate_pages.or(base.checkpoint.truncate_pages),
+                ..base.checkpoint
+            },
             ..base
         });
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
@@ -810,7 +824,7 @@ impl Runner {
         let commits = self.w.model.commits().len();
         self.staging_moved()?;
         let fired0 = (self.remote_fired(), fired(&self.w.staging_faults));
-        let queued0 = self.w.sqlite.queued_injections();
+        let taken0 = self.w.sqlite.taken_injections().len();
         self.denials_baseline();
         let ended = self.run_one(plan);
         if matches!(ended, TickEnd::Done(_)) {
@@ -861,7 +875,7 @@ impl Runner {
         };
         per_tick(&stats, self.limits())?;
         let step = self.after_refusal(step)?;
-        let step = self.kill_after_fault(step, fired0, queued0);
+        let step = self.kill_after_fault(step, fired0, taken0);
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
         self.verify_ready()?;
         Ok((step, stats))
@@ -906,9 +920,13 @@ impl Runner {
             .map_err(|err| bug_fault(format!("listing staging failed: {err}")))?
             .map(|info| info.key.range().max());
         self.staged_high = staged;
+        // While a listing is pending the engine confirms nothing, and any
+        // staged file is "at least" that: the mark stays until a listing says
+        // what the replica holds.
         if self.staging_disturbed
             && self.actor.booted()
             && staged.is_some()
+            && self.actor.replicated().is_some()
             && staged >= self.actor.replicated()
         {
             self.staging_disturbed = false;
@@ -1269,10 +1287,10 @@ impl Runner {
         held
     }
 
-    fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), queued0: usize) -> Step {
+    fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), taken0: usize) -> Step {
         let fired_now = (self.remote_fired(), fired(&self.w.staging_faults));
         let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
-        let source = self.w.sqlite.queued_injections() < queued0;
+        let source = self.w.sqlite.taken_injections().len() > taken0;
         let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
         // A kill inside a hold is a restart there, which reaches the open defect D9 (retry
         // counts and degraded states reset at a restart, so a halt that outlasts restarts is never
@@ -1925,6 +1943,11 @@ impl Runner {
         if matches!(op, RemoteOp::RollBack) {
             if let Some(from) = rolled_from {
                 self.w.acked.forget_from(from);
+                // The engine may upload past the hole before it lists again, so the replica's
+                // chain has a gap until a snapshot: a restore of its newest confirmed state is
+                // damage, truthfully, and an owed ahead-of-WAL check cannot be made (D106).
+                self.expect(StopCause::RemoteCorrupt);
+                self.expect(StopCause::DatabaseAheadOfWalUnchecked);
             }
             self.expect(StopCause::RemoteRegressed);
         }
@@ -1977,9 +2000,15 @@ impl Runner {
             // model follows it as damage, and the history judge refuses a restore that gives it.
             EnvFault::EvictPageCache => {
                 // The evicted frames are damage SQLite still counts as committed: the engine
-                // may find the WAL corrupt or cut short, now or once an armed eviction fires.
+                // may find the WAL corrupt or cut short, now or once an armed eviction fires, or,
+                // when it fires between the cure's checked read and its checkpoint, find the
+                // checkpoint copied the disk's older bytes (`lsr_core`'s cure, D108).
                 self.expect(StopCause::WalCorrupt);
                 self.expect(StopCause::WalTruncated);
+                self.expect(StopCause::WalLostCommits {
+                    pages: NonZeroU32::MIN,
+                    first: NonZeroU32::MIN,
+                });
                 let acted = self.w.sqlite.evict_page_cache();
                 self.scenario_bool("EvictPageCache", acted)?;
                 self.w.adopt_evicted();
@@ -2036,6 +2065,48 @@ impl Runner {
 
     /// After a drain that finished: `Latest` is the local head, unless a bucket rollback
     /// took files the engine had already confirmed.
+    /// The operator stops the engine, with the snapshot `-once -force-snapshot` ends with when
+    /// `snapshot`; a fresh engine boots later.
+    fn shutdown(&mut self, snapshot: bool) -> Result<(), Violation> {
+        self.report.shutdowns = self.report.shutdowns.saturating_add(1);
+        if snapshot {
+            self.actor.request_final_snapshot();
+        }
+        self.drain()?;
+        if snapshot {
+            self.judge_final_snapshot()?;
+            self.report
+                .final_snapshots
+                .push(self.actor.final_snapshot());
+        }
+        self.reboot();
+        self.app.restarted(self.op_began_at);
+        Ok(())
+    }
+
+    /// A drain asked to end with a snapshot: a snapshot it reports written is on the replica,
+    /// a level-9 file from transaction 1 to at least everything the drain confirmed. One it
+    /// reports failed is the scenario's to expect; the history judge holds either way.
+    fn judge_final_snapshot(&mut self) -> Result<(), Violation> {
+        let lsr_core::FinalSnapshot::Written(info) = self.actor.final_snapshot() else {
+            return Ok(());
+        };
+        let listed = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
+            .map_err(|e| bug_fault(format!("the replica does not list: {e:?}")))?;
+        let held = listed
+            .level(lsr_core::Level::SNAPSHOT)
+            .iter()
+            .any(|file| file.key == info.key);
+        let from_one = info.key.range().min() == lsr_ltx::Txid::MIN;
+        if held && from_one {
+            Ok(())
+        } else {
+            Err(bug_fault(format!(
+                "the final snapshot {info:?} is reported written but the replica does not hold it whole"
+            )))
+        }
+    }
+
     fn judge_drained(&mut self) -> Result<(), Violation> {
         let drained = self.w.lost.is_empty();
         self.judge_history(crate::history::Ask {
@@ -2328,12 +2399,8 @@ impl Runner {
             Op::EnvFault(fault) => self.env_fault(*fault)?,
             Op::ClockJump(millis) => self.clock_jump(*millis),
             Op::Tick => self.tick()?,
-            Op::Shutdown => {
-                self.report.shutdowns = self.report.shutdowns.saturating_add(1);
-                self.drain()?;
-                self.reboot();
-                self.app.restarted(self.op_began_at);
-            }
+            Op::Shutdown => self.shutdown(false)?,
+            Op::ShutdownWithSnapshot => self.shutdown(true)?,
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),
@@ -2464,6 +2531,8 @@ impl Runner {
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
             | PersistentCause::DatabaseAheadOfWal { .. }
+            | PersistentCause::WalLostCommits { .. }
+            | PersistentCause::DatabaseAheadOfWalUnchecked
             | PersistentCause::ConditionalWritesUnsupported
             | PersistentCause::Bug => true,
         }
@@ -2734,6 +2803,7 @@ pub fn run_with(
         error_domain: weights.error_domain,
         known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
+        truncate_pages: weights.truncate_pages,
         kill_after_fault: weights.kill_after_fault,
         remote_s3: weights.remote_s3,
         no_create_only: weights.no_create_only,
@@ -2877,7 +2947,11 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
         | PersistentCause::WalSyncFailed
-        | PersistentCause::DatabaseAheadOfWal { .. } => true,
+        // A check that could not be made says the file may be ahead of its WAL, as a verdict
+        // says it is.
+        | PersistentCause::DatabaseAheadOfWal { .. }
+        | PersistentCause::WalLostCommits { .. }
+        | PersistentCause::DatabaseAheadOfWalUnchecked => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
@@ -2899,7 +2973,9 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::WalTruncated
         | StopCause::WalUnlinked
         | StopCause::WalSyncFailed
-        | StopCause::DatabaseAheadOfWal { .. } => true,
+        | StopCause::DatabaseAheadOfWal { .. }
+        | StopCause::WalLostCommits { .. }
+        | StopCause::DatabaseAheadOfWalUnchecked => true,
         StopCause::StoreDenied(_)
         | StopCause::StoreRefused
         | StopCause::RemoteCorrupt

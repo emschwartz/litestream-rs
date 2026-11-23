@@ -6,6 +6,8 @@
 #[cfg(test)]
 mod after_restart;
 #[cfg(test)]
+mod ahead_unchecked;
+#[cfg(test)]
 mod clock_reads;
 #[cfg(test)]
 mod crash_law;
@@ -23,6 +25,7 @@ mod evicted_wal;
 mod failstop;
 #[cfg(test)]
 mod faults;
+mod final_snapshot;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]

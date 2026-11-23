@@ -94,6 +94,8 @@ const fn outlasts_success(cause: PersistentCause) -> bool {
         | PersistentCause::PageSizeChanged { .. }
         // Degraded only until the cure that follows it succeeds; the notice outlasts it.
         | PersistentCause::DatabaseAheadOfWal { .. }
+        | PersistentCause::WalLostCommits { .. }
+        | PersistentCause::DatabaseAheadOfWalUnchecked
         | PersistentCause::Bug
         | PersistentCause::Stalled(_) => false,
     }

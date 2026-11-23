@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use lsr_core::AheadKind;
 use lsr_replica::{
     AppNotice, DegradedCause, Denied, Gone, Health, JournalSignal, Phase, Replicator,
     SnapshotCause, SnapshotCauseKind, Stall, StopCause, Task, Timestamp,
@@ -160,6 +161,16 @@ pub(crate) const fn task_name(task: Task) -> &'static str {
     }
 }
 
+/// A verdict's name, the one place it is spelled: its `/healthz` key, its degraded cause and,
+/// after `lsr_`, its metric (`docs/decisions/D103.md`, `D108.md`; owner-approved).
+#[must_use]
+pub(crate) const fn verdict_name(kind: AheadKind) -> &'static str {
+    match kind {
+        AheadKind::AheadOfWal => "database_ahead_of_wal",
+        AheadKind::WalLostCommits => "wal_lost_commits",
+    }
+}
+
 /// A degraded cause's name (the page number and sizes are in `/healthz` only).
 #[must_use]
 pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
@@ -175,7 +186,9 @@ pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::WalSyncFailed => "wal_sync_failed",
         DegradedCause::PageSizeChanged { .. } => "page_size_changed",
         DegradedCause::DatabasePageMismatch { .. } => "database_page_mismatch",
-        DegradedCause::DatabaseAheadOfWal { .. } => "database_ahead_of_wal",
+        DegradedCause::DatabaseAheadOfWal { .. } => verdict_name(AheadKind::AheadOfWal),
+        DegradedCause::WalLostCommits { .. } => verdict_name(AheadKind::WalLostCommits),
+        DegradedCause::DatabaseAheadOfWalUnchecked => "database_ahead_of_wal_unchecked",
         DegradedCause::ConditionalWritesUnsupported => "conditional_writes_unsupported",
         DegradedCause::Bug => "bug",
         DegradedCause::Stalled(stall) => stall_name(stall),
@@ -301,8 +314,9 @@ impl Object {
     }
 }
 
-fn ahead_json(health: &Health) -> Value {
-    let Some(ahead) = health.ahead_of_wal else {
+/// The standing verdict of `kind`, or `null`.
+fn ahead_json(health: &Health, kind: AheadKind) -> Value {
+    let Some(ahead) = health.ahead_of_wal.filter(|ahead| ahead.kind == kind) else {
         return Value::Null;
     };
     let mut o = Object::new();
@@ -310,6 +324,16 @@ fn ahead_json(health: &Health) -> Value {
     o.num("first_page", ahead.first_page.get());
     o.text("restore_point", &ahead.restore_point.to_string());
     o.text("kept_until", &ahead.kept_until.to_string());
+    o.end()
+}
+
+fn unchecked_json(health: &Health) -> Value {
+    let Some(unchecked) = health.ahead_of_wal_unchecked else {
+        return Value::Null;
+    };
+    let mut o = Object::new();
+    o.text("since", &unchecked.since.to_string());
+    o.text("kept_until", &unchecked.kept_until.to_string());
     o.end()
 }
 
@@ -367,7 +391,10 @@ fn running_json(o: &mut Object, health: &Health) {
         health.journal.map(|s| journal_name(s).to_owned()),
     );
     o.maybe("journal_detail", health.journal.map(|s| format!("{s:?}")));
-    o.raw("database_ahead_of_wal", ahead_json(health));
+    for kind in [AheadKind::AheadOfWal, AheadKind::WalLostCommits] {
+        o.raw(verdict_name(kind), ahead_json(health, kind));
+    }
+    o.raw("database_ahead_of_wal_unchecked", unchecked_json(health));
     o.maybe(
         "held_by",
         health
@@ -468,6 +495,55 @@ mod tests {
         assert!(body.contains("\"app\":\"allowed\""), "{body}");
     }
 
+    /// A check for a database file ahead of its WAL that could not be made is a notice in both
+    /// outputs while it stands, with `/healthz` still 200, under its own name, and both drop it
+    /// once it ends (D106).
+    #[test]
+    fn an_unchecked_wal_checkpoint_is_a_notice_in_both_outputs() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        health.phase = Phase::Running;
+        let view = |health: &Health| DbView {
+            path: PathBuf::from("/app.db"),
+            replica_type: "file",
+            state: DbState::Running(Box::new(health.clone())),
+        };
+        health.ahead_of_wal_unchecked =
+            Some(lsr_replica::AheadOfWalUnchecked::of(lsr_core::Unchecked {
+                made: at,
+            }));
+        let (up, body) = healthz(&[view(&health)], at);
+        assert!(up, "{body}");
+        let until = at.saturating_add(lsr_core::AHEAD_KEPT_FOR);
+        assert!(
+            body.contains(&format!(
+                "\"database_ahead_of_wal_unchecked\":{{\"since\":\"{at}\",\"kept_until\":\"{until}\"}}"
+            )),
+            "{body}"
+        );
+        assert!(body.contains("\"database_ahead_of_wal\":null"), "{body}");
+        let metrics = crate::metrics::render(&[view(&health)], at);
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal_unchecked{db=\"/app.db\"} 1"),
+            "{metrics}"
+        );
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal{db=\"/app.db\"} 0"),
+            "{metrics}"
+        );
+        health.ahead_of_wal_unchecked = None;
+        let (_, body) = healthz(&[view(&health)], at);
+        assert!(
+            body.contains("\"database_ahead_of_wal_unchecked\":null"),
+            "{body}"
+        );
+        let metrics = crate::metrics::render(&[view(&health)], at);
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal_unchecked{db=\"/app.db\"} 0"),
+            "{metrics}"
+        );
+    }
+
     /// A database file found ahead of its WAL is a notice in both outputs while the state
     /// before it is kept, with `/healthz` still 200, and both drop it once it ends.
     #[test]
@@ -481,6 +557,7 @@ mod tests {
             state: DbState::Running(Box::new(health.clone())),
         };
         health.ahead_of_wal = Some(lsr_replica::AheadOfWal::of(lsr_core::Ahead {
+            kind: AheadKind::AheadOfWal,
             restore_point: lsr_replica::Txid::new(7).unwrap(),
             pages: std::num::NonZeroU32::new(2).unwrap(),
             first: std::num::NonZeroU32::new(5).unwrap(),
@@ -496,9 +573,14 @@ mod tests {
             )),
             "{body}"
         );
+        assert!(body.contains("\"wal_lost_commits\":null"), "{body}");
         let metrics = crate::metrics::render(&[view(&health)], at);
         assert!(
             metrics.contains("lsr_database_ahead_of_wal{db=\"/app.db\"} 1"),
+            "{metrics}"
+        );
+        assert!(
+            metrics.contains("lsr_wal_lost_commits{db=\"/app.db\"} 0"),
             "{metrics}"
         );
         health.ahead_of_wal = None;
@@ -508,6 +590,54 @@ mod tests {
         assert!(
             metrics.contains("lsr_database_ahead_of_wal{db=\"/app.db\"} 0"),
             "{metrics}"
+        );
+    }
+
+    /// Commits a checkpoint lost are a notice of their own in both outputs, under the
+    /// owner-approved names, with `/healthz` still 200; the ahead-of-WAL notice stays null.
+    #[test]
+    fn commits_a_checkpoint_lost_are_a_notice_of_their_own_in_both_outputs() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        health.phase = Phase::Running;
+        let view = |health: &Health| DbView {
+            path: PathBuf::from("/app.db"),
+            replica_type: "file",
+            state: DbState::Running(Box::new(health.clone())),
+        };
+        health.ahead_of_wal = Some(lsr_replica::AheadOfWal::of(lsr_core::Ahead {
+            kind: AheadKind::WalLostCommits,
+            restore_point: lsr_replica::Txid::new(7).unwrap(),
+            pages: std::num::NonZeroU32::new(1).unwrap(),
+            first: std::num::NonZeroU32::new(3).unwrap(),
+            made: at,
+        }));
+        let (up, body) = healthz(&[view(&health)], at);
+        assert!(up, "{body}");
+        let kept_until = at.saturating_add(lsr_core::AHEAD_KEPT_FOR);
+        assert!(
+            body.contains(&format!(
+                "\"wal_lost_commits\":{{\"pages\":1,\"first_page\":3,\"restore_point\":\"{}\",\"kept_until\":\"{kept_until}\"}}",
+                lsr_replica::Txid::new(7).unwrap()
+            )),
+            "{body}"
+        );
+        assert!(body.contains("\"database_ahead_of_wal\":null"), "{body}");
+        let metrics = crate::metrics::render(&[view(&health)], at);
+        assert!(
+            metrics.contains("lsr_wal_lost_commits{db=\"/app.db\"} 1"),
+            "{metrics}"
+        );
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal{db=\"/app.db\"} 0"),
+            "{metrics}"
+        );
+        assert_eq!(
+            cause_name(DegradedCause::WalLostCommits {
+                pages: std::num::NonZeroU32::MIN,
+                first: std::num::NonZeroU32::MIN,
+            }),
+            "wal_lost_commits"
         );
     }
 

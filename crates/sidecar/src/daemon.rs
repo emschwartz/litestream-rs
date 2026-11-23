@@ -36,8 +36,8 @@ use std::time::Duration;
 use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
 use lsr_replica::{
-    Config, DynStore, Gate, IfReplicationStops, Replicator, RestoreError, Runtime, Stopped, Trip,
-    record_takeover, restore_if_missing,
+    Config, DynStore, FinalSnapshot, FinalSnapshotFailure, Gate, IfReplicationStops, Replicator,
+    RestoreError, Runtime, Stopped, Trip, record_takeover, restore_if_missing,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{CredentialChain, CredentialError, S3Store};
@@ -56,6 +56,14 @@ pub enum End {
     DidNotStart,
     /// Its file never appeared.
     NeverAppeared,
+    /// It drained, through `txid`, but the level-9 snapshot `-force-snapshot` asked for was not
+    /// written, for `why`.
+    SnapshotNotWritten {
+        /// The newest transaction on the replica.
+        txid: Option<lsr_ltx::Txid>,
+        /// Why not.
+        why: FinalSnapshotFailure,
+    },
 }
 
 /// Every database's end, in config order, and the `-exec` child's.
@@ -81,7 +89,8 @@ impl Finished {
             End::Stopped(
                 Stopped::DeadlineReached { .. } | Stopped::Stopped(_) | Stopped::Gone(_),
             )
-            | End::DidNotStart => false,
+            | End::DidNotStart
+            | End::SnapshotNotWritten { .. } => false,
         });
         dbs && self.child.is_none_or(ChildEnd::clean)
     }
@@ -437,7 +446,14 @@ impl Daemon {
     /// Drains every running database within what is left of the one deadline begun at
     /// `begun` (the signal, the child's exit, or now), and reports each.
     #[must_use]
-    pub(crate) fn stop(&self, waiter: Option<Waiter>, begun: lsr_ltx::Timestamp) -> Finished {
+    /// Drains every database; with `snapshot`, each running one ends with a level-9 snapshot
+    /// (`-once -force-snapshot`).
+    pub(crate) fn stop(
+        &self,
+        waiter: Option<Waiter>,
+        begun: lsr_ltx::Timestamp,
+        snapshot: bool,
+    ) -> Finished {
         if let Some(waiter) = waiter {
             waiter.end();
         }
@@ -445,7 +461,12 @@ impl Daemon {
         let syncs: Vec<_> = slots
             .iter()
             .map(|slot| match &slot.state {
-                State::Running(replicator) => Some(replicator.stop(self.left(begun))),
+                State::Running(replicator) => {
+                    if snapshot {
+                        replicator.request_final_snapshot();
+                    }
+                    Some(replicator.stop(self.left(begun)))
+                }
                 State::Waiting | State::Failed => None,
             })
             .collect();
@@ -453,7 +474,10 @@ impl Daemon {
         for (slot, sync) in slots.iter().zip(syncs) {
             let path = slot.plan.path().to_owned();
             let end = match (sync, &slot.state) {
-                (Some(sync), _) => End::Stopped(sync.wait()),
+                (Some(sync), State::Running(replicator)) => {
+                    ending(sync.wait(), replicator.health().final_snapshot)
+                }
+                (Some(sync), State::Waiting | State::Failed) => End::Stopped(sync.wait()),
                 (None, State::Waiting) => End::NeverAppeared,
                 (None, State::Failed | State::Running(_)) => End::DidNotStart,
             };
@@ -537,6 +561,12 @@ impl Daemon {
                 let fields = [at, ("cause", format!("{gone:?}").into())];
                 self.log.error("database replicator is gone", &fields);
             }
+            End::SnapshotNotWritten { txid, why } => {
+                let txid = txid.map_or_else(|| "none".to_owned(), |t| t.to_string());
+                let fields = [at, ("txid", txid.into()), ("error", why.to_string().into())];
+                self.log
+                    .error("database drained, snapshot not written", &fields);
+            }
             End::DidNotStart => self.log.error("database did not start", &[at]),
             End::NeverAppeared => self.log.info("database never appeared", &[at]),
         }
@@ -610,6 +640,23 @@ fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreError
             let store = S3Store::resolved((**config).clone(), &resolved)?;
             Ok(Arc::new(store))
         }
+    }
+}
+
+/// A drained database's end, with the snapshot it was asked to end with: a drain whose
+/// snapshot failed is not clean.
+fn ending(stopped: Stopped, snapshot: FinalSnapshot) -> End {
+    match (stopped, snapshot) {
+        (Stopped::Drained { txid }, FinalSnapshot::Failed(why)) => {
+            End::SnapshotNotWritten { txid, why }
+        }
+        (
+            stopped,
+            FinalSnapshot::NotAsked
+            | FinalSnapshot::Asked { .. }
+            | FinalSnapshot::Written(_)
+            | FinalSnapshot::Failed(_),
+        ) => End::Stopped(stopped),
     }
 }
 
