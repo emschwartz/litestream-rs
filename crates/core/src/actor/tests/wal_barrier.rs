@@ -234,3 +234,23 @@ fn a_second_failed_sync_in_a_later_generation_truncates_again() {
         ranges(&rig)
     );
 }
+
+/// The kernel evicts the pages the failed sync covered, so a read of the WAL returns the disk's
+/// older bytes (`crate::cure`): the newest frame no longer passes its checksum. The cure reads
+/// the WAL with checked reads before it checkpoints, finds the chain broken below the committed
+/// end, and runs no TRUNCATE, which would have copied those older bytes into the database file.
+#[test]
+fn a_cure_that_finds_an_evicted_frame_runs_no_checkpoint() {
+    let (mut rig, mut actor, failed) = failed_sync();
+    let Some(Event::Degraded { until, .. }) = event(&failed) else {
+        panic!("{failed:?}");
+    };
+    let len = rig.wal.file_bytes().len();
+    rig.wal.corrupt_byte(len - 8);
+    let retried = rig.tick(&mut actor, until.unix_millis());
+    let Some(Event::Degraded { cause, .. }) = event(&retried) else {
+        panic!("{retried:?}");
+    };
+    assert_eq!(*cause, PersistentCause::WalCorrupt);
+    assert_eq!(truncates(&rig), 0, "{:?}", rig.ck.calls());
+}

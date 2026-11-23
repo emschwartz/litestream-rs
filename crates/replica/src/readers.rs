@@ -6,8 +6,9 @@
 //! never runs, and under [`ReaderTracking::Tracked`] it runs only while no [`ReaderGuard`]
 //! lives. A TRUNCATE asked for while one does is refused without calling SQLite, as
 //! `SourceError::ReadersHeld` and not as busy (SQLite was never asked), so the engine waits its
-//! backoff and asks again. PASSIVE checkpoints never wait on readers and are
-//! unaffected.
+//! backoff and asks again. A FULL checkpoint (the cure after a failed WAL sync runs one)
+//! waits for readers on older snapshots the same way and is guarded alike. PASSIVE checkpoints
+//! never wait on readers and are unaffected.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -61,7 +62,7 @@ impl Guarded {
         }
     }
 
-    fn may_truncate(&self) -> bool {
+    fn may_wait(&self) -> bool {
         match self.tracking {
             ReaderTracking::Untracked => false,
             ReaderTracking::Tracked => self.readers.load(Ordering::SeqCst) == 0,
@@ -80,8 +81,12 @@ impl Checkpointer for Guarded {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         match mode {
-            CheckpointMode::Truncate if !self.may_truncate() => Err(SourceError::ReadersHeld),
-            CheckpointMode::Truncate | CheckpointMode::Passive => self.sqlite.checkpoint(mode),
+            CheckpointMode::Truncate | CheckpointMode::Full if !self.may_wait() => {
+                Err(SourceError::ReadersHeld)
+            }
+            CheckpointMode::Truncate | CheckpointMode::Full | CheckpointMode::Passive => {
+                self.sqlite.checkpoint(mode)
+            }
         }
     }
 

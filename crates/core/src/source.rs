@@ -204,6 +204,10 @@ pub enum CheckpointMode {
     Passive,
     /// Copy everything, then truncate the WAL file, waiting for readers.
     Truncate,
+    /// Copy everything, waiting for readers, and leave the WAL as it is: its frame counts stay
+    /// real, so a caller can tell exactly which frames were copied. The cure after a failed WAL
+    /// sync runs it to prove what it copied (issue #197).
+    Full,
 }
 
 /// What a checkpoint reported: SQLite's three result columns, plus the epoch

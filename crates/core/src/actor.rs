@@ -76,6 +76,7 @@
 
 mod ahead;
 mod clock;
+mod floor;
 mod lag;
 mod parts;
 mod state;
@@ -116,6 +117,7 @@ use crate::maintain::{
 };
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
+use crate::probe::Starts;
 use crate::publish::Why;
 use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent, Recovered,
@@ -204,6 +206,10 @@ pub struct ActorConfig {
     /// How long a commit may stay off the replica before fail-stop trips for it
     /// (`crate::failstop`), and when the probe at the bound runs.
     pub max_unreplicated_age: MaxUnreplicatedAge,
+    /// The replica's destination, as the engine journal names it (`lsr_journal::ReplicaId::of`
+    /// over its canonical name): the confirmed floor is read back for this destination only.
+    /// `None` keeps no floor.
+    pub destination: Option<lsr_journal::ReplicaId>,
 }
 
 /// What a maintenance tick did.
@@ -1067,6 +1073,33 @@ impl Actor {
         Some(self.want_takeover(task, TakeoverRecord::through(through), now))
     }
 
+    /// A boot about to snapshot because one read of the newest staged file disagreed with
+    /// what the file is (it did not verify, or its last page is not the WAL's) reads it once
+    /// more first: one failed read says nothing, as for the sweep (`boot_listing`). The file
+    /// becomes the suspect and the boot fails with `StagedLost`; the next boot that reads the
+    /// same answer snapshots. `doubted` is the suspect this boot began with.
+    fn doubt_newest_read(
+        &mut self,
+        doubted: Option<FileKey>,
+        newest: Option<&NewestStagedFile>,
+        recovered: &Recovered,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        let read_disagreed = matches!(
+            recovered,
+            Recovered::Snapshot {
+                cause: SnapshotCause::NewestStagedFileUnreadable | SnapshotCause::LastPageMismatch,
+                ..
+            }
+        );
+        let key = FileKey::new(Level::ZERO, TxidRange::single(newest?.txid()));
+        if !read_disagreed || doubted == Some(key) {
+            return None;
+        }
+        self.kept.suspect_staged = Some(key);
+        Some(self.boot_failed(Fault::StagedLost, now))
+    }
+
     /// A boot step failed: the boot ends and is retried.
     fn boot_failed(&mut self, fault: Fault, now: Timestamp) -> Tick {
         self.fault(Task::Sync, fault, now)
@@ -1085,6 +1118,7 @@ impl Actor {
         }
         let takeover = self.boot_takeover();
         let journal = read_journal(env.journal.as_deref_mut());
+        let doubted = self.kept.suspect_staged;
         let suspect = &mut self.kept.suspect_staged;
         let listed = boot_listing(env.staging, env.remote, suspect, takeover).await;
         let Listed {
@@ -1109,6 +1143,15 @@ impl Actor {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, now),
         };
+        // A refusal or a drop the sweep and the witness passes already proved explains the
+        // snapshot; only a verdict resting on the newest staged file's one read is doubted.
+        let proven = refused.is_some() || !matches!(dropped, Dropped::Nothing);
+        if let Some(tick) = (!proven)
+            .then(|| self.doubt_newest_read(doubted, newest_staged.as_ref(), &recovered, now))
+            .flatten()
+        {
+            return tick;
+        }
         let continued = matches!(recovered, Recovered::Continue(_));
         let from = match recovered {
             Recovered::Continue(at) | Recovered::WalRestarted(at) => boot_continues(at),
@@ -1286,6 +1329,7 @@ impl Actor {
     fn set_upload(&mut self, state: UploadState) {
         self.engine.upload = state;
         self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
+        self.raise_floor(state.confirmed());
         self.engine.witnesses.confirmed(state.confirmed());
     }
 
@@ -2049,6 +2093,7 @@ impl Actor {
         match remote.read(&key, 0, ReadLen::or_chunk(1)).await {
             Ok(_) => Some(self.list_again_later(now)),
             Err(StoreError::NotFound { .. }) => {
+                self.floor_regressed();
                 Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
             }
             Err(err) => Some(self.fault(Task::Maintenance, R::fault(&err), now)),
@@ -2168,7 +2213,15 @@ impl Actor {
         if inventory.newest() >= published || self.engine.maintain.gone == published {
             return None;
         }
-        match probe_past(remote, inventory.newest(), published, None).await {
+        match probe_past(
+            remote,
+            inventory.newest(),
+            published,
+            None,
+            &Starts::of(inventory),
+        )
+        .await
+        {
             Ok(found) if found.is_empty() => {
                 self.engine.maintain.gone = published;
                 None
@@ -2502,8 +2555,11 @@ impl BootGate {
         // A listing may lag the replica's writes: keys past it are read for, through the
         // staged position (any staged file may be on the replica), as boot reads past every
         // listing. A record capped short of a key the listing hid refuses this engine's own
-        // upload at a later boot.
-        let past = probe_past(remote, listed, tip, Some(local)).await?;
+        // upload at a later boot. The listing here is of level 0 alone, so the probe names
+        // no level 1 to 8 start: a merged file it then misses above `local` caps the record
+        // short, and a later boot refuses the replica's files, a stop and never a silent loss.
+        // Listing every level here would cost each vouch ten more listing calls.
+        let past = probe_past(remote, listed, tip, Some(local), &Starts::default()).await?;
         let found = past.last().map(|key| key.range().max());
         let replica = tip.max(listed).max(found);
         match replica.map(|replica| replica.min(local)) {
@@ -2587,7 +2643,9 @@ impl Actor {
         if let Some(read) = self.kept.journal_read {
             self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
             self.adopt_ahead(read.ahead);
+            self.adopt_floor(read.floor);
         }
+        self.raise_floor(upload.confirmed());
         self.kept.writer = Some(writer);
     }
 
@@ -2602,12 +2660,26 @@ impl Actor {
         tick: Tick,
         now: Timestamp,
     ) -> Tick {
-        let (Some(file), Some(writer)) = (file, self.kept.writer.as_mut()) else {
+        let Some(file) = file else {
             return tick;
         };
-        let held = writer.durable().copied().or(self.kept.journal_read);
-        let wanted = (self.kept.unproven.recorded(), self.kept.ahead);
-        if held.map(|held| (held.unproven, held.ahead)) == Some(wanted) {
+        let Some(held) = self
+            .kept
+            .writer
+            .as_ref()
+            .map(|writer| writer.durable().copied())
+        else {
+            return tick;
+        };
+        let held = held.or(self.kept.journal_read);
+        let wanted = (
+            self.kept.unproven.recorded(),
+            self.kept.ahead,
+            // A floor is never dropped, another destination's included: the record keeps its
+            // own until this engine has one (`floor`).
+            self.kept.floor.or(held.and_then(|held| held.floor)),
+        );
+        if held.map(|held| (held.unproven, held.ahead, held.floor)) == Some(wanted) {
             // Nothing the engine holds is missing from the journal: nothing lags it.
             self.kept.journal_write = Ok(());
             return tick;
@@ -2615,7 +2687,11 @@ impl Actor {
         let record = lsr_journal::Journal {
             unproven: wanted.0,
             ahead: wanted.1,
+            floor: wanted.2,
             ..held.unwrap_or(lsr_journal::Journal::ABSENT)
+        };
+        let Some(writer) = self.kept.writer.as_mut() else {
+            return tick;
         };
         match writer.write(file, &record) {
             Ok(()) => self.kept.journal_write = Ok(()),
