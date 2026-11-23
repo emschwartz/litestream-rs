@@ -122,10 +122,6 @@ pub const fn forced_by(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
         // that sync, damage, or a staging backup put back can.
         SnapshotCauseKind::LocalRewound => &[LyingDisk, WalDamaged, StagingEdited],
         SnapshotCauseKind::StagedUnverified => FORCES_STAGED_UNVERIFIED,
-        // The engine's fsync of the WAL failed (a fault failed the step), and
-        // a TRUNCATE checkpoint then moved the unstaged frames into the
-        // database file.
-        SnapshotCauseKind::WalSyncFailed => &[PositionUnproven, WalDamaged, LyingDisk],
         SnapshotCauseKind::CheckpointBoundary => return None,
         SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
     })

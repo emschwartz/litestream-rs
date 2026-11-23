@@ -106,10 +106,6 @@ pub(crate) struct Inner {
     /// transaction SQLite ended itself on an error, cannot leave a flag saying otherwise.
     issued: u64,
     returned: u64,
-    /// A sync of the WAL failed. The kernel reports a failed writeback once and then calls the
-    /// pages clean, so every later sync answers the same, until a TRUNCATE checkpoint completes
-    /// (`Checkpointer::checkpoint`): nothing the WAL held then is known to be on disk.
-    pub(crate) wal_sync_failed: bool,
 }
 
 /// Which file a path named: device and inode.
@@ -261,7 +257,6 @@ impl Sqlite {
             epoch: ReadLockHold::first(),
             issued: 0,
             returned: 0,
-            wal_sync_failed: false,
         };
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -498,17 +493,14 @@ impl WalSource for Sqlite {
 
     fn sync(&mut self) -> Result<(), SourceError> {
         let mut inner = self.lock();
-        if inner.wal_sync_failed {
-            return Err(SourceError::FsyncFailed);
-        }
         inner.ensure_read_lock_held()?;
+        // A failed sync is not remembered: the kernel reports a failed writeback once, so the
+        // next sync may succeed over bytes that never reached the disk. v1 goes on, as Go does
+        // (`docs/decisions/D173.md`).
         match crate::pages::sync_wal(&inner.reader) {
             Ok(()) => Ok(()),
             Err(WalSync::NoWal) => Err(SourceError::Io(io::ErrorKind::NotFound)),
-            Err(WalSync::Failed(_rc)) => {
-                inner.wal_sync_failed = true;
-                Err(SourceError::FsyncFailed)
-            }
+            Err(WalSync::Failed(_rc)) => Err(SourceError::FsyncFailed),
         }
     }
 }
@@ -686,13 +678,6 @@ mod tests {
         (
             "returned",
             Keep::Ephemeral("barriers and write locks of this open; SQLite releases them all"),
-        ),
-        (
-            "wal_sync_failed",
-            Keep::Ephemeral(
-                "a failed WAL sync answers every later sync of this open the same; across a \
-                 restart the engine journal's debt carries it (lsr_core::obligations, `unproven`)",
-            ),
         ),
     ];
 

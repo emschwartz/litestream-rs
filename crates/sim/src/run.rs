@@ -1067,7 +1067,6 @@ impl Runner {
             | Event::Retrying { .. }
             | Event::Resnapshot(_)
             | Event::Clamped(_)
-            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => Ok(Step::Ran),
         }
     }
@@ -1103,7 +1102,6 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Clamped(_)
-            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => return Ok(()),
         };
         self.forcings
@@ -1148,7 +1146,6 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Clamped(_)
-            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => {}
         }
     }
@@ -1922,9 +1919,8 @@ impl Runner {
                 self.w.acked.forget_from(from);
                 // The engine may upload past the hole before it lists again, so the replica's
                 // chain has a gap until a snapshot: a restore of its newest confirmed state is
-                // damage, truthfully, and an owed ahead-of-WAL check cannot be made (D106).
+                // damage, truthfully.
                 self.expect(StopCause::RemoteCorrupt);
-                self.expect(StopCause::DatabaseAheadOfWalUnchecked);
             }
             self.expect(StopCause::RemoteRegressed);
         }
@@ -1973,23 +1969,6 @@ impl Runner {
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
             EnvFault::DriverWritesNothing => self.w.sqlite.driver_writes_nothing_once(),
-            // The database SQLite serves now reads the evicted frames' older bytes: the
-            // model follows it as damage, and the history judge refuses a restore that gives it.
-            EnvFault::EvictPageCache => {
-                // The evicted frames are damage SQLite still counts as committed: the engine
-                // may find the WAL corrupt or cut short, now or once an armed eviction fires, or,
-                // when it fires between the cure's checked read and its checkpoint, find the
-                // checkpoint copied the disk's older bytes (`lsr_core`'s cure, D108).
-                self.expect(StopCause::WalCorrupt);
-                self.expect(StopCause::WalTruncated);
-                self.expect(StopCause::WalLostCommits {
-                    pages: NonZeroU32::MIN,
-                    first: NonZeroU32::MIN,
-                });
-                let acted = self.w.sqlite.evict_page_cache();
-                self.scenario_bool("EvictPageCache", acted)?;
-                self.w.adopt_evicted();
-            }
             EnvFault::FlipDatabasePage(pgno) => {
                 let flipped = self.w.sqlite.flip_db_page(pgno);
                 self.scenario_bool("FlipDatabasePage", flipped)?;
@@ -2284,14 +2263,6 @@ impl Runner {
         if regrows && self.w.sqlite.backfilled() > 0 {
             return Ok(());
         }
-        // Damage to a WAL whose writeback a failed sync lost: the model's record of the lost
-        // bytes is not rewritten by the damage, so it loses track of the database (seeds 0x80b,
-        // 0x563, 0x1d and 0x3aa of the mixed set, once failed syncs were drawn). A drawn history
-        // skips it and counts the skip; it is a listed gap in the checker.
-        if self.lenient && self.w.sqlite.writeback_lost() {
-            self.report.reach.bump("wal.damage_skipped.writeback_lost");
-            return Ok(());
-        }
         // A cut below the committed end leaves the wal-index naming frames the
         // file no longer holds, which no SQLite reader can make sense of; a
         // drawn cut takes only frames past it (a rolled-back or spilled tail).
@@ -2517,9 +2488,6 @@ impl Runner {
             | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
-            | PersistentCause::DatabaseAheadOfWal { .. }
-            | PersistentCause::WalLostCommits { .. }
-            | PersistentCause::DatabaseAheadOfWalUnchecked
             | PersistentCause::ConditionalWritesUnsupported
             | PersistentCause::Bug => true,
         }
@@ -2577,14 +2545,9 @@ impl Runner {
         }
     }
 
-    /// The model no longer matches SQLite's rules: named as the known defect D103 explains it
-    /// when a failed WAL sync's lost writeback is in play, plainly otherwise.
+    /// The model no longer matches SQLite's rules.
     fn model_diverged(&self) -> Violation {
-        bug_fault(if self.w.sqlite.writeback_lost() {
-            crate::oracle::MODEL_DIVERGED_AFTER_LOST_WRITEBACK
-        } else {
-            crate::oracle::MODEL_DIVERGED
-        })
+        bug_fault(crate::oracle::MODEL_DIVERGED)
     }
 
     /// The end of a history: drain, judge the replica, check the resources.
@@ -2733,7 +2696,6 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Idle
         | Event::Resnapshot(_)
         | Event::Clamped(_)
-        | Event::AheadOfWal(_)
         | Event::TakeoverWanted(_) => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
@@ -2909,8 +2871,7 @@ const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause, over_files: bool
         | C::PrevFrameMismatch
         | C::LastPageMismatch
         | C::LocalRewound { .. }
-        | C::StagedUnverified { .. }
-        | C::WalSyncFailed => true,
+        | C::StagedUnverified { .. } => true,
         C::CheckpointBoundary | C::OperatorRequested => false,
     }
 }
@@ -2925,12 +2886,7 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
-        | PersistentCause::WalSyncFailed
-        // A check that could not be made says the file may be ahead of its WAL, as a verdict
-        // says it is.
-        | PersistentCause::DatabaseAheadOfWal { .. }
-        | PersistentCause::WalLostCommits { .. }
-        | PersistentCause::DatabaseAheadOfWalUnchecked => true,
+        | PersistentCause::WalSyncFailed => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
@@ -2951,10 +2907,7 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::WalCorrupt
         | StopCause::WalTruncated
         | StopCause::WalUnlinked
-        | StopCause::WalSyncFailed
-        | StopCause::DatabaseAheadOfWal { .. }
-        | StopCause::WalLostCommits { .. }
-        | StopCause::DatabaseAheadOfWalUnchecked => true,
+        | StopCause::WalSyncFailed => true,
         StopCause::StoreDenied(_)
         | StopCause::StoreRefused
         | StopCause::RemoteCorrupt

@@ -90,10 +90,11 @@ fn store_cells() -> impl Iterator<Item = (String, Cell)> {
 fn every_cell_is_drawn_or_says_why_not() {
     // Drawn, known wrong, unmodelled. A move in these numbers is a change to the domain: say
     // it in the pull request.
-    assert_eq!(tally(source_cells()), [22, 1, 3], "source cells");
+    assert_eq!(tally(source_cells()), [22, 0, 4], "source cells");
     assert_eq!(tally(store_cells()), [41, 0, 0], "store cells");
-    // Each SQLite call fails at least one way where known failures are counted.
-    for op in SOURCE_OPS {
+    // Each SQLite call fails at least one way where known failures are counted, but the sync of
+    // the WAL: a failed sync is modelled by its scenarios, not drawn (`docs/decisions/D173.md`).
+    for op in SOURCE_OPS.into_iter().filter(|op| *op != SourceOp::Sync) {
         assert!(
             SOURCE_CLASSES
                 .iter()
@@ -102,14 +103,11 @@ fn every_cell_is_drawn_or_says_why_not() {
         );
     }
     // Every known defect is reached by some cell, but D9, which a restart inside an
-    // overlapping hold reaches, and the mixed database, which D2's cell reaches with a power
-    // loss.
-    for known in KnownWrong::ALL.into_iter().filter(|known| {
-        !matches!(
-            known,
-            KnownWrong::HaltForgottenAtRestart | KnownWrong::DatabaseAheadOfWal
-        )
-    }) {
+    // overlapping hold reaches.
+    for known in KnownWrong::ALL
+        .into_iter()
+        .filter(|known| !matches!(known, KnownWrong::HaltForgottenAtRestart))
+    {
         assert!(
             source_cells()
                 .chain(store_cells())
@@ -166,7 +164,6 @@ fn the_store_draw_reaches_every_drawable_class_and_no_other() {
 
 #[test]
 fn a_known_defect_matches_only_its_own_failure() {
-    let diverged = crate::oracle::bug_fault(crate::oracle::MODEL_DIVERGED_AFTER_LOST_WRITEBACK);
     let forgotten = Violation::HealthBlind {
         hold: "DiskFull".to_owned(),
         retries: 40,
@@ -190,22 +187,8 @@ fn a_known_defect_matches_only_its_own_failure() {
         cause: lsr_core::PersistentCause::StoreDenied(Denied::Permission),
     };
     assert_eq!(
-        KnownWrong::of(&diverged, &KnownWrong::ALL),
-        Some(KnownWrong::DatabaseAheadOfWal)
-    );
-    assert_eq!(
         KnownWrong::of(&forgotten, &KnownWrong::ALL),
         Some(KnownWrong::HaltForgottenAtRestart)
-    );
-    let verdict = Violation::UnexpectedDegraded {
-        cause: lsr_core::PersistentCause::DatabaseAheadOfWal {
-            pages: std::num::NonZeroU32::MIN,
-            first: std::num::NonZeroU32::new(2).unwrap(),
-        },
-    };
-    assert_eq!(
-        KnownWrong::of(&verdict, &KnownWrong::ALL),
-        Some(KnownWrong::DatabaseAheadOfWal)
     );
     let another_bug = crate::oracle::bug_fault("something else");
     for unknown in [
@@ -223,7 +206,7 @@ fn a_known_defect_matches_only_its_own_failure() {
         );
     }
     assert_eq!(
-        KnownWrong::of(&diverged, &[]),
+        KnownWrong::of(&forgotten, &[]),
         None,
         "only defects the run drew"
     );

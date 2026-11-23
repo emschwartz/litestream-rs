@@ -304,7 +304,11 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         ],
         FaultKind::WalTruncatedBelowCommitted => &[wal_truncated_externally_under_lock],
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
-        FaultKind::WalSyncFailed => &[wal_fsync_fails, wal_fsync_fails_then_restart],
+        FaultKind::WalSyncFailed => &[
+            wal_fsync_fails,
+            wal_fsync_fails_then_power_loss,
+            wal_fsync_fails_then_restart,
+        ],
         FaultKind::DatabasePageMismatch => &[db_page_flipped_under_sync],
         FaultKind::CreateOnlyUnsupported => &[create_only_refused_mid_run],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
@@ -1388,11 +1392,9 @@ pub fn wal_unlinked_mid_run() -> Scenario {
 }
 
 /// The engine's sync of the WAL fails once, and the kernel keeps the pages it covered off the
-/// disk for good (the simulator's lost writeback): nothing from that generation is staged, the
-/// next try checkpoints with TRUNCATE, and a snapshot from the database file follows. Where the
-/// responses stop instead, the run ends there: a person's restart would trust the WAL again,
-/// which waits on a durable record ([`wal_fsync_fails_then_restart`]); the oracle judges the
-/// default responses in [`wal_fsync_fails_then_snapshot`].
+/// disk for good (the simulator's lost writeback): nothing from that generation is staged until
+/// a sync succeeds, the sync task is degraded at `wal_sync_failed` meanwhile, and the next try
+/// syncs again and goes on, as Go does. Where the responses stop instead, the run ends there.
 #[must_use]
 pub fn wal_fsync_fails() -> Scenario {
     build(
@@ -1405,17 +1407,24 @@ pub fn wal_fsync_fails() -> Scenario {
                 commit(2, false),
             ],
             ticks(SETTLE),
+            vec![Op::Restore],
         ],
-        vec![Expect::Stopped(StopCause::WalSyncFailed), Expect::Recovered],
+        vec![
+            Expect::Stopped(StopCause::WalSyncFailed),
+            Expect::Recovered,
+            Expect::Oracle,
+        ],
     )
 }
 
-/// [`wal_fsync_fails`] under the default responses, then a power loss: the snapshot after the
-/// TRUNCATE holds what the failed sync covered, and the database file held it durably.
+/// [`wal_fsync_fails`], then a power loss: the retried sync went on and staged frames the
+/// kernel may have dropped, so the database can come back behind what was staged. How much of
+/// the unsynced tail survives is drawn, so the boot may or may not snapshot (`LocalRewound`);
+/// either way the oracle restores the replica (`docs/decisions/D173.md`).
 #[must_use]
-pub fn wal_fsync_fails_then_snapshot() -> Scenario {
+pub fn wal_fsync_fails_then_power_loss() -> Scenario {
     build(
-        "wal_fsync_fails_then_snapshot",
+        "wal_fsync_fails_then_power_loss",
         vec![
             live(),
             vec![
@@ -1429,17 +1438,13 @@ pub fn wal_fsync_fails_then_snapshot() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        vec![
-            Expect::Stopped(StopCause::WalSyncFailed),
-            Expect::Event(EventMatch::Resnapshot(CauseKind::WalSyncFailed)),
-            Expect::Oracle,
-        ],
+        vec![Expect::Stopped(StopCause::WalSyncFailed), Expect::Oracle],
     )
 }
 
 /// The engine's sync of the WAL fails, and the process restarts before its retry. The new
-/// process must not stage the frames the failed sync covered. It does today: the debt is held
-/// in memory only, and a durable record waits on the engine journal decision.
+/// process knows nothing of the failure and syncs as any boot does: nothing is remembered across
+/// a restart, as in Go.
 #[must_use]
 pub fn wal_fsync_fails_then_restart() -> Scenario {
     build(

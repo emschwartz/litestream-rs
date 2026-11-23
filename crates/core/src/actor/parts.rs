@@ -21,18 +21,16 @@ use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
-use super::ahead::AheadCheck;
 use super::clock::EngineClock;
 use super::once::FinalSnapshot;
 use super::once_retention::FinalRetention;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
-use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::counts::WorkCounts;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
-use crate::journal::{JournalSignal, JournalWriter};
+use crate::journal::JournalSignal;
 use crate::layout::FileKey;
 #[cfg(test)]
 use crate::obligations::{Keep, Record};
@@ -42,8 +40,6 @@ use crate::store::Denied;
 use crate::takeover::TakeoverRecord;
 use crate::upload::UploadState;
 use crate::witness::Witnesses;
-use lsr_journal::Journal;
-use std::io::ErrorKind;
 
 /// Whether the actor was asked to stop, which no rebuild forgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,9 +136,6 @@ pub(super) struct Kept {
     /// The retention pass a drain was asked to end with (`once_retention`): a request of this
     /// process.
     pub(super) final_retention: FinalRetention,
-    /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
-    /// a frame that sync covered is no truer after a rebuild.
-    pub(super) unproven: Unproven,
     /// The takeover the driver handed in (`crate::takeover`): an operator's,
     /// a restore's, or one this engine asked for before dropping its own
     /// staged files.
@@ -180,29 +173,9 @@ pub(super) struct Kept {
     /// What the last boot's read of the journal reported. A report, not engine state: nothing
     /// decides on it.
     pub(super) journal: Option<JournalSignal>,
-    /// The journal's writer, from the last boot that was lent a journal.
-    pub(super) writer: Option<JournalWriter>,
-    /// The record that boot read, if any: what is durable until this lifetime writes.
-    pub(super) journal_read: Option<Journal>,
-    /// How the last journal write ended: an error is `JournalUnwritable` until one succeeds.
-    pub(super) journal_write: Result<(), ErrorKind>,
     /// Recoveries that found a commit abandoned after the read lock was taken: a report,
     /// kept across rebuilds, since the snapshot that follows names only the generation change.
     pub(super) read_lock_violations: u64,
-    /// Whether the next sync step is the ahead-of-WAL check (`super::ahead`). A rebuild keeps
-    /// it: the rebuilt engine boots over the same files.
-    pub(super) ahead_check: AheadCheck,
-    /// The standing ahead-of-WAL verdict, journalled, while its restore point is kept.
-    pub(super) ahead: Option<lsr_journal::Ahead>,
-    /// The standing notice that an owed ahead-of-WAL check could not be made, journalled, for
-    /// its window (`docs/decisions.md` D106).
-    pub(super) unchecked: Option<lsr_journal::Unchecked>,
-    /// What the next tick tells the operator about the verdict, before anything else runs.
-    pub(super) ahead_notice: Option<super::AheadNotice>,
-    /// The WAL's committed end that the cure's FULL checkpoint copied and its read-back proved
-    /// (`crate::cure`), while the TRUNCATE that empties it is still owed: the TRUNCATE then runs
-    /// without scanning frames the kernel may have evicted since.
-    pub(super) verified: Option<lsr_wal::CommittedEnd>,
 }
 
 impl Kept {
@@ -223,7 +196,6 @@ impl Kept {
             work: WorkCounts::default(),
             final_snapshot: FinalSnapshot::NotAsked,
             final_retention: FinalRetention::NotAsked,
-            unproven: Unproven::No,
             takeover: None,
             wanted_takeover: None,
             spent_takeover: None,
@@ -236,15 +208,7 @@ impl Kept {
             quiet: BTreeSet::new(),
             doubt_baseline: None,
             journal: None,
-            writer: None,
-            journal_read: None,
-            journal_write: Ok(()),
             read_lock_violations: 0,
-            ahead_check: AheadCheck::No,
-            ahead: None,
-            unchecked: None,
-            ahead_notice: None,
-            verified: None,
         }
     }
 
@@ -269,7 +233,6 @@ impl Kept {
             work,
             final_snapshot,
             final_retention,
-            unproven,
             takeover,
             wanted_takeover: _,
             spent_takeover,
@@ -282,15 +245,7 @@ impl Kept {
             quiet: _,
             doubt_baseline: _,
             journal,
-            writer,
-            journal_read,
-            journal_write,
             read_lock_violations,
-            ahead_check,
-            ahead,
-            unchecked,
-            ahead_notice,
-            verified,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -310,7 +265,6 @@ impl Kept {
             work: *work,
             final_snapshot: *final_snapshot,
             final_retention: final_retention.clone(),
-            unproven: *unproven,
             takeover: *takeover,
             // A rebuilt engine boots again and asks again for what it needs.
             wanted_takeover: None,
@@ -325,31 +279,17 @@ impl Kept {
             quiet: BTreeSet::new(),
             doubt_baseline: None,
             journal: *journal,
-            writer: writer.clone(),
-            journal_read: *journal_read,
-            journal_write: *journal_write,
             read_lock_violations: *read_lock_violations,
-            ahead_check: *ahead_check,
-            ahead: *ahead,
-            unchecked: *unchecked,
-            ahead_notice: *ahead_notice,
-            verified: *verified,
         }
     }
 
-    /// The restore point retention keeps: the oldest of those asked for, a degraded task's, a
-    /// scheduled verify's and an ahead-of-WAL verdict's. Retention keeps one chain, so while an
-    /// older point is kept the verdict's is not; the older one is also before the damage.
-    /// Derived on every read, so there is no copy to fall behind.
+    /// The restore point retention keeps: the oldest of those asked for, a degraded task's and a
+    /// scheduled verify's. Derived on every read, so there is no copy to fall behind.
     pub(super) fn kept_restore_point(&self) -> Option<Txid> {
-        [
-            self.task_restore_point.txid(),
-            self.verify_restore_point,
-            self.ahead.map(|ahead| ahead.restore_point),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
+        [self.task_restore_point.txid(), self.verify_restore_point]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// The cause a snapshot is owed for besides the engine's own, if any.
@@ -555,8 +495,7 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "clock",
         Keep::Ephemeral(
-            "engine time follows the wall clock from each start; the one journalled fact dated by \
-             it, the ahead-of-WAL verdict, re-dates itself when the clock is behind",
+            "engine time follows the wall clock from each start; nothing journalled is dated by it",
         ),
     ),
     (
@@ -618,14 +557,6 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         "final_retention",
         Keep::Ephemeral(
             "a -once request of this process: a restart is a new run, which asks again or not",
-        ),
-    ),
-    (
-        "unproven",
-        Keep::Journalled(
-            Record::EngineJournal,
-            "a failed WAL sync's debt: a restart before the cure must still pay it \
-             (docs/decisions.md D100)",
         ),
     ),
     (
@@ -692,55 +623,8 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         Keep::Ephemeral("what the last boot read of the journal: the next boot reads again"),
     ),
     (
-        "writer",
-        Keep::Ephemeral("the writer's place in the file: the next process reads the file again"),
-    ),
-    (
-        "journal_read",
-        Keep::Derived("the record this process's boot read"),
-    ),
-    (
-        "journal_write",
-        Keep::Ephemeral("whether the last journal write failed; tried again every tick"),
-    ),
-    (
         "read_lock_violations",
         Keep::Ephemeral("read-lock violations recovery found since the process began: a report"),
-    ),
-    (
-        "ahead_check",
-        Keep::Derived(
-            "owed by a boot that restores a debt over the staged generation: judged again from \
-             the journal and recovery at every boot",
-        ),
-    ),
-    (
-        "ahead",
-        Keep::Journalled(
-            Record::EngineJournal,
-            "a database found ahead of its WAL: the restore point before it stays kept for the \
-             window across restarts (docs/decisions.md D103)",
-        ),
-    ),
-    (
-        "ahead_notice",
-        Keep::Ephemeral("what the next tick says; a boot that finds the verdict says it again"),
-    ),
-    (
-        "unchecked",
-        Keep::Journalled(
-            Record::EngineJournal,
-            "an owed ahead-of-WAL check given up: the notice stands for its window across \
-             restarts (docs/decisions.md D106)",
-        ),
-    ),
-    (
-        "verified",
-        Keep::Ephemeral(
-            "the cure's proof of what its checkpoint copied; a restart proves it again; cost: a \
-             frame evicted after the proof reads as WAL corruption until the generation moves \
-             (docs/decisions/D108.md)",
-        ),
     ),
 ];
 

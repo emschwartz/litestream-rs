@@ -1,6 +1,0 @@
-name = "journal-debt-kept-after-snapshot"
-fix = "8ef5a8f"
-package = "lsr-core"
-tests = [
-    "actor::tests::journal::a_recorded_truncate_already_run_is_not_run_again",
-]

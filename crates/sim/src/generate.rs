@@ -64,10 +64,6 @@ pub enum EnvFault {
     /// The next driver start writes no WAL header, as the real driver's open
     /// does not once `_litestream_seq` exists. Scenarios only.
     DriverWritesNothing,
-    /// The kernel evicts the WAL pages a failed fsync of ours lost, so later reads find the
-    /// disk's older bytes (`SimSqlite::evict_page_cache`). Drawn by its own weight
-    /// ([`Weights::evict_page_cache`]), never by `env_fault`'s.
-    EvictPageCache,
 }
 
 /// The request an [`HttpFault`] waits for: the shapes the S3 store sends for the simulator's
@@ -560,9 +556,6 @@ pub struct Weights {
     /// usual 32, so its TRUNCATE and the snapshot it takes under the write lock (CKPT-4) are
     /// reached in short runs. Never drawn by a mix: the nightly sets it.
     pub truncate_pages: Option<std::num::NonZeroU32>,
-    /// [`EnvFault::EvictPageCache`]: a step that does anything only after a failed fsync of
-    /// the WAL, in its generation.
-    pub evict_page_cache: u32,
     /// [`Op::HttpFault`]: a step that does anything only with the replica on S3.
     pub http_fault: u32,
 }
@@ -662,7 +655,6 @@ impl Default for Weights {
             // shape; swarm mixes draw it.
             verify: 0,
             truncate_pages: None,
-            evict_page_cache: 0,
             http_fault: 0,
         }
     }
@@ -694,12 +686,11 @@ enum Kind {
     AppInTick,
     Verify,
     OtherConnectionCommit,
-    EvictPageCache,
     HttpFault,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 26] {
+    fn table(&self) -> [(Kind, u32); 25] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -725,7 +716,6 @@ impl Weights {
             (Kind::AppInTick, self.app_in_tick),
             (Kind::Verify, self.verify),
             (Kind::OtherConnectionCommit, self.other_connection_commit),
-            (Kind::EvictPageCache, self.evict_page_cache),
             (Kind::HttpFault, self.http_fault),
         ]
     }
@@ -806,7 +796,6 @@ impl Weights {
             app_in_tick: 0,
             verify: 0,
             truncate_pages: None,
-            evict_page_cache: 0,
             http_fault: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
@@ -855,8 +844,6 @@ impl Weights {
         // And after that, for the same reason: a second application connection that commits,
         // with its own checkpoint count (a WAL header written again with the same salts).
         mix.other_connection_commit = weight(false);
-        // And after that, for the same reason: page-cache eviction after a failed WAL fsync.
-        mix.evict_page_cache = weight(false);
         // Drawn after that, for the same reason: half each.
         mix.kill_after_fault = below(&entropy, 2) == 0;
         // And after that, for the same reason: the replica on the real S3 store in half the
@@ -1191,7 +1178,6 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::OtherConnectionCommit => Op::OtherConnectionCommit {
             pages: small(entropy, 4).saturating_add(1),
         },
-        Kind::EvictPageCache => Op::EnvFault(EnvFault::EvictPageCache),
         Kind::HttpFault => Op::HttpFault(http_fault(entropy)),
         Kind::Vacuum => vacuum(entropy, weights.vacuum_resizes),
         Kind::OtherProcessReader => Op::OtherProcessReader {

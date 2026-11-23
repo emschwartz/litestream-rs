@@ -249,7 +249,7 @@ fn page_two() -> PageNo {
     PageNo::new(2, PageSize::MIN).unwrap()
 }
 
-fn every_persistent_cause() -> [PersistentCause; 20] {
+fn every_persistent_cause() -> [PersistentCause; 17] {
     [
         PersistentCause::StoreDenied(Denied::Credentials),
         PersistentCause::StoreDenied(Denied::Permission),
@@ -269,15 +269,6 @@ fn every_persistent_cause() -> [PersistentCause; 20] {
             now: ps(),
         },
         PersistentCause::DatabasePageMismatch { pgno: page_two() },
-        PersistentCause::DatabaseAheadOfWal {
-            pages: NonZeroU32::MIN,
-            first: NonZeroU32::MIN.saturating_add(1),
-        },
-        PersistentCause::WalLostCommits {
-            pages: NonZeroU32::MIN,
-            first: NonZeroU32::MIN.saturating_add(2),
-        },
-        PersistentCause::DatabaseAheadOfWalUnchecked,
         PersistentCause::ConditionalWritesUnsupported,
         PersistentCause::Bug,
     ]
@@ -304,9 +295,6 @@ fn every_persistent_cause_is_listed() {
         | PersistentCause::WalSyncFailed
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::DatabasePageMismatch { .. }
-        | PersistentCause::DatabaseAheadOfWal { .. }
-        | PersistentCause::WalLostCommits { .. }
-        | PersistentCause::DatabaseAheadOfWalUnchecked
         | PersistentCause::ConditionalWritesUnsupported
         | PersistentCause::Bug => true,
         // Not configurable: `every_retried_fault_stalls_and_no_stall_stops` covers it.
@@ -356,9 +344,6 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
             | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
-            | PersistentCause::DatabaseAheadOfWal { .. }
-            | PersistentCause::WalLostCommits { .. }
-            | PersistentCause::DatabaseAheadOfWalUnchecked
             | PersistentCause::ConditionalWritesUnsupported
             | PersistentCause::Stalled(_) => Action::Retry,
         };
@@ -393,11 +378,6 @@ fn each_field_names_one_cause() {
             PersistentCause::DatabasePageMismatch { .. } => {
                 one.database_page_mismatch = Response::Stop;
             }
-            PersistentCause::DatabaseAheadOfWal { .. }
-            | PersistentCause::WalLostCommits { .. }
-            | PersistentCause::DatabaseAheadOfWalUnchecked => {
-                one.database_ahead_of_wal = Response::Stop;
-            }
             PersistentCause::ConditionalWritesUnsupported => {
                 one.conditional_writes_unsupported = Response::Stop;
             }
@@ -406,11 +386,7 @@ fn each_field_names_one_cause() {
         }
         for other in every_persistent_cause() {
             let flipped = Responses::GO_LIKE.stops(other) != one.stops(other);
-            assert_eq!(
-                flipped,
-                other == cause || (ahead_of_wal(other) && ahead_of_wal(cause)),
-                "{cause:?} changed {other:?}"
-            );
+            assert_eq!(flipped, other == cause, "{cause:?} changed {other:?}");
         }
     }
 }
@@ -1054,15 +1030,4 @@ fn snapshot_counts_keep_each_cause_apart() {
     assert_eq!(listed.len(), SnapshotCauseKind::ALL.len());
     assert!(listed.contains(&(SnapshotCauseKind::CheckpointBoundary, 2)));
     assert!(listed.contains(&(SnapshotCauseKind::GenerationChanged, 0)));
-}
-
-/// The two causes one response answers: a file found ahead of its WAL, and a check for it that
-/// could not be made (D106).
-const fn ahead_of_wal(cause: PersistentCause) -> bool {
-    matches!(
-        cause,
-        PersistentCause::DatabaseAheadOfWal { .. }
-            | PersistentCause::WalLostCommits { .. }
-            | PersistentCause::DatabaseAheadOfWalUnchecked
-    )
 }

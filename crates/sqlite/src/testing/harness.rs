@@ -787,8 +787,7 @@ impl<B: Backend> Rig<B> {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Resnapshot(_)
-            | Event::Clamped(_)
-            | Event::AheadOfWal(_) => {}
+            | Event::Clamped(_) => {}
         }
         match next {
             Next::Now if matches!(event, Event::Idle) => self.clock.advance(SPIN_STEP),

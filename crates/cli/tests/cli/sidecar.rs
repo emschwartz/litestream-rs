@@ -477,7 +477,7 @@ fn metrics_and_health_are_served_on_exactly_the_given_address() {
         .iter()
         .filter(|s| s.name == "lsr_snapshots_total")
         .collect();
-    assert_eq!(snapshots.len(), 12, "{text}");
+    assert_eq!(snapshots.len(), 11, "{text}");
     assert!(
         snapshots.iter().any(|s| {
             s.labels.get("cause").is_some_and(|c| c == "first_sync") && s.value >= 1.0

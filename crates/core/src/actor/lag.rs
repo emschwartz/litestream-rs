@@ -36,7 +36,6 @@ const fn doubt_only(cause: SnapshotCause) -> bool {
         | SnapshotCause::BehindRemote { .. }
         | SnapshotCause::LocalRewound { .. }
         | SnapshotCause::CheckpointBoundary
-        | SnapshotCause::WalSyncFailed
         | SnapshotCause::StagedUnverified { .. } => false,
     }
 }

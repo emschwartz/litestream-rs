@@ -36,49 +36,6 @@ fn still_fails(seed: u64, ops: &[Op], opts: &Opts, defect: KnownWrong) {
     }
 }
 
-/// A failed WAL sync, another process's checkpoint of the frames it covered, then a power loss:
-/// SQLite recovers a database file no commit made (D103). The engine's boot check now finds it
-/// and raises its verdict; the simulator does not yet adopt the mixed file, so the run still fails.
-/// Written by hand without a bucket rollback: seed 0x585's history, which first reached it, drifted
-/// off it once a rollback could spend a takeover record.
-#[test]
-fn a_checkpoint_of_unproven_frames_then_a_power_loss_leaves_a_database_ahead_of_its_wal() {
-    let opts = Opts {
-        drawn: false,
-        known_wrong: true,
-        ..Opts::default()
-    };
-    still_fails(
-        0x585,
-        crate::histories::mix_after_failed_sync::OPS,
-        &opts,
-        KnownWrong::DatabaseAheadOfWal,
-    );
-}
-
-/// Fixed: a failed WAL sync was remembered in memory only, so a restart before the TRUNCATE
-/// staged frames the failed sync covered, until the engine journal recorded the debt. Seed 0x21
-/// of the mixed set with the known-wrong cells drawn (its first 130 operations) reaches it on
-/// the tree that stops at another writer, where seed 0xf, whose history began with second
-/// writers, no longer did; it must pass now.
-#[test]
-fn a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0x21() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: false,
-        lying_wal_sync: false,
-        after_restart: AfterRestart::Retry,
-        clock_law: ClockLaw::PerTick,
-        error_domain: true,
-        known_wrong: true,
-        staging_fs: false,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(0x21), crate::histories::seed_0x21::OPS, &opts) {
-        panic!("{failure}");
-    }
-}
-
 /// Fixed: a staging read refused for permission during level-1 compaction degraded maintenance
 /// as the replica's `StoreDenied(Permission)` until #145 routed compaction's local reads through
 /// `Fault::from_staging`. Seed 0x68f of the fixed set's mix (its first 39 operations) reaches it

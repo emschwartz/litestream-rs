@@ -396,16 +396,8 @@ pub fn within(what: Bound, seen: u64, limit: u64) -> Result<(), Violation> {
 }
 
 /// The context of the `BugFault` raised when the model's newest image is no longer the database
-/// SQLite's rules hold: a check of the harness against itself, which a failed WAL sync followed
-/// by a power loss can trip before the world adopts the result as damage.
+/// SQLite's rules hold: a check of the harness against itself.
 pub const MODEL_DIVERGED: &str = "the model no longer matches SQLite's rules";
-
-/// [`MODEL_DIVERGED`] while a failed sync of the WAL has lost a writeback the model still
-/// carries: the one divergence the known defect D103 explains
-/// ([`crate::domain::KnownWrong::DatabaseAheadOfWal`]). Any other divergence keeps the plain
-/// context and fails the run as a harness defect.
-pub const MODEL_DIVERGED_AFTER_LOST_WRITEBACK: &str =
-    "the model no longer matches SQLite's rules after a failed WAL sync lost its writeback";
 
 /// A `BugFault` naming `context`.
 #[must_use]

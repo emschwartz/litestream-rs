@@ -185,9 +185,15 @@ fn wal_fsync_fails() {
     run(scenario::wal_fsync_fails);
 }
 
-/// A restart between a failed WAL sync and the TRUNCATE that pays for it still owes the
-/// TRUNCATE: the engine journal holds the debt, so the new process stages no frame the failed
-/// sync covered (`StagedNotDurable` otherwise).
+/// A power loss after the retried sync went on: the database is behind what was staged and the
+/// boot snapshots it, as for any rewound database (`docs/decisions/D173.md`).
+#[test]
+fn wal_fsync_fails_then_power_loss() {
+    run(scenario::wal_fsync_fails_then_power_loss);
+}
+
+/// A restart between a failed WAL sync and its retry remembers nothing of it and boots as after
+/// any crash: no debt, no TRUNCATE of the engine's own.
 #[test]
 fn wal_fsync_fails_then_restart() {
     run(scenario::wal_fsync_fails_then_restart);

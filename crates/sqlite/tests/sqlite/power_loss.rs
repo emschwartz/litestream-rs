@@ -306,11 +306,12 @@ fn nothing_unproven_staged<B: Backend>(rig: &Rig<B>, before: ((u32, u32), u64)) 
 
 /// Linux reports a failed writeback once, to each descriptor, then calls the pages clean, so the
 /// next fsync succeeds over bytes that never reached the disk. A failed sync of the WAL before
-/// staging stages nothing from that WAL generation and shows in health as `WalSyncFailed`; the
-/// engine checkpoints with TRUNCATE (SQLite writes the pages into the database file again and
-/// syncs it) and snapshots, and the replica then survives a power loss.
+/// staging stages nothing from that WAL generation then and shows in health as `WalSyncFailed`;
+/// the next try syncs again and goes on, as Go does, with no checkpoint of the engine's own and no
+/// snapshot owed (`docs/decisions/D173.md`). A power loss afterwards takes the frames the failed
+/// sync covered, and the boot finds the database behind what was staged and snapshots it.
 #[test]
-fn a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate() {
+fn a_failed_wal_sync_stages_nothing_then_goes_on_and_a_power_loss_snapshots() {
     let dir = TempDir::new().unwrap();
     let (mut rig, before) = failing_wal_sync(&dir);
     let ticks = rig.ticks().len();
@@ -337,16 +338,15 @@ fn a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_trun
     );
     nothing_unproven_staged(&rig, before);
     rig.settle().unwrap();
-    nothing_unproven_staged(&rig, before);
     assert!(
-        rig.ticks().iter().skip(ticks).any(|t| matches!(
+        rig.ticks().iter().skip(ticks).all(|t| !matches!(
             t,
             Tick::Ran {
-                event: Event::Resnapshot(SnapshotCause::WalSyncFailed),
+                event: Event::Resnapshot(_),
                 ..
             }
         )),
-        "the TRUNCATE ran and a snapshot followed: {:?}",
+        "no snapshot is owed: {:?}",
         &rig.ticks()[ticks..]
     );
     assert_eq!(rig.actor().degraded(Task::Sync), None);
@@ -358,15 +358,15 @@ fn a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_trun
     rig.check().unwrap();
 }
 
-/// A restart between the failed sync and the TRUNCATE: the new process must not stage the frames
-/// the failed sync covered. The engine journal beside staging holds the debt across the restart.
+/// A restart between the failed sync and its retry: the new process remembers nothing of the
+/// failure and boots as it would after any crash.
 #[test]
-fn a_restart_after_a_failed_wal_sync_ships_no_unproven_frame() {
+fn a_restart_after_a_failed_wal_sync_boots_as_after_any_crash() {
     let dir = TempDir::new().unwrap();
-    let (mut rig, before) = failing_wal_sync(&dir);
+    let (mut rig, _before) = failing_wal_sync(&dir);
     rig.tick().unwrap();
     assert_eq!(rig.vfs().fired().len(), 1, "the engine's sync failed once");
     rig.restart().unwrap();
     rig.settle().unwrap();
-    nothing_unproven_staged(&rig, before);
+    rig.check().unwrap();
 }

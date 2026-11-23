@@ -40,8 +40,8 @@
 //! end of the file, `ReadTxLost` when the read transaction cannot be retaken (the next call
 //! retakes it, in a new epoch), `Unlinked` when the WAL path no longer names the file SQLite
 //! holds open (deleted, or replaced, by another process: SQLite keeps writing the deleted file,
-//! out of every reader's reach), `FsyncFailed` when its sync of the WAL failed (and every
-//! later sync until a TRUNCATE checkpoint completes), and `Io` for the rest.
+//! out of every reader's reach), `FsyncFailed` when its sync of the WAL failed (the next sync
+//! is made again, with nothing remembered), and `Io` for the rest.
 //!
 //! [`app_connection`] and [`check_app_connection`] set up and check the application's own connections
 //! (`wal_autocheckpoint = 0`, PLAN section 6; never `SQLITE_FCNTL_PERSIST_WAL`, which only the

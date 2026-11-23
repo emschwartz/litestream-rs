@@ -677,8 +677,6 @@ impl World {
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
         self.sync_model_at(at);
-        // A failed sync inside the tick may have had its pages evicted at once.
-        self.adopt_evicted();
         match ran {
             RunEnd::Done(out) => TickEnd::Done(out),
             RunEnd::Crashed { polls } => {
@@ -1146,14 +1144,6 @@ impl World {
         block_on(up.write(bytes))?;
         block_on(up.commit())?;
         Ok(())
-    }
-
-    /// Follows evicted WAL pages (`SimSqlite::evict_page_cache`) when they changed what SQLite
-    /// serves: damage, as [`World::adopt_corrupt_state`] takes it.
-    pub fn adopt_evicted(&mut self) {
-        if self.sqlite.take_evicted() {
-            self.adopt_corrupt_state();
-        }
     }
 
     /// [`World::adopt_local_state`] for damage that corrupted the database

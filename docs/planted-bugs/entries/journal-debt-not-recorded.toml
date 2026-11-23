@@ -1,7 +1,0 @@
-name = "journal-debt-not-recorded"
-fix = "8ef5a8f"
-package = "lsr-core"
-tests = [
-    "actor::tests::journal::a_failed_wal_sync_is_recorded_in_the_tick_that_met_it",
-    "actor::tests::journal::a_restart_after_a_failed_wal_sync_still_owes_the_truncate",
-]

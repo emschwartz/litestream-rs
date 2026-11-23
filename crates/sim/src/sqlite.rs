@@ -309,18 +309,14 @@ struct State {
     // writes them (Linux's "fsyncgate"): until the generation ends they stay as they were.
     lost_writeback: Option<LostWriteback>,
     // The app's own connection has not yet fsynced the WAL since our sync failed. Linux reports
-    // The next failed sync of ours has its lost pages evicted at once
-    // ([`SimSqlite::evict_page_cache`]).
-    evict_armed: bool,
-    // The lost pages were evicted since the world last asked ([`SimSqlite::take_evicted`]).
-    evicted: bool,
     // a writeback error to every file description open when it happened (errseq, since 4.13), so
     // the app's first WAL sync after ours fails too, and that checkpoint backfills nothing. A
     // process that opens the WAL after our sync saw the error (the CLI) is told nothing.
     app_unsynced_error: bool,
     // Every WAL byte range a failed sync of ours lost, by generation, for the life of the
     // simulated machine: a level-0 file staged from one was never durable, whatever the WAL
-    // holds by the time anyone looks.
+    // holds by the time anyone looks. v1 stages it all the same once a sync succeeds (D173), so
+    // [`SimSqlite::wal_range_durable`] does not judge those ranges.
     lost_ranges: Vec<(Salts, u64, u64)>,
     present: bool,
     unlinked: bool,
@@ -1092,30 +1088,6 @@ impl State {
         out
     }
 
-    /// Puts back, in the WAL as reads find it, the disk's bytes under every byte a failed sync
-    /// of this generation covered and nothing rewrote since; whether any changed.
-    fn evict_lost(&mut self) -> bool {
-        let Some(lost) = self.lost_writeback.take() else {
-            return false;
-        };
-        let mut changed = false;
-        if lost.salts == self.index.salts {
-            for (at, written) in lost.wal.iter().enumerate() {
-                let disk = lost.durable.get(at).copied().unwrap_or(0);
-                if let Some(now) = self.wal.get_mut(at)
-                    && *written != disk
-                    && *now == *written
-                {
-                    *now = disk;
-                    changed = true;
-                }
-            }
-        }
-        self.lost_writeback = Some(lost);
-        self.evicted |= changed;
-        changed
-    }
-
     /// Truncates the WAL to nothing, durably, keeping its bytes as the stale
     /// bytes a later crash may show.
     fn forget_wal(&mut self) {
@@ -1272,8 +1244,6 @@ impl SimSqlite {
             app_autocheckpoint: None,
             our_sync_lies: false,
             lost_writeback: None,
-            evict_armed: false,
-            evicted: false,
             app_unsynced_error: false,
             lost_ranges: Vec::new(),
             app_auto: AutoTally::default(),
@@ -1731,19 +1701,6 @@ impl SimSqlite {
         self.with(|state| state.faults.driver_writes_nothing = true);
     }
 
-    /// Whether a failed sync of the WAL lost a writeback that the model still carries, in this
-    /// generation or an earlier one, or one is queued for the engine's next sync.
-    pub fn writeback_lost(&self) -> bool {
-        self.with(|state| {
-            state.lost_writeback.is_some()
-                || state
-                    .faults
-                    .injections
-                    .iter()
-                    .any(|(op, err)| *op == SourceOp::Sync && *err == SourceError::FsyncFailed)
-        })
-    }
-
     /// The next call of `op` fails with `err`.
     pub fn inject(&self, op: SourceOp, err: SourceError) {
         self.with(|state| state.faults.injections.push((op, err)));
@@ -1776,26 +1733,6 @@ impl SimSqlite {
     #[must_use]
     pub fn block_losses(&self) -> (u32, u32) {
         self.with(|state| state.block_kept)
-    }
-
-    /// The kernel evicts the WAL pages a failed sync of ours lost (Linux marks them clean,
-    /// so memory pressure may drop them): a later read of those bytes, by SQLite or the
-    /// engine, finds what the disk held before the writes. With such pages in this
-    /// generation they go now; otherwise the next failed sync's go as it fails, which the
-    /// kernel may also do. False only when an eviction is armed already and nothing is lost.
-    /// [`SimSqlite::take_evicted`] says when bytes changed.
-    pub fn evict_page_cache(&self) -> bool {
-        self.with(|state| {
-            if state.evict_lost() {
-                return true;
-            }
-            !mem::replace(&mut state.evict_armed, true)
-        })
-    }
-
-    /// Whether evicted pages changed what SQLite serves since the last call.
-    pub fn take_evicted(&self) -> bool {
-        self.with(|state| mem::take(&mut state.evicted))
     }
 
     /// Power losses under the block law that found database blocks a partial backfill had
@@ -1877,19 +1814,24 @@ impl SimSqlite {
 
     /// Whether the WAL bytes `[start, end)` of generation `salts` would survive a power loss
     /// now: true too when the WAL is in another generation (those frames are no longer
-    /// SQLite's), or when the disk lies about our sync (that lie is the scenario's point).
+    /// SQLite's), when the disk lies about our sync (that lie is the scenario's point), or when
+    /// a failed sync of ours lost the range: v1 goes on past it.
     #[must_use]
     pub fn wal_range_durable(&self, salts: Salts, start: u64, end: u64) -> bool {
         self.with(|state| {
             if state.our_sync_lies {
                 return true;
             }
+            // Frames a failed sync lost are staged once a retried sync succeeds: v1 goes on after
+            // a failed sync of the WAL, as Go does, and a power loss then takes them
+            // (`docs/decisions/D173.md`). The boot's rewind check answers it, so the staged file
+            // is not a violation.
             let lost = state
                 .lost_ranges
                 .iter()
                 .any(|(s, from, to)| *s == salts && start < *to && *from < end);
             if lost {
-                return false;
+                return true;
             }
             if state.index.salts != salts {
                 return true;
@@ -2091,9 +2033,6 @@ impl WalSource for SimSource {
                     durable: state.durable.clone(),
                     wal: state.wal.clone(),
                 });
-                if mem::take(&mut state.evict_armed) {
-                    state.evict_lost();
-                }
             }
             return Err(err);
         }

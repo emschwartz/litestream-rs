@@ -8,7 +8,6 @@
 //! notice's text.
 
 use std::fmt;
-use std::num::NonZeroU32;
 
 use lsr_core::{
     AppCheckpoint, AppCheckpoints, Degraded, FinalRetention, FinalSnapshot, Gate, JournalSignal,
@@ -191,71 +190,12 @@ pub struct Health {
     /// Fail-stop (`Config::if_replication_stops`): whether replication has tripped, and what
     /// that does to the application.
     pub held_by: FailStop,
-    /// A boot after a failed WAL sync found the database file ahead of its WAL: pages from
-    /// commits the WAL lost, replicated as the application serves them. Stands while the state
-    /// before them is kept restorable, then ends on its own (`docs/decisions.md` D103).
-    pub ahead_of_wal: Option<AheadOfWal>,
     /// The retention pass a stop was asked to end with
     /// ([`crate::Replicator::request_final_retention`]): not asked, running, or how it ended.
     pub final_retention: FinalRetention,
     /// The snapshot a stop was asked to end with ([`crate::Replicator::request_final_snapshot`]):
     /// not asked, owed, written, or why it was not.
     pub final_snapshot: FinalSnapshot,
-    /// A boot after a failed WAL sync owed the check for a database file ahead of its WAL and
-    /// could not make it, because the replica could not give its own newest confirmed state, so
-    /// the WAL was checkpointed unchecked. Stands for a fixed window, then ends on its own
-    /// (`docs/decisions.md` D106).
-    pub ahead_of_wal_unchecked: Option<AheadOfWalUnchecked>,
-}
-
-/// An owed check for a database file ahead of its WAL that could not be made.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AheadOfWalUnchecked {
-    /// When the check was given up.
-    pub since: Timestamp,
-    /// When this ends.
-    pub kept_until: Timestamp,
-}
-
-impl AheadOfWalUnchecked {
-    /// The report of a notice the engine holds.
-    #[must_use]
-    pub fn of(unchecked: lsr_core::Unchecked) -> Self {
-        Self {
-            since: unchecked.made,
-            kept_until: unchecked.made.saturating_add(lsr_core::AHEAD_KEPT_FOR),
-        }
-    }
-}
-
-/// The database file found holding a state no commit made after a failed WAL sync: ahead of
-/// its WAL (`docs/decisions.md` D103), or missing commits a checkpoint lost (D108).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AheadOfWal {
-    /// What was found.
-    pub kind: lsr_core::AheadKind,
-    /// How many pages differed from their images at the restore point.
-    pub pages: NonZeroU32,
-    /// The lowest of them.
-    pub first_page: NonZeroU32,
-    /// The newest staged transaction when the damage was found: the state before it.
-    pub restore_point: Txid,
-    /// When the restore point goes back to normal retention and this ends.
-    pub kept_until: Timestamp,
-}
-
-impl AheadOfWal {
-    /// The report of a verdict the engine holds.
-    #[must_use]
-    pub fn of(ahead: lsr_core::Ahead) -> Self {
-        Self {
-            kind: ahead.kind,
-            pages: ahead.pages,
-            first_page: ahead.first,
-            restore_point: ahead.restore_point,
-            kept_until: ahead.made.saturating_add(lsr_core::AHEAD_KEPT_FOR),
-        }
-    }
 }
 
 /// Fail-stop's state (`lsr_core::failstop`, `docs/proposals/fail-stop.md`).
@@ -409,10 +349,8 @@ impl Health {
                 },
             },
             journal: None,
-            ahead_of_wal: None,
             final_retention: FinalRetention::NotAsked,
             final_snapshot: FinalSnapshot::NotAsked,
-            ahead_of_wal_unchecked: None,
         }
     }
 

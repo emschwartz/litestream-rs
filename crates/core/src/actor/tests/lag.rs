@@ -141,43 +141,6 @@ fn a_crash_loop_does_not_reset_the_clock() {
     assert!(at <= since.unix_millis() + BOUND + life, "{at}");
 }
 
-/// A snapshot the engine owes after it wrote unstaged frames into the database file keeps the
-/// lag that was there: those commits are in no staged file and in no WAL frame. Here the WAL
-/// sync fails, the TRUNCATE empties the WAL, and staging refuses the snapshot.
-#[test]
-fn a_snapshot_owed_after_a_truncate_keeps_the_lag() {
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(go_like());
-    rig.settle(&mut actor, T0);
-    rig.wal.inject(SourceOp::Sync, SourceError::FsyncFailed);
-    rig.commit(2);
-    let failed = rig.tick(&mut actor, T0 + 1);
-    let Some(Event::Degraded { until, .. }) = event(&failed) else {
-        panic!("{failed:?}");
-    };
-    let since = actor
-        .unreplicated_since()
-        .expect("the commit is off the replica");
-    for _ in 0..1_000 {
-        rig.staging.inner.inject_failure(
-            StoreOp::Upload,
-            StoreError::Transient {
-                op: StoreOp::Upload,
-                kind: ErrorKind::StorageFull,
-            },
-        );
-    }
-    let seen = drive(&mut rig, &mut actor, until.unix_millis(), T0 + 30_000);
-    assert!(
-        rig.ck
-            .calls()
-            .contains(&CheckpointCall::Checkpoint(CheckpointMode::Truncate)),
-        "the TRUNCATE ran: {seen:?}"
-    );
-    assert!(actor.pending_snapshot().is_some());
-    assert_eq!(actor.unreplicated_since(), Some(since), "{seen:?}");
-}
-
 /// A refusal before the first listing trips; a timeout does not; the first listing ends it.
 #[test]
 fn a_refusal_at_boot_trips_until_the_first_listing() {

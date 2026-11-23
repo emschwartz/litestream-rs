@@ -39,7 +39,7 @@ use lsr_core::{
 use lsr_ltx::{PageNo, PageSize};
 
 use crate::generate::{EnvFault, Target};
-use crate::oracle::{MODEL_DIVERGED_AFTER_LOST_WRITEBACK, Violation};
+use crate::oracle::Violation;
 
 /// What a history may do with one (operation, error) pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,13 +60,6 @@ pub enum Cell {
 /// tracking item and the signature its failures have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KnownWrong {
-    /// After a failed sync of the WAL, a checkpoint (the application's, or the TRUNCATE that pays
-    /// the debt) copies frames the failed sync covered into the database file, and a power loss
-    /// then cuts the WAL short of them: SQLite recovers a database file no commit made. The
-    /// engine replicates it as a clean state until its boot check lands (`docs/decisions.md`
-    /// D103). The simulator does not adopt that state (decision D73): its model check fails
-    /// the run where it appears, which this defect counts as known.
-    DatabaseAheadOfWal,
     /// Retry counts and degraded states reset at a restart, so a halt that outlasts restarts
     /// is never reported degraded (BEHAVIOR's D9). Reached by a restart inside an overlapping
     /// hold ([`crate::Weights::overlap`]), not by a cell of the tables.
@@ -75,16 +68,12 @@ pub enum KnownWrong {
 
 impl KnownWrong {
     /// Every known defect.
-    pub const ALL: [Self; 2] = [Self::DatabaseAheadOfWal, Self::HaltForgottenAtRestart];
+    pub const ALL: [Self; 1] = [Self::HaltForgottenAtRestart];
 
     /// Where the defect is tracked and who fixes it.
     #[must_use]
     pub const fn tracking(self) -> &'static str {
         match self {
-            Self::DatabaseAheadOfWal => {
-                "#99 (D103, D104); fixed by the journal session's check at a boot that finds a \
-                 recorded WAL-sync debt"
-            }
             Self::HaltForgottenAtRestart => {
                 "#99 (D9); open: retry counts, waits and degraded states must survive a restart"
             }
@@ -95,19 +84,6 @@ impl KnownWrong {
     #[must_use]
     pub fn matches(self, violation: &Violation) -> bool {
         match self {
-            // Before the boot check the model diverged; with it the engine raises its own
-            // verdict for the same file, which the simulator does not yet adopt.
-            Self::DatabaseAheadOfWal => {
-                matches!(
-                    violation,
-                    Violation::BugFault { context } if context == MODEL_DIVERGED_AFTER_LOST_WRITEBACK
-                ) || matches!(
-                    violation,
-                    Violation::UnexpectedDegraded {
-                        cause: lsr_core::PersistentCause::DatabaseAheadOfWal { .. }
-                    }
-                )
-            }
             Self::HaltForgottenAtRestart => {
                 matches!(violation, Violation::HealthBlind { restarts, .. } if *restarts > 0)
             }
@@ -272,7 +248,12 @@ const fn disk_full_cell(op: SourceOp) -> Cell {
 
 const fn fsync_cell(op: SourceOp) -> Cell {
     match op {
-        SourceOp::Sync => Cell::KnownWrong(KnownWrong::DatabaseAheadOfWal),
+        SourceOp::Sync => Cell::Unmodelled(
+            "a failed sync of the WAL is met and goes on (D173); a checkpoint that copies the frames \
+             it covered, then a power loss, leaves a database no commit made, which v1 does not \
+             detect or repair, so a random history cannot judge it. \
+             `wal_fsync_fails` and `wal_fsync_fails_then_power_loss` are the scenarios",
+        ),
         SourceOp::Open
         | SourceOp::Len
         | SourceOp::Committed

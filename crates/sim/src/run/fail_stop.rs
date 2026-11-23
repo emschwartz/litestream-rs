@@ -34,7 +34,6 @@ impl Runner {
                 | Event::Idle
                 | Event::Resnapshot(_)
                 | Event::Clamped(_)
-                | Event::AheadOfWal(_)
                 | Event::TakeoverWanted(_) => false,
             },
             TickEnd::Done(_) | TickEnd::Crashed { .. } => false,
@@ -177,12 +176,11 @@ impl Runner {
 const fn breaks_continuity(cause: SnapshotCause) -> bool {
     match cause {
         SnapshotCause::StagedUnverified { .. } | SnapshotCause::LocalRewound { .. } => true,
-        // No replica yet, or one ahead of us (D81 keeps it out); a checkpoint or a failed WAL
-        // sync is a mid-run cause; the rest the engine never counts as lag.
+        // No replica yet, or one ahead of us (D81 keeps it out); a checkpoint is a mid-run
+        // cause; the rest the engine never counts as lag.
         SnapshotCause::FirstSync
         | SnapshotCause::BehindRemote { .. }
         | SnapshotCause::CheckpointBoundary
-        | SnapshotCause::WalSyncFailed
         | SnapshotCause::OperatorRequested
         | SnapshotCause::GenerationChanged
         | SnapshotCause::WalMissing

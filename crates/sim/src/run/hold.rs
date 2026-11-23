@@ -249,15 +249,6 @@ impl Runner {
     /// Runs `ticks` ticks under `hold`, judging restores in the middle and at the end while it
     /// holds, then lifts it.
     pub(super) fn hold(&mut self, hold: Hold, ticks: u8) -> Result<(), Violation> {
-        // A lying disk, with its power loss, while a failed sync's writeback is held or queued:
-        // the model loses track of the database (seed 0x80b of the mixed set, once the D2 fix
-        // let runs live past a restart with the debt held). Skipped and counted, a listed gap.
-        if hold == Hold::LyingDisk && self.lenient && self.w.sqlite.writeback_lost() {
-            self.report
-                .reach
-                .bump("hold.skipped.lying_disk_writeback_lost");
-            return Ok(());
-        }
         self.report.reach.bump(format!("hold.{}", name(hold)));
         if let Hold::Wal(op) = hold {
             return self.wal_damage_held(op, ticks);

@@ -7,8 +7,6 @@
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
-pub mod mix_after_failed_sync;
-pub mod seed_0x116;
 pub mod seed_0x126d68ed250e;
 pub mod seed_0x126d68ef1c07;
 pub mod seed_0x126d68ef545f;
@@ -17,7 +15,6 @@ pub mod seed_0x126d68fac789;
 pub mod seed_0x126d68facf74;
 pub mod seed_0x126d68fae16b;
 pub mod seed_0x1919f;
-pub mod seed_0x21;
 pub mod seed_0x25;
 pub mod seed_0x2a8;
 pub mod seed_0x2c;
@@ -181,30 +178,12 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         ),
     ),
     (
-        "seed_0x21",
-        "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0x21",
-        Guard::Own("journal-debt-not-recorded-sim"),
-    ),
-    (
-        "mix_after_failed_sync",
-        "a_checkpoint_of_unproven_frames_then_a_power_loss_leaves_a_database_ahead_of_its_wal",
-        Guard::Unguarded(
-            "it pins an open defect (KnownWrong::DatabaseAheadOfWal) and passes only while main \
-             fails with it, so no plant can be judged by it",
-        ),
-    ),
-    (
         "seed_0xe9",
         "a_halt_across_restarts_still_goes_unreported_seed_0xe9",
         Guard::Unguarded(
             "it pins an open defect (KnownWrong::HaltForgottenAtRestart) and passes only while \
              main fails with it, so no plant can be judged by it",
         ),
-    ),
-    (
-        "seed_0x116",
-        "a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116",
-        Guard::Own("journal-debt-not-recorded-sim"),
     ),
     (
         "seed_0xf488c",

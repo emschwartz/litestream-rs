@@ -1,7 +1,0 @@
-# A boot re-dates the recorded verdict, so its window starts again at every restart and never ends.
-name = "ahead-window-restarts-at-boot"
-fix = "6ed52046"
-package = "lsr-core"
-tests = [
-    "actor::tests::journal::the_restore_point_is_kept_for_the_window_across_a_restart",
-]
