@@ -382,6 +382,18 @@ impl FaultHandle {
         state.lag.window = window.max(1);
     }
 
+    /// Whether listings still show `key` as it was before a lagged write or
+    /// delete, not as the store holds it now: a listing made now does not show
+    /// what is under the key.
+    #[must_use]
+    pub fn hides(&self, key: FileKey) -> bool {
+        lock(&self.state)
+            .lag
+            .stale
+            .iter()
+            .any(|stale| stale.key == key)
+    }
+
     /// Listings a lag changed.
     #[must_use]
     pub fn stale_listings(&self) -> u32 {
