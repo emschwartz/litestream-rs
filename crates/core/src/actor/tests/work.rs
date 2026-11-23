@@ -75,3 +75,22 @@ fn checkpoints_are_counted_per_mode() {
         CallTotals::default()
     );
 }
+
+/// Across a WAL restart the new generation's frames count from its header, not as a
+/// difference from the old generation's offset, which lies further on.
+#[test]
+fn wal_bytes_across_a_restart_count_the_new_generation_from_its_header() {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=4 {
+        rig.commit(n);
+        rig.settle(&mut actor, T0 + 1);
+    }
+    let before = actor.work().wal_bytes();
+    rig.wal.force_restart();
+    rig.commit(5);
+    let committed = rig.wal.committed_end().offset().get();
+    rig.settle(&mut actor, T0 + 2);
+    let header = u64::try_from(lsr_wal::HEADER_LEN).unwrap();
+    assert_eq!(actor.work().wal_bytes() - before, committed - header);
+    assert_eq!(actor.synced_wal_offset(), committed);
+}

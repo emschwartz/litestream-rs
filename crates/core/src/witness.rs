@@ -54,6 +54,7 @@ use lsr_ltx::{
 };
 use lsr_wal::{Salts, ScanLimit, TxOutcome, WalError, WalOffset};
 
+use crate::fault::role::Role;
 use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::recover::{BootWal, Range, wal_range};
@@ -253,8 +254,12 @@ impl Witnesses {
     #[cfg(test)]
     pub(crate) fn trust_all<S: ObjectStore>(staging: &S) -> Self {
         let mut all = Self::new();
-        let files = crate::conformance::block_on(staged_from(staging, None, usize::MAX))
-            .unwrap_or_default();
+        let files = crate::conformance::block_on(staged_from(
+            &crate::fault::role::Staging(staging),
+            None,
+            usize::MAX,
+        ))
+        .unwrap_or_default();
         for info in files {
             let bytes = crate::conformance::block_on(staging.read(
                 &info.key,
@@ -362,8 +367,8 @@ pub(crate) async fn witness_pending<L, S, R, P>(
     confirmed: Option<Txid>,
 ) -> Result<Pending, Fault>
 where
-    L: ObjectStore,
-    S: ObjectStore,
+    L: Role,
+    S: Role,
     R: Read + Seek,
     P: PageSource,
 {
@@ -403,7 +408,6 @@ where
         }
         match witness_one(staging, &mut live, info, prev, &mut framed).await? {
             Ok((token, next)) => {
-                mark!(Boot4);
                 tokens.push(token);
                 prev = Before {
                     txid: Some(next.txid),
@@ -426,7 +430,7 @@ where
 
 /// The replica's tail, when the live WAL holds its range with its pages and
 /// commit size: where the first pending file must start.
-async fn anchor<L: ObjectStore, S: ObjectStore, R: Read + Seek, P>(
+async fn anchor<L: Role, S: Role, R: Read + Seek, P>(
     staging: &L,
     remote: &S,
     live: &mut LiveDb<'_, R, P>,
@@ -437,12 +441,12 @@ async fn anchor<L: ObjectStore, S: ObjectStore, R: Read + Seek, P>(
     let listed = staging
         .list(Level::ZERO, after, PageLimit::ONE)
         .await
-        .map_err(|err| Fault::from_staging(&err))?;
+        .map_err(|err| L::fault(&err))?;
     let staged = listed.files.first().is_some_and(|info| info.key == key);
     let decoded = if staged {
-        decode(staging, key, Fault::from_staging).await?
+        decode(staging, key, L::fault).await?
     } else {
-        decode(remote, key, Fault::from_remote).await?
+        decode(remote, key, S::fault).await?
     };
     let Some(decoded) = decoded else {
         return Ok(None);
@@ -495,7 +499,7 @@ fn span(header: &Header) -> Option<(Salts, u64, WalOffset, NonZeroU32)> {
 /// earlier state. A snapshot the read cannot prove is refused and taken
 /// again; a file that starts a generation without holding every page (a
 /// hop) is refused, since only a running position can prove it lost nothing.
-async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
+async fn witness_one<L: Role, R: Read + Seek, P: PageSource>(
     staging: &L,
     live: &mut LiveDb<'_, R, P>,
     info: &FileInfo,
@@ -507,7 +511,7 @@ async fn witness_one<L: ObjectStore, R: Read + Seek, P: PageSource>(
     if Some(info.key) != next.map(|next| FileKey::new(Level::ZERO, TxidRange::single(next))) {
         return Ok(Err(Refused::Unusable));
     }
-    let Some(decoded) = decode(staging, info.key, Fault::from_staging).await? else {
+    let Some(decoded) = decode(staging, info.key, L::fault).await? else {
         return Ok(Err(Refused::Unusable));
     };
     let Some((salts, start, end, commit)) = span(&decoded.header) else {
@@ -638,11 +642,8 @@ fn framed_pages<R: Read + Seek>(
 ///
 /// # Errors
 /// The staging store's fault when a read fails.
-pub(crate) async fn still_holds<L: ObjectStore>(
-    staging: &L,
-    token: &Witnessed,
-) -> Result<bool, Fault> {
-    let decoded = decode(staging, token.key(), Fault::from_staging).await?;
+pub(crate) async fn still_holds<L: Role>(staging: &L, token: &Witnessed) -> Result<bool, Fault> {
+    let decoded = decode(staging, token.key(), L::fault).await?;
     Ok(decoded.is_some_and(|file| token.matches(file.bytes, file.checksum)))
 }
 

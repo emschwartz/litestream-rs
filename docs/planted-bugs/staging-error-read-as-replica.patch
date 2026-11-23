@@ -1,0 +1,11 @@
+--- a/crates/core/src/fault/role.rs
++++ b/crates/core/src/fault/role.rs
+@@ -59,7 +59,7 @@
+ 
+ impl<S: ObjectStore> Role for Staging<'_, S> {
+     fn fault(err: &StoreError) -> Fault {
+-        Fault::from_staging(err)
++        Fault::from_remote(err)
+     }
+ 
+     fn compact_input(err: StoreError) -> CompactError {

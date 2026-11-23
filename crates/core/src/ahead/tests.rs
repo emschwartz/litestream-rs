@@ -9,6 +9,7 @@ use lsr_wal::{CommittedEnd, Salts, ScanLimit, TxOutcome, WalReader};
 
 use super::*;
 use crate::conformance::block_on;
+use crate::fault::role::Replica;
 use crate::mem::MemStore;
 use crate::position::{Continuity, LastPage};
 use crate::source::{CommittedRead, FakeDb, FakeWal, PageSource, SourceError, SourceOp};
@@ -67,7 +68,14 @@ fn run<P: PageSource>(
     db: &mut P,
     table: &PageChecksumTable,
 ) -> Result<Option<Found>, Fault> {
-    block_on(check(position, wal, db, table, &MemStore::new(), None))
+    block_on(check(
+        position,
+        wal,
+        db,
+        table,
+        &Replica(&MemStore::new()),
+        None,
+    ))
 }
 
 #[test]
@@ -245,7 +253,14 @@ fn the_images_come_from_the_replica_when_nothing_is_pending() {
     let remote = replica_at(4);
     let empty = PageChecksumTable::new();
     let checked = |wal: &mut FakeWal, db: &mut FakeDb| {
-        block_on(check(&position, wal, db, &empty, &remote, Txid::new(4)))
+        block_on(check(
+            &position,
+            wal,
+            db,
+            &empty,
+            &Replica(&remote),
+            Txid::new(4),
+        ))
     };
     assert_eq!(checked(&mut wal, &mut db), Ok(None));
     db.write_page(pg(3), &bytes(9));

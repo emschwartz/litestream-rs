@@ -1,0 +1,13 @@
+diff --git a/crates/sqlite/src/version.rs b/crates/sqlite/src/version.rs
+index 791153d7..bf3be6b9 100644
+--- a/crates/sqlite/src/version.rs
++++ b/crates/sqlite/src/version.rs
+@@ -35,7 +35,7 @@ pub(crate) fn check_linked() -> Result<(), OpenError> {
+ }
+ 
+ fn check(found: c_int, source_id: &str) -> Result<(), OpenError> {
+-    if found == WRITTEN_FOR_NUMBER && source_id == WRITTEN_FOR_SOURCE_ID {
++    if found == WRITTEN_FOR_NUMBER || source_id == WRITTEN_FOR_SOURCE_ID {
+         return Ok(());
+     }
+     Err(OpenError::SqliteBuild {

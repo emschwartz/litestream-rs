@@ -32,12 +32,12 @@ pub const REQUIRED: &[&str] = &[
     "check.stamps",          // WrongCreatedAt (ledger: time-provenance, time-provenance-sim)
     "check.deletes", // RetentionTooEager, DeletedOnOneRead (ledger: delete-on-one-failed-read-*)
     // Crashes: power loss is the only source of rewinds, torn staged files and kept unsynced
-    // frames, the shapes the boot rules and the liveness oracle's map exist for.
+    // frames, the shapes the boot rules and the needless-snapshot map exist for.
     "crash.Process",
     "crash.Power",
     "power.kept_unsynced_wal",
     "power.kept_cut_frame",
-    // Every snapshot cause the liveness oracle maps to its justifying faults; a cause no run
+    // Every snapshot cause the needless-snapshot check maps to its forcings; a cause no run
     // reaches is a row of that map nothing tests. CheckpointBoundary and OperatorRequested have
     // no event of their own and are counted when staged (`snapshot.staged.*`).
     "snapshot.FirstSync",
@@ -47,10 +47,10 @@ pub const REQUIRED: &[&str] = &[
     "snapshot.GenerationChanged",
     "snapshot.PrevFrameMismatch",
     "snapshot.LastPageMismatch",
-    // The liveness oracle's other two judgments: an operator's snapshot is
-    // judged when staged, and every staged file given up is judged.
+    // An operator's snapshot is judged when staged, and every staged file given up is judged
+    // by the lost-restore-point check.
     "snapshot.staged.OperatorRequested",
-    "liveness.given_up",
+    "lost_restore_points.counted",
     // Another writer: OtherWriterMissed (ledger: maintenance-another-writer).
     "remote.second_writer",
     "stop.OtherWriter",

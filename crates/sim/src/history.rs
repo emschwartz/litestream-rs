@@ -25,8 +25,8 @@
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfInside, CreatedAtSource, Database, Entropy, FileKey, Inventory, MemSink, MemStore,
-    RestoreError, RestoreOptions, RestoreTarget, SeededEntropy, restore_with,
+    AsOfInside, CreatedAtSource, Database, Entropy, FileKey, MemSink, RestoreError, RestoreOptions,
+    RestoreTarget, SeededEntropy, restore_with,
 };
 use lsr_history::{AheadMode, Counts, Digest, Judge, Log, NodeId, Signals};
 use lsr_ltx::{Timestamp, Txid};
@@ -92,7 +92,7 @@ enum Restored {
 }
 
 fn restore(
-    remote: &MemStore,
+    remote: &crate::remote::Bucket,
     target: RestoreTarget,
     damaged: &[FileKey],
 ) -> Result<Restored, Violation> {
@@ -214,20 +214,19 @@ impl History {
     /// that failed in a way the oracle would also call a bug.
     pub fn judge(
         &mut self,
-        remote: &MemStore,
+        remote: &crate::remote::Bucket,
         now: Timestamp,
         damaged: &[FileKey],
         ask: Ask,
     ) -> Result<(), Violation> {
         self.log.note_time(now.unix_millis());
-        let inventory = block_on(Inventory::load(remote))
-            .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
-        let Some(newest) = inventory.newest() else {
+        let files = crate::oracle::replica_files(remote);
+        let Some(newest) = crate::oracle::newest_of(&files) else {
             return Ok(());
         };
         if ask.sweep {
             self.sweep(remote, newest, damaged)?;
-            self.boundaries(remote, inventory.files(), damaged)?;
+            self.boundaries(remote, &files, damaged)?;
         }
         if let Restored::Content(digest) = self.restored(remote, RestoreTarget::Latest, damaged)? {
             self.judge
@@ -257,7 +256,7 @@ impl History {
     /// `AsOf` one millisecond after each of the newest created-at times the store recorded.
     fn boundaries(
         &mut self,
-        remote: &MemStore,
+        remote: &crate::remote::Bucket,
         files: &[lsr_core::FileInfo],
         damaged: &[FileKey],
     ) -> Result<(), Violation> {
@@ -283,7 +282,7 @@ impl History {
 
     fn restored(
         &mut self,
-        remote: &MemStore,
+        remote: &crate::remote::Bucket,
         target: RestoreTarget,
         damaged: &[FileKey],
     ) -> Result<Restored, Violation> {
@@ -301,7 +300,7 @@ impl History {
 
     fn sweep(
         &mut self,
-        remote: &MemStore,
+        remote: &crate::remote::Bucket,
         newest: Txid,
         damaged: &[FileKey],
     ) -> Result<(), Violation> {

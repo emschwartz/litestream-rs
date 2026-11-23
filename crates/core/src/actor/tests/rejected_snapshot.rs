@@ -141,3 +141,62 @@ fn a_rejected_snapshot_that_cannot_be_deleted_goes_first_and_holds_retention() {
     assert_eq!(after.len(), 1);
     assert_eq!(restored(&rig), 2);
 }
+
+/// The stored created-at time of `info`.
+fn created(info: &FileInfo) -> i64 {
+    info.created_at().unwrap().at().unix_millis()
+}
+
+/// A clock that steps back across a restart, with staging intact: the new engine's clamp
+/// starts from the newest staged file's header, so it stamps its next file no earlier than
+/// the files the engine before it wrote. Its snapshots do not go backwards either: the next
+/// one waits until the clock's snapshot window starts after the newest snapshot's created-at
+/// time, and is stamped then, so retention meets no snapshot pair whose created-at times run
+/// backwards and holds nothing.
+#[test]
+fn a_clock_stepped_back_across_a_restart_stamps_nothing_earlier() {
+    let day: i64 = 86_400_000;
+    let (mut rig, mut actor) = before_first_snapshot();
+    rig.follow(&mut actor, T0, 50);
+    let [first] = Rig::files(&rig.remote, Level::SNAPSHOT)[..] else {
+        panic!("one snapshot");
+    };
+    let mut actor = Actor::new(cfg());
+    let back = T0 - 3_600_000;
+    rig.commit(2);
+    let seen = rig.follow(&mut actor, back, 50);
+    no_stop(&seen);
+    let newest_l0 = Rig::files(&rig.remote, Level::ZERO)
+        .into_iter()
+        .max_by_key(|info| info.key.range().max())
+        .unwrap();
+    assert_eq!(newest_l0.key.range().max().get(), 2);
+    assert!(
+        created(&newest_l0) >= created(&first),
+        "the new engine stamped transaction 2 before the snapshot of transaction 1"
+    );
+    assert_eq!(
+        Rig::files(&rig.remote, Level::SNAPSHOT),
+        vec![first],
+        "no snapshot while the clock is behind the newest one"
+    );
+    let seen = rig.follow(&mut actor, T0 + day + 1, 300);
+    no_stop(&seen);
+    let held_backwards = seen.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Maintained {
+                event: MaintainedEvent::Waiting {
+                    held: Some(RetentionHold::SnapshotCreatedAtBackwards { .. }),
+                },
+                ..
+            })
+        )
+    });
+    assert!(!held_backwards, "{seen:?}");
+    let [second] = Rig::files(&rig.remote, Level::SNAPSHOT)[..] else {
+        panic!("one snapshot after retention");
+    };
+    assert_eq!(second.key.range().max().get(), 2);
+    assert!(created(&second) > created(&first));
+}

@@ -390,7 +390,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_IEC" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
 "TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_SI" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
 "TestStripSQLitePrefix" = { counterpart = "lsr-config::expand::tests::go_strip_sqlite_prefix_table" }
-"TestX509FallbackRoots" = { counterpart = "lsr-store-s3::trust::tests::go_unix::nothing_found_falls_back_to_mozilla_roots" }
+"TestX509FallbackRoots" = { counterpart = "lsr-store-s3::trust::tests::variables_naming_nothing_fall_back_to_mozilla_roots_and_refuse_the_private_ca" }
 
 ["litestream/cmd/litestream/register_test.go"]
 "TestRegisterCommand_Run" = { reason = "@control-socket-cli" }
@@ -447,7 +447,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestRestoreCommand_RunForceOverwritesExistingOutput" = { counterpart = "lsr-cli::cli::cli::force_replaces_an_existing_database_and_its_journal_files" }
 "TestRestoreCommand_RunIfReplicaExists" = { counterpart = ["lsr-cli::cli::cli::if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing", "lsr-cli::cli::cli::if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet", "lsr-cli::cli::cli::if_replica_exists_skips_a_path_without_ltx_as_go_does", "lsr-cli::cli::cli::dry_run_refuses_an_empty_replica_even_with_if_replica_exists"] }
 "TestRestoreCommand_RunJSONOutput" = { counterpart = "lsr-cli::cli::cli::restore_json_reports_go_s_fields" }
-"TestRestoreCommand_RunMissingOutputPathForReplicaURL" = { counterpart = "lsr-cli::bin/lsr::args::tests::missing_required_flag_for_every_required_flag" }
+"TestRestoreCommand_RunMissingOutputPathForReplicaURL" = { counterpart = "lsr-cli::bin/lsr::args::tests::missing_required_flag" }
 "TestRestoreCommand_RunOrphanedSidecars" = { counterpart = ["lsr-cli::cli::cli::a_stale_journal_file_refuses_until_clear_journal_files", "lsr-replica::local::tests::create_refuses_each_journal_file_and_removes_nothing"] }
 "TestRestoreCommand_RunRequiresForceForExistingJournal" = { counterpart = "lsr-replica::local::tests::a_stale_journal_blocks_the_restore_until_cleared" }
 "TestRestoreCommand_RunRequiresForceForExistingOutput" = { counterpart = "lsr-cli::cli::cli::an_existing_output_exits_1_and_stays_byte_identical" }
@@ -1687,8 +1687,8 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestParsePos/OK" = { reason = "@go-ltx-pos" }
 "TestParseTXID" = { counterpart = "lsr-ltx::ids::tests::parse_round_trips_the_bounds" }
 "TestParseTXID/ErrInvalidFormat" = { counterpart = "lsr-ltx::ids::tests::parse_rejects_everything_go_never_writes" }
-"TestParseTXID/ErrTooLong" = { counterpart = "lsr-ltx::time::tests::every_parse_error_is_produced" }
-"TestParseTXID/ErrTooShort" = { counterpart = "lsr-ltx::time::tests::every_parse_error_is_produced" }
+"TestParseTXID/ErrTooLong" = { counterpart = "lsr-ltx::time::tests::only_go_s_shape_is_read" }
+"TestParseTXID/ErrTooShort" = { counterpart = "lsr-ltx::time::tests::only_go_s_shape_is_read" }
 "TestParseTXID/OK" = { counterpart = "lsr-ltx::ids::tests::parse_round_trips_the_bounds" }
 "TestParseTimestamp" = { counterpart = ["lsr-ltx::time::tests::offsets_fractions_and_truncation", "lsr-ltx::time::tests::known_instants_parse_and_print"] }
 "TestPeekHeader" = { counterpart = "lsr-ltx::ltx::pins::decoder_header_appears_with_the_header_event_and_stays" }

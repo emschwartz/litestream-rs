@@ -42,6 +42,9 @@ fn ts(n: i64) -> Timestamp {
     Timestamp::from_unix_millis(n)
 }
 
+/// A key, which of its reads from the start (counting from 1), and the bytes that read returns.
+type OtherBytes = (FileKey, usize, Vec<u8>);
+
 /// A store that counts every call it is asked to make.
 #[derive(Clone, Debug, Default)]
 struct Counting {
@@ -64,6 +67,10 @@ struct Counting {
     /// Keys whose next read returns its bytes with the middle one flipped,
     /// the stored bytes untouched: one bad read.
     flip_next_read: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// A key, which of its reads from the start (counting from 1), and the
+    /// bytes that read returns instead of the stored ones: one read that
+    /// answered with another valid file, the stored bytes untouched.
+    other_bytes_on_read: Arc<std::sync::Mutex<Option<OtherBytes>>>,
     /// Keys every listing leaves out while reads still find them: a listing
     /// that lags the bucket.
     unlisted: Arc<std::sync::Mutex<Vec<FileKey>>>,
@@ -97,6 +104,11 @@ impl Counting {
     /// The next read of `key` returns one byte flipped.
     fn flip_next_read(&self, key: FileKey) {
         self.flip_next_read.lock().unwrap().push(key);
+    }
+
+    /// The `nth` read of `key` from its start returns `bytes`.
+    fn other_bytes_on_read(&self, key: FileKey, nth: usize, bytes: Vec<u8>) {
+        *self.other_bytes_on_read.lock().unwrap() = Some((key, nth, bytes));
     }
 
     /// Every key a delete was asked for, in order.
@@ -167,9 +179,22 @@ impl ObjectStore for Counting {
             let at = pending.iter().position(|k| k == key);
             at.map(|at| pending.remove(at)).is_some()
         };
+        let other = {
+            let nth = self.reads_of(key);
+            let mut planted = self.other_bytes_on_read.lock().unwrap();
+            match planted.as_ref() {
+                Some((at, n, _)) if offset == 0 && at == key && *n == nth => {
+                    planted.take().map(|(_, _, bytes)| bytes)
+                }
+                Some(_) | None => None,
+            }
+        };
         let read = self.inner.read(key, offset, len);
         async move {
             let mut bytes = read.await?;
+            if let Some(other) = other {
+                bytes = other;
+            }
             let middle = bytes.len() / 2;
             if flip && let Some(byte) = bytes.get_mut(middle) {
                 *byte ^= 0x01;

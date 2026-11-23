@@ -18,7 +18,7 @@
 
 ## Rust style
 - The lint set is in `Cargo.toml`; gates run with `-D warnings`. No `unwrap`, `expect`, `panic`, `as`, indexing or unchecked arithmetic in non-test code. An exception is `#[expect(lint, reason = "the invariant")]` on the smallest item, never `allow`.
-- Functions are at most 70 lines.
+- Functions are at most 150 lines (clippy `too-many-lines-threshold`, a hard error, D164). A reasoned `#[expect(clippy::too_many_lines)]` is allowed for a function that is one straight-line sequence (boot, the maintenance step, the tick). No function or type exists only to carry values between two halves of a split; a helper with one caller that names no separate idea is inlined. Applied when a file is next touched, not as a repo-wide reflow.
 - `unsafe` is denied workspace-wide; only the SQLite crate may opt in, one reasoned `#[expect(unsafe_code)]` per site. The one other exception is the counting allocator the memory gates install (`crates/core/tests/core/heap.rs`; `GlobalAlloc` is an unsafe trait); it lives in a test binary and is never linked into a shipped one.
 - Errors are typed (`thiserror`), one enum per crate boundary, each variant carrying what a caller needs to act. No stringly errors, no `anyhow` in library crates.
 - Every public item has a doc comment. Comments say why, never what. Mechanism goes in the module's `//!` doc.
@@ -41,7 +41,7 @@
 - `just check` is the land gate: format, clippy, tests. Scope while iterating: `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo nextest run -p <crate> <test name>`. The README lists which tests need nothing, Docker, Go or Tigris.
 - `just upstream` clones the pinned upstream sources into `.upstream/` (read-only reference: `litestream` at 041a8c3, `ltx` at v0.5.3). [docs/go-terms.md](docs/go-terms.md) maps our terms to Go's, LTX's and SQLite's for the same things.
 - Crates live in `crates/<name>` and are named `lsr-<name>` (working prefix).
-- New runtime dependencies: prefer none. Dev- and test-only dependencies that strengthen correctness checking (fuzzing, schedule exploration, sanitizer support) are welcome. Either way, each one is named in the report with why and its license. Every dependency, external or `lsr-*`, is declared once in the root `[workspace.dependencies]` and referenced as `name.workspace = true`; a crate may add features, never a version or path. (The `fuzz/` crate is outside the workspace and keeps its own.)
+- Runtime dependencies are allowed where they replace hand-written code that is not part of the replication contract or the Go-fidelity surface (owner decision, D164). Kept hand-written: the replication path, the Go flag parser and Go-compatible output, the credential chain, the YAML pipeline, the `/metrics` and `/healthz` server, the shell-words port and the slog format. Each new dependency is named in its PR with its license. Dev- and test-only dependencies that strengthen correctness checking (fuzzing, schedule exploration, sanitizer support) are welcome. Every dependency, external or `lsr-*`, is declared once in the root `[workspace.dependencies]` and referenced as `name.workspace = true`; a crate may add features, never a version or path. (The `fuzz/` crate is outside the workspace and keeps its own.)
 
 ## Branches and landing
 - The repository lives on GitHub (`origin`, github.com/emschwartz/litestream-rs); work lands on its `main`, which stays green.
