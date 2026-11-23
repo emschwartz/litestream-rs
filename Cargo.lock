@@ -1107,6 +1107,7 @@ dependencies = [
  "proptest",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "rustls-platform-verifier",
  "rusty-s3",
  "serde_json",
