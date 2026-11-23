@@ -26,8 +26,6 @@ use lsr_store_fs::FsStore;
 
 const POLL: Duration = Duration::from_secs(1);
 const EVERY: Duration = Duration::from_secs(60);
-/// Two polls short of the interval.
-const ALMOST: Duration = Duration::from_secs(58);
 
 fn verifying() -> Config {
     Config {
@@ -124,6 +122,15 @@ fn advance(replicator: &Replicator, clock: &lsr_replica::FakeClockHandle, by: Du
     wait(replicator, |h| h.reported_at >= now);
 }
 
+/// Advances the clock to `at`, which must still be ahead: a deadline measured from when a run
+/// was due, not a fixed step after a catch-up whose own length (how many polls the replicator
+/// needed) depends on thread timing.
+fn advance_to(replicator: &Replicator, clock: &lsr_replica::FakeClockHandle, at: Timestamp) {
+    let now = clock.now();
+    assert!(now < at, "the catch-up ran past {at:?}: it is {now:?}");
+    advance(replicator, clock, at.saturating_duration_since(now));
+}
+
 /// Rewrites one page of the newest level-0 file on the replica, through the store, as a
 /// stale page would look: every file still decodes and verifies, and the restore of its
 /// transaction holds a page the database never had, provided that restore reads this file
@@ -214,15 +221,20 @@ fn a_clock_step_back_does_not_put_off_the_scheduled_verify() {
 fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     let site = Site::new();
     let (runtime, clock) = fake();
+    // A poll short of the first run, an interval after the replicator starts.
+    let almost = clock.now().saturating_add(EVERY.saturating_sub(POLL));
     let replicator = Replicator::start_with(&site.db, site.store(), verifying(), runtime).unwrap();
     let events = events(&replicator);
     site.commit(3);
     advance(&replicator, &clock, POLL);
     let health = moved_until(&replicator, &clock, (POLL, 240), caught_up);
-    advance(&replicator, &clock, ALMOST);
+    advance_to(&replicator, &clock, almost);
     assert_eq!(runs(&replicator.health()), 0, "not due yet");
     clock.advance(POLL);
     let first = wait(&replicator, |h| runs(h) == 1);
+    // The next run is due an interval after this one ended, on the clock as it reads now (the
+    // fake clock does not move while the test waits): a poll short of it.
+    let almost = clock.now().saturating_add(EVERY.saturating_sub(POLL));
     let check = first.verification;
     assert_eq!(check.runs.passed, 1, "{check:?}");
     let verified = check.last_good.map(|(txid, _)| txid);
@@ -244,7 +256,7 @@ fn the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes() {
     site.commit(2);
     advance(&replicator, &clock, POLL);
     let newer = moved_until(&replicator, &clock, (POLL, 240), caught_up);
-    advance(&replicator, &clock, ALMOST);
+    advance_to(&replicator, &clock, almost);
     assert_eq!(
         runs(&replicator.health()),
         1,
