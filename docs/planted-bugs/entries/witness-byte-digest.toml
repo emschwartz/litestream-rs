@@ -1,0 +1,6 @@
+name = "witness-byte-digest"
+fix = "1b5ac06"
+package = "lsr-core"
+tests = [
+    "a_staged_file_whose_bytes_differ_but_still_verify_is_refused",
+]

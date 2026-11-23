@@ -1,0 +1,9 @@
+# A position at the start of a generation keeps the chain seed of the header it saw, though
+# SQLite wrote that header again with the same salts and another checkpoint sequence: the first
+# frame fails its checksum and the WAL reads as corrupt for good.
+name = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-core"
+tests = [
+    "a_step_from_the_start_follows_a_header_written_again_with_the_same_salts",
+]

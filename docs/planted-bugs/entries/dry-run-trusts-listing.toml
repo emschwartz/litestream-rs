@@ -1,0 +1,5 @@
+name = "dry-run-trusts-listing"
+fix = "32572b5"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["a_dry_run_over_a_lagging_listing_fails_like_the_restore"]

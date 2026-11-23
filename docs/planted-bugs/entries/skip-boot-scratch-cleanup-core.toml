@@ -1,0 +1,6 @@
+name = "skip-boot-scratch-cleanup-core"
+fix = "31842f7"
+package = "lsr-core"
+tests = [
+    "a_boot_removes_the_scratch_killed_uploads_left",
+]

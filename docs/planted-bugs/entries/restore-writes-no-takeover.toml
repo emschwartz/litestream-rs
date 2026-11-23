@@ -1,0 +1,6 @@
+# A restore that leaves no takeover record: the replicator started on it refuses the replica.
+name = "restore-writes-no-takeover"
+fix = "0fcb1b6"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["second_writer::a_restored_database_replicates_without_a_refusal"]

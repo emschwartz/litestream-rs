@@ -1,0 +1,6 @@
+name = "journal-slot-error-unreported"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::boot_reports_what_it_read_of_the_journal",
+]
