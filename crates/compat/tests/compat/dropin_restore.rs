@@ -248,6 +248,16 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
         if name == "litestream.yml" || name == "empty-replica" {
             continue;
         }
+        // litestream-rs's restore also writes a takeover record in the restored database's
+        // meta directory, so a replicator started on it builds on the replica it came from
+        // (docs/decisions.md, the takeover record); Go writes none. It is not the database.
+        let last = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if last.starts_with('.') && last.ends_with("-litestream") {
+            continue;
+        }
         if path.is_dir() {
             out.insert(name, "directory".to_owned());
             walk(root, &path, out);
