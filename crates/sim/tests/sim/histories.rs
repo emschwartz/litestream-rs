@@ -3,7 +3,7 @@
 //!
 //! A recorded history can still stop reaching its bug when the runner or the engine around it
 //! changes, and then it passes for nothing. So every history names, in [`GUARDS`], the planted
-//! bug in `docs/planted-bugs.toml` its test must fail under (`just planted-bugs` runs each one
+//! bug in `docs/planted-bugs/entries/` its test must fail under (`just planted-bugs` runs each one
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
@@ -162,7 +162,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x2e7",
         "a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7",
-        Guard::Own("boot-drop-record-capped-at-confirmed"),
+        Guard::Own("takeover-before-drop-skipped-sim"),
     ),
     (
         "seed_0xb6b",
@@ -236,11 +236,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
 
 /// The ledger's entries, by name, with the test-name substrings each lists.
 fn ledger() -> Vec<(String, Vec<String>)> {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs.toml");
-    let text = std::fs::read_to_string(&path).unwrap();
-    text.split("[[bug]]")
-        .skip(1)
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs/entries");
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
         .map(|entry| {
             let quoted = |line: &str| -> Vec<String> {
                 line.split('"')
@@ -261,7 +261,13 @@ fn ledger() -> Vec<(String, Vec<String>)> {
                 .unwrap_or_default();
             (name, tests)
         })
-        .collect()
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "no ledger entries under {}",
+        dir.display()
+    );
+    entries
 }
 
 #[test]

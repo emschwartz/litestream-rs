@@ -1,0 +1,9 @@
+name = "boot-gate-refuses-nothing-sim"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "foreign_file_while_down_stops",
+    "vm_restore_stops_until_a_take_over",
+    "a_boot_never_builds_on_files_nothing_local_vouches_for_seed_0xb44",
+]

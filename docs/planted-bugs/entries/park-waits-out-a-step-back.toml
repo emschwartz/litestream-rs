@@ -1,0 +1,4 @@
+name = "park-waits-out-a-step-back"
+fix = "af15d43"
+package = "lsr-replica"
+tests = ["a_park_keeps_its_remaining_wait_when_the_clock_steps_back"]

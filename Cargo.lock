@@ -858,7 +858,6 @@ dependencies = [
  "lsr-compat",
  "lsr-config",
  "lsr-core",
- "lsr-local",
  "lsr-ltx",
  "lsr-replica",
  "lsr-sidecar",
@@ -879,8 +878,8 @@ dependencies = [
  "libc",
  "lsr-config",
  "lsr-core",
- "lsr-local",
  "lsr-ltx",
+ "lsr-replica",
  "lsr-sim",
  "lsr-sqlite",
  "lsr-store-fs",
@@ -918,7 +917,6 @@ version = "0.0.0"
 dependencies = [
  "crc",
  "lsr-core",
- "lsr-heap",
  "lsr-journal",
  "lsr-ltx",
  "lsr-spec",
@@ -941,10 +939,6 @@ dependencies = [
  "rusqlite",
  "tempfile",
 ]
-
-[[package]]
-name = "lsr-heap"
-version = "0.0.0"
 
 [[package]]
 name = "lsr-history"
@@ -974,17 +968,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lsr-local"
-version = "0.0.0"
-dependencies = [
- "lsr-core",
- "lsr-ltx",
- "rusqlite",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "lsr-ltx"
 version = "0.0.0"
 dependencies = [
@@ -1001,7 +984,6 @@ name = "lsr-replica"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
- "lsr-local",
  "lsr-ltx",
  "lsr-replica",
  "lsr-sqlite",
@@ -1055,8 +1037,8 @@ version = "0.0.0"
 dependencies = [
  "lsr-core",
  "lsr-history",
- "lsr-local",
  "lsr-ltx",
+ "lsr-replica",
  "lsr-sim",
  "lsr-sqlite",
  "lsr-store-fs",
@@ -1095,6 +1077,7 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "rusty-s3",
+ "serde_json",
  "shuttle",
  "tempfile",
  "thiserror",

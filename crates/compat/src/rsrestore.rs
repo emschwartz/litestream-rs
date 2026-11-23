@@ -4,7 +4,7 @@
 //! [`stage`] copies the fixture into a temporary directory and restores the recorded
 //! mtimes, which is where [`lsr_store_fs::FsStore`] reads each file's creation time from.
 //! [`restore_replica`] then runs the real executor over that copy into a
-//! [`lsr_local::FileSink`]. The executor's own failure comes back as a value, because the
+//! [`lsr_replica::local::FileSink`]. The executor's own failure comes back as a value, because the
 //! matrix asserts on it (a gap is a correct answer); only a harness failure is an error.
 
 use std::fs;
@@ -14,8 +14,8 @@ use lsr_core::{
     FileKey, Inventory, PlanOutcome, RestoreError, RestoreOptions, RestoreTarget, Restored,
     plan_reference, restore, restore_with,
 };
-use lsr_local::FileSink;
 use lsr_ltx::{Encoder, Event, ReadDecoder};
+use lsr_replica::local::FileSink;
 use lsr_store_fs::FsStore;
 
 use crate::error::CompatError;

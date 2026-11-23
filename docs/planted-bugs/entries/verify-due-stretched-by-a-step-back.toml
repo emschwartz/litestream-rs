@@ -1,0 +1,5 @@
+name = "verify-due-stretched-by-a-step-back"
+fix = "50b9040"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["a_clock_step_back_does_not_put_off_the_scheduled_verify"]

@@ -1,0 +1,5 @@
+name = "config-empty-meta-path-dropped"
+fix = "claude/dropin-config"
+package = "lsr-config"
+test_bin = "config"
+tests = ["an_empty_meta_path_is_the_current_directory_as_go"]

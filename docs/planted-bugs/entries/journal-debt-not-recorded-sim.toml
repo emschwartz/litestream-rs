@@ -1,0 +1,8 @@
+name = "journal-debt-not-recorded-sim"
+fix = "8ef5a8f"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::wal_fsync_fails_then_restart",
+    "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0x21",
+]

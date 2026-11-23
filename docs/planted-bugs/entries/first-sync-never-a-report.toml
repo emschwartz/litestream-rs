@@ -1,0 +1,4 @@
+name = "first-sync-never-a-report"
+fix = "checker-holes (rewind reports)"
+package = "lsr-sim"
+tests = ["run::tests::a_first_sync_over_files_reports_a_loss"]

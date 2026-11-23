@@ -1,31 +1,24 @@
 diff --git a/crates/store-s3/src/chain.rs b/crates/store-s3/src/chain.rs
-index e57c26e..f155d5c 100644
+index 289e024b..b46e8dd5 100644
 --- a/crates/store-s3/src/chain.rs
 +++ b/crates/store-s3/src/chain.rs
-@@ -143,6 +143,12 @@ impl CredentialChain {
+@@ -183,6 +183,9 @@ impl CredentialChain {
      pub fn resolve(&self) -> Result<Resolved, CredentialError> {
          let (profile, named) = self.profile();
          let environment = self.env_keys();
 +        if let Ok(credentials) = environment {
-+            return Ok(Resolved {
-+                credentials,
-+                source: Source::Environment,
-+            });
++            return Ok(Resolved::fixed(credentials, Source::Environment));
 +        }
          let files = self.shared_files(&profile)?;
          let gap = match &environment {
              Ok(_) => EnvGap::Both,
-@@ -168,12 +174,7 @@ impl CredentialChain {
-                 source: Source::Explicit,
-             });
+@@ -209,9 +212,6 @@ impl CredentialChain {
+         if let Some(credentials) = &self.explicit {
+             return Ok(Resolved::fixed(credentials.clone(), Source::Explicit));
          }
 -        if let Ok(credentials) = environment {
--            return Ok(Resolved {
--                credentials,
--                source: Source::Environment,
--            });
+-            return Ok(Resolved::fixed(credentials, Source::Environment));
 -        }
-+
-         match section.and_then(|section| profile_keys(&section, &files.credentials_path)) {
-             Some((credentials, from_credentials, path)) => Ok(Resolved {
-                 credentials,
+         if let Some(file) = self.var("AWS_WEB_IDENTITY_TOKEN_FILE") {
+             let role = self.var("AWS_ROLE_ARN");
+             return self.web_identity(file, role, self.var("AWS_ROLE_SESSION_NAME"));

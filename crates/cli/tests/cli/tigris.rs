@@ -54,8 +54,8 @@ use lsr_core::{
     Depth, FileInfo, Inventory, Level, ObjectStore, PageLimit, PlanOutcome, ReadLen, RestoreError,
     Restored, restore, verify,
 };
-use lsr_local::FileSink;
 use lsr_ltx::{HEADER_LEN, Header};
+use lsr_replica::local::FileSink;
 use lsr_store_s3::{
     HttpRequest, HttpResponse, Method, OpenUpload, RequestBuilder, S3Config, S3Credentials,
     S3Store, SecretString, SystemClock, Transport, TransportError, UreqTransport, abandon_upload,

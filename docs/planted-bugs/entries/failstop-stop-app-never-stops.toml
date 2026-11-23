@@ -1,0 +1,5 @@
+name = "failstop-stop-app-never-stops"
+fix = "c5881f5"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::an_unsafe_stop_while_running_stops_the_child_under_stop_app"]

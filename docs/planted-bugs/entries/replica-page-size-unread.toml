@@ -1,0 +1,4 @@
+name = "replica-page-size-unread"
+fix = "7bf9707"
+package = "lsr-core"
+tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
