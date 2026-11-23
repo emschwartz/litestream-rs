@@ -349,6 +349,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** main can be red for about one CI run after a bad combination, and not every commit on main passed CI as a whole.
 - **Why:** with six or more branches open, each merge cost every other branch a merge and a 20 minute CI run, for hours of serial waiting. The one real catch in that period (renamed causes) would have shown as a red main within one run.
 - **Revisit if:** before any release, or when main goes red more than once a day.
+- **Amended 2026-11-22 (owner):** PRs land by squash-merge, so `main` keeps no merge commits; each PR becomes one commit titled by its conventional PR title. Batches of several PRs are no longer integrated as one merge commit.
 - **Links:** the merge protocol in the session notes; AGENTS.md.
 
 ## D32. An unusable KMS key is a permission refusal
