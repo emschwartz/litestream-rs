@@ -124,3 +124,48 @@ fn a_publish_error_says_what_it_left() {
         } if source.kind() == io::ErrorKind::AlreadyExists
     ));
 }
+
+/// Each step's text goes into the operator's message for a failed publish.
+#[test]
+fn each_publish_step_names_itself_for_the_operator() {
+    let named = [
+        (
+            PublishStep::Check,
+            "running SQLite's check of the restored database",
+        ),
+        (PublishStep::SyncScratch, "syncing the restored data"),
+        (
+            PublishStep::CheckAbsent,
+            "checking the target is still absent",
+        ),
+        (PublishStep::Link, "linking the restored file into place"),
+        (
+            PublishStep::SyncName,
+            "syncing the directory after the link",
+        ),
+        (PublishStep::RemoveScratch, "removing the scratch file"),
+        (
+            PublishStep::SyncRemoval,
+            "syncing the directory after removing the scratch",
+        ),
+        (
+            PublishStep::CheckReplaceable,
+            "checking the target may still be replaced",
+        ),
+        (
+            PublishStep::RemoveJournals,
+            "removing the replaced database's journal files",
+        ),
+        (
+            PublishStep::SyncJournals,
+            "syncing the directory after removing the journal files",
+        ),
+        (
+            PublishStep::Rename,
+            "renaming the restored file over the target",
+        ),
+    ];
+    for (step, text) in named {
+        assert_eq!(step.to_string(), text);
+    }
+}

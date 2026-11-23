@@ -18,6 +18,11 @@
 //! copies a frame below its end copies a page the scan saw covered, so it is skipped. The
 //! wal-index is read again after the reads, and a read transaction lost or a WAL restarted under
 //! them is `WalMoved`, retried as any sync step is.
+//!
+//! A replica that cannot give its state at its newest confirmed transaction is told apart from
+//! one that cannot be reached ([`CheckError`]): a failed call heals by retrying, damage (a gap a
+//! bucket rollback left, a file that does not verify) does not, and the actor gives the check up
+//! when it recurs (`docs/decisions.md` D106).
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -27,11 +32,13 @@ use lsr_wal::{OpenError, WalReader};
 
 use crate::fault::Fault;
 use crate::fault::role::Role;
+use crate::inventory::InventoryError;
 use crate::pages::PageChecksumTable;
 use crate::plan::RestoreTarget;
 use crate::position::Position;
-use crate::restore::{RestoreError, RestoreOptions, restore_from};
+use crate::restore::{RestoreError, RestoreOptions, restore_one_plan};
 use crate::source::{PageSource, WalSource};
+use crate::store::StoreError;
 use crate::sync::scan_whole;
 use crate::verify::DigestSink;
 
@@ -44,12 +51,28 @@ pub struct Found {
     pub first: NonZeroU32,
 }
 
+/// Why the check did not finish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckError {
+    /// A read failed or the WAL moved: retried as any sync step is.
+    Fault(Fault),
+    /// The replica could not give its state at its newest confirmed transaction because it is
+    /// damaged, not because a call failed: retrying does not heal it.
+    Unrestorable,
+}
+
+impl From<Fault> for CheckError {
+    fn from(fault: Fault) -> Self {
+        Self::Fault(fault)
+    }
+}
+
 /// Checks the database file against the images at `position`'s transaction, the newest staged
 /// one; `confirmed` is the replica's newest transaction, `table` the page table seeded at boot.
 ///
 /// # Errors
-/// The [`Fault`] a read met: the WAL moved, a page could not be read, or the replica could not
-/// give its state at `confirmed`.
+/// [`CheckError::Fault`] for what a read met (the WAL moved, a page could not be read, a store
+/// call failed); [`CheckError::Unrestorable`] when the replica's state at `confirmed` is damaged.
 pub(crate) async fn check<W: WalSource, P: PageSource, R: Role>(
     position: &Position,
     wal: &mut W,
@@ -57,7 +80,7 @@ pub(crate) async fn check<W: WalSource, P: PageSource, R: Role>(
     table: &PageChecksumTable,
     remote: &R,
     confirmed: Option<Txid>,
-) -> Result<Option<Found>, Fault> {
+) -> Result<Option<Found>, CheckError> {
     let page_size = position.page_size();
     let file = wal
         .open()
@@ -70,10 +93,11 @@ pub(crate) async fn check<W: WalSource, P: PageSource, R: Role>(
         return Err(Fault::PageSizeChanged {
             was: page_size,
             now: reader.header().page_size(),
-        });
+        }
+        .into());
     }
     if committed.end().salts() != salts || position.cursor().salts() != salts {
-        return Err(Fault::WalMoved);
+        return Err(Fault::WalMoved.into());
     }
     let covered = scan_whole(&mut reader, committed)?;
     let size = match covered.commit() {
@@ -109,14 +133,14 @@ pub(crate) async fn check<W: WalSource, P: PageSource, R: Role>(
     // in the wal-index while the hold stands.
     let after = wal.committed().map_err(Fault::from_source)?;
     if after.epoch() != committed.epoch() || after.end().salts() != salts {
-        return Err(Fault::WalMoved);
+        return Err(Fault::WalMoved.into());
     }
     Ok(differ)
 }
 
 /// `found` with one more page; the pages are visited in ascending order, so the first one
 /// stays the lowest.
-fn tally(found: Option<Found>, pgno: PageNo) -> Found {
+pub(crate) fn tally(found: Option<Found>, pgno: PageNo) -> Found {
     match found {
         None => Found {
             pages: NonZeroU32::MIN,
@@ -129,7 +153,7 @@ fn tally(found: Option<Found>, pgno: PageNo) -> Found {
     }
 }
 
-fn open_fault(err: OpenError) -> Fault {
+pub(crate) fn open_fault(err: OpenError) -> Fault {
     match err {
         OpenError::Io(_) => Fault::LocalIo,
         // A header torn mid-restart: the next recover classifies it.
@@ -137,16 +161,17 @@ fn open_fault(err: OpenError) -> Fault {
     }
 }
 
-/// The replica's state at `txid`, one checksum a page, into `pages`.
+/// The replica's state at `txid`, one checksum a page, into `pages`, from one plan.
 async fn digests_at<R: Role>(
     remote: &R,
     txid: Txid,
     pages: &mut BTreeMap<u32, PageChecksum>,
-) -> Result<(), Fault> {
+) -> Result<(), CheckError> {
     let sink = DigestSink { pages };
-    match restore_from(
+    // One plan a tick: the actor tries again on a later tick, and gives up on damage that
+    // recurs there (`super::actor::ahead`).
+    match restore_one_plan(
         remote,
-        None,
         RestoreTarget::Txid(txid),
         RestoreOptions::default(),
         sink,
@@ -158,19 +183,27 @@ async fn digests_at<R: Role>(
     }
 }
 
-/// What a restore of the replica's newest confirmed state failing means for the check: a store
-/// error is the store's fault, retried as such; a file that does not verify or a history that
-/// does not plan is the replica's damage.
-pub(crate) fn restore_fault<R: Role>(err: &RestoreError) -> Fault {
+/// What a restore of the replica's newest confirmed state failing means for the check: a failed
+/// call (a read, a listing page) or a replica changing under the restore is the store's fault,
+/// retried as such; a history that does not plan, a file or database that does not verify, or a
+/// listing no real store returns is the replica's damage.
+pub(crate) fn restore_fault<R: Role>(err: &RestoreError) -> CheckError {
     match err {
-        RestoreError::Store(err) => R::fault(err),
-        RestoreError::Unstable { .. } | RestoreError::ListingBehind { .. } => Fault::StoreTransient,
-        RestoreError::Inventory(_)
+        RestoreError::Store(StoreError::Corrupt { .. })
+        | RestoreError::Inventory(
+            InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_),
+        )
         | RestoreError::NoPlan(_)
         | RestoreError::File { .. }
         | RestoreError::DatabaseChecksum { .. }
-        | RestoreError::CreatedAtRepeated { .. } => Fault::RemoteCorrupt,
-        RestoreError::Sink { .. } | RestoreError::Publish { .. } => Fault::LocalIo,
+        | RestoreError::CreatedAtRepeated { .. } => CheckError::Unrestorable,
+        RestoreError::Store(err) | RestoreError::Inventory(InventoryError::Store(err)) => {
+            R::fault(err).into()
+        }
+        RestoreError::Unstable { .. } | RestoreError::ListingBehind { .. } => {
+            Fault::StoreTransient.into()
+        }
+        RestoreError::Sink { .. } | RestoreError::Publish { .. } => Fault::LocalIo.into(),
     }
 }
 

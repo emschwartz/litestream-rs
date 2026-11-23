@@ -192,6 +192,57 @@ fn the_scheduled_verify_is_off_by_default() {
     assert!(!any_verified(&events));
 }
 
+/// A run falls due while nothing else would wake the thread: no poll for an hour, no timed
+/// checkpoint, maintenance a day away. The thread wakes for the run.
+#[test]
+fn a_run_due_between_polls_wakes_the_thread() {
+    let site = Site::new();
+    let (runtime, clock) = fake();
+    let rare_polls = Config {
+        poll_interval: NonZeroDuration::new(Duration::from_secs(3600)).unwrap(),
+        checkpoint: lsr_core::CheckpointConfig {
+            interval: None,
+            ..lsr_core::CheckpointConfig::default()
+        },
+        ..verifying_quietly()
+    };
+    let replicator = Replicator::start_with(&site.db, site.store(), rare_polls, runtime).unwrap();
+    wait(&replicator, caught_up);
+    // Parked, so the run cannot start with a turn that begins after the clock moves.
+    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
+    assert!(parked.is_none());
+    clock.advance(EVERY);
+    let health = wait(&replicator, |h| runs(h) == 1);
+    assert_eq!(health.verification.runs.passed, 1, "{health:?}");
+}
+
+/// The verify thread ends with the replicator: once it is stopped, nothing holds the store.
+#[test]
+fn the_verify_thread_lets_the_store_go_once_the_replicator_stops() {
+    let site = Site::new();
+    let store = site.store();
+    let held = Arc::downgrade(&store);
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, verifying(), runtime).unwrap();
+    wait(&replicator, caught_up);
+    clock.advance(EVERY);
+    wait(&replicator, |h| runs(h) == 1);
+    assert!(matches!(
+        common::stopped(&replicator),
+        lsr_replica::Stopped::Drained { .. }
+    ));
+    // The verify thread drops its handle on the store as it ends, on its own time.
+    let mut looks = 0_u32;
+    while held.strong_count() > 0 {
+        looks += 1;
+        assert!(
+            looks < 10_000_000,
+            "the verify thread still holds the store"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// A wall clock that steps back before the first run does not add the step to the wait: the
 /// run comes within a few intervals of clock, never the hour of the step.
 #[test]
@@ -311,6 +362,7 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     ));
     clock.advance(EVERY);
     let failed = wait(&replicator, |h| h.verification.runs.failed == 1);
+    eprintln!("DBG {:?}", failed.verification);
     let failing = failed.verification.failing.unwrap();
     assert_eq!(failing.txid, txid);
     assert!(
@@ -443,6 +495,46 @@ impl ObjectStore for Gated {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.inner.delete(keys).await
     }
+}
+
+/// A run whose restore matches the live database still fails when its listing finds the
+/// newest history out of reach: here a hole opens after the transaction it restores, while
+/// it waits inside the store.
+#[test]
+fn a_run_that_restores_but_finds_the_newest_out_of_reach_fails_as_unrestorable() {
+    let site = Site::new();
+    let gated = Arc::new(Gated::new(&site));
+    let store: Arc<dyn DynStore> = Arc::<Gated>::clone(&gated);
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, verifying_quietly(), runtime).unwrap();
+    site.commit(1);
+    advance(&replicator, &clock, POLL);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    settle_maintenance(&replicator, &clock, &site);
+    clock.advance(EVERY);
+    gated.wait_entered();
+    let mut last = replicated(&replicator.health());
+    for _ in 0..2 {
+        site.commit(1);
+        advance(&replicator, &clock, POLL);
+        last = replicated(&moved_until(&replicator, &clock, (POLL, 240), |h| {
+            caught_up(h) && replicated(h) > last
+        }));
+    }
+    // The second newest level-0 file goes: the newest is past a hole.
+    let files = FsStore::new(&site.replica);
+    let zero = block_on(files.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
+    let hole = zero.files.iter().rev().nth(1).unwrap().key;
+    block_on(files.delete(&[hole])).unwrap();
+    gated.release();
+    let done = wait(&replicator, |h| runs(h) == 1);
+    let failing = done.verification.failing.unwrap();
+    assert_eq!(
+        failing.found,
+        Mismatch::Unrestorable,
+        "{:?}",
+        done.verification
+    );
 }
 
 /// While a run waits inside a store call, commits are still synced and uploaded at each

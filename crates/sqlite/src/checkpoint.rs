@@ -27,6 +27,7 @@ fn wal_checkpoint(conn: &Connection, mode: CheckpointMode) -> (c_int, c_int, c_i
     let mode = match mode {
         CheckpointMode::Passive => ffi::SQLITE_CHECKPOINT_PASSIVE,
         CheckpointMode::Truncate => ffi::SQLITE_CHECKPOINT_TRUNCATE,
+        CheckpointMode::Full => ffi::SQLITE_CHECKPOINT_FULL,
     };
     let (mut log, mut checkpointed) = (-1, -1);
     let db = handle(conn);

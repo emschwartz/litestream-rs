@@ -23,7 +23,7 @@ use std::io::{Read, Seek};
 use lsr_ltx::{PageChecksum, PageNo, Txid};
 use lsr_wal::WalReader;
 
-use crate::ahead::restore_fault;
+use crate::ahead::{CheckError, restore_fault};
 use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::plan::RestoreTarget;
@@ -61,8 +61,8 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
     // refusal stands. A store that failed is the store's fault, and the boot runs again.
     let restored = match restored.map_err(|err| restore_fault::<R>(&err)) {
         Ok(restored) => restored,
-        Err(Fault::RemoteCorrupt) => return Ok(false),
-        Err(fault) => return Err(fault),
+        Err(CheckError::Unrestorable) => return Ok(false),
+        Err(CheckError::Fault(fault)) => return Err(fault),
     };
     let page_size = restored.page_size();
     let same = match reader {

@@ -1,0 +1,6 @@
+# The same defect planted against seed 0x95a's recorded history.
+name = "boot-walk-stops-at-the-gap-with-staging-empty-sim"
+fix = "9af30d8"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_boot_with_staging_wiped_walks_past_a_wide_hole_seed_0x95a"]

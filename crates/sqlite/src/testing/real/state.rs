@@ -46,6 +46,8 @@ pub(super) struct Real {
     /// Changes read back before an operation inside a tick, owed to the world first.
     pub(super) owed: VecDeque<Written>,
     pub(super) injected: Vec<(SourceOp, SourceError)>,
+    /// Injected errors a call took, in order, for the simulator's error-domain marks.
+    pub(super) taken: Vec<(SourceOp, SourceError)>,
     pub(super) lie_ours: bool,
     pub(super) tick: Tick,
 }
@@ -279,6 +281,7 @@ impl Real {
             OtherProcessMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
             OtherProcessMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
             OtherProcessMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
+            OtherProcessMode::Full => "PRAGMA wal_checkpoint(FULL)",
         };
         let (busy, log, done): (i64, i64, i64) = conn
             .query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))

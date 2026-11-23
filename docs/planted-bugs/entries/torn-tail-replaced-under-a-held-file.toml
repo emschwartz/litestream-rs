@@ -1,0 +1,5 @@
+# A level-0 tail judged torn was replaced by its staged copy even when a higher-level file already held that transaction.
+name = "torn-tail-replaced-under-a-held-file"
+fix = "9af30d8"
+package = "lsr-core"
+tests = ["a_torn_tail_a_higher_level_file_already_holds_is_not_replaced"]

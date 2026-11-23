@@ -1,16 +1,17 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 9d28208c..1be4e719 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1416,7 +1416,7 @@
+@@ -1488,7 +1488,7 @@ impl Actor {
          if self.owes_truncate() {
-             return self.unprove(env);
+             return self.unprove(env, now);
          }
 -        if !self.staging_has_room() {
 +        if false && !self.staging_has_room() {
              // Marked as a step cut short, so the sync runs again when room
              // frees up: no new WAL change may come to wake it.
              self.engine.course.set_tail(Tail::More);
-@@ -2365,7 +2365,6 @@
+@@ -2458,7 +2458,6 @@ impl Actor {
              return self.kept.tasks.ready(Task::Sync, now);
          }
          let sync = self.kept.tasks.ready(Task::Sync, now)

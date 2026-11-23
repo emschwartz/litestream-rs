@@ -6,7 +6,8 @@ use crc::{CRC_32_ISCSI, Crc};
 use lsr_ltx::{FileChecksum, Timestamp, Txid};
 
 use crate::facts::{
-    Ahead, Floor, Journal, Proof, ReplicaId, StoredBudget, Triple, Unproven, WalChecksum,
+    Ahead, AheadKind, Floor, Journal, Proof, ReplicaId, StoredBudget, Triple, Unchecked, Unproven,
+    WalChecksum,
 };
 use crate::read::Seq;
 
@@ -16,9 +17,14 @@ pub const SLOT: usize = 4096;
 pub const RECORD_MAX: usize = 512;
 /// The record's first eight bytes.
 pub const MAGIC: [u8; 8] = *b"LSRJRNL\0";
-/// The newest version this binary writes: 2 while an ahead-of-WAL verdict stands, 1 otherwise.
-pub const VERSION: u16 = 2;
-/// The version of a record without the verdict, which every binary since the journal reads.
+/// The newest version this binary writes: 4 while a lost-commits verdict stands, else 3 while an
+/// unchecked notice stands, else 2 while an ahead-of-WAL verdict stands, else 1.
+pub const VERSION: u16 = 4;
+/// The version of a record with an unchecked notice and no lost-commits verdict.
+const VERSION_3: u16 = 3;
+/// The version of a record with an ahead-of-WAL verdict and no unchecked notice.
+const VERSION_2: u16 = 2;
+/// The version of a record with neither, which every binary since the journal reads.
 const VERSION_1: u16 = 1;
 
 /// Magic, version, body length and sequence number.
@@ -36,6 +42,11 @@ const HAS_BUDGET: u8 = 4;
 const HAS_PENDING: u8 = 8;
 /// Version 2.
 const HAS_AHEAD: u8 = 16;
+/// Version 3.
+const HAS_UNCHECKED: u8 = 32;
+/// Version 4: the verdict is [`AheadKind::WalLostCommits`]; set only beside [`HAS_AHEAD`], and
+/// adds no bytes.
+const LOST_COMMITS: u8 = 64;
 
 /// Why a slot holds no record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
@@ -55,7 +66,8 @@ pub enum Invalid {
     /// A sequence number of zero, which no writer uses.
     #[error("sequence number 0")]
     Seq,
-    /// A flag no writer of the version sets, or an anchor without a floor.
+    /// A flag no writer of the version sets, an anchor without a floor, or a verdict's kind
+    /// without a verdict.
     #[error("flags {0:#04x}")]
     Flags(u8),
     /// A transaction id of zero.
@@ -128,6 +140,8 @@ fn body(journal: &Journal) -> Vec<u8> {
         (journal.budget.is_some(), HAS_BUDGET),
         (journal.pending.is_some(), HAS_PENDING),
         (journal.ahead.is_some(), HAS_AHEAD),
+        (journal.unchecked.is_some(), HAS_UNCHECKED),
+        (lost_commits(journal), LOST_COMMITS),
     ]
     .iter()
     .filter(|(on, _)| *on)
@@ -156,6 +170,9 @@ fn body(journal: &Journal) -> Vec<u8> {
         out.put(&ahead.first.get().to_le_bytes());
         out.put(&ahead.made.unix_millis().to_le_bytes());
     }
+    if let Some(unchecked) = journal.unchecked {
+        out.put(&unchecked.made.unix_millis().to_le_bytes());
+    }
     let debt = match journal.unproven {
         Unproven::No => 0,
         Unproven::Truncate => 1,
@@ -165,15 +182,23 @@ fn body(journal: &Journal) -> Vec<u8> {
     out.0
 }
 
+/// Whether `journal` holds a lost-commits verdict, the one fact only version 4 can say.
+fn lost_commits(journal: &Journal) -> bool {
+    journal
+        .ahead
+        .is_some_and(|ahead| ahead.kind == AheadKind::WalLostCommits)
+}
+
 /// The slot holding `journal` with sequence number `seq`, zeros after the record.
 #[must_use]
 pub fn encode(journal: &Journal, seq: Seq) -> [u8; SLOT] {
     let body = body(journal);
     let len = u16::try_from(body.len()).unwrap_or(u16::MAX);
-    let version = if journal.ahead.is_some() {
-        VERSION
-    } else {
-        VERSION_1
+    let version = match (lost_commits(journal), journal.unchecked, journal.ahead) {
+        (true, _, _) => VERSION,
+        (false, Some(_), _) => VERSION_3,
+        (false, None, Some(_)) => VERSION_2,
+        (false, None, None) => VERSION_1,
     };
     let mut out = Out(Vec::with_capacity(RECORD_MAX));
     out.put(&MAGIC);
@@ -211,13 +236,27 @@ impl In<'_> {
         Txid::new(self.u64()).ok_or(Invalid::Txid)
     }
 
-    fn ahead(&mut self) -> Result<Ahead, Invalid> {
+    /// The verdict, when `flags` say one is stored.
+    fn ahead(&mut self, flags: u8) -> Result<Option<Ahead>, Invalid> {
+        if flags & HAS_AHEAD == 0 {
+            return Ok(None);
+        }
+        let kind = if flags & LOST_COMMITS == 0 {
+            AheadKind::AheadOfWal
+        } else {
+            AheadKind::WalLostCommits
+        };
+        self.verdict(kind).map(Some)
+    }
+
+    fn verdict(&mut self, kind: AheadKind) -> Result<Ahead, Invalid> {
         let restore_point = self.txid()?;
         let pages = u32::from_le_bytes(self.take());
         let first = u32::from_le_bytes(self.take());
         let made = Timestamp::from_unix_millis(i64::from_le_bytes(self.take()));
         match (NonZeroU32::new(pages), NonZeroU32::new(first)) {
             (Some(pages), Some(first)) => Ok(Ahead {
+                kind,
                 restore_point,
                 pages,
                 first,
@@ -251,6 +290,7 @@ fn body_len(flags: u8) -> usize {
         part(HAS_BUDGET, 9),
         part(HAS_PENDING, 40),
         part(HAS_AHEAD, 24),
+        part(HAS_UNCHECKED, 8),
         1,
     ]
     .iter()
@@ -261,12 +301,18 @@ fn body_len(flags: u8) -> usize {
 fn decode_body(body: &[u8], version: u16) -> Result<Journal, Invalid> {
     let mut input = In(body);
     let [flags] = input.take::<1>();
+    let one = HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING;
     let known = if version >= VERSION {
-        HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING | HAS_AHEAD
+        one | HAS_AHEAD | HAS_UNCHECKED | LOST_COMMITS
+    } else if version >= VERSION_3 {
+        one | HAS_AHEAD | HAS_UNCHECKED
+    } else if version >= VERSION_2 {
+        one | HAS_AHEAD
     } else {
-        HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING
+        one
     };
-    if flags & !known != 0 || (flags & HAS_ANCHOR != 0 && flags & HAS_FLOOR == 0) {
+    let orphan = |bit: u8, needs: u8| flags & bit != 0 && flags & needs == 0;
+    if flags & !known != 0 || orphan(HAS_ANCHOR, HAS_FLOOR) || orphan(LOST_COMMITS, HAS_AHEAD) {
         return Err(Invalid::Flags(flags));
     }
     let want = body_len(flags);
@@ -302,11 +348,10 @@ fn decode_body(body: &[u8], version: u16) -> Result<Journal, Invalid> {
         );
         Some(Proof { txid, triple, wal })
     };
-    let ahead = if flags & HAS_AHEAD == 0 {
-        None
-    } else {
-        Some(input.ahead()?)
-    };
+    let ahead = input.ahead(flags)?;
+    let unchecked = (flags & HAS_UNCHECKED != 0).then(|| Unchecked {
+        made: Timestamp::from_unix_millis(i64::from_le_bytes(input.take())),
+    });
     let unproven = match input.take::<1>() {
         [0] => Unproven::No,
         [1] => Unproven::Truncate,
@@ -319,6 +364,7 @@ fn decode_body(body: &[u8], version: u16) -> Result<Journal, Invalid> {
         budget,
         pending,
         ahead,
+        unchecked,
     })
 }
 
