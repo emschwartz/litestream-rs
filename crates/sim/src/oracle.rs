@@ -307,12 +307,19 @@ pub enum Violation {
     /// engine retried at least twice its stall threshold while the app committed, and at the
     /// end no task reported a degraded state: health said all was well while replication was
     /// halted.
-    #[error("{hold} halted replication through {retries} retries and health reported nothing")]
+    #[error(
+        "{hold} halted replication through {retries} retries and {restarts} restarts and health \
+         reported nothing"
+    )]
     HealthBlind {
         /// The fault that held.
         hold: String,
         /// The retries the engine made under it.
         retries: u64,
+        /// The times the engine booted again under it: a halt that outlasts a restart is the
+        /// known defect D9 ([`crate::domain::KnownWrong::HaltForgottenAtRestart`]), one that
+        /// does not is not.
+        restarts: u64,
     },
     /// A level-0 file was staged from WAL frames a power loss would take back: the engine's
     /// sync of the WAL before staging failed, was skipped, or covered frames an earlier failed
@@ -376,6 +383,13 @@ pub fn within(what: Bound, seen: u64, limit: u64) -> Result<(), Violation> {
 /// SQLite's rules hold: a check of the harness against itself, which a failed WAL sync followed
 /// by a power loss can trip before the world adopts the result as damage.
 pub const MODEL_DIVERGED: &str = "the model no longer matches SQLite's rules";
+
+/// [`MODEL_DIVERGED`] while a failed sync of the WAL has lost a writeback the model still
+/// carries: the one divergence the known defect D103 explains
+/// ([`crate::domain::KnownWrong::DatabaseAheadOfWal`]). Any other divergence keeps the plain
+/// context and fails the run as a harness defect.
+pub const MODEL_DIVERGED_AFTER_LOST_WRITEBACK: &str =
+    "the model no longer matches SQLite's rules after a failed WAL sync lost its writeback";
 
 /// A `BugFault` naming `context`.
 #[must_use]

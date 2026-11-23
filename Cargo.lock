@@ -875,7 +875,6 @@ dependencies = [
 name = "lsr-compat"
 version = "0.0.0"
 dependencies = [
- "libc",
  "lsr-config",
  "lsr-core",
  "lsr-ltx",

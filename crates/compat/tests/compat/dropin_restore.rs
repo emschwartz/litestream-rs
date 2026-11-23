@@ -18,15 +18,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 
 use lsr_compat::{
-    GoVersion, Manifest, Outcome, Staged, Target, all_fixtures, go_binary, hash_pages, lsr_binary,
-    stage,
+    Differential, GoVersion, Manifest, Outcome, Staged, Target, all_fixtures, go_binary,
+    hash_pages, lsr_binary, stage,
 };
 use lsr_core::needs::{Resource, must};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
 
 /// A flag as one or two arguments, valid values weighted over bad ones; the `@WORD@`
 /// sentinels are replaced (a bare word could occur inside a temporary path).
@@ -344,10 +342,6 @@ fn answers(rig: &Rig, case: &Case) -> (Vec<String>, Side, Side) {
     (args, go, lsr)
 }
 
-/// How often each ending was reached: the run must reach every one, or its pass shows
-/// nothing.
-type Tally = Mutex<BTreeMap<String, u32>>;
-
 /// What a run ended as, for the tally.
 fn ending(side: &Side) -> String {
     let (code, stderr, stdout) = &side.ran;
@@ -365,14 +359,10 @@ fn ending(side: &Side) -> String {
     }
 }
 
-fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
+/// Compares one case and names how Go's run ended.
+fn compare(rig: &Rig, case: &Case) -> Result<String, TestCaseError> {
     let (args, go, lsr) = answers(rig, case);
-    let mut counts = tally
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let count = counts.entry(ending(&go)).or_default();
-    *count = count.saturating_add(1);
-    drop(counts);
+    let ended = ending(&go);
     let ((go_code, go_err, go_out), (lsr_code, lsr_err, lsr_out)) = (&go.ran, &lsr.ran);
     let report = format!(
         "case: {case:?}\nargs: {args:?}\nGo  ({go_code:?}): {go_err}{go_out}\nlsr ({lsr_code:?}): {lsr_err}{lsr_out}"
@@ -389,7 +379,7 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
             lsr.after == starting(rig, case)
         };
         prop_assert!(fine, "a timestamp past the newest file\n{report}");
-        return Ok(());
+        return Ok(ended);
     }
     // Go's -if-replica-exists exits 0 for any transaction it cannot find, a txid past the
     // newest file of a replica that has files included, and writes no database; a script
@@ -400,7 +390,7 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
             failure(lsr_err, lsr_out) == Failure::NoBackups && lsr.after == starting(rig, case),
             "-if-replica-exists over a replica with files\n{report}"
         );
-        return Ok(());
+        return Ok(ended);
     }
     prop_assert_eq!(go_code, lsr_code, "exit codes\n{}", report);
     if *go_code != Some(0) {
@@ -418,7 +408,7 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
     let start = starting(rig, case);
     let go_only_removed = go.after.iter().all(|(name, v)| start.get(name) == Some(v));
     if lsr.after == start && go_only_removed {
-        return Ok(());
+        return Ok(ended);
     }
     prop_assert!(
         *go_code == Some(0),
@@ -432,7 +422,46 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
         go.after,
         lsr.after
     );
-    Ok(())
+    Ok(ended)
+}
+
+/// Endings the run must reach, each with a line built to reach it: the tokens, and what sits
+/// at the output (`None`: any of the four states) before the run.
+const AIMED: &[(&str, &[&str], Option<Before>)] = &[
+    ("restored", &["-o", "@OUT@", "@URL@"], Some(Before::Absent)),
+    ("planned", &["-dry-run", "-o", "@OUT@", "@URL@"], None),
+    ("help", &["-h"], None),
+    (
+        "skipped",
+        &["-if-replica-exists", "-o", "@OUT@", "@EMPTYURL@"],
+        Some(Before::Absent),
+    ),
+    ("Usage", &["-bogus", "@DB@"], None),
+    ("NoConfig", &["-config", "@MISSING@", "@DB@"], None),
+    ("NotInConfig", &["-config", "@CONFIG@", "@OTHER@"], None),
+    (
+        "Exists",
+        &["-o", "@OUT@", "@URL@"],
+        Some(Before::NotADatabase),
+    ),
+    (
+        "NoBackups",
+        &["-o", "@OUT@", "@EMPTYURL@"],
+        Some(Before::Absent),
+    ),
+];
+
+/// Cases per aimed ending.
+const AIMED_CASES: u32 = 6;
+
+/// Cases for one aimed line: its tokens, the output as given or any, the database any.
+fn aimed(tokens: &'static [&'static str], out: Option<Before>) -> impl Strategy<Value = Case> {
+    let out = out.map_or_else(|| before().boxed(), |b| Just(b).boxed());
+    (out, before()).prop_map(move |(out, db)| Case {
+        tokens: tokens.to_vec(),
+        out,
+        db,
+    })
 }
 
 fn rig() -> Rig {
@@ -484,34 +513,24 @@ fn rig() -> Rig {
     }
 }
 
-/// The differential: 512 generated cases per run, shrunk to the shortest that disagrees.
+/// The differential: 512 free cases and [`AIMED_CASES`] aimed at each ending in [`AIMED`],
+/// shrunk to the shortest that disagrees.
 #[test]
 #[ignore = "runs the pinned Go binaries; just compat"]
 fn go_and_lsr_restore_the_same_command_lines() {
     let rig = rig();
-    let mut runner = TestRunner::new(Config {
-        cases: 512,
-        failure_persistence: None,
-        ..Config::default()
-    });
-    let tally = Tally::default();
-    if let Err(error) = runner.run(&case(), |case| compare(&rig, &case, &tally)) {
+    let run = Differential::new("restore command lines");
+    let mut parts = vec![run.free(512, &case(), |case| compare(&rig, &case))];
+    for (ending, tokens, out) in AIMED {
+        let cases = aimed(tokens, *out);
+        parts.push(run.aimed(ending, AIMED_CASES, &cases, |case| compare(&rig, &case)));
+    }
+    if let Some(Err(error)) = parts.into_iter().find(Result::is_err) {
         panic!("{error}");
     }
-    let tally = tally.into_inner().unwrap();
-    eprintln!("Go ended as: {tally:?}");
-    for ending in [
-        "restored",
-        "planned",
-        "help",
-        "skipped",
-        "Usage",
-        "NoConfig",
-        "NotInConfig",
-        "Exists",
-        "NoBackups",
-    ] {
-        let seen = tally.get(ending).copied().unwrap_or(0);
-        assert!(seen >= 3, "{ending} ended only {seen} cases: {tally:?}");
+    let endings: Vec<&str> = AIMED.iter().map(|(ending, _, _)| *ending).collect();
+    match run.require(&endings, 3) {
+        Ok(tally) => eprintln!("Go ended as: {tally:?}"),
+        Err(error) => panic!("{error}"),
     }
 }
