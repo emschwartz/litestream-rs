@@ -47,7 +47,7 @@ use tokio::task::JoinSet;
 use crate::request::{HttpRequest, Method};
 use crate::transport::{HttpResponse, Transport, TransportError};
 use crate::transport::{MAX_BODY, map_io};
-use crate::trust::{self, Roots};
+use crate::trust;
 
 /// Why a [`ReqwestTransport`] could not be built.
 #[derive(Debug, thiserror::Error)]
@@ -110,17 +110,14 @@ impl std::fmt::Debug for ReqwestTransport {
 
 impl ReqwestTransport {
     /// The store's own client and runtime; every request ends within `deadline`.
-    /// It trusts the certificate authorities Go would trust in this process,
-    /// as [`UreqTransport::new`](crate::UreqTransport::new) describes.
+    /// It trusts the certificate authorities
+    /// [`UreqTransport::new`](crate::UreqTransport::new) describes.
     ///
     /// # Errors
     /// [`ReqwestSetupError`] when the client or the runtime cannot be built.
     pub fn new(deadline: Duration) -> Result<Self, ReqwestSetupError> {
-        Self::with_roots(deadline, trust::system())
-    }
-
-    pub(crate) fn with_roots(deadline: Duration, roots: Roots) -> Result<Self, ReqwestSetupError> {
-        let tls = trust::rustls_config(roots).map_err(|_tls| ReqwestSetupError::Client)?;
+        let tls =
+            trust::rustls_config(trust::system()).map_err(|_tls| ReqwestSetupError::Client)?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .tls_backend_preconfigured(tls)
