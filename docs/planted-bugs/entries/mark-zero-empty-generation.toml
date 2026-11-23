@@ -1,7 +1,7 @@
 # A running position pinned at the first frame of a generation with no frames does not follow the
 # new header SQLite writes with random salts (checkpoint sequence 0): a second whole snapshot. The
-# sim's liveness oracle catches it too, now that a change under a held read lock justifies nothing
-# (liveness::a_new_wal_header_over_an_empty_pinned_generation_is_followed, seed 0xf4846).
+# sim's needless-snapshot check catches it too, now that a change under a held read lock justifies nothing
+# (needless_snapshot::a_new_wal_header_over_an_empty_pinned_generation_is_followed, seed 0xf4846).
 name = "mark-zero-empty-generation"
 fix = "claude/rewound-snapshot"
 package = "lsr-core"

@@ -321,8 +321,9 @@ impl FaultHandle {
     }
 
     /// The objects a [`FaultShape::CorruptPublish`] changed, and those a
-    /// [`FaultShape::SizeMismatch`] left short that a delete then failed to
-    /// remove, in order: where the damage really landed, whatever the
+    /// [`FaultShape::SizeMismatch`] left short that the engine keeps: after a
+    /// level-0 replace, which it must not delete, or after any other write whose
+    /// delete failed. In order: where the damage really landed, whatever the
     /// scenario meant to hit.
     #[must_use]
     pub fn damaged(&self) -> Vec<FileKey> {
@@ -630,6 +631,7 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         Ok(FaultsUpload {
             inner,
             key: *key,
+            mode,
             wrote: 0,
             state: Arc::clone(&self.state),
             volatile: self.volatile.clone(),
@@ -737,6 +739,7 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
 pub struct FaultsUpload<U> {
     inner: U,
     key: FileKey,
+    mode: WriteMode,
     wrote: u64,
     state: Arc<Mutex<FaultState>>,
     volatile: Option<VolatileHandle>,
@@ -892,12 +895,24 @@ impl<U: Upload> FaultsUpload<U> {
             }
             Verdict::SizeMismatch => {
                 let mut info = self.inner.commit().await?;
-                // Not damage the store hid: it said the size, so the engine
-                // is told and must delete the object. A restore that meets it
-                // stays judged, unless the engine's delete of it failed.
+                // Not damage the store hid: it said the size, so the engine is
+                // told. A level-0 replace must not delete it (the key may have
+                // held an acknowledged object, D78), so the short object is
+                // damage a restore may stop on until the uploader writes the key
+                // again. Any other write must remove it (a create-only write
+                // deletes it in its commit; a compaction output or a snapshot is
+                // removed under the engine's own reason, its inputs or the chain
+                // below still covering it), so a restore that meets it stays
+                // judged unless that delete failed.
                 if let Some(raw) = &self.raw {
                     truncate(raw, &info).await?;
-                    lock(&self.state).short.push(info.key);
+                    let mut state = lock(&self.state);
+                    let kept = self.mode == WriteMode::Replace && self.key.level() == Level::ZERO;
+                    if kept {
+                        state.damaged.push(info.key);
+                    } else {
+                        state.short.push(info.key);
+                    }
                 }
                 info.size = info.size.saturating_sub(1);
                 Ok(info)

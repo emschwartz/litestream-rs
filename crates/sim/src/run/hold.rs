@@ -446,9 +446,7 @@ impl Runner {
         let Some(view) = view else {
             return Ok(());
         };
-        let newest = block_on(Inventory::load(&self.w.remote_raw))
-            .map_err(|err| bug_fault(format!("listing the replica: {err}")))?
-            .newest();
+        let newest = crate::oracle::newest_of(&crate::oracle::replica_files(&self.w.remote_raw));
         let mut targets = vec![RestoreTarget::Latest, RestoreTarget::AsOf(self.now())];
         if let Some(newest) = newest {
             for _ in 0..SAMPLED_TXIDS {

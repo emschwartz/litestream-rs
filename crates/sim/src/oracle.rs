@@ -26,13 +26,14 @@
 //!   window (`retention`);
 //! - after every tick, each level-0 file the replica took is one the engine
 //!   incarnation that put it staged itself, or holds exactly what the WAL it
-//!   booted on held for its range (`witness`).
+//!   booted on held for its range (`witness`);
+//! - every staged file the engine gave up before the replica took it was
+//!   forced by something in effect (`lost_restore_points`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use lsr_core::conformance::block_on;
-use lsr_core::{Did, FileKey, Inventory, PlanOutcome, RestoreTarget, is_snapshot_start};
+use lsr_core::{Did, FileInfo, FileKey, PlanOutcome, RestoreTarget, is_snapshot_start};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 use lsr_wal::Salts;
 use thiserror::Error;
@@ -161,24 +162,24 @@ pub enum Violation {
         key: String,
     },
     /// The engine announced or staged a snapshot that no fault, damage or
-    /// request since the evidence it overturns justifies (see
-    /// `crate::liveness`).
-    #[error("a snapshot for {cause:?} with nothing to justify it; in the window: {window:?}")]
-    UnjustifiedSnapshot {
+    /// request since the evidence it overturns forces: a needless full upload
+    /// (see `crate::needless_snapshot`).
+    #[error("a needless snapshot for {cause:?}: nothing forces it; in effect: {window:?}")]
+    NeedlessSnapshot {
         /// The cause.
         cause: lsr_core::SnapshotCauseKind,
-        /// What the window held.
-        window: Vec<crate::liveness::Justifier>,
+        /// The forcings in effect.
+        window: Vec<crate::forcing::Forcing>,
     },
     /// The engine deleted staged files no replica file holds, giving up
-    /// their restore points, with no fault in the window that could force
-    /// it (see `crate::liveness`).
-    #[error("{lost} staged files given up with nothing to justify it; in the window: {window:?}")]
-    UnjustifiedGiveUp {
+    /// their restore points, with nothing in effect that could force it
+    /// (see `crate::oracle::lost_restore_points`).
+    #[error("{lost} staged files given up with nothing forcing it; in effect: {window:?}")]
+    UnforcedGiveUp {
         /// How many.
         lost: u64,
-        /// What the window held.
-        window: Vec<crate::liveness::Justifier>,
+        /// The forcings in effect.
+        window: Vec<crate::forcing::Forcing>,
     },
     /// A running engine listed the replica while another writer's file stood
     /// past its own position, and did not stop.
@@ -816,9 +817,8 @@ pub fn check_with(
 ) -> Result<Checked, Violation> {
     let cover = covers(model, recorder, ground)?;
     write_once(model, recorder, ground)?;
-    let inventory = block_on(Inventory::load(remote))
-        .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
-    let files = inventory.files();
+    let held = replica_files(remote);
+    let files = held.as_slice();
     let mut out = Checked::default();
     let judge = as_of::Judge {
         remote,
@@ -836,7 +836,7 @@ pub fn check_with(
         .map(|f| f.key.range().max())
         .min();
     let reach = contract::Reach::over(files, |_| true);
-    let newest = inventory.newest().map_or(0, Txid::get);
+    let newest = newest_of(files).map_or(0, Txid::get);
     for txid in (1..=newest).filter_map(Txid::new) {
         judge.txid(txid, &reach, oldest, &mut out)?;
     }
@@ -849,7 +849,7 @@ pub fn check_with(
             None => Ok(out),
         };
     }
-    let Some(latest) = judge.latest(&reach, inventory.newest(), &mut out)? else {
+    let Some(latest) = judge.latest(&reach, newest_of(files), &mut out)? else {
         return Ok(out);
     };
     if let Some(acked) = acked.binding(ground.lost).filter(|a| *a > latest) {
@@ -869,7 +869,23 @@ pub fn check_with(
     Ok(out)
 }
 
+/// The replica's files as the store holds them, ascending by key: read from the store's own
+/// objects ([`crate::remote::Bucket::stored`]), never through the engine's listing code (`Inventory::load`, its
+/// paging and its merge), so a listing defect the engine has cannot also hide a file from the
+/// judges.
+#[must_use]
+pub fn replica_files(remote: &crate::remote::Bucket) -> Vec<FileInfo> {
+    remote.stored()
+}
+
+/// The last transaction any of `files` covers.
+#[must_use]
+pub fn newest_of(files: &[FileInfo]) -> Option<Txid> {
+    files.iter().map(|file| file.key.range().max()).max()
+}
+
 mod as_of;
+pub mod lost_restore_points;
 mod retention;
 mod witness;
 
