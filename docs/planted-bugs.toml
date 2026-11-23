@@ -1799,3 +1799,22 @@ tests = [
     "a_hole_right_after_a_lagging_listing_does_not_hide_the_files_past_it",
     "a_hidden_level_zero_file_of_several_transactions_is_found_from_where_level_zero_ends",
 ]
+
+[[bug]]
+name = "boot-walk-stops-at-the-gap-with-staging-empty"
+fix = "9af30d8"
+package = "lsr-core"
+tests = ["with_nothing_staged_the_probe_walks_past_a_wide_hole"]
+
+[[bug]]
+name = "boot-walk-stops-at-the-gap-with-staging-empty-sim"
+fix = "9af30d8"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_boot_with_staging_wiped_walks_past_a_wide_hole_seed_0x95a"]
+
+[[bug]]
+name = "torn-tail-replaced-under-a-held-file"
+fix = "9af30d8"
+package = "lsr-core"
+tests = ["a_torn_tail_a_higher_level_file_already_holds_is_not_replaced"]
