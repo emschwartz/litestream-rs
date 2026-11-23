@@ -1696,7 +1696,11 @@ impl Runner {
             // file of the same id) and snapshotting above it is not behind.
             let ours = self.actor.staged().max(self.actor.replicated());
             let behind = ours < Some(key.range().max());
-            if watching && listed && theirs && behind && !relisting {
+            // A listing that still shows the key as it was before a lagged
+            // write (an earlier object of the engine's own, or nothing) never
+            // showed the other writer's file, whatever the store holds.
+            let shown = !self.w.remote_faults.hides(key);
+            if watching && listed && shown && theirs && behind && !relisting {
                 return Err(Violation::OtherWriterMissed {
                     key: key.to_string(),
                 });

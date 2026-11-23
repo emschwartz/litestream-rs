@@ -349,6 +349,35 @@ fn a_lagging_listing_hides_writes_and_deletes_for_a_bounded_while() {
     assert_eq!(listed(&store), 2);
 }
 
+/// A key whose write a listing lag hides stays hidden when another writer
+/// replaces it under the wrappers: listings show the key as it was, never the
+/// new object, until the lag runs out. A judge that asks whether the engine
+/// listed that object must see it as hidden.
+#[test]
+fn a_key_the_lag_hides_stays_hidden_when_replaced_under_the_wrappers() {
+    let raw = MemStore::new();
+    let store = Faults::new(raw.clone(), Vec::new(), 7).corrupting_through(raw.clone());
+    block_on(upload(&store, 1)).unwrap();
+    store.handle().lag_listings(1, 3);
+    block_on(upload(&store, 2)).unwrap();
+    assert!(store.handle().hides(fkey(0, 2, 2)));
+    assert!(!store.handle().hides(fkey(0, 1, 1)));
+    // Another writer replaces key 2 directly in the store.
+    block_on(raw.delete(&[fkey(0, 2, 2)])).unwrap();
+    block_on(upload(&raw, 2)).unwrap();
+    let page = block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
+    let keys: Vec<_> = page.files.iter().map(|f| f.key).collect();
+    assert_eq!(
+        keys,
+        vec![fkey(0, 1, 1)],
+        "the first listing shows key 2 as it was"
+    );
+    for _ in 0..3 {
+        block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
+    }
+    assert!(!store.handle().hides(fkey(0, 2, 2)));
+}
+
 /// The boot's scratch removal reaches the store under every simulator wrapper, with its count
 /// and with no fault drawn.
 #[test]
