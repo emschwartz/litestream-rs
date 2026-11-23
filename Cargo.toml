@@ -31,6 +31,8 @@ lsr-wal = { path = "crates/wal" }
 # from libFuzzer's bytes. No derive feature, so no proc-macro build.
 arbitrary = { version = "1.4", default-features = false }
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+# Argument parsing for `lsr`'s own commands, `verify`, `files`, `take-over` and `config check` (MIT OR Apache-2.0). Go-compatible commands keep the hand-written Go flag parser.
+clap = { version = "4", default-features = false, features = ["std", "error-context"] }
 crc = "3.4.0"
 jiff = { version = "1.0", default-features = false, features = ["std"] }
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
@@ -45,6 +47,9 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no
 rustls = { version = "0.23.46", default-features = false }
 # The operating system's certificate verifier, used on macOS and Windows as Go uses it there.
 rustls-platform-verifier = { version = "0.7", default-features = false }
+# The system's root certificates (Apache-2.0 OR ISC OR MIT) on Linux and the BSDs, for the S3
+# store's own clients; `webpki-roots` below is the fallback when the system holds none.
+rustls-native-certs = { version = "0.8", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
 # The sidecar forwards signals to its -exec child and waits for it without reaping

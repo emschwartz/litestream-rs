@@ -91,6 +91,7 @@ use std::num::NonZeroU32;
 
 use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 
+use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
@@ -241,6 +242,24 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     newest_staged: Option<Txid>,
     witnesses: &Witnesses,
 ) -> Result<Uploaded, UploadFailed> {
+    upload_next_in(
+        state,
+        &Staging(staging),
+        &Replica(remote),
+        newest_staged,
+        witnesses,
+    )
+    .await
+}
+
+/// [`upload_next`] with each store as its role.
+pub(crate) async fn upload_next_in<L: Role, S: Role>(
+    state: UploadState,
+    staging: &L,
+    remote: &S,
+    newest_staged: Option<Txid>,
+    witnesses: &Witnesses,
+) -> Result<Uploaded, UploadFailed> {
     match plan_upload(&state, newest_staged) {
         UploadPlan::Idle => Ok(Uploaded {
             state,
@@ -260,9 +279,9 @@ fn fail(state: UploadState, fault: Fault) -> UploadFailed {
 }
 
 /// A listing failure as the fault the uploader and the actor route.
-pub(crate) fn inventory_fault(err: &InventoryError) -> Fault {
+pub(crate) fn inventory_fault<R: Role>(err: &InventoryError) -> Fault {
     match err {
-        InventoryError::Store(err) => Fault::from_remote(err),
+        InventoryError::Store(err) => R::fault(err),
         InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_) => {
             mark!(Boot17);
             Fault::RemoteCorrupt
@@ -270,7 +289,7 @@ pub(crate) fn inventory_fault(err: &InventoryError) -> Fault {
     }
 }
 
-async fn list_step<L: ObjectStore, S: ObjectStore>(
+async fn list_step<L: Role, S: Role>(
     state: UploadState,
     staging: &L,
     remote: &S,
@@ -278,7 +297,7 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
 ) -> Result<Uploaded, UploadFailed> {
     let inventory = Inventory::load(remote)
         .await
-        .map_err(|err| fail(state, inventory_fault(&err)))?;
+        .map_err(|err| fail(state, inventory_fault::<S>(&err)))?;
     let confirmed = state.confirmed();
     let probed = look_past(&inventory, staging, remote, confirmed, newest_staged)
         .await
@@ -369,7 +388,7 @@ impl Seen<'_> {
 /// lags a delete shows a file that is gone: list again); otherwise the
 /// keys past it are probed ([`probe_past`]), through at least the newest
 /// staged transaction, which this engine may have uploaded already.
-async fn look_past<L: ObjectStore, S: ObjectStore>(
+async fn look_past<L: Role, S: Role>(
     inventory: &Inventory,
     staging: &L,
     remote: &S,
@@ -409,10 +428,7 @@ async fn look_past<L: ObjectStore, S: ObjectStore>(
 
 /// Whether staging holds no file at all. Past an empty listing the staged files past it are all
 /// of them, so no second listing is made.
-async fn staging_is_empty<L: ObjectStore>(
-    staging: &L,
-    inventory: &Inventory,
-) -> Result<bool, Fault> {
+async fn staging_is_empty<L: Role>(staging: &L, inventory: &Inventory) -> Result<bool, Fault> {
     if inventory.newest().is_none() {
         return Ok(true);
     }
@@ -436,7 +452,7 @@ fn first_past(listed: Option<Txid>, confirmed: Option<Txid>) -> Option<Txid> {
 ///
 /// # Errors
 /// The replica's fault when a read fails other than by a missing key.
-pub(crate) async fn past_known<S: ObjectStore>(
+pub(crate) async fn past_known<S: Role>(
     remote: &S,
     inventory: &Inventory,
     known: Option<Txid>,
@@ -475,7 +491,7 @@ pub(crate) async fn past_known<S: ObjectStore>(
 ///
 /// # Errors
 /// The replica's fault when a read fails other than by a missing key.
-pub(crate) async fn probe_past<S: ObjectStore>(
+pub(crate) async fn probe_past<S: Role>(
     remote: &S,
     listed: Option<Txid>,
     confirmed: Option<Txid>,
@@ -485,7 +501,7 @@ pub(crate) async fn probe_past<S: ObjectStore>(
     let first = first_past(listed, confirmed);
     probe::walk(remote, first, through, starts, false)
         .await
-        .map_err(|err| Fault::from_remote(&err))
+        .map_err(|err| S::fault(&err))
 }
 
 /// The reads a probe past a listing that ends at `listed` makes when it finds nothing: the
@@ -528,10 +544,10 @@ pub fn capped_probe_reads(listed: Option<Txid>, starts: &Starts) -> u64 {
 ///
 /// # Errors
 /// The replica's fault when the read fails other than by a missing key.
-pub(crate) async fn exists<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
+pub(crate) async fn exists<S: Role>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
     probe::exists(remote, key)
         .await
-        .map_err(|err| Fault::from_remote(&err))
+        .map_err(|err| S::fault(&err))
 }
 
 fn diverged(confirmed: Txid, from: Txid) -> Uploaded {
@@ -559,7 +575,7 @@ enum TailVerdict {
 /// showed it. Only the newest key is read back: an older one was confirmed
 /// by its own commit in an earlier run, and reading every key at boot would be
 /// a whole replica scan.
-async fn judge_tail<L: ObjectStore, S: ObjectStore>(
+async fn judge_tail<L: Role, S: Role>(
     staging: &L,
     remote: &S,
     tail: Txid,
@@ -571,7 +587,7 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
     let page = staging
         .list(Level::ZERO, after, limit)
         .await
-        .map_err(|err| Fault::from_staging(&err))?;
+        .map_err(|err| L::fault(&err))?;
     let Some(staged) = page.files.first().filter(|staged| staged.key == key) else {
         return remote_decodes(remote, &key)
             .await
@@ -603,7 +619,7 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
 }
 
 /// Streams both copies and compares them chunk by chunk.
-async fn same_bytes<L: ObjectStore, S: ObjectStore>(
+async fn same_bytes<L: Role, S: Role>(
     staging: &L,
     remote: &S,
     key: &FileKey,
@@ -614,11 +630,11 @@ async fn same_bytes<L: ObjectStore, S: ObjectStore>(
         let ours = staging
             .read(key, offset, len)
             .await
-            .map_err(|err| Fault::from_staging(&err))?;
+            .map_err(|err| L::fault(&err))?;
         let theirs = remote
             .read(key, offset, len)
             .await
-            .map_err(|err| Fault::from_remote(&err))?;
+            .map_err(|err| S::fault(&err))?;
         if ours != theirs {
             return Ok(false);
         }
@@ -632,7 +648,7 @@ async fn same_bytes<L: ObjectStore, S: ObjectStore>(
 
 /// Reads the replica's object through the LTX decoder. It must verify whole and
 /// name exactly `key`; anything else is a corrupt replica.
-async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(), Fault> {
+async fn remote_decodes<S: Role>(remote: &S, key: &FileKey) -> Result<(), Fault> {
     if remote_verifies(remote, key).await? {
         Ok(())
     } else {
@@ -645,25 +661,22 @@ async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(),
 ///
 /// # Errors
 /// The replica's fault when a read fails: that says nothing about the bytes.
-pub(crate) async fn remote_verifies<S: ObjectStore>(
-    remote: &S,
-    key: &FileKey,
-) -> Result<bool, Fault> {
-    verifies(remote, key, CHUNK, Fault::from_remote).await
+pub(crate) async fn remote_verifies<S: Role>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
+    verifies(remote, key, CHUNK, S::fault).await
 }
 
 /// Whether the replica's object `key` fails verification on two reads in a
 /// row. Writing over it is decided by this, never by one read: a read that
 /// came back wrong says nothing about the stored bytes, and a verifying
 /// object with other bytes is never written over.
-async fn remote_torn<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
+async fn remote_torn<S: Role>(remote: &S, key: &FileKey) -> Result<bool, Fault> {
     Ok(!remote_verifies(remote, key).await? && !remote_verifies(remote, key).await?)
 }
 
 /// Whether the staged file `key` verifies whole and names exactly `key`.
 /// A missing or unusable one does not; any other store error is the fault.
-async fn staged_verifies<L: ObjectStore>(staging: &L, key: &FileKey) -> Result<bool, Fault> {
-    match verifies(staging, key, CHUNK, Fault::from_staging).await {
+async fn staged_verifies<L: Role>(staging: &L, key: &FileKey) -> Result<bool, Fault> {
+    match verifies(staging, key, CHUNK, L::fault).await {
         Ok(verifies) => Ok(verifies),
         Err(Fault::StagedLost) => Ok(false),
         Err(fault) => Err(fault),
@@ -692,7 +705,7 @@ impl StagedPages {
     ///
     /// # Errors
     /// The staging store's fault when it cannot list, or lists with a cursor that stalls.
-    pub(crate) async fn next<L: ObjectStore>(
+    pub(crate) async fn next<L: Role>(
         &mut self,
         staging: &L,
     ) -> Result<Option<Vec<FileInfo>>, Fault> {
@@ -702,7 +715,7 @@ impl StagedPages {
         let page = staging
             .list(at.level, at.after, PageLimit::MAX)
             .await
-            .map_err(|err| Fault::from_staging(&err))?;
+            .map_err(|err| L::fault(&err))?;
         self.at = at
             .following(page.next)
             .map_err(Fault::from_staging_listing)?;
@@ -721,7 +734,7 @@ impl StagedPages {
 ///
 /// # Errors
 /// As [`StagedPages::next`].
-pub(crate) async fn staged_from<L: ObjectStore>(
+pub(crate) async fn staged_from<L: Role>(
     staging: &L,
     from: Option<Txid>,
     most: usize,
@@ -746,7 +759,7 @@ pub(crate) async fn staged_from<L: ObjectStore>(
 ///
 /// # Errors
 /// The staging store's fault when it cannot list or delete.
-pub(crate) async fn drop_staged_from<L: ObjectStore>(staging: &L, from: Txid) -> Result<(), Fault> {
+pub(crate) async fn drop_staged_from<L: Role>(staging: &L, from: Txid) -> Result<(), Fault> {
     loop {
         let mut last = Vec::new();
         let mut pages = StagedPages::from(Some(from));
@@ -761,7 +774,7 @@ pub(crate) async fn drop_staged_from<L: ObjectStore>(staging: &L, from: Txid) ->
         for info in last.iter().rev() {
             publish::remove_staged(staging, &[info.key])
                 .await
-                .map_err(|err| Fault::from_staging(&err))?;
+                .map_err(|err| L::fault(&err))?;
         }
     }
 }
@@ -789,7 +802,7 @@ pub(crate) enum Swept {
 ///
 /// # Errors
 /// The staging store's fault when it cannot list, read or delete.
-pub(crate) async fn sweep_staged<L: ObjectStore>(
+pub(crate) async fn sweep_staged<L: Role>(
     staging: &L,
     confirmed: Option<Txid>,
     suspect: Option<FileKey>,
@@ -825,7 +838,7 @@ enum PutError {
     Rejected(Fault, Option<publish::Rejected>),
 }
 
-async fn put_step<L: ObjectStore, S: ObjectStore>(
+async fn put_step<L: Role, S: Role>(
     state: UploadState,
     staging: &L,
     remote: &S,
@@ -884,7 +897,7 @@ fn list_first(state: UploadState) -> UploadState {
 
 /// The bucket refused the upload of `key`: an object is already there. See
 /// the module docs for what each read-back finds.
-async fn taken<L: ObjectStore, S: ObjectStore>(
+async fn taken<L: Role, S: Role>(
     state: UploadState,
     staging: &L,
     remote: &S,
@@ -918,7 +931,7 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
     list_step(list_first(state), staging, remote, newest_staged).await
 }
 
-async fn put_staged<L: ObjectStore, S: ObjectStore>(
+async fn put_staged<L: Role, S: Role>(
     staging: &L,
     remote: &S,
     token: &Witnessed,
@@ -940,12 +953,10 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
         Ok(published) if published.key() == *key => Ok(published.info()),
         Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
         Err(Unpublished::Taken(_)) => Err(PutError::Taken),
-        Err(Unpublished::Rejected(err, own)) => {
-            Err(PutError::Rejected(Fault::from_remote(&err), own))
-        }
+        Err(Unpublished::Rejected(err, own)) => Err(PutError::Rejected(S::fault(&err), own)),
         Err(Unpublished::Failed(err)) => {
             mark!(Up6);
-            Err(PutError::Commit(Fault::from_remote(&err)))
+            Err(PutError::Commit(S::fault(&err)))
         }
     }
 }
@@ -977,7 +988,7 @@ fn names_key(header: &Header, key: &FileKey) -> Result<(), PutError> {
 /// are the ones `token` was minted for: a file replaced after it was
 /// witnessed is refused before the commit. The upload counts the bytes it
 /// writes; its commit checks the store holds them ([`Writer`]).
-async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
+async fn copy_verified<'s, L: Role, S: Role>(
     staging: &L,
     remote: &'s S,
     token: &Witnessed,
@@ -994,7 +1005,7 @@ async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
         let chunk = staging
             .read(key, offset, len)
             .await
-            .map_err(|err| PutError::Before(Fault::from_staging(&err)))?;
+            .map_err(|err| PutError::Before(L::fault(&err)))?;
         bytes.add(&chunk);
         if !feed_all(&mut decoder, &chunk).map_err(PutError::Before)? {
             return Err(PutError::Before(Fault::StagedLost));
@@ -1028,7 +1039,7 @@ async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
     Ok(())
 }
 
-async fn begin<'s, S: ObjectStore>(
+async fn begin<'s, S: Role>(
     remote: &'s S,
     key: &FileKey,
     header: &Header,
@@ -1036,17 +1047,14 @@ async fn begin<'s, S: ObjectStore>(
 ) -> Result<Writer<'s, S>, PutError> {
     Writer::begin(remote, key, header.fields().timestamp, mode)
         .await
-        .map_err(|err| PutError::Before(Fault::from_remote(&err)))
+        .map_err(|err| PutError::Before(S::fault(&err)))
 }
 
-async fn write_chunk<S: ObjectStore>(
-    upload: &mut Writer<'_, S>,
-    chunk: &[u8],
-) -> Result<(), PutError> {
+async fn write_chunk<S: Role>(upload: &mut Writer<'_, S>, chunk: &[u8]) -> Result<(), PutError> {
     upload
         .write(chunk)
         .await
-        .map_err(|err| PutError::Before(Fault::from_remote(&err)))
+        .map_err(|err| PutError::Before(S::fault(&err)))
 }
 
 #[cfg(test)]

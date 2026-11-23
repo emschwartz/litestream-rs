@@ -1,5 +1,5 @@
-//! The snapshot liveness oracle (`crates/sim/src/liveness.rs`) judges every
-//! run; these runs give it something to judge on purpose.
+//! The needless-snapshot check (`crates/sim/src/needless_snapshot.rs`) judges
+//! every run; these runs give it something to judge on purpose.
 
 use lsr_sim::run::run_ops;
 use lsr_sim::{CrashKind, Op, Opts, Seed};
@@ -106,7 +106,7 @@ fn a_rollback_that_empties_the_replica_justifies_a_first_sync() {
     match run_ops(Seed::new(0x7d), &ops, &opts) {
         Ok(report) => {
             assert!(
-                report.reach.get("liveness.justified.FirstSync") >= 2,
+                report.reach.get("needless_snapshot.forced.FirstSync") >= 2,
                 "{:#?}",
                 report.trace
             );

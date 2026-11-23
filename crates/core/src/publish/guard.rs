@@ -1,5 +1,6 @@
-//! The source guard: no module of the engine outside `publish` writes to or
-//! deletes from a store itself.
+//! The source guards: no module of the engine outside `publish` writes to or
+//! deletes from a store itself, and none outside `fault` classifies a store
+//! error except through its store's role.
 //!
 //! A raw commit needs a raw upload, which only `begin_upload` makes, so the
 //! guard counts calls of `begin_upload` and `delete` in the crate's non-test
@@ -31,9 +32,18 @@ const ALLOWED: &[(&str, &str)] = &[
         "the created-at wrapper, a store passing calls through",
     ),
     ("conformance.rs", "the store conformance suite"),
+    (
+        "role.rs",
+        "the staging and replica roles, stores passing calls through",
+    ),
 ];
 
 const CALLS: &[&str] = &[".begin_upload(", ".delete("];
+
+/// The two ways to turn a store error into a fault, which only `fault` (and
+/// its `role` module) may name: everywhere else an error is classified by its
+/// store's role (`fault::role`), so it cannot be taken for the other store's.
+const CLASSIFIERS: &[&str] = &["from_staging(", "from_remote("];
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -65,9 +75,9 @@ fn non_test(text: &str) -> impl Iterator<Item = (usize, &str)> {
     text.lines().enumerate().take(end)
 }
 
-/// Every call of a store's `begin_upload` or `delete` outside the allowed
-/// files, as `path:line: text`.
-fn raw_calls() -> Vec<String> {
+/// Every line of the crate's non-test source outside `allowed` files that
+/// names one of `calls`, as `path:line: text`.
+fn found(calls: &[&str], allowed: &[&str]) -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     sources(&root, &mut files);
@@ -79,13 +89,13 @@ fn raw_calls() -> Vec<String> {
     let mut found = Vec::new();
     for path in files {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if ALLOWED.iter().any(|(allowed, _)| *allowed == name) {
+        if allowed.contains(&name) {
             continue;
         }
         let text = fs::read_to_string(&path).unwrap();
         for (n, line) in non_test(&text) {
             let code = line.split("//").next().unwrap_or("");
-            if CALLS.iter().any(|call| code.contains(call)) {
+            if calls.iter().any(|call| code.contains(call)) {
                 found.push(format!(
                     "{}:{}: {}",
                     path.display(),
@@ -96,6 +106,23 @@ fn raw_calls() -> Vec<String> {
         }
     }
     found
+}
+
+/// Every call of a store's `begin_upload` or `delete` outside the allowed
+/// files.
+fn raw_calls() -> Vec<String> {
+    let allowed: Vec<&str> = ALLOWED.iter().map(|(name, _)| *name).collect();
+    found(CALLS, &allowed)
+}
+
+#[test]
+fn no_engine_module_classifies_a_store_error_outside_its_role() {
+    let found = found(CLASSIFIERS, &["fault.rs", "role.rs"]);
+    assert!(
+        found.is_empty(),
+        "store errors classified outside fault::role (use the store's Role::fault):\n{}",
+        found.join("\n")
+    );
 }
 
 #[test]

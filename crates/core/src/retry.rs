@@ -308,6 +308,7 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
             inner,
             key: *key,
             written: 0,
+            mode,
             core: Arc::clone(&self.core),
         })
     }
@@ -379,14 +380,17 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
 /// An upload through a [`Retrying`] store: passes writes and the commit
 /// through once, and checks the committed size.
 ///
-/// A commit whose stored size differs deletes the object before it reports
-/// the error, so a mismatch never leaves a listable file; see
+/// A commit whose stored size differs is reported, never taken as whole. After
+/// a create-only write the object is deleted first; after a replace it is left,
+/// since the key may have held an acknowledged object (`crate::publish::settle`,
+/// the rule every engine commit follows); see
 /// [`crate::store::CorruptCause::CommitSizeMismatch`] for what the caller may conclude.
 #[derive(Debug)]
 pub struct RetryingUpload<S: ObjectStore, P, E> {
     inner: S::Upload,
     key: FileKey,
     written: u64,
+    mode: WriteMode,
     core: Arc<Core<S, P, E>>,
 }
 
@@ -404,7 +408,7 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> 
         let info = self.inner.commit().await?;
         let core = &*self.core;
         let keys = [self.key];
-        crate::publish::settle(info, self.key, self.written, || {
+        crate::publish::settle(info, self.key, self.written, self.mode, || {
             core.run(|| core.inner.delete(&keys))
         })
         .await
