@@ -543,30 +543,7 @@ fn go_s_series_are_there(text: &str, db: &str) {
     ] {
         assert_eq!(label_keys(one(&samples, name, &[("db", db)])), ["db"]);
     }
-    // The write synced: its frames are counted and the WAL read past its header.
-    for name in [
-        "litestream_sync_count",
-        "litestream_total_wal_bytes",
-        "litestream_wal_size",
-    ] {
-        assert!(one(&samples, name, &[("db", db)]).value > 0.0, "{name}");
-    }
-    assert!(
-        one(&samples, "litestream_disk_full", &[("db", db)])
-            .value
-            .abs()
-            < f64::EPSILON
-    );
-    for mode in ["PASSIVE", "TRUNCATE"] {
-        let labels = [("db", db), ("mode", mode)];
-        for name in [
-            "litestream_checkpoint_count",
-            "litestream_checkpoint_error_count",
-            "litestream_checkpoint_seconds",
-        ] {
-            assert_eq!(label_keys(one(&samples, name, &labels)), ["db", "mode"]);
-        }
-    }
+    go_s_sync_and_checkpoint_values(&samples, db);
     let put = [("replica_type", "file"), ("operation", "PUT")];
     let total = one(&samples, "litestream_replica_operation_total", &put);
     assert_eq!(label_keys(total), ["operation", "replica_type"]);
@@ -584,6 +561,34 @@ fn go_s_series_are_there(text: &str, db: &str) {
     );
     one(&samples, "lsr_unreplicated_age_seconds", &[("db", db)]);
     one(&samples, "lsr_wal_bytes", &[("db", db)]);
+}
+
+/// The sync, WAL and checkpoint series after a synced write: counted, with Go's labels.
+fn go_s_sync_and_checkpoint_values(samples: &[Sample], db: &str) {
+    // The write synced: its frames are counted and the WAL read past its header.
+    for name in [
+        "litestream_sync_count",
+        "litestream_total_wal_bytes",
+        "litestream_wal_size",
+    ] {
+        assert!(one(samples, name, &[("db", db)]).value > 0.0, "{name}");
+    }
+    assert!(
+        one(samples, "litestream_disk_full", &[("db", db)])
+            .value
+            .abs()
+            < f64::EPSILON
+    );
+    for mode in ["PASSIVE", "TRUNCATE"] {
+        let labels = [("db", db), ("mode", mode)];
+        for name in [
+            "litestream_checkpoint_count",
+            "litestream_checkpoint_error_count",
+            "litestream_checkpoint_seconds",
+        ] {
+            assert_eq!(label_keys(one(samples, name, &labels)), ["db", "mode"]);
+        }
+    }
 }
 
 /// An empty host is every interface, as Go binds it, and the log says so rather than
