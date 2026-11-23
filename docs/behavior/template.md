@@ -108,7 +108,7 @@ Version 0.0.0: these are what the code is built to deliver.
 
 | Evidence | Size and fault mix | Runs |
 |---|---|---|
-| Simulator fixed seeds: sim `seeds_1_to_8` through `seeds_57_to_64`, each judged by oracle `RestoreMismatch`, `WrongAnswer`, `RestoreRefused`, `CoversMidTx`, `UnwitnessedPut` and by the history judge through oracle `History(NotInHistory, Broken)` | 64 seeds of the default mix: commits, crashes, power loss (prefix law), store faults, clock jumps, staging damage, second writer, rollback. No lagging listings | Every commit (the gate) |
+| Simulator fixed seeds: sim `seeds_1_to_8` through `seeds_57_to_64`, each judged by oracle `RestoreMismatch`, `WrongAnswer`, `RestoreRefused`, `CoversMidTx`, `UnstagedPut` and by the history judge through oracle `History(NotInHistory, Broken)` | 64 seeds of the default mix: commits, crashes, power loss (prefix law), store faults, clock jumps, staging damage, second writer, rollback. No lagging listings | Every commit (the gate) |
 | Simulator regression seeds in `sim/tests/sim/fixed_seeds.rs` (about 30 named) | One history each | The gate |
 | Simulator rotating seeds: sim `soak` | Default and swarm mixes for a time budget (`just sim-nightly`, 900 s) | Nightly. `#[ignore]` in the gate |
 | Real engine, directory store: history `every_restore_of_a_file_replica_is_a_node_of_the_history` | **One seed (7), 60 steps, no faults, clean drained stops only** | The gate |
@@ -133,7 +133,7 @@ Version 0.0.0: these are what the code is built to deliver.
 
 After a rewind the replica still holds the lost branch. Its transactions stay restorable by id or instant until retention removes them.
 
-**Counted against G2.** Nothing shown on main. Three simulator seeds once showed the latest state going back after a rollback and a restored staging copy; they pass since the witness commit b812e0f and are pinned: sim `a_staging_copy_put_back_after_two_rollbacks_never_restores_an_older_latest_seed_0x484`, `a_staging_copy_from_before_a_vacuum_never_restores_an_older_latest_seed_0x15c`, `a_staging_copy_put_back_after_a_truncated_wal_never_restores_an_older_latest_seed_0x385`. What remains from that family is id reuse, a G1 hazard (BOOT-19). G2 stays falsifiable only by the driver that injected the fault, because in two rows of the table above the engine's signal can be missing (C3).
+**Counted against G2.** Nothing shown on main. Three simulator seeds once showed the latest state going back after a rollback and a restored staging copy; they no longer arise since the engine stopped taking a staging copy put back from another timeline as a cost to defend against (D173, D175: a copy put back is uploaded as staged, which accepted cost (1) names). What remains from that family is id reuse, a G1 hazard (BOOT-19). G2 stays falsifiable only by the driver that injected the fault, because in two rows of the table above the engine's signal can be missing (C3).
 
 **Engine-level evidence.** The same runs as G1, judged by judge `WentBackwards` (through oracle `History`) and oracle `LatestLostAck`.
 
@@ -395,7 +395,7 @@ While any task is degraded, retention pins the newest transaction the replica he
 
 ### Boot
 
-A boot runs on the first tick of every process, and again after a rebuild. In order: list the replica and read back its newest level-0 file; sweep the staged files; witness the pending staged files against the live WAL; read the newest staged file; decide (`core/src/actor.rs`). A failure at any step starts the boot again from the top after the sync task's wait. Nothing is uploaded before the boot finishes.
+A boot runs on the first tick of every process, and again after a rebuild. In order: list the replica and read back its newest level-0 file; sweep the staged files; read and check the pending staged files (each whole, chained to the one before); read the newest staged file; decide (`core/src/actor.rs`). A failure at any step starts the boot again from the top after the sync task's wait. Nothing is uploaded before the boot finishes.
 
 <!-- rows: Boot -->
 
@@ -470,7 +470,7 @@ Every `SnapshotCause` variant (`core/src/fault.rs`). A snapshot reads every page
 |---|---|---|---|---|---|
 | `FirstSync` | No staged file and no replica level-0 file to continue from | There is nothing to build on | Yes | None | BOOT-1 |
 | `BehindRemote` | At boot, the replica's newest transaction is above the newest staged file's, the WAL does not vouch for the replica's newest file, and a takeover record covers it | An operator took over (`lsr take-over`, or a restore) a replica this database has no record of writing | The doubt is real | None: the boot already reads the replica's newest level-0 file and continues without a snapshot when the WAL vouches for it | BOOT-6, BOOT-22 |
-| `NewestStagedFileUnreadable` | A staged file failed verification twice, or diverged from the replica's object, or had no witness token (boot refuses no more than the cap: RUN-18 holds the position instead) | The chain from the replica to the WAL has a hole in staging | After a divergence, yes. After a drop for verification it is taken only when recovery cannot continue from the newest file left (BOOT-5); mid-run (RUN-16) it is always taken, since a checkpoint may have removed the dropped frames and nothing judges that before the drop | Mid-run, judge the WAL against the newest file left before dropping, as boot does. The boot drop and the witness-cap case (RUN-18) no longer snapshot | BOOT-5, BOOT-13, RUN-16, RUN-17 |
+| `NewestStagedFileUnreadable` | A staged file failed verification twice, or diverged from the replica's object, or had no token (boot refuses no more than the cap: RUN-18 holds the position instead) | The chain from the replica to the WAL has a hole in staging | After a divergence, yes. After a drop for verification it is taken only when recovery cannot continue from the newest file left (BOOT-5); mid-run (RUN-16) it is always taken, since a checkpoint may have removed the dropped frames and nothing judges that before the drop | Mid-run, judge the WAL against the newest file left before dropping, as boot does. The boot drop and the token-cap case (RUN-18) no longer snapshot | BOOT-5, BOOT-13, RUN-16, RUN-17 |
 | `WalMissing` | No WAL file, or a torn header | Commits after the position may have been checkpointed and are in no WAL | Yes. Not needed in one common case: a database just restored from this replica, which is snapshotted in full right after being downloaded | Compare the database's pages with per-page digests of the replica's tip and ship only the pages that differ. Needs local state that survives restarts | BOOT-7, RUN-9 |
 | `GenerationChanged` | At boot, any salt change. Running, a restart that the read lock and `salt1 + 1` do not prove, or frames abandoned after the position | Commits written after the position and overwritten by the restart are in no WAL | The doubt is real in the sidecar case. Not when the crash fell between the engine's own checkpoint and its first file of the new generation | The page-digest compare above. This is the cause behind the measured crash-loop storm (BOOT-20) | BOOT-8, RUN-8, RUN-10 |
 | `PrevFrameMismatch` | The frame before the position is not a commit frame, or the position is mid-transaction | The WAL is not the one the staged file came from | Yes | Page-digest compare | BOOT-10 |
@@ -479,7 +479,7 @@ Every `SnapshotCause` variant (`core/src/fault.rs`). A snapshot reads every page
 | `CheckpointBoundary` | The engine's own TRUNCATE changed the WAL | A commit may have slipped between the last sync and the checkpoint | Usually not: nothing slipped in | Seal first, checkpoint with RESTART, and read SQLite's reported frame count to prove nothing was committed in between. Needs a spike on real SQLite | CKPT-4 |
 | `OperatorRequested` | An operator asked | By definition | Yes | None | RUN-23 |
 | `WalSyncFailed` | The TRUNCATE that follows a failed WAL fsync completed (RUN-3) | Commits the failed sync covered were never staged; the TRUNCATE wrote them into the database file, which the snapshot reads | Yes: those commits are in no WAL any more | None while the WAL is the only other copy | RUN-3 |
-| `StagedUnverified` | At boot, pending staged files the live WAL does not vouch for, and recovery cannot continue | The files cannot be proven, so they are not published; the snapshot holds their end state | Not for files this process's predecessor wrote from a proven position: only the proof was lost with the process | Persist each staged file's token, chained to its predecessor. Needs a journal | BOOT-11, GO-3 |
+| `StagedUnverified` | At boot, pending staged files that do not read whole or do not chain, and recovery cannot continue | The files cannot be uploaded, so they are not published; the snapshot holds their end state | Only for torn or misplaced files: a plain crash, a WAL restart or a staging copy put back leaves files that read whole and chain, which are uploaded as staged (D175) | None needed | BOOT-11, GO-3 |
 
 **Cost today.** A snapshot costs one full read of the database, one full-size upload, its staged copy, and its share of each later merge. No rate limit, budget or backoff bounds how often any cause may fire. On main there is no per-cause counter, so the rate cannot be alerted on (#86 adds one).
 
@@ -603,7 +603,7 @@ These are defects in the evidence, not in the engine. Each weakens a guarantee's
 |---|---|---|
 | L1 | No file certifies its predecessor. Every file is written without a running page checksum, as Go's default is, so a chain of individually valid files with wrong content restores without error (REST-9) | Decision D2 in `docs/PLAN.md`: Go's compactor rejects tracked checksums, and Go must stay a fallback |
 | L2 | The LTX file checksum covers decompressed pages, not the compressed bytes. Two different byte strings can decode to the same pages and both verify | Go's format. The upload token carries a digest of the raw bytes for the engine's own files |
-| L3 | The engine keeps one file of its own across restarts, the engine journal (decision D8 amends D6), and so far records one fact in it: a failed WAL fsync | The root of D1, D3, D9 and of `StagedUnverified` after a plain crash; of D2's residue |
+| L3 | The engine keeps one file of its own across restarts, the engine journal (decision D8 amends D6), and so far records one fact in it: a failed WAL fsync | The root of D1, D3, D9; of D2's residue |
 | L4 | A lying disk makes the replica run ahead of the database | No software fix. Detected only while the regrown WAL differs (BOOT-9) |
 | L5 | The simulator and the engine can share a wrong belief about SQLite or the disk | Reduced by the history judge, real-SQLite crash cycles and LazyFS; not removed |
 
