@@ -1701,6 +1701,21 @@ impl Actor {
         position
     }
 
+    /// The newest id an upload step may treat as this engine's own.
+    ///
+    /// A listing judges the replica against everything this engine put
+    /// there: what it staged, and what one of its own drops vouched for
+    /// (files the replica may hold unconfirmed). Other plans ignore drops.
+    fn upload_bound(&self, plan: UploadPlan) -> Option<Txid> {
+        match plan {
+            UploadPlan::List => self
+                .staged()
+                .max(self.engine.dropped_through)
+                .max(self.engine.acknowledged),
+            UploadPlan::Idle | UploadPlan::Upload(_) => self.staged(),
+        }
+    }
+
     /// Staged files to the replica, up to the per-tick limit.
     async fn upload_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
@@ -1719,12 +1734,13 @@ impl Actor {
         let mut last = Did::Nothing;
         for _ in 0..limit {
             let plan = plan_upload(&self.engine.upload, self.staged());
+            let bound = self.upload_bound(plan);
             let witnesses = &self.engine.witnesses;
             let uploaded = upload_next(
                 self.engine.upload,
                 env.staging,
                 env.remote,
-                self.staged(),
+                bound,
                 witnesses,
             )
             .await;
@@ -1748,7 +1764,7 @@ impl Actor {
                         }
                         self.kept.suspect_staged = None;
                         mark!(Run16);
-                        return Some(self.lose_staged(env, key.range().min(), now).await);
+                        return Some(self.lose_staged(env, key.range().min(), None, now).await);
                     }
                     return Some(self.fault(Task::Upload, failed.fault, now));
                 }
@@ -1798,9 +1814,14 @@ impl Actor {
     ) -> Tick {
         let key = FileKey::new(Level::ZERO, TxidRange::single(from));
         let token = self.engine.witnesses.get(&key).copied();
+        // An id one of this engine's own drops vouched for holds its own
+        // earlier upload on the replica (one whose answer was lost), not
+        // another writer's: that object stands, and the staged file that
+        // took its id goes, as for a staged file that changed.
+        let vouched = Some(from) <= self.engine.dropped_through;
         let ours = match token {
-            Some(token) => still_holds(env.staging, &token).await,
-            None => Ok(false),
+            Some(token) if !vouched => still_holds(env.staging, &token).await,
+            Some(_) | None => Ok(false),
         };
         match ours {
             Ok(true) => self.fault(Task::Upload, Fault::RemoteAheadOfLocal, now),
@@ -1809,7 +1830,7 @@ impl Actor {
                     return tick;
                 }
                 self.set_upload(state);
-                self.lose_staged(env, from, now).await
+                self.lose_staged(env, from, Some(from), now).await
             }
             Err(fault) => self.fault(Task::Upload, fault, now),
         }
@@ -1826,8 +1847,15 @@ impl Actor {
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         from: Txid,
+        cap: Option<Txid>,
         now: Timestamp,
     ) -> Tick {
+        // What the takeover record kept before this drop vouches for
+        // (`Self::vouch_before_drop`, with the same cap): the replica may hold
+        // those files unconfirmed, and they stay this engine's own.
+        let vouched = self
+            .staged()
+            .map(|staged| cap.map_or(staged, |cap| staged.min(cap)));
         self.engine.witnesses.drop_from(from);
         if let Err(fault) = drop_staged_from(env.staging, from).await {
             // The staged files from `from` on are still there, and the next
@@ -1840,12 +1868,21 @@ impl Actor {
             self.set_upload(UploadState::ListFirst { confirmed });
             return self.fault(Task::Upload, fault, now);
         }
+        self.engine.dropped_through = self.engine.dropped_through.max(vouched);
         // Acknowledged ids from `from` on that the replica lost (a rollback)
         // are gone with their staged copies: they are never taken again, so
         // the uploads resume with the snapshot above them.
         let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
         if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload) {
             self.engine.upload = UploadState::At(confirmed.max(Some(ack)));
+        }
+        // Files the drop vouched for may be on the replica unconfirmed (an
+        // upload whose answer was lost): list first, so the listing confirms
+        // those it finds and the snapshot goes above them, before maintenance
+        // or a snapshot judges them.
+        let confirmed = self.engine.upload.confirmed();
+        if self.engine.dropped_through > confirmed {
+            self.engine.upload = UploadState::ListFirst { confirmed };
         }
         // The position is past `from`; a snapshot after it would leave a hole.
         let cause = SnapshotCause::NewestStagedFileUnreadable;
