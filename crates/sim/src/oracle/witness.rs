@@ -13,7 +13,7 @@
 //! staging backup put back, or a staged file replaced by another valid one,
 //! passes neither, whether it went up at boot or under a running engine.
 
-use lsr_core::{FileKey, MemStore, ObjectStore, ReadLen, conformance::block_on};
+use lsr_core::{FileKey, ObjectStore, ReadLen, conformance::block_on};
 use lsr_ltx::{Decoder, Event, Header};
 use lsr_wal::{Salts, WalOffset};
 
@@ -55,7 +55,7 @@ pub enum Judged {
 pub fn judge_put(
     model: &Model,
     staging: &[RecorderEvent],
-    remote: &MemStore,
+    remote: &crate::remote::Bucket,
     put: &RecorderEvent,
     life: Incarnation,
 ) -> Result<Judged, Violation> {

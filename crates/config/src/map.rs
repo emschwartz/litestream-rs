@@ -174,6 +174,26 @@ pub enum ReplicaPlan {
 }
 
 impl ReplicaPlan {
+    /// The destination as the engine journal names it: the digest of the replica's canonical
+    /// name, its kind and location with fields separated by a zero byte (an S3 replica's
+    /// endpoint, bucket and prefix; a directory's absolute path). Credentials and tuning are not
+    /// part of it. The endpoint is, and AWS's default endpoint follows the region, so changing
+    /// the region names another destination: that boot adopts no floor, and the next confirmed
+    /// upload writes the new one.
+    #[must_use]
+    pub fn destination(&self) -> lsr_replica::ReplicaId {
+        let name = match self {
+            Self::File(path) => format!("file\0{}", path.display()),
+            Self::S3 { config, .. } => format!(
+                "s3\0{}\0{}\0{}",
+                config.endpoint().url(),
+                config.bucket().as_str(),
+                config.prefix().as_str()
+            ),
+        };
+        lsr_replica::ReplicaId::of(name.as_bytes())
+    }
+
     /// Go's `ReplicaClient.Type()`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
@@ -405,6 +425,7 @@ fn one(
 ) -> Option<DbPlan> {
     let mut config = base?.clone();
     config.meta_dir = Some(meta?);
+    config.destination = replica.as_ref().map(ReplicaPlan::destination);
     Some(DbPlan {
         entry: entry.clone(),
         path,
@@ -454,6 +475,8 @@ fn settings(
         verify_interval: config.validation_interval().and_then(positive),
         if_replication_stops: config.rust().if_replication_stops(),
         max_unreplicated_age: config.rust().max_unreplicated_age(),
+        // Set per database, once its replica is known (`one`).
+        destination: None,
     })
 }
 

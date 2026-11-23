@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2574,7 +2574,7 @@
+@@ -2693,7 +2693,7 @@
+     // the replica's object is another writer's, they go, and recovery
      // snapshots above what the replica holds.
      if let Some(from) = diverged {
-         mark!(Boot13);
 -        if let Some(tip) = tip.filter(|tip| gate.refuses(*tip)) {
 +        if let Some(tip) = tip.filter(|tip| gate.refuses(*tip) && false) {
              return Err(BootStep::Refused(tip));

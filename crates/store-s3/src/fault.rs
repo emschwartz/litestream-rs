@@ -166,6 +166,7 @@ pub struct RequestShape {
 struct Script {
     pending: VecDeque<Fault>,
     seen: Vec<RequestShape>,
+    fired: Vec<Fault>,
 }
 
 /// A [`Transport`] that plays its script over `inner`.
@@ -196,10 +197,21 @@ impl<T: Transport> FaultTransport<T> {
         self.script().pending.push_back(fault);
     }
 
+    /// Drops every fault pushed and not yet used.
+    pub fn clear(&self) {
+        self.script().pending.clear();
+    }
+
     /// Faults pushed and not yet used.
     #[must_use]
     pub fn pending(&self) -> usize {
         self.script().pending.len()
+    }
+
+    /// Every fault a request met so far, oldest first.
+    #[must_use]
+    pub fn fired(&self) -> Vec<Fault> {
+        self.script().fired.clone()
     }
 
     /// Every request seen so far, oldest first.
@@ -223,7 +235,9 @@ impl<T: Transport> FaultTransport<T> {
             .pending
             .iter()
             .position(|fault| Some(fault.on()) == shape)?;
-        script.pending.remove(at)
+        let fault = script.pending.remove(at)?;
+        script.fired.push(fault.clone());
+        Some(fault)
     }
 }
 

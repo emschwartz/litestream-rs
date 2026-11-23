@@ -28,11 +28,20 @@ mod fixed {
         );
     }
 
+    /// `weights` with the replica on `MemStore` and no provider faults: the per-push seeds keep
+    /// the histories they had before the S3 replica was drawn (`docs/decisions/D124.md`), and
+    /// `remote_s3` runs S3 seeds of its own.
+    fn on_mem(mut weights: Weights) -> Weights {
+        weights.remote_s3 = false;
+        weights.http_fault = 0;
+        weights
+    }
+
     fn batch(first: u64) {
         let mut ticks = Vec::new();
         for n in (first..).take(8) {
             let seed = Seed::new(n);
-            match run(seed, STEPS, &Weights::mixed(seed)) {
+            match run(seed, STEPS, &on_mem(Weights::mixed(seed))) {
                 Ok(report) => ticks.push(report.ticks),
                 Err(failure) => panic!("{failure}"),
             }
@@ -1213,10 +1222,37 @@ mod wal_regrown {
 
 #[cfg(test)]
 mod lagging_listings {
-    use lsr_core::{StopCause, StoreError, StoreOp};
-    use lsr_sim::generate::WalOp;
+    use lsr_core::{SourceError, SourceOp, StopCause, StoreError, StoreOp};
+    use lsr_sim::generate::{MetaOp, WalOp};
     use lsr_sim::run::run_ops;
     use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
+
+    /// Bucket rollbacks take transactions 1 to 4 and leave 5, staging is wiped, and the boot
+    /// lists behind a lag that shows nothing. Its walk stopped after 3 missing transactions,
+    /// short of 5, so it took the replica as empty, wrote a first sync and uploaded a new 4
+    /// below the replica's 5: the latest state went back with no signal (seed 0x95a under its
+    /// mixed mix, 22 recorded operations). With nothing staged to bound it, the walk now goes to
+    /// its cap and finds 5.
+    #[test]
+    fn a_boot_with_staging_wiped_walks_past_a_wide_hole_seed_0x95a() {
+        let seed = Seed::new(0x95a);
+        let weights = Weights::mixed(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
+            clock_law: weights.clock_law,
+            overlap: weights.overlap,
+            error_domain: weights.error_domain,
+            known_wrong: weights.known_wrong,
+            staging_fs: weights.staging_fs,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, crate::histories::seed_0x95a::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
 
     /// A lagging listing hides a merged level-1 file, so an as-of restore through the hold's
     /// view plans from the finer level-0 files under it, while the raw replica plans from the
@@ -1363,11 +1399,73 @@ mod lagging_listings {
         swarm(seed, &ops);
     }
 
+    /// The replica's listings lag. Another writer puts the transaction after the engine's,
+    /// the engine's maintenance merges it into a level-1 file, and the operator removes the
+    /// other writer's level-0 file and restarts the engine. The boot listing hides the
+    /// level-1 file, and the read past the listing named only level-0 keys and snapshots,
+    /// so the engine took the replica as ending below it and uploaded its own transaction
+    /// into the freed key: a restore of the newest state gave pages no commit made (seed
+    /// 0x517 under its swarm mix, shrunk from 47 operations). The read past the listing now
+    /// names the level-1 key from where the listed level-1 files end.
+    #[test]
+    fn a_lagging_listing_that_hides_a_merged_file_sends_no_upload_into_its_key_seed_0x517() {
+        let seed = Seed::new(0x517);
+        let ops = [
+            Op::CommitInTick { pages: 3 },
+            Op::CommitInTick { pages: 4 },
+            Op::EnvFault(EnvFault::Source(SourceOp::ReadPage, SourceError::Busy)),
+            Op::CommitInTick { pages: 1 },
+            Op::CommitInTick { pages: 1 },
+            Op::Shutdown,
+            Op::LaggingListings {
+                writes: 6,
+                window: 22,
+            },
+            Op::Shutdown,
+            Op::SecondWriter { ticks: 4 },
+            Op::Shutdown,
+        ];
+        swarm(seed, &ops);
+    }
+
+    /// The same defect reached through a staging directory saved and put back: the other
+    /// writer's file is merged into level 1 and removed, the lagging listing hides the
+    /// level-1 file, and the engine's upload reuses the freed transaction, so a restore of
+    /// that transaction differs from what it committed (seed 0x4dc under its swarm mix,
+    /// shrunk to 11 operations).
+    #[test]
+    fn a_merged_file_hidden_from_a_lagging_listing_is_found_by_its_level_key_seed_0x4dc() {
+        let seed = Seed::new(0x4dc);
+        let ops = [
+            Op::LaggingListings {
+                writes: 3,
+                window: 31,
+            },
+            Op::Tick,
+            Op::Tick,
+            Op::WalDamage {
+                op: WalOp::TruncateAtFrame(19),
+                ticks: 1,
+            },
+            Op::Meta(MetaOp::Save),
+            Op::SecondWriter { ticks: 2 },
+            Op::EnvFault(EnvFault::Source(SourceOp::Open, SourceError::Busy)),
+            Op::Meta(MetaOp::Restore),
+            Op::EnvFault(EnvFault::Source(SourceOp::ReadPage, SourceError::Busy)),
+            Op::SecondWriter { ticks: 6 },
+            Op::Tick,
+        ];
+        swarm(seed, &ops);
+    }
+
     /// Runs `ops` under `seed`'s swarm mix; any violation fails the test.
     fn swarm(seed: Seed, ops: &[Op]) {
+        let weights = Weights::swarm(seed);
         let opts = Opts {
             drawn: true,
-            block_crash_law: Weights::swarm(seed).block_crash_law,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
             ..Opts::default()
         };
         if let Err(failure) = run_ops(seed, ops, &opts) {
@@ -1445,6 +1543,38 @@ mod short_object_left {
             ..Opts::default()
         };
         if let Err(failure) = run_ops(seed, h::seed_0x4c::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod merged_ids {
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{AfterRestart, ClockLaw, Opts, Seed};
+
+    /// An operator removed another writer's level-0 file 2-2 after maintenance had merged it
+    /// into level-1 2-2, and a lagging listing hid the level-1 file: the engine took id 2 as
+    /// free and uploaded its own 2, so restoring the latest state gave a state no commit made
+    /// (swarm seed 0xf4721, shrunk to 89 operations). The probe past the listing now names the
+    /// level-1 key, finds 2 taken, and the engine skips to 3.
+    #[test]
+    fn an_id_a_lagging_listing_hides_under_a_merged_file_is_not_reused_seed_0xf4721() {
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: true,
+            lying_wal_sync: false,
+            after_restart: AfterRestart::Busy,
+            clock_law: ClockLaw::EachRead,
+            overlap: true,
+            staging_fs: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(
+            Seed::new(0xf4721),
+            crate::histories::seed_0xf4721::OPS,
+            &opts,
+        ) {
             panic!("{failure}");
         }
     }

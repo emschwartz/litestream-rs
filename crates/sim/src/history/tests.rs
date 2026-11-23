@@ -36,10 +36,22 @@ fn damaged() -> (Model, History, MemStore) {
 fn a_restore_of_a_state_adopted_from_damage_fails() {
     let (model, mut history, remote) = damaged();
     // Adopted as plain truth, the damaged state passes as a node: the hole.
-    history.judge(&remote, NOW, &[], Ask::default()).unwrap();
+    history
+        .judge(
+            &crate::remote::Bucket::Mem(remote.clone()),
+            NOW,
+            &[],
+            Ask::default(),
+        )
+        .unwrap();
     history.adopted_corruption(&model);
     let got = history
-        .judge(&remote, NOW, &[], Ask::default())
+        .judge(
+            &crate::remote::Bucket::Mem(remote.clone()),
+            NOW,
+            &[],
+            Ask::default(),
+        )
         .unwrap_err();
     assert!(
         matches!(

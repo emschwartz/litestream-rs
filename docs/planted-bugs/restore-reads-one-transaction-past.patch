@@ -1,0 +1,18 @@
+diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
+--- a/crates/core/src/restore.rs
++++ b/crates/core/src/restore.rs
+@@ -612,8 +612,11 @@ pub async fn listed_past<S: ObjectStore>(
+         None => Txid::new(1),
+     };
+     let starts = crate::probe::Starts::of(inventory);
+-    let found = crate::probe::walk(store, first, None, &starts, true)
++    let Some(first) = first else {
++        return Ok(None);
++    };
++    let _ = &starts;
++    crate::probe::holder(store, first, &crate::probe::Starts::default())
+         .await
+-        .map_err(RestoreError::Store)?;
+-    Ok(found.first().copied())
++        .map_err(RestoreError::Store)
+ }

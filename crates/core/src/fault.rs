@@ -182,6 +182,9 @@ pub enum BugSite {
     CappedCheckpointStep,
     /// An upload had bytes to send and no open upload to send them to.
     UploadNeverOpened,
+    /// The checkpoint protocol was asked for a FULL checkpoint, which only the cure after a
+    /// failed WAL sync runs.
+    FullCheckpointInProtocol,
     /// The decoder took no byte of a non-empty chunk.
     DecoderStalled,
     /// Compaction was planned with inputs it cannot take.
