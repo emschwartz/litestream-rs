@@ -174,6 +174,10 @@ pub enum VfsError {
     /// A power loss could not undo a file's writes, so the files are not what a loss leaves.
     #[error("the power loss could not undo the writes: {0:?}")]
     Undo(io::ErrorKind),
+    /// A query named a file no connection through this VFS ever opened, so there is no record
+    /// to answer from (a path spelled differently resolves to the same record, see `known`).
+    #[error("the VFS never saw this file")]
+    UnknownFile,
 }
 
 #[derive(Debug)]
@@ -256,8 +260,18 @@ impl Shared {
         at
     }
 
+    /// The record for `path`, spelled as the caller likes: SQLite hands the VFS fully resolved
+    /// paths (symlinks followed, so `/var/...` is `/private/var/...` on macOS), so a caller's
+    /// spelling is resolved the same way before the lookup. The directory is resolved and the
+    /// file name kept, so a file SQLite has since deleted (a WAL after a clean close) is still
+    /// found; a path whose directory is gone is looked up as given.
     fn known(&self, path: &std::path::Path) -> Option<usize> {
-        self.lock().paths.iter().position(|p| p == path)
+        let resolved = path
+            .parent()
+            .zip(path.file_name())
+            .and_then(|(dir, name)| Some(std::fs::canonicalize(dir).ok()?.join(name)))
+            .unwrap_or_else(|| path.to_path_buf());
+        self.lock().paths.iter().position(|p| *p == resolved)
     }
 
     fn decide(&self, kind: FileKind, op: Op, path: Option<usize>) -> Decision {
@@ -719,19 +733,19 @@ impl FaultVfs {
 
     /// Whether bytes `[start, end)` of the file at `path` survive a power loss now under
     /// [`CrashLaw::AllOrNothing`]: no write since its last sync touched them, counting the
-    /// writes a failed sync lost. A file the VFS does not track, or durability not tracked at
-    /// all, loses nothing.
-    #[must_use]
-    pub fn durable(&self, path: &std::path::Path, start: u64, end: u64) -> bool {
-        let Some(at) = self.shared.known(path) else {
-            return true;
-        };
+    /// writes a failed sync lost. Durability not tracked at all loses nothing.
+    ///
+    /// # Errors
+    /// [`VfsError::UnknownFile`] for a file no connection through this VFS opened: with no
+    /// record, "durable" would be a guess that passes whatever is asked.
+    pub fn durable(&self, path: &std::path::Path, start: u64, end: u64) -> Result<bool, VfsError> {
+        let at = self.shared.known(path).ok_or(VfsError::UnknownFile)?;
         let state = self.shared.lock();
-        state.undo.get(&at).is_none_or(|undo| {
+        Ok(state.undo.get(&at).is_none_or(|undo| {
             undo.dirty
                 .iter()
                 .all(|(from, to)| *to <= start || *from >= end)
-        })
+        }))
     }
 
     /// The first `N` bytes of the wal-index of the database at `db`, read from the mapping the

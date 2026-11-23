@@ -326,6 +326,26 @@ fn two_unsynced_rows(name: &str) -> (TempDir, std::path::PathBuf, FaultVfs, Conn
     (dir, db, vfs, conn)
 }
 
+/// A durability query answers for the file under any spelling of its directory (SQLite records
+/// the resolved path, and a temporary directory sits behind a symlink on macOS), and refuses a
+/// file the VFS never saw: "durable" for an unknown file would pass whatever a test asked.
+#[test]
+fn a_durability_query_follows_a_symlink_and_refuses_an_unknown_file() {
+    let (dir, db, vfs, _conn) = two_unsynced_rows("spelling");
+    let wal = db.with_extension("db-wal");
+    assert!(
+        !vfs.durable(&wal, 0, u64::MAX).unwrap(),
+        "rows 2 and 3 are in the WAL, not synced"
+    );
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+    assert!(!vfs.durable(&link.join("a.db-wal"), 0, u64::MAX).unwrap());
+    assert!(matches!(
+        vfs.durable(&dir.path().join("never.db"), 0, u64::MAX),
+        Err(VfsError::UnknownFile)
+    ));
+}
+
 /// A sync made while the disk lies succeeds and keeps nothing; the same sync on an honest
 /// disk keeps every commit.
 #[test]
@@ -412,7 +432,7 @@ fn partial_backfill_then_power_loss(name: &str, law: CrashLaw) -> (Vec<u8>, Vec<
         busy == 0 && done > 0 && done < log,
         "a partial backfill: {done} of {log}"
     );
-    let unsynced = !vfs.durable(&db, 0, u64::MAX);
+    let unsynced = !vfs.durable(&db, 0, u64::MAX).unwrap();
     vfs.cut_power();
     drop((reader, app));
     vfs.restore_power().unwrap();
