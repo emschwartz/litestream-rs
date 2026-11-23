@@ -1053,6 +1053,7 @@ impl<B: Backend> Rig<B> {
             .ok_or(RigError::State("judge without a model"))?;
         let copy = MemStore::new();
         block_on(copy_store(&FsStore::new(&self.remote_root), &copy))?;
+        let copy = lsr_sim::remote::Bucket::Mem(copy);
         Ok(lsr_sim::check(model, &self.remote_log, &copy, &self.acked)?)
     }
 

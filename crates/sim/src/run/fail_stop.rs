@@ -21,7 +21,7 @@ impl Runner {
         ended: &TickEnd<Tick>,
     ) -> Result<(), Violation> {
         self.fail_stop_commits();
-        let (remote, staging) = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let (remote, staging) = (self.remote_fired(), fired(&self.w.staging_faults));
         let reported_failure = match ended {
             TickEnd::Done(Tick::Ran { event, .. }) => match event {
                 Event::Retrying { .. } => true,

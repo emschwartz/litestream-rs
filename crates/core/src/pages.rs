@@ -126,7 +126,6 @@ impl PageChecksumTable {
         if recorded == found || self.mismatched.get(&pgno) == Some(&found) {
             return Ok(());
         }
-        mark!(Run12);
         self.mismatched.insert(pgno, found);
         Err(Mismatch {
             pgno,

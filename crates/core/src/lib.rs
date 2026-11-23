@@ -21,9 +21,6 @@
 
 #![forbid(unsafe_code)]
 
-// First, so `mark!` is in scope in every module after it.
-#[macro_use]
-pub mod marks;
 mod actor;
 mod ahead;
 mod app;
