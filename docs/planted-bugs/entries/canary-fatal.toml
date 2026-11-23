@@ -1,0 +1,5 @@
+name = "canary-fatal"
+fix = "none"
+package = "lsr-ltx"
+canary = "killed"
+tests = ["checksum::tests::the_crc_is_go_iso_on_its_check_string"]

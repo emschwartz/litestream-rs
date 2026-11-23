@@ -1,0 +1,6 @@
+name = "relist-after-failed-drop"
+fix = "4e76863"
+package = "lsr-core"
+tests = [
+    "a_failed_drop_after_a_divergence_uploads_nothing_built_on_it",
+]

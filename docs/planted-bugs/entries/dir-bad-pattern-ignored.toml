@@ -1,0 +1,5 @@
+name = "dir-bad-pattern-ignored"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_malformed_pattern_fails_the_scan_only_when_a_name_reaches_it"]

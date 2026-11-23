@@ -2566,10 +2566,10 @@ impl BootGate {
     /// Before the boot drops staged files: the takeover that keeps what
     /// staging vouched for once they are gone, unless the held record covers
     /// it already. That is `local`, capped at the replica's newest key: the
-    /// confirmed `tip`, or a newer level-0 key the listing judged torn (it may
-    /// be this engine's own upload, read wrong). Pending files above every
-    /// replica key vouch for nothing there, so one put back from a backup
-    /// never raises it.
+    /// confirmed `tip`, or a newer level-0 key judged torn (it may be this
+    /// engine's own upload, read wrong), listed or found by a read past a
+    /// listing that lags. Pending files above every replica key vouch for
+    /// nothing there, so one put back from a backup never raises it.
     async fn vouch<R: ObjectStore>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
         let Takeover::Vouch(record) = self.takeover else {
             return Ok(());
@@ -2578,8 +2578,16 @@ impl BootGate {
         let Some(local) = self.local.filter(|local| !covers(*local)) else {
             return Ok(());
         };
-        let listed = newest_replica_level_zero(remote).await?;
-        let replica = tip.max(listed.map(|info| info.key.range().max()));
+        let listed = newest_replica_level_zero(remote)
+            .await?
+            .map(|info| info.key.range().max());
+        // A listing may lag the replica's writes: keys past it are read for, through the
+        // staged position (any staged file may be on the replica), as boot reads past every
+        // listing. A record capped short of a key the listing hid refuses this engine's own
+        // upload at a later boot.
+        let past = probe_past(remote, listed, tip, Some(local)).await?;
+        let found = past.last().map(|key| key.range().max());
+        let replica = tip.max(listed).max(found);
         match replica.map(|replica| replica.min(local)) {
             Some(through) if !covers(through) => {
                 Err(BootStep::Vouch(TakeoverRecord::through(through)))
@@ -2800,9 +2808,10 @@ struct Listed {
 /// passes that disagree retry the boot.
 ///
 /// The listing leaves a torn newest key unconfirmed, for its staged copy to
-/// be uploaded over it. When that copy is the file refused, the key stays
-/// as the replica lists it and is confirmed: new content never takes a
-/// transaction a listing showed, so the snapshot goes above it.
+/// be uploaded over it. When that copy is the file refused and a read finds
+/// the key on the replica (a read, since a listing may lag), the key stays as
+/// the replica holds it and is confirmed: new content never takes a
+/// transaction the replica holds, so the snapshot goes above it.
 async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
     env: &mut Env<'_, W, P, C, L, R>,
     mut reader: Option<&mut WalReader<W::Wal>>,
@@ -2825,16 +2834,12 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectS
     drop_staged_from(env.staging, from).await?;
     let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
     let key = FileKey::new(Level::ZERO, TxidRange::single(from));
-    let listed = env
-        .remote
-        .list(
-            Level::ZERO,
-            from.prev().map(TxidRange::single),
-            PageLimit::ONE,
-        )
+    // A read, not a listing: a listing may lag the replica's writes, and one that leaves the
+    // key out would let new content take a transaction the replica holds.
+    let held = crate::probe::exists(env.remote, &key)
         .await
         .map_err(|err| Fault::from_remote(&err))?;
-    if next == Some(from) && listed.files.first().is_some_and(|info| info.key == key) {
+    if next == Some(from) && held {
         return Ok((first, UploadState::At(Some(from))));
     }
     Ok((first, upload))

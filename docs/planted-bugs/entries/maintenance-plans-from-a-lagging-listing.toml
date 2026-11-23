@@ -1,0 +1,5 @@
+# Maintenance plans from a listing that ends before the engine's confirmed upload.
+name = "maintenance-plans-from-a-lagging-listing"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = ["the_first_listing_after_a_boot_plans_nothing_while_it_hides_the_confirmed_upload"]
