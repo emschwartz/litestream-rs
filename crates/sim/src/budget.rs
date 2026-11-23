@@ -56,13 +56,15 @@ pub const PER_FILE: u64 = 1024;
 pub const READS_PER_BOOT: u64 = 24 + PROBE_READS;
 
 /// The most reads that end a probe past a listing: the keys named for each
-/// missing transaction it reads past before it stops, three per transaction
-/// (`lsr_core::fresh_probe_reads` is the exact count).
+/// missing transaction it reads past before it stops, at most
+/// [`lsr_core::NAMED_KEYS_MAX`] per transaction (the level-0 and snapshot keys, and the
+/// level 1 to 8 keys from the starts the listing implies; `lsr_core::fresh_probe_reads`
+/// is the exact count for a given listing).
 #[expect(
     clippy::as_conversions,
     reason = "a u32 widens to a u64 losslessly; `From` is not const"
 )]
-pub const PROBE_READS: u64 = 3 * (lsr_core::PROBE_GAP as u64 + 1);
+pub const PROBE_READS: u64 = lsr_core::NAMED_KEYS_MAX * (lsr_core::PROBE_GAP as u64 + 1);
 
 /// Reads one retry of a degraded task may make of the replica: a header and
 /// the newest file it names.

@@ -40,6 +40,11 @@ pub const PROBE_CAP: u32 = 64;
 /// operator removed, or a bucket rolled back, leaves a gap under the files uploaded after it.
 pub const PROBE_GAP: u32 = 3;
 
+/// The most keys [`holder`] names for one transaction: its level-0 file, a level-0 file from
+/// the first transaction, a level-0 file from where the listed level 0 ends, two starts for
+/// each of levels 1 to 8, and the snapshot.
+pub const NAMED_KEYS_MAX: u64 = 3 + 1 + 2 * 8;
+
 /// A probe asks only whether an object exists, so it reads one byte.
 const PROBE_LEN: ReadLen = ReadLen::or_chunk(1);
 
