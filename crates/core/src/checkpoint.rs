@@ -711,6 +711,9 @@ pub(crate) async fn checkpoint_in<W: WalSource, P: PageSource, C: Checkpointer, 
     let result = match mode {
         CheckpointMode::Passive => protocol.passive().await,
         CheckpointMode::Truncate => protocol.truncate().await,
+        // The policy decides PASSIVE or TRUNCATE; only the cure after a failed WAL sync runs FULL,
+        // outside the protocol.
+        CheckpointMode::Full => Err(BugSite::FullCheckpointInProtocol.hit()),
     };
     let staged = Staged {
         reached: protocol.good,
