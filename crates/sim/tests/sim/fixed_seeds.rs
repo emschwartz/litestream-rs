@@ -1033,7 +1033,7 @@ mod second_writer {
 #[cfg(test)]
 mod replaced_staging {
     use lsr_core::{StoreError, StoreOp};
-    use lsr_sim::generate::{MetaOp, Target};
+    use lsr_sim::generate::{MetaOp, Target, WalOp};
     use lsr_sim::run::run_ops;
     use lsr_sim::store::FaultShape;
     use lsr_sim::{Op, Opts, Seed};
@@ -1082,6 +1082,70 @@ mod replaced_staging {
     #[test]
     fn a_staged_file_forged_while_down_is_refused_at_boot() {
         pending_then(Op::StagingDamage(MetaOp::ForgeNewest));
+    }
+
+    /// Runs the pending upload's history with `then` after it, the trace on,
+    /// and returns the trace from the step `then` ends with.
+    fn pending_traced(then: &[Op]) -> Vec<String> {
+        let mut ops = vec![commit(), Op::Tick, Op::Tick, Op::Tick];
+        ops.extend([failed_upload(), commit(), Op::Tick]);
+        ops.extend_from_slice(then);
+        let last = format!("{}: ", ops.len().saturating_sub(1));
+        ops.extend(std::iter::repeat_n(Op::Tick, 12));
+        ops.push(Op::Restore);
+        let opts = Opts {
+            trace: true,
+            ..Opts::default()
+        };
+        match run_ops(Seed::new(0x5717), &ops, &opts) {
+            Ok(report) => {
+                let from = report.trace.iter().position(|line| line.starts_with(&last));
+                assert!(from.is_some(), "no step {last}in the trace");
+                report.trace.into_iter().skip(from.unwrap_or(0)).collect()
+            }
+            Err(failure) => panic!("{}", failure.violation),
+        }
+    }
+
+    /// A staging backup holds the pending transaction 2. The file is then
+    /// deleted, so the engine snapshots the database again as transaction 2
+    /// and gives the new file a token; its upload fails too. The backup is
+    /// put back under the running engine: the file under key 2 no longer
+    /// matches its token, so the upload refuses it and the engine snapshots
+    /// again.
+    #[test]
+    fn a_staging_backup_put_back_under_a_running_engine_is_refused_by_its_token() {
+        let mut then = vec![Op::Meta(MetaOp::Save), Op::Meta(MetaOp::DeleteNewest)];
+        then.extend(std::iter::repeat_n(Op::Tick, 4));
+        then.extend([failed_upload(), Op::Tick, Op::Meta(MetaOp::Restore)]);
+        let trace = pending_traced(&then);
+        assert!(
+            trace.iter().any(|line| line.contains("fault: StagedLost")),
+            "the put-back file was not refused: {trace:#?}"
+        );
+    }
+
+    /// A staging backup holds the pending transaction 2. The WAL is then
+    /// written again under the same salts (a disk lost the frames and the
+    /// application wrote other ones), and the engine snapshots. The backup is
+    /// put back while the engine is down: the boot's WAL pass does not vouch
+    /// for transaction 2, so the boot refuses it and snapshots.
+    #[test]
+    fn a_staging_backup_put_back_while_down_is_refused_at_boot() {
+        let trace = pending_traced(&[
+            Op::Meta(MetaOp::Save),
+            Op::WalDamage {
+                op: WalOp::RegrowSameSalts(7),
+                ticks: 1,
+            },
+            Op::StagingDamage(MetaOp::Restore),
+        ]);
+        assert!(
+            trace
+                .iter()
+                .any(|line| line.contains("StagedUnverified { from: Txid(0000000000000002) }")),
+            "the boot did not refuse the put-back file: {trace:#?}"
+        );
     }
 }
 

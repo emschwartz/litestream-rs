@@ -1095,6 +1095,7 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "rusty-s3",
+ "serde_json",
  "shuttle",
  "tempfile",
  "thiserror",

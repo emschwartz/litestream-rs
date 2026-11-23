@@ -1878,6 +1878,13 @@ impl Runner {
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
             EnvFault::DriverWritesNothing => self.w.sqlite.driver_writes_nothing_once(),
+            // The database SQLite serves now reads the evicted frames' older bytes: the
+            // model follows it as damage, and the history judge refuses a restore that gives it.
+            EnvFault::EvictPageCache => {
+                let acted = self.w.sqlite.evict_page_cache();
+                self.scenario_bool("EvictPageCache", acted)?;
+                self.w.adopt_evicted();
+            }
             EnvFault::FlipDatabasePage(pgno) => {
                 let flipped = self.w.sqlite.flip_db_page(pgno);
                 self.scenario_bool("FlipDatabasePage", flipped)?;
@@ -2504,6 +2511,10 @@ impl Runner {
         let (kept, holes) = self.w.sqlite.block_losses();
         reach.add("power.block_kept_unsynced", u64::from(kept));
         reach.add("power.block_hole", u64::from(holes));
+        reach.add(
+            "power.db_unsynced_blocks",
+            u64::from(self.w.sqlite.db_torn_losses()),
+        );
         reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
         reach.add(
             "batch.remote_calls",
