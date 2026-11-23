@@ -444,3 +444,35 @@ assertions.
 | `filesystem.rs` `RealFs::sync_dir`, `File::sync_all` | replaced by `Ok(())` | An fsync that does nothing shows only after a power loss. The crash tests in `docs/planted-bugs.toml` (`delete-without-dir-sync` among them) check that the store makes the call, and the LazyFS rig checks the real syscall. |
 | `engine_journal.rs` `FsJournalFile::sync`, `sync_dir` | replaced by `Ok(())` | The same, for the journal file and its directory. |
 | `engine_journal.rs` `read_slot` | guard `err.kind() == UnexpectedEof` becomes `true` | Besides end of file, a read of an open journal fails only on a device fault no test can produce. |
+
+## replica
+
+`cargo mutants -p lsr-replica --test-package lsr-replica --test-tool nextest --timeout 240` at commit `1e1d181`:
+568 mutants, 263 caught, 91 missed, 213 unviable, 1 timeout. Adding `--test-package lsr-cli --test-package
+lsr-sidecar`, whose tests drive the replicator end to end, caught 8 more. The final run adds `--all-features`, so
+the test-only half-stack gate in `stack.rs` is mutated too. No survivor revealed a bug in the engine.
+
+The survivors fell into a few classes. Display and Debug texts nobody read are now read. Error guards that treat one
+`io::ErrorKind` as "absent" are now fed an error they must not absorb. Answers the replicator handle gives in rare
+states (a forked child, a thread that died after its loop, a stop cut off by a tick from before its deadline, a
+first boot that panics) each got a scenario. Pass-throughs (the meters, the reader-tracking checkpointer, the
+executor's waker, the system park) are driven directly: the meters by the store conformance suite, the park by a
+clock that reads scripted instants. Four places were simplified instead of tested:
+
+- the integrity check's open flags, which the URI's `mode=ro` already implies;
+- the rule keeping the first problems, moved into one function so its boundary is tested;
+- the first-boot answer's arm for a drain before the boot, which the phase set under the same lock already gives;
+- the lag the thread counts itself, which dropped a staged-but-not-uploaded term the engine's own lag clock
+  always covers with an earlier time.
+
+### Equivalent
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `local.rs` `ReplaceFs` and `PublishFs` `sync_scratch` and `sync_dir`, `sync_dir` | replaced by `Ok(())` | An fsync that does nothing shows only after a power loss. The publish and replace order tests check the calls are made in order. |
+| `thread.rs` `Worker::connection` | guard `opened == self.shared.database` becomes `true` | The path naming another file between the open and the check needs a rename inside one call. The swap before the open is tested (`a_database_replaced_after_a_panic_is_degraded_and_not_reopened`). |
+| `thread.rs` `Progress::advance` | `>` becomes `<` on the unsynced WAL bytes | Committed WAL bytes past the synced position, while the engine can measure, exist only between two steps of one turn, and no health snapshot a test can wait for shows that moment. |
+| `thread.rs` `Worker::ran` | guard `!idle` becomes `true` | The engine never answers an idle tick with "run again now". The guard keeps the thread from spinning if it ever did. |
+| `thread.rs` `Worker::count` | guard `*files > 0` becomes `true` or `>=` | A sync event with no files comes only from a maintenance step that neither reached the committed end nor found a reset WAL, which no deterministic test produces. |
+| `scheduled.rs` `Scheduled::kept_restore_point` | replaced by `None` | What the engine keeps from retention for a failing verify shows only as files retention leaves days later. The engine's keeping is tested in lsr-core. |
+| `stack.rs` `spawn` | `stack / 2` becomes `stack * 2` | The test-only half-stack gate doubled instead of halved still passes every suite: it only loses the headroom margin it exists to prove. |

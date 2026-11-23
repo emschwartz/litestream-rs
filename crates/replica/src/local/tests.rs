@@ -564,9 +564,12 @@ fn a_failed_restore_leaves_no_target_and_no_scratch() {
 }
 
 /// A target named with no directory syncs the current one; the empty parent is not a path.
+/// A named directory is the one synced, so one that does not exist fails.
 #[test]
 fn a_bare_target_name_syncs_the_current_directory() {
     sync_dir(Path::new("bare.db")).unwrap();
+    let dir = TempDir::new().unwrap();
+    sync_dir(&dir.path().join("missing").join("db")).unwrap_err();
 }
 
 /// A restore that starts over leaves nothing of the first attempt in the scratch.
