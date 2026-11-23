@@ -9,12 +9,12 @@ use super::*;
 /// Rewrites staged `n` as a whole, valid LTX file under the same key and
 /// header, with page 1 filled with `fill`: what a staging backup put back,
 /// or any replacement that verifies, leaves. Returns its bytes.
-fn forge(rig: &Rig, n: u64, fill: u8) -> Vec<u8> {
-    forge_page(rig, n, 1, fill)
+fn replace_staged(rig: &Rig, n: u64, fill: u8) -> Vec<u8> {
+    replace_staged_page(rig, n, 1, fill)
 }
 
-/// As [`forge`], with page `pgno` filled instead.
-fn forge_page(rig: &Rig, n: u64, pgno: u32, fill: u8) -> Vec<u8> {
+/// As [`replace_staged`], with page `pgno` filled instead.
+fn replace_staged_page(rig: &Rig, n: u64, pgno: u32, fill: u8) -> Vec<u8> {
     let store = &rig.staging.inner;
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()));
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
@@ -35,17 +35,17 @@ fn forge_page(rig: &Rig, n: u64, pgno: u32, fill: u8) -> Vec<u8> {
     for (pgno, data) in &pages {
         encoder.write_page(*pgno, data).unwrap();
     }
-    let forged = encoder.finish(None).unwrap().0;
-    assert_ne!(forged, bytes);
+    let other = encoder.finish(None).unwrap().0;
+    assert_ne!(other, bytes);
     block_on(async {
         let mut up = store
             .begin_upload(&key, ts(T0), crate::store::WriteMode::Replace)
             .await
             .unwrap();
-        up.write(&forged).await.unwrap();
+        up.write(&other).await.unwrap();
         up.commit().await.unwrap();
     });
-    forged
+    other
 }
 
 /// Whether the replica's level-0 object for `n` is `bytes`.
@@ -64,10 +64,10 @@ fn a_staged_file_replaced_under_a_running_engine_is_never_uploaded() {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2], T0 + 1);
     assert_eq!(ranges(&rig.remote), vec![(1, 1)]);
-    let forged = forge(&rig, 2, 0xEE);
+    let other = replace_staged(&rig, 2, 0xEE);
     let seen = rig.follow(&mut actor, T0 + 2, 50);
     no_stop(&seen);
-    assert!(!replica_holds(&rig, 2, &forged), "{seen:?}");
+    assert!(!replica_holds(&rig, 2, &other), "{seen:?}");
     assert!(seen.iter().any(|tick| matches!(
         event(tick),
         Some(Event::Resnapshot(SnapshotCause::NewestStagedFileUnreadable))
@@ -79,20 +79,20 @@ fn a_staged_file_replaced_under_a_running_engine_is_never_uploaded() {
 /// A pending file replaced while the engine was down is not what the live
 /// WAL holds for its range. It and every file after it go, and the WAL,
 /// which still holds their frames, stages them again as one file: no
-/// snapshot, and nothing forged reaches the replica.
+/// snapshot, and none of the replacement reaches the replica.
 #[test]
 fn a_replaced_pending_file_is_regenerated_from_the_wal_at_boot() {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
     assert_eq!(staged(&rig), vec![2, 3, 4]);
-    let forged = forge(&rig, 3, 0xEE);
+    let other = replace_staged(&rig, 3, 0xEE);
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
     assert_eq!(staged(&rig), vec![2]);
     let seen = rig.settle(&mut actor, T0 + 2);
     no_stop(&seen);
-    assert!(!replica_holds(&rig, 3, &forged));
+    assert!(!replica_holds(&rig, 3, &other));
     assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
     assert_eq!(snapshots(&rig), vec![1]);
     assert_eq!(restored(&rig), 4);
@@ -171,7 +171,7 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
         up.write(&torn).await.unwrap();
         up.commit().await.unwrap();
     });
-    let forged = forge(&rig, 3, 0xEE);
+    let other = replace_staged(&rig, 3, 0xEE);
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(
@@ -183,7 +183,7 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
         })
     );
     rig.settle(&mut actor, T0 + 2);
-    assert!(!replica_holds(&rig, 3, &forged));
+    assert!(!replica_holds(&rig, 3, &other));
     assert!(replica_holds(&rig, 3, &torn));
     // The snapshot took 4 (the torn object keeps a full decode of every
     // level-0 file from running here).
@@ -271,12 +271,12 @@ fn a_replaced_pending_snapshot_is_taken_again() {
         .inner
         .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
     rig.settle(&mut actor, T0);
-    let forged = forge_page(&rig, 1, 3, 0xEE);
+    let other = replace_staged_page(&rig, 1, 3, 0xEE);
     let mut actor = Actor::new(cfg());
     rig.tick(&mut actor, T0 + 1);
     let seen = rig.settle(&mut actor, T0 + 1);
     no_stop(&seen);
-    assert!(!replica_holds(&rig, 1, &forged));
+    assert!(!replica_holds(&rig, 1, &other));
     assert_eq!(snapshots(&rig), vec![1]);
 }
 
@@ -381,8 +381,8 @@ fn a_tail_whose_pages_the_wal_does_not_hold_anchors_nothing() {
     commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
     commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
     stage_held(&mut rig, &mut actor, &[4], T0 + 1);
-    let forged = forge(&rig, 3, 0xEE);
-    put_l0(&rig.remote.inner, 3, &forged);
+    let other = replace_staged(&rig, 3, 0xEE);
+    put_l0(&rig.remote.inner, 3, &other);
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(
