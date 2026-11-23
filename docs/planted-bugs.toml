@@ -1778,3 +1778,16 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
 
+# The fail-stop commit gate leaked one count of its flag per connection, and replaced an
+# application's commit hook without a word.
+[[bug]]
+name = "gate-leaks-its-flag"
+fix = "70f61c6"
+package = "lsr-sqlite"
+tests = ["gate::tests::the_gate_is_freed_with_its_connection"]
+
+[[bug]]
+name = "gate-hides-a-taken-hook"
+fix = "70f61c6"
+package = "lsr-sqlite"
+tests = ["gate::tests::an_application_hook_set_first_is_reported_not_silently_replaced"]
