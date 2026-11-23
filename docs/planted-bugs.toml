@@ -380,7 +380,7 @@ tests = ["maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_i
 name = "maintenance-plans-from-a-lagging-listing"
 fix = "8c7d8ce"
 package = "lsr-core"
-tests = ["maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload"]
+tests = ["the_first_listing_after_a_boot_plans_nothing_while_it_hides_the_confirmed_upload"]
 
 # One failed read of the staged copy takes it as torn and confirms the replica's differing object.
 [[bug]]
