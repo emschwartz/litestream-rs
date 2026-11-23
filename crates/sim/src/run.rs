@@ -2037,7 +2037,6 @@ impl Runner {
                 let half = bytes.len() / 2;
                 bytes.truncate(half);
             }),
-            MetaOp::ForgeNewest => w.forge_newest_staged(),
         };
         self.step_done(&format!("{op:?}"), done)
     }

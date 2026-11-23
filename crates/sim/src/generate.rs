@@ -318,10 +318,6 @@ pub enum MetaOp {
     /// Deletes every staged file while the engine runs: the staging directory
     /// removed under it, with no restart.
     DeleteAll,
-    /// Rewrites the newest level-0 file as another whole, valid file under
-    /// the same key and header, with page bytes changed: a file replaced by
-    /// one that verifies, which only a witness bound to its bytes refuses.
-    ForgeNewest,
 }
 
 /// A step on the replica from outside the engine. Scenarios only.
