@@ -106,7 +106,8 @@ pub enum Fault {
     /// filesystem; the handling is right either way, since nothing the
     /// replica promised depends on the lost file.
     StagedLost,
-    /// The local disk is full.
+    /// A disk the engine writes to is full: the database's, staging's, or a filesystem
+    /// replica's.
     LocalDiskFull,
     /// A local read or write failed.
     LocalIo,
@@ -1031,8 +1032,14 @@ impl Fault {
     /// `NotFound` is `RemoteObjectMissing` whatever was being done: the answer
     /// is the same (list again, trust the listing).
     #[must_use]
-    pub fn from_remote(err: &StoreError) -> Self {
+    fn from_remote(err: &StoreError) -> Self {
         match err {
+            // A filesystem replica out of room: the operator frees space, as for staging and
+            // as Go's `no space left on device` asks, whichever disk it is.
+            StoreError::Transient {
+                kind: io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded,
+                ..
+            } => Self::LocalDiskFull,
             StoreError::Transient { .. } => Self::StoreTransient,
             StoreError::Throttled { retry_after, .. } => Self::StoreThrottled {
                 retry_after: retry_after.filter(|wait| !wait.is_zero()),
@@ -1062,7 +1069,7 @@ impl Fault {
     /// can fix the directory without a restart. A write the disk or a quota
     /// has no room for is a full disk, whatever the store calls it.
     #[must_use]
-    pub const fn from_staging(err: &StoreError) -> Self {
+    const fn from_staging(err: &StoreError) -> Self {
         match err {
             StoreError::Transient {
                 kind: io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded,
@@ -1264,6 +1271,8 @@ pub struct Clamped {
     /// The earlier time the clock read.
     pub now: Timestamp,
 }
+
+pub(crate) mod role;
 
 #[cfg(test)]
 pub(crate) mod tests;

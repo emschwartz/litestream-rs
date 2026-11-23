@@ -25,8 +25,8 @@
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfInside, CreatedAtSource, Database, Entropy, FileKey, Inventory, MemSink, RestoreError,
-    RestoreOptions, RestoreTarget, SeededEntropy, restore_with,
+    AsOfInside, CreatedAtSource, Database, Entropy, FileKey, MemSink, RestoreError, RestoreOptions,
+    RestoreTarget, SeededEntropy, restore_with,
 };
 use lsr_history::{AheadMode, Counts, Digest, Judge, Log, NodeId, Signals};
 use lsr_ltx::{Timestamp, Txid};
@@ -220,14 +220,13 @@ impl History {
         ask: Ask,
     ) -> Result<(), Violation> {
         self.log.note_time(now.unix_millis());
-        let inventory = block_on(Inventory::load(remote))
-            .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
-        let Some(newest) = inventory.newest() else {
+        let files = crate::oracle::replica_files(remote);
+        let Some(newest) = crate::oracle::newest_of(&files) else {
             return Ok(());
         };
         if ask.sweep {
             self.sweep(remote, newest, damaged)?;
-            self.boundaries(remote, inventory.files(), damaged)?;
+            self.boundaries(remote, &files, damaged)?;
         }
         if let Restored::Content(digest) = self.restored(remote, RestoreTarget::Latest, damaged)? {
             self.judge

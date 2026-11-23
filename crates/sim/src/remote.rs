@@ -379,6 +379,25 @@ impl Bucket {
         })
     }
 
+    /// Every replica file the bucket holds, ascending by key, read from the bucket's own store
+    /// (`crate::oracle::replica_files`): never through a listing's paging or merge.
+    #[must_use]
+    pub fn stored(&self) -> Vec<FileInfo> {
+        match self {
+            Self::Mem(store) => store.stored(),
+            Self::S3(wire) => {
+                let fake = wire.inner();
+                let mut files: Vec<FileInfo> = fake
+                    .keys()
+                    .iter()
+                    .filter_map(|object| Stored::of(fake, object).map(|stored| stored.info()))
+                    .collect();
+                files.sort_by_key(|info| info.key);
+                files
+            }
+        }
+    }
+
     /// Moves what a listing reports as `key`'s last-modified time.
     pub fn set_last_modified(&self, key: &FileKey, at: Timestamp) {
         match self {

@@ -552,8 +552,10 @@ pub struct Weights {
     /// The process dies right after every tick in which an injected fault fired: a store fault,
     /// or a failure of a SQLite-side call. Whatever the fault left the engine owing must then
     /// survive a restart, so an obligation held only in memory fails the run
-    /// (`lsr_core::obligations`). Not an operation, for the same reason as `block_crash_law`;
-    /// drawn last in the swarm mix.
+    /// (`lsr_core::obligations`). Inside a hold it kills only where known defects are counted
+    /// ([`Weights::known_wrong`]): a restart there reaches the open defect D9, as an overlapping
+    /// hold's own restarts do. Not an operation, for the same reason as `block_crash_law`; drawn
+    /// last in the swarm mix.
     pub kill_after_fault: bool,
     /// [`Op::AppInTick`].
     pub app_in_tick: u32,
@@ -766,10 +768,6 @@ impl Weights {
     /// rarely overlap. Drawn from the seed's own stream, so the history's
     /// stream is untouched.
     #[must_use]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one draw per field in the order recorded mixes rely on; a split would hide it"
-    )]
     pub fn swarm(seed: Seed) -> Self {
         let entropy = SeededEntropy::new(seed.stream(12));
         let weight = |keep_always: bool| {
