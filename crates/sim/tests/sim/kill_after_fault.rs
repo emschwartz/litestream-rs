@@ -3,15 +3,8 @@
 //! survive a restart. It is the proof of the obligation ledger (`lsr_core::obligations`): with a
 //! journalled field's journalling planted out, the law fails runs the swarm without it passes.
 
-use lsr_sim::{Seed, Weights, history, run};
-
-const STEPS: u32 = 300;
-
-fn digest(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    })
-}
+use lsr_sim::run::run_ops;
+use lsr_sim::{AfterRestart, ClockLaw, Opts, Seed, Weights};
 
 /// The law is drawn in half the swarm, last, and never in the default mix, so recorded histories
 /// keep their shape.
@@ -24,25 +17,27 @@ fn half_the_swarm_draws_the_law_and_the_default_mix_never() {
     assert!(!Weights::default().kill_after_fault);
 }
 
-/// Seed 0x116, under the swarm mix with the whole error domain and its known-wrong cells drawn
-/// and the law on: a failed sync of the WAL whose tick the law ends. The restarted engine still
-/// owes the TRUNCATE because the engine journal holds the debt. With the debt's journalling
-/// planted out (`journal-debt-not-recorded-sim`) it stages frames the failed sync covered; the
-/// same seed without the law passes either way.
+/// Seed 0x116's recorded history (drawn under the swarm mix with the whole error domain, its
+/// known-wrong cells and the law): a failed sync of the WAL whose tick the law ends. The restarted
+/// engine still owes the TRUNCATE because the engine journal holds the debt. With the debt's
+/// journalling planted out (`journal-debt-not-recorded-sim`) it stages frames the failed sync
+/// covered; the same history without the law passes either way.
 #[test]
 fn a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116() {
-    let seed = Seed::new(0x116);
-    let mut weights = Weights::swarm(seed);
-    weights.error_domain = true;
-    weights.known_wrong = true;
-    weights.kill_after_fault = true;
-    assert_eq!(
-        digest(&format!("{:?}", history(seed, STEPS, &weights))),
-        0xf1c2_a43d_298b_81e4,
-        "the live generator changed seed 0x116's run; find another seed the debt plant fails \
-         only under the law"
-    );
-    if let Err(failure) = run(seed, STEPS, &weights) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Busy,
+        clock_law: ClockLaw::PerTick,
+        overlap: false,
+        error_domain: true,
+        known_wrong: true,
+        staging_fs: true,
+        kill_after_fault: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x116), crate::histories::seed_0x116::OPS, &opts) {
         panic!("{failure}");
     }
 }

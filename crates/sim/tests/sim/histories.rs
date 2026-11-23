@@ -7,6 +7,7 @@
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
+pub mod seed_0x116;
 pub mod seed_0x126d68ed250e;
 pub mod seed_0x126d68ef1c07;
 pub mod seed_0x126d68ef545f;
@@ -23,8 +24,11 @@ pub mod seed_0x2d;
 pub mod seed_0x31c;
 pub mod seed_0x330;
 pub mod seed_0x46;
+pub mod seed_0x4c;
 pub mod seed_0x585;
 pub mod seed_0x753;
+pub mod seed_0x80e;
+pub mod seed_0x82;
 pub mod seed_0x8ef;
 pub mod seed_0x9f9;
 pub mod seed_0xa4d;
@@ -51,6 +55,16 @@ pub enum Guard {
 /// Every recorded history: its module, the test that runs it, and its guard.
 pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
+        "seed_0x82",
+        "a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82",
+        Guard::Own("written-snapshot-unwatched"),
+    ),
+    (
+        "seed_0x80e",
+        "an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e",
+        Guard::Own("hold-as-of-demands-the-raw-answer-sim"),
+    ),
+    (
         "seed_0x25",
         "a_torn_staged_file_is_dropped_seed_0x25",
         Guard::OnPath("always-snapshot-at-boot"),
@@ -64,6 +78,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0x46",
         "a_torn_staged_file_is_dropped_seed_0x46",
         Guard::OnPath("always-snapshot-at-boot"),
+    ),
+    (
+        "seed_0x4c",
+        "a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c",
+        Guard::Own("sim-short-object-damage"),
     ),
     (
         "seed_0x126d68ef1c07",
@@ -166,6 +185,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
             "it pins an open defect (KnownWrong::HaltForgottenAtRestart) and passes only while \
              main fails with it, so no plant can be judged by it",
         ),
+    ),
+    (
+        "seed_0x116",
+        "a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116",
+        Guard::Own("journal-debt-not-recorded-sim"),
     ),
     (
         "seed_0xf488c",
