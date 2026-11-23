@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lsr_compat::{Manifest, Outcome, Staged, Target, all_fixtures, hash_pages, stage};
+use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{Depth, Inventory, PlanOutcome, Report, Severity, verify};
 use lsr_ltx::Timestamp;
@@ -607,7 +608,7 @@ fn replica_of(dir: &Path, db: &[u8]) {
     block_on(async {
         let key = FileKey::new(Level::SNAPSHOT, one);
         let mut upload = store
-            .begin_upload(&key, Timestamp::from_unix_millis(1000))
+            .begin_upload(&key, Timestamp::from_unix_millis(1000), WriteMode::Replace)
             .await
             .expect("begin");
         upload.write(&bytes).await.expect("write");
@@ -647,7 +648,14 @@ fn integrity_check_publishes_a_valid_database_in_every_mode() {
         if let Some(line) = line {
             assert!(run.stdout.contains(line), "{check}: {}", run.stdout);
         }
-        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1, "{check}");
+        // The database and its meta directory, which holds only the takeover record a
+        // restore leaves for the replicator started on it.
+        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 2, "{check}");
+        let meta = dir.path().join(".out.db-litestream");
+        assert_eq!(fs::read_dir(&meta).expect("meta").count(), 1, "{check}");
+        let record = fs::read(meta.join("lsr-takeover")).expect("takeover record");
+        assert!(lsr_core::TakeoverRecord::decode(&record).is_ok(), "{check}");
+        assert!(run.stdout.contains("takeover recorded through"), "{check}");
     }
 }
 
@@ -1217,4 +1225,46 @@ fn a_url_restore_with_a_timestamp_refuses_an_empty_replica() {
     let run = lsr(&["restore", "-if-replica-exists", "-o", out, &url]);
     assert_eq!(run.code, 0, "{}", run.stderr);
     assert!(!output.exists());
+}
+
+/// `lsr take-over <db>` records a takeover through the replica's newest transaction in the
+/// database's meta directory.
+#[test]
+fn take_over_records_the_replicas_newest_transaction() {
+    let db = sqlite_pages();
+    let work = tempfile::tempdir().expect("tempdir");
+    let replica = work.path().join("replica");
+    replica_of(&replica, &db);
+    let database = work.path().join("app.db");
+    let meta = work.path().join(".app.db-litestream");
+    let run = lsr(&[
+        "take-over",
+        path_str(&database),
+        "--replica",
+        path_str(&replica),
+    ]);
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{}", run.stdout);
+    assert!(
+        run.stdout.starts_with("takeover recorded through "),
+        "{}",
+        run.stdout
+    );
+    let record = fs::read(meta.join("lsr-takeover")).expect("takeover record");
+    lsr_core::TakeoverRecord::decode(&record).expect("a takeover record");
+}
+
+/// `lsr restore` to an output that names no file is refused with exit 1 (as Go's commands
+/// exit) before anything is written: it has no meta directory for the takeover record.
+#[test]
+fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
+    let db = sqlite_pages();
+    let work = tempfile::tempdir().expect("tempdir");
+    let replica = work.path().join("replica");
+    replica_of(&replica, &db);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("sub").join("..");
+    let run = restore_checked(&replica, &output, "none");
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert!(run.stderr.contains("no meta directory"), "{}", run.stderr);
+    assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
 }

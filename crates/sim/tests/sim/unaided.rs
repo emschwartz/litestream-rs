@@ -6,6 +6,7 @@
 //! `busy` or `nothing`), every seed's app does that after a restart instead of what its mix drew;
 //! with `LSR_SIM_NO_WAL_DAMAGE` set, no seed draws WAL damage; with `LSR_SIM_LYING_SYNC` set,
 //! every seed's disk lies about the engine's WAL fsync instead of what its mix drew; with
+//! `LSR_SIM_APP_IN_TICK` set to a weight, every seed draws app operations inside a tick at it; with
 //! `LSR_SIM_SWARM` set, every seed runs its swarm mix (`Weights::swarm`) instead, and with
 //! `LSR_SIM_DEFAULT` set the default mix; with `LSR_SIM_HOLD` set to a rate in a thousand, holds
 //! are drawn at least that often (`tests/sim/survival.rs`); with `LSR_SIM_KNOWN_WRONG` set, the
@@ -44,7 +45,10 @@
 //! anchor alone; a staging fault four steps later forced a snapshot over it.
 
 use lsr_sim::domain::{KnownWrong, known_in};
-use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, history, replay_line, run_with};
+use lsr_sim::run::run_ops;
+use lsr_sim::{
+    AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, history, replay_line, run_with,
+};
 
 const STEPS: u32 = 300;
 
@@ -91,6 +95,9 @@ pub fn weights(seed: Seed) -> Weights {
     weights.block_crash_law |= std::env::var("LSR_SIM_BLOCK_LAW").is_ok();
     weights.known_wrong |= std::env::var("LSR_SIM_KNOWN_WRONG").is_ok();
     weights.lying_wal_sync |= std::env::var("LSR_SIM_LYING_SYNC").is_ok();
+    if let Ok(weight) = std::env::var("LSR_SIM_APP_IN_TICK") {
+        weights.app_in_tick = weight.parse().expect("LSR_SIM_APP_IN_TICK is a weight");
+    }
     if std::env::var("LSR_SIM_NO_WAL_DAMAGE").is_ok() {
         weights.wal_damage = 0;
     }
@@ -176,11 +183,47 @@ fn seeds_to_first_failure() {
 /// Found unaided by the swarm, with nothing written for it: under the planted bug "the boot
 /// anchor accepts any tail in the live generation" (`docs/planted-bugs/anchor-any-tail.patch`),
 /// seed 44's drawn mix, 8 steps in, restores a transaction to pages no commit had. (Found on
-/// the merged head with the boot witness; seed 15 found it before the witness landed.)
+/// the merged head with the boot witness; seed 15 found it before the witness landed.) The
+/// history is recorded and the settings its mix drew are written out, so no change to the
+/// generator or the mix gives it another run.
 #[test]
 fn swarm_seed_44_restores_only_committed_states() {
-    let seed = Seed::new(44);
-    if let Err(failure) = run_with(seed, 8, &Weights::mixed(seed), &Opts::default()) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Busy,
+        clock_law: ClockLaw::EachRead,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(44), crate::histories::seed_0x2c::OPS, &opts) {
+        panic!("{failure}");
+    }
+}
+
+/// Found unaided once the app could act inside a tick (`Op::AppInTick`): seed 0xf488c's drawn
+/// mix commits between the engine's last sync step and its TRUNCATE, and the boundary snapshot
+/// took that commit's pages for damage (`DatabasePageMismatch`) until it stopped checking them
+/// (docs/decisions.md D121, plant `boundary-snapshot-keeps-page-table`). Seed 0xf49a2 found it
+/// first, before main's later swarm draws reshuffled the mixes. Main's swarm, without these
+/// operations, kills the plant on none of seeds 1000001 to 1002000. The history is recorded as
+/// that mix drew it, since main's overlapping-fault draw has since moved the seed's mix.
+#[test]
+fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Retry,
+        clock_law: ClockLaw::PerTick,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(
+        Seed::new(0xf488c),
+        crate::histories::seed_0xf488c::OPS,
+        &opts,
+    ) {
         panic!("{failure}");
     }
 }
@@ -193,10 +236,16 @@ fn swarm_seed_44_restores_only_committed_states() {
 /// its content then, not the node the redo rebuilt with the same content later.
 #[test]
 fn swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss() {
-    let seed = Seed::new(0x753);
-    let mut weights = Weights::swarm(seed);
-    weights.block_crash_law = true;
-    if let Err(failure) = run_with(seed, 42, &weights, &Opts::default()) {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Redo,
+        clock_law: ClockLaw::EachRead,
+        staging_fs: false,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x753), crate::histories::seed_0x753::OPS, &opts) {
         panic!("{}", failure.message(failure.steps));
     }
 }

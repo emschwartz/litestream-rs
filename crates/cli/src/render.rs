@@ -66,11 +66,21 @@ pub fn done(done: &Done) -> String {
             created_at_fallbacks,
             json: true,
         } => files_json(inventory, *created_at_fallbacks),
+        Done::TakenOver { through, meta } => taken_over_text(*through, meta),
         Done::Daemon(_) => String::new(),
         Done::DaemonHelp(text) => (*text).to_owned(),
         Done::ConfigChecked(checked) => checked.to_string(),
         Done::Help => help(),
         Done::Version => format!("lsr {}\n", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// `lsr take-over`'s line.
+fn taken_over_text(through: Option<Txid>, meta: &Path) -> String {
+    match through {
+        Some(txid) => format!("takeover recorded through {txid} in {}\n", meta.display()),
+        None => "the replica is empty: there is nothing to take over and nothing was recorded\n"
+            .to_owned(),
     }
 }
 
@@ -88,6 +98,9 @@ pub fn help() -> String {
     let mut out = String::from("lsr: restore, verify and list a Litestream file replica\n");
     for command in CommandName::ALL {
         let mut usage = format!("\nlsr {}", command.word());
+        if let Some(positional) = command.positional() {
+            put!(usage, " {positional}");
+        }
         for spec in FLAGS.iter().filter(|s| s.commands.contains(&command)) {
             let value = spec.value.map_or(String::new(), |v| format!(" {v}"));
             let flag = format!("{}{value}", spec.name);
@@ -530,6 +543,7 @@ fn restored_text(
         restored.files(),
         restored.bytes_read(),
     );
+    putln!(out, "takeover recorded through {}", restored.reached());
     // Only an as-of restore over a lazily listed store reads created-at times; the line
     // for every other restore stays as it was.
     if restored.created_at_read() > 0 {

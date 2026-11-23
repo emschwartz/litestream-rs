@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2574,7 +2574,7 @@
+     // snapshots above what the replica holds.
+     if let Some(from) = diverged {
+         mark!(Boot13);
+-        if let Some(tip) = tip.filter(|tip| gate.refuses(*tip)) {
++        if let Some(tip) = tip.filter(|tip| gate.refuses(*tip) && false) {
+             return Err(BootStep::Refused(tip));
+         }
+         gate.vouch(remote, tip).await?;

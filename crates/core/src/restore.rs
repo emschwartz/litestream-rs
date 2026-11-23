@@ -20,10 +20,11 @@
 //! with backoff belongs to a store wrapper, and core holds no timer.
 //!
 //! A listing is not trusted to be whole for the newest state. Before a `Latest` or `AsOf`
-//! target's chain is applied, the restore reads one byte of each level-0 key that would hold the
-//! transaction after the listing's newest, the two a reader can name without a listing: that
-//! transaction's own file, and a snapshot ending at it (after planning, so an `AsOf` target's
-//! created-at reads come first). A store whose listings lag its writes
+//! target's chain is applied, the restore reads one byte of each key a reader can name without
+//! a listing for the transaction after the listing's newest (`crate::probe`, the reads the
+//! engine's uploader makes past its own listings): that transaction's level-0 file, a level-0
+//! file from the first transaction, and the snapshot ending at it (after planning, so an
+//! `AsOf` target's created-at reads come first). A store whose listings lag its writes
 //! would otherwise give an older state as the newest, with success. A key found that way is
 //! listed for again. A file found that way is either hidden by a lagging listing or put by a
 //! replicator after the listing, and one read cannot tell; the next listing can. A listing
@@ -60,10 +61,10 @@ use thiserror::Error;
 
 use crate::created_at::{ResolveError, resolve_counted};
 use crate::inventory::{Inventory, InventoryError};
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{FileInfo, FileKey};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
-use crate::store::{ObjectStore, ReadAt, ReadLen, StoreError};
+use crate::store::{ObjectStore, ReadLen, StoreError};
 
 #[cfg(any(test, feature = "testing"))]
 mod mem_sink;
@@ -524,6 +525,7 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
                     left: err.left(),
                     source: Box::new(err),
                 })?;
+                mark!(Rest1);
                 return Ok(Restored {
                     reached: chain.reaches(),
                     page_size: last.header().page_size(),
@@ -582,8 +584,10 @@ impl Retries {
         match abort {
             Abort::Fatal(err) => Err(err),
             Abort::Vanished(missing) => {
+                mark!(Rest4);
                 self.vanished = self.vanished.saturating_add(1);
                 if self.vanished >= MAX_ATTEMPTS {
+                    mark!(World28);
                     return Err(RestoreError::Unstable {
                         attempts: attempt,
                         missing,
@@ -611,6 +615,7 @@ impl Retries {
                 // listing; the last term only bounds the loop if that reasoning is wrong.
                 let exhausted = attempt >= MAX_CHASE.saturating_add(MAX_ATTEMPTS);
                 if self.lagged >= MAX_ATTEMPTS || exhausted {
+                    mark!(World4);
                     return Err(RestoreError::ListingBehind {
                         attempts: attempt,
                         found,
@@ -679,6 +684,7 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         | PlanOutcome::AsOfInsideFile { .. }
         | PlanOutcome::InsideFile { .. }
         | PlanOutcome::MalformedSnapshot { .. }) => {
+            mark!(Rest3);
             return Err(RestoreError::NoPlan(NoPlan(other)).into());
         }
     };
@@ -696,10 +702,10 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     Ok((chain, last, inside_file))
 }
 
-/// A level-0 file a read finds past the newest transaction `inventory` lists, if any: the
-/// next transaction's own file, or a snapshot that ends at it (the first transaction's, for an
-/// empty listing). A listing that lags the
-/// store's writes is told from a whole one this way, as far as a reader can name keys.
+/// A file a read finds past the newest transaction `inventory` lists, if any: one of the keys
+/// a reader can name without a listing for the next transaction (the first transaction, for an
+/// empty listing), as the engine's own probe reads them (`crate::probe`). A listing that lags
+/// the store's writes is told from a whole one this way, as far as a reader can name keys.
 ///
 /// # Errors
 /// [RestoreError::Store] for a read that fails other than as not found.
@@ -714,20 +720,9 @@ pub async fn listed_past<S: ObjectStore>(
     let Some(next) = next else {
         return Ok(None);
     };
-    // Both keys in one batch: a store that reads side by side asks for them together.
-    let reads = [TxidRange::single(next), TxidRange::from_start(next)].map(|range| ReadAt {
-        key: FileKey::new(Level::ZERO, range),
-        offset: 0,
-        len: ReadLen::or_chunk(1),
-    });
-    for (at, read) in reads.iter().zip(store.read_many(&reads).await) {
-        match read {
-            Ok(_) => return Ok(Some(at.key)),
-            Err(StoreError::NotFound { .. }) => {}
-            Err(err) => return Err(RestoreError::Store(err)),
-        }
-    }
-    Ok(None)
+    crate::probe::holder(store, next)
+        .await
+        .map_err(RestoreError::Store)
 }
 
 /// The plan for [target]: an instant asks for the created-at times it needs, counted
@@ -830,6 +825,7 @@ fn check_header(key: FileKey, header: &Header, previous: Previous<'_>) -> Result
         return Err(FileFault::NotASnapshot);
     }
     if header.txids() != key.range() {
+        mark!(Rest5);
         return Err(FileFault::RangeMismatch {
             header: header.txids(),
         });

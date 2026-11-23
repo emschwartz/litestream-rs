@@ -14,6 +14,7 @@ use lsr_spec::restore_plan::{self as spec, Judgement};
 
 use crate::bytes::violation;
 use crate::listing::{ArbFile, ArbListing};
+use lsr_core::WriteMode;
 
 /// Holds an outcome to a judgement: the contract decides the case, and allows
 /// this outcome.
@@ -68,7 +69,10 @@ fn store_of(files: &[ArbFile]) -> MemStore {
     block_on(async {
         for file in files {
             let created = Timestamp::from_unix_millis(file.created);
-            let Ok(mut up) = store.begin_upload(&file.key, created).await else {
+            let Ok(mut up) = store
+                .begin_upload(&file.key, created, WriteMode::Replace)
+                .await
+            else {
                 violation("the memory store refused an upload");
             };
             if up.write(b"x").await.is_err() || up.commit().await.is_err() {

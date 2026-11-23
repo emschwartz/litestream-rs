@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+index 72c0787d..2b62cc51 100644
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -687,7 +687,7 @@ pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
+ ) -> Outcome {
+     let output = job.output_key();
+     match crate::probe::exists(replica, &output).await {
+-        Ok(true) => return Outcome::Replan { key: output },
++        Ok(true) => {}
+         Ok(false) => {}
+         Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
+     }

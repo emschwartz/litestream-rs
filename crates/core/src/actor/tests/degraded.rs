@@ -463,8 +463,8 @@ fn a_rebuild_keeps_a_snapshot_request_made_behind_another_cause() {
 }
 
 /// A maintenance job that keeps failing persistently waits on its level's
-/// backoff, not the task's, and its degraded state still counts every
-/// failure.
+/// backoff, not the task's, its degraded state still counts every failure,
+/// and a success once no level waits clears it.
 #[test]
 fn a_degraded_maintenance_job_counts_its_retries() {
     let (mut rig, mut actor) = caught_up_go_like();
@@ -493,6 +493,9 @@ fn a_degraded_maintenance_job_counts_its_retries() {
         }
     }
     assert_eq!(counted, [Some(1), Some(2), Some(3)]);
+    // Once no level waits any more, the job's next success clears it.
+    rig.follow(&mut actor, now + 3_600_000, 200);
+    assert_eq!(actor.degraded(Task::Maintenance), None);
 }
 
 /// The actor built to replace one whose engine is distrusted knows nothing
@@ -552,41 +555,48 @@ fn booted_follows_the_engines_own_rebuild() {
 }
 
 /// The bucket rolls back past transaction 2, which the engine had
-/// acknowledged, and the staged copy of 2 is gone too. The relist must not
-/// forget that 2 was acknowledged: the replacement snapshot takes 3, never
-/// 2 again with a later state, so a restore to 2 refuses rather than
-/// returning pages 2 never held.
+/// acknowledged (by uploading it, or by finding it on the replica at boot),
+/// and the staged copy of 2 is gone too. The relist must not forget that 2
+/// was acknowledged: the replacement snapshot takes 3, never 2 again with a
+/// later state, so a restore to 2 refuses rather than returning pages 2
+/// never held.
 #[test]
 fn a_relist_never_takes_an_acknowledged_transaction_again() {
-    let (mut rig, mut actor) = caught_up_go_like();
-    rig.commit(2);
-    rig.settle(&mut actor, T0 + 10);
-    assert_eq!(newest_replica_file(&rig), Some(2));
-    let gone: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
-        .unwrap()
-        .files()
-        .iter()
-        .map(|f| f.key)
-        .filter(|key| key.range().max().get() == 2)
-        .collect();
-    block_on(rig.remote.inner.delete(&gone)).unwrap();
-    let staged: Vec<FileKey> = Rig::files(&rig.staging, Level::ZERO)
-        .iter()
-        .map(|f| f.key)
-        .filter(|key| key.range().max().get() == 2)
-        .collect();
-    block_on(rig.staging.inner.delete(&staged)).unwrap();
-    actor.fault(Task::Upload, Fault::RemoteRegressed, ts(T0 + 20));
-    rig.follow(&mut actor, T0 + 20, 50);
-    let reput: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
-        .unwrap()
-        .files()
-        .iter()
-        .map(|f| f.key)
-        .filter(|key| key.range().max().get() == 2)
-        .collect();
-    assert!(reput.is_empty(), "{reput:?}");
-    assert_eq!(newest_replica_file(&rig), Some(3));
+    for rebooted in [false, true] {
+        let (mut rig, mut actor) = caught_up_go_like();
+        rig.commit(2);
+        rig.settle(&mut actor, T0 + 10);
+        assert_eq!(newest_replica_file(&rig), Some(2));
+        if rebooted {
+            actor = Actor::new(go_like());
+            rig.settle(&mut actor, T0 + 10);
+        }
+        let gone: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
+            .unwrap()
+            .files()
+            .iter()
+            .map(|f| f.key)
+            .filter(|key| key.range().max().get() == 2)
+            .collect();
+        block_on(rig.remote.inner.delete(&gone)).unwrap();
+        let staged: Vec<FileKey> = Rig::files(&rig.staging, Level::ZERO)
+            .iter()
+            .map(|f| f.key)
+            .filter(|key| key.range().max().get() == 2)
+            .collect();
+        block_on(rig.staging.inner.delete(&staged)).unwrap();
+        actor.fault(Task::Upload, Fault::RemoteRegressed, ts(T0 + 20));
+        rig.follow(&mut actor, T0 + 20, 50);
+        let reput: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
+            .unwrap()
+            .files()
+            .iter()
+            .map(|f| f.key)
+            .filter(|key| key.range().max().get() == 2)
+            .collect();
+        assert!(reput.is_empty(), "rebooted {rebooted}: {reput:?}");
+        assert_eq!(newest_replica_file(&rig), Some(3), "rebooted {rebooted}");
+    }
 }
 
 /// A retried fault that keeps failing one task becomes a stall at the [`STALLED_AFTER`]th
