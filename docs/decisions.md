@@ -78,6 +78,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D122 | Run the simulator's histories on real SQLite: how, when the world draws page-level commits of arbitrary bytes? | A backend in lsr-sqlite behind the sim's seam; each drawn page a row, SQLite decides the pages, the world reads back what changed through SQLite | Claude (sim-real-sqlite), **delegated** | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
 | D162 | `databases` with a `dir` entry: print the working directory, as Go does? | No: print the entry's directory, unscanned | Claude (dropin-readonly), **delegated** | 2026-11-23 | open to owner review |
+| D161 | Serve Go's `/debug/pprof` profiler on `addr`? | No: every `/debug/pprof` path is a 404 whose body names this decision | owner (proposed by Claude) | 2026-11-23 | decided |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -93,7 +94,9 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Options:** track them now; write `NoChecksum` as Go does.
 - **Choice:** not until after cutover. v1 writes `NoChecksum`.
 - **Cost accepted:** no file-to-file checksum chain, so a wrong neighbour is not caught by the format.
-- **Why:** Go's level compactor forces `NoChecksum` on its output while copying the last input's post-apply checksum (`compactor.go:165` at 041a8c3), so a tracked last input fails with "post-apply checksum not allowed" (read in code, not run). Go restore reads tracked chains only from v0.5.18. Tracking would break rollback to Go.
+- **Why:** Go's level compactor forces `NoChecksum` on its output while copying the last input's post-apply checksum (`compactor.go:165` at 041a8c3), so a tracked last input fails with "post-apply checksum not allowed". Go restore reads tracked chains only from v0.5.18. Tracking would break rollback to Go.
+- **Tested (2026-11-23):** against pinned Go 041a8c3, a file replica Rust writes with every level-0 file tracked, and one with untracked files then a tracked one, both restore under Go page for page, and Go's own compactor refuses both with "post-apply checksum not allowed", leaving no level-1 file. The same replica untracked, as litestream-rs writes it, compacts and restores (`compat::tracked_checksums`). So a tracked writer would stop Go's compaction the moment Go took the replica back: rollback is what tracking breaks, and what it breaks is tested, not read.
+- **We rely on:** the scheduled verify-restores (`validation.interval`, `lsr_verify_*`) to catch an interleaved history, files from two writers spliced into one chain, which with `NoChecksum` the format itself no longer can.
 - **Revisit if:** Go is no longer the fallback writer. With the page checksum table, tracking needs no prior page content and no extra scan, so rollback is the only reason to wait.
 - **Links:** `docs/PLAN.md`.
 
@@ -782,6 +785,17 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost if wrong:** a script that parsed Go's output and relied on the working directory appearing for a `dir` entry sees the directory instead. Scanning the directory and printing each database it holds was the other choice; it can be added later without breaking this one, since a `dir` entry's row then names its directory.
 - **Evidence:** `compat::go_and_lsr_list_the_same_databases_and_files` compares the two outputs with Go's working-directory row mapped to the entry's directory, and every other line byte for byte; `cli::databases_lists_each_entry_without_scanning_a_dir`.
 - **Links:** `docs/BEHAVIOR.md` CFG-44; `crates/cli/src/run.rs` (`databases_command`).
+
+## D161. `/debug/pprof` is not served
+
+- **Question:** Go's `replicate` serves Go's runtime profiler (`net/http/pprof`) on the metrics address. Should litestream-rs serve a profiler there?
+- **Options:** a Rust profiler behind a feature flag; a 404 that names the decision; the plain 404 every unknown path gets.
+- **Choice:** every `/debug/pprof` path is a 404 whose body names this decision, with no dependency and no feature flag.
+- **Decided by:** owner.
+- **Why:** Go's profiles describe Go's runtime and no Rust tool reads them as such; a Rust profiler is a dependency for a diagnostic no operator workflow has asked for. A body naming the decision tells an operator who reaches for Go's profiler why it is absent, which a bare 404 does not.
+- **Cost accepted:** a deployment that scraped Go's profiles from the sidecar gets none.
+- **Evidence:** `cli::metrics_and_health_are_served_on_exactly_the_given_address` asserts the 404 and its body for `/debug/pprof`, `/debug/pprof/` and a profile path with a query.
+- **Links:** #177; D48; `docs/BEHAVIOR.md` CFG-35; `crates/sidecar/src/http.rs`.
 
 ## Unverified, not recorded
 
