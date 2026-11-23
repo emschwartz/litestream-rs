@@ -78,6 +78,7 @@ mod ahead;
 mod clock;
 mod floor;
 mod lag;
+mod once;
 mod parts;
 mod state;
 mod unproven;
@@ -92,6 +93,7 @@ use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 pub use ahead::AHEAD_KEPT_FOR;
 use clock::EngineClock;
+pub use once::{FinalSnapshot, FinalSnapshotFailure};
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
 pub use state::{Degraded, Phase, Task};
 use state::{Gate, Live};
@@ -1244,9 +1246,14 @@ impl Actor {
         now: Timestamp,
         deadline: Timestamp,
     ) -> Tick {
+        // A snapshot the drain was asked to end with is not cut by the deadline once
+        // everything is uploaded (`once`).
         if now >= deadline {
             return if self.settled(env.wal) {
-                self.drained()
+                match self.final_snapshot_unit(env, now).await {
+                    Some(tick) => tick,
+                    None => self.drained(),
+                }
             } else {
                 self.missed(env, now).await
             };
@@ -1260,10 +1267,12 @@ impl Actor {
         if let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
-        if self.settled(env.wal) {
-            self.drained()
-        } else {
-            self.ran(Event::Idle, now)
+        if !self.settled(env.wal) {
+            return self.ran(Event::Idle, now);
+        }
+        match self.final_snapshot_unit(env, now).await {
+            Some(tick) => tick,
+            None => self.drained(),
         }
     }
 

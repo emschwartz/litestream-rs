@@ -171,9 +171,9 @@ fn a_second_signal_cuts_the_drain() {
     );
 }
 
-/// `-once`: every database synced and uploaded, then exit. `-force-snapshot` and
-/// `-enforce-retention` are refused (the replicator's API has neither a level-9
-/// snapshot on demand nor a one-off retention pass).
+/// `-once`: every database synced and uploaded, then exit. `-once -force-snapshot` ends each
+/// with one level-9 file of the whole database (docs/decisions.md D167). `-enforce-retention`
+/// is refused (no one-off retention pass yet).
 #[test]
 fn once_replicates_everything_committed_and_exits() {
     let dir = TempDir::new().unwrap();
@@ -186,13 +186,20 @@ fn once_replicates_everything_committed_and_exits() {
     let (status, out) = finish(start(&["-once", "-config", cfg]));
     assert_eq!(status.code(), Some(0), "{out}");
     restores_to(dir.path(), &replica, &app);
-    for flag in ["-force-snapshot", "-enforce-retention"] {
-        let out = lsr()
-            .args(["replicate", "-once", flag, "-config", cfg])
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(1), "{flag}");
-    }
+    let level9 = replica.join("ltx").join("9");
+    assert!(std::fs::read_dir(&level9).map_or(true, |d| d.count() == 0));
+    write(&app, 16);
+    let (status, out) = finish(start(&["-once", "-force-snapshot", "-config", cfg]));
+    assert_eq!(status.code(), Some(0), "{out}");
+    let snapshots: Vec<_> = std::fs::read_dir(&level9).unwrap().collect();
+    assert_eq!(snapshots.len(), 1, "{out}");
+    let again = TempDir::new().unwrap();
+    restores_to(again.path(), &replica, &app);
+    let out = lsr()
+        .args(["replicate", "-once", "-enforce-retention", "-config", cfg])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
 }
 
 #[test]

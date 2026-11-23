@@ -331,6 +331,9 @@ impl Worker {
         if commands.snapshot {
             actor.request_snapshot();
         }
+        if commands.final_snapshot {
+            actor.request_final_snapshot();
+        }
         if commands.accept_pages {
             actor.accept_database_pages();
         }
@@ -700,6 +703,7 @@ impl Worker {
             .ahead_of_wal_unchecked()
             .map(AheadOfWalUnchecked::of);
         let snapshots = self.actor.snapshots();
+        let final_snapshot = self.actor.final_snapshot();
         let read_lock_violations = self.actor.read_lock_violations();
         let ran = self.app_ran_total();
         let app = self.app_total();
@@ -734,6 +738,7 @@ impl Worker {
                 read_lock_violations,
                 ..seen.counters
             };
+            health.final_snapshot = final_snapshot;
             health.verification = verification;
             health.journal = journal;
             health.ahead_of_wal = ahead_of_wal;

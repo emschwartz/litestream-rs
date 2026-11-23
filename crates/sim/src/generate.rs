@@ -215,6 +215,9 @@ pub enum Op {
     Tick,
     /// The operator stops the engine: it drains, then a fresh one boots later.
     Shutdown,
+    /// The operator stops the engine as `replicate -once -force-snapshot` does: it drains and
+    /// ends with a level-9 snapshot, then a fresh one boots later. Scenarios only.
+    ShutdownWithSnapshot,
     /// The operator asks for a snapshot.
     RequestSnapshot,
     /// The oracle restores every transaction and `Latest` and judges them.

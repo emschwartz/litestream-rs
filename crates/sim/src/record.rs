@@ -124,6 +124,7 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         Op::ClockJump(millis) => format!("Op::ClockJump({millis})"),
         Op::Tick => "Op::Tick".to_owned(),
         Op::Shutdown => "Op::Shutdown".to_owned(),
+        Op::ShutdownWithSnapshot => "Op::ShutdownWithSnapshot".to_owned(),
         Op::RequestSnapshot => "Op::RequestSnapshot".to_owned(),
         Op::Restore => "Op::Restore".to_owned(),
         Op::Restart => "Op::Restart".to_owned(),

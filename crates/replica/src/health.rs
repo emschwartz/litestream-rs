@@ -11,8 +11,8 @@ use std::fmt;
 use std::num::NonZeroU32;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, Gate, JournalSignal, PersistentCause, Severity,
-    SnapshotCause, SnapshotCounts, StopCause, Task, Trip,
+    AppCheckpoint, AppCheckpoints, Degraded, FinalSnapshot, Gate, JournalSignal, PersistentCause,
+    Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -190,6 +190,9 @@ pub struct Health {
     /// commits the WAL lost, replicated as the application serves them. Stands while the state
     /// before them is kept restorable, then ends on its own (`docs/decisions.md` D103).
     pub ahead_of_wal: Option<AheadOfWal>,
+    /// The snapshot a stop was asked to end with ([`crate::Replicator::request_final_snapshot`]):
+    /// not asked, owed, written, or why it was not.
+    pub final_snapshot: FinalSnapshot,
     /// A boot after a failed WAL sync owed the check for a database file ahead of its WAL and
     /// could not make it, because the replica could not give its own newest confirmed state, so
     /// the WAL was checkpointed unchecked. Stands for a fixed window, then ends on its own
@@ -397,6 +400,7 @@ impl Health {
             },
             journal: None,
             ahead_of_wal: None,
+            final_snapshot: FinalSnapshot::NotAsked,
             ahead_of_wal_unchecked: None,
         }
     }

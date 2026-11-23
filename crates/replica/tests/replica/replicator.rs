@@ -111,6 +111,31 @@ fn a_stop_can_be_awaited() {
     site.assert_restores(&*store);
 }
 
+/// A stop asked to end with a snapshot writes one level-9 file of the whole database after the
+/// last upload, and the health says so.
+#[test]
+fn a_stop_can_end_with_a_level_nine_snapshot() {
+    let site = Site::new();
+    let store = site.store();
+    let (runtime, clock) = fake();
+    clock.release();
+    let replicator =
+        Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
+    site.commit(2);
+    replicator.request_final_snapshot();
+    let stopped = lsr_core::conformance::block_on(replicator.stop(PATIENCE));
+    let Stopped::Drained { txid: Some(txid) } = stopped else {
+        panic!("{stopped:?}");
+    };
+    let health = replicator.health();
+    let lsr_replica::FinalSnapshot::Written(info) = health.final_snapshot else {
+        panic!("{:?}", health.final_snapshot);
+    };
+    assert_eq!(info.key.level(), lsr_core::Level::SNAPSHOT);
+    assert_eq!(info.key.range().max(), txid);
+    site.assert_restores(&*store);
+}
+
 /// The same stop while the engine waits out a failed upload: the drain's retry needs the
 /// clock to move, and on a held fake clock it never does (this hung `just check` under load,
 /// where the engine's first reads met the test's commit).

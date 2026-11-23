@@ -136,6 +136,9 @@ pub struct RunReport {
     pub power_losses: u32,
     /// Drains the operator asked for.
     pub shutdowns: u32,
+    /// How each drain asked to end with a level-9 snapshot (`Op::ShutdownWithSnapshot`)
+    /// ended it, in order.
+    pub final_snapshots: Vec<lsr_core::FinalSnapshot>,
     /// Commits the app made inside a tick, before a checkpoint's barrier.
     pub commits_in_tick: u32,
     /// Oracle restores of the whole replica.
@@ -2048,6 +2051,48 @@ impl Runner {
 
     /// After a drain that finished: `Latest` is the local head, unless a bucket rollback
     /// took files the engine had already confirmed.
+    /// The operator stops the engine, with the snapshot `-once -force-snapshot` ends with when
+    /// `snapshot`; a fresh engine boots later.
+    fn shutdown(&mut self, snapshot: bool) -> Result<(), Violation> {
+        self.report.shutdowns = self.report.shutdowns.saturating_add(1);
+        if snapshot {
+            self.actor.request_final_snapshot();
+        }
+        self.drain()?;
+        if snapshot {
+            self.judge_final_snapshot()?;
+            self.report
+                .final_snapshots
+                .push(self.actor.final_snapshot());
+        }
+        self.reboot();
+        self.app.restarted(self.op_began_at);
+        Ok(())
+    }
+
+    /// A drain asked to end with a snapshot: a snapshot it reports written is on the replica,
+    /// a level-9 file from transaction 1 to at least everything the drain confirmed. One it
+    /// reports failed is the scenario's to expect; the history judge holds either way.
+    fn judge_final_snapshot(&mut self) -> Result<(), Violation> {
+        let lsr_core::FinalSnapshot::Written(info) = self.actor.final_snapshot() else {
+            return Ok(());
+        };
+        let listed = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
+            .map_err(|e| bug_fault(format!("the replica does not list: {e:?}")))?;
+        let held = listed
+            .level(lsr_core::Level::SNAPSHOT)
+            .iter()
+            .any(|file| file.key == info.key);
+        let from_one = info.key.range().min() == lsr_ltx::Txid::MIN;
+        if held && from_one {
+            Ok(())
+        } else {
+            Err(bug_fault(format!(
+                "the final snapshot {info:?} is reported written but the replica does not hold it whole"
+            )))
+        }
+    }
+
     fn judge_drained(&mut self) -> Result<(), Violation> {
         let drained = self.w.lost.is_empty();
         self.judge_history(crate::history::Ask {
@@ -2340,12 +2385,8 @@ impl Runner {
             Op::EnvFault(fault) => self.env_fault(*fault)?,
             Op::ClockJump(millis) => self.clock_jump(*millis),
             Op::Tick => self.tick()?,
-            Op::Shutdown => {
-                self.report.shutdowns = self.report.shutdowns.saturating_add(1);
-                self.drain()?;
-                self.reboot();
-                self.app.restarted(self.op_began_at);
-            }
+            Op::Shutdown => self.shutdown(false)?,
+            Op::ShutdownWithSnapshot => self.shutdown(true)?,
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),

@@ -23,6 +23,7 @@ mod evicted_wal;
 mod failstop;
 #[cfg(test)]
 mod faults;
+mod final_snapshot;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]

@@ -1853,7 +1853,7 @@ detected_by = "sidecar::`help_succeeds_only_when_asked_for_literally`, compat::`
 [[row]]
 table = "Config and startup"
 id = "CFG-33"
-circumstance = "A Go command `lsr` does not have: `reset`, and the commands that talk to a running daemon over its control socket, `status`, `sync`, `list`, `info`, `start`, `stop`, `register`, `unregister`; `replicate -once` with `-force-snapshot` or `-enforce-retention`. (`restore` takes Go's arguments: REST-13; `databases`, `ltx` and `wal` are built: CFG-44)"
+circumstance = "A Go command `lsr` does not have: `reset`, and the commands that talk to a running daemon over its control socket, `status`, `sync`, `list`, `info`, `start`, `stop`, `register`, `unregister`; `replicate -once -enforce-retention`. (`restore` takes Go's arguments: REST-13; `databases`, `ltx` and `wal` are built: CFG-44; `-once -force-snapshot`: CFG-45)"
 response = "refuse, naming the command or flag. A gap to build, tracked in #177 (D48)"
 signal = "exit 64"
 at_risk = "Nothing runs"
@@ -1981,6 +1981,17 @@ at_risk = "None: nothing is written"
 recovery = "n/a"
 detected_by = "compat::`go_and_lsr_list_the_same_databases_and_files`, cli::`databases_lists_each_entry_without_scanning_a_dir`, cli::`ltx_lists_one_level_by_default_and_wal_warns`, cli::`levels_as_go_reads_them`, cli::`ltx_defaults_to_level_zero_and_all_is_every_level`; plant::`ltx-default-level-all`, plant::`databases-scans-dir-entries`, plant::`wal-without-warning`"
 notes = "The compat test is a differential against the pinned `litestream` over 512 generated lines per run, both run in one directory against a config of two databases on file replicas (one the fixture replica), and a second config with a `dir` entry. Standard output must be equal byte for byte, exit codes equal and failure classes equal; a tally fails the run unless each command succeeds with each config and each refusal class is reached. It found two differences: the `dir` entry under `databases` (kept, D162), and a database path looked up through a plan of the whole config, which refused beside an empty `dir` entry (fixed toward Go, also in `restore`). It passed once with that lookup still wrong, because a token the generator relied on was never replaced; the tally now counts the `dir` config's cases per command, and the run fails against the old lookup"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-45"
+circumstance = "`replicate -once -force-snapshot`: every database drains, then ends with one level-9 file of the whole database, `1..position`, as Go's `runOnce` writes it"
+response = "as Go: the snapshot is written after the last upload, outside the snapshot interval, and written again at a position the newest snapshot already holds. It is not cut by `shutdown-sync-timeout` once everything is uploaded, and not retried: a fault, or a step that cannot prove the position (a reset wal-index on an idle database), ends that database's run without it (D167)"
+signal = "exit 0; a database whose snapshot was not written logs `database drained, snapshot not written` with the reason and the run exits 1"
+at_risk = "None: a snapshot not written leaves the replica as the drain left it, and one published with a lost response is a whole file"
+recovery = "Operator: run it again"
+detected_by = "compat::`go_and_lsr_end_once_with_one_level_nine_snapshot`, compat::`a_second_run_at_the_same_position_writes_the_same_snapshot_on_both`, compat::`once_alone_writes_no_snapshot_on_either_side`, core::`the_snapshot_follows_the_last_upload_and_ends_the_drain`, core::`a_reset_wal_index_fails_the_snapshot_by_name`, core::`a_failed_write_ends_the_drain_without_a_snapshot`, core::`a_passed_deadline_does_not_cut_the_snapshot`, sim::`a_snapshot_published_with_a_lost_response_then_a_power_loss_restores`, cli::`once_replicates_everything_committed_and_exits`"
+notes = "Go runs database by database and stops at the first error; every database runs here and each outcome is reported (D167). `-once -enforce-retention` is still refused (CFG-33)"
 
 [[row]]
 table = "Circumstances the code does not distinguish"
