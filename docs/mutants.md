@@ -421,3 +421,15 @@ three it had not reached, and the tally above counts the second result.
 | `header.rs` `WalHeader::checkpoint_seq` | 1 | Caught: `header_decodes_every_field` decodes a header whose sequence is 7, not only 0. |
 | `frame.rs` `WalOffset`'s Display | 1 | Caught: the same test reads it, since error messages name offsets with it. |
 | `testing.rs` `page` | 6 | Equivalent (escape line): the mixing steps of the test-data generator. A weaker mixer still gives deterministic pages that differ by seed and page number, and changing the generator would change every recorded simulator history. The rest of `testing.rs` (the WAL builder and its checksums) stays mutated, since the simulator builds its WALs with it. |
+
+## store-s3: classify and listing
+
+`LSR_SKIP=minio,toxiproxy,tigris cargo mutants -p lsr-store-s3 --test-package lsr-store-s3 --test-tool nextest
+--jobs 4 --timeout 240 -f crates/store-s3/src/classify.rs -f crates/store-s3/src/list.rs` at commit `db94eb9`:
+85 mutants, 69 caught, 5 missed, 11 unviable, no timeouts. The tests that need MinIO, Toxiproxy or Tigris were
+skipped. After the tests below: 74 caught, 0 missed, 11 unviable. No survivor revealed a bug.
+
+| Where | Mutants | Resolution |
+| --- | --- | --- |
+| `classify.rs` `S3Code::from_name` | 3 (the `AllAccessDisabled`, `InvalidDigest` and `InvalidRange` arms deleted) | Caught: `code_is_read_from_the_body` now reads each of the three names. |
+| `list.rs` `name_bounds` | 2 (returns `None`, or made-up bounds) | Caught: `a_page_s_bounds_span_its_files_and_unrecognized_names`. The bounds are what the listing compares across pages to refuse one that went backwards. |
