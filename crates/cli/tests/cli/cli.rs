@@ -1268,3 +1268,29 @@ fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
     assert!(run.stderr.contains("no meta directory"), "{}", run.stderr);
     assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
 }
+
+/// Go finds a `DB_PATH` among the config's `path` entries only (`Config.DBConfig`): a `dir`
+/// entry beside it is not scanned, so one that holds no database does not stop the restore.
+#[test]
+fn a_database_path_restores_beside_a_dir_entry_that_holds_nothing() {
+    let (staged, manifest) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("app.db");
+    let empty = dir.path().join("scan");
+    fs::create_dir(&empty).expect("mkdir");
+    let config = config_for(dir.path(), &db, &staged);
+    let mut text = fs::read_to_string(&config).expect("read");
+    text.push_str(&format!(
+        "  - dir: {}\n    pattern: \"*.db\"\n    replica:\n      url: file://{}\n",
+        empty.display(),
+        dir.path().join("scan-replica").display()
+    ));
+    fs::write(&config, text).expect("write");
+    let run = lsr(&["restore", "-config", path_str(&config), path_str(&db)]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_pages_equal(
+        &db,
+        latest_pages(&manifest),
+        "restore beside an empty dir entry",
+    );
+}

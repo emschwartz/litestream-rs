@@ -179,10 +179,15 @@ fn put(path: &Path, before: Before) {
 
 fn layout(dir: &Path, replica: &Path, out: Before, db: Before) -> Layout {
     let config = dir.join("litestream.yml");
+    // An empty `dir` entry beside the database: Go's lookup of a DB_PATH reads only the
+    // `path` entries, so it must not stop a restore.
+    std::fs::create_dir_all(dir.join("scan")).unwrap();
     let text = format!(
-        "dbs:\n  - path: {}\n    replica:\n      url: file://{}\n",
+        "dbs:\n  - path: {}\n    replica:\n      url: file://{}\n  - dir: {}\n    pattern: \"*.db\"\n    replica:\n      url: file://{}\n",
         dir.join("app.db").display(),
-        replica.display()
+        replica.display(),
+        dir.join("scan").display(),
+        dir.join("scan-replica").display(),
     );
     std::fs::write(&config, text).unwrap();
     std::fs::create_dir_all(dir.join("empty-replica")).unwrap();
@@ -245,7 +250,7 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         let name = path.strip_prefix(root).unwrap().display().to_string();
-        if name == "litestream.yml" || name == "empty-replica" {
+        if name == "litestream.yml" || name == "empty-replica" || name == "scan" {
             continue;
         }
         // litestream-rs's restore also writes a takeover record in the restored database's

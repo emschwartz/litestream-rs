@@ -713,12 +713,14 @@ fn resolve_from(
         RestoreFrom::Database { path, config } => {
             let loaded = lsr_sidecar::load_config(config.as_deref(), expand)?;
             let want = expand_path(&path, &ProcessEnv).map_err(CliError::DatabasePath)?;
-            let plan = lsr_config::plan(&loaded.config, &ProcessEnv).map_err(CliError::Plan)?;
-            let db = plan
-                .dbs()
-                .iter()
-                .find(|db| !db.from_dir() && db.path() == want)
+            // Go's `DBConfig` reads only the `path` entries: `dir` entries are not scanned
+            // and the other entries are not built.
+            let narrowed = loaded
+                .config
+                .only_database(&want)
                 .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
+            let plan = lsr_config::plan(&narrowed, &ProcessEnv).map_err(CliError::Plan)?;
+            let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
             let output = output.unwrap_or_else(|| db.path().to_path_buf());
             Ok(Resolution::Open(Opening::of_plan(db.replica()), output))
         }
