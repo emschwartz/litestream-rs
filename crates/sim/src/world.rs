@@ -939,7 +939,8 @@ impl World {
     }
 
     /// Whether staging and the replica both hold `key` with different bytes:
-    /// a staged copy edited or forged under a key the replica took.
+    /// a staged copy damaged or put back from a backup under a key the replica
+    /// took.
     ///
     /// # Errors
     /// Either store's error other than a missing key.
@@ -1075,7 +1076,7 @@ impl World {
     }
 
     /// Whether staging holds `key` under bytes the engine never put there: a
-    /// copy an operation forged or put back, which stays the operator's for as
+    /// copy an operation rewrote or put back, which stays the operator's for as
     /// long as it is staged, whatever the replica holds now.
     ///
     /// # Errors

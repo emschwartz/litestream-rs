@@ -52,8 +52,8 @@ response = "continue: each gets a token and is uploaded"
 signal = "none"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`, core::`frames_past_the_committed_end_prove_no_staged_file`, core::`a_staged_file_whose_bytes_differ_but_still_verify_is_refused`, core::`a_staged_file_replaced_under_a_running_engine_is_never_uploaded`; oracle::`UnwitnessedPut`, plant::`witness-wal-residue`, plant::`witness-byte-digest`, plant::`witness-trailer-compare`"
-recovered_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`"
+detected_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`, sim::`a_staging_backup_put_back_while_down_is_refused_at_boot`, core::`frames_past_the_committed_end_prove_no_staged_file`, core::`a_staged_file_whose_bytes_differ_but_still_verify_is_refused`, core::`a_staged_file_replaced_under_a_running_engine_is_never_uploaded`; oracle::`UnwitnessedPut`, plant::`witness-wal-residue`, plant::`witness-byte-digest`, plant::`witness-trailer-compare`"
+recovered_by = "sim::`a_staged_file_forged_while_down_is_refused_at_boot`, sim::`a_staging_backup_put_back_while_down_is_refused_at_boot`"
 
 [[row]]
 table = "Boot"
@@ -381,7 +381,7 @@ at_risk = "None"
 recovery = "Automatic"
 detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`, sim::`survival::a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5`, sim::`survival::a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed`; plant::`takeover-before-drop-skipped`, plant::`takeover-before-drop-skipped-sim`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`takeover-ask-spins`"
 recovered_by = "sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`"
-notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and waits its backoff, and nothing is deleted unrecorded. Pending files above every replica key vouch for nothing there, so a forged one never raises the record"
+notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and waits its backoff, and nothing is deleted unrecorded. Pending files above every replica key vouch for nothing there, so one put back from a backup never raises the record"
 
 [[row]]
 table = "Boot"
@@ -606,8 +606,8 @@ response = "As RUN-16. The upload is aborted before anything is visible"
 signal = "as RUN-16"
 at_risk = "As RUN-16"
 recovery = "Automatic"
-detected_by = "sim::`a_staged_file_forged_under_a_running_engine_is_refused`, core::`a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible`"
-recovered_by = "sim::`a_staged_file_forged_under_a_running_engine_is_refused`"
+detected_by = "sim::`a_staged_file_forged_under_a_running_engine_is_refused`, sim::`a_staging_backup_put_back_under_a_running_engine_is_refused_by_its_token`, core::`a_staged_file_replaced_after_its_witness_is_refused_and_leaves_nothing_visible`"
+recovered_by = "sim::`a_staged_file_forged_under_a_running_engine_is_refused`, sim::`a_staging_backup_put_back_under_a_running_engine_is_refused_by_its_token`"
 
 [[row]]
 table = "Running"

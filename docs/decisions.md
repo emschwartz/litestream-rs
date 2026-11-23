@@ -57,6 +57,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D103 | What does a boot do when it finds a recorded unproven-WAL debt and the database file may hold pages from commits the WAL lost? | Check the file against the last staged state before the TRUNCATE; a proven mix is replicated as served, noticed as `database_ahead_of_wal`, and the state before it kept 7 days, with no operator action; `STRICT` stops | Claude (journal), **delegated**, decided by a Fable review; self-clearing by the owner | 2026-11-22 | open to owner review |
 | D104 | Can the engine's read mark keep other checkpoints from copying unproven WAL frames while the debt stands? | No: the mark cannot be placed at the proven frame, and the cure itself must release it; D103's check is the fix. Two marks plus a WAL rewrite is left as a spike | Claude (journal), **delegated**, decided by a Fable review | 2026-11-22 | decided |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
+| D131 | What does the engine defend against? | Accidents, not deliberate forgery | owner | 2026-11-23 | decided |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 | D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
@@ -383,7 +384,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** this engine uploads only from witnessed, synced staged copies and keeps a takeover record before deleting its own (BOOT-30), so without an operator's hand a boot divergence is another writer at this engine's next id. Refusing it covers that restart without a record, and rule (a) covers the other writer's files above staging, so the stop record kept nothing the boot does not now see. One fewer meta-directory file and crash-consistency surface. An unusable takeover record then costs only what no record costs.
 - **Cost accepted:** an operator who puts back a staging backup holding another copy of the replica's newest key stops instead of snapshotting; `lsr take-over` clears it, as for D12's other operator actions.
 - **Revisit if:** a world without an operator's hand produces a boot divergence.
-- **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-38, CFG-39; `crates/core/src/actor.rs` (`boot_listing`); #110.
+- **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-38, CFG-39; `crates/core/src/actor.rs` (`boot_listing`); #110; D131 (an operator putting back a backup is the accident this refusal covers; a forged copy is out of scope).
 
 ## D35. A stall at the end of a run
 
@@ -495,6 +496,19 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
 - **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
 - **Links:** #127 item I.
+
+## D131. The threat model: accidents, not forgery
+
+- **Question:** the engine and the simulator had begun to defend against files crafted to deceive the engine (a staged file re-encoded under the same key and header with other pages and a matching checksum). Is that in scope?
+- **Choice (owner):** no. "Don't bother defending against malicious behavior since a truly malicious thing could do worse."
+- **In scope, accidents:** crashes and power loss; disks that lie about a sync, fail, or return other bytes than were written; bit rot; a misconfiguration that runs two writers on one prefix or one meta directory; an operator who puts back an old copy of the meta or staging directory, or of the whole volume; a bucket rolled back, or thinned by a lifecycle rule; a listing that lags; provider bugs (wrong bytes acknowledged, a commit whose answer is lost); Go and Rust taking turns on one database.
+- **Out of scope, deliberate forgery:** anyone who writes files meant to pass the engine's checks. A staged file re-encoded with changed or extra pages and a valid trailer. A replica object edited to verify. A takeover record or journal written by hand to say what did not happen.
+- **What still holds:** G1 to G4 under every in-scope fault. Every successful restore is a state the application committed.
+- **Cost accepted:** someone who can write the meta directory or the bucket can make the engine replicate wrong data, and no check finds it. The same person can write the database file, which the engine replicates faithfully.
+- **Rule for new work:** a defence, a simulator op or a behaviour row names the accident that reaches it. A file that verifies and holds what no engine ever wrote is not an accident: a torn write fails the trailer, bit rot fails a checksum, and an older copy put back is bytes an engine wrote (`MetaOp::Save` and `Restore` model that).
+- **What it removes:** the simulator's `MetaOp::ForgeNewest` and what exists only for it; PR #187 (`MetaOp::GrowNewest`) closes unmerged. No engine check goes: each one is reached by an accident above (the classification is in the PR that lands this entry).
+- **Revisit if:** the meta directory or the bucket becomes writable by a party the database file is not.
+- **Links:** `docs/BEHAVIOR.md` A3, A5, L1, BOOT-4, BOOT-11, BOOT-13, RUN-17; D12, D50; #187.
 
 ## D40. An S3 replica with an empty prefix (delegated)
 
