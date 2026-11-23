@@ -59,53 +59,126 @@ impl Fields {
         self.get(name).map(|f| f.line).or(self.line)
     }
 
-    pub(crate) fn string(&self, name: &str) -> Option<String> {
-        match self.get(name).map(|f| &f.value) {
-            Some(Value::Str(text)) => Some(text.clone()),
-            _ => None,
+    /// The value of `name` when the walk stored it as `want` reads it; `None` when absent or
+    /// null (Go's zero value). Any other type is a disagreement between the key schema and
+    /// the build, recorded as a [`ProblemKind::FieldType`] so the load fails, never read as
+    /// absent.
+    fn typed<'a, T>(
+        &'a self,
+        name: &'static str,
+        walk: &mut Walk,
+        expected: &'static str,
+        want: impl FnOnce(&'a Value) -> Option<T>,
+    ) -> Option<T> {
+        let value = &self.get(name)?.value;
+        if matches!(value, Value::Null) {
+            return None;
         }
+        let got = want(value);
+        if got.is_none() {
+            let kind = ProblemKind::FieldType {
+                key: name,
+                expected,
+                found: value.kind(),
+            };
+            walk.problem(self.path.key(name), self.line(name), kind);
+        }
+        got
     }
 
-    pub(crate) fn boolean(&self, name: &str) -> Option<bool> {
-        match self.get(name).map(|f| &f.value) {
-            Some(Value::Bool(value)) => Some(*value),
-            _ => None,
-        }
+    pub(crate) fn string(&self, name: &'static str, walk: &mut Walk) -> Option<String> {
+        self.typed(name, walk, "a string", |v| {
+            if let Value::Str(text) = v {
+                Some(text.clone())
+            } else {
+                None
+            }
+        })
     }
 
-    pub(crate) fn int(&self, name: &str) -> Option<i64> {
-        match self.get(name).map(|f| &f.value) {
-            Some(Value::Int(value)) => Some(*value),
-            _ => None,
-        }
+    pub(crate) fn boolean(&self, name: &'static str, walk: &mut Walk) -> Option<bool> {
+        self.typed(name, walk, "a boolean", |v| {
+            if let Value::Bool(value) = v {
+                Some(*value)
+            } else {
+                None
+            }
+        })
     }
 
-    pub(crate) fn duration(&self, name: &str) -> Option<GoDuration> {
-        match self.get(name).map(|f| &f.value) {
-            Some(Value::Duration(value)) => Some(*value),
-            _ => None,
-        }
+    pub(crate) fn int(&self, name: &'static str, walk: &mut Walk) -> Option<i64> {
+        self.typed(name, walk, "an integer", |v| {
+            if let Value::Int(value) = v {
+                Some(*value)
+            } else {
+                None
+            }
+        })
     }
 
-    pub(crate) fn bytes(&self, name: &str) -> Option<u64> {
-        match self.get(name).map(|f| &f.value) {
-            Some(Value::Bytes(value)) => Some(*value),
-            _ => None,
-        }
+    pub(crate) fn duration(&self, name: &'static str, walk: &mut Walk) -> Option<GoDuration> {
+        self.typed(name, walk, "a duration", |v| {
+            if let Value::Duration(value) = v {
+                Some(*value)
+            } else {
+                None
+            }
+        })
     }
 
-    pub(crate) fn map(&self, name: &str) -> Option<&Fields> {
-        match self.get(name).map(|f| &f.value) {
-            Some(Value::Map(fields)) => Some(fields),
-            _ => None,
-        }
+    pub(crate) fn bytes(&self, name: &'static str, walk: &mut Walk) -> Option<u64> {
+        self.typed(name, walk, "a byte size", |v| {
+            if let Value::Bytes(value) = v {
+                Some(*value)
+            } else {
+                None
+            }
+        })
     }
 
-    pub(crate) fn maps(&self, name: &str) -> Listed<'_> {
+    pub(crate) fn map(&self, name: &'static str, walk: &mut Walk) -> Option<&Fields> {
+        self.typed(name, walk, "a mapping", |v| {
+            if let Value::Map(fields) = v {
+                Some(fields)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn maps(&self, name: &'static str, walk: &mut Walk) -> Listed<'_> {
         match self.get(name).map(|f| &f.value) {
             None => Listed::Absent,
             Some(Value::Maps(items)) => Listed::Items(items),
-            Some(_) => Listed::Null,
+            Some(Value::Null) => Listed::Null,
+            Some(other) => {
+                let kind = ProblemKind::FieldType {
+                    key: name,
+                    expected: "a list of mappings",
+                    found: other.kind(),
+                };
+                walk.problem(self.path.key(name), self.line(name), kind);
+                Listed::Null
+            }
+        }
+    }
+}
+
+impl Value {
+    /// The type's name, for [`ProblemKind::FieldType`].
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Str(_) => "a string",
+            Self::Bool(_) => "a boolean",
+            Self::Int(_) => "an integer",
+            Self::Uint(_) => "an unsigned integer",
+            Self::Duration(_) => "a duration",
+            Self::Bytes(_) => "a byte size",
+            Self::List(_) => "a list",
+            Self::Any => "any value",
+            Self::Map(_) => "a mapping",
+            Self::Maps(_) => "a list of mappings",
         }
     }
 }
