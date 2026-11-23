@@ -24,7 +24,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use rusqlite::{Connection, ErrorCode, OpenFlags};
+use rusqlite::{Connection, ErrorCode};
 use thiserror::Error;
 
 /// How many problems are kept in an [IntegrityFailure].
@@ -73,6 +73,21 @@ pub struct IntegrityFailure {
 }
 
 impl IntegrityFailure {
+    /// The failure for every problem SQLite listed: the first
+    /// [KEPT_MESSAGES] of them, and a placeholder when it listed none.
+    fn keeping_the_first(pragma: &'static str, mut messages: Vec<String>) -> Self {
+        let more = messages.len() > KEPT_MESSAGES;
+        messages.truncate(KEPT_MESSAGES);
+        if messages.is_empty() {
+            messages.push("no rows and no \"ok\"".to_owned());
+        }
+        Self {
+            pragma,
+            messages,
+            more,
+        }
+    }
+
     /// The pragma that failed (`quick_check` or `integrity_check`).
     #[must_use]
     pub const fn pragma(&self) -> &'static str {
@@ -132,14 +147,11 @@ fn problems(rows: &[String]) -> impl Iterator<Item = &str> {
 }
 
 fn run_pragma(path: &Path, pragma: &str) -> rusqlite::Result<Vec<String>> {
-    let conn = Connection::open_with_flags(
-        immutable_uri(path).map_err(|err| {
-            rusqlite::Error::InvalidPath(format!("{}: {err}", path.display()).into())
-        })?,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    // The URI's `mode=ro` makes the connection read-only whatever the
+    // default flags ask for, and stops SQLite creating a missing file.
+    let conn = Connection::open(immutable_uri(path).map_err(|err| {
+        rusqlite::Error::InvalidPath(format!("{}: {err}", path.display()).into())
+    })?)?;
     let rows = {
         let mut stmt = conn.prepare(&format!("PRAGMA {pragma}({CHECK_LIMIT})"))?;
         stmt.query_map([], |row| row.get::<_, String>(0))?
@@ -167,15 +179,54 @@ pub(crate) fn check(path: &Path, check: IntegrityCheck) -> Result<(), CheckError
         Err(err) if err.sqlite_error_code().is_some_and(is_verdict) => vec![err.to_string()],
         Err(err) => return Err(CheckError::Failed(io::Error::other(err))),
     };
-    let more = messages.len() > KEPT_MESSAGES;
-    let mut messages = messages;
-    messages.truncate(KEPT_MESSAGES);
-    if messages.is_empty() {
-        messages.push("no rows and no \"ok\"".to_owned());
+    Err(CheckError::Refused(IntegrityFailure::keeping_the_first(
+        pragma, messages,
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failure_of(count: usize) -> IntegrityFailure {
+        let messages = (0..count).map(|n| format!("problem {n}")).collect();
+        IntegrityFailure::keeping_the_first("quick_check", messages)
     }
-    Err(CheckError::Refused(IntegrityFailure {
-        pragma,
-        messages,
-        more,
-    }))
+
+    #[test]
+    fn a_list_is_cut_only_past_what_is_kept() {
+        let full = failure_of(KEPT_MESSAGES);
+        assert_eq!(full.messages().len(), KEPT_MESSAGES);
+        assert!(!full.more());
+        let cut = failure_of(KEPT_MESSAGES + 1);
+        assert_eq!(cut.messages(), full.messages());
+        assert!(cut.more());
+        assert_eq!(failure_of(0).messages(), ["no rows and no \"ok\""]);
+    }
+
+    #[test]
+    fn problems_drop_the_headings_and_blank_lines() {
+        let rows = [
+            "*** in database main ***\nPage 2: bad\n\n  Page 3: worse  ".to_owned(),
+            String::new(),
+            "row 4 missing".to_owned(),
+        ];
+        assert_eq!(
+            problems(&rows).collect::<Vec<_>>(),
+            ["Page 2: bad", "Page 3: worse", "row 4 missing"]
+        );
+    }
+
+    /// A file SQLite cannot open is the environment failing, not a verdict
+    /// on a database: the restore fails rather than being refused.
+    #[test]
+    fn a_missing_file_fails_the_check_without_a_verdict() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("db");
+        assert!(matches!(
+            check(&missing, IntegrityCheck::Quick),
+            Err(CheckError::Failed(_))
+        ));
+        assert!(!missing.exists(), "the check created the file it checks");
+    }
 }

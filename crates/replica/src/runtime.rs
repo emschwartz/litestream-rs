@@ -340,11 +340,6 @@ mod fake {
             lock(&self.time.state).free = true;
             self.time.signal.notify_all();
         }
-
-        /// From now on the clock moves only by [`FakeClockHandle::advance`].
-        pub fn hold(&self) {
-            lock(&self.time.state).free = false;
-        }
     }
 }
 
@@ -359,41 +354,74 @@ mod tests {
         runtime.park.park(None);
     }
 
-    /// A clock that reads `start` once, then an hour earlier, moving 10 ms a read.
-    struct SteppedBack {
-        start: i64,
-        reads: std::sync::atomic::AtomicI64,
+    /// A clock that reads the scripted instants in turn, then `after` for good, and counts its
+    /// reads: a park's progress is measured in readings, not in wall time.
+    struct Scripted {
+        script: Mutex<std::collections::VecDeque<i64>>,
+        after: i64,
+        reads: std::sync::atomic::AtomicUsize,
     }
 
-    impl Clock for SteppedBack {
+    impl Clock for Scripted {
         fn now(&self) -> Timestamp {
-            let n = self.reads.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                return Timestamp::from_unix_millis(self.start);
-            }
-            let back = self.start.saturating_sub(3_600_000);
-            Timestamp::from_unix_millis(back.saturating_add(n.saturating_mul(10)))
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let next = lock(&self.script).pop_front().unwrap_or(self.after);
+            Timestamp::from_unix_millis(next)
         }
     }
 
-    /// A clock that steps back while a park waits does not make the park wait the
-    /// step on top: the park returns, for its caller to plan again.
+    /// The clock's reads during one `park_from(until, read)` on a [SystemPark] over `script`
+    /// then `after`.
+    fn reads_while_parked(script: &[i64], after: i64, until: i64, read: Option<i64>) -> usize {
+        let clock = Arc::new(Scripted {
+            script: Mutex::new(script.iter().copied().collect()),
+            after,
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let park = SystemPark::new(Arc::<Scripted>::clone(&clock));
+        let until = Some(Timestamp::from_unix_millis(until));
+        match read {
+            Some(read) => park.park_from(until, Timestamp::from_unix_millis(read)),
+            None => park.park(until),
+        }
+        clock.reads.load(Ordering::SeqCst)
+    }
+
+    /// A park waits until the clock reaches its wake, reading it again as it goes; one that
+    /// starts with its wake still ahead does not return at once.
     #[test]
-    fn a_park_keeps_its_remaining_wait_when_the_clock_steps_back() {
-        let clock = Arc::new(SteppedBack {
-            start: 1_000_000,
-            reads: std::sync::atomic::AtomicI64::new(0),
-        });
-        let park = Arc::new(SystemPark::new(clock));
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            park.park(Some(Timestamp::from_unix_millis(1_000_030)));
-            tx.send(()).unwrap();
-        });
-        assert!(
-            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
-            "the park waited out the step"
-        );
+    fn a_park_waits_until_the_clock_reaches_its_wake() {
+        // `park` reads the clock once for itself, then at 101 to 104 and at 105.
+        assert!(reads_while_parked(&[100, 101, 102, 103, 104], 105, 105, None) >= 5);
+    }
+
+    /// The caller's own reading read again is no step back: the park goes on waiting.
+    #[test]
+    fn a_park_that_reads_the_callers_instant_again_goes_on_waiting() {
+        assert!(reads_while_parked(&[100, 101], 102, 102, Some(100)) >= 3);
+    }
+
+    /// A clock that steps back while a park waits does not make the park wait the step on
+    /// top: it returns at the first reading earlier than the last, for its caller to plan
+    /// again.
+    #[test]
+    fn a_park_returns_at_the_first_step_back() {
+        assert_eq!(reads_while_parked(&[99], 102, 102, Some(100)), 1);
+    }
+
+    /// The provided `park_from` is a plain park: a [Park] that only parks still waits.
+    #[test]
+    fn the_provided_park_from_parks() {
+        struct Counting(std::sync::atomic::AtomicUsize);
+        impl Park for Counting {
+            fn park(&self, _until: Option<Timestamp>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn unpark(&self) {}
+        }
+        let park = Counting(std::sync::atomic::AtomicUsize::new(0));
+        park.park_from(None, Timestamp::from_unix_millis(0));
+        assert_eq!(park.0.load(Ordering::SeqCst), 1);
     }
 
     /// A step back that comes after the caller read the clock and before its park began is not

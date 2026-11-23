@@ -6,6 +6,8 @@
 #[cfg(test)]
 mod after_restart;
 #[cfg(test)]
+mod ahead_unchecked;
+#[cfg(test)]
 mod clock_reads;
 #[cfg(test)]
 mod crash_law;

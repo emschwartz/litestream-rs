@@ -177,6 +177,9 @@ pub(super) struct Kept {
     pub(super) ahead_check: AheadCheck,
     /// The standing ahead-of-WAL verdict, journalled, while its restore point is kept.
     pub(super) ahead: Option<lsr_journal::Ahead>,
+    /// The standing notice that an owed ahead-of-WAL check could not be made, journalled, for
+    /// its window (`docs/decisions.md` D106).
+    pub(super) unchecked: Option<lsr_journal::Unchecked>,
     /// What the next tick tells the operator about the verdict, before anything else runs.
     pub(super) ahead_notice: Option<super::AheadNotice>,
     /// The confirmed floor for the configured destination, journalled (`super::floor`).
@@ -215,6 +218,7 @@ impl Kept {
             read_lock_violations: 0,
             ahead_check: AheadCheck::No,
             ahead: None,
+            unchecked: None,
             ahead_notice: None,
             floor: None,
         }
@@ -255,6 +259,7 @@ impl Kept {
             read_lock_violations,
             ahead_check,
             ahead,
+            unchecked,
             ahead_notice,
             floor,
         } = self;
@@ -290,6 +295,7 @@ impl Kept {
             read_lock_violations: *read_lock_violations,
             ahead_check: *ahead_check,
             ahead: *ahead,
+            unchecked: *unchecked,
             ahead_notice: *ahead_notice,
             floor: *floor,
         }
@@ -658,6 +664,14 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "ahead_notice",
         Keep::Ephemeral("what the next tick says; a boot that finds the verdict says it again"),
+    ),
+    (
+        "unchecked",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "an owed ahead-of-WAL check given up: the notice stands for its window across \
+             restarts (docs/decisions.md D106)",
+        ),
     ),
     (
         "floor",

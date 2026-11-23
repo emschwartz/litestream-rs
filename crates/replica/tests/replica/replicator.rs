@@ -267,6 +267,13 @@ fn health_compares_the_local_and_replica_positions() {
     faulty.fail_uploads.store(false, Ordering::SeqCst);
     clock.advance(POLL);
     let full = moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    // The sizes are the files' own, read while the thread is parked.
+    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
+    assert!(parked.is_none());
+    let health = replicator.health();
+    let wal = site.db.with_file_name("app.db-wal");
+    assert_eq!(health.db_bytes, std::fs::metadata(&site.db).unwrap().len());
+    assert_eq!(health.wal_bytes, std::fs::metadata(&wal).unwrap().len());
     assert!(full.wal_bytes > 0 && full.db_bytes > 0, "{full:?}");
     // New writes: seen at the next poll, then replicated.
     site.commit(3);
@@ -315,6 +322,20 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
     // That checkpoint emptied the WAL; a commit gives SQLite a new one to replicate from.
     site.commit(1);
     drop(replicator);
+    // A start whose first boot panics has no engine to measure, yet counts what staging
+    // holds past the replica, which is every staged file.
+    faulty.panic_always.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, _clock) = fake();
+    let panicked = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    wait(&panicked, |h| h.counters.panics > 0);
+    let again = panicked.stop(Duration::ZERO).wait();
+    assert!(
+        matches!(again, Stopped::DeadlineReached { staged_not_uploaded: n, .. } if n == staged_not_uploaded),
+        "{again:?}"
+    );
+    drop(panicked);
+    faulty.panic_always.store(false, Ordering::SeqCst);
     let (runtime, _clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert_eq!(booted(&next), Booted::Booted);
@@ -393,6 +414,40 @@ fn a_stopped_replicator_reports_its_cause() {
         stopped(&replicator),
         Stopped::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
+}
+
+/// A database page changed in the file without a WAL frame degrades syncing; the operator's
+/// acceptance of the file as it is ends the degradation.
+#[test]
+fn accepting_the_database_pages_ends_a_page_mismatch() {
+    use std::os::unix::fs::FileExt as _;
+    let site = Site::new();
+    site.commit(20);
+    site.app
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+        .unwrap();
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    wait(&replicator, caught_up);
+    // Page 3 lives in the database file alone: the WAL is empty since the checkpoint.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&site.db)
+        .unwrap();
+    file.write_all_at(&[0xEE; 4096], 2 * 4096).unwrap();
+    replicator.request_snapshot();
+    let mismatched = |h: &lsr_replica::Health| {
+        h.task(Task::Sync)
+            .is_some_and(|d| matches!(d.cause, DegradedCause::DatabasePageMismatch { .. }))
+    };
+    wait(&replicator, mismatched);
+    replicator.accept_database_pages();
+    replicator.request_snapshot();
+    wait(&replicator, |h| h.task(Task::Sync).is_none());
+    assert!(matches!(
+        stopped_moving(&replicator, &clock, POLL),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// An operator's snapshot is staged at once, with no new commit, and reported as an event.
@@ -479,6 +534,17 @@ fn a_reader_guard_holds_off_truncate() {
     assert_eq!(checkpoints(&seen, CheckpointMode::Truncate), 0, "{seen:?}");
     drop(guard);
     reader.execute_batch("COMMIT").unwrap();
+    // With the guard gone the held-off TRUNCATE runs, and the write lock its boundary
+    // snapshot took is released: the application commits again at once.
+    let mut truncates = 0;
+    for _ in 0..5 {
+        clock.advance(POLL);
+        let now = clock.now();
+        wait(&replicator, |h| h.reported_at >= now);
+        truncates += checkpoints(&events.drain(), CheckpointMode::Truncate);
+    }
+    assert!(truncates > 0, "no TRUNCATE once the guard was dropped");
+    site.commit(1);
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
@@ -526,6 +592,18 @@ fn verify_and_restore_if_missing_use_the_shared_store() {
     let to = site.path("if-missing");
     assert!(restore_if_missing(&*store, &to).unwrap().is_some());
     assert_same(&site.app, &to);
+    // A target that cannot be looked at is not missing: here a path under a regular file.
+    let under_a_file = to.join("db");
+    let refused = restore_if_missing(&*store, &under_a_file);
+    assert!(
+        matches!(
+            refused,
+            Err(lsr_replica::RestoreError::Destination(
+                lsr_replica::local::CreateError::Inspect { .. }
+            ))
+        ),
+        "{refused:?}"
+    );
 }
 
 /// A panic inside a tick is caught: the engine is rebuilt after the wait and boots again,
@@ -596,16 +674,26 @@ fn an_app_checkpoint_is_counted_and_reported() {
         Some(AppNotice::Checkpointing { ran: 1 })
     );
     assert!(!health.is_degraded(), "a notice, not a degraded state");
-    let seen = events.drain();
+    // Reported once: later turns that see the same total say nothing more.
+    for _ in 0..3 {
+        clock.advance(POLL);
+        let now = clock.now();
+        wait(&replicator, |h| h.reported_at >= now);
+    }
+    let reports: Vec<_> = events
+        .drain()
+        .into_iter()
+        .filter(|event| matches!(event, Event::AppCheckpoint { .. }))
+        .collect();
     assert!(
-        seen.iter().any(|event| matches!(
-            event,
-            Event::AppCheckpoint {
+        matches!(
+            reports.as_slice(),
+            [Event::AppCheckpoint {
                 seen: AppCheckpoint::Backfilled { .. },
                 total: 1
-            }
-        )),
-        "{seen:?}"
+            }]
+        ),
+        "{reports:?}"
     );
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
@@ -805,9 +893,42 @@ fn a_thread_that_dies_is_reported_gone() {
     clock.advance(POLL);
     let health = wait(&replicator, |h| h.phase == Phase::Gone(Gone::ThreadDied));
     assert_eq!(health.phase, Phase::Gone(Gone::ThreadDied));
+    // The file is free for the next replicator at once, without a stop of the dead one.
+    let (runtime, _clock) = fake();
+    let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert_eq!(stopped(&replicator), Stopped::Gone(Gone::ThreadDied));
     assert_eq!(booted(&replicator), Booted::Gone(Gone::ThreadDied));
-    // The file is free for the next replicator.
+    assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    site.assert_restores(&*site.store());
+}
+
+/// A sink whose drop panics: the thread drops it with the engine, after the loop and its exit
+/// guard are done.
+struct ExplodesOnDrop;
+
+impl EventSink for ExplodesOnDrop {
+    fn event(&mut self, _event: &Event) {}
+}
+
+impl Drop for ExplodesOnDrop {
+    fn drop(&mut self) {
+        panic!("the sink's drop panics");
+    }
+}
+
+/// A thread that dies after its loop ended, with no outcome published, is still seen gone by
+/// every handle, and the next replicator of the file takes its place.
+#[test]
+fn a_thread_that_dies_without_an_outcome_is_reported_gone() {
+    let site = Site::new();
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    replicator.set_events(Box::new(ExplodesOnDrop));
+    site.commit(1);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    assert_eq!(stopped(&replicator), Stopped::Gone(Gone::ThreadDied));
+    assert_eq!(replicator.health().phase, Phase::Gone(Gone::ThreadDied));
     let (runtime, _clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert!(matches!(stopped(&next), Stopped::Drained { .. }));
@@ -874,5 +995,26 @@ fn a_retry_s_backoff_is_waited_out_by_moving_the_clock() {
         health.counters.uploads > start.counters.uploads,
         "{health:?}"
     );
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+}
+
+/// A replicator prints its database and state, and a runtime its clock: what a panic message
+/// or a log of either shows.
+#[test]
+fn a_replicator_and_its_runtime_print_what_they_hold() {
+    let site = Site::new();
+    let (runtime, _clock) = fake();
+    let printed_runtime = format!("{runtime:?}");
+    assert!(
+        printed_runtime.starts_with("Runtime { now: "),
+        "{printed_runtime}"
+    );
+    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let printed = format!("{replicator:?}");
+    assert!(
+        printed.starts_with("Replicator { shared: Shared { database: "),
+        "{printed}"
+    );
+    assert!(printed.contains("state: "), "{printed}");
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }

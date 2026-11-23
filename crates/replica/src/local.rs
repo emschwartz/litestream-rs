@@ -491,7 +491,7 @@ impl FileSink {
         // to open it; a file that is no longer the scratch is not ours to use.
         let same = fs::metadata(&scratch).is_ok_and(|named| {
             file.metadata()
-                .is_ok_and(|held| named.dev() == held.dev() && named.ino() == held.ino())
+                .is_ok_and(|held| (named.dev(), named.ino()) == (held.dev(), held.ino()))
         });
         if !same {
             return Err(CreateError::RestoreInProgress(scratch));

@@ -83,10 +83,3 @@ pub fn seen_or(
         None => Err(NeverGotThere(Box::new(replicator.health()))),
     }
 }
-
-/// Whether the thread has parked on the clock as it reads now: it has done everything the
-/// current time asks of it, so a health it reports reflects every commit made before.
-#[must_use]
-pub fn settled(clock: &FakeClockHandle) -> bool {
-    clock.seen_by_park() == Some(clock.now())
-}
