@@ -1049,6 +1049,12 @@ impl Runner {
         {
             self.liveness.note_in_tick(Justifier::PositionUnproven);
         }
+        // A boot that continues short of the committed end (a commit it never staged) holds a
+        // position no read transaction pinned, so a restart before its first sync is a change
+        // it cannot follow.
+        if matches!(event, Event::Booted { cause: None }) && self.w.staging_behind_newest_commit() {
+            self.liveness.note_in_tick(Justifier::PositionUnproven);
+        }
         let (cause, at_boot) = match event {
             Event::Booted { cause: Some(cause) } => (cause, true),
             Event::Resnapshot(cause) => (cause, false),
