@@ -78,6 +78,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D122 | Run the simulator's histories on real SQLite: how, when the world draws page-level commits of arbitrary bytes? | A backend in lsr-sqlite behind the sim's seam; each drawn page a row, SQLite decides the pages, the world reads back what changed through SQLite | Claude (sim-real-sqlite), **delegated** | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
 | D162 | `databases` with a `dir` entry: print the working directory, as Go does? | No: print the entry's directory, unscanned | Claude (dropin-readonly), **delegated** | 2026-11-23 | open to owner review |
+| D140 | What are the simulator's two checks against forcings called, now that neither is a liveness property? | `needless_snapshot` (efficiency) and `oracle::lost_restore_points` (safety), judged against `forcing::Forcing` | Claude (split-liveness), **delegated**; split approved by the owner | 2026-11-23 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -175,7 +176,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
   - At 4096 pending tokens the sync step holds its position; it no longer stages a file that is certain to be refused and replaced by a snapshot (#108).
   - After boot drops an unreadable staged file, the engine stages again from the WAL when the WAL still holds the range (#108).
 - **Cost accepted:** one extra GET at boot in the first case.
-- **Revisit if:** the liveness oracle still shows snapshots with no real doubt behind them.
+- **Revisit if:** the needless-snapshot check still shows snapshots with no real doubt behind them.
 - **Links:** #108 (merged), D12.
 
 ## D12. Boot finds replica files it cannot vouch for
@@ -454,7 +455,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Measured:** 1000 swarm seeds per plant (seeds 1000001 to 1001000, the mixed weights), with and without them. A plant counted as found when a seed failed with it and not on the clean tree. `sim-read-lock-retake` was found (seed 6) either way; `wal-barrier` at seed 1 either way, by the direct check that a staged file's WAL frames are durable, with no crash needed. Neither tree found the issue's two plants, the sequence bumped before the TRUNCATE and the barrier released before the seal, nor `stamp-before-committed-read`.
 - **Why:** the engine persists only at store calls. Every SQLite state a crash between two seam calls leaves (the barrier dropped, a checkpoint done and the bump not, a truncated WAL with no header) is one another process can also produce while the engine is down, and the simulator already draws those. A torn database file inside a checkpoint is masked by the WAL, which SQLite synced before it copied.
 - **Cost accepted:** a defect that only a crash between two seam calls exposes would go unseen. None is known.
-- **What it found:** a gap in the liveness oracle: a bucket rolled back past its only transaction justifies a first sync (sim `a_rollback_that_empties_the_replica_justifies_a_first_sync`).
+- **What it found:** a gap in the needless-snapshot check: a bucket rolled back past its only transaction justifies a first sync (sim `a_rollback_that_empties_the_replica_justifies_a_first_sync`).
 - **Revisit if:** the engine persists anything outside a store call, or a defect turns up between two calls into SQLite.
 - **Links:** #127 (item C).
 
@@ -782,6 +783,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost if wrong:** a script that parsed Go's output and relied on the working directory appearing for a `dir` entry sees the directory instead. Scanning the directory and printing each database it holds was the other choice; it can be added later without breaking this one, since a `dir` entry's row then names its directory.
 - **Evidence:** `compat::go_and_lsr_list_the_same_databases_and_files` compares the two outputs with Go's working-directory row mapped to the entry's directory, and every other line byte for byte; `cli::databases_lists_each_entry_without_scanning_a_dir`.
 - **Links:** `docs/BEHAVIOR.md` CFG-44; `crates/cli/src/run.rs` (`databases_command`).
+
+## D140. The simulator's checks against forcings, renamed (delegated)
+
+- **Question:** `crates/sim/src/liveness.rs` held a snapshot check, a give-up check and the window of faults both judge against. Neither check is a liveness property: one fails a run that pays for a needless full upload, the other a run that lost staged history. The owner approved splitting and renaming it; what names?
+- **Choice:** the window is `forcing` (`Forcing`, was `Justifier`; `ForgottenAt`; `noted_by_op`, `noted_by_opts`; state `Forcings`). The efficiency check is `needless_snapshot` (`Violation::NeedlessSnapshot`, was `UnjustifiedSnapshot`; table `forced_by`, was `justifies`). The safety check joins the other safety judges as `oracle::lost_restore_points` (`Violation::UnforcedGiveUp`, was `UnjustifiedGiveUp`; table `FORCES_GIVE_UP`). Coverage keys follow: `needless_snapshot.forced.*` and `.owed`, `lost_restore_points.counted`, and every witness-cost count under `pending_unprovable.*`. "Liveness" stays only on the stuck-engine check (`StuckRetrying`, `stall_liveness`).
+- **Delegated:** names chosen by the agent doing the split, reviewed by a Fable agent, which rejected `window` (the crate already has retention and idle windows), `Justifier` (a run start or an operator's request justifies nothing), and `DroppedHistory` ("history" is taken by `src/history.rs` and `lsr-history`).
+- **Cost if wrong:** names only; behaviour is unchanged. A reach baseline or script that matched the old `liveness.*` keys or violation texts needs the new ones.
+- **Evidence:** the move carries every test; the lsr-sim suite and the planted bugs the checks kill pass as before.
+- **Links:** `crates/sim/src/forcing.rs`, `crates/sim/src/needless_snapshot.rs`, `crates/sim/src/oracle/lost_restore_points.rs`.
 
 ## Unverified, not recorded
 
