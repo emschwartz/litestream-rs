@@ -25,6 +25,16 @@
 //! the `-wal` file is opened with `std::fs`: SQLite takes no POSIX lock on it. The crate's
 //! `clippy.toml` disallows the `std::fs` opens; the WAL open is the one reasoned exception.
 //!
+//! The application is held to the same rule, and to one more: **one SQLite library per
+//! process.** Its connections must use the copy of SQLite this crate links (the one bundled by
+//! `libsqlite3-sys`). Each copy keeps its own table of the POSIX locks it holds, so a second
+//! copy (a system SQLite through pkg-config, SQLCipher, a loadable-extension build) cannot see
+//! this copy's locks and drops them when it closes a descriptor on the same file: SQLite's own
+//! "multiple copies of SQLite linked into the same application" corruption case. The `identity`
+//! and `shm` modules also read the bundled copy's file and wal-index layouts directly. Nor may
+//! the application close a descriptor it opened on the database file or its `-shm` while its
+//! connections are open, for the reason above.
+//!
 //! Errors inside the trait methods are core's `SourceError`: `Busy` for a contended lock or a
 //! wal-index header a writer is mid-way through (retry), `DiskFull`, `Short` for a page past the
 //! end of the file, `ReadTxLost` when the read transaction cannot be retaken (the next call
@@ -34,7 +44,8 @@
 //! later sync until a TRUNCATE checkpoint completes), and `Io` for the rest.
 //!
 //! [`app_connection`] and [`check_app_connection`] set up and check the application's own connections
-//! (`SQLITE_FCNTL_PERSIST_WAL` on, `wal_autocheckpoint = 0`, PLAN section 6).
+//! (`wal_autocheckpoint = 0`, PLAN section 6; never `SQLITE_FCNTL_PERSIST_WAL`, which only the
+//! replicator's own two connections set, see [`app_connection`]).
 //! [`app_connection_for`] first checks that the connection opens a given [`DatabaseFile`]
 //! (device and inode), and [`app_connection_raw`] does the same on a raw handle, for an application
 //! whose connections are not rusqlite's; it is here because only this crate may use `unsafe`.

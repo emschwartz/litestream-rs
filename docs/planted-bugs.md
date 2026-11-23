@@ -17,6 +17,12 @@ that caught it must fail.
   comment added) must report `SURVIVED` and `canary-fatal` (the wrong CRC table) must report
   `killed`. Before every verdict the runner also checks that the scratch tree is at this checkout's
   HEAD. A canary that misreports, or a tree at another commit, fails the run.
+- One run at a time. The scratch tree and its target dir are shared, so a run first takes a lock on
+  `target/planted-bugs/lock` and waits for any holder (`--no-wait` refuses instead, with exit 2).
+  Every build and test process inherits the lock, so a run killed mid-way holds it until the last
+  process it left exits; a new run never applies its patches under an old run's cargo or tests.
+  Each build and test command runs in a session of its own, emptied when it ends or times out, so
+  a test's child that a planted bug never stopped does not outlive it (Linux, through `/proc`).
 - `just planted-bugs-unaided [seeds]` asks a different question: with no named test run, how many
   swarm seeds does the simulator need to fail on each plant? It prints a table (seeds to first
   failure, or `none`); a plant no seed finds is a listed generator gap, not a failure.

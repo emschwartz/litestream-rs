@@ -13,14 +13,17 @@
 //! that exists in one file, both or neither; the two file-path variables, pointing at a file
 //! or at nothing; and files with key spellings in any case, spaces, comments, blank values,
 //! repeated keys and sections, `[profile x]` in either file, and lines that are not INI.
-//! Profiles that need a network service or a subprocess (`role_arn`, `credential_process`,
-//! SSO) are the known gap of CFG-7, asserted as a gap in `go_resolves_what_rust_does_not_build`.
+//! Profiles that need a network service or a subprocess are the roles differential's
+//! (`dropin_roles`); the ones litestream-rs does not build yet (an assumed role, SSO) are the
+//! known gap of CFG-7, asserted as a gap in `go_resolves_what_rust_does_not_build`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use lsr_compat::{Dump, DumpEnv, go_dump, go_dump_binary, rust_dump};
+use lsr_compat::{
+    Answer, Answers, Dump, DumpEnv, FakeAws, Roles, TokenAnswer, go_dump, go_dump_binary, rust_dump,
+};
 use lsr_core::needs::{Resource, must};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
@@ -488,9 +491,9 @@ fn go_and_rust_resolve_the_same_credentials() {
     }
 }
 
-/// The known gap (CFG-7): a profile whose credentials come from a subprocess or an assumed
-/// role. Go's SDK runs `credential_process`; litestream-rs builds no such source and finds no
-/// keys. Asserted as a difference, so closing the gap, or Go dropping the source, shows here.
+/// The known gap (CFG-7): a profile whose credentials come from an assumed role over another
+/// profile's keys. Go's SDK calls STS `AssumeRole`; litestream-rs refuses the profile as not
+/// built yet (issue #176). Asserted as a difference, so closing the gap shows here.
 #[test]
 #[ignore = "runs the pinned Go dumper; just compat"]
 fn go_resolves_what_rust_does_not_build() {
@@ -503,17 +506,30 @@ fn go_resolves_what_rust_does_not_build() {
     std::fs::create_dir_all(home.join(".aws")).unwrap();
     std::fs::write(
         home.join(".aws").join("config"),
-        "[default]\ncredential_process = printf '{\"Version\":1,\"AccessKeyId\":\"proc-id\",\"SecretAccessKey\":\"proc-secret\"}'\n",
+        "[default]\nrole_arn = arn:aws:iam::000000000000:role/fake\nsource_profile = base\n\
+         [profile base]\naws_access_key_id = base-id\naws_secret_access_key = base-secret\n",
     )
     .unwrap();
     let config = base.join("litestream.yml");
     std::fs::write(
         &config,
-        "dbs:\n  - path: /data/app.db\n    replica:\n      url: s3://bucket/prefix\n",
+        "dbs:\n  - path: /data/app.db\n    replica:\n      url: s3://bucket/prefix\n      region: us-east-1\n",
     )
     .unwrap();
+    let fake = FakeAws::start(Answers {
+        sts: Answer::Credentials,
+        container: Answer::Credentials,
+        container_token: None,
+        imds_token: TokenAnswer::Token,
+        imds_roles: Roles::One,
+        imds: Answer::Credentials,
+    })
+    .unwrap();
     let env = DumpEnv {
-        vars: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+        vars: BTreeMap::from([
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("AWS_ENDPOINT_URL_STS".to_owned(), fake.url()),
+        ]),
         home,
         cwd: base.clone(),
         credentials: true,
@@ -524,13 +540,21 @@ fn go_resolves_what_rust_does_not_build() {
         Dump::Runs(dbs) => dbs
             .first()
             .and_then(|db| db.replica.credentials.clone())
-            .map(|c| (c.access_key_id, c.error.is_empty())),
+            .map(|c| (c.access_key_id, c.error)),
         Dump::Refused(_) => None,
     };
-    assert_eq!(
-        key(&go_out),
-        Some(("proc-id".to_owned(), true)),
+    let go_key = key(&go_out);
+    assert!(
+        go_key
+            .as_ref()
+            .is_some_and(|(id, error)| id == "sts-id" && error.is_empty()),
         "{go_out:?}"
     );
-    assert_eq!(key(&rust_out), Some((String::new(), false)), "{rust_out:?}");
+    let rust_key = key(&rust_out);
+    assert!(
+        rust_key.as_ref().is_some_and(
+            |(id, error)| id.is_empty() && error.contains("not built in litestream-rs yet")
+        ),
+        "{rust_out:?}"
+    );
 }

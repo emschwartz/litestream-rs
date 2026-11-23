@@ -8,9 +8,10 @@
 //! - in the credentials file, a `[profile x]` section is dropped;
 //! - the credentials file's sections are laid over the config file's: a new
 //!   section is taken whole; a shared one takes the credentials file's section
-//!   error (which may clear the config file's), and its key id, secret and
-//!   session token only when the credentials file holds both the id and the
-//!   secret.
+//!   error (which may clear the config file's), its key id, secret and session
+//!   token only when the credentials file holds both the id and the secret, and
+//!   each other key the chain reads (`role_arn`, `credential_process`, ...) that
+//!   it holds.
 //!
 //! The SDK does this at load, so its failures stop the load whatever source would
 //! have given credentials: a profile named by a non-empty `AWS_PROFILE` that no
@@ -76,9 +77,32 @@ pub(super) fn merge(mut config: Sections, credentials: Sections) -> Sections {
             }
             dst.keys_from = src.keys_from.clone();
         }
+        for key in MERGED_KEYS {
+            if src.has(key) {
+                dst.set(key, src.string(key));
+            }
+        }
     }
     config
 }
+
+/// The keys `mergeSections` copies one by one from the credentials file over the config
+/// file's (`stringKeys` in `config/shared_config.go`), those the chain reads.
+const MERGED_KEYS: [&str; 13] = [
+    "role_arn",
+    "source_profile",
+    "credential_source",
+    "external_id",
+    "role_session_name",
+    "region",
+    "credential_process",
+    "web_identity_token_file",
+    "sso_session",
+    "sso_account_id",
+    "sso_region",
+    "sso_role_name",
+    "sso_start_url",
+];
 
 /// The chosen profile in the merged sections.
 pub(super) fn choose(mut merged: Sections, profile: &str) -> Profile {

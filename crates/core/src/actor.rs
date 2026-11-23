@@ -115,6 +115,7 @@ use crate::maintain::{
 };
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
+use crate::publish::Why;
 use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, Recovered, WalView,
     newest_level_zero, newest_replica_level_zero, read_header, recover,
@@ -1532,6 +1533,7 @@ impl Actor {
         let probes = Probes {
             prev: FrameCheck::Miss(Miss::Truncated),
             stale_next: false,
+            rechained: false,
         };
         let source = PositionSource::Running(&position, probes);
         Ok(
@@ -1896,7 +1898,7 @@ impl Actor {
             .filter(|_| more)
             .map_or(bound, |key| key.range().max());
         if !keys.is_empty()
-            && let Err(err) = env.staging.delete(&keys).await
+            && let Err(err) = crate::publish::remove_staged(env.staging, &keys).await
         {
             return Some(self.fault(Task::Prune, Fault::from_staging(&err), now));
         }
@@ -2027,7 +2029,7 @@ impl Actor {
     /// be listed (`crate::watch`). One that is not is read: gone, the replica
     /// lost files this process confirmed, and the uploader lists again (or
     /// the engine stops, as configured); found, the listing lags and nothing
-    /// is decided, so the watch stands for the next listing. With nothing
+    /// is planned from it, so the watch stands for the next listing. With nothing
     /// missing the watch moves to this listing.
     async fn watch_unit<R: ObjectStore>(
         &mut self,
@@ -2042,7 +2044,7 @@ impl Actor {
             return None;
         };
         match remote.read(&key, 0, ReadLen::or_chunk(1)).await {
-            Ok(_) => None,
+            Ok(_) => Some(self.list_again_later(now)),
             Err(StoreError::NotFound { .. }) => {
                 Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
             }
@@ -2080,7 +2082,7 @@ impl Actor {
         mark!(Maint4);
         // Watched no more, whether the delete goes through or not.
         self.engine.maintain.watch = RegressionWatch::forget(self.engine.maintain.watch, key);
-        if let Err(err) = remote.delete(&[key]).await {
+        if let Err(err) = crate::publish::remove_one(remote, key, Why::RottenCovered).await {
             return Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now));
         }
         // The listing no longer holds: the next tick lists and reads back again.
@@ -2228,6 +2230,21 @@ impl Actor {
         }
     }
 
+    /// A snapshot the store took: the next listing must show it, so a listing that hides it
+    /// plans nothing (`crate::regression_watch`), and no second snapshot takes its key.
+    fn snapshot_written(&mut self, info: FileInfo, now: Timestamp, created_at_read: u64) -> Tick {
+        self.maintained(now);
+        self.engine.maintain.watch = RegressionWatch::made(self.engine.maintain.watch, info.key);
+        let event = MaintainedEvent::Snapshot(info);
+        self.ran(
+            Event::Maintained {
+                event,
+                created_at_read,
+            },
+            now,
+        )
+    }
+
     /// A level-9 snapshot of a fresh proof. A sync that staged a file first
     /// ends the tick: the upload runs before the snapshot is due again.
     async fn snapshot_job<
@@ -2298,28 +2315,30 @@ impl Actor {
             .state
             .record_snapshot(now, written.as_ref().err().map(|failed| &failed.fault));
         match written {
-            Ok(info) => {
-                self.maintained(now);
-                let event = MaintainedEvent::Snapshot(info);
-                self.ran(
-                    Event::Maintained {
-                        event,
-                        created_at_read,
-                    },
-                    now,
-                )
-            }
-            Err(SnapshotFailed { fault, key }) => {
-                // The store took the commit and then said the object is not
-                // what was sent: it is listed, so it goes, as a rejected
-                // compaction output does.
-                if fault.leaves_bad_snapshot() && env.remote.delete(&[key]).await.is_err() {
-                    self.engine.maintain.state.distrust_snapshot(key);
-                }
-                let waiter = self.job_waiter(job, now);
-                self.fault(waiter, fault, now)
-            }
+            Ok(info) => self.snapshot_written(info, now, created_at_read),
+            Err(failed) => self.snapshot_failed(env.remote, job, failed, now).await,
         }
+    }
+
+    /// A snapshot that did not publish. When the store took the commit and
+    /// then said the object is not what was sent, it is listed, so it goes,
+    /// as a rejected compaction output does.
+    async fn snapshot_failed<R: ObjectStore>(
+        &mut self,
+        remote: &R,
+        job: &Job,
+        SnapshotFailed { fault, key }: SnapshotFailed,
+        now: Timestamp,
+    ) -> Tick {
+        if fault.leaves_bad_snapshot()
+            && crate::publish::remove_one(remote, key, Why::RejectedSnapshot)
+                .await
+                .is_err()
+        {
+            self.engine.maintain.state.distrust_snapshot(key);
+        }
+        let waiter = self.job_waiter(job, now);
+        self.fault(waiter, fault, now)
     }
 
     /// Maintenance lists again when the sync task's wait ends, or after the
@@ -2482,7 +2501,8 @@ impl BootGate {
     /// it already. That is `local`, capped at the replica's newest key: the
     /// confirmed `tip`, or a newer level-0 key the listing judged torn (it may
     /// be this engine's own upload, read wrong). Pending files above every
-    /// replica key vouch for nothing there, so a forged one never raises it.
+    /// replica key vouch for nothing there, so one put back from a backup
+    /// never raises it.
     async fn vouch<R: ObjectStore>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
         let Takeover::Vouch(record) = self.takeover else {
             return Ok(());

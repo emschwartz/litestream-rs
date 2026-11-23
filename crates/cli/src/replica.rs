@@ -50,10 +50,10 @@ pub fn remote<T: Transport>(store: S3Store<T>) -> Remote<T> {
 /// [`CliError::Credentials`], or [`CliError::S3Config`] when the endpoint
 /// cannot address the bucket.
 pub fn open_s3(config: S3Config) -> Result<Remote, CliError> {
-    let credentials = CredentialChain::from_process()
+    let resolved = CredentialChain::from_process()
+        .with_region(config.region().as_str())
         .resolve()
-        .map_err(CliError::Credentials)?
-        .into_credentials();
-    let store = S3Store::new(config, credentials).map_err(CliError::S3Config)?;
+        .map_err(CliError::Credentials)?;
+    let store = S3Store::resolved(config, &resolved).map_err(CliError::S3Config)?;
     Ok(remote(store))
 }

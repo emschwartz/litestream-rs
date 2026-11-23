@@ -25,8 +25,8 @@ use lsr_core::{
     FileInfo, FileKey, Level, ObjectStore, PageLimit, ReadLen, RestoreError, RestoreOptions,
     RestoreTarget, Restored, StoreError, cmp_range, restore, restore_with,
 };
-use lsr_local::FileSink;
 use lsr_ltx::Txid;
+use lsr_replica::local::FileSink;
 use lsr_store_s3::{BucketName, Endpoint, Prefix, S3Config, S3Credentials, S3Store, SecretString};
 
 use crate::error::CompatError;

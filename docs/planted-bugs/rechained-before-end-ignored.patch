@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/recover.rs b/crates/core/src/recover.rs
+--- a/crates/core/src/recover.rs
++++ b/crates/core/src/recover.rs
+@@ -972,7 +972,7 @@
+         },
+         PositionSource::Boot(NewestStagedFile::Unreadable { .. }) => FrameState::Fresh,
+         PositionSource::Running(_, _) if at_start => FrameState::Fresh,
+-        PositionSource::Running(_, probes) if probes.rechained => FrameState::Rewritten,
++        PositionSource::Running(_, probes) if probes.rechained && probes.stale_next => FrameState::Rewritten,
+         PositionSource::Running(position, probes) => match probes.prev {
+             FrameCheck::Miss(miss) => FrameState::Miss(miss),
+             FrameCheck::Frame(frame)

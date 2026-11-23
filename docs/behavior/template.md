@@ -29,7 +29,7 @@ Rows that earn none of the three carry one of these instead:
 | **known wrong** | A defect is open. Section 6 has it |
 | **accepted, undetected** | A stated limit of the design |
 
-Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "local", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs.toml` and re-planted nightly.
+Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs.toml` and re-planted nightly.
 
 **Tally of the 176 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
 
@@ -206,7 +206,7 @@ Evidence: the planner's self-check runs on every job (`retention` in `core/src/m
 
 ## 2. Fault model
 
-Scope has three values here. **In**: the engine is meant to keep G1 to G4 through the fault and a rig produces it. **Out**: excluded on purpose, with the reason given; an operator must prevent it. **Gap**: the fault is real, the engine is meant to cope or nobody decided, and no rig produces it. v1 filed several gaps as "out". "Rig" names what produces the fault in a test; "rig: none" is itself a finding.
+Scope has three values here. **In**: the engine is meant to keep G1 to G4 through the fault and a rig produces it. **Out**: excluded on purpose, with the reason given; an operator must prevent it. Deliberate forgery of local or replica files is out (D131): files written to pass the engine's checks. **Gap**: the fault is real, the engine is meant to cope or nobody decided, and no rig produces it. v1 filed several gaps as "out". "Rig" names what produces the fault in a test; "rig: none" is itself a finding.
 
 The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, other-process reader and checkpoint, crash, power loss, lying WAL sync, store fault, environment fault, clock jump, shutdown, snapshot request, staging damage, WAL damage, second writer, remote rollback, dropped created-at), `FaultShape` (error, error after publish, size or checksum mismatch, corrupt publish, flip a byte on read, fail at a rate), and `EnvFault`. A store fault fires at one call index or at a rate; **no shape holds a fault until a later step**, which is why lasting conditions have no S mark. Anything not in that list has no simulator rig.
 
@@ -234,7 +234,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 |---|---|---|---|
 | The application's own automatic or manual checkpoints | In | Counted and reported as a notice; they cannot pass the engine's read mark (RUN-22) | sim `app_autocheckpoints`; sim `rules_match_sqlite` compares the model with real SQLite |
 | The application commits (growing the database or not), begins or ends a reader, checkpoints in any mode or deletes the WAL between two of the engine's calls into SQLite inside one tick | In | The read-lock proofs (RUN-7, CKPT-1): what lands before a committed read is in the step, what lands after waits for the next | sim `Op::AppInTick` in swarm mixes (`sim/src/sqlite/in_tick.rs`), at any call of the tick, reads included; `Op::CommitInTick` for the one commit before the checkpoint's barrier |
-| Another process checkpoints while the engine is down | In | BOOT-7, BOOT-8 | sim `app_checkpoint_while_down`; sqlite `the_apps_last_close_while_the_replicator_is_down_keeps_or_deletes_the_wal` |
+| Another process checkpoints while the engine is down | In | BOOT-7, BOOT-8 | sim `app_checkpoint_while_down`; sqlite `the_apps_last_close_while_the_replicator_is_down_deletes_the_wal` |
 | WAL deleted, truncated or its header torn | In | BOOT-7, RUN-5, RUN-6, RUN-9 | sim `wal_deleted_while_down`, `wal_header_torn`, `wal_truncated_externally_under_lock`, `wal_unlinked_mid_run` |
 | WAL rewritten with other bytes in the same generation | In | BOOT-9, BOOT-10 | sim `wal_regrown_same_salts_diff_bytes`, `wal_rewritten_same_length`; core `a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued` |
 | A committed WAL frame flips a bit | In | RUN-4 | sim `bit_flip_in_committed_frame`, `bit_flip_in_committed_frame_healed` |
@@ -242,7 +242,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Journal mode changed away from WAL while the engine runs | In by SQLite's own rule | The engine's read transaction blocks it | sim `our_reader_blocks_leaving_wal_mode` |
 | Journal mode changed away from WAL while the engine is down | In | Start puts the database back in WAL mode, or refuses with `NotWal` (CFG-4); the first sync is a snapshot | **untested** end to end |
 | The database file replaced by another file at the same path | Partly | While running: the WAL's device and inode no longer match, `wal_unlinked` (RUN-6). While down: a snapshot, since the WAL cannot continue | replica `a_database_replaced_after_a_panic_is_degraded_and_not_reopened`. Inode number reuse making a different file look the same: **unknown** |
-| A process that closes a file descriptor on the database inside the application's process | Out. Reason: POSIX semantics give a library no way to see or stop it; it is an embedding rule | POSIX locks for the whole process drop. Not detected | None. The embedding rules forbid it (`README`, library section) |
+| A process that closes a file descriptor on the database inside the application's process | Out. Reason: POSIX semantics give a library no way to see or stop it; it is an embedding rule | POSIX locks for the whole process drop. Not detected | None. The embedding rules forbid it (`crates/sqlite/src/lib.rs`, module doc) |
 | `synchronous=NORMAL` (the usual WAL setting) and power loss | In | SQLite leaves committed frames unsynced until its next checkpoint, so power loss takes back acknowledged commits: SQLite's contract. The engine fsyncs the WAL before staging, so the replica does not run ahead on an honest disk; after the loss the boot continues or snapshots by the boot rows. The LazyFS rig sees the database lose acknowledged commits in most runs | LazyFS; sqlite `power_loss_at_each_wal_sync_loses_no_acknowledged_transaction` |
 | `synchronous=OFF` | Out. Reason: SQLite itself promises no crash consistency, so there is no committed history to be faithful to | Not detected (A10) | None |
 

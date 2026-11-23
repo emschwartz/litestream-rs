@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/chain/remote.rs b/crates/store-s3/src/chain/remote.rs
+index 444ee162..0b59b9b5 100644
+--- a/crates/store-s3/src/chain/remote.rs
++++ b/crates/store-s3/src/chain/remote.rs
+@@ -268,7 +268,7 @@ fn allowed(text: &str) -> Result<(), CredentialError> {
+     let host = url.host_str().filter(|h| !h.is_empty()).ok_or_else(|| {
+         refuse("unable to parse host from local HTTP cred provider URL".to_owned())
+     })?;
+-    if url.scheme() != "http" {
++    if url.scheme() != "ftp" {
+         return Ok(());
+     }
+     let bare = host.trim_start_matches('[').trim_end_matches(']');
