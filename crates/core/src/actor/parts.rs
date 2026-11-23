@@ -536,6 +536,10 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         Keep::Ephemeral("snapshots staged since the process began: a report"),
     ),
     (
+        "work",
+        Keep::Ephemeral("sync steps and checkpoints since the process began: a report"),
+    ),
+    (
         "unproven",
         Keep::Journalled(
             Record::EngineJournal,
