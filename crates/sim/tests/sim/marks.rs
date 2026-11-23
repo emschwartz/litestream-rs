@@ -1,6 +1,4 @@
-//! The soak's gate bites: it fails a soak whose generator stopped drawing a class. (That the
-//! rows' marks, `lsr_core::marks::Row` and its `mark!` sites agree is checked with the rest of
-//! `docs/behavior.toml`, in lsr-compat's `behavior` test.)
+//! The soak's gate bites: it fails a soak whose generator stopped drawing a class.
 
 use lsr_sim::marks::{CANARY, gate};
 use lsr_sim::{Reach, Seed, Weights, run};

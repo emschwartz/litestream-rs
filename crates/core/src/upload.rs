@@ -290,7 +290,6 @@ pub(crate) fn inventory_fault<R: Role>(err: &InventoryError) -> Fault {
     match err {
         InventoryError::Store(err) => R::fault(err),
         InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_) => {
-            mark!(Boot17);
             Fault::RemoteCorrupt
         }
     }
@@ -315,11 +314,9 @@ async fn list_step<L: Role, S: Role>(
     };
     let newest = seen.newest();
     if newest > newest_staged {
-        mark!(Up10);
         return Err(fail(state, Fault::RemoteAheadOfLocal));
     }
     if newest < confirmed {
-        mark!(Up11);
         return Err(fail(state, Fault::RemoteRegressed));
     }
     let known = match newest {
@@ -564,7 +561,6 @@ async fn judge_tail<L: Role, S: Role>(
             .map(|()| TailVerdict::Sound);
     }
     if remote_torn(remote, &key).await? {
-        mark!(Boot16);
         return Ok(TailVerdict::Replace);
     }
     // Both copies verify on their own reads, so the first compare read
@@ -611,7 +607,6 @@ async fn remote_decodes<S: Role>(remote: &S, key: &FileKey) -> Result<(), Fault>
     if remote_verifies(remote, key).await? {
         Ok(())
     } else {
-        mark!(Boot14);
         Err(Fault::RemoteCorrupt)
     }
 }
@@ -771,10 +766,8 @@ pub(crate) async fn sweep_staged<L: Role>(
         for info in page {
             if !staged_verifies(staging, &info.key).await? {
                 if suspect != Some(info.key) {
-                    mark!(Boot5);
                     return Ok(Swept::Suspect(info.key));
                 }
-                mark!(Boot5);
                 return Ok(Swept::Condemned(info.key.range().min()));
             }
         }
@@ -822,7 +815,6 @@ async fn settle_put<S: ObjectStore>(
         Ok(info) => Ok(put_done(key, info)),
         Err(PutError::Before(fault)) => Err(fail(state, fault)),
         Err(PutError::Rejected(fault, own)) => {
-            mark!(Up8);
             // Only a rejected create-only write hands back its object (the
             // bucket refuses a taken key before it takes any bytes), so only
             // that object goes. Best effort: the retry replaces the key either
@@ -913,10 +905,7 @@ async fn put_staged<L: Role, S: Role>(
         Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
         Err(Unpublished::Taken(_)) => Err(PutError::Taken),
         Err(Unpublished::Rejected(err, own)) => Err(PutError::Rejected(S::fault(&err), own)),
-        Err(Unpublished::Failed(err)) => {
-            mark!(Up6);
-            Err(PutError::Commit(S::fault(&err)))
-        }
+        Err(Unpublished::Failed(err)) => Err(PutError::Commit(S::fault(&err))),
     }
 }
 

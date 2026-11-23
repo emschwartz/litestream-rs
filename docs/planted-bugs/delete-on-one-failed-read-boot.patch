@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -524,7 +524,7 @@
+@@ -749,7 +749,7 @@
      while let Some(page) = pages.next(staging).await? {
          for info in page {
              if !staged_verifies(staging, &info.key).await? {
 -                if suspect != Some(info.key) {
 +                if false {
-                     mark!(Boot5);
                      return Ok(Swept::Suspect(info.key));
                  }
+                 return Ok(Swept::Condemned(info.key.range().min()));
