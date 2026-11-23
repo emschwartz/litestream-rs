@@ -611,6 +611,10 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         Keep::Ephemeral("whether the last journal write failed; tried again every tick"),
     ),
     (
+        "read_lock_violations",
+        Keep::Ephemeral("read-lock violations recovery found since the process began: a report"),
+    ),
+    (
         "ahead_check",
         Keep::Derived(
             "owed by a boot that restores a debt over the staged generation: judged again from \
