@@ -397,13 +397,16 @@ fn a_second_stop_keeps_the_earlier_deadline() {
 #[test]
 fn dropping_the_last_handle_drains_and_closes() {
     let site = Site::new();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    wait(&replicator, caught_up);
+    let before = wait(&replicator, caught_up).replicated;
     let clone = replicator.clone();
     drop(replicator);
     site.commit(2);
     assert_eq!(clone.health().phase, Phase::Running);
+    // The replicator may be mid-read when the application commits and wait out a retry on the
+    // fake clock; moving it until the commits are replicated leaves the drop nothing to retry.
+    moved_until(&clone, &clock, (POLL, 240), |h| h.replicated != before);
     drop(clone);
     let (runtime, _clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
@@ -577,7 +580,7 @@ fn a_reader_guard_holds_off_truncate() {
 #[test]
 fn app_connection_sets_up_only_this_database() {
     let site = Site::new();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let pooled = Connection::open(&site.db).unwrap();
     replicator.app_connection(&pooled).unwrap();
@@ -594,7 +597,9 @@ fn app_connection_sets_up_only_this_database() {
     pooled
         .execute("INSERT INTO t(v) VALUES (x'00')", [])
         .unwrap();
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    // The insert may meet the replicator's read: the drain retries, so the clock must move.
+    let stopped = stopped_moving(&replicator, &clock, POLL);
+    assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
     site.assert_restores(&*site.store());
 }
 
