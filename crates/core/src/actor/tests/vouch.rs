@@ -392,3 +392,97 @@ fn maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_uplo
     assert_eq!(rig.takeover.map(TakeoverRecord::txid), Some(tx(4)));
     assert_eq!(super::restored(&rig), 4);
 }
+
+/// A staging directory put back from a backup taken when it held only
+/// transaction 1, with the replica's own copy of 1.
+fn staging_holding_only_one(rig: &Rig) -> Counting {
+    let old_staging = Counting::default();
+    let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
+    let bytes = block_on(rig.remote.inner.read(&one, 0, ReadLen::CHUNK)).unwrap();
+    block_on(async {
+        let mut up = old_staging
+            .inner
+            .begin_upload(&one, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&bytes).await.unwrap();
+        up.commit().await.unwrap()
+    });
+    old_staging
+}
+
+/// The bucket rolls back: every replica file ending at `newest` is gone.
+fn roll_back_to_before(rig: &Rig, newest: Txid) {
+    let all = block_on(crate::Inventory::load(&rig.remote.inner)).unwrap();
+    let gone: Vec<FileKey> = all
+        .files()
+        .iter()
+        .map(|info| info.key)
+        .filter(|key| key.range().max() == newest)
+        .collect();
+    block_on(rig.remote.inner.delete(&gone)).unwrap();
+}
+
+/// The replica holds transactions 1 to 3, but staging is an old backup put
+/// back holding only 1, and a takeover record covers the replica, so the
+/// boot takes the replica as its base and owes a snapshot above 3. That
+/// snapshot cannot be staged yet (staging refuses writes). After
+/// maintenance's first listing the bucket rolls back and loses 3. The
+/// listing after the regression finds 2: above what staging holds, but a
+/// file this process confirmed as its base, so it is the replica's, not
+/// another writer's. It used to stop the engine for another writer.
+#[test]
+fn a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas() {
+    let mut rig = three();
+    rig.staging = staging_holding_only_one(&rig);
+    rig.wal.force_restart();
+    rig.commit(7);
+    let mut actor = go_like_actor();
+    actor.remember_takeover(TakeoverRecord::through(tx(3)));
+    for _ in 0..200 {
+        rig.staging.inner.inject_failure(
+            StoreOp::Upload,
+            StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: std::io::ErrorKind::ConnectionReset,
+            },
+        );
+    }
+    let boot = rig.tick(&mut actor, T0 + 3);
+    assert!(
+        matches!(
+            booted(&boot),
+            Some(Some(SnapshotCause::BehindRemote { .. }))
+        ),
+        "{boot:?}"
+    );
+    let mut now = T0 + 3;
+    let mut listed = false;
+    for _ in 0..40 {
+        let tick = rig.tick(&mut actor, now);
+        if matches!(event(&tick), Some(Event::Maintained { .. })) {
+            listed = true;
+            break;
+        }
+        if let Some(Next::At(at)) = next_of(&tick) {
+            now = now.max(at.unix_millis());
+        }
+    }
+    assert!(listed, "maintenance listed once before the rollback");
+    roll_back_to_before(&rig, tx(3));
+    let seen = rig.follow(&mut actor, super::listing_due(now), 80);
+    let regressed = seen.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Degraded {
+                cause: PersistentCause::RemoteRegressed,
+                ..
+            })
+        )
+    });
+    assert!(regressed, "{seen:?}");
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+}

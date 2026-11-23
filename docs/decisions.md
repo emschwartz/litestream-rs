@@ -78,6 +78,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D122 | Run the simulator's histories on real SQLite: how, when the world draws page-level commits of arbitrary bytes? | A backend in lsr-sqlite behind the sim's seam; each drawn page a row, SQLite decides the pages, the world reads back what changed through SQLite | Claude (sim-real-sqlite), **delegated** | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
 | D162 | `databases` with a `dir` entry: print the working directory, as Go does? | No: print the entry's directory, unscanned | Claude (dropin-readonly), **delegated** | 2026-11-23 | open to owner review |
+| D51 | A listing after a bucket rollback finds a file above staging but at or below what this process confirmed: stop or take it? | Take it as the replica's file | Claude, **delegated** | 2026-11-23 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -390,6 +391,16 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** an operator who puts back a staging backup holding another copy of the replica's newest key stops instead of snapshotting; `lsr take-over` clears it, as for D12's other operator actions.
 - **Revisit if:** a world without an operator's hand produces a boot divergence.
 - **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-38, CFG-39; `crates/core/src/actor.rs` (`boot_listing`); #110; D131 (an operator putting back a backup is the accident this refusal covers; a forged copy is out of scope).
+
+## D51. A listing after a rollback trusts what this process confirmed (delegated)
+
+- **Question:** after a bucket rollback the running engine lists the replica again with nothing confirmed (UP-11). It compared that listing only with staging (and its own drops' vouched files), so a file above staging stopped it for another writer (UP-10) even when this process had confirmed that id before the rollback. Should such a file stop the engine?
+- **Choice (delegated to an agent):** no. The listing's bound includes the acknowledged mark, the highest id this process saw confirmed. A file at or below it is the replica's, and a newest file that staging still holds is compared by bytes as before.
+- **Options considered:** keep the stop, which an operator clears with `lsr take-over`; trust the takeover record held at runtime, which hid other writers' files in 25 tests.
+- **Why:** the owner's priority is no unnecessary stops. Staging ends below the confirmed mark only after the engine took the replica as its base (a boot behind it, D12 with a takeover) or lost staged files, and in both cases the boot or the drop already accepted those ids as its own. The relist already kept the mark so no snapshot reuses those ids. An accident reaches it: a staging backup put back, a boot that takes the replica as base under a takeover record, then a rollback (swarm seed 0xf42ce, pinned by the actor test below).
+- **Cost accepted:** after a rollback, a second writer that refills an id in that range, with no staged copy to compare, is built on instead of stopped on. A boot behind the replica already gives the same trust, and the rollback itself is reported (`remote_regressed`).
+- **Revisit if:** a world where a second writer writes only into rolled-back ids matters, or the engine journal (which would record what was confirmed and by whom) lands.
+- **Links:** `docs/BEHAVIOR.md` UP-10, UP-11; `crates/core/src/actor.rs` (`upload_bound`); core `vouch::a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas`.
 
 ## D35. A stall at the end of a run
 

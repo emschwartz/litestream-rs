@@ -1719,7 +1719,10 @@ impl Actor {
     /// (files the replica may hold unconfirmed). Other plans ignore drops.
     fn upload_bound(&self, plan: UploadPlan) -> Option<Txid> {
         match plan {
-            UploadPlan::List => self.staged().max(self.engine.dropped_through),
+            UploadPlan::List => self
+                .staged()
+                .max(self.engine.dropped_through)
+                .max(self.engine.acknowledged),
             UploadPlan::Idle | UploadPlan::Upload(_) => self.staged(),
         }
     }
