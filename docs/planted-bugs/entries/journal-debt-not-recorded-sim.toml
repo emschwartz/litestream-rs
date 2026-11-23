@@ -1,4 +1,5 @@
 name = "journal-debt-not-recorded-sim"
+patch = "journal-debt-not-recorded"
 fix = "8ef5a8f"
 package = "lsr-sim"
 test_bin = "sim"

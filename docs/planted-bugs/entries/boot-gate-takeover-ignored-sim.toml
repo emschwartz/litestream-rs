@@ -1,4 +1,5 @@
 name = "boot-gate-takeover-ignored-sim"
+patch = "boot-gate-takeover-ignored"
 fix = "aa1165d"
 package = "lsr-sim"
 test_bin = "sim"
