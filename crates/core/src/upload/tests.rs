@@ -12,6 +12,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::conformance::block_on;
 use crate::fault::Next;
+use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{Backoff, PersistentCause, Policy, policy};
 use crate::layout::CreatedAt;
 use crate::mem::{MemStore, MemUpload};
@@ -534,7 +535,7 @@ fn a_listed_key_of_another_size_is_uploaded_again_over_the_same_key() {
         };
         let listing_first = UploadState::ListFirst { confirmed: None };
         assert_eq!(
-            policy(&Fault::from_remote(&mismatch)),
+            policy(&Replica::<MemStore>::fault(&mismatch)),
             Policy::Retry(crate::fault::Backoff::Doubling)
         );
         let listed = next(listing_first, &staging, &remote, 1).unwrap();
@@ -1213,7 +1214,7 @@ fn the_upload_reads_in_quarter_mebibyte_chunks() {
 #[test]
 fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(MemStore::new());
-    let got = block_on(drop_staged_from(&staging, txid(1)));
+    let got = block_on(drop_staged_from(&Staging(&staging), txid(1)));
     assert_eq!(got, Err(Fault::LocalIo));
 }
 

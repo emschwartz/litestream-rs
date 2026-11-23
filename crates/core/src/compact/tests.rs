@@ -12,6 +12,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::fault::role::Replica;
 use crate::layout::CreatedAt;
 use crate::layout::ListedTime;
 use crate::mem::{MemStore, MemUpload};
@@ -966,7 +967,7 @@ fn thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound() {
     };
     let dest = MemStore::new();
     let done = block_on(compact_with(
-        &source,
+        &Replica(&source),
         &dest,
         &inputs(&infos),
         level(9),
