@@ -153,6 +153,7 @@ enum Call {
     EndBarrier,
     Passive,
     Truncate,
+    Full,
     BumpSeq,
     WriteLock,
     EndWriteLock,
@@ -220,6 +221,7 @@ impl Checkpointer for RealCk {
         let call = match mode {
             CheckpointMode::Passive => Call::Passive,
             CheckpointMode::Truncate => Call::Truncate,
+            CheckpointMode::Full => Call::Full,
         };
         self.record(call, Some(run));
         Ok(run)
@@ -290,6 +292,7 @@ impl Checkpointer for ModelCk {
         let call = match mode {
             CheckpointMode::Passive => Call::Passive,
             CheckpointMode::Truncate => Call::Truncate,
+            CheckpointMode::Full => Call::Full,
         };
         let event = self.next(call);
         let run = self.ck.checkpoint(mode)?;
@@ -593,6 +596,7 @@ impl World {
             OtherProcessMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
             OtherProcessMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
             OtherProcessMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
+            OtherProcessMode::Full => "PRAGMA wal_checkpoint(FULL)",
         };
         let real: (i64, i64, i64) = self
             .app

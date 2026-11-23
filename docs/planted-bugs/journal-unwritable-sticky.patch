@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 5c73e256..062976c6 100644
+index 84e54b99..605979f3 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2633,8 +2633,6 @@ impl Actor {
-             self.kept.unchecked,
+@@ -2694,8 +2694,6 @@ impl Actor {
+             self.kept.floor.or(held.and_then(|held| held.floor)),
          );
-         if held.map(|held| (held.unproven, held.ahead, held.unchecked)) == Some(wanted) {
+         if held.map(|held| (held.unproven, held.ahead, held.unchecked, held.floor)) == Some(wanted) {
 -            // Nothing the engine holds is missing from the journal: nothing lags it.
 -            self.kept.journal_write = Ok(());
              return tick;

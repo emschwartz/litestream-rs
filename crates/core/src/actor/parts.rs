@@ -182,6 +182,8 @@ pub(super) struct Kept {
     pub(super) unchecked: Option<lsr_journal::Unchecked>,
     /// What the next tick tells the operator about the verdict, before anything else runs.
     pub(super) ahead_notice: Option<super::AheadNotice>,
+    /// The confirmed floor for the configured destination, journalled (`super::floor`).
+    pub(super) floor: Option<lsr_journal::Floor>,
 }
 
 impl Kept {
@@ -218,6 +220,7 @@ impl Kept {
             ahead: None,
             unchecked: None,
             ahead_notice: None,
+            floor: None,
         }
     }
 
@@ -258,6 +261,7 @@ impl Kept {
             ahead,
             unchecked,
             ahead_notice,
+            floor,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -293,6 +297,7 @@ impl Kept {
             ahead: *ahead,
             unchecked: *unchecked,
             ahead_notice: *ahead_notice,
+            floor: *floor,
         }
     }
 
@@ -655,6 +660,14 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
              restarts (docs/decisions.md D106)",
         ),
     ),
+    (
+        "floor",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "the confirmed floor for the configured destination: every id at or below it is \
+             taken, and its anchor names the bytes confirmed there (issue #171, item 4)",
+        ),
+    ),
 ];
 
 /// What each field of [`Engine`] is to a restart: a rebuild replaces the engine whole, so most
@@ -698,8 +711,8 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
         Keep::Owed(
             "never lowered while the process lives, but set at boot from the replica's listing: \
              a replica that went backwards before a restart lets a snapshot take an \
-             acknowledged id again until the confirmed high-water mark is journalled \
-             (issue #171, item 4)",
+             acknowledged id again. The mark is journalled (Kept.floor); the boot rule that \
+             reads it back into this field is the rest of issue #171, item 4",
         ),
     ),
     (

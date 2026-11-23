@@ -13,9 +13,7 @@
 //!   names a ledger entry, every `oracle::` a `Violation` variant, every `judge::` an `Anomaly`
 //!   variant; every `plant::` is backed: the row also cites a test the entry's run would fail
 //!   (the entry's package, and a test filter that matches); and an In review cell starts with a
-//!   PR number, a branch tag or `None`; every row's `mark` is `site` or `none: <reason>`, the
-//!   rows marked `site` are exactly lsr-core's `marks::Row` variants, and each variant has a
-//!   `mark!` in lsr-core's source;
+//!   PR number, a branch tag or `None`;
 //! - with the Rust test listing (`every_behavior_citation_resolves`, run by `just
 //!   evidence-fresh`): every test citation names a test of its crate's package (by its name, or a
 //!   path ending in it, as the document cites it) or, for `sim::`, a simulator scenario; and every
@@ -75,8 +73,6 @@ struct Row {
     notes: String,
     #[serde(default)]
     in_review: String,
-    #[serde(default)]
-    mark: String,
 }
 
 impl Row {
@@ -354,71 +350,7 @@ fn problems(doc: &Doc) -> Vec<String> {
             out.push(format!("{id}: no test and no no-test mark"));
         }
     }
-    out.extend(mark_problems(doc));
     out
-}
-
-/// What is wrong with the rows' coverage marks: a row with no `mark`, a row marked `site` that
-/// is no `Row` variant or the reverse, and a variant with no `mark!` in lsr-core.
-fn mark_problems(doc: &Doc) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut sited = BTreeSet::new();
-    for row in &doc.row {
-        match row.mark.as_str() {
-            "site" => drop(sited.insert(row.id.as_str())),
-            other
-                if other
-                    .strip_prefix("none: ")
-                    .is_some_and(|why| !why.is_empty()) => {}
-            other => out.push(format!(
-                "{}: mark {other:?} is neither \"site\" nor \"none: <reason>\"",
-                row.id
-            )),
-        }
-    }
-    let variants: BTreeSet<&str> = lsr_core::marks::Row::ALL
-        .iter()
-        .map(|row| row.id())
-        .collect();
-    for id in sited.difference(&variants) {
-        out.push(format!(
-            "{id}: marked site, and lsr_core::marks::Row has no variant for it"
-        ));
-    }
-    for id in variants.difference(&sited) {
-        out.push(format!(
-            "{id}: a lsr_core::marks::Row variant, and its row is not marked site"
-        ));
-    }
-    let code = core_source();
-    for row in lsr_core::marks::Row::ALL {
-        let site = format!("mark!({row:?})");
-        if !code.contains(&site) {
-            out.push(format!("{}: no `{site}` in crates/core/src", row.id()));
-        }
-    }
-    out
-}
-
-/// lsr-core's source, every file of it in one string.
-fn core_source() -> String {
-    let mut text = String::new();
-    let mut stack = vec![workspace_root().join("crates/core/src")];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                text.push_str(&read(&path));
-            }
-        }
-    }
-    assert!(
-        text.contains("macro_rules! mark"),
-        "lsr-core's source was not found"
-    );
-    text
 }
 
 #[test]
@@ -558,7 +490,6 @@ fn a_plant_cited_without_a_test_its_entry_runs_is_unbacked() {
         no_test: String::new(),
         notes: String::new(),
         in_review: String::new(),
-        mark: String::new(),
     };
     assert_eq!(
         unbacked(&row("x::`kills_it`; plant::`p`"), &ledger),
@@ -594,38 +525,4 @@ fn a_citation_cell_parses_or_says_why_not() {
             ("sim".into(), "b".into())
         ])
     );
-}
-
-/// Each fault of a row's coverage mark is reported: no mark, a mark of neither form, a site with
-/// no `Row` variant, and a variant whose row is not marked site.
-#[test]
-fn a_bad_coverage_mark_is_reported() {
-    let row = |id: &str, mark: &str| Row {
-        table: "T".into(),
-        id: id.into(),
-        circumstance: String::new(),
-        response: String::new(),
-        signal: String::new(),
-        at_risk: String::new(),
-        recovery: String::new(),
-        detected_by: String::new(),
-        survived_by: String::new(),
-        recovered_by: String::new(),
-        no_test: String::new(),
-        notes: String::new(),
-        in_review: String::new(),
-        mark: mark.into(),
-    };
-    let doc = Doc {
-        row: vec![row("T-1", ""), row("T-2", "none:"), row("T-3", "site")],
-    };
-    let found = mark_problems(&doc).join("\n");
-    for expected in [
-        "T-1: mark \"\" is neither",
-        "T-2: mark \"none:\" is neither",
-        "T-3: marked site, and lsr_core::marks::Row has no variant",
-        "BOOT-1: a lsr_core::marks::Row variant, and its row is not marked site",
-    ] {
-        assert!(found.contains(expected), "{expected} not in:\n{found}");
-    }
 }

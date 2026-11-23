@@ -36,9 +36,15 @@
 //! a restart then snapshots anyway (the WAL the TRUNCATE emptied is a new generation), and the
 //! journal records that the TRUNCATE ran, so a restart never owes a second one.
 //!
+//! Before its TRUNCATE the cure reads the WAL with checked reads (`crate::cure`, D108): a page
+//! the kernel evicted reads as the disk's older bytes and fails its frame's checksum, and the
+//! step fails `WalCorruptBelowCommitted` instead of copying those bytes into the database file.
+//!
 //! What this cannot protect against:
-//! - The page cache losing the pages before the TRUNCATE copies them (a reboot, a power loss,
-//!   or eviction under memory pressure). SQLite then backfills whatever the disk holds. Nothing
+//! - The page cache losing the pages before a checkpoint copies them, where the engine cannot
+//!   see it: a reboot or power loss, an eviction inside the checkpoint call after the cure's read,
+//!   or an eviction followed by the application's own checkpoint. SQLite then backfills whatever
+//!   the disk holds. Nothing
 //!   was staged from the lost frames, so the replica is not ahead of the database, but the
 //!   database may be damaged. A checkpoint that copied some of those frames first (the
 //!   application's, another process's, or a TRUNCATE that went busy behind a reader after
@@ -99,7 +105,6 @@ impl Actor {
     pub(super) fn sync_failed(&mut self, fault: Fault) {
         match evidence(&fault) {
             Evidence::Once(Obligation::UnprovenWal) => {
-                mark!(Run3);
                 self.kept.unproven = Unproven::Truncate;
             }
             Evidence::Repeats => {}
@@ -118,6 +123,9 @@ impl Actor {
         L: ObjectStore,
         R: ObjectStore,
     {
+        // A frame the kernel evicted reads as the disk's older bytes and fails its checksum: no
+        // checkpoint of ours copies it into the database file (`crate::cure`).
+        crate::cure::scan(env.wal)?;
         let run = env.ck.checkpoint(CheckpointMode::Truncate);
         self.kept.app.ours(env.wal.committed().ok(), run.ok());
         match run {

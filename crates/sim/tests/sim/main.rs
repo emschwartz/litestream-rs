@@ -16,6 +16,8 @@ mod differential;
 #[cfg(test)]
 mod dropped_created_at;
 #[cfg(test)]
+mod evicted_cure;
+#[cfg(test)]
 mod evicted_wal;
 #[cfg(test)]
 mod failstop;
@@ -33,6 +35,8 @@ mod known_wrong;
 mod marks;
 #[cfg(test)]
 mod needless_snapshot;
+#[cfg(test)]
+mod remote_s3;
 #[cfg(test)]
 mod replay;
 #[cfg(test)]

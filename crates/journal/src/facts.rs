@@ -9,6 +9,18 @@ use lsr_ltx::{FileChecksum, Timestamp, Txid};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ReplicaId(pub [u8; 8]);
 
+impl ReplicaId {
+    /// The digest of a destination's canonical name (FNV-1a 64, little-endian): two names
+    /// that differ in any byte are, for this purpose, two destinations.
+    #[must_use]
+    pub fn of(name: &[u8]) -> Self {
+        let digest = name.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        Self(digest.to_le_bytes())
+    }
+}
+
 /// A staged file's bytes: its length, the FNV-1a 64 digest of its raw bytes, and its LTX file
 /// checksum.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

@@ -1,8 +1,6 @@
 # The scheduled verify calls every transaction without an exact plan "merged by compaction,
-# nothing to compare", so a replica that lost the live transaction passes. The simulator's
-# verify judge (crates/sim/src/run/verify.rs) catches it unaided at its 13th swarm seed.
+# nothing to compare", so a replica that lost the live transaction passes.
 name = "verify-no-plan-called-merged"
 fix = "plant"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
+package = "lsr-core"
+tests = ["verify::tests::against::a_transaction_the_replica_does_not_hold_fails_to_restore"]

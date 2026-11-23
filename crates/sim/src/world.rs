@@ -26,6 +26,7 @@ use crate::exec::{Polls, RunEnd, run_until};
 use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
+use crate::remote::{Bucket, RemoteBackend};
 use crate::seed::Seed;
 use crate::side::{SideMaker, SqliteSide};
 use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode};
@@ -39,7 +40,7 @@ use lsr_core::WriteMode;
 /// The staging store the actor sees.
 pub type StagingStore = Faults<YieldEachCall<Recorder<Volatile<StagingRaw>>>>;
 /// The replica store the actor sees.
-pub type RemoteStore = Faults<YieldEachCall<Recorder<MemStore>>>;
+pub type RemoteStore = Faults<YieldEachCall<Recorder<RemoteBackend>>>;
 
 /// Why the harness could not rewrite a staged file.
 #[derive(Debug, thiserror::Error)]
@@ -241,7 +242,7 @@ pub struct World {
     /// in-memory filesystem ([`World::use_fs_staging`]).
     pub staging_raw: StagingRaw,
     /// The replica with nothing in front of it: what the oracle restores from.
-    pub remote_raw: MemStore,
+    pub remote_raw: Bucket,
     /// What the staging store really did.
     pub staging_recorder: RecorderLog,
     /// What the replica really did.
@@ -286,6 +287,25 @@ pub struct World {
     in_tick_time: Arc<Mutex<Option<Timestamp>>>,
 }
 
+/// The replica stack over `backend`: the recorder on the world's clock, the yield on each call
+/// and the object-level faults, which corrupt a published object through `raw`.
+fn remote_stack(
+    backend: RemoteBackend,
+    raw: &Bucket,
+    clock: &Arc<FakeClock>,
+    high: &HighWater,
+    seed: u64,
+) -> (RemoteStore, RecorderLog) {
+    let mut recorder = Recorder::new(backend).with_clock(Arc::clone(clock), high.clone());
+    if raw.wire().is_some() {
+        recorder = recorder.landed_through(raw.landed());
+    }
+    let log = recorder.log();
+    let store =
+        Faults::new(YieldEachCall::new(recorder), Vec::new(), seed).corrupting_through(raw.clone());
+    (store, log)
+}
+
 /// The first instant of a run's clock.
 pub const EPOCH_MILLIS: i64 = 1_700_000_000_000;
 
@@ -303,7 +323,8 @@ impl World {
         let clock = Arc::new(FakeClock::new(Timestamp::from_unix_millis(EPOCH_MILLIS)));
         let high = HighWater::default();
         let staging_raw = StagingRaw::Mem(MemStore::new());
-        let remote_raw = MemStore::new();
+        let remote_mem = MemStore::new();
+        let remote_raw = Bucket::Mem(remote_mem.clone());
         let volatile = Volatile::new(staging_raw.clone());
         let volatile_handle = volatile.handle();
         let staging_recorder = Recorder::new(volatile).with_clock(Arc::clone(&clock), high.clone());
@@ -314,15 +335,13 @@ impl World {
             seed.stream(2),
         )
         .volatile_on_late_error(volatile_handle.clone());
-        let remote_recorder =
-            Recorder::new(remote_raw.clone()).with_clock(Arc::clone(&clock), high.clone());
-        let remote_recorder_log = remote_recorder.log();
-        let remote = Faults::new(
-            YieldEachCall::new(remote_recorder),
-            Vec::new(),
+        let (remote, remote_recorder_log) = remote_stack(
+            RemoteBackend::Mem(remote_mem),
+            &remote_raw,
+            &clock,
+            &high,
             seed.stream(3),
-        )
-        .corrupting_through(remote_raw.clone());
+        );
         let initial = PageImage::from_bytes(page_size, &sqlite.image());
         let model = Model::new(initial);
         let history = History::new(
@@ -369,6 +388,26 @@ impl World {
             in_tick: None,
             in_tick_time: Arc::default(),
         }
+    }
+
+    /// Puts the replica on the S3 store over a fresh in-memory bucket behind its fault layer
+    /// (`crate::remote`), with the same wrappers in front of it as before. Call before the first
+    /// boot: the replica starts empty, and its fault schedule and batch widths start over.
+    pub fn use_s3_remote(&mut self) {
+        let Some((backend, bucket)) = crate::remote::s3(&self.clock) else {
+            return;
+        };
+        let (remote, log) = remote_stack(
+            backend,
+            &bucket,
+            &self.clock,
+            &self.high,
+            self.seed.stream(3),
+        );
+        self.remote_faults = remote.handle();
+        self.remote = remote;
+        self.remote_raw = bucket;
+        self.remote_recorder = log;
     }
 
     /// The app commits `pages`, leaving `db_size` pages; `None` when SQLite's
@@ -722,6 +761,25 @@ impl World {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let listing = block_on(self.staging_raw.list(Level::ZERO, None, PageLimit::MAX))?;
         Ok(listing.files.last().copied())
+    }
+
+    /// Whether the local database holds a commit past the one the newest level-0 file in
+    /// staging holds. A boot then continues from a position short of the WAL's committed end,
+    /// which no read transaction pinned: the generation can restart under it before the engine
+    /// stages the rest. Nothing staged, or staging that cannot be read, is not behind.
+    #[must_use]
+    pub fn staging_behind_newest_commit(&self) -> bool {
+        let Ok(Some(newest)) = self.newest_staged() else {
+            return false;
+        };
+        let Ok(bytes) = self.read_staged(&newest.key) else {
+            return false;
+        };
+        let txid = newest.key.range().max();
+        let staged = self
+            .model
+            .staged_commit(txid, crate::store::wal_end(&bytes));
+        staged.is_some() && staged != self.model.newest_commit()
     }
 
     /// The level-0 files in staging; none when it cannot be listed.
@@ -1233,6 +1291,7 @@ impl World {
     /// The first [`Violation`].
     pub fn check(&self, retention: Option<Windows>) -> Result<Checked, Violation> {
         let mut exempt = self.remote_faults.rejected();
+        exempt.extend(self.remote_recorder.rejected());
         let damaged = self.remote_faults.damaged();
         let flipped = self.remote_faults.flipped();
         for key in &self.repaired {

@@ -1,6 +1,7 @@
-//! The planner's values as the restore-plan spec's (`lsr-spec`), so the tests,
-//! the simulator and the fuzz targets judge the planner by an oracle that
-//! cannot call it.
+//! The planner's values as the restore-plan spec's (`lsr-spec`), so the planner's
+//! own tests and the fuzz targets judge it by an oracle that cannot call it. The
+//! simulator judges restores by its own restatement of the contract instead
+//! (`crates/sim/src/contract.rs`).
 //!
 //! Conversion only: no rule of the contract lives here, and nothing here
 //! decides. The spec depends on nothing, so the direction of this adapter is
