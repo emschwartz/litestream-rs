@@ -1,0 +1,6 @@
+name = "relist-acknowledged-mark"
+fix = "c38534d"
+package = "lsr-core"
+tests = [
+    "a_relist_never_takes_an_acknowledged_transaction_again",
+]

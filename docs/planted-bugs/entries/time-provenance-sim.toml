@@ -1,0 +1,6 @@
+# The same plant, judged by the simulator: stored created-at times dropped, AsOf judged by origin.
+name = "time-provenance-sim"
+fix = "a427b57"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["as_of_never_takes_an_upload_time_for_a_commit_time"]

@@ -1,0 +1,8 @@
+name = "failstop-no-clear"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_trip_for_age_clears_once_caught_up",
+    "failstop::tests::a_failure_after_the_bound_trips_until_caught_up",
+    "failstop::tests::the_clock_never_trips_early",
+]

@@ -1,0 +1,5 @@
+name = "boot-snapshot-cause"
+fix = "aedecc4"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_request_before_boot_keeps_the_boots_own_snapshot_cause"]

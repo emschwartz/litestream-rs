@@ -1,0 +1,6 @@
+name = "journal-advance-on-failed-sync"
+fix = "a64cc50"
+package = "lsr-core"
+tests = [
+    "journal_model::the_writer_matches_the_model_under_the_block_law",
+]

@@ -1,0 +1,5 @@
+# A running engine's divergence from another writer's file snapshotted above it.
+name = "divergence-snapshots-above-another-writer"
+fix = "8ce228d"
+package = "lsr-core"
+tests = ["a_running_engine_stops_when_another_writer_took_its_next_id"]

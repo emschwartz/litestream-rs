@@ -1,0 +1,6 @@
+# An unusable takeover record taken as covering everything instead of as absent.
+name = "unusable-takeover-taken-as-given"
+fix = "68d2d90"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["second_writer::an_unusable_takeover_record_is_reported_and_costs_no_stop"]

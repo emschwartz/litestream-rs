@@ -1,0 +1,12 @@
+# Every read path (restore, verify, compaction, upload, boot recovery) decodes through
+# lsr_ltx::Decoder, so skipping the trailer's file checksum there would let any changed header,
+# index or page byte through.
+name = "ltx-skip-file-checksum"
+fix = "claude/ltx-integrity"
+package = "lsr-ltx"
+test_bin = "ltx"
+tests = [
+    "errors::file_checksum",
+    "corruption::every_bit_flip_of_a_go_file_fails_or_aliases",
+    "corruption::every_byte_change_to_a_small_rust_file_fails_or_aliases",
+]

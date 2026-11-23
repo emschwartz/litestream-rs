@@ -1,0 +1,7 @@
+name = "sim-oracle-reissued-snapshot"
+fix = "8cd91db"
+package = "lsr-sim"
+tests = [
+    "oracle::tests::oracle_pairs_a_reissued_snapshot_with_its_newest_note",
+    "a_snapshot_id_taken_again_after_a_lost_staged_snapshot",
+]
