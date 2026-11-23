@@ -66,7 +66,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
 | D49 | Temporary credentials: refresh before expiry, and a source that answers without keys | Refresh five minutes early; refuse an answer without keys or an STS answer without credentials | Claude (dropin-roles), **delegated** | 2026-11-22 | open to owner review |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
-| D51 | `restore` with Go's arguments: delete the output first, refuse a timestamp past the newest file, let `-if-replica-exists` excuse any missing transaction, as Go does? | No to all three: replace only at publish, restore the newest state, skip only an empty replica | Claude (dropin-commands), **delegated** | 2026-11-23 | open to owner review |
+| D160 | `restore` with Go's arguments: delete the output first, refuse a timestamp past the newest file, let `-if-replica-exists` excuse any missing transaction, as Go does? | No to all three: replace only at publish, restore the newest state, skip only an empty replica | Claude (dropin-commands), **delegated** | 2026-11-23 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -643,7 +643,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a night goes red on a key that a longer soak reaches (add a floor per key), or the marks start deriving BEHAVIOR's D, S and R (section 7.3, item 2).
 - **Links:** #127.
 
-## D51. Restore with Go's arguments: three departures (delegated)
+## D160. Restore with Go's arguments: three departures (delegated)
 
 - **Question:** `lsr restore` now reads Go's command line and is compared with Go file by file (REST-13). Three of Go's behaviours would lose data or decide on a time the project does not trust.
 - **Choice:**

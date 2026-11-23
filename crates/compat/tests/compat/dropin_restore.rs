@@ -380,7 +380,7 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
     // Go refuses a timestamp after the replica's newest file when it restores from a URL
     // (`CalcRestoreTarget`), deciding on listed modification times, and restores the newest
     // state for the same timestamp from a config. litestream-rs restores the newest state
-    // both ways (docs/decisions.md D51), or meets the next check Go never reached: accepted
+    // both ways (docs/decisions.md D160), or meets the next check Go never reached: accepted
     // when it restored the newest state, or failed and left the directory as it was.
     if go_err.contains("timestamp does not exist") {
         let fine = if *lsr_code == Some(0) {
@@ -394,7 +394,7 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
     // Go's -if-replica-exists exits 0 for any transaction it cannot find, a txid past the
     // newest file of a replica that has files included, and writes no database; a script
     // then starts its application on an empty one. litestream-rs skips only an empty
-    // replica and refuses the rest (docs/decisions.md D51).
+    // replica and refuses the rest (docs/decisions.md D160).
     if go_out.contains("no matching backups found") && *go_code == Some(0) && *lsr_code != Some(0) {
         prop_assert!(
             failure(lsr_err, lsr_out) == Failure::NoBackups && lsr.after == starting(rig, case),
@@ -412,7 +412,7 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
     }
     // Go removes the output (an empty file, or with -force any file and its journal files)
     // before it restores, so a restore that then fails, or skips, has already removed them;
-    // litestream-rs removes nothing unless it publishes (docs/decisions.md D51). When
+    // litestream-rs removes nothing unless it publishes (docs/decisions.md D160). When
     // litestream-rs left the directory as it was and Go only removed from it, both ended
     // the same way, by the checks above.
     let start = starting(rig, case);
