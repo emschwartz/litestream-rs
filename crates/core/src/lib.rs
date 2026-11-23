@@ -45,6 +45,7 @@ mod maintain;
 mod mem;
 #[cfg(any(test, feature = "testing"))]
 pub mod needs;
+pub mod obligations;
 mod pages;
 mod plan;
 mod position;
