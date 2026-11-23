@@ -1070,6 +1070,33 @@ impl Actor {
         Some(self.want_takeover(task, TakeoverRecord::through(through), now))
     }
 
+    /// A boot about to snapshot because one read of the newest staged file disagreed with
+    /// what the file is (it did not verify, or its last page is not the WAL's) reads it once
+    /// more first: one failed read says nothing, as for the sweep (`boot_listing`). The file
+    /// becomes the suspect and the boot fails with `StagedLost`; the next boot that reads the
+    /// same answer snapshots. `doubted` is the suspect this boot began with.
+    fn doubt_newest_read(
+        &mut self,
+        doubted: Option<FileKey>,
+        newest: Option<&NewestStagedFile>,
+        recovered: &Recovered,
+        now: Timestamp,
+    ) -> Option<Tick> {
+        let read_disagreed = matches!(
+            recovered,
+            Recovered::Snapshot {
+                cause: SnapshotCause::NewestStagedFileUnreadable | SnapshotCause::LastPageMismatch,
+                ..
+            }
+        );
+        let key = FileKey::new(Level::ZERO, TxidRange::single(newest?.txid()));
+        if !read_disagreed || doubted == Some(key) {
+            return None;
+        }
+        self.kept.suspect_staged = Some(key);
+        Some(self.boot_failed(Fault::StagedLost, now))
+    }
+
     /// A boot step failed: the boot ends and is retried.
     fn boot_failed(&mut self, fault: Fault, now: Timestamp) -> Tick {
         mark!(Boot23);
@@ -1089,6 +1116,7 @@ impl Actor {
         }
         let takeover = self.boot_takeover();
         let journal = read_journal(env.journal.as_deref_mut());
+        let doubted = self.kept.suspect_staged;
         let suspect = &mut self.kept.suspect_staged;
         let listed = boot_listing(env.staging, env.remote, suspect, takeover).await;
         let Listed {
@@ -1113,6 +1141,15 @@ impl Actor {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, now),
         };
+        // A refusal or a drop the sweep and the witness passes already proved explains the
+        // snapshot; only a verdict resting on the newest staged file's one read is doubted.
+        let proven = refused.is_some() || !matches!(dropped, Dropped::Nothing);
+        if let Some(tick) = (!proven)
+            .then(|| self.doubt_newest_read(doubted, newest_staged.as_ref(), &recovered, now))
+            .flatten()
+        {
+            return tick;
+        }
         let continued = matches!(recovered, Recovered::Continue(_));
         let from = match recovered {
             Recovered::Continue(at) | Recovered::WalRestarted(at) => boot_continues(at),
