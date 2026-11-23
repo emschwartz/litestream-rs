@@ -1,7 +1,0 @@
-name = "witness-anchor-held"
-fix = "plant"
-package = "lsr-core"
-tests = [
-    "a_tail_whose_pages_the_wal_does_not_hold_anchors_nothing",
-    "a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one",
-]

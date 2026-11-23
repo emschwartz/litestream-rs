@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
-index dbb3c63..37f9f3a 100644
+index 54b2dc44..fba50042 100644
 --- a/crates/core/src/witness.rs
 +++ b/crates/core/src/witness.rs
-@@ -343,7 +343,7 @@ where
-     let from = confirmed.map_or(Some(Txid::MIN), Txid::next);
-     let pending: Vec<FileInfo> = match from {
+@@ -306,7 +306,7 @@ pub(crate) async fn check_pending<L: Role, S: Role>(
+     let mut expect = confirmed.map_or(Some(Txid::MIN), Txid::next);
+     let pending: Vec<FileInfo> = match expect {
          // One past the cap: the first file no token could be minted for.
 -        Some(from) => staged_from(staging, Some(from), MAX_WITNESSED.saturating_add(1)).await?,
 +        Some(from) => staged_from(staging, Some(from), usize::MAX).await?,
          None => Vec::new(),
      };
-     let Some(first) = pending.first() else {
+     let mut tokens = Vec::new();

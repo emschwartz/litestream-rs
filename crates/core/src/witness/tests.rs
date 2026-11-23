@@ -2,7 +2,7 @@
 //! bytes it was minted for. The boot pass is driven through the actor
 //! (`crate::actor` tests, `witness`) and the simulator.
 
-use lsr_ltx::{Encoder, HeaderFields, PageSize, Timestamp};
+use lsr_ltx::{Encoder, HeaderFields, PageNo, PageSize, Timestamp};
 
 use super::*;
 use crate::fault::role::{Role, Staging};
@@ -186,7 +186,7 @@ fn a_file_longer_than_one_read_is_decoded_whole() {
     ))
     .unwrap()
     .unwrap();
-    assert_eq!(decoded.pages.len(), 300);
+    assert_eq!(decoded.header.fields().commit, 300);
     let mut tally = ByteTally::new();
     tally.add(&bytes);
     assert_eq!(decoded.bytes, tally);

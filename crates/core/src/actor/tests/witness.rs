@@ -48,6 +48,15 @@ fn replace_staged_page(rig: &Rig, n: u64, pgno: u32, fill: u8) -> Vec<u8> {
     other
 }
 
+/// Puts staged 2 under key 3: a whole, valid file, but one that starts where the file before
+/// transaction 2 ended, not where the replica's file for 2 ended, so it does not chain.
+fn misplace_staged_tail(rig: &Rig) {
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let two = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
+    put_l0(&rig.staging.inner, 3, &relabelled(&two, 3));
+}
+
 /// Whether the replica's level-0 object for `n` is `bytes`.
 fn replica_holds(rig: &Rig, n: u64, bytes: &[u8]) -> bool {
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()));
@@ -76,28 +85,6 @@ fn a_staged_file_replaced_under_a_running_engine_is_never_uploaded() {
     assert_eq!(restored(&rig), 2);
 }
 
-/// A pending file replaced while the engine was down is not what the live
-/// WAL holds for its range. It and every file after it go, and the WAL,
-/// which still holds their frames, stages them again as one file: no
-/// snapshot, and none of the replacement reaches the replica.
-#[test]
-fn a_replaced_pending_file_is_regenerated_from_the_wal_at_boot() {
-    let (mut rig, mut actor) = caught_up();
-    stage_held(&mut rig, &mut actor, &[2, 3, 4], T0 + 1);
-    assert_eq!(staged(&rig), vec![2, 3, 4]);
-    let other = replace_staged(&rig, 3, 0xEE);
-    let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
-    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
-    assert_eq!(staged(&rig), vec![2]);
-    let seen = rig.settle(&mut actor, T0 + 2);
-    no_stop(&seen);
-    assert!(!replica_holds(&rig, 3, &other));
-    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
-    assert_eq!(snapshots(&rig), vec![1]);
-    assert_eq!(restored(&rig), 4);
-}
-
 /// A plain crash with files pending in the live WAL: every one is witnessed
 /// and uploaded with the bytes the engine before the crash staged.
 #[test]
@@ -120,12 +107,34 @@ fn pending_files_in_the_live_wal_are_uploaded_as_staged() {
     assert_eq!(snapshots(&rig), vec![1]);
 }
 
-/// The replica's tail and the pending file were staged in a WAL generation
-/// the application has since checkpointed away: nothing live vouches for
-/// the pending file, so it is deleted unpublished, the boot names it, and
-/// the snapshot takes the transaction after the replica's newest.
+/// A pending file that is torn, with a whole file after it, is never uploaded: the boot
+/// reads it whole, finds it does not verify, and drops it with the file after it. The
+/// WAL, which holds their frames, stages them again.
 #[test]
-fn pending_files_from_a_gone_generation_are_dropped_and_named() {
+fn a_torn_pending_file_is_not_uploaded_and_is_staged_again() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let mut torn = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
+    torn.truncate(torn.len() / 2);
+    put_l0(&rig.staging.inner, 2, &torn);
+    let mut actor = Actor::new(cfg());
+    // The boot's sweep meets the torn file first and doubts that one read, so the boot
+    // retries before it goes on.
+    rig.tick(&mut actor, T0 + 2);
+    let seen = rig.settle(&mut actor, T0 + 1_002);
+    no_stop(&seen);
+    assert!(!replica_holds(&rig, 2, &torn));
+    assert_eq!(restored(&rig), 3);
+}
+
+/// The replica's tail and the pending file were staged in a WAL generation
+/// the application has since checkpointed away. The pending file holds
+/// commits the application made, so it is uploaded as staged, as Go uploads
+/// it, and the boot's snapshot (the generation changed) follows it.
+#[test]
+fn pending_files_from_a_gone_generation_are_uploaded_before_the_snapshot() {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2], T0 + 1);
     rig.wal.force_restart();
@@ -135,22 +144,19 @@ fn pending_files_from_a_gone_generation_are_dropped_and_named() {
     assert_eq!(
         event(&boot),
         Some(&Event::Booted {
-            cause: Some(SnapshotCause::StagedUnverified {
-                from: Txid::new(2).unwrap()
-            })
+            cause: Some(SnapshotCause::GenerationChanged)
         })
     );
     let seen = rig.settle(&mut actor, T0 + 2);
     no_stop(&seen);
-    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
-    assert_eq!(snapshots(&rig), vec![1, 2]);
+    assert!(ranges(&rig.remote).contains(&(2, 2)));
     assert_eq!(restored(&rig), 3);
 }
 
 /// The replica's newest level-0 object is torn and its staged copy, which
-/// boot's listing would upload over it, is not what the WAL holds: the
-/// object stays as listed and is confirmed, and the snapshot takes the
-/// transaction after it, never the listed one.
+/// boot's listing would upload over it, does not chain to the file before it: the object stays as
+/// listed and is confirmed, and the snapshot takes the transaction after it,
+/// never the listed one.
 #[test]
 fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
     let (mut rig, mut actor) = caught_up();
@@ -171,7 +177,7 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
         up.write(&torn).await.unwrap();
         up.commit().await.unwrap();
     });
-    let other = replace_staged(&rig, 3, 0xEE);
+    misplace_staged_tail(&rig);
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(
@@ -183,7 +189,6 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
         })
     );
     rig.settle(&mut actor, T0 + 2);
-    assert!(!replica_holds(&rig, 3, &other));
     assert!(replica_holds(&rig, 3, &torn));
     // The snapshot took 4 (the torn object keeps a full decode of every
     // level-0 file from running here).
@@ -194,12 +199,11 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
     );
 }
 
-/// A torn tail behind a listing that lags and leaves its key out, with no forgery: the
-/// application checkpointed the WAL away while the engine was down, so nothing live vouches
-/// for the tail's staged copy and the witness refuses it. Only a read can tell the key is
-/// still on the replica; a listing that left it out freed the key for the transactions
-/// committed since ("transaction 16 covers commit 45 and then commit 57", which the
-/// simulator first found through a forged staged copy).
+/// A torn tail behind a listing that lags and leaves its key out, its staged copy not
+/// chaining to the file before it, so the boot refuses that copy. Only a read can tell the key is still on the replica; a
+/// listing that left it out freed the key for the transactions committed since
+/// ("transaction 16 covers commit 45 and then commit 57", which the simulator first found
+/// through a forged staged copy).
 #[test]
 fn a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica() {
     let (mut rig, mut actor) = caught_up();
@@ -220,6 +224,7 @@ fn a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_repli
         up.commit().await.unwrap();
     });
     rig.remote.hidden.lock().unwrap().push(key);
+    misplace_staged_tail(&rig);
     rig.wal.force_restart();
     rig.commit(4);
     let mut actor = Actor::new(cfg());
@@ -231,14 +236,14 @@ fn a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_repli
     );
 }
 
-/// The takeover kept before the witness drops a refused staged copy covers the replica's
+/// The takeover kept before the boot drops a refused staged copy covers the replica's
 /// newest key: reads that came back wrong judged that tail torn, so it is not the confirmed
 /// position, and a record capped at the confirmed transaction stopped one short of it. Once
 /// reads were honest, a later boot refused the engine's own upload (seed 0x3ed in the
 /// simulator: "a boot refused replica files through 0x26 with staging intact and no other
 /// writer").
 #[test]
-fn the_takeover_before_a_witness_drop_covers_a_torn_looking_tail() {
+fn the_takeover_before_a_refused_copy_drop_covers_a_torn_looking_tail() {
     // Enough wrong reads of the tail that every read the boot makes of it comes back wrong.
     const FLIPS: usize = 10;
     let (mut rig, mut actor) = caught_up();
@@ -248,6 +253,7 @@ fn the_takeover_before_a_witness_drop_covers_a_torn_looking_tail() {
     for _ in 0..FLIPS {
         rig.remote.flip_next_read(key);
     }
+    misplace_staged_tail(&rig);
     rig.wal.force_restart();
     rig.commit(4);
     let mut actor = Actor::new(go_like());
@@ -297,11 +303,10 @@ fn a_pending_snapshot_the_wal_proves_is_uploaded_as_staged() {
 }
 
 /// The same crash, but the application then commits a page the snapshot
-/// took from the database file: the file's copy can no longer be told from
-/// the database's, so the snapshot is taken again, and the replica still
-/// gets exactly one.
+/// took from the database file: the snapshot is still uploaded as staged,
+/// the replica gets exactly one, and the commit follows it.
 #[test]
-fn a_pending_snapshot_the_wal_cannot_prove_is_taken_again() {
+fn a_pending_snapshot_is_uploaded_as_staged_when_the_application_has_committed_since() {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     rig.remote
@@ -312,76 +317,13 @@ fn a_pending_snapshot_the_wal_cannot_prove_is_taken_again() {
     rig.wal.append_tx(&[(pg(2), vec![9; PS.bytes()])], nz(3));
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 1);
-    assert_eq!(
-        event(&boot),
-        Some(&Event::Booted {
-            cause: Some(SnapshotCause::StagedUnverified {
-                from: Txid::new(1).unwrap()
-            })
-        })
-    );
-    let seen = rig.settle(&mut actor, T0 + 1);
-    no_stop(&seen);
-    assert_eq!(ranges(&rig.remote), vec![(1, 1)]);
-    assert!(!replica_holds(&rig, 1, &before[0].1));
-    assert_eq!(snapshots(&rig), vec![1]);
-}
-
-/// A pending snapshot whose page from the database file was replaced by
-/// other bytes is refused and taken again.
-#[test]
-fn a_replaced_pending_snapshot_is_taken_again() {
-    let mut rig = Rig::new();
-    let mut actor = Actor::new(cfg());
-    rig.remote
-        .inner
-        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
-    rig.settle(&mut actor, T0);
-    let other = replace_staged_page(&rig, 1, 3, 0xEE);
-    let mut actor = Actor::new(cfg());
-    rig.tick(&mut actor, T0 + 1);
-    let seen = rig.settle(&mut actor, T0 + 1);
-    no_stop(&seen);
-    assert!(!replica_holds(&rig, 1, &other));
-    assert_eq!(snapshots(&rig), vec![1]);
-}
-
-/// A pending snapshot that matches the live WAL page for page but stops
-/// short of the replica's newest file in the same generation describes an
-/// earlier state: it is refused, never uploaded after a later one, and the
-/// WAL carries on from the replica's newest with nothing to replace it.
-#[test]
-fn a_pending_snapshot_short_of_the_replicas_newest_is_refused() {
-    let (mut rig, mut actor) = caught_up();
-    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
-    let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(1).unwrap()));
-    let early = block_on(rig.remote.inner.read(&one, 0, all)).unwrap();
-    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
-    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
-    assert_eq!(staged(&rig), vec![2, 3]);
-    // The first snapshot, put back under the next transaction: whole and
-    // valid, every page what the WAL held at its end.
-    let stale = relabelled(&early, 4);
-    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(4).unwrap()));
-    block_on(async {
-        let mut up = rig
-            .staging
-            .inner
-            .begin_upload(&key, ts(T0), crate::store::WriteMode::Replace)
-            .await
-            .unwrap();
-        up.write(&stale).await.unwrap();
-        up.commit().await.unwrap();
-    });
-    let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
     assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
-    assert_eq!(staged(&rig), vec![2, 3]);
-    rig.commit(4);
-    let seen = rig.settle(&mut actor, T0 + 2);
+    let seen = rig.settle(&mut actor, T0 + 1);
     no_stop(&seen);
-    assert!(!replica_holds(&rig, 4, &stale));
-    assert_eq!(restored(&rig), 4);
+    assert!(replica_holds(&rig, 1, &before[0].1));
+    assert_eq!(snapshots(&rig), vec![1]);
+    assert_eq!(ranges(&rig.remote).first(), Some(&(1, 1)));
+    assert_eq!(restored_page(&rig, 2), 9);
 }
 
 /// `bytes` re-encoded as the file for transaction `n`, pages and the rest of
@@ -405,11 +347,11 @@ fn relabelled(bytes: &[u8], n: u64) -> Vec<u8> {
 
 /// A power loss under `synchronous=NORMAL` dropped the frames of a staged,
 /// unpublished transaction: SQLite's committed end is back before them,
-/// although they still sit in the file and verify. The boot proves nothing
-/// past the committed end its one wal-index read gave, so the staged file is
-/// never uploaded as the WAL's.
+/// although they still sit in the file and verify. The staged file holds a
+/// commit the application made and the disk lost; it is uploaded as staged,
+/// as Go uploads it, and the boot's snapshot of the database follows.
 #[test]
-fn frames_past_the_committed_end_prove_no_staged_file() {
+fn a_staged_file_the_disk_lost_the_frames_of_is_uploaded_before_the_snapshot() {
     let (mut rig, mut actor) = caught_up();
     let before = rig.wal.committed_end();
     stage_held(&mut rig, &mut actor, &[2], T0 + 1);
@@ -419,9 +361,20 @@ fn frames_past_the_committed_end_prove_no_staged_file() {
     let read = CommittedRead::new(before, 0, rig.wal.epoch()).unwrap();
     rig.wal.script_committed(Some(read));
     let mut actor = Actor::new(cfg());
-    rig.tick(&mut actor, T0 + 2);
-    rig.settle(&mut actor, T0 + 2);
-    assert!(!replica_holds(&rig, 2, &two));
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert!(
+        matches!(
+            event(&boot),
+            Some(Event::Booted {
+                cause: Some(SnapshotCause::LocalRewound { .. })
+            })
+        ),
+        "{boot:?}"
+    );
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert!(replica_holds(&rig, 2, &two));
+    assert_eq!(snapshots(&rig), vec![1, 3]);
 }
 
 /// Writes `bytes` under level-0 key `n` in `store`, replacing what is there.
@@ -435,30 +388,6 @@ fn put_l0(store: &MemStore, n: u64, bytes: &[u8]) {
         up.write(bytes).await.unwrap();
         up.commit().await.unwrap();
     });
-}
-
-/// The replica's newest file anchors the pending run only when the live WAL
-/// holds its pages: one whose page differs from the WAL's (the replica's and
-/// the staged copy alike) anchors nothing, though its commit size agrees,
-/// and the pending file after it is not uploaded on it.
-#[test]
-fn a_tail_whose_pages_the_wal_does_not_hold_anchors_nothing() {
-    let (mut rig, mut actor) = caught_up();
-    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
-    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
-    stage_held(&mut rig, &mut actor, &[4], T0 + 1);
-    let other = replace_staged(&rig, 3, 0xEE);
-    put_l0(&rig.remote.inner, 3, &other);
-    let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
-    assert_eq!(
-        event(&boot),
-        Some(&Event::Booted {
-            cause: Some(SnapshotCause::StagedUnverified {
-                from: Txid::new(4).unwrap()
-            })
-        })
-    );
 }
 
 /// A pending file must start where the file before it ended. One that
@@ -532,27 +461,6 @@ fn reencoded(
     encoder.finish(None).unwrap().0
 }
 
-/// A pending file must end at the commit size the WAL's last transaction in
-/// its range gives: one that claims a smaller database, its pages otherwise
-/// the WAL's, describes no state the database had and is refused.
-#[test]
-fn a_pending_file_with_another_commit_size_is_refused() {
-    let (mut rig, mut actor) = caught_up();
-    stage_held(&mut rig, &mut actor, &[2], T0 + 1);
-    let (_, bytes) = staged_bytes(&rig)
-        .into_iter()
-        .find(|(n, _)| *n == 2)
-        .unwrap();
-    let smaller = reencoded(&bytes, |fields| fields.commit = 2, &[]);
-    put_l0(&rig.staging.inner, 2, &smaller);
-    let mut actor = Actor::new(cfg());
-    rig.tick(&mut actor, T0 + 2);
-    let seen = rig.settle(&mut actor, T0 + 2);
-    no_stop(&seen);
-    assert!(!replica_holds(&rig, 2, &smaller));
-    assert_eq!(restored(&rig), 2);
-}
-
 /// A pending file that neither starts where the file before it ended nor
 /// at the live generation's first frame is refused, whatever it holds: here
 /// an incremental filled out to every page, each the database's.
@@ -592,52 +500,6 @@ fn restored_page(rig: &Rig, pgno: u32) -> u8 {
     ))
     .unwrap();
     sink.published().unwrap().page(pgno).unwrap()[0]
-}
-
-/// A power loss on a disk that lies about the engine's WAL barrier drops the
-/// frames of the replica's newest file and of the pending file after it. The
-/// application comes back and retries both jobs: the first is not idempotent
-/// (it stamps the time) and writes its page with other bytes into the same
-/// frames, the second writes its page again verbatim. The live WAL now holds
-/// the pending file's range page for page, at the offset and commit size it
-/// names, after a range that is not the replica's newest file. Only the
-/// anchor sees it (an honest barrier keeps those frames, so nothing else
-/// needs to): the pending file is never uploaded on that file, and the
-/// replica restores what the database holds.
-#[test]
-fn a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one() {
-    let (mut rig, mut actor) = caught_up();
-    let kept = rig.wal.committed_end().frame_count();
-    rig.wal.append_tx(&[(pg(2), vec![0xA0; PS.bytes()])], nz(3));
-    rig.settle(&mut actor, T0 + 1);
-    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
-    let job = [(pg(1), vec![0xC0; PS.bytes()])];
-    rig.remote
-        .inner
-        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
-    rig.wal.append_tx(&job, nz(3));
-    rig.settle(&mut actor, T0 + 1);
-    assert_eq!(staged(&rig).last(), Some(&3));
-    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
-    rig.wal.lose_frames_from(kept);
-    rig.wal.append_tx(&[(pg(2), vec![0xB0; PS.bytes()])], nz(3));
-    rig.wal.append_tx(&job, nz(3));
-    let mut actor = Actor::new(cfg());
-    let boot = rig.tick(&mut actor, T0 + 2);
-    assert_eq!(
-        event(&boot),
-        Some(&Event::Booted {
-            cause: Some(SnapshotCause::StagedUnverified {
-                from: Txid::new(3).unwrap()
-            })
-        })
-    );
-    let seen = rig.settle(&mut actor, T0 + 2);
-    no_stop(&seen);
-    assert_eq!(
-        (restored_page(&rig, 1), restored_page(&rig, 2)),
-        (0xC0, 0xB0)
-    );
 }
 
 /// A replica outage longer than the witness cap: the engine stops staging at
@@ -722,42 +584,10 @@ fn pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal() {
     );
 }
 
-/// A pending file must hold exactly the pages its range stages: one that
-/// also carries a page the range never wrote describes no file this engine
-/// staged and is refused. The upper edge of the page count, beside the files
-/// that differ from the WAL in a page above.
-#[test]
-fn a_pending_file_with_one_page_too_many_is_refused() {
-    let (mut rig, mut actor) = caught_up();
-    stage_held(&mut rig, &mut actor, &[2], T0 + 1);
-    let (_, bytes) = staged_bytes(&rig)
-        .into_iter()
-        .find(|(n, _)| *n == 2)
-        .unwrap();
-    let mut decoder = ReadDecoder::new(&bytes[..]);
-    let mut held = Vec::new();
-    while let Some(event) = decoder.next_event().unwrap() {
-        if let lsr_ltx::Event::Page(page) = event {
-            held.push(page.pgno().get());
-        }
-    }
-    let fields = decoder.finish().unwrap().header().fields();
-    let spare = (1..=fields.commit).find(|raw| !held.contains(raw)).unwrap();
-    let page = vec![0xa5; fields.page_size.bytes()];
-    let more = reencoded(&bytes, |_| {}, &[(pg(spare), page)]);
-    put_l0(&rig.staging.inner, 2, &more);
-    let mut actor = Actor::new(cfg());
-    rig.tick(&mut actor, T0 + 2);
-    let seen = rig.settle(&mut actor, T0 + 2);
-    no_stop(&seen);
-    assert!(!replica_holds(&rig, 2, &more));
-    assert_eq!(restored(&rig), 2);
-}
-
-/// One read of a pending file that answers with another valid file (a lying read; the stored
-/// bytes are the engine's): the first witness pass refuses the file and the second witnesses
-/// it. Passes that disagree prove nothing, so the boot deletes nothing and retries
-/// (`LocalIo`); the next boot witnesses the stored bytes and uploads them.
+/// One read of a pending file that answers with torn bytes (a lying read; the stored bytes
+/// are the engine's): the first pass refuses the file and the second accepts it. Passes that
+/// disagree prove nothing, so the boot deletes nothing and retries (`LocalIo`); the next
+/// boot reads the stored bytes and uploads them.
 #[test]
 fn witness_passes_that_disagree_retry_the_boot() {
     let (mut rig, mut actor) = caught_up();
@@ -765,11 +595,10 @@ fn witness_passes_that_disagree_retry_the_boot() {
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
     let stored = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
-    let other = replace_staged(&rig, 3, 0xEE);
-    put_l0(&rig.staging.inner, 3, &stored);
-    // The boot reads the newest staged file once before it witnesses, so the second read
-    // from its start is the first witness pass's.
-    rig.staging.other_bytes_on_read(key, 2, other);
+    let torn = stored[..stored.len() / 2].to_vec();
+    // The boot reads the newest staged file once before it checks, so the second read
+    // from its start is the first pass's.
+    rig.staging.other_bytes_on_read(key, 2, torn);
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert!(

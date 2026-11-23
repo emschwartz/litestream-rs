@@ -14,52 +14,30 @@
 //! A token is minted in exactly two places, both in this crate:
 //! - **Made here.** [`crate::sync`] staged the file: this process wrote those
 //!   bytes, and the token comes from the encoder's own trailer.
-//! - **The live WAL.** At boot, [`witness_pending`] re-derives every pending
-//!   staged file (above the replica's newest transaction) from the WAL as it
-//!   is now. The live WAL is the one thing a restored staging backup does not
-//!   put back, and it answers in bytes.
+//! - **Read at boot.** [`check_pending`] reads every pending staged file
+//!   (above the replica's newest transaction) whole, verifies it, and mints
+//!   its token from that read, as Go uploads the files it finds in its local
+//!   directory (`docs/decisions/D175.md`). A file keeps the header time it was
+//!   staged with, so the age of the oldest commit not yet on the replica
+//!   survives a restart.
 //!
-//! The witness ladder has one more rung that v1 cannot use: a checksum chain
-//! (each file's pre-apply checksum equal to the previous file's post-apply
-//! one) would vouch for files the WAL no longer holds. Every file v1 and Go
-//! write is untracked (`docs/decisions.md`, D2), so there is nothing to
-//! compare; [`Refused::NotInLiveWal`] marks the seam where that rung goes.
-//! Below it, the file is dropped.
-//!
-//! The boot pass walks the WAL range by range from the replica's newest
-//! level-0 file (the tail) on. The tail must lie in the live WAL with the
-//! pages and commit size it holds; that anchors the run on content, not on a
-//! header link. Each pending file must then start where the one before it
-//! ended, in the live generation, hold exactly the pages a sync step would
-//! have staged for its range (the newest version of every page the range
-//! holds, plus the pages the database grew by, `crate::sync::plan_pages`) with
-//! the same bytes, and end at the same commit size. A grown page has no frame
-//! in its range; it is compared with the database file, and only when the WAL
-//! holds no frame for it anywhere, since checkpoints write the database file
-//! only from frames. A pending snapshot needs no anchor: it is read from the
-//! live generation's first frame and checked whole, every page against its
-//! frame or the database file by the same rule, and it must not stop short
-//! of a file before it in its generation; one the read cannot prove is taken
-//! again, so the replica gets one snapshot either way. A file that starts a
-//! new generation without holding every page is never witnessed at boot: a
-//! hop between generations is proven only by a running position that held
-//! the read lock across it.
+//! The boot pass checks more than Go does: each file must start in the WAL
+//! where the one before it ended (same salts, next offset; for the first
+//! pending file, the replica's newest file), or at the first frame (a new WAL
+//! generation or a snapshot). The first file that fails is
+//! refused with every file after it. It does not compare the files with the
+//! WAL: recovery compares the newest staged file with it, and the live WAL is
+//! not the proof that a file's bytes are the commits' bytes.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek};
-use std::num::NonZeroU32;
+use std::collections::BTreeMap;
 
-use lsr_ltx::{
-    Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Timestamp, Txid, TxidRange,
-};
-use lsr_wal::{Salts, ScanLimit, TxOutcome, WalError, WalOffset};
+use lsr_ltx::{Decoder, FileChecksum, Header, Timestamp, Txid, TxidRange};
+use lsr_wal::{Salts, WalOffset};
 
 use crate::fault::role::Role;
 use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::recover::{BootWal, Range, wal_range};
-use crate::source::PageSource;
-use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
+use crate::store::{ObjectStore, ReadLen, StoreError};
 use crate::upload::staged_from;
 
 /// The most tokens held for pending staged files; at about 40 bytes a token
@@ -151,6 +129,16 @@ impl Witnessed {
     /// ending in `checksum`, read the bytes this token was minted for.
     pub(crate) fn matches(&self, bytes: ByteTally, checksum: FileChecksum) -> bool {
         self.bytes == bytes && self.checksum == checksum
+    }
+
+    /// A token for a staged file the boot read whole and verified.
+    fn of_read(key: FileKey, file: &Decoded) -> Self {
+        Self {
+            key,
+            bytes: file.bytes,
+            checksum: file.checksum,
+            stamp: file.header.fields().timestamp,
+        }
     }
 
     /// A token for the staged file `bytes`, decoded here. Tests only: it
@@ -287,139 +275,75 @@ impl FromIterator<Witnessed> for Witnesses {
 /// What the boot pass found among the pending staged files.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Pending {
-    /// Tokens for the witnessed files, oldest first: a run from the first
-    /// pending transaction with no gap.
+    /// Tokens for the files that read whole and chain, oldest first: a run
+    /// from the first pending transaction with no gap.
     pub(crate) tokens: Vec<Witnessed>,
-    /// The first pending file the WAL does not vouch for: it and every one
-    /// after it must go.
+    /// The first pending file that failed: it and every one after it must go.
     pub(crate) refused: Option<Txid>,
 }
 
-/// Why a file got no witness. Only the first refusal of a run matters, and it
-/// is not reported further; the variants name the rule for readers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Refused {
-    /// The file or the tail does not decode and verify, names no usable WAL
-    /// range, or is not the next transaction.
-    Unusable,
-    /// The range is not in the live WAL: another generation or page size,
-    /// or a file that hops generations. This is the seam for the checksum
-    /// chain rung (see the module docs), unavailable while every file is
-    /// untracked.
-    NotInLiveWal,
-    /// The live WAL holds that range with other pages, other bytes or another
-    /// commit size, or a grown page differs from the database file.
-    Contradicted,
-}
-
-/// What the next pending file follows: the previous transaction, and where
-/// its file ended in the live WAL when that is known (the replica's tail is
-/// in the live WAL, or a pending file was witnessed). With no such end, only
-/// a snapshot can start the run.
-#[derive(Clone, Copy)]
-struct Before {
-    txid: Option<Txid>,
-    link: Option<Prev>,
-}
-
-/// Where the previous file of the run ended.
-#[derive(Clone, Copy)]
-struct Prev {
-    txid: Txid,
-    salts: Salts,
-    end: u64,
-    commit: NonZeroU32,
-}
-
-/// A whole file, verified on this read: its header, the checksum of each page
-/// and its trailer checksum.
+/// A whole file, verified on this read: its header, its bytes and its trailer
+/// checksum.
 struct Decoded {
     header: Header,
-    pages: BTreeMap<PageNo, PageChecksum>,
     bytes: ByteTally,
     checksum: FileChecksum,
 }
 
-/// The WAL and the database file the boot pass compares with.
-pub(crate) struct LiveDb<'a, R, P> {
-    /// The WAL as boot opened it, with the committed end of the boot's one wal-index
-    /// read: no range past it is proven.
-    pub(crate) wal: BootWal<'a, R>,
-    /// The database file.
-    pub(crate) db: &'a mut P,
-}
-
-/// Witnesses the staged level-0 files above `confirmed`, the replica's newest
-/// transaction, against the live WAL and database (see the module docs).
-///
-/// The tail is read from staging when its staged copy is there (boot's
-/// listing already found it byte-equal to the replica's), else from the
-/// replica. With no WAL nothing is witnessed; with an empty replica or a
-/// tail not in the live WAL, only a run that starts with a snapshot is.
+/// Reads the staged level-0 files above `confirmed`, the replica's newest
+/// transaction, and mints a token for each from the read (see the module
+/// docs). The first file must follow the replica's newest file, read from
+/// staging when it is still there, else from the replica; when that file does
+/// not decode, only a file at the first frame can start the run.
 ///
 /// # Errors
-/// A store or WAL read that failed; that says nothing about the bytes.
-pub(crate) async fn witness_pending<L, S, R, P>(
+/// A store read that failed; that says nothing about the bytes.
+pub(crate) async fn check_pending<L: Role, S: Role>(
     staging: &L,
     remote: &S,
-    live: Option<LiveDb<'_, R, P>>,
     confirmed: Option<Txid>,
-) -> Result<Pending, Fault>
-where
-    L: Role,
-    S: Role,
-    R: Read + Seek,
-    P: PageSource,
-{
-    let from = confirmed.map_or(Some(Txid::MIN), Txid::next);
-    let pending: Vec<FileInfo> = match from {
+) -> Result<Pending, Fault> {
+    let mut expect = confirmed.map_or(Some(Txid::MIN), Txid::next);
+    let pending: Vec<FileInfo> = match expect {
         // One past the cap: the first file no token could be minted for.
         Some(from) => staged_from(staging, Some(from), MAX_WITNESSED.saturating_add(1)).await?,
         None => Vec::new(),
     };
-    let Some(first) = pending.first() else {
-        return Ok(Pending::default());
-    };
-    let refuse_all = Pending {
-        tokens: Vec::new(),
-        refused: Some(first.key.range().min()),
-    };
-    let Some(mut live) = live else {
-        return Ok(refuse_all);
-    };
-    let mut prev = Before {
-        txid: confirmed,
-        link: match confirmed {
-            Some(tail) => anchor(staging, remote, &mut live, tail).await?,
-            None => None,
-        },
-    };
-    let mut framed = None;
     let mut tokens = Vec::new();
+    if pending.is_empty() {
+        return Ok(Pending::default());
+    }
+    let mut prev = match confirmed {
+        Some(tail) => tail_link(staging, remote, tail).await?,
+        None => None,
+    };
     for info in &pending {
         // Past the cap a file could get no token: it goes as refused files do,
         // and the WAL stages it again once uploads make room.
-        if tokens.len() >= MAX_WITNESSED {
+        let wanted = expect.map(|txid| FileKey::new(Level::ZERO, TxidRange::single(txid)));
+        let read = if tokens.len() < MAX_WITNESSED && Some(info.key) == wanted {
+            decode(staging, info.key, L::fault).await?
+        } else {
+            None
+        };
+        let chained = read.and_then(|file| {
+            let link = link_of(&file.header)?;
+            let first_frame = WalOffset::start(file.header.page_size()).get();
+            // A file starts where the one before it ended, or starts a new
+            // generation or a snapshot at the first frame.
+            let starts = link.start == first_frame
+                || prev.is_some_and(|prev| prev.salts == link.salts && prev.end == link.start);
+            starts.then_some((file, link))
+        });
+        let Some((file, next)) = chained else {
             return Ok(Pending {
                 tokens,
                 refused: Some(info.key.range().min()),
             });
-        }
-        match witness_one(staging, &mut live, info, prev, &mut framed).await? {
-            Ok((token, next)) => {
-                tokens.push(token);
-                prev = Before {
-                    txid: Some(next.txid),
-                    link: Some(next),
-                };
-            }
-            Err(_refused) => {
-                return Ok(Pending {
-                    tokens,
-                    refused: Some(info.key.range().min()),
-                });
-            }
-        }
+        };
+        tokens.push(Witnessed::of_read(info.key, &file));
+        prev = Some(next);
+        expect = info.key.range().max().next();
     }
     Ok(Pending {
         tokens,
@@ -427,212 +351,43 @@ where
     })
 }
 
-/// The replica's tail, when the live WAL holds its range with its pages and
-/// commit size: where the first pending file must start.
-async fn anchor<L: Role, S: Role, R: Read + Seek, P>(
+/// Where the replica's newest file sits in its WAL, when it reads whole.
+async fn tail_link<L: Role, S: Role>(
     staging: &L,
     remote: &S,
-    live: &mut LiveDb<'_, R, P>,
     tail: Txid,
-) -> Result<Option<Prev>, Fault> {
+) -> Result<Option<Link>, Fault> {
     let key = FileKey::new(Level::ZERO, TxidRange::single(tail));
-    let after = tail.prev().map(TxidRange::single);
-    let listed = staging
-        .list(Level::ZERO, after, PageLimit::ONE)
-        .await
-        .map_err(|err| L::fault(&err))?;
-    let staged = listed.files.first().is_some_and(|info| info.key == key);
-    let decoded = if staged {
-        decode(staging, key, L::fault).await?
-    } else {
-        decode(remote, key, S::fault).await?
+    let file = match decode(staging, key, L::fault).await? {
+        Some(file) => Some(file),
+        None => decode(remote, key, S::fault).await?,
     };
-    let Some(decoded) = decoded else {
-        return Ok(None);
-    };
-    let Some((salts, start, end, commit)) = span(&decoded.header) else {
-        return Ok(None);
-    };
-    let held = match wal_range(&mut live.wal, start, end, salts)? {
-        Range::Pages { pages, commit: got } => {
-            got.is_none_or(|got| got == commit)
-                && pages
-                    .iter()
-                    .filter(|(pgno, _)| pgno.get() <= commit.get())
-                    .all(|(pgno, digest)| decoded.pages.get(pgno) == Some(digest))
-        }
-        Range::Rewritten | Range::NotInThisWal => false,
-    };
-    Ok(held.then_some(Prev {
-        txid: tail,
-        salts,
-        end: end.get(),
-        commit,
-    }))
+    Ok(file.and_then(|file| link_of(&file.header)))
 }
 
-/// The file's generation, WAL range and commit size, when its header names a
-/// range that ends on a frame boundary. Whether that range is in the live
-/// WAL is [`wal_range`]'s to say: it refuses another generation or page size.
-fn span(header: &Header) -> Option<(Salts, u64, WalOffset, NonZeroU32)> {
+/// Where a file sits in its WAL: its generation and the offsets it spans.
+#[derive(Clone, Copy)]
+struct Link {
+    salts: Salts,
+    start: u64,
+    end: u64,
+}
+
+/// The file's generation and WAL range, when its header names a range that
+/// ends on a frame boundary.
+fn link_of(header: &Header) -> Option<Link> {
     let fields = header.fields();
     let origin = fields.wal?;
     let (salt1, salt2) = origin.salts();
-    let salts = Salts { salt1, salt2 };
     let end = WalOffset::new(
         origin.offset().checked_add(origin.size())?,
         fields.page_size,
     )?;
-    Some((salts, origin.offset(), end, NonZeroU32::new(fields.commit)?))
-}
-
-/// One pending file against the live WAL: its token and where it ends, or
-/// why it is refused.
-///
-/// A file that starts where the previous one ended is an incremental. One
-/// read from the live generation's first frame is a snapshot when it holds
-/// every page: it is checked page by page against the WAL range and, for
-/// each page the range does not hold, the database file (only where no
-/// frame exists anywhere in the WAL), and it must reach at least as far as
-/// a previous file in the same generation, since one that stops short is an
-/// earlier state. A snapshot the read cannot prove is refused and taken
-/// again; a file that starts a generation without holding every page (a
-/// hop) is refused, since only a running position can prove it lost nothing.
-async fn witness_one<L: Role, R: Read + Seek, P: PageSource>(
-    staging: &L,
-    live: &mut LiveDb<'_, R, P>,
-    info: &FileInfo,
-    prev: Before,
-    framed: &mut Option<Option<BTreeSet<PageNo>>>,
-) -> Result<Result<(Witnessed, Prev), Refused>, Fault> {
-    let txid = info.key.range().max();
-    let next = prev.txid.map_or(Some(Txid::MIN), Txid::next);
-    if Some(info.key) != next.map(|next| FileKey::new(Level::ZERO, TxidRange::single(next))) {
-        return Ok(Err(Refused::Unusable));
-    }
-    let Some(decoded) = decode(staging, info.key, L::fault).await? else {
-        return Ok(Err(Refused::Unusable));
-    };
-    let Some((salts, start, end, commit)) = span(&decoded.header) else {
-        return Ok(Err(Refused::NotInLiveWal));
-    };
-    let follows = prev
-        .link
-        .filter(|link| link.salts == salts && link.end == start);
-    let first_frame = WalOffset::start(decoded.header.page_size()).get();
-    let prev_commit = match (follows, prev.link) {
-        (Some(link), _) => link.commit.get(),
-        // A snapshot that stops short of a file before it in its generation
-        // describes an earlier state of that WAL. (The link is always in the
-        // live generation; a file in another is refused by `wal_range`.)
-        (None, Some(link)) if end.get() < link.end => {
-            return Ok(Err(Refused::Contradicted));
-        }
-        (None, _) if start == first_frame => 0,
-        (None, _) => return Ok(Err(Refused::NotInLiveWal)),
-    };
-    let wal_pages = match wal_range(&mut live.wal, start, end, salts)? {
-        Range::Pages {
-            pages,
-            commit: Some(got),
-        } if got == commit => pages,
-        Range::Pages { .. } | Range::Rewritten => return Ok(Err(Refused::Contradicted)),
-        Range::NotInThisWal => return Ok(Err(Refused::NotInLiveWal)),
-    };
-    if !holds_exactly(&decoded, &wal_pages, prev_commit, commit, live, framed)? {
-        return Ok(Err(Refused::Contradicted));
-    }
-    let token = Witnessed {
-        key: info.key,
-        bytes: decoded.bytes,
-        checksum: decoded.checksum,
-        stamp: decoded.header.fields().timestamp,
-    };
-    let next = Prev {
-        txid,
-        salts,
+    Some(Link {
+        salts: Salts { salt1, salt2 },
+        start: origin.offset(),
         end: end.get(),
-        commit,
-    };
-    Ok(Ok((token, next)))
-}
-
-/// Whether the file holds exactly the pages a sync step stages for its range:
-/// every WAL page up to `commit` with the WAL's bytes, and every page grown
-/// above `prev_commit` the range does not hold, with the database file's
-/// bytes, and nothing else. A snapshot is the case `prev_commit` = 0: every
-/// page the range does not hold comes from the database file.
-fn holds_exactly<R: Read + Seek, P: PageSource>(
-    decoded: &Decoded,
-    wal_pages: &BTreeMap<PageNo, PageChecksum>,
-    prev_commit: u32,
-    commit: NonZeroU32,
-    live: &mut LiveDb<'_, R, P>,
-    framed: &mut Option<Option<BTreeSet<PageNo>>>,
-) -> Result<bool, Fault> {
-    let page_size = decoded.header.page_size();
-    let from_wal = wal_pages
-        .iter()
-        .filter(|(pgno, _)| pgno.get() <= commit.get());
-    let mut expected = 0_usize;
-    for (pgno, digest) in from_wal {
-        if decoded.pages.get(pgno) != Some(digest) {
-            return Ok(false);
-        }
-        expected = expected.saturating_add(1);
-    }
-    let grown = (prev_commit.saturating_add(1)..=commit.get())
-        .filter_map(|raw| PageNo::new(raw, page_size))
-        .filter(|pgno| !wal_pages.contains_key(pgno));
-    let mut buf = vec![0_u8; page_size.bytes()];
-    for pgno in grown {
-        let Some(digest) = decoded.pages.get(&pgno) else {
-            return Ok(false);
-        };
-        let pages = match framed {
-            Some(pages) => pages,
-            None => framed.insert(framed_pages(&mut live.wal)?),
-        };
-        // A frame anywhere may have reached the database file since: the
-        // file's copy cannot be told from the database's, so no witness.
-        if pages.as_ref().is_none_or(|pages| pages.contains(&pgno)) {
-            return Ok(false);
-        }
-        if live.db.read_page(pgno, &mut buf).is_err() || PageChecksum::of(pgno, &buf) != *digest {
-            return Ok(false);
-        }
-        expected = expected.saturating_add(1);
-    }
-    Ok(decoded.pages.len() == expected)
-}
-
-/// Every page any committed transaction of the live WAL writes, up to the boot's
-/// committed end; `None` when the WAL cannot be read that far.
-fn framed_pages<R: Read + Seek>(
-    boot: &mut BootWal<'_, R>,
-) -> Result<Option<BTreeSet<PageNo>>, Fault> {
-    let wal = &mut *boot.reader;
-    let mut cursor = wal.cursor_at_start();
-    let mut pages = BTreeSet::new();
-    loop {
-        match wal.next_tx(&cursor, ScanLimit::Committed(boot.committed)) {
-            Ok(TxOutcome::Tx(tx)) => {
-                pages.extend(tx.frames().iter().map(lsr_wal::FrameRef::pgno));
-                cursor = *tx.end();
-            }
-            Ok(TxOutcome::End { .. }) => return Ok(Some(pages)),
-            Err(WalError::Io(_)) => return Err(Fault::LocalIo),
-            Err(
-                WalError::PageSizeMismatch { .. }
-                | WalError::Restarted { .. }
-                | WalError::CursorPastEnd { .. }
-                | WalError::CorruptBelowCommitted { .. }
-                | WalError::TruncatedBelowCommitted { .. }
-                | WalError::EndNotAtCommit { .. }
-                | WalError::TooManyFrames,
-            ) => return Ok(None),
-        }
-    }
+    })
 }
 
 /// Whether the staging store still holds, under the token's key, exactly the
@@ -653,7 +408,6 @@ async fn decode<S: ObjectStore>(
     key: FileKey,
     fault: fn(&StoreError) -> Fault,
 ) -> Result<Option<Decoded>, Fault> {
-    let mut pages = BTreeMap::new();
     let mut decoder = Decoder::new();
     let mut bytes = ByteTally::new();
     let mut offset = 0_u64;
@@ -666,12 +420,9 @@ async fn decode<S: ObjectStore>(
         bytes.add(&chunk);
         let mut rest = chunk.as_slice();
         while !rest.is_empty() {
-            let Ok((used, event)) = decoder.feed(rest) else {
+            let Ok((used, _)) = decoder.feed(rest) else {
                 return Ok(None);
             };
-            if let Some(Event::Page(page)) = event {
-                pages.insert(page.pgno(), page.checksum());
-            }
             crate::invariant!(used != 0, BugSite::DecoderStalled);
             rest = rest.get(used..).unwrap_or_default();
         }
@@ -684,7 +435,6 @@ async fn decode<S: ObjectStore>(
     match decoder.finish() {
         Ok(verified) if verified.header().txids() == key.range() => Ok(Some(Decoded {
             header: *verified.header(),
-            pages,
             bytes,
             checksum: verified.trailer().file_checksum(),
         })),

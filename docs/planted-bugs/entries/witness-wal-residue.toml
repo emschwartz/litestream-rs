@@ -1,6 +1,0 @@
-name = "witness-wal-residue"
-fix = "1b5ac06"
-package = "lsr-core"
-tests = [
-    "frames_past_the_committed_end_prove_no_staged_file",
-]

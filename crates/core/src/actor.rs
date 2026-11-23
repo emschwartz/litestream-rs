@@ -138,7 +138,7 @@ use crate::upload::{
     drop_staged_from, inventory_fault, plan_upload, sweep_staged, upload_next, upload_next_in,
 };
 use crate::verify::LivePages;
-use crate::witness::{LiveDb, Pending, Witnesses, still_holds, witness_pending};
+use crate::witness::{Pending, Witnesses, check_pending, still_holds};
 
 /// What one tick may touch, lent for that tick only.
 pub struct Env<'a, W, P, C, L, R> {
@@ -1199,8 +1199,8 @@ impl Actor {
         self.fault(Task::Sync, fault, now)
     }
 
-    /// Lists the replica, witnesses the pending staged files against the
-    /// live WAL (`crate::witness`), reads the newest staged file left and
+    /// Lists the replica, checks the pending staged files
+    /// (`crate::witness`), reads the newest staged file left and
     /// recovers (in that order). A failure anywhere boots again from the start.
     async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
@@ -1240,7 +1240,7 @@ impl Actor {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, now),
         };
-        // A refusal or a drop the sweep and the witness passes already proved explains the
+        // A refusal or a drop the sweep and the staged-file check already proved explains the
         // snapshot; only a verdict resting on the newest staged file's one read is doubted.
         let proven = refused.is_some() || !matches!(dropped, Dropped::Nothing);
         if let Some(tick) = (!proven)
@@ -2916,61 +2916,44 @@ struct Listed {
     gate: BootGate,
 }
 
-/// Boot's witness pass over the pending staged files (`crate::witness`).
-/// The first file the WAL does not vouch for is deleted with every one
-/// after it, once a second pass agrees: one read never condemns a file. Two
-/// passes that disagree retry the boot.
+/// Boot's check of the pending staged files (`crate::witness`).
+/// The first file that fails is deleted with every one after it, once a
+/// second pass agrees: one read never condemns a file. Two passes that
+/// disagree retry the boot.
 ///
 /// The listing leaves a torn newest key unconfirmed, for its staged copy to
 /// be uploaded over it. When that copy is the file refused and a read finds
 /// the key on the replica (a read, since a listing may lag), the key stays as
 /// the replica holds it and is confirmed: new content never takes a
 /// transaction the replica holds, so the snapshot goes above it.
-async fn boot_witness<W: WalSource, P: PageSource, C, L: Role, R: Role>(
-    env: &mut Env<'_, W, P, C, L, R>,
-    mut reader: Option<&mut WalReader<W::Wal>>,
-    committed: CommittedRead,
+async fn boot_witness<L: Role, R: Role>(
+    staging: &L,
+    remote: &R,
     upload: UploadState,
     gate: BootGate,
 ) -> Result<(Pending, UploadState), BootStep> {
     let confirmed = upload.confirmed();
-    let first = witness_once(env, reader.as_deref_mut(), committed, confirmed).await?;
+    let first = check_pending(staging, remote, confirmed).await?;
     let Some(from) = first.refused else {
         return Ok((first, upload));
     };
-    let second = witness_once(env, reader, committed, confirmed).await?;
+    let second = check_pending(staging, remote, confirmed).await?;
     if second.refused != Some(from) {
         return Err(Fault::LocalIo.into());
     }
-    gate.vouch(env.remote, confirmed).await?;
-    drop_staged_from(env.staging, from).await?;
+    gate.vouch(remote, confirmed).await?;
+    drop_staged_from(staging, from).await?;
     let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
     let key = FileKey::new(Level::ZERO, TxidRange::single(from));
     // A read, not a listing: a listing may lag the replica's writes, and one that leaves the
     // key out would let new content take a transaction the replica holds.
-    let held = crate::store::exists(env.remote, &key)
+    let held = crate::store::exists(remote, &key)
         .await
         .map_err(|err| R::fault(&err))?;
     if next == Some(from) && held {
         return Ok((first, UploadState::At(Some(from))));
     }
     Ok((first, upload))
-}
-
-async fn witness_once<W: WalSource, P: PageSource, C, L: Role, R: Role>(
-    env: &mut Env<'_, W, P, C, L, R>,
-    reader: Option<&mut WalReader<W::Wal>>,
-    committed: CommittedRead,
-    confirmed: Option<Txid>,
-) -> Result<Pending, Fault> {
-    let live = reader.map(|reader| LiveDb {
-        wal: BootWal {
-            reader,
-            committed: committed.end(),
-        },
-        db: &mut *env.db,
-    });
-    witness_pending(env.staging, env.remote, live, confirmed).await
 }
 
 /// The boot's reader bounded by its committed end.
@@ -2981,7 +2964,7 @@ fn boot_wal_of<R>(
     reader.map(|reader| BootWal { reader, committed })
 }
 
-/// What the boot's judges found: the witness pass, the upload state it leaves, and
+/// What the boot's judges found: the staged-file check, the upload state it leaves, and
 /// recovery.
 struct Judged {
     pending: Pending,
@@ -3014,8 +2997,8 @@ async fn boot_seed<L: Role>(
     }
 }
 
-/// The witness pass and recovery, on one wal-index read and one reader opened after it:
-/// both judge the same WAL, and no range past that committed end.
+/// The staged-file check and recovery. Recovery judges the WAL on one wal-index read and one
+/// reader opened after it, and no range past that committed end.
 async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     upload: UploadState,
@@ -3023,7 +3006,7 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
 ) -> Result<Judged, BootStep> {
     let committed = env.wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(env.wal)?;
-    let (pending, upload) = boot_witness(env, reader.as_mut(), committed, upload, gate).await?;
+    let (pending, upload) = boot_witness(env.staging, env.remote, upload, gate).await?;
     let booted = boot_recover(env, reader.as_mut(), committed, upload.confirmed(), gate).await?;
     Ok(Judged {
         pending,

@@ -4,4 +4,4 @@
 name = "boot-drop-record-capped-at-confirmed"
 fix = "88577ff"
 package = "lsr-core"
-tests = ["the_takeover_before_a_witness_drop_covers_a_torn_looking_tail"]
+tests = ["the_takeover_before_a_refused_copy_drop_covers_a_torn_looking_tail"]
