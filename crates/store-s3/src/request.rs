@@ -82,6 +82,21 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
+    /// An unsigned request, for the credential sources (STS, container, instance metadata).
+    pub(crate) fn new(
+        method: Method,
+        url: Url,
+        headers: Vec<(&'static str, String)>,
+        body: Vec<u8>,
+    ) -> Self {
+        Self {
+            method,
+            url,
+            headers,
+            body,
+        }
+    }
+
     /// A request to `url` with these headers and no body, for transport tests.
     #[cfg(test)]
     pub(crate) fn for_test(method: Method, url: Url, headers: Vec<(&'static str, String)>) -> Self {
@@ -324,6 +339,16 @@ impl RequestBuilder {
             prefix: config.prefix().clone(),
             provider: config.provider(),
         })
+    }
+
+    /// The same replica, signed with other credentials: what a refresh builds.
+    pub(crate) fn with_credentials(&self, credentials: &S3Credentials) -> Self {
+        Self {
+            bucket: self.bucket.clone(),
+            credentials: credentials.to_signer(),
+            prefix: self.prefix.clone(),
+            provider: self.provider,
+        }
     }
 
     fn base_headers(&self) -> Headers {

@@ -650,6 +650,23 @@ impl FaultVfs {
         });
     }
 
+    /// Whether bytes `[start, end)` of the file at `path` survive a power loss now under
+    /// [`CrashLaw::AllOrNothing`]: no write since its last sync touched them, counting the
+    /// writes a failed sync lost. A file the VFS does not track, or durability not tracked at
+    /// all, loses nothing.
+    #[must_use]
+    pub fn durable(&self, path: &std::path::Path, start: u64, end: u64) -> bool {
+        let Some(at) = self.shared.known(path) else {
+            return true;
+        };
+        let state = self.shared.lock();
+        state.undo.get(&at).is_none_or(|undo| {
+            undo.dirty
+                .iter()
+                .all(|(from, to)| *to <= start || *from >= end)
+        })
+    }
+
     /// The power fails now, between calls (module doc): what an [`Effect::PowerLoss`] does
     /// when its call comes.
     pub fn cut_power(&self) {

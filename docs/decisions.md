@@ -57,6 +57,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D103 | What does a boot do when it finds a recorded unproven-WAL debt and the database file may hold pages from commits the WAL lost? | Check the file against the last staged state before the TRUNCATE; a proven mix is replicated as served, noticed as `database_ahead_of_wal`, and the state before it kept 7 days, with no operator action; `STRICT` stops | Claude (journal), **delegated**, decided by a Fable review; self-clearing by the owner | 2026-11-22 | open to owner review |
 | D104 | Can the engine's read mark keep other checkpoints from copying unproven WAL frames while the debt stands? | No: the mark cannot be placed at the proven frame, and the cure itself must release it; D103's check is the fix. Two marks plus a WAL rewrite is left as a spike | Claude (journal), **delegated**, decided by a Fable review | 2026-11-22 | decided |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
+| D131 | What does the engine defend against? | Accidents, not deliberate forgery | owner | 2026-11-23 | decided |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 | D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
@@ -64,11 +65,12 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D41 | `watch: true` on a `dir` entry, refused since the phase-4 plan: keep refusing under D33? | Keep refusing until built; the owner chooses | Claude (dropin-dir), **delegated** | 2026-11-22 | open to owner review |
 | D42 | The config file names only one of `access-key-id` and `secret-access-key`: ignore it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
 | D43 | A shared AWS file holds a line that is not INI: skip it as Go does? | No: refuse | Claude (dropin-creds), **delegated** | 2026-11-22 | open to owner review |
-| D44 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles) | A gap to build under D33, tracked in #176; refused by name until then | Claude (dropin-creds), from the parent session | 2026-11-22 | gap, open |
+| D44 | Credential sources that need a network call or a subprocess (instance roles, web identity, SSO, `credential_process`, assumed roles) | Built in Go's order, except assumed roles, SSO and login sessions, which are refused by name; tracked in #176 | Claude (dropin-roles), from the parent session | 2026-11-22 | partly built, gap open |
 | D45 | Config Go accepts and litestream-rs refuses at load or start (unknown and duplicate keys, values no start could use, schedules core does not run): copy Go under D33? | No: keep refusing, naming the key | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D46 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
 | D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
+| D49 | Temporary credentials: refresh before expiry, and a source that answers without keys | Refresh five minutes early; refuse an answer without keys or an STS answer without credentials | Claude (dropin-roles), **delegated** | 2026-11-22 | open to owner review |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D62 | What does the simulator's hold judge require of an as-of restore through a fault? | The as-of bound (G3), not the raw replica's answer | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
@@ -383,7 +385,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Why:** this engine uploads only from witnessed, synced staged copies and keeps a takeover record before deleting its own (BOOT-30), so without an operator's hand a boot divergence is another writer at this engine's next id. Refusing it covers that restart without a record, and rule (a) covers the other writer's files above staging, so the stop record kept nothing the boot does not now see. One fewer meta-directory file and crash-consistency surface. An unusable takeover record then costs only what no record costs.
 - **Cost accepted:** an operator who puts back a staging backup holding another copy of the replica's newest key stops instead of snapshotting; `lsr take-over` clears it, as for D12's other operator actions.
 - **Revisit if:** a world without an operator's hand produces a boot divergence.
-- **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-38, CFG-39; `crates/core/src/actor.rs` (`boot_listing`); #110.
+- **Links:** `docs/BEHAVIOR.md` BOOT-13, BOOT-21, BOOT-22, CFG-38, CFG-39; `crates/core/src/actor.rs` (`boot_listing`); #110; D131 (an operator putting back a backup is the accident this refusal covers; a forged copy is out of scope).
 
 ## D35. A stall at the end of a run
 
@@ -495,6 +497,19 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the judge checks the store's contract, not the engine's behaviour, so it finds a store defect the engine would survive (the delete plant). Per-entry independence can split a rename (both names, or neither), which ext4 would not; it is the rule the WAL's fault VFS and `Volatile` already use, so the disk stays one law (#121). A fault the fault layer injects after publishing (`ErrorAfterPublish`) does not unsync anything on `MemFs`: the store did sync, so in this profile such a file always survives.
 - **Revisit if:** the shared directory-entry rule changes; or `MemFs` and the host disagree in `differential::the_doubles_answer_as_the_real_store_does`.
 - **Links:** #127 item I.
+
+## D131. The threat model: accidents, not forgery
+
+- **Question:** the engine and the simulator had begun to defend against files crafted to deceive the engine (a staged file re-encoded under the same key and header with other pages and a matching checksum). Is that in scope?
+- **Choice (owner):** no. "Don't bother defending against malicious behavior since a truly malicious thing could do worse."
+- **In scope, accidents:** crashes and power loss; disks that lie about a sync, fail, or return other bytes than were written; bit rot; a misconfiguration that runs two writers on one prefix or one meta directory; an operator who puts back an old copy of the meta or staging directory, or of the whole volume; a bucket rolled back, or thinned by a lifecycle rule; a listing that lags; provider bugs (wrong bytes acknowledged, a commit whose answer is lost); Go and Rust taking turns on one database.
+- **Out of scope, deliberate forgery:** anyone who writes files meant to pass the engine's checks. A staged file re-encoded with changed or extra pages and a valid trailer. A replica object edited to verify. A takeover record or journal written by hand to say what did not happen.
+- **What still holds:** G1 to G4 under every in-scope fault. Every successful restore is a state the application committed.
+- **Cost accepted:** someone who can write the meta directory or the bucket can make the engine replicate wrong data, and no check finds it. The same person can write the database file, which the engine replicates faithfully.
+- **Rule for new work:** a defence, a simulator op or a behaviour row names the accident that reaches it. A file that verifies and holds what no engine ever wrote is not an accident: a torn write fails the trailer, bit rot fails a checksum, and an older copy put back is bytes an engine wrote (`MetaOp::Save` and `Restore` model that).
+- **What it removes:** the simulator's `MetaOp::ForgeNewest` and what exists only for it; PR #187 (`MetaOp::GrowNewest`) closes unmerged. No engine check goes: each one is reached by an accident above (the classification is in the PR that lands this entry).
+- **Revisit if:** the meta directory or the bucket becomes writable by a party the database file is not.
+- **Links:** `docs/BEHAVIOR.md` A3, A5, L1, BOOT-4, BOOT-11, BOOT-13, RUN-17; D12, D50; #187.
 
 ## D40. An S3 replica with an empty prefix (delegated)
 
@@ -629,13 +644,13 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** a real file with a harmless non-INI line turns up.
 - **Links:** `docs/BEHAVIOR.md` CFG-22; `crates/store-s3/src/chain/ini.rs`.
 
-## D44. Credential sources that need a network call or a subprocess: a gap to build
+## D44. Credential sources that need a network call or a subprocess: built, except assumed roles and SSO
 
-- **Question:** Go's SDK resolves EC2 instance roles, ECS and EKS container credentials, web-identity tokens, assumed roles (`role_arn` with `source_profile` or `credential_source`), SSO and `credential_process`. litestream-rs builds none of them (CFG-7), so an application on EC2, ECS or EKS with a role and no static keys does not start under `lsr`.
-- **Choice:** not an accepted trade-off. D33 (full drop-in) requires these, and they are tracked as a gap to build in #176, which names the Go code to match and the differential that will prove it. Until then the chain finds no keys and the start fails naming the sources it tried.
-- **Cost until built:** role-based deployments need static keys under litestream-rs.
-- **Evidence of the gap:** `compat::go_resolves_what_rust_does_not_build` asserts it, so building any source shows there first.
-- **Links:** #176; `docs/BEHAVIOR.md` CFG-7; `crates/store-s3/src/chain.rs`.
+- **Question:** Go's SDK resolves EC2 instance roles, ECS and EKS container credentials, web-identity tokens, assumed roles (`role_arn` with `source_profile` or `credential_source`), IAM Identity Center (SSO), login sessions and `credential_process`. Without them an application on EC2, ECS or EKS with a role and no static keys does not start under `lsr`.
+- **Choice:** built in the SDK's order, after the environment's keys: web identity from the environment, then the profile (static keys, `web_identity_token_file`, `credential_process`), then container credentials, then the instance metadata service, each as the SDK v1.19.6 and `feature/ec2/imds` v1.18.16 call them, with the SDK's load-time profile checks. Still a gap, tracked in #176: assumed roles over `source_profile` or `credential_source`, SSO and login sessions. A profile that needs one is refused, naming the source, rather than skipped, so the chain never signs with credentials Go would not have chosen.
+- **Cost until the rest is built:** a deployment that assumes a role from a profile, or signs in through SSO, needs static keys or a source that is built.
+- **Evidence:** `compat::go_and_rust_fetch_the_same_temporary_credentials` (a differential against Go's SDK over a fake STS, container endpoint and metadata service); `compat::go_resolves_what_rust_does_not_build` asserts the remaining gap, so building it shows there first.
+- **Links:** #176; `docs/BEHAVIOR.md` CFG-7, CFG-41, CFG-42, CFG-43; `crates/store-s3/src/chain.rs`, `chain/remote.rs`, `chain/process.rs`, `signer.rs`.
 
 ## D45. Config refusals stricter than Go (delegated)
 
@@ -676,6 +691,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost until built:** a deployment that runs one of these commands, or graphs one of these series, needs Go Litestream for it.
 - **Evidence of the gap:** `compat::go_and_lsr_read_the_same_replicate_command_lines` accepts the `-once` refusals only by their message, tied here.
 - **Links:** #177; `docs/BEHAVIOR.md` CFG-33, CFG-35.
+
+## D49. Temporary credentials: refreshed early, and an answer without keys refused (delegated)
+
+- **Question:** three places where litestream-rs's temporary credentials could follow Go's SDK exactly or differ. (1) The SDK fetches again only once the cached credentials have expired. (2) A container or metadata answer that parses but holds no keys (`{}`) becomes credentials with an empty key id, which every request then signs with and every bucket refuses. (3) An STS answer without `Credentials` or `Expiration` crashes the process (`stscreds/web_identity_provider.go:152`, `assume_role_provider.go:321` dereference them unchecked).
+- **Choice:** (1) fetch five minutes before expiry, so no request is signed with credentials that expire in flight; a failed fetch keeps credentials that are still valid and is tried on the next request, and once they have expired the store fails `Transient` when waiting may help (no answer, 5xx, 429) and `Denied(Credentials)` otherwise, which the health handle reports. (2) and (3) refuse the answer when it arrives, naming the source. None of the three changes what a replica holds; (2) and (3) turn a later refusal or a crash into an earlier, named one.
+- **Delegated:** decided by the agent building #176 for the owner.
+- **Cost if wrong:** (1) one more fetch per credential lifetime than Go makes. (2) a credential endpoint that legitimately answers without keys (none is known) would start under Go and not under litestream-rs, though Go could not sign a request that a bucket accepts.
+- **Evidence:** `store-s3::signer::tests` (refresh margin, failed fetch, the two failure classes); `compat::go_and_rust_fetch_the_same_temporary_credentials` counts Go's empty key and Go's crash as refusals and requires litestream-rs to refuse.
+- **Links:** `docs/BEHAVIOR.md` CFG-42, CFG-43; `crates/store-s3/src/source.rs`, `signer.rs`.
 
 ## D74. Every engine commit checks the size the store acknowledged (delegated)
 

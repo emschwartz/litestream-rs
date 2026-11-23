@@ -296,3 +296,96 @@ fn a_name_with_a_nul_is_refused() {
         Some(VfsError::NameHasNul)
     );
 }
+
+/// The database file's bytes, read while no connection has it open.
+fn db_bytes(db: &std::path::Path) -> Vec<u8> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "no connection has the database open: the power loss killed them all"
+    )]
+    let bytes = std::fs::read(db).unwrap();
+    bytes
+}
+
+/// Runs a partial PASSIVE backfill under `law` and cuts the power: returns the database file
+/// before the backfill, after the loss, and whether SQLite left the backfill's writes unsynced.
+fn partial_backfill_then_power_loss(name: &str, law: CrashLaw) -> (Vec<u8>, Vec<u8>, bool) {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("a.db");
+    let vfs = vfs(name);
+    let conn = open(&db, &vfs);
+    conn.execute_batch(
+        "PRAGMA page_size = 512; VACUUM; CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB);
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40)
+         INSERT INTO t SELECT i, randomblob(300) FROM n;",
+    )
+    .unwrap();
+    drop(conn);
+    let base = db_bytes(&db);
+    let app = open(&db, &vfs);
+    app.pragma_update(None, "synchronous", "NORMAL").unwrap();
+    vfs.track_durability();
+    vfs.set_crash_law(law);
+    app.execute_batch("UPDATE t SET v = randomblob(300)")
+        .unwrap();
+    let reader = open(&db, &vfs);
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM t;")
+        .unwrap();
+    app.execute_batch("UPDATE t SET v = zeroblob(300) WHERE id <= 3")
+        .unwrap();
+    let (busy, log, done): (i64, i64, i64) = app
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert!(
+        busy == 0 && done > 0 && done < log,
+        "a partial backfill: {done} of {log}"
+    );
+    let unsynced = !vfs.durable(&db, 0, u64::MAX);
+    vfs.cut_power();
+    drop((reader, app));
+    vfs.restore_power().unwrap();
+    let after = db_bytes(&db);
+    let app = open(&db, &vfs);
+    let zeroed: i64 = app
+        .query_row(
+            "SELECT count(*) FROM t WHERE v = zeroblob(300)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        zeroed, 3,
+        "the WAL, synced before the backfill, recovers every commit"
+    );
+    let check: String = app
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+    (base, after, unsynced)
+}
+
+/// Real SQLite's partial PASSIVE backfill writes database pages and advances `nBackfill` with
+/// no sync of the database file, so a power loss under the block law can tear that file (the
+/// simulator's model draws the same tear, `lsr_sim`'s `sqlite::tests`). The WAL still carries
+/// every frame, so SQLite's recovery masks the tear.
+#[test]
+fn a_partial_backfill_leaves_database_writes_a_power_loss_can_tear() {
+    let mut torn = 0;
+    for seed in 0..8 {
+        let (base, after, unsynced) =
+            partial_backfill_then_power_loss(&format!("partial-{seed}"), CrashLaw::drawn(seed));
+        assert!(unsynced, "SQLite left the backfilled pages unsynced");
+        if after != base {
+            torn += 1;
+        }
+    }
+    assert!(torn > 0, "no seed kept a backfilled block");
+    let (base, after, _) = partial_backfill_then_power_loss("partial-none", CrashLaw::AllOrNothing);
+    assert_eq!(
+        after, base,
+        "all-or-nothing keeps none of the backfill's writes"
+    );
+}

@@ -289,6 +289,12 @@ side! {
     fn crash_by_law(&self, law: CrashLaw);
     /// Power losses under the block law that kept a block, and those with a hole.
     fn block_losses(&self) -> (u32, u32);
+    /// Power losses under the block law that found unsynced database blocks.
+    fn db_torn_losses(&self) -> u32;
+    /// The kernel evicts the WAL pages a failed sync lost, now or at the next failed sync.
+    fn evict_page_cache(&self) -> bool;
+    /// Whether evicted pages changed what SQLite serves since the last call.
+    fn take_evicted(&self) -> bool;
     /// Every recovery the engine's parser and SQLite disagreed on.
     fn recovery_disagreements(&self) -> Vec<String>;
     /// Power losses that kept unsynced bytes, and those that cut a frame.

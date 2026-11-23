@@ -2057,6 +2057,42 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82"]
 
+[[bug]]
+name = "imds-token-fallback-narrow"
+fix = "claude/dropin-roles"
+package = "lsr-store-s3"
+tests = ["chain::sources_tests::instance_metadata_falls_back_without_a_token"]
+
+[[bug]]
+name = "refresh-never-due"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["signer::tests::fetches_once_within_the_margin_before_expiry"]
+
+[[bug]]
+name = "failed-refresh-drops-credentials"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["signer::tests::a_failed_fetch_keeps_valid_credentials_and_tries_again"]
+
+[[bug]]
+name = "container-host-unchecked"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["chain::sources_tests::container_host_must_be_loopback_or_a_container_address"]
+
+[[bug]]
+name = "process-version-unchecked"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["chain::sources_tests::credential_process_output_is_checked"]
+
+[[bug]]
+name = "web-identity-before-env-keys"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["chain::sources_tests::environment_keys_come_before_web_identity_and_web_identity_before_the_host"]
+
 # The staging role classifies its errors as the replica's: a missing staged file reads as "list
 # again" instead of lost, a failed staging fsync as an ambiguous upload. Since store errors become
 # faults only through a store's role (crates/core/src/fault/role.rs), this is the one place the

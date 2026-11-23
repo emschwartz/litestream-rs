@@ -48,7 +48,10 @@ fn missing(err: CredentialError) -> Tried {
         | CredentialError::PartialProfile { .. }
         | CredentialError::MalformedLine { .. }
         | CredentialError::ReadFailed { .. }
-        | CredentialError::FileTooLarge { .. }) => panic!("expected Missing, got {other:?}"),
+        | CredentialError::FileTooLarge { .. }
+        | CredentialError::NotBuilt { .. }
+        | CredentialError::ProfileInvalid { .. }
+        | CredentialError::Source(_)) => panic!("expected Missing, got {other:?}"),
     }
 }
 
@@ -277,7 +280,7 @@ fn a_profile_without_keys_gives_nothing() {
     let config = write(
         &dir,
         "config",
-        "[default]\nregion = us-east-1\nrole_arn = arn:aws:iam::1:role/r\ncredential_process = /bin/x\n",
+        "[default]\nregion = us-east-1\nrole_arn = arn:aws:iam::1:role/r\n",
     );
     let err = chain(&[
         ("AWS_SHARED_CREDENTIALS_FILE", s(&creds)),

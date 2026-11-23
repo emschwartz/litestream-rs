@@ -13,8 +13,8 @@
 //!
 //! This is the one `unsafe` outside the SQLite crate: `GlobalAlloc` cannot be
 //! implemented without it. It forwards every call to the system allocator and
-//! only does arithmetic on the side. The crate is a dev-dependency of test
-//! binaries and is never linked into a shipped one.
+//! only does arithmetic on the side. It lives in this test binary, so it is
+//! never linked into a shipped one.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -27,7 +27,7 @@ thread_local! {
     static PEAK: Cell<isize> = const { Cell::new(0) };
 }
 
-/// The allocator to install: `#[global_allocator] static HEAP: lsr_heap::Counting = lsr_heap::Counting;`.
+/// The allocator to install: `#[global_allocator] static HEAP: Counting = Counting;`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Counting;
 
@@ -116,10 +116,4 @@ pub fn peak_of<R>(f: impl FnOnce() -> R) -> (R, Peak) {
             kept: above(end),
         },
     )
-}
-
-/// Bytes this thread holds right now, for a test to size a fixture it just built.
-#[must_use]
-pub fn live_bytes() -> usize {
-    usize::try_from(LIVE.with(Cell::get)).unwrap_or(0)
 }

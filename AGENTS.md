@@ -19,7 +19,7 @@
 ## Rust style
 - The lint set is in `Cargo.toml`; gates run with `-D warnings`. No `unwrap`, `expect`, `panic`, `as`, indexing or unchecked arithmetic in non-test code. An exception is `#[expect(lint, reason = "the invariant")]` on the smallest item, never `allow`.
 - Functions are at most 70 lines.
-- `unsafe` is denied workspace-wide; only the SQLite crate may opt in, one reasoned `#[expect(unsafe_code)]` per site. The one other exception is `lsr-heap`, the counting allocator the memory gates install (`GlobalAlloc` is an unsafe trait); it is a dev-dependency and never linked into a shipped binary.
+- `unsafe` is denied workspace-wide; only the SQLite crate may opt in, one reasoned `#[expect(unsafe_code)]` per site. The one other exception is the counting allocator the memory gates install (`crates/core/tests/core/heap.rs`; `GlobalAlloc` is an unsafe trait); it lives in a test binary and is never linked into a shipped one.
 - Errors are typed (`thiserror`), one enum per crate boundary, each variant carrying what a caller needs to act. No stringly errors, no `anyhow` in library crates.
 - Every public item has a doc comment. Comments say why, never what. Mechanism goes in the module's `//!` doc.
 - No mid-sentence em dashes in docs or comments.
@@ -49,7 +49,7 @@
 - Everything Claude authors here that others see (pull request bodies, issues, comments) says it was authored by Claude and names the full versioned model slug, for example "Authored by Claude (claude-opus-5-5)". It never speaks as the owner.
 - Commit messages follow Conventional Commits (commitizen's default format): a subject `type(scope): summary`, imperative, lower-case after the colon, at most 72 characters, no trailing period; a blank line; a body that says why; optional footers.
   - Types: `feat` (new behaviour), `fix` (a bug), `perf`, `refactor` (no behaviour change), `test`, `docs`, `build` (dependencies, Cargo, the justfile), `ci`, `chore`, `revert`.
-  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `local`, `sqlite`, `replica`, `config`, `sidecar`, `sim`, `history`, `compat`, `cli`, `fuzzing`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
+  - Scope: the crate without its `lsr-` prefix (`ltx`, `wal`, `core`, `store-s3`, `store-fs`, `sqlite`, `replica`, `config`, `sidecar`, `sim`, `history`, `compat`, `cli`, `fuzzing`), or `plan` for `docs/PLAN.md` and `docs/plans/`, or `deps`, `ci`, `lint`. Omit it only when a change spans the whole workspace.
   - A change that breaks a public API or the replica format takes `!` after the scope and a `BREAKING CHANGE:` footer saying what breaks.
   - Decisions made mid-task are `Call: <what> (why; cost if wrong)` footers.
   - `just commit-check` checks the subjects of the commits on the branch since local `main` (or `origin/main` when there is none; `just commit-check <base>` names another).

@@ -2449,7 +2449,8 @@ impl BootGate {
     /// it already. That is `local`, capped at the replica's newest key: the
     /// confirmed `tip`, or a newer level-0 key the listing judged torn (it may
     /// be this engine's own upload, read wrong). Pending files above every
-    /// replica key vouch for nothing there, so a forged one never raises it.
+    /// replica key vouch for nothing there, so one put back from a backup
+    /// never raises it.
     async fn vouch<R: Role>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
         let Takeover::Vouch(record) = self.takeover else {
             return Ok(());

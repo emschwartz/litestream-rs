@@ -3,7 +3,7 @@
 //!
 //! Each runs on the caller's thread and blocks until done. The restore writes a scratch file
 //! beside the target and publishes it by hard link only after every file verified
-//! (`lsr_local::FileSink`); an existing target or a stale sidecar is refused, never replaced.
+//! ([`crate::local::FileSink`]); an existing target or a stale sidecar is refused, never replaced.
 //!
 //! A restore then records a takeover through the transaction it restored, in the target's
 //! default meta directory (`.<name>-litestream` beside it; see `crate::meta`), so a
@@ -14,10 +14,10 @@
 use std::io;
 use std::path::Path;
 
+use crate::local::{CreateError, FileSink};
 use lsr_core::{
     Depth, Report, RestoreOptions, RestoreTarget, Restored, TakeoverRecord, VerifyError,
 };
-use lsr_local::{CreateError, FileSink};
 use lsr_ltx::Txid;
 
 use crate::config::Config;
