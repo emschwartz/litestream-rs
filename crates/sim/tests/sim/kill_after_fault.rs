@@ -42,30 +42,47 @@ fn a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116() {
     }
 }
 
-/// Seed 0x148 of the survival campaign (its swarm mix, holds at no less than 20 in a thousand,
-/// overlapping faults, the law drawn), cut after its failing step. The law killed the process
-/// inside a full-disk hold, a restart there, which resets the retry counts and degraded states
-/// the halt report reads: the open defect D9 (`KnownWrong::HaltForgottenAtRestart`), which only
-/// runs that count known defects may reach. With the known-wrong cells left out, as here, the
-/// law does not kill inside a hold, so the halt is reported.
+/// A store fault arms the law, and a full staging disk then holds for 64 ticks. A fault that
+/// fires inside the hold would have the law kill the process there: a restart inside a hold,
+/// which resets the retry counts and degraded states the halt report reads (the open defect D9,
+/// `KnownWrong::HaltForgottenAtRestart`). With the known-wrong cells left out the law does not
+/// kill inside a hold, so the halt is reported degraded as it lasts.
 #[test]
-fn the_law_kills_inside_a_hold_only_where_known_defects_are_counted_seed_0x148() {
+fn the_law_does_not_kill_inside_a_hold_where_known_defects_are_not_counted() {
+    use lsr_core::{StoreError, StoreOp};
+    use lsr_sim::FaultShape;
+    use lsr_sim::generate::{Hold, Op, Target};
+
     let opts = lsr_sim::Opts {
-        drawn: true,
-        block_crash_law: false,
-        lying_wal_sync: false,
-        after_restart: lsr_sim::AfterRestart::Busy,
-        clock_law: lsr_sim::ClockLaw::PerTick,
-        overlap: true,
-        error_domain: false,
-        known_wrong: false,
-        staging_fs: true,
         kill_after_fault: true,
+        known_wrong: false,
+        // Overlapping holds: the hold runs a drawn sub-history, so faults fire inside it.
+        overlap: true,
         ..lsr_sim::Opts::default()
     };
-    if let Err(failure) =
-        lsr_sim::run::run_ops(Seed::new(0x148), crate::histories::seed_0x148::OPS, &opts)
-    {
+    let ops = [
+        Op::Commit {
+            pages: 2,
+            grow: false,
+        },
+        Op::Tick,
+        Op::Tick,
+        Op::Tick,
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::List,
+            ahead: 1,
+            shape: FaultShape::Error(StoreError::Transient {
+                op: StoreOp::List,
+                kind: std::io::ErrorKind::ConnectionReset,
+            }),
+        },
+        Op::Hold {
+            hold: Hold::DiskFull,
+            ticks: 64,
+        },
+    ];
+    if let Err(failure) = lsr_sim::run::run_ops(Seed::new(1), &ops, &opts) {
         panic!("{failure}");
     }
 }
