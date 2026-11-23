@@ -625,6 +625,8 @@ impl World {
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
         self.sync_model_at(at);
+        // A failed sync inside the tick may have had its pages evicted at once.
+        self.adopt_evicted();
         match ran {
             RunEnd::Done(out) => TickEnd::Done(out),
             RunEnd::Crashed { polls } => {
@@ -939,7 +941,8 @@ impl World {
     }
 
     /// Whether staging and the replica both hold `key` with different bytes:
-    /// a staged copy edited or forged under a key the replica took.
+    /// a staged copy damaged or put back from a backup under a key the replica
+    /// took.
     ///
     /// # Errors
     /// Either store's error other than a missing key.
@@ -1075,7 +1078,7 @@ impl World {
     }
 
     /// Whether staging holds `key` under bytes the engine never put there: a
-    /// copy an operation forged or put back, which stays the operator's for as
+    /// copy an operation rewrote or put back, which stays the operator's for as
     /// long as it is staged, whatever the replica holds now.
     ///
     /// # Errors
@@ -1155,6 +1158,14 @@ impl World {
         Ok(())
     }
 
+    /// Follows evicted WAL pages (`SimSqlite::evict_page_cache`) when they changed what SQLite
+    /// serves: damage, as [`World::adopt_corrupt_state`] takes it.
+    pub fn adopt_evicted(&mut self) {
+        if self.sqlite.take_evicted() {
+            self.adopt_corrupt_state();
+        }
+    }
+
     /// [`World::adopt_local_state`] for damage that corrupted the database
     /// (a flipped bit): the model follows it, and the history judge refuses
     /// any restore that gives it.
@@ -1180,6 +1191,29 @@ impl World {
             end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
         };
         self.model.vacuum(image, app, self.remote_recorder.len());
+        self.log_history();
+    }
+
+    /// After the WAL's generation was regrown with its commit marks kept: every mark is a
+    /// commit of the writer that regrew it, so the model takes each one, in order, as a new
+    /// image at its place in the WAL. A file staged up to an earlier mark is then that mark's
+    /// commit, not the one made at the same place before the regrowth, whose pages the WAL no
+    /// longer holds.
+    pub fn adopt_regrown(&mut self) {
+        if self.model_matches_sqlite() {
+            return;
+        }
+        let page_size = self.sqlite.page_size();
+        let salts = self.sqlite.salts();
+        let at = self.remote_recorder.len();
+        for (end, bytes) in self.sqlite.commit_images() {
+            let image = PageImage::from_bytes(page_size, &bytes);
+            let app = AppCommit {
+                salts,
+                end: WalOffset::from_frame_index(end, page_size),
+            };
+            self.model.vacuum(image, app, at);
+        }
         self.log_history();
     }
 
