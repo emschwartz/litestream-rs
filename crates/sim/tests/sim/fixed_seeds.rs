@@ -1262,3 +1262,36 @@ mod refused_upload {
         }
     }
 }
+
+#[cfg(test)]
+mod short_object_left {
+    use crate::histories as h;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Opts, Seed, Weights};
+
+    /// An upload the store kept one byte short, whose delete then failed: the short object
+    /// stays in the replica, damage the engine did not cause and may not remove on one bad
+    /// read. Reading it degrades the sync task with
+    /// `RemoteCorrupt`, which the judge excuses as it does a corrupted publish. Seeds 0x113,
+    /// 0x6c5 and 0xb8b of the mixed weights took the same path.
+    #[test]
+    fn a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c() {
+        let seed = Seed::new(0x4c);
+        let w = Weights::mixed(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: w.block_crash_law,
+            lying_wal_sync: w.lying_wal_sync,
+            after_restart: w.after_restart,
+            clock_law: w.clock_law,
+            overlap: w.overlap,
+            error_domain: w.error_domain,
+            known_wrong: w.known_wrong,
+            staging_fs: w.staging_fs,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, h::seed_0x4c::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
+}
