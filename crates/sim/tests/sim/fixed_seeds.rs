@@ -1092,6 +1092,34 @@ mod lagging_listings {
     use lsr_sim::run::run_ops;
     use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
 
+    /// A lagging listing hides a merged level-1 file, so an as-of restore through the hold's
+    /// view plans from the finer level-0 files under it, while the raw replica plans from the
+    /// merged file and takes the earlier state for an instant inside it. Both answers meet the
+    /// as-of bound, which promises only that nothing begun after the instant is in the answer
+    /// (G3 in `docs/BEHAVIOR.md`), and the hold judge failed the run for not matching the
+    /// raw answer (seed 0x80e under its mixed mix, shrunk to 14 operations). It now holds an
+    /// as-of answer that differs from the raw one to the bound.
+    #[test]
+    fn an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e() {
+        let seed = Seed::new(0x80e);
+        let weights = Weights::mixed(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
+            clock_law: weights.clock_law,
+            overlap: weights.overlap,
+            error_domain: weights.error_domain,
+            known_wrong: weights.known_wrong,
+            staging_fs: weights.staging_fs,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, crate::histories::seed_0x80e::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
+
     /// The replica's listings lag; the engine uploads transactions 1 and 2,
     /// its staging directory is wiped and it boots again with the WAL intact.
     /// The boot listing does not show 2 yet, so the engine took the replica as

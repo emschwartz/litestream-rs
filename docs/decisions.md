@@ -69,6 +69,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
 | D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
+| D62 | What does the simulator's hold judge require of an as-of restore through a fault? | The as-of bound (G3), not the raw replica's answer | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
@@ -681,6 +682,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** `hit` is exact only for store faults and injected SQLite failures; for every other class it means an engine tick ran with the fault in place or after it, which is not proof the damage was read. A row whose detection sits in a `const fn` mapping arm has no site yet ("not yet placed"). A rare class or row that a short night misses makes that night red until a floor or an exemption says otherwise.
 - **Revisit if:** a night goes red on a key that a longer soak reaches (add a floor per key), or the marks start deriving BEHAVIOR's D, S and R (section 7.3, item 2).
 - **Links:** #127.
+
+## D62. The hold judge holds an as-of answer to the bound
+
+- **The case:** a lagging listing hides a merged level-1 file. An as-of restore through the hold's view plans from the finer level-0 files under it; the raw replica plans from the merged file and, for an instant inside it, takes the earlier state. The two answers differ, and the hold judge failed the run for not matching the raw one (simulator seed 0x80e).
+- **Options:** (a) the judge demands equality with the raw replica for every target, as before; (b) the as-of planner prefers the finest files so both answers agree; (c) the judge holds an as-of answer that differs from the raw one to the as-of bound.
+- **Choice:** (c). G3 in `docs/BEHAVIOR.md` promises only that an as-of answer holds no commit begun after the instant, and says any older state meets it. Both answers do, so the judge was wrong, not the planner. `Latest` and a transaction id keep the equality check: their answer is fixed by the replica.
+- **Cost accepted:** a view that answered as of an instant with a state too old for its own files is not caught by this judge; the history judge's lag checks are where staleness is bounded. Under a backward clock step the history judge checks only that the answer is a state of the history (its untimed path), so the pinned 0x80e history exercises that path.
+- **Revisit if:** the as-of guarantee gains a lower bound (an answer at least as new as the newest file before the instant).
+- **Links:** `crates/sim/src/run/hold.rs` (`judge_through`), `crates/sim/src/history.rs` (`judge_as_of`), G3 in `docs/BEHAVIOR.md`.
 
 ## D75. One module writes to and deletes from the stores (delegated)
 
