@@ -837,12 +837,26 @@ fn stop_app_without_exec_is_refused() {
 
 /// Replicates `setup`'s database at 4096-byte pages, then rewrites the database at 8192: the
 /// next boot finds the replica's page size is not the database's.
+///
+/// The first daemon runs on a config of its own with the default shutdown deadline, not the
+/// test's: its drain must upload the file it just staged, and a short deadline the test sets
+/// for its own daemon would make that a race under load.
 fn change_the_page_size(setup: &Setup) {
     let app = database(&setup.db);
     write(&app, 5);
     drop(app);
+    let first = setup.dir.path().join("first.yml");
+    std::fs::write(
+        &first,
+        format!(
+            "dbs:\n  - path: {}\n    replica:\n      path: {}\n",
+            setup.db.display(),
+            setup.replica.display()
+        ),
+    )
+    .unwrap();
     let mut command = lsr();
-    command.args(["replicate", "-config"]).arg(&setup.config);
+    command.args(["replicate", "-config"]).arg(&first);
     let mut daemon = Daemon::spawn(command);
     daemon.wait_for(&["msg=\"initialized db\""]);
     daemon.signal("TERM");
