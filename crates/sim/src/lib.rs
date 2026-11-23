@@ -10,8 +10,8 @@
 //! the database really was and judge the replica against it, and [`history`]
 //! judges the same replica by content alone, sharing nothing with the engine; [`world`] builds
 //! all of it for one run; [`seed`] names a run. [`generate`] draws a history from
-//! a seed, [`resources`] holds the resource bounds, [`liveness`] judges each
-//! snapshot against the faults that could justify it, and [`run`] applies a
+//! a seed, [`resources`] holds the resource bounds, [`forcing`] notes what can force
+//! the engine's hand and [`needless_snapshot`] judges each snapshot against it, and [`run`] applies a
 //! history to the actor, judges it, and shrinks a failure. [`staging`] puts the real directory
 //! store (`lsr-store-fs`) under the staging wrappers in a share of runs, on [`memfs`], an
 //! in-memory filesystem under the same crash law, so a power loss acts on the store's own syncs.
@@ -27,17 +27,19 @@ pub mod crash_law;
 pub mod domain;
 pub mod exec;
 pub mod failstop;
+pub mod forcing;
 pub mod generate;
 pub mod history;
 pub mod journal;
-pub mod liveness;
 pub mod marks;
 pub mod memfs;
 pub mod model;
+pub mod needless_snapshot;
 pub mod oracle;
 pub mod reach;
 pub mod record;
 pub mod recovery;
+pub mod remote;
 pub mod resources;
 pub mod run;
 pub mod scenario;

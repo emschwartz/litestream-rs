@@ -102,6 +102,7 @@ use crate::checkpoint::{
 use crate::created_at::{ResolvedCreatedAt, resolve};
 use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
+use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{
     Action, Backoff, Clamped, Fault, Next, OtherWriter, PersistentCause, Policy, Responses,
     STALLED_AFTER, SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
@@ -157,7 +158,7 @@ pub struct Env<'a, W, P, C, L, R> {
     /// The engine journal (`docs/journal.md`), or `None` to run without one. Boot reads it and
     /// reports what it found ([`Actor::journal`]); every verdict, the worst included, leaves the
     /// engine doing exactly what it does with `None`.
-    pub journal: Option<&'a mut (dyn JournalFile + Send)>,
+    pub journal: Option<&'a mut (dyn JournalFile + Send + 'static)>,
 }
 
 impl<
@@ -696,7 +697,6 @@ impl Actor {
     /// Makes the next sync a snapshot (an operator asked). A cause already
     /// pending is kept.
     pub fn request_snapshot(&mut self) {
-        mark!(Run23);
         self.kept.snapshot_asked = true;
         self.engine
             .course
@@ -742,7 +742,19 @@ impl Actor {
                 };
             }
         };
-        let tick = self.tick_at(&mut env, now).await;
+        // From here on each store is reached as its role: an error from it is
+        // classified as that store's, never the other's (`fault::role`).
+        let (staging, remote) = (Staging(env.staging), Replica(env.remote));
+        let mut roles = Env {
+            wal: &mut *env.wal,
+            db: &mut *env.db,
+            ck: &mut *env.ck,
+            staging: &staging,
+            remote: &remote,
+            clock: env.clock,
+            journal: env.journal.as_deref_mut(),
+        };
+        let tick = self.tick_at(&mut roles, now).await;
         let tick = self.reconcile_journal(env.journal.as_deref_mut(), tick, now);
         self.observe_lag(env.wal, now);
         let tick = self.wake_for_probe(tick);
@@ -759,8 +771,8 @@ impl Actor {
         W: WalSource,
         P: PageSource,
         C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
+        L: Role,
+        R: Role,
     {
         self.expire(now);
         if let Some(released) = self.expire_ahead(now) {
@@ -793,7 +805,6 @@ impl Actor {
         match self.kept.stop {
             Stop::No => self.run(env, now).await,
             Stop::Draining { deadline } => {
-                mark!(Run24);
                 let deadline = self.on_engine_clock(deadline);
                 self.drain(env, now, deadline).await
             }
@@ -811,7 +822,6 @@ impl Actor {
             .map_or((EngineClock::start(now), false), |clock| clock.read(now));
         self.kept.clock = Some(clock);
         if stepped {
-            mark!(Run19);
             return Err(Clamped {
                 prev: clock.now(),
                 now,
@@ -1097,9 +1107,6 @@ impl Actor {
                 self.arm_takeover_below(newest);
             }
             Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
-                if matches!(did, Did::Put(_)) {
-                    mark!(Up1);
-                }
                 let at = listing_after_upload(now, &self.kept.cfg.maintenance);
                 self.engine.maintain.list_by(at);
                 let watch = self.engine.maintain.watch;
@@ -1142,14 +1149,13 @@ impl Actor {
 
     /// A boot step failed: the boot ends and is retried.
     fn boot_failed(&mut self, fault: Fault, now: Timestamp) -> Tick {
-        mark!(Boot23);
         self.fault(Task::Sync, fault, now)
     }
 
     /// Lists the replica, witnesses the pending staged files against the
     /// live WAL (`crate::witness`), reads the newest staged file left and
     /// recovers (in that order). A failure anywhere boots again from the start.
-    async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
+    async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -1219,7 +1225,7 @@ impl Actor {
         self.ran(Event::Booted { cause }, now)
     }
 
-    async fn run<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
+    async fn run<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -1250,7 +1256,7 @@ impl Actor {
     }
 
     /// Only sync and upload run; maintenance and checkpoints wait for the next start.
-    async fn drain<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
+    async fn drain<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -1284,13 +1290,7 @@ impl Actor {
 
     /// The drain's deadline passed with work left: what was left, and the
     /// stop the deadline's fault routes to.
-    async fn missed<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn missed<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -1308,13 +1308,7 @@ impl Actor {
     /// What is not on the replica. A failed read counts high, never low: the
     /// WAL file's length for the bytes, every staged transaction past the
     /// confirmed one for the files.
-    async fn unfinished<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn unfinished<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &self,
         env: &mut Env<'_, W, P, C, L, R>,
     ) -> Unfinished {
@@ -1396,13 +1390,7 @@ impl Actor {
     }
 
     /// Sync, then the checkpoint that sync's proof allows.
-    async fn wal_unit<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn wal_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -1493,7 +1481,7 @@ impl Actor {
     }
 
     /// One sync step from what recovery says about the WAL now.
-    async fn step<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
+    async fn step<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -1507,7 +1495,6 @@ impl Actor {
         if !self.staging_has_room() {
             // Marked as a step cut short, so the sync runs again when room
             // frees up: no new WAL change may come to wake it.
-            mark!(Run18);
             self.engine.course.set_tail(Tail::More);
             return Ok(Stepped::Held);
         }
@@ -1519,7 +1506,6 @@ impl Actor {
         let stamp = env.clock.now().max(self.stamp_floor(now));
         let size = reader.header().page_size();
         if let Some(was) = self.engine.page_size.filter(|was| *was != size) {
-            mark!(Run11);
             return Err(Fault::PageSizeChanged { was, now: size });
         }
         self.engine.page_size = Some(size);
@@ -1603,7 +1589,7 @@ impl Actor {
         clippy::type_complexity,
         reason = "a private step's two exits: the opened WAL, or the verdict that ends it"
     )]
-    fn open_wal<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore, R: ObjectStore>(
+    fn open_wal<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
     ) -> Result<Result<(WalReader<W::Wal>, CommittedRead), Stepped>, Fault> {
@@ -1629,7 +1615,6 @@ impl Actor {
         let (None, Some(position)) = (self.pending(), self.position()) else {
             return Err(Fault::WalMoved);
         };
-        mark!(Run9);
         let view = wal_view::<W, W::Wal>(wal, None, committed)?;
         // With no header, recovery decides before it looks at the probes.
         let probes = Probes {
@@ -1665,7 +1650,6 @@ impl Actor {
         let (files, txs, end) = match synced {
             Synced::Idle(through) => (0, 0, StepEnd::Through(through)),
             Synced::IndexReset => {
-                mark!(Run10);
                 self.engine.course.set_tail(Tail::Reset(committed));
                 return Stepped::Synced {
                     files: 0,
@@ -1679,7 +1663,6 @@ impl Actor {
                 changes,
                 ..
             } => {
-                mark!(Run1);
                 let key = witness.key();
                 self.engine.witnesses.insert(witness);
                 // With a cause pending, the step that wrote was the snapshot.
@@ -1719,13 +1702,7 @@ impl Actor {
     }
 
     /// The checkpoint `decision` asked for, on the proof this tick's sync left.
-    async fn checkpoint_unit<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn checkpoint_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         proof: SyncedThrough,
@@ -1753,7 +1730,6 @@ impl Actor {
         let done = match done {
             Ok(done) => done,
             Err(CheckpointFailed { fault, staged, .. }) => {
-                mark!(Ckpt5);
                 self.took(staged);
                 return self.fault(Task::Checkpoint, fault, now);
             }
@@ -1796,14 +1772,23 @@ impl Actor {
         position
     }
 
+    /// The newest id an upload step may treat as this engine's own.
+    ///
+    /// A listing judges the replica against everything this engine put
+    /// there: what it staged, and what one of its own drops vouched for
+    /// (files the replica may hold unconfirmed). Other plans ignore drops.
+    fn upload_bound(&self, plan: UploadPlan) -> Option<Txid> {
+        match plan {
+            UploadPlan::List => self
+                .staged()
+                .max(self.engine.dropped_through)
+                .max(self.engine.acknowledged),
+            UploadPlan::Idle | UploadPlan::Upload(_) => self.staged(),
+        }
+    }
+
     /// Staged files to the replica, up to the per-tick limit.
-    async fn upload_unit<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn upload_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -1821,12 +1806,13 @@ impl Actor {
         for _ in 0..limit {
             let plan = plan_upload(&self.engine.upload, self.staged());
             self.note_attempt(plan);
+            let bound = self.upload_bound(plan);
             let witnesses = &self.engine.witnesses;
             let uploaded = upload_next(
                 self.engine.upload,
                 env.staging,
                 env.remote,
-                self.staged(),
+                bound,
                 witnesses,
             )
             .await;
@@ -1849,8 +1835,7 @@ impl Actor {
                             return Some(tick);
                         }
                         self.kept.suspect_staged = None;
-                        mark!(Run16);
-                        return Some(self.lose_staged(env, key.range().min(), now).await);
+                        return Some(self.lose_staged(env, key.range().min(), None, now).await);
                     }
                     return Some(self.fault(Task::Upload, failed.fault, now));
                 }
@@ -1881,13 +1866,7 @@ impl Actor {
     /// nothing about writers, and the divergence goes as before
     /// ([`Self::lose_staged`]). A boot's divergence is recovery's: it cannot
     /// tell an earlier run's upload from another writer's.
-    async fn diverged<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn diverged<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         state: UploadState,
@@ -1896,9 +1875,14 @@ impl Actor {
     ) -> Tick {
         let key = FileKey::new(Level::ZERO, TxidRange::single(from));
         let token = self.engine.witnesses.get(&key).copied();
+        // An id one of this engine's own drops vouched for holds its own
+        // earlier upload on the replica (one whose answer was lost), not
+        // another writer's: that object stands, and the staged file that
+        // took its id goes, as for a staged file that changed.
+        let vouched = Some(from) <= self.engine.dropped_through;
         let ours = match token {
-            Some(token) => still_holds(env.staging, &token).await,
-            None => Ok(false),
+            Some(token) if !vouched => still_holds(env.staging, &token).await,
+            Some(_) | None => Ok(false),
         };
         match ours {
             Ok(true) => self.fault(Task::Upload, Fault::RemoteAheadOfLocal, now),
@@ -1907,7 +1891,7 @@ impl Actor {
                     return tick;
                 }
                 self.set_upload(state);
-                self.lose_staged(env, from, now).await
+                self.lose_staged(env, from, Some(from), now).await
             }
             Err(fault) => self.fault(Task::Upload, fault, now),
         }
@@ -1920,18 +1904,19 @@ impl Actor {
     /// before `from` (the upload task only uploads the confirmed transaction
     /// plus one), so the chain has no hole, and when it holds `from` itself
     /// (a divergence confirms it) the snapshot goes above it.
-    async fn lose_staged<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn lose_staged<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         from: Txid,
+        cap: Option<Txid>,
         now: Timestamp,
     ) -> Tick {
+        // What the takeover record kept before this drop vouches for
+        // (`Self::vouch_before_drop`, with the same cap): the replica may hold
+        // those files unconfirmed, and they stay this engine's own.
+        let vouched = self
+            .staged()
+            .map(|staged| cap.map_or(staged, |cap| staged.min(cap)));
         self.engine.witnesses.drop_from(from);
         if let Err(fault) = drop_staged_from(env.staging, from).await {
             // The staged files from `from` on are still there, and the next
@@ -1939,17 +1924,25 @@ impl Actor {
             // following it. List first, from below `from`, so the listing
             // judges the divergence again and this runs again before anything
             // is uploaded; the acknowledged mark is kept apart.
-            mark!(Up9);
             let confirmed = self.engine.upload.confirmed().min(from.prev());
             self.set_upload(UploadState::ListFirst { confirmed });
             return self.fault(Task::Upload, fault, now);
         }
+        self.engine.dropped_through = self.engine.dropped_through.max(vouched);
         // Acknowledged ids from `from` on that the replica lost (a rollback)
         // are gone with their staged copies: they are never taken again, so
         // the uploads resume with the snapshot above them.
         let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
         if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload) {
             self.engine.upload = UploadState::At(confirmed.max(Some(ack)));
+        }
+        // Files the drop vouched for may be on the replica unconfirmed (an
+        // upload whose answer was lost): list first, so the listing confirms
+        // those it finds and the snapshot goes above them, before maintenance
+        // or a snapshot judges them.
+        let confirmed = self.engine.upload.confirmed();
+        if self.engine.dropped_through > confirmed {
+            self.engine.upload = UploadState::ListFirst { confirmed };
         }
         // The position is past `from`; a snapshot after it would leave a hole.
         let cause = SnapshotCause::NewestStagedFileUnreadable;
@@ -1964,13 +1957,7 @@ impl Actor {
     /// Deletes staged level-0 files the replica no longer needs from staging,
     /// oldest first, at most `MAX_DELETE` (W3). A failure waits on its own
     /// task and holds nothing else.
-    async fn prune_unit<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn prune_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -1978,7 +1965,7 @@ impl Actor {
         let bound = self.prune_ready(now)?;
         let listing = match env.staging.list(Level::ZERO, None, PageLimit::MAX).await {
             Ok(listing) => listing,
-            Err(err) => return Some(self.fault(Task::Prune, Fault::from_staging(&err), now)),
+            Err(err) => return Some(self.fault(Task::Prune, L::fault(&err), now)),
         };
         let keys: Vec<FileKey> = listing
             .files
@@ -1997,10 +1984,9 @@ impl Actor {
         if !keys.is_empty()
             && let Err(err) = crate::publish::remove_staged(env.staging, &keys).await
         {
-            return Some(self.fault(Task::Prune, Fault::from_staging(&err), now));
+            return Some(self.fault(Task::Prune, L::fault(&err), now));
         }
         self.kept.tasks.get_mut(Task::Prune).succeed();
-        mark!(Up16);
         self.engine.pruned = Some(through);
         if keys.is_empty() {
             return None;
@@ -2032,13 +2018,7 @@ impl Actor {
     /// Lists the replica and runs what maintenance says is due, only once
     /// every staged file is published (so a snapshot's last transaction is at or below the
     /// published one).
-    async fn maintain_unit<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn maintain_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
@@ -2046,9 +2026,10 @@ impl Actor {
         if !self.maintain_ready(now) {
             return None;
         }
-        let inventory = match Inventory::load(env.remote).await {
+        let loaded = Inventory::load(env.remote).await;
+        let inventory = match loaded.map_err(|err| inventory_fault::<R>(&err)) {
             Ok(inventory) => inventory,
-            Err(err) => return Some(self.fault(Task::Maintenance, inventory_fault(&err), now)),
+            Err(fault) => return Some(self.fault(Task::Maintenance, fault, now)),
         };
         // Uploads are idle, so everything this engine wrote is at or below
         // its position: a file past it is another writer's. In steady state
@@ -2128,7 +2109,7 @@ impl Actor {
     /// the engine stops, as configured); found, the listing lags and nothing
     /// is planned from it, so the watch stands for the next listing. With nothing
     /// missing the watch moves to this listing.
-    async fn watch_unit<R: ObjectStore>(
+    async fn watch_unit<R: Role>(
         &mut self,
         remote: &R,
         inventory: &Inventory,
@@ -2145,13 +2126,13 @@ impl Actor {
             Err(StoreError::NotFound { .. }) => {
                 Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
             }
-            Err(err) => Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now)),
+            Err(err) => Some(self.fault(Task::Maintenance, R::fault(&err), now)),
         }
     }
 
     /// The read-back a boot owes (see `maintain::audit`). `None` when every
     /// newest file is sound: the same listing then plans the next job.
-    async fn read_back_unit<R: ObjectStore>(
+    async fn read_back_unit<R: Role>(
         &mut self,
         remote: &R,
         inventory: &Inventory,
@@ -2173,14 +2154,12 @@ impl Actor {
         }
         self.engine.maintain.suspect = None;
         if !covered {
-            mark!(Maint4);
             return Some(self.fault(Task::Maintenance, Fault::RemoteCorrupt, now));
         }
-        mark!(Maint4);
         // Watched no more, whether the delete goes through or not.
         self.engine.maintain.watch = RegressionWatch::forget(self.engine.maintain.watch, key);
         if let Err(err) = crate::publish::remove_one(remote, key, Why::RottenCovered).await {
-            return Some(self.fault(Task::Maintenance, Fault::from_remote(&err), now));
+            return Some(self.fault(Task::Maintenance, R::fault(&err), now));
         }
         // The listing no longer holds: the next tick lists and reads back again.
         self.engine.maintain.stale = true;
@@ -2192,13 +2171,7 @@ impl Actor {
         Some(self.ran(event, now))
     }
 
-    async fn run_job<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn run_job<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         job: &Job,
@@ -2236,7 +2209,7 @@ impl Actor {
     /// In steady state this listing is the first to see one. A listing that lags a delete
     /// shows a file that is gone, so a read must find one before the engine stops; a
     /// listing a read contradicts plans nothing either, and is taken again later.
-    async fn listing_untrusted<R: ObjectStore>(
+    async fn listing_untrusted<R: Role>(
         &mut self,
         remote: &R,
         inventory: &Inventory,
@@ -2245,11 +2218,7 @@ impl Actor {
         let known = self.snapshot_after();
         if inventory.newest() > known {
             return Some(match past_known(remote, inventory, known).await {
-                Ok(true) => {
-                    mark!(Up10);
-                    mark!(Maint10);
-                    self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now)
-                }
+                Ok(true) => self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now),
                 Ok(false) => self.list_again_later(now),
                 Err(fault) => self.fault(Task::Maintenance, fault, now),
             });
@@ -2264,7 +2233,7 @@ impl Actor {
     /// later) and maintenance lists again later; when it is gone, the listing
     /// is the replica's and plans as before (retention holds on it), and the
     /// upload lane learns of the loss at its next listing.
-    async fn listing_lags<R: ObjectStore>(
+    async fn listing_lags<R: Role>(
         &mut self,
         remote: &R,
         inventory: &Inventory,
@@ -2344,13 +2313,7 @@ impl Actor {
 
     /// A level-9 snapshot of a fresh proof. A sync that staged a file first
     /// ends the tick: the upload runs before the snapshot is due again.
-    async fn snapshot_job<
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
-    >(
+    async fn snapshot_job<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         job: &Job,
@@ -2420,7 +2383,7 @@ impl Actor {
     /// A snapshot that did not publish. When the store took the commit and
     /// then said the object is not what was sent, it is listed, so it goes,
     /// as a rejected compaction output does.
-    async fn snapshot_failed<R: ObjectStore>(
+    async fn snapshot_failed<R: Role>(
         &mut self,
         remote: &R,
         job: &Job,
@@ -2600,7 +2563,7 @@ impl BootGate {
     /// engine's own upload, read wrong), listed or found by a read past a
     /// listing that lags. Pending files above every replica key vouch for
     /// nothing there, so one put back from a backup never raises it.
-    async fn vouch<R: ObjectStore>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
+    async fn vouch<R: Role>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
         let Takeover::Vouch(record) = self.takeover else {
             return Ok(());
         };
@@ -2640,18 +2603,15 @@ impl BootGate {
 /// A crash loop otherwise leaves one per boot, each as large as the file it was writing; at
 /// boot nothing of this engine is uploading yet. A failure is the directory's, which every
 /// upload and prune needs too.
-async fn remove_scratch<L: ObjectStore, R: ObjectStore>(
-    staging: &L,
-    remote: &R,
-) -> Result<(), Fault> {
+async fn remove_scratch<L: Role, R: Role>(staging: &L, remote: &R) -> Result<(), Fault> {
     staging
         .remove_scratch()
         .await
-        .map_err(|err| Fault::from_staging(&err))?;
+        .map_err(|err| L::fault(&err))?;
     remote
         .remove_scratch()
         .await
-        .map_err(|err| Fault::from_remote(&err))?;
+        .map_err(|err| R::fault(&err))?;
     Ok(())
 }
 
@@ -2755,7 +2715,7 @@ impl Actor {
 /// and keeps a takeover record before deleting its own, so without an
 /// operator's hand a boot divergence is a second writer (the contested id).
 /// The boot refuses it before touching staging (`BootStep::Refused`).
-async fn boot_listing<L: ObjectStore, R: ObjectStore>(
+async fn boot_listing<L: Role, R: Role>(
     staging: &L,
     remote: &R,
     suspect: &mut Option<FileKey>,
@@ -2786,7 +2746,6 @@ async fn boot_listing<L: ObjectStore, R: ObjectStore>(
     // the replica's object is another writer's, they go, and recovery
     // snapshots above what the replica holds.
     if let Some(from) = diverged {
-        mark!(Boot13);
         if let Some(tip) = tip.filter(|tip| gate.refuses(*tip)) {
             return Err(BootStep::Refused(tip));
         }
@@ -2838,7 +2797,7 @@ struct Listed {
 /// the key on the replica (a read, since a listing may lag), the key stays as
 /// the replica holds it and is confirmed: new content never takes a
 /// transaction the replica holds, so the snapshot goes above it.
-async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
+async fn boot_witness<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     mut reader: Option<&mut WalReader<W::Wal>>,
     committed: CommittedRead,
@@ -2852,10 +2811,8 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectS
     };
     let second = witness_once(env, reader, committed, confirmed).await?;
     if second.refused != Some(from) {
-        mark!(Boot12);
         return Err(Fault::LocalIo.into());
     }
-    mark!(Boot11);
     gate.vouch(env.remote, confirmed).await?;
     drop_staged_from(env.staging, from).await?;
     let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
@@ -2864,14 +2821,14 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectS
     // key out would let new content take a transaction the replica holds.
     let held = crate::probe::exists(env.remote, &key)
         .await
-        .map_err(|err| Fault::from_remote(&err))?;
+        .map_err(|err| R::fault(&err))?;
     if next == Some(from) && held {
         return Ok((first, UploadState::At(Some(from))));
     }
     Ok((first, upload))
 }
 
-async fn witness_once<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
+async fn witness_once<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     reader: Option<&mut WalReader<W::Wal>>,
     committed: CommittedRead,
@@ -2906,7 +2863,7 @@ struct Judged {
 /// The page table and the quiet files a boot starts with. Only a boot that continues seeds
 /// the table, from the staged files boot already verified: a snapshot records every page it
 /// reads.
-async fn boot_seed<L: ObjectStore>(
+async fn boot_seed<L: Role>(
     staging: &L,
     course: &Course,
     confirmed: Option<Txid>,
@@ -2930,7 +2887,7 @@ async fn boot_seed<L: ObjectStore>(
 
 /// The witness pass and recovery, on one wal-index read and one reader opened after it:
 /// both judge the same WAL, and no range past that committed end.
-async fn boot_judge<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectStore>(
+async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     upload: UploadState,
     gate: BootGate,
@@ -2960,7 +2917,7 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectSto
 /// boot stops with `OtherWriter` unless the gate is off or a takeover record
 /// covers them; then the verdict is the one recovery gives without the gate,
 /// a snapshot above them.
-async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
+async fn boot_recover<W: WalSource, P, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     mut reader: Option<&mut WalReader<W::Wal>>,
     committed: CommittedRead,
@@ -2978,9 +2935,6 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
     let wanted = behind.filter(|tip| staged.is_none() || gate.above(*tip));
     let tip_file = match wanted {
         Some(tip) => {
-            if staged.is_none() {
-                mark!(Boot2);
-            }
             let wal = boot_wal_of(reader.as_deref_mut(), end);
             match NewestStagedFile::load_remote(remote, wal, tip).await {
                 Ok(file) => file,
@@ -3011,10 +2965,7 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
         page_size.zip(now).filter(|(was, now)| was != now),
         refused_through,
     ) {
-        (Some((was, now)), _) => {
-            mark!(Boot15);
-            Recovered::Stop(StopCause::PageSizeChanged { was, now })
-        }
+        (Some((was, now)), _) => Recovered::Stop(StopCause::PageSizeChanged { was, now }),
         (None, Some(_)) => Recovered::Stop(StopCause::OtherWriter),
         // A boot position holds no read lock, so no verdict here names a broken one; a
         // rewound WAL's event repeats what its snapshot cause carries.
@@ -3041,7 +2992,7 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
 /// the replica's newest file's, since the next file goes on its prefix. A newest
 /// staged file unusable as a position names nothing: it can never be
 /// uploaded (it gets no witness), so its page size constrains no file.
-async fn prefix_page_size<R: ObjectStore>(
+async fn prefix_page_size<R: Role>(
     newest_staged: Option<&NewestStagedFile>,
     confirmed: Option<Txid>,
     remote: &R,
@@ -3067,21 +3018,20 @@ const PAGE_SIZE_HEADERS: usize = 8;
 /// other bytes) says nothing, so the next newest file is read; when none of the newest
 /// [`PAGE_SIZE_HEADERS`] decodes, the replica is corrupt as far as a boot can tell. Taking no
 /// answer for no constraint let a boot snapshot a new page size onto the prefix.
-async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize>, Fault> {
+async fn replica_page_size<R: Role>(remote: &R) -> Result<Option<PageSize>, Fault> {
     let inventory = Inventory::load(remote)
         .await
-        .map_err(|err| inventory_fault(&err))?;
+        .map_err(|err| inventory_fault::<R>(&err))?;
     let mut files: Vec<&FileInfo> = inventory.files().iter().collect();
     if files.is_empty() {
         return Ok(None);
     }
     files.sort_by_key(|file| std::cmp::Reverse(file.key.range().max()));
     for file in files.into_iter().take(PAGE_SIZE_HEADERS) {
-        if let Some(header) = read_header(remote, &file.key, Fault::from_remote).await? {
+        if let Some(header) = read_header(remote, &file.key, R::fault).await? {
             return Ok(Some(header.page_size()));
         }
     }
-    mark!(Boot14);
     Err(Fault::RemoteCorrupt)
 }
 
@@ -3113,7 +3063,6 @@ fn boot_course(
 
 /// The boot's recovery proved the staged position: the engine continues from it.
 fn boot_continues(position: Position) -> Result<Position, SnapshotCause> {
-    mark!(Boot3);
     Ok(position)
 }
 

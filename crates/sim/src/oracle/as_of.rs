@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfInside, CreatedAtSource, FileInfo, FileKey, MemSink, MemStore, PlanOutcome, RestoreError,
+    AsOfInside, CreatedAtSource, FileInfo, FileKey, MemSink, PlanOutcome, RestoreError,
     RestoreOptions, RestoreTarget, restore_with,
 };
 use lsr_ltx::{Timestamp, Txid};
@@ -101,7 +101,7 @@ pub fn stamps(
 /// Everything an `AsOf` judgment reads.
 pub struct Judge<'a> {
     /// The raw replica.
-    pub remote: &'a MemStore,
+    pub remote: &'a crate::remote::Bucket,
     /// Its listing.
     pub files: &'a [FileInfo],
     /// The commits.

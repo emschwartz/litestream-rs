@@ -66,6 +66,7 @@ mod pages;
 mod shm;
 #[cfg(feature = "testing")]
 pub mod testing;
+mod version;
 
 pub use conn::{
     DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig, app_connection,

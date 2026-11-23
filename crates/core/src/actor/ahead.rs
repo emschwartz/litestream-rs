@@ -27,9 +27,9 @@ use lsr_ltx::{Timestamp, Txid};
 
 use super::parts::Course;
 use super::{Actor, Env, Stepped};
+use crate::fault::role::Role;
 use crate::fault::{Fault, StopCause};
 use crate::source::{Checkpointer, PageSource, WalSource};
-use crate::store::ObjectStore;
 
 /// How long a verdict keeps the state before the damage restorable: long enough for an operator
 /// to notice the log line over a weekend and a few working days. The kept chain is about one
@@ -74,8 +74,8 @@ impl Actor {
         W: WalSource,
         P: PageSource,
         C: Checkpointer,
-        L: ObjectStore,
-        R: ObjectStore,
+        L: Role,
+        R: Role,
     {
         let Course::At { position, .. } = &self.engine.course else {
             // A snapshot is owed already: the WAL is not the newest staged file's.

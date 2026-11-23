@@ -1,5 +1,5 @@
-//! The snapshot liveness oracle (`crates/sim/src/liveness.rs`) judges every
-//! run; these runs give it something to judge on purpose.
+//! The needless-snapshot check (`crates/sim/src/needless_snapshot.rs`) judges
+//! every run; these runs give it something to judge on purpose.
 
 use lsr_sim::run::run_ops;
 use lsr_sim::{CrashKind, Op, Opts, Seed};
@@ -31,7 +31,7 @@ fn restarts_with_nothing_damaged_never_snapshot() {
         ops.extend([commit(), Op::Tick, Op::Crash(CrashKind::Process), Op::Tick]);
     }
     ops.push(Op::Restore);
-    if let Err(failure) = run_ops(Seed::new(0x11fe), &ops, &Opts::default()) {
+    if let Err(failure) = run_ops(Seed::new(1), &ops, &Opts::default()) {
         panic!("{failure}");
     }
 }
@@ -51,7 +51,7 @@ fn a_staged_snapshot_of_a_rewound_database_survives_a_restart() {
     ops.extend([Op::PowerLoss, Op::Tick, Op::Tick, Op::Restart]);
     ops.extend(std::iter::repeat_n(Op::Tick, 6));
     ops.push(Op::Restore);
-    if let Err(failure) = run_ops(Seed::new(0x4e3), &ops, &Opts::default()) {
+    if let Err(failure) = run_ops(Seed::new(1), &ops, &Opts::default()) {
         panic!("{failure}");
     }
 }
@@ -72,7 +72,7 @@ fn a_new_wal_header_over_an_empty_pinned_generation_is_followed() {
     ops.push(commit());
     ops.extend(std::iter::repeat_n(Op::Tick, 4));
     ops.push(Op::Restore);
-    if let Err(failure) = run_ops(Seed::new(0xf4846), &ops, &Opts::default()) {
+    if let Err(failure) = run_ops(Seed::new(1), &ops, &Opts::default()) {
         panic!("{failure}");
     }
 }
@@ -108,11 +108,44 @@ fn a_rollback_that_empties_the_replica_justifies_a_first_sync() {
     match run_ops(Seed::new(0x7d), &ops, &opts) {
         Ok(report) => {
             assert!(
-                report.reach.get("liveness.justified.FirstSync") >= 2,
+                report.reach.get("needless_snapshot.forced.FirstSync") >= 2,
                 "{:#?}",
                 report.trace
             );
         }
         Err(failure) => panic!("{failure}\n{:#?}", failure.trace),
     }
+}
+
+/// A power loss stops the engine before it stages the last commit, and another process
+/// checkpoints every frame into the database. The boot continues from the newest staged file,
+/// short of the WAL's committed end, so no read transaction pins its position. The next commit
+/// restarts the WAL before the engine stages the rest; that commit's frames are only in the
+/// database file now, and the engine snapshots for `GenerationChanged`. The judge takes that
+/// snapshot as needed, not as one a running engine's read lock rules out. (Shrunk from a mixed
+/// campaign run; the second writer stops the first engine, so the boot is a fresh process's.)
+#[test]
+fn a_restart_after_a_boot_behind_the_committed_end_justifies_a_snapshot() {
+    let ops = [
+        Op::Tick,
+        Op::Tick,
+        Op::Tick,
+        Op::Shrink { pages: 1 },
+        Op::Crash(CrashKind::Power),
+        Op::OtherProcessCheckpoint(lsr_sim::OtherProcessMode::Restart),
+        Op::SecondWriter { ticks: 7 },
+        Op::Tick,
+        Op::Commit {
+            pages: 3,
+            grow: false,
+        },
+    ];
+    let report = match run_ops(Seed::new(1), &ops, &Opts::default()) {
+        Ok(report) => report,
+        Err(failure) => panic!("step {}: {}", failure.step, failure.violation),
+    };
+    assert!(
+        report.reach.get("snapshot.GenerationChanged") > 0,
+        "the engine snapshots"
+    );
 }

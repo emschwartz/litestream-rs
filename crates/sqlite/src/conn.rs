@@ -197,9 +197,13 @@ impl Sqlite {
     /// transaction (the first epoch of a holder no earlier open had) and maps the wal-index. It
     /// returns once the read transaction is held, so nothing can checkpoint past it.
     ///
+    /// It first checks that the SQLite answering is the bundled build this crate's layout
+    /// reads follow (the `version` module), and refuses any other.
+    ///
     /// # Errors
     /// [`OpenError`]; nothing stays open or pinned.
     pub fn open_with(path: &Path, config: &SqliteConfig) -> Result<Self, OpenError> {
+        crate::version::check_linked()?;
         let sqlite = |source| OpenError::Sqlite {
             path: path.to_owned(),
             source,
