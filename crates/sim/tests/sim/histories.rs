@@ -24,7 +24,6 @@ pub mod seed_0x31c;
 pub mod seed_0x330;
 pub mod seed_0x46;
 pub mod seed_0x4c;
-pub mod seed_0x4f4;
 pub mod seed_0x585;
 pub mod seed_0x753;
 pub mod seed_0x80e;
@@ -37,6 +36,7 @@ pub mod seed_0xb6b;
 pub mod seed_0xb9e;
 pub mod seed_0xe9;
 pub mod seed_0xf;
+pub mod seed_0xf4721;
 pub mod seed_0xf488c;
 
 /// What guards a recorded history against passing for nothing.
@@ -56,14 +56,14 @@ pub enum Guard {
 /// Every recorded history: its module, the test that runs it, and its guard.
 pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
+        "seed_0xf4721",
+        "an_id_a_lagging_listing_hides_under_a_merged_file_is_not_reused_seed_0xf4721",
+        Guard::Own("probe-skips-higher-levels-sim"),
+    ),
+    (
         "seed_0x95a",
         "a_boot_with_staging_wiped_walks_past_a_wide_hole_seed_0x95a",
         Guard::Own("boot-walk-stops-at-the-gap-with-staging-empty-sim"),
-    ),
-    (
-        "seed_0x4f4",
-        "a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4",
-        Guard::Own("probe-skips-higher-levels-sim"),
     ),
     (
         "seed_0x82",

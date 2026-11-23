@@ -1272,31 +1272,6 @@ mod lagging_listings {
         }
     }
 
-    /// Lagging listings, bucket rollbacks and a second writer: with the probe past a listing
-    /// naming no level 1 to 8 key, a restore of a transaction differs from its commit (seed
-    /// 0x4f4 under its swarm mix, 72 recorded operations). It stands in for the seeds 0x517 and
-    /// 0x4dc histories, recorded on an older tree, that no longer reach the defect.
-    #[test]
-    fn a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4() {
-        let seed = Seed::new(0x4f4);
-        let weights = Weights::swarm(seed);
-        let opts = Opts {
-            drawn: true,
-            block_crash_law: weights.block_crash_law,
-            lying_wal_sync: weights.lying_wal_sync,
-            after_restart: weights.after_restart,
-            clock_law: weights.clock_law,
-            overlap: weights.overlap,
-            error_domain: weights.error_domain,
-            known_wrong: weights.known_wrong,
-            staging_fs: weights.staging_fs,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(seed, crate::histories::seed_0x4f4::OPS, &opts) {
-            panic!("{failure}");
-        }
-    }
-
     /// A lagging listing hides a merged level-1 file, so an as-of restore through the hold's
     /// view plans from the finer level-0 files under it, while the raw replica plans from the
     /// merged file and takes the earlier state for an instant inside it. Both answers meet the
@@ -1586,6 +1561,38 @@ mod short_object_left {
             ..Opts::default()
         };
         if let Err(failure) = run_ops(seed, h::seed_0x4c::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod merged_ids {
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{AfterRestart, ClockLaw, Opts, Seed};
+
+    /// An operator removed another writer's level-0 file 2-2 after maintenance had merged it
+    /// into level-1 2-2, and a lagging listing hid the level-1 file: the engine took id 2 as
+    /// free and uploaded its own 2, so restoring the latest state gave a state no commit made
+    /// (swarm seed 0xf4721, shrunk to 89 operations). The probe past the listing now names the
+    /// level-1 key, finds 2 taken, and the engine skips to 3.
+    #[test]
+    fn an_id_a_lagging_listing_hides_under_a_merged_file_is_not_reused_seed_0xf4721() {
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: true,
+            lying_wal_sync: false,
+            after_restart: AfterRestart::Busy,
+            clock_law: ClockLaw::EachRead,
+            overlap: true,
+            staging_fs: true,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(
+            Seed::new(0xf4721),
+            crate::histories::seed_0xf4721::OPS,
+            &opts,
+        ) {
             panic!("{failure}");
         }
     }
