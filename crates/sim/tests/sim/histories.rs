@@ -7,6 +7,7 @@
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
+pub mod seed_0x116;
 pub mod seed_0x126d68ed250e;
 pub mod seed_0x126d68ef1c07;
 pub mod seed_0x126d68ef545f;
@@ -197,6 +198,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
             "it pins an open defect (KnownWrong::HaltForgottenAtRestart) and passes only while \
              main fails with it, so no plant can be judged by it",
         ),
+    ),
+    (
+        "seed_0x116",
+        "a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116",
+        Guard::Own("journal-debt-not-recorded-sim"),
     ),
     (
         "seed_0xf488c",

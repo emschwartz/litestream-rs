@@ -1,5 +1,6 @@
 # The same plant, judged by the simulator: stored created-at times dropped, AsOf judged by origin.
 name = "time-provenance-sim"
+patch = "time-provenance"
 fix = "a427b57"
 package = "lsr-sim"
 test_bin = "sim"

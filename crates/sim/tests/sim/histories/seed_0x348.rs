@@ -1,4 +1,7 @@
 //! Seed 0x348's first 103 operations, as the live generator under the seed's own mix drew them.
+//!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
 
 use lsr_core::{SourceError, SourceOp, StoreError, StoreOp};
 use lsr_sim::generate::{AppAt, AppOp, EnvFault, Hold, MetaOp, Op, RemoteOp, Target, WalOp};
@@ -158,7 +161,7 @@ pub const OPS: &[Op] = &[
         hold: Hold::ReadersHeld,
         ticks: 4,
     },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Verify,
     Op::AppInTick {
         at: AppAt::Call(23),
@@ -227,7 +230,7 @@ pub const OPS: &[Op] = &[
             kind: ErrorKind::ConnectionReset,
         }),
     },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::WalDamage {
         op: WalOp::TearHeader,
         ticks: 5,

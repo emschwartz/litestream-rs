@@ -1,4 +1,7 @@
 //! Seed 0x2e7's first 198 operations, as the live generator under the seed's own mix drew them.
+//!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
 
 use lsr_core::{SourceError, SourceOp, StoreOp};
 use lsr_sim::generate::{AppAt, AppOp, EnvFault, Hold, MetaOp, Op, RemoteOp, WalOp};
@@ -17,7 +20,7 @@ pub const OPS: &[Op] = &[
     Op::OtherProcessReader { begin: false },
     Op::Tick,
     Op::SecondWriter { ticks: 3 },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::StagingDamage(MetaOp::StripNewestOrigin),
     Op::StagingDamage(MetaOp::DeleteNewest),
     Op::AppInTick {
@@ -52,7 +55,7 @@ pub const OPS: &[Op] = &[
     Op::Verify,
     Op::Meta(MetaOp::Restore),
     Op::Verify,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::LaggingListings {
         writes: 6,
         window: 36,
@@ -74,7 +77,7 @@ pub const OPS: &[Op] = &[
     Op::EnvFault(EnvFault::WipeStaging),
     Op::SecondWriter { ticks: 1 },
     Op::Spill,
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Meta(MetaOp::Restore),
     Op::Shutdown,
     Op::Commit {
@@ -101,7 +104,7 @@ pub const OPS: &[Op] = &[
         writes: 7,
         window: 18,
     },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Verify,
     Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::OtherProcessReader { begin: true },
@@ -130,7 +133,7 @@ pub const OPS: &[Op] = &[
         writes: 1,
         window: 14,
     },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Rollback,
     Op::LaggingListings {
         writes: 2,
@@ -192,7 +195,7 @@ pub const OPS: &[Op] = &[
     },
     Op::Shutdown,
     Op::Crash(CrashKind::Power),
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::EnvFault(EnvFault::WipeStaging),
     Op::Verify,
     Op::Commit {
@@ -229,7 +232,7 @@ pub const OPS: &[Op] = &[
         pages: 3,
         grow: false,
     },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Meta(MetaOp::Save),
     Op::Crash(CrashKind::Process),
@@ -289,7 +292,7 @@ pub const OPS: &[Op] = &[
     Op::Crash(CrashKind::Process),
     Op::Remote(RemoteOp::RollBack),
     Op::Rollback,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::AppInTick {
         at: AppAt::Call(4),
         op: AppOp::Commit {

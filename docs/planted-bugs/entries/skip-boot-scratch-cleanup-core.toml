@@ -1,4 +1,5 @@
 name = "skip-boot-scratch-cleanup-core"
+patch = "skip-boot-scratch-cleanup"
 fix = "31842f7"
 package = "lsr-core"
 tests = [

@@ -1,4 +1,7 @@
 //! Seed 0x21's first 130 operations, as the live generator under the seed's own mix with the known-wrong cells drawn drew them.
+//!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
 
 use lsr_core::{SourceError, SourceOp};
 use lsr_sim::generate::{AppAt, AppOp, EnvFault, Hold, MetaOp, Op, RemoteOp, WalOp};
@@ -127,7 +130,7 @@ pub const OPS: &[Op] = &[
     },
     Op::EnvFault(EnvFault::Source(SourceOp::BeginBarrier, SourceError::Busy)),
     Op::Crash(CrashKind::Process),
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Spill,
     Op::Spill,
     Op::LaggingListings {
@@ -213,7 +216,7 @@ pub const OPS: &[Op] = &[
         ticks: 3,
     },
     Op::Heal,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::LaggingListings {
         writes: 6,
         window: 33,
@@ -235,7 +238,7 @@ pub const OPS: &[Op] = &[
         op: WalOp::TearHeader,
         ticks: 4,
     },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::LaggingListings {
         writes: 7,
         window: 35,
