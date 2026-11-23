@@ -267,6 +267,13 @@ fn health_compares_the_local_and_replica_positions() {
     faulty.fail_uploads.store(false, Ordering::SeqCst);
     clock.advance(POLL);
     let full = moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    // The sizes are the files' own, read while the thread is parked.
+    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|_| false).unwrap();
+    assert!(parked.is_none());
+    let health = replicator.health();
+    let wal = site.db.with_file_name("app.db-wal");
+    assert_eq!(health.db_bytes, std::fs::metadata(&site.db).unwrap().len());
+    assert_eq!(health.wal_bytes, std::fs::metadata(&wal).unwrap().len());
     assert!(full.wal_bytes > 0 && full.db_bytes > 0, "{full:?}");
     // New writes: seen at the next poll, then replicated.
     site.commit(3);
@@ -315,6 +322,20 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
     // That checkpoint emptied the WAL; a commit gives SQLite a new one to replicate from.
     site.commit(1);
     drop(replicator);
+    // A start whose first boot panics has no engine to measure, yet counts what staging
+    // holds past the replica, which is every staged file.
+    faulty.panic_always.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, _clock) = fake();
+    let panicked = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    wait(&panicked, |h| h.counters.panics > 0);
+    let again = panicked.stop(Duration::ZERO).wait();
+    assert!(
+        matches!(again, Stopped::DeadlineReached { staged_not_uploaded: n, .. } if n == staged_not_uploaded),
+        "{again:?}"
+    );
+    drop(panicked);
+    faulty.panic_always.store(false, Ordering::SeqCst);
     let (runtime, _clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert_eq!(booted(&next), Booted::Booted);

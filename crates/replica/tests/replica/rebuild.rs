@@ -85,6 +85,60 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
     assert!(staged_not_uploaded >= 1, "{stopped:?}");
 }
 
+/// The deadline report while a fresh engine waits counts every staged file past the
+/// newest transaction the replica held, the one staged in the tick that panicked among
+/// them, and none the replica already holds.
+#[test]
+fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
+    use lsr_core::{Level, ObjectStore as _, PageLimit};
+    let site = Site::new();
+    let faulty = site.faulty();
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let retry = Duration::from_secs(60);
+    let replicator =
+        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let held = moved_until(&replicator, &clock, (POLL, 240), caught_up).replicated;
+    faulty.fail_uploads.store(true, Ordering::SeqCst);
+    site.commit(1);
+    clock.advance(POLL);
+    wait(&replicator, |h| h.synced > held && h.counters.retries > 0);
+    // The retry stages this commit, then its upload panics.
+    site.commit(1);
+    faulty.panic_always.store(true, Ordering::SeqCst);
+    clock.advance(retry);
+    wait(&replicator, |h| h.counters.panics == 1);
+    let meta = config().meta_dir_for(&site.db).unwrap();
+    let listed = lsr_replica::block_on(lsr_store_fs::FsStore::new(&meta).list(
+        Level::ZERO,
+        None,
+        PageLimit::MAX,
+    ))
+    .unwrap();
+    let held = held.map(|(txid, _)| txid);
+    let past = listed
+        .files
+        .iter()
+        .filter(|info| Some(info.key.range().max()) > held)
+        .count();
+    assert!(past >= 2, "{listed:?}");
+    assert!(
+        listed.files.len() > past,
+        "nothing the replica holds is staged"
+    );
+    let stop = replicator.stop(Duration::from_secs(5));
+    clock.advance(Duration::from_secs(5));
+    let stopped = ended(stop);
+    let Some(Stopped::DeadlineReached {
+        staged_not_uploaded,
+        ..
+    }) = stopped
+    else {
+        panic!("{stopped:?}");
+    };
+    assert_eq!(usize::try_from(staged_not_uploaded).unwrap(), past);
+}
+
 /// A panic in a drain does not wait out the rebuild's wait: the stop ends at its deadline.
 #[test]
 fn a_panic_during_a_drain_still_stops_at_the_deadline() {
