@@ -1435,7 +1435,9 @@ impl Actor {
         if self.owes_truncate() && !may_checkpoint {
             return Some(self.owed_in_drain(now));
         }
-        let stepped = self.counted_step(env, now).await;
+        let began = self.step_began(env.clock);
+        let stepped = self.step(env, now).await;
+        self.step_ended(env.clock, began, &stepped);
         let (files, proof) = match self.stepped(stepped, now) {
             Ok(synced) => synced,
             Err(tick) => return Some(tick),
@@ -1502,29 +1504,26 @@ impl Actor {
         }
     }
 
-    /// [`Self::step`], counted (`crate::counts`).
-    async fn counted_step<W, P, C, L, R>(
+    /// What a sync step is counted from (`crate::counts`): when it began and where the
+    /// position stood. Plain calls around the step, not a wrapper future, so counting adds no
+    /// frame to the replicator thread's stack.
+    fn step_began(&self, clock: &dyn Clock) -> (Timestamp, Option<Position>) {
+        (clock.now(), self.position())
+    }
+
+    /// Counts the sync step that began at `began` from `from` and ended as `stepped`.
+    fn step_ended(
         &mut self,
-        env: &mut Env<'_, W, P, C, L, R>,
-        now: Timestamp,
-    ) -> Result<Stepped, Fault>
-    where
-        W: WalSource,
-        P: PageSource,
-        C: Checkpointer,
-        L: Role,
-        R: Role,
-    {
-        let began = env.clock.now();
-        let from = self.position();
-        let stepped = self.step(env, now).await;
-        let took = env.clock.now().saturating_duration_since(began);
+        clock: &dyn Clock,
+        (began, from): (Timestamp, Option<Position>),
+        stepped: &Result<Stepped, Fault>,
+    ) {
+        let took = clock.now().saturating_duration_since(began);
         let fault = stepped.as_ref().err().copied();
         let to = self.position();
         self.kept
             .work
             .sync_step(fault, took, from.as_ref(), to.as_ref());
-        stepped
     }
 
     /// One sync step from what recovery says about the WAL now.
@@ -2420,7 +2419,9 @@ impl Actor {
                 now,
             );
         }
-        let stepped = self.counted_step(env, now).await;
+        let began = self.step_began(env.clock);
+        let stepped = self.step(env, now).await;
+        self.step_ended(env.clock, began, &stepped);
         let proof = match self.stepped(stepped, now) {
             Ok((0, Some(proof))) => proof,
             // A reset wal-index gives no proof until the next commit, and
