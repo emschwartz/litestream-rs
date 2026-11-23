@@ -1297,6 +1297,16 @@ impl Actor {
         self.engine.upload = state;
         self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
         self.engine.witnesses.confirmed(state.confirmed());
+        // Only a position the uploader stands on passes the dropped ids; a
+        // listing still owed keeps them, since it may confirm less.
+        if let UploadState::At(confirmed) = state
+            && self
+                .engine
+                .dropped_acknowledged
+                .is_some_and(|dropped| Some(dropped.max()) <= confirmed)
+        {
+            self.engine.dropped_acknowledged = None;
+        }
     }
 
     /// The checkpoint the policy wants now, when its task and the sync task
@@ -1707,6 +1717,26 @@ impl Actor {
         position
     }
 
+    /// Moves the upload past acknowledged ids a drop removed from staging.
+    ///
+    /// A drop after a rollback places the snapshot above the acknowledged
+    /// ids, which are never taken again. A listing afterwards confirms only
+    /// what the replica still holds, so the next planned id can be one of
+    /// those: it has no staged file, and planning it would fail every upload
+    /// with `StagedLost` until a restart. Their pages are in the snapshot
+    /// above, so the upload resumes there.
+    fn pass_dropped_acknowledged(&mut self) {
+        let (Some(dropped), UploadState::At(confirmed)) =
+            (self.engine.dropped_acknowledged, self.engine.upload)
+        else {
+            return;
+        };
+        let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
+        if next.is_some_and(|next| dropped.contains(next)) {
+            self.engine.upload = UploadState::At(Some(dropped.max()));
+        }
+    }
+
     /// The newest id an upload step may treat as this engine's own.
     ///
     /// A listing judges the replica against everything this engine put
@@ -1740,6 +1770,7 @@ impl Actor {
             .map_or(u32::MAX, NonZeroU32::get);
         let mut last = Did::Nothing;
         for _ in 0..limit {
+            self.pass_dropped_acknowledged();
             let plan = plan_upload(&self.engine.upload, self.staged());
             let bound = self.upload_bound(plan);
             let witnesses = &self.engine.witnesses;
@@ -1880,6 +1911,7 @@ impl Actor {
         // are gone with their staged copies: they are never taken again, so
         // the uploads resume with the snapshot above them.
         let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
+        self.engine.dropped_acknowledged = acknowledged.and_then(|ack| TxidRange::new(from, ack));
         if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload) {
             self.engine.upload = UploadState::At(confirmed.max(Some(ack)));
         }

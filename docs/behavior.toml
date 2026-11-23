@@ -590,11 +590,11 @@ table = "Running"
 id = "RUN-16"
 mark = "site"
 circumstance = "A staged file is missing or fails verification when its turn to upload comes. First failed read: retry. Second failed read of the same file on a later tick: it and every staged file after it are deleted (`actor.rs`)"
-response = "retry, then snapshot, `NewestStagedFileUnreadable`. The upload's failures so far still count toward a stall and its degraded state stays: nothing reached the replica, so only an upload that goes through clears them"
+response = "retry, then snapshot, `NewestStagedFileUnreadable`. The upload's failures so far still count toward a stall and its degraded state stays: nothing reached the replica, so only an upload that goes through clears them. Deleted ids the replica had acknowledged and then lost (a rollback) are never taken again: the snapshot goes above them, and a listing that confirms less moves the uploads past them to it"
 signal = "`newest_staged_file_unreadable`; the upload task's degraded state, kept"
 at_risk = "Restore points of the deleted files"
 recovery = "Automatic"
-detected_by = "core::`one_bad_read_of_a_staged_file_while_uploading_drops_nothing`, core::`the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots`, core::`a_resnapshot_keeps_the_failed_uploads_toward_a_stall`, sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`; plant::`delete-on-one-failed-read-upload`"
+detected_by = "core::`one_bad_read_of_a_staged_file_while_uploading_drops_nothing`, core::`the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots`, core::`a_resnapshot_keeps_the_failed_uploads_toward_a_stall`, core::`uploads_resume_above_acknowledged_ids_a_rollback_took`, sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`; plant::`delete-on-one-failed-read-upload`"
 recovered_by = "sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`"
 
 [[row]]

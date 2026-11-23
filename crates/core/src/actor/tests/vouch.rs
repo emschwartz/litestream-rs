@@ -486,3 +486,48 @@ fn a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas(
         "{seen:?}"
     );
 }
+
+/// The bucket rolls back past two acknowledged transactions while the put of
+/// the newer one had its answer lost. The staged copy of the lost id is
+/// dropped and a snapshot takes the next id up, since acknowledged ids are
+/// never taken again; the listing after the drop then confirms only the
+/// replica's real newest, below the acknowledged ids. The uploads must
+/// resume at the snapshot above them. They used to plan the dropped id next,
+/// which has no staged file and no witness, and fail with `StagedLost` on
+/// every tick until a restart.
+#[test]
+fn uploads_resume_above_acknowledged_ids_a_rollback_took() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    rig.settle(&mut actor, T0);
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    rig.remote
+        .inner
+        .inject_failure_after_publish(super::transient(StoreOp::Upload));
+    rig.commit(3);
+    let mut now = T0 + 2;
+    for _ in 0..20 {
+        if let Some(Event::Retrying { until, .. }) = event(&rig.tick(&mut actor, now)) {
+            now = until.unix_millis();
+            break;
+        }
+    }
+    roll_back_to_before(&rig, tx(3));
+    roll_back_to_before(&rig, tx(2));
+    let seen = rig.follow(&mut actor, now, 200);
+    let resnapshot = seen
+        .iter()
+        .position(|tick| matches!(event(tick), Some(Event::Resnapshot(_))));
+    let after = &seen[resnapshot.unwrap_or(seen.len())..];
+    let lost = after.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Retrying {
+                fault: Fault::StagedLost,
+                ..
+            })
+        )
+    });
+    assert!(resnapshot.is_some() && !lost, "{seen:?}");
+    assert_eq!(super::restored(&rig), 3);
+}
