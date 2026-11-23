@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/counts.rs b/crates/core/src/counts.rs
+--- a/crates/core/src/counts.rs
++++ b/crates/core/src/counts.rs
+@@ -202,7 +202,7 @@
+         from: Option<&Position>,
+         to: Option<&Position>,
+     ) {
+-        self.sync.record(fault.is_some(), took);
++        self.sync.record(false, took);
+         self.disk_full = fault == Some(Fault::LocalDiskFull);
+         self.wal_bytes = self.wal_bytes.saturating_add(wal_bytes(from, to));
+     }

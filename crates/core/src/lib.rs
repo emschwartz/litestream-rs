@@ -28,11 +28,13 @@ mod checkpoint;
 mod compact;
 #[cfg(any(test, feature = "testing"))]
 pub mod conformance;
+mod counts;
 mod created_at;
 mod cure;
 mod env;
 mod failstop;
 mod fault;
+mod identity;
 mod inventory;
 mod journal;
 mod layout;
@@ -79,6 +81,7 @@ pub use checkpoint::{
 pub use compact::{
     CompactError, Compacted, CompactionInputs, InputFault, InputsError, MAX_INPUTS, compact,
 };
+pub use counts::{CallTotals, WorkCounts};
 pub use created_at::{
     MAX_AHEAD, Need, Resolve, ResolveError, Resolved, ResolvedCreatedAt, Step as CreatedAtStep,
     resolve, resolve_counted,

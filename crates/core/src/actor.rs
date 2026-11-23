@@ -103,6 +103,7 @@ use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
     Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
+use crate::counts::{Counted, WorkCounts};
 use crate::created_at::{ResolvedCreatedAt, resolve};
 use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
@@ -111,6 +112,7 @@ use crate::fault::{
     Action, Backoff, Clamped, Fault, Next, OtherWriter, PersistentCause, Policy, Responses,
     STALLED_AFTER, SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
 };
+use crate::identity;
 use crate::inventory::Inventory;
 use crate::journal::{JournalFile, JournalSignal, JournalWriteError, JournalWriter, judge};
 use crate::layout::{FileInfo, FileKey, Level};
@@ -618,6 +620,19 @@ impl Actor {
         self.kept.snapshots
     }
 
+    /// What the engine's sync steps and checkpoints did since the actor began.
+    #[must_use]
+    pub const fn work(&self) -> WorkCounts {
+        self.kept.work
+    }
+
+    /// Where in the WAL the newest staged file ends (Go's `litestream_wal_size`, the offset
+    /// its last sync read to); 0 before the first sync.
+    #[must_use]
+    pub fn synced_wal_offset(&self) -> u64 {
+        self.position().map_or(0, |p| p.synced().offset().get())
+    }
+
     /// Why the next sync is a snapshot, when it is one.
     #[must_use]
     pub fn pending_snapshot(&self) -> Option<SnapshotCause> {
@@ -767,16 +782,22 @@ impl Actor {
         // From here on each store is reached as its role: an error from it is
         // classified as that store's, never the other's (`fault::role`).
         let (staging, remote) = (Staging(env.staging), Replica(env.remote));
+        // Each checkpoint asked of SQLite is counted (`crate::counts`).
+        let mut ck = Counted::new(&mut *env.ck, env.clock);
         let mut roles = Env {
             wal: &mut *env.wal,
             db: &mut *env.db,
-            ck: &mut *env.ck,
+            ck: &mut ck,
             staging: &staging,
             remote: &remote,
             clock: env.clock,
             journal: env.journal.as_deref_mut(),
         };
-        let tick = self.tick_at(&mut roles, now).await;
+        // Boxed: the tick's state machine is the largest future the replicator thread polls,
+        // and on the heap it is not part of every poll frame below `block_on`, which in a
+        // debug build is what the half-stack headroom gate measures (`lsr_replica::stack`).
+        let tick = Box::pin(self.tick_at(&mut roles, now)).await;
+        self.kept.work.add_checkpoints(ck.totals());
         let tick = self.reconcile_journal(env.journal.as_deref_mut(), tick, now);
         self.observe_lag(env.wal, now);
         let tick = self.wake_for_probe(tick);
@@ -1220,7 +1241,10 @@ impl Actor {
         let journal = read_journal(env.journal.as_deref_mut());
         let doubted = self.kept.suspect_staged;
         let suspect = &mut self.kept.suspect_staged;
-        let listed = boot_listing(env.staging, env.remote, suspect, takeover).await;
+        let no_journal = journal
+            .as_ref()
+            .is_none_or(|(_, parsed)| parsed.verdict == lsr_journal::Verdict::Missing);
+        let listed = boot_listing(env.staging, env.remote, suspect, takeover, no_journal).await;
         let Listed {
             upload,
             dropped,
@@ -1500,7 +1524,9 @@ impl Actor {
         if self.owes_truncate() && !may_checkpoint {
             return Some(self.owed_in_drain(now));
         }
+        let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
+        self.step_ended(env.clock, began, &stepped);
         let (files, proof) = match self.stepped(stepped, now) {
             Ok(synced) => synced,
             Err(tick) => return Some(tick),
@@ -1565,6 +1591,28 @@ impl Actor {
             Ok(Stepped::Stop(cause)) => Err(self.verdict(Task::Sync, cause, now)),
             Err(fault) => Err(self.fault(Task::Sync, fault, now)),
         }
+    }
+
+    /// What a sync step is counted from (`crate::counts`): when it began and where the
+    /// position stood. Plain calls around the step, not a wrapper future, so counting adds no
+    /// frame to the replicator thread's stack.
+    fn step_began(&self, clock: &dyn Clock) -> (Timestamp, Option<Position>) {
+        (clock.now(), self.position())
+    }
+
+    /// Counts the sync step that began at `began` from `from` and ended as `stepped`.
+    fn step_ended(
+        &mut self,
+        clock: &dyn Clock,
+        (began, from): (Timestamp, Option<Position>),
+        stepped: &Result<Stepped, Fault>,
+    ) {
+        let took = clock.now().saturating_duration_since(began);
+        let fault = stepped.as_ref().err().copied();
+        let to = self.position();
+        self.kept
+            .work
+            .sync_step(fault, took, from.as_ref(), to.as_ref());
     }
 
     /// One sync step from what recovery says about the WAL now.
@@ -2490,7 +2538,9 @@ impl Actor {
                 now,
             );
         }
+        let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
+        self.step_ended(env.clock, began, &stepped);
         let proof = match self.stepped(stepped, now) {
             Ok((0, Some(proof))) => proof,
             // A reset wal-index gives no proof until the next commit, and
@@ -2725,6 +2775,8 @@ enum Takeover {
 struct BootGate {
     takeover: Takeover,
     local: Option<Txid>,
+    /// The meta directory holds no journal (or the engine runs without one).
+    no_journal: bool,
 }
 
 impl BootGate {
@@ -2768,6 +2820,14 @@ impl BootGate {
             }
             Some(_) | None => Ok(()),
         }
+    }
+
+    /// Whether the meta directory is brand new: nothing staged when the boot began, no
+    /// journal and no takeover record. Only then does a refusal ask whether the local
+    /// database is the replica's state (`crate::identity`); any of the three is a record of
+    /// this engine's past, and the gate's own rules judge with it.
+    const fn fresh(self) -> bool {
+        self.no_journal && self.local.is_none() && matches!(self.takeover, Takeover::Vouch(None))
     }
 
     /// Whether replica files through `tip` that the WAL did not vouch for
@@ -2925,6 +2985,7 @@ async fn boot_listing<L: Role, R: Role>(
     remote: &R,
     suspect: &mut Option<FileKey>,
     takeover: Takeover,
+    no_journal: bool,
 ) -> Result<Listed, BootStep> {
     remove_scratch(staging, remote).await?;
     // Where staging stood before this boot dropped anything of its own: the
@@ -2946,7 +3007,11 @@ async fn boot_listing<L: Role, R: Role>(
         Err(failed) => return Err(failed.fault.into()),
     };
     let tip = upload.confirmed();
-    let gate = BootGate { takeover, local };
+    let gate = BootGate {
+        takeover,
+        local,
+        no_journal,
+    };
     // The staged files from `from` on cannot continue the replica: unless
     // the replica's object is another writer's, they go, and recovery
     // snapshots above what the replica holds.
@@ -3122,7 +3187,7 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
 /// boot stops with `OtherWriter` unless the gate is off or a takeover record
 /// covers them; then the verdict is the one recovery gives without the gate,
 /// a snapshot above them.
-async fn boot_recover<W: WalSource, P, C, L: Role, R: Role>(
+async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     mut reader: Option<&mut WalReader<W::Wal>>,
     committed: CommittedRead,
@@ -3165,11 +3230,17 @@ async fn boot_recover<W: WalSource, P, C, L: Role, R: Role>(
     };
     let page_size = prefix_page_size(newest_staged.as_ref(), confirmed, remote).await?;
     let now = view.header.map(|header| header.page_size());
-    let refused_through = unvouched.filter(|tip| gate.refuses(*tip));
-    let recovered = match (
-        page_size.zip(now).filter(|(was, now)| was != now),
-        refused_through,
-    ) {
+    let refused = unvouched.filter(|tip| gate.refuses(*tip));
+    let resized = page_size.zip(now).filter(|(was, now)| was != now);
+    let refused_through = match refused {
+        Some(tip) if gate.fresh() => {
+            let same =
+                identity::local_is_replica(env.wal, reader, committed, env.db, remote, tip).await?;
+            (!same).then_some(tip)
+        }
+        Some(_) | None => refused,
+    };
+    let recovered = match (resized, refused_through) {
         (Some((was, now)), _) => Recovered::Stop(StopCause::PageSizeChanged { was, now }),
         (None, Some(_)) => Recovered::Stop(StopCause::OtherWriter),
         // A boot position holds no read lock, so no verdict here names a broken one; a

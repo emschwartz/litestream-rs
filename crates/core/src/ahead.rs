@@ -187,7 +187,7 @@ async fn digests_at<R: Role>(
 /// call (a read, a listing page) or a replica changing under the restore is the store's fault,
 /// retried as such; a history that does not plan, a file or database that does not verify, or a
 /// listing no real store returns is the replica's damage.
-fn restore_fault<R: Role>(err: &RestoreError) -> CheckError {
+pub(crate) fn restore_fault<R: Role>(err: &RestoreError) -> CheckError {
     match err {
         RestoreError::Store(StoreError::Corrupt { .. })
         | RestoreError::Inventory(

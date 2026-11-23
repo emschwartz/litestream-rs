@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/counts.rs b/crates/core/src/counts.rs
+--- a/crates/core/src/counts.rs
++++ b/crates/core/src/counts.rs
+@@ -204,7 +204,7 @@
+     ) {
+         self.sync.record(fault.is_some(), took);
+         self.disk_full = fault == Some(Fault::LocalDiskFull);
+-        self.wal_bytes = self.wal_bytes.saturating_add(wal_bytes(from, to));
++        self.wal_bytes = self.wal_bytes.saturating_add(0 * wal_bytes(from, to));
+     }
+ 
+     pub(crate) fn add_checkpoints(&mut self, tick: CheckpointTotals) {

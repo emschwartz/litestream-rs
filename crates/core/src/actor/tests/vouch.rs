@@ -541,6 +541,217 @@ fn uploads_resume_above_acknowledged_ids_a_rollback_took() {
     assert_eq!(super::restored(&rig), 3);
 }
 
+/// A redeploy that keeps the database but not the meta directory: staging is empty, there is
+/// no journal and no takeover record, and the application's last close checkpointed the WAL
+/// into the database file and restarted it, so the WAL cannot vouch for the replica's newest
+/// transaction. The replica holds 1 to 3, and the database file holds exactly its state at 3
+/// (page 1 written by transaction 3, pages 2 and 3 from the start). Returns that rig.
+pub(super) fn redeployed_with_a_new_meta_directory() -> Rig {
+    let mut rig = three();
+    rig.staging = Counting::default();
+    rig.wal.force_restart();
+    rig.db.write_page(pg(1), &vec![3; PS.bytes()]);
+    rig
+}
+
+/// Every page of the local database equals the replica's state at its newest transaction, so
+/// the replica holds nothing this database did not write: the boot snapshots above it (the WAL
+/// restarted, `GenerationChanged`), as a takeover record through that transaction would, and
+/// nothing stops.
+#[test]
+fn a_new_meta_directory_over_the_replicas_own_state_snapshots_above_it() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    let mut actor = go_like_actor();
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(
+        booted(&boot),
+        Some(Some(SnapshotCause::GenerationChanged)),
+        "{boot:?}"
+    );
+    let seen = rig.follow(&mut actor, T0 + 2, 50);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(super::restored(&rig), 3);
+}
+
+/// One page of the local database differs from the replica's state (a database that is not
+/// the one the replica holds, or one the application changed before the boot): the boot
+/// stops for another writer, as with no check.
+#[test]
+fn a_new_meta_directory_over_a_different_database_stops() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    rig.db.write_page(pg(2), &vec![9; PS.bytes()]);
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+    assert_eq!(actor.refused_through(), Some(tx(3)));
+}
+
+/// The same pages but one more of them: the database grew past the replica's state, so it is
+/// not that state, and the boot stops.
+#[test]
+fn a_new_meta_directory_over_a_longer_database_stops() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    rig.db.set_page_count(4);
+    rig.db.write_page(pg(4), &vec![4; PS.bytes()]);
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}
+
+/// The local state is read through the WAL: after the restart the database file still holds
+/// page 1 as transaction 1 wrote it, and a frame of the new generation holds page 1 as
+/// transaction 3 wrote it. The committed state equals the replica's, so the boot snapshots.
+#[test]
+fn a_new_meta_directory_reads_the_local_state_through_the_wal() {
+    let mut rig = three();
+    rig.staging = Counting::default();
+    rig.wal.force_restart();
+    rig.commit(3);
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 50);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(super::restored(&rig), 3);
+}
+
+/// Staging holds a backup with transaction 1 only, put back while the database stayed: the meta
+/// directory is not new, so the boot does not ask whether the database is the replica's state,
+/// and the gate's own rule stops it even though every page is equal.
+#[test]
+fn an_old_staging_backup_over_the_replicas_own_state_still_stops() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
+    let bytes = block_on(rig.remote.inner.read(&one, 0, ReadLen::CHUNK)).unwrap();
+    put_level_zero(&rig.staging.inner, one, &bytes);
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}
+
+/// A takeover record through 2 is held, so the meta directory is not new: its record judges,
+/// and transaction 3 above it stops the boot though every page is equal.
+#[test]
+fn a_held_takeover_short_of_the_replica_still_stops_over_its_own_state() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    let mut actor = go_like_actor();
+    actor.remember_takeover(TakeoverRecord::through(tx(2)));
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}
+
+/// The application vacuumed to another page size: the database is not the replica's state,
+/// and the boot stops for the page size, as it did before the check.
+#[test]
+fn a_new_meta_directory_over_a_resized_database_stops_for_the_page_size() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    super::resize(&mut rig, super::big());
+    let mut actor = Actor::new(cfg());
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(seen.last(), Some(&super::page_size_changed()), "{seen:?}");
+}
+
+/// A checkpoint by another connection lands while the boot reads the replica: the local reads
+/// may mix two states, so the check proves nothing and the boot runs again (`WalMoved`); the
+/// next boot finds the database equal and snapshots.
+#[test]
+fn a_wal_that_moves_under_the_check_retries_the_boot() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    *rig.remote.moves_epoch_on_read.lock().unwrap() = Some(rig.wal.clone());
+    let mut actor = go_like_actor();
+    let boot = rig.tick(&mut actor, T0 + 2);
+    let retried = matches!(
+        event(&boot),
+        Some(Event::Retrying {
+            fault: Fault::WalMoved,
+            ..
+        })
+    );
+    assert!(retried, "{boot:?}");
+    let seen = rig.follow(&mut actor, T0 + 2, 50);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(super::restored(&rig), 3);
+}
+
+fn put_level_zero(store: &MemStore, key: FileKey, bytes: &[u8]) {
+    block_on(async {
+        let mut up = store
+            .begin_upload(&key, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(bytes).await.unwrap();
+        up.commit().await.unwrap()
+    });
+}
+
+/// The application's last close deleted the WAL: the local state is the database file alone,
+/// its length the page count. Equal to the replica's state, the boot snapshots above it.
+#[test]
+fn a_new_meta_directory_with_no_wal_reads_the_database_file_alone() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    rig.wal.remove_file();
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 50);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(super::restored(&rig), 3);
+}
+
+/// With no WAL, a database file one page longer than the replica's state is not that state.
+#[test]
+fn a_new_meta_directory_with_no_wal_over_a_longer_database_stops() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    rig.wal.remove_file();
+    rig.db.set_page_count(4);
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}
+
+/// With no WAL, one page of the database file differs: the boot stops.
+#[test]
+fn a_new_meta_directory_with_no_wal_over_a_different_database_stops() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    rig.wal.remove_file();
+    rig.db.write_page(pg(3), &vec![7; PS.bytes()]);
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}
+
 #[test]
 fn publishing_a_covered_transaction_spends_the_takeover_record() {
     let mut rig = Rig::new();

@@ -418,7 +418,7 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
     });
     // Once the engine has put the transaction the record covers again, after a listing that
     // ended below it, the record is spent and the replicator deletes it
-    // (docs/decisions/D170.md).
+    // (docs/decisions/D172.md).
     assert!(!path.exists());
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());

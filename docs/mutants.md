@@ -408,7 +408,7 @@ three it had not reached, and the tally above counts the second result.
 | `pages.rs` `seeded` | `min() > from` becomes `>=` | The extra file it calls pending is the confirmed one; a quiet mark at or below the confirmed transaction is trimmed in `Actor::observe_lag` before any read. |
 | `actor/lag.rs` `Actor::observe_lag` | `retain(txid > replicated)` becomes `>=` | `only_quiet_pending` reads the marks from the transaction after the replicated one, so a kept mark equal to it is never read. |
 
-### Takeover spend (D170): equivalent survivors of `just mutants-diff`
+### Takeover spend (D172): equivalent survivors of `just mutants-diff`
 
 | Where | Mutation | Why |
 | --- | --- | --- |

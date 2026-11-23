@@ -28,6 +28,7 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
+use crate::counts::WorkCounts;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::journal::{JournalSignal, JournalWriter};
@@ -131,6 +132,8 @@ pub(super) struct Kept {
     pub(super) unguarded: Option<Timestamp>,
     /// Snapshots staged since the actor began, per cause: a report.
     pub(super) snapshots: SnapshotCounts,
+    /// What the sync steps and checkpoints did since the actor began: a report.
+    pub(super) work: WorkCounts,
     /// The snapshot a drain was asked to end with (`once`): a request of this process.
     pub(super) final_snapshot: FinalSnapshot,
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
@@ -222,6 +225,7 @@ impl Kept {
             suspect_staged: None,
             unguarded: None,
             snapshots: SnapshotCounts::default(),
+            work: WorkCounts::default(),
             final_snapshot: FinalSnapshot::NotAsked,
             unproven: Unproven::No,
             takeover: None,
@@ -268,6 +272,7 @@ impl Kept {
             suspect_staged,
             unguarded,
             snapshots,
+            work,
             final_snapshot,
             unproven,
             takeover,
@@ -309,6 +314,7 @@ impl Kept {
             // asks it again.
             unguarded: *unguarded,
             snapshots: *snapshots,
+            work: *work,
             final_snapshot: *final_snapshot,
             unproven: *unproven,
             takeover: *takeover,
@@ -618,6 +624,10 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "snapshots",
         Keep::Ephemeral("snapshots staged since the process began: a report"),
+    ),
+    (
+        "work",
+        Keep::Ephemeral("sync steps and checkpoints since the process began: a report"),
     ),
     (
         "final_snapshot",

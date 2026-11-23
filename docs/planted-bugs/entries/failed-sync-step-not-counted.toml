@@ -1,0 +1,4 @@
+name = "failed-sync-step-not-counted"
+fix = "plant"
+package = "lsr-core"
+tests = ["actor::tests::work::a_full_disk_is_reported_until_a_step_stages"]
