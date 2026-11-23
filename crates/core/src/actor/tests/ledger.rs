@@ -47,3 +47,29 @@ fn every_journalled_field_is_read_at_boot_and_written_at_the_end_of_a_tick() {
         );
     }
 }
+
+/// A fault reported once (a failed WAL sync) is never a plain retry, and leaves its obligation in
+/// a field the ledger shows held in the engine journal: what a restart must not forget.
+#[test]
+fn a_fault_reported_once_leaves_a_journalled_obligation() {
+    use crate::fault::{Evidence, Policy, evidence, policy};
+
+    let mut once = 0;
+    for fault in crate::fault::tests::every_fault() {
+        let Evidence::Once(owed) = evidence(&fault) else {
+            continue;
+        };
+        let field = owed.field();
+        once += 1;
+        assert!(
+            !matches!(policy(&fault), Policy::Retry(_)),
+            "{fault:?} is reported once but plainly retried"
+        );
+        let keep = parts::KEPT_LEDGER.iter().find(|(entry, _)| *entry == field);
+        assert!(
+            matches!(keep, Some((_, Keep::Journalled(Record::EngineJournal, _)))),
+            "{fault:?} leaves its obligation in {field}, which the ledger does not journal"
+        );
+    }
+    assert!(once > 0, "no fault is reported once");
+}
