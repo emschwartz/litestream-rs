@@ -766,6 +766,70 @@ pub fn restored_old_meta() -> Scenario {
     s
 }
 
+/// An upload of the engine's own published and was reported as other bytes, and the delete that
+/// would clear it failed: the replica holds the transaction, unconfirmed. Its staged copy then
+/// turns unreadable, so the running engine drops it, and the process dies before the snapshot
+/// that replaces it is staged, with the WAL restarted meanwhile so it no longer holds the file.
+/// The takeover the engine keeps before the drop must reach that file (the newest put it
+/// sent), or the next boot takes it for another writer's and stops.
+#[must_use]
+pub fn a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it() -> Scenario {
+    use crate::generate::Target;
+    use crate::store::FaultShape;
+    let transient = |op| {
+        FaultShape::Error(lsr_core::StoreError::Transient {
+            op,
+            kind: std::io::ErrorKind::ConnectionReset,
+        })
+    };
+    let fail = |target, op, shape| Op::StoreFault {
+        target,
+        op,
+        ahead: 0,
+        shape,
+    };
+    let mut s = build(
+        "a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it",
+        vec![
+            vec![commit(3, false), Op::Shutdown, commit(2, false), Op::Tick, Op::Tick],
+            vec![
+                fail(
+                    Target::Remote,
+                    lsr_core::StoreOp::Upload,
+                    FaultShape::ChecksumMismatch,
+                ),
+                fail(
+                    Target::Remote,
+                    lsr_core::StoreOp::Delete,
+                    transient(lsr_core::StoreOp::Delete),
+                ),
+                Op::Tick,
+                Op::Meta(MetaOp::FlipNewestByte),
+                fail(
+                    Target::Staging,
+                    lsr_core::StoreOp::Upload,
+                    transient(lsr_core::StoreOp::Upload),
+                ),
+                Op::Tick,
+                Op::Tick,
+                Op::Tick,
+                Op::Tick,
+            ],
+            vec![
+                Op::OurReader { begin: false },
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+                commit(1, false),
+                Op::Restart,
+            ],
+            ticks(SETTLE * 2),
+            vec![Op::Restore],
+        ],
+        vec![Expect::Oracle],
+    );
+    s.check = Some(no_refusal);
+    s
+}
+
 /// One byte of the newest staged file changed on disk. The replica already holds the newest staged file, so
 /// the torn copy is deleted and the snapshot takes the transaction after it.
 #[must_use]

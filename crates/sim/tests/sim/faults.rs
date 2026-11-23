@@ -300,6 +300,11 @@ fn newest_staged_file_lost() {
 }
 
 #[test]
+fn a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it() {
+    run(scenario::a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it);
+}
+
+#[test]
 fn restored_old_meta() {
     run(scenario::restored_old_meta);
 }
