@@ -1269,6 +1269,36 @@ fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
     assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
 }
 
+/// A database with its own `meta-path` gets the restore's takeover record there, where the
+/// replicator started on it looks, and none in the default place beside the database. The
+/// record's place is asserted directly: the identity check would let a boot go on either way.
+#[test]
+fn a_restore_by_config_records_the_takeover_in_the_configured_meta_directory() {
+    let (staged, _manifest) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("app.db");
+    let meta = dir.path().join("elsewhere");
+    let config = dir.path().join("litestream.yml");
+    fs::write(
+        &config,
+        format!(
+            "dbs:\n  - path: {}\n    meta-path: {}\n    replica:\n      url: file://{}\n",
+            db.display(),
+            meta.display(),
+            staged.replica().display()
+        ),
+    )
+    .expect("config");
+    let run = lsr(&["restore", "-config", path_str(&config), path_str(&db)]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let record = fs::read(meta.join("lsr-takeover")).expect("takeover record in the meta-path");
+    lsr_core::TakeoverRecord::decode(&record).expect("a takeover record");
+    assert!(
+        !dir.path().join(".app.db-litestream").exists(),
+        "a record beside the database, where the replicator does not look"
+    );
+}
+
 /// Go finds a `DB_PATH` among the config's `path` entries only (`Config.DBConfig`): a `dir`
 /// entry beside it is not scanned, so one that holds no database does not stop the restore.
 #[test]

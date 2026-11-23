@@ -1276,12 +1276,12 @@ notes = "Accepted limit (L1). It is why BOOT-18 and BOOT-19 are silent at restor
 [[row]]
 table = "Restore"
 id = "REST-11"
-circumstance = "Every restore that publishes writes a takeover record through the restored transaction into the target's default meta directory (`.<name>-litestream`); the sidecar's `-restore-if-db-not-exists` writes it into the configured one. Failing to write it is an error after the database is in place (`RestoreError::TakeoverRecord`, `CliError::Takeover`). A destination that names no file has no meta directory and is refused before anything is written (`RestoreError::NoMetaDir`, `CliError::NoMetaDir`, exit 3)"
+circumstance = "Every restore that publishes writes a takeover record through the restored transaction into the meta directory the database uses: `lsr restore` of a configured database (`-config`, to its own path) and the sidecar's `-restore-if-db-not-exists` write it into the configured one (`meta-path` or `meta-dir`), and every other restore into the target's default one (`.<name>-litestream`). Failing to write it is an error after the database is in place (`RestoreError::TakeoverRecord`, `CliError::Takeover`). A destination that names no file has no meta directory and is refused before anything is written (`RestoreError::NoMetaDir`, `CliError::NoMetaDir`, exit 3)"
 response = "A replicator started on the restored database snapshots above the replica it came from instead of refusing it (BOOT-22). The CLI prints \"takeover recorded through {txid}\""
 signal = "exit 0; exit 3 when the record cannot be written"
 at_risk = "None"
 recovery = "Run `lsr take-over`"
-detected_by = "replica::`second_writer::a_restored_database_replicates_without_a_refusal`, cli::`integrity_check_publishes_a_valid_database_in_every_mode`, replica::`restored::a_restore_to_a_path_with_no_file_name_is_refused_before_writing`, cli::`restore_to_an_output_with_no_file_name_is_refused_before_writing`; plant::`restore-writes-no-takeover`, plant::`restore-writes-no-takeover-cli`"
+detected_by = "replica::`second_writer::a_restored_database_replicates_without_a_refusal`, cli::`integrity_check_publishes_a_valid_database_in_every_mode`, replica::`restored::a_restore_to_a_path_with_no_file_name_is_refused_before_writing`, cli::`restore_to_an_output_with_no_file_name_is_refused_before_writing`, cli::`a_restore_by_config_records_the_takeover_in_the_configured_meta_directory`; plant::`restore-writes-no-takeover`, plant::`restore-writes-no-takeover-cli`"
 notes = "The record failing to write after a publish is **code only**"
 
 [[row]]

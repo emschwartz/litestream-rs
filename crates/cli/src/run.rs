@@ -609,7 +609,8 @@ async fn restore_command(args: Box<RestoreArgs>) -> Result<Done, CliError> {
         timestamp_given,
     } = *args;
     let url_timestamp = timestamp_given && matches!(from, RestoreFrom::Url(_));
-    let how = How {
+    let mut how = How {
+        meta: None,
         target,
         as_of_inside,
         clear_journal_files_first: clear_journal_files,
@@ -645,6 +646,7 @@ async fn restore_command(args: Box<RestoreArgs>) -> Result<Done, CliError> {
             cleared: Vec::new(),
         }
     } else {
+        how.meta.clone_from(&opening.meta);
         restore_or_plan(&opening, &output, how, dry_run).await?
     };
     Ok(Done::Restore(Box::new(RestoreDone {
@@ -660,6 +662,8 @@ async fn restore_command(args: Box<RestoreArgs>) -> Result<Done, CliError> {
 struct Opening {
     replica: Replica,
     keys: Option<S3Credentials>,
+    /// The meta directory the config gives the database, when a config named it.
+    meta: Option<PathBuf>,
 }
 
 impl Opening {
@@ -668,6 +672,7 @@ impl Opening {
             ReplicaPlan::File(dir) => Self {
                 replica: Replica::Dir(dir.clone()),
                 keys: None,
+                meta: None,
             },
             ReplicaPlan::S3 {
                 config,
@@ -678,6 +683,7 @@ impl Opening {
                     Credentials::FromConfig(keys) => Some(keys.clone()),
                     Credentials::FromEnvironment => None,
                 },
+                meta: None,
             },
         }
     }
@@ -712,6 +718,7 @@ fn resolve_from(
                 Opening {
                     replica,
                     keys: None,
+                    meta: None,
                 },
                 output,
             ))
@@ -726,7 +733,12 @@ fn resolve_from(
             Ok(Resolution::Open(opening, output))
         }
         RestoreFrom::Database { path, config } => {
-            let (opening, db) = config_replica(&path, config.as_deref(), expand)?;
+            let (mut opening, db) = config_replica(&path, config.as_deref(), expand)?;
+            // Only the configured database itself has the configured meta directory; a copy
+            // restored elsewhere is a new database, with the default one beside it.
+            if output.as_ref().is_some_and(|out| *out != db) {
+                opening.meta = None;
+            }
             Ok(Resolution::Open(opening, output.unwrap_or(db)))
         }
     }
@@ -757,7 +769,11 @@ fn config_replica(
         .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
     let plan = lsr_config::plan(&narrowed, &ProcessEnv).map_err(CliError::Plan)?;
     let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
-    Ok((Opening::of_plan(db.replica()), db.path().to_path_buf()))
+    let opening = Opening {
+        meta: Some(db.meta_dir().to_path_buf()),
+        ..Opening::of_plan(db.replica())
+    };
+    Ok((opening, db.path().to_path_buf()))
 }
 
 const fn expand_of(no_expand_env: bool) -> Expand {
@@ -915,6 +931,8 @@ fn output_exists(output: &Path, existing: Existing) -> Result<bool, CliError> {
 
 /// How a restore runs, apart from where from and where to.
 struct How {
+    /// Where the takeover record goes; the output's default meta directory when `None`.
+    meta: Option<PathBuf>,
     target: RestoreTarget,
     as_of_inside: AsOfInside,
     clear_journal_files_first: bool,
@@ -941,6 +959,7 @@ async fn restore_on<S: ObjectStore>(
     how: How,
 ) -> Result<Finished, CliError> {
     let How {
+        meta,
         target,
         as_of_inside,
         clear_journal_files_first,
@@ -962,7 +981,10 @@ async fn restore_on<S: ObjectStore>(
         // A replicator started on the restored database builds on the replica it came from,
         // through the takeover record: an output with no meta directory is refused before
         // anything is written, never restored without one.
-        let meta = meta_dir_of(output)?;
+        let meta = match meta {
+            Some(meta) => meta,
+            None => meta_dir_of(output)?,
+        };
         let sink = FileSink::create_over(output, existing)?.with_integrity_check(integrity_check);
         if txid_and_timestamp {
             return Err(UsageError::GoTxidAndTimestamp.into());
