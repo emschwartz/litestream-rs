@@ -42,6 +42,21 @@ fn a_wiped_staging_in_the_same_wal_generation_continues() {
     assert_eq!(actor.refused_through(), None);
 }
 
+/// Wiped staging, and the database committed once more since the replica's newest file: the
+/// WAL vouches for that file, so the boot continues and stages the new commit. The identity
+/// check cannot answer this one (the database is ahead of the replica, so it differs), which
+/// is what tells the WAL's vouching apart from it.
+#[test]
+fn a_wiped_staging_with_commits_the_replica_lacks_continues_on_the_wals_word() {
+    let mut rig = three();
+    rig.staging = Counting::default();
+    rig.commit(4);
+    let mut actor = go_like_actor();
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(booted(&boot), Some(None), "{boot:?}");
+    assert_eq!(actor.refused_through(), None);
+}
+
 /// Staging lost its newest files but the WAL still holds the replica's
 /// newest: vouched, so the boot continues from it, where it used to take a
 /// `BehindRemote` snapshot.
