@@ -4,8 +4,8 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-dbg-in-tests = true
 
-# TigerStyle's limit (decision D5). Reviewed at phase 1 exit: see docs/PLAN.md.
-too-many-lines-threshold = 70
+# Raised from TigerStyle's 70 to 150 (decision D164, amending D5); still a hard error.
+too-many-lines-threshold = 150
 
 # Time and sleep come in through `Clock`, `Sleeper` and the tick's `now`, so the
 # simulator and tests can stub them (PLAN.md section 2, goal 5). The few sites

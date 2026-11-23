@@ -586,10 +586,6 @@ const fn depth_name(depth: Depth) -> &'static str {
 }
 
 /// A finding's machine name and its message.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one arm per Finding variant, each a single message; the match must stay exhaustive"
-)]
 fn finding_parts(finding: &Finding) -> (&'static str, String) {
     match finding {
         Finding::NoSnapshot => (
