@@ -556,15 +556,6 @@ impl<B: Backend> Rig<B> {
         self.app.exec(APP, sql)
     }
 
-    /// Turns `SQLITE_FCNTL_PERSIST_WAL` off on the application's connection (an application at SQLite's
-    /// defaults never had it on).
-    ///
-    /// # Errors
-    /// [`RigError`].
-    pub fn app_persist_wal_off(&mut self) -> Result<(), RigError> {
-        self.app.persist_wal_off(APP)
-    }
-
     /// The application's process opens and closes the database and `-shm` with `std::fs`, dropping
     /// its own POSIX locks on them. Only for an application in another process.
     ///
@@ -772,7 +763,8 @@ impl<B: Backend> Rig<B> {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Resnapshot(_)
-            | Event::Clamped(_) => {}
+            | Event::Clamped(_)
+            | Event::AheadOfWal(_) => {}
         }
         match next {
             Next::Now if matches!(event, Event::Idle) => self.clock.advance(SPIN_STEP),

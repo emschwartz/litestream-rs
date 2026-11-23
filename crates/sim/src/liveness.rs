@@ -299,6 +299,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         Op::LaggingListings { .. }
         | Op::Commit { .. }
         | Op::CommitInTick { .. }
+        | Op::OtherConnectionCommit { .. }
         | Op::AppInTick { .. }
         | Op::Spill
         | Op::Rollback

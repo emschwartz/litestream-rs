@@ -139,6 +139,7 @@ classes! {
     Commit = "Commit", Input;
     CommitInTick = "CommitInTick", Input;
     AppInTick = "AppInTick", Input;
+    OtherConnectionCommit = "OtherConnectionCommit", Input;
     Spill = "Spill", Input;
     Rollback = "Rollback", Input;
     Vacuum = "Vacuum", Input;
@@ -324,6 +325,7 @@ impl Class {
             Op::Commit { .. } => Self::Commit,
             Op::CommitInTick { .. } => Self::CommitInTick,
             Op::AppInTick { .. } => Self::AppInTick,
+            Op::OtherConnectionCommit { .. } => Self::OtherConnectionCommit,
             Op::Spill => Self::Spill,
             Op::Rollback => Self::Rollback,
             Op::Vacuum { .. } => Self::Vacuum,

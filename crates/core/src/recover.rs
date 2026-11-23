@@ -593,6 +593,11 @@ pub struct Probes {
     /// that names the position's. Frames with no commit after them are a rolled-back
     /// spill and do not count.
     pub stale_next: bool,
+    /// Whether the frame before the end verifies but carries another running checksum than
+    /// the position scanned to it: the chain before the end was written again from another
+    /// seed (SQLite writes a generation's header again, same salts, once its wal-index holds
+    /// no frame), so the frames the position covers are not the ones it staged.
+    pub rechained: bool,
 }
 
 impl Probes {
@@ -632,12 +637,20 @@ impl Probes {
             cursor.salts(),
             cursor.next().page_size(),
         );
-        // At the WAL's start there is no frame before: `frame_before` answers a miss without
+        // At the WAL's start there is no frame before: `chained_before` answers a miss without
         // reading, and `frame_state` takes a running position there as fresh.
-        let prev = FrameCheck::of(wal.frame_before(cursor.next(), cursor.salts(), proven))?;
+        let answer = wal.chained_before(cursor.next(), cursor.salts(), proven);
+        let rechained = answer
+            .as_ref()
+            .is_ok_and(|(_, checksum)| *checksum != cursor.checksum());
+        let prev = FrameCheck::of(answer.map(|(frame, _checksum)| frame))?;
         let stale_next = (reset || wal.header().salts() != cursor.salts())
             && wal.commit_follows(&cursor).map_err(|_err| Fault::LocalIo)?;
-        Ok(Self { prev, stale_next })
+        Ok(Self {
+            prev,
+            stale_next,
+            rechained,
+        })
     }
 }
 
@@ -981,6 +994,7 @@ fn frame_state(source: &PositionSource<'_>, seen: &Seen) -> FrameState {
         },
         PositionSource::Boot(NewestStagedFile::Unreadable { .. }) => FrameState::Fresh,
         PositionSource::Running(_, _) if at_start => FrameState::Fresh,
+        PositionSource::Running(_, probes) if probes.rechained => FrameState::Rewritten,
         PositionSource::Running(position, probes) => match probes.prev {
             FrameCheck::Miss(miss) => FrameState::Miss(miss),
             FrameCheck::Frame(frame)

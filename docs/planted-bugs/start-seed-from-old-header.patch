@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/sync.rs b/crates/core/src/sync.rs
+--- a/crates/core/src/sync.rs
++++ b/crates/core/src/sync.rs
+@@ -311,7 +311,7 @@
+ /// commit), so the seed a position took at the start can be stale; nothing of the generation
+ /// was staged from it, and [`WalReader::resume`] reseeds the same way.
+ fn seeded(held: FrameCursor, start: FrameCursor) -> FrameCursor {
+-    if held.next() == start.next() && held.salts() == start.salts() {
++    if held.next() == start.next() && held.salts() == start.salts() && held.checksum() == start.checksum() {
+         start
+     } else {
+         held
