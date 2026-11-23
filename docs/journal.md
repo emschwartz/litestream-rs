@@ -2,8 +2,10 @@
 
 Status: the storage protocol is specified, machine-checked, and implemented. The engine reads the
 journal at boot and reports what it found (`Actor::journal`, `docs/BEHAVIOR.md` BOOT-25 to BOOT-29),
-and records one fact in it: the unproven-WAL debt after a failed WAL fsync, written at the end of the
-tick that changes it and restored at boot (`crates/core/src/actor/unproven.rs`, RUN-3, decision D100).
+and records two facts in it: the unproven-WAL debt after a failed WAL fsync, written at the end of the
+tick that changes it and restored at boot (`crates/core/src/actor/unproven.rs`, RUN-3, decision D100),
+and a boot's verdict that the database file was ahead of its WAL, kept for seven days
+(`crates/core/src/actor/ahead.rs`, BOOT-31, decision D103).
 The replica thread, the simulator and the real-SQLite rig each lend it.
 
 The model is `lsr_spec::journal` (`crates/spec/src/journal/`). It shares no code with the
@@ -15,8 +17,13 @@ and `journal_scenarios.rs` (named histories). `just journal-model` runs the deep
 One file per database, `<meta>/lsr-journal`, never renamed, never unlinked, never sent to the
 replica. 8192 bytes: slot 0 is bytes 0 to 4096, slot 1 is 4096 to 8192. A slot holds one record
 in its first 512 bytes (magic, version, length, sequence number, body, CRC-32C over all of it)
-and zeros after. The body is the four facts: the floor (destination digest, bound, optional
-anchor), the unproven-WAL debt, the snapshot budget's two numbers, and at most one pending proof.
+and zeros after. The body is the five facts: the floor (destination digest, bound, optional
+anchor), the unproven-WAL debt, the snapshot budget's two numbers, at most one pending proof, and
+at most one verdict that the database file was found ahead of its WAL (its restore point, page
+count, first page and time; `docs/decisions.md` D103). A record holding the verdict is version 2;
+every other record is version 1, so a binary that predates the verdict reads it as `Newer` only
+while a verdict stands. While two verdicts stand, the later keeps the earlier's restore point; the
+writer refuses a record that moves it forward.
 
 ## Reading
 

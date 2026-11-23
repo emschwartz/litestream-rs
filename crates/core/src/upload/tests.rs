@@ -15,6 +15,7 @@ use crate::fault::Next;
 use crate::fault::{Backoff, PersistentCause, Policy, policy};
 use crate::layout::CreatedAt;
 use crate::mem::{MemStore, MemUpload};
+use crate::store::Upload;
 use crate::store::{CorruptCause, Listing, StoreError, StoreOp};
 
 // The whole-tick loop the actor runs (`Actor::upload_unit`), as these tests

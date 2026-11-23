@@ -460,6 +460,15 @@ pub enum StopCause {
         /// The page.
         pgno: PageNo,
     },
+    /// A boot after a failed WAL sync found database-file pages no WAL frame covers that are
+    /// not their images at the newest staged transaction: a checkpoint copied frames the failed
+    /// sync covered, and the WAL lost them (`crate::ahead`).
+    DatabaseAheadOfWal {
+        /// How many pages differ.
+        pages: NonZeroU32,
+        /// The lowest page that differs.
+        first: NonZeroU32,
+    },
     /// The shutdown deadline arrived.
     Shutdown,
     /// A bug in this program.
@@ -500,6 +509,15 @@ pub enum PersistentCause {
     DatabasePageMismatch {
         /// The page.
         pgno: PageNo,
+    },
+    /// A boot after a failed WAL sync found database-file pages no WAL frame covers that are
+    /// not their images at the newest staged transaction: a checkpoint copied frames the failed
+    /// sync covered, and the WAL lost them (`crate::ahead`).
+    DatabaseAheadOfWal {
+        /// How many pages differ.
+        pages: NonZeroU32,
+        /// The lowest page that differs.
+        first: NonZeroU32,
     },
     /// A bug in this program.
     Bug,
@@ -610,6 +628,9 @@ impl PersistentCause {
             StopCause::WalSyncFailed => Some(Self::WalSyncFailed),
             StopCause::PageSizeChanged { was, now } => Some(Self::PageSizeChanged { was, now }),
             StopCause::DatabasePageMismatch { pgno } => Some(Self::DatabasePageMismatch { pgno }),
+            StopCause::DatabaseAheadOfWal { pages, first } => {
+                Some(Self::DatabaseAheadOfWal { pages, first })
+            }
             StopCause::Bug => Some(Self::Bug),
             StopCause::Shutdown => None,
         }
@@ -633,6 +654,9 @@ impl PersistentCause {
             Self::WalSyncFailed => StopCause::WalSyncFailed,
             Self::PageSizeChanged { was, now } => StopCause::PageSizeChanged { was, now },
             Self::DatabasePageMismatch { pgno } => StopCause::DatabasePageMismatch { pgno },
+            Self::DatabaseAheadOfWal { pages, first } => {
+                StopCause::DatabaseAheadOfWal { pages, first }
+            }
             Self::Bug => StopCause::Bug,
             Self::Stalled(_) => return None,
         })
@@ -703,6 +727,10 @@ pub struct Responses {
     /// serves), keeps the task degraded and retention pinned until a verified
     /// WAL frame rewrites the page or an operator accepts it.
     pub database_page_mismatch: Response,
+    /// A boot after a failed WAL sync found the database file ahead of its WAL (`crate::ahead`).
+    /// Keeping trying replicates the file as the application serves it, keeps the state before
+    /// it restorable for a fixed window, and reports it; nothing an operator does ends it.
+    pub database_ahead_of_wal: Response,
     /// A condition the code rules out happened. Keeping trying rebuilds the
     /// engine and boots again after the wait; it never continues from the
     /// state the failure left.
@@ -729,6 +757,7 @@ impl Responses {
         wal_sync_failed: Response::KeepTrying,
         page_size_changed: Response::KeepTrying,
         database_page_mismatch: Response::KeepTrying,
+        database_ahead_of_wal: Response::KeepTrying,
         bug: Response::KeepTrying,
         other_writer: OtherWriter::Stop,
     };
@@ -749,6 +778,7 @@ impl Responses {
         wal_sync_failed: Response::Stop,
         page_size_changed: Response::Stop,
         database_page_mismatch: Response::Stop,
+        database_ahead_of_wal: Response::Stop,
         bug: Response::Stop,
         other_writer: OtherWriter::Stop,
     };
@@ -785,6 +815,7 @@ impl Responses {
             PersistentCause::WalSyncFailed => self.wal_sync_failed,
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
             PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
+            PersistentCause::DatabaseAheadOfWal { .. } => self.database_ahead_of_wal,
             PersistentCause::Stalled(_) => return Action::Retry,
             PersistentCause::RemoteRegressed => {
                 return match self.remote_regressed {

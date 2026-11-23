@@ -1,0 +1,10 @@
+--- a/crates/sqlite/src/conn.rs
++++ b/crates/sqlite/src/conn.rs
+@@ -520,6 +520,7 @@ impl WalSource for Sqlite {
+ /// # Errors
+ /// [`SetupError::Sqlite`] when the pragma fails.
+ pub fn app_connection(conn: &Connection) -> Result<(), SetupError> {
++    persist_wal(conn).map_err(SetupError::Sqlite)?;
+     conn.pragma_update(None, "wal_autocheckpoint", 0)
+         .map_err(SetupError::Sqlite)
+ }

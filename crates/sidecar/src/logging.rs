@@ -16,12 +16,14 @@
 //! so a grep for forced snapshots keeps working on `cause=`.
 
 use std::io::{self, Write};
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
+use lsr_core::AheadNotice;
 use lsr_core::{Clock, Event as EngineEvent};
-use lsr_replica::{Event, EventSink, Txid, VerifyOutcome};
+use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
 use crate::json::string as json_string;
 
@@ -358,6 +360,42 @@ fn verified_line(txid: Txid, outcome: VerifyOutcome) -> Line {
     }
 }
 
+/// The first report of a database file found ahead of its WAL: logged louder than a degraded
+/// task, since commits are lost and nothing will retry them back.
+fn found_ahead_line(pages: NonZeroU32, first: NonZeroU32, until: Timestamp) -> Line {
+    (
+        LogLevel::Error,
+        "database file holds pages from commits its WAL lost after a failed WAL sync; replicating it as served; the state before it stays restorable",
+        vec![
+            ("pages", u64::from(pages.get()).into()),
+            ("first_page", u64::from(first.get()).into()),
+            ("retry_at", until.to_string().into()),
+        ],
+    )
+}
+
+/// What an operator is told about a standing ahead-of-WAL verdict after its first report.
+fn ahead_line(notice: AheadNotice) -> Line {
+    match notice {
+        AheadNotice::Kept {
+            restore_point,
+            until,
+        } => (
+            LogLevel::Warn,
+            "the state before pages ran ahead of the WAL stays restorable",
+            vec![
+                ("restore_point", restore_point.to_string().into()),
+                ("until", until.to_string().into()),
+            ],
+        ),
+        AheadNotice::Released { restore_point } => (
+            LogLevel::Info,
+            "restore point released to normal retention",
+            vec![("restore_point", restore_point.to_string().into())],
+        ),
+    }
+}
+
 fn engine_line(event: &EngineEvent) -> Option<Line> {
     Some(match event {
         EngineEvent::Idle => return None,
@@ -385,6 +423,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             "maintenance",
             vec![("event", debug(event))],
         ),
+        EngineEvent::Degraded {
+            cause: DegradedCause::DatabaseAheadOfWal { pages, first },
+            until,
+            ..
+        } => found_ahead_line(*pages, *first, *until),
         EngineEvent::Degraded {
             task, cause, until, ..
         } => (
@@ -414,6 +457,7 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             "clock went backwards",
             vec![("clamped", debug(clamped))],
         ),
+        EngineEvent::AheadOfWal(notice) => ahead_line(*notice),
         EngineEvent::TakeoverWanted(record) => (
             LogLevel::Info,
             "takeover record kept before dropping staged files",

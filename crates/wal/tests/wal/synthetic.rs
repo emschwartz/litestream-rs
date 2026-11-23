@@ -681,8 +681,30 @@ fn generation_unchanged_reads_the_header_again() {
     assert!(!reader.generation_unchanged().unwrap(), "a short header");
     shared.borrow_mut().clear();
     assert!(!reader.generation_unchanged().unwrap(), "an empty file");
+    *shared.borrow_mut() = rewritten_header(&wal.bytes);
+    assert!(
+        !reader.generation_unchanged().unwrap(),
+        "the same salts under another checkpoint sequence: another seed"
+    );
     *shared.borrow_mut() = wal.bytes.clone();
     assert!(reader.generation_unchanged().unwrap());
+}
+
+/// `bytes` with the header written again as SQLite's next writer does once the wal-index holds
+/// no frame: the same salts, the checkpoint sequence plus one, and the checksum over that.
+fn rewritten_header(bytes: &[u8]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    let seq = u32::from_be_bytes(out[12..16].try_into().unwrap());
+    out[12..16].copy_from_slice(&seq.wrapping_add(1).to_be_bytes());
+    let order = lsr_wal::WalHeader::decode(bytes[..HEADER_LEN].try_into().unwrap())
+        .unwrap()
+        .byte_order();
+    let sum = lsr_wal::WalChecksum::ZERO
+        .extend(order, &out[..24])
+        .unwrap();
+    out[24..28].copy_from_slice(&sum.s0().to_be_bytes());
+    out[28..32].copy_from_slice(&sum.s1().to_be_bytes());
+    out
 }
 
 /// A WAL file the test can replace after the reader opened it.

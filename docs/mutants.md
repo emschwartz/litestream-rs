@@ -54,6 +54,18 @@ test, not a survivor, but it is reported separately and slower than a catch.
 | `decoder.rs` `read_retrying` | match guard becomes `true` | every read error is retried forever |
 | `index.rs` `put_uvarint` `value >= 0x80` | `>=` becomes `<` | the shift loop never ends for a multi-byte value |
 
+### Second run: the whole crate
+
+`cargo mutants -p lsr-ltx --test-package lsr-ltx --test-tool nextest --jobs 4 --timeout 240` at commit
+`b754be6`: 714 mutants in 23 minutes, 610 caught, 8 missed, 96 unviable, no timeouts. The loops in the table
+above now end as failures, not timeouts: nextest's own deadline (`.config/nextest.toml`) kills the hanging
+test before cargo-mutants' timeout. No survivor revealed a bug.
+
+| Where | Mutation | Resolution |
+| --- | --- | --- |
+| `index/lookup.rs` `check_page` (6 mutants) | its guards and its `pgno > commit` comparison | Gone. `check_page` restated `PageSequence::push`'s first two checks (above the commit, then the lock page) for an entry `decode_frame` is handed; index entries come from an index already checked against the header, so no test reached the copy. Both now call `PageSequence::fits`, which the streaming decoder's tests pin. |
+| `page.rs` `DbPages::get` (2 mutants) | returns `0` or `1` | Caught: `a_database_holds_the_pages_up_to_its_length` now reads the length back. lsr-core and lsr-sqlite read it, but this crate's tests did not. |
+
 ## core
 
 **Status: met.** The first run was stopped at 899 of 1463 mutants (about eight hours on four shared
