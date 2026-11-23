@@ -22,7 +22,7 @@ use lsr_wal::{Salts, WalOffset};
 
 use crate::clock::ClockLaw;
 use crate::crash_law::CrashLaw;
-use crate::failstop::{FailStopJudge, fired};
+use crate::failstop::{FailStopJudge, Fired, fired};
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
@@ -226,6 +226,9 @@ pub struct Opts {
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
+    /// The process dies right after every tick in which an injected fault fired
+    /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
+    pub kill_after_fault: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
@@ -361,6 +364,11 @@ struct Runner {
     expected: Vec<StopCause>,
     /// A drawn step that has nothing to act on is skipped, not a failure.
     lenient: bool,
+    /// The process dies right after a tick in which an injected fault fired.
+    kill_after_fault: bool,
+    /// A fault operation was applied since the last kill: the law kills once per operation, so
+    /// a fault that keeps firing (a rate) does not keep the engine from ever running.
+    kill_armed: bool,
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
@@ -434,6 +442,7 @@ impl Runner {
     fn configured(seed: Seed, opts: &Opts) -> Self {
         let mut runner = Self::new(seed, &opts.sqlite).with_staging_fs(seed, opts);
         runner.lenient = opts.drawn;
+        runner.kill_after_fault = opts.kill_after_fault;
         if opts.drawn {
             runner.draw_power_law(seed, opts);
             runner.draw_batch_widths(seed);
@@ -495,6 +504,8 @@ impl Runner {
             app_before: AppCheckpoints::NONE,
             expected: Vec::new(),
             lenient: false,
+            kill_after_fault: false,
+            kill_armed: false,
             expected_sizes: Vec::new(),
             life: Incarnation::default(),
             // The database's first content is on no replica yet.
@@ -776,6 +787,7 @@ impl Runner {
         let commits = self.w.model.commits().len();
         self.staging_moved()?;
         let fired0 = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let queued0 = self.w.sqlite.queued_injections();
         let ended = self.run_one(plan);
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
@@ -823,6 +835,7 @@ impl Runner {
         };
         per_tick(&stats, self.limits())?;
         let step = self.after_refusal(step)?;
+        let step = self.kill_after_fault(step, fired0, queued0);
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
         self.verify_ready()?;
         Ok((step, stats))
@@ -1208,6 +1221,29 @@ impl Runner {
             }
             *was = now;
         }
+    }
+
+    /// The kill-after-fault law ([`Weights::kill_after_fault`]): the first tick in which a store
+    /// fault or an injected SQLite-side failure fires after a fault operation is followed at once
+    /// by a process crash, before anything else can pay what the fault left owing.
+    fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), queued0: usize) -> Step {
+        let fired_now = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
+        let source = self.w.sqlite.queued_injections() < queued0;
+        let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
+        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) {
+            return step;
+        }
+        self.kill_armed = false;
+        let lost = self.w.crash(CrashKind::Process);
+        self.note_lost(&lost);
+        if self.trace {
+            self.report
+                .trace
+                .push(format!("    then killed after a fault, lost: {lost:?}"));
+        }
+        self.crashed(CrashKind::Process);
+        Step::Crashed
     }
 
     fn crash_tick(&mut self, kind: CrashKind) -> Result<(), Violation> {
@@ -1616,6 +1652,12 @@ impl Runner {
                 stopped_here = true;
                 break;
             }
+            // A process the kill-after-fault law ended in this tick owes no stop for it: what it
+            // listed died with it, and the next boot is recovery's to judge.
+            if step == Step::Crashed {
+                watching = false;
+                continue;
+            }
             // A running engine that listed the replica in this tick while the
             // other writer's file stood past its own position holds the proof
             // of another writer: it must stop. A boot's listing is recovery's to
@@ -1761,6 +1803,7 @@ impl Runner {
         ahead: u8,
         shape: crate::FaultShape,
     ) {
+        self.kill_armed = true;
         if target == Target::Remote
             && matches!(
                 shape,
@@ -1836,6 +1879,7 @@ impl Runner {
     }
 
     fn env_fault(&mut self, fault: EnvFault) -> Result<(), Violation> {
+        self.kill_armed = true;
         match fault {
             EnvFault::DeleteWal => {
                 if self.w.sqlite.delete_wal() {
@@ -2612,6 +2656,7 @@ pub fn run_with(
         error_domain: weights.error_domain,
         known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
+        kill_after_fault: weights.kill_after_fault,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)

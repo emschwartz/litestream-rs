@@ -471,6 +471,12 @@ pub struct Weights {
     /// it stands, the WAL regrowths). Not an operation, for the same reason as
     /// `block_crash_law`; drawn last in the swarm mix.
     pub overlap: bool,
+    /// The process dies right after every tick in which an injected fault fired: a store fault,
+    /// or a failure of a SQLite-side call. Whatever the fault left the engine owing must then
+    /// survive a restart, so an obligation held only in memory fails the run
+    /// (`lsr_core::obligations`). Not an operation, for the same reason as `block_crash_law`;
+    /// drawn last in the swarm mix.
+    pub kill_after_fault: bool,
     /// [`Op::AppInTick`].
     pub app_in_tick: u32,
     /// [`Op::Verify`].
@@ -566,6 +572,9 @@ impl Default for Weights {
             error_domain: false,
             known_wrong: false,
             overlap: false,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            kill_after_fault: false,
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             app_in_tick: 0,
@@ -720,6 +729,7 @@ impl Weights {
             error_domain: false,
             known_wrong: false,
             overlap: false,
+            kill_after_fault: false,
             app_in_tick: 0,
             verify: 0,
             evict_page_cache: 0,
@@ -775,6 +785,8 @@ impl Weights {
         mix.other_connection_commit = weight(false);
         // And after that, for the same reason: page-cache eviction after a failed WAL fsync.
         mix.evict_page_cache = weight(false);
+        // Drawn after that, for the same reason: half each.
+        mix.kill_after_fault = below(&entropy, 2) == 0;
         mix
     }
 
