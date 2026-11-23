@@ -638,7 +638,8 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
     }
 
     /// A failed delete of an object a size mismatch left short makes it
-    /// damage the store keeps: the engine tried to remove it and could not.
+    /// damage the store keeps: the engine tried to remove it and could not,
+    /// whether this layer failed the delete or the store under it did.
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         if let Verdict::Fail(err) = self.verdict(Call::Delete) {
             let mut state = lock(&self.state);
@@ -656,7 +657,18 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
                 before.push((*key, info_of(raw, key).await?));
             }
         }
-        self.inner.delete(keys).await?;
+        if let Err(err) = self.inner.delete(keys).await {
+            // The store under the fault layer failed it (an S3 store's request met a provider
+            // fault): a short object it was asked to remove is damage it may keep.
+            let mut state = lock(&self.state);
+            let kept: Vec<FileKey> = keys
+                .iter()
+                .filter(|key| state.short.contains(key))
+                .copied()
+                .collect();
+            state.damaged.extend(kept);
+            return Err(err);
+        }
         let mut state = lock(&self.state);
         state.short.retain(|key| !keys.contains(key));
         for (key, info) in before {
