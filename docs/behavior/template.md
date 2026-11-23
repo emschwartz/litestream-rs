@@ -206,7 +206,7 @@ Evidence: the planner's self-check runs on every job (`retention` in `core/src/m
 
 ## 2. Fault model
 
-Scope has three values here. **In**: the engine is meant to keep G1 to G4 through the fault and a rig produces it. **Out**: excluded on purpose, with the reason given; an operator must prevent it. **Gap**: the fault is real, the engine is meant to cope or nobody decided, and no rig produces it. v1 filed several gaps as "out". "Rig" names what produces the fault in a test; "rig: none" is itself a finding.
+Scope has three values here. **In**: the engine is meant to keep G1 to G4 through the fault and a rig produces it. **Out**: excluded on purpose, with the reason given; an operator must prevent it. Deliberate forgery of local or replica files is out (D131): files written to pass the engine's checks. **Gap**: the fault is real, the engine is meant to cope or nobody decided, and no rig produces it. v1 filed several gaps as "out". "Rig" names what produces the fault in a test; "rig: none" is itself a finding.
 
 The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, other-process reader and checkpoint, crash, power loss, lying WAL sync, store fault, environment fault, clock jump, shutdown, snapshot request, staging damage, WAL damage, second writer, remote rollback, dropped created-at), `FaultShape` (error, error after publish, size or checksum mismatch, corrupt publish, flip a byte on read, fail at a rate), and `EnvFault`. A store fault fires at one call index or at a rate; **no shape holds a fault until a later step**, which is why lasting conditions have no S mark. Anything not in that list has no simulator rig.
 

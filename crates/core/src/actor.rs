@@ -2502,7 +2502,7 @@ impl BootGate {
     /// confirmed `tip`, or a newer level-0 key judged torn (it may be this
     /// engine's own upload, read wrong), listed or found by a read past a
     /// listing that lags. Pending files above every replica key vouch for
-    /// nothing there, so a forged one never raises it.
+    /// nothing there, so one put back from a backup never raises it.
     async fn vouch<R: ObjectStore>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
         let Takeover::Vouch(record) = self.takeover else {
             return Ok(());
