@@ -1,0 +1,18 @@
+diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
+index e58a7fea..5e8c5a19 100644
+--- a/crates/cli/src/run.rs
++++ b/crates/cli/src/run.rs
+@@ -864,6 +864,13 @@ async fn restore_on<S: ObjectStore>(
+         Vec::new()
+     };
+     let created = create_parents(output).map_err(CliError::Parent)?;
++    if existing == Existing::Any {
++        for suffix in ["", "-wal", "-shm", "-journal"] {
++            let mut path = output.as_os_str().to_owned();
++            path.push(suffix);
++            drop(std::fs::remove_file(path));
++        }
++    }
+     let attempt = async {
+         // A replicator started on the restored database builds on the replica it came from,
+         // through the takeover record: an output with no meta directory is refused before

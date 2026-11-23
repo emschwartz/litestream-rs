@@ -2,6 +2,7 @@
 # left the list once boot learned to stop on another writer: the engine now stops before it merges
 # that writer's file, so no level-1 file holds the freed key and the planted tree passes it.
 name = "boot-trusts-a-stale-listing"
+patch = "listing-trusted-without-probe"
 fix = "8c7d8ce"
 package = "lsr-sim"
 test_bin = "sim"

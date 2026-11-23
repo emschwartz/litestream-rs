@@ -1,4 +1,5 @@
 name = "clock-step-back-freezes-timers-sim"
+patch = "clock-step-back-freezes-timers"
 fix = "48aee1d"
 package = "lsr-sim"
 test_bin = "sim"

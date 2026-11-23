@@ -1,4 +1,5 @@
 name = "failstop-no-probe-sim"
+patch = "failstop-no-probe"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
