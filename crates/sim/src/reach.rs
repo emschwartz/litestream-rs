@@ -29,7 +29,7 @@ pub const REQUIRED: &[&str] = &[
     "check.asof.planned",    // AsOfTooNew, NotLatest (ledger: asof-straddle)
     "check.asof.inside",     // as-of inside a file's range (ledger: asof-straddle)
     "check.asof.refused",    // as-of refusals the planner's contract judges
-    "check.stamps",          // WrongCreatedAt (ledger: time-provenance, time-provenance-sim)
+    "check.stamps",          // WrongCreatedAt (ledger: time-provenance)
     "check.deletes", // RetentionTooEager, DeletedOnOneRead (ledger: delete-on-one-failed-read-*)
     // Crashes: power loss is the only source of rewinds, torn staged files and kept unsynced
     // frames, the shapes the boot rules and the liveness oracle's map exist for.
