@@ -7,6 +7,7 @@
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
+pub mod mix_after_failed_sync;
 pub mod seed_0x116;
 pub mod seed_0x126d68ed250e;
 pub mod seed_0x126d68ef1c07;
@@ -25,7 +26,6 @@ pub mod seed_0x31c;
 pub mod seed_0x330;
 pub mod seed_0x46;
 pub mod seed_0x4c;
-pub mod seed_0x585;
 pub mod seed_0x734;
 pub mod seed_0x753;
 pub mod seed_0x80e;
@@ -174,8 +174,8 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         ),
     ),
     (
-        "seed_0x585",
-        "a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_0x585",
+        "mix_after_failed_sync",
+        "a_checkpoint_of_unproven_frames_then_a_power_loss_leaves_a_database_ahead_of_its_wal",
         Guard::Unguarded(
             "it pins an open defect (KnownWrong::DatabaseAheadOfWal) and passes only while main \
              fails with it, so no plant can be judged by it",

@@ -137,6 +137,17 @@ pub(super) struct Kept {
     /// A takeover the engine needs durable before it deletes staged files the
     /// replica holds: the driver writes it and hands it back.
     pub(super) wanted_takeover: Option<TakeoverRecord>,
+    /// A takeover this engine spent by publishing a transaction it covers: the
+    /// driver deletes the durable record and hands it back
+    /// ([`super::Actor::forget_takeover`]). Kept across a rebuild, so the record
+    /// cannot come back at the next start.
+    pub(super) spent_takeover: Option<TakeoverRecord>,
+    /// This engine saw the replica hold less than the held takeover covers (a listing
+    /// below the record, or a regression): its next publish of a covered transaction
+    /// spends the record. Without that evidence a covered publish is a put again of an
+    /// unconfirmed upload, and the record still describes the replica. In memory only:
+    /// each boot's listing finds the evidence again.
+    pub(super) takeover_armed: bool,
     /// The replica's newest transaction when a boot refused to build on files
     /// nothing vouched for: what the stop reports.
     pub(super) refused_through: Option<Txid>,
@@ -198,6 +209,8 @@ impl Kept {
             unproven: Unproven::No,
             takeover: None,
             wanted_takeover: None,
+            spent_takeover: None,
+            takeover_armed: false,
             refused_through: None,
             lag: Lag::default(),
             listed: false,
@@ -237,6 +250,8 @@ impl Kept {
             unproven,
             takeover,
             wanted_takeover: _,
+            spent_takeover,
+            takeover_armed,
             refused_through,
             lag,
             listed,
@@ -270,6 +285,8 @@ impl Kept {
             takeover: *takeover,
             // A rebuilt engine boots again and asks again for what it needs.
             wanted_takeover: None,
+            spent_takeover: *spent_takeover,
+            takeover_armed: *takeover_armed,
             refused_through: *refused_through,
             lag: *lag,
             listed: *listed,
@@ -449,6 +466,11 @@ pub(super) struct Engine {
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
+    /// The newest level-0 transaction this engine sent a put for. Past what a listing or a
+    /// commit confirmed, only its own puts whose answer was lost can be on the replica: a
+    /// boot's listing showed everything earlier processes put. So a takeover record before
+    /// a running drop vouches for no id past this one.
+    pub(super) attempted: Option<Txid>,
 }
 
 impl Engine {
@@ -466,6 +488,7 @@ impl Engine {
             pruned: None,
             acknowledged: None,
             witnesses: Witnesses::new(),
+            attempted: None,
         }
     }
 }
@@ -555,6 +578,18 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         Keep::Ephemeral(
             "nothing is deleted until the driver hands it back durable; a restart asks again",
         ),
+    ),
+    (
+        "spent_takeover",
+        Keep::Ephemeral(
+            "the driver deletes the record in the tick it is handed out; a restart before then \
+             reads the record as it stood before the publish, and spends it again once that \
+             boot's listing arms it",
+        ),
+    ),
+    (
+        "takeover_armed",
+        Keep::Derived("each boot's listing finds again the replica below the held record"),
     ),
     (
         "refused_through",
@@ -683,5 +718,12 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
     (
         "witnesses",
         Keep::Derived("witnessed again at boot against the live WAL (crate::witness)"),
+    ),
+    (
+        "attempted",
+        Keep::Derived(
+            "a boot's listing shows every put an earlier process made, so a new engine has sent \
+             none past it",
+        ),
     ),
 ];

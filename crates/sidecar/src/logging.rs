@@ -318,6 +318,11 @@ impl EventSink for DbEvents {
                 "the takeover record could not be written; staged files are kept until it is",
                 vec![("kind", debug(kind))],
             ),
+            Event::TakeoverNotRemoved { kind } => (
+                LogLevel::Error,
+                "a spent takeover record could not be deleted from the meta directory; retrying",
+                vec![("kind", debug(kind))],
+            ),
             Event::Verified { txid, outcome } => verified_line(*txid, *outcome),
         };
         let mut all = vec![db];

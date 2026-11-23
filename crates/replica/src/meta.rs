@@ -115,6 +115,20 @@ pub(crate) fn write_takeover(meta: &Path, record: TakeoverRecord) -> io::Result<
     replace(meta, TAKEOVER_FILE, TAKEOVER_SCRATCH, &record.encode())
 }
 
+/// Deletes the takeover record, synced: the engine spent it by publishing a transaction it
+/// covers (`lsr_core::Actor::takeover_spent`), and a restart must not hand it back. A record
+/// already gone is no error.
+///
+/// # Errors
+/// The first failed file operation.
+pub(crate) fn remove_takeover(meta: &Path) -> io::Result<()> {
+    match fs::remove_file(meta.join(TAKEOVER_FILE)) {
+        Ok(()) => File::open(meta)?.sync_all(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 /// Writes `text` to `meta/name` through `scratch`: synced, renamed, and the
 /// directory synced.
 fn replace(meta: &Path, name: &str, scratch: &str, text: &str) -> io::Result<()> {
@@ -131,6 +145,18 @@ mod tests {
     use lsr_ltx::Txid;
 
     use super::*;
+
+    /// A spent record is deleted, and deleting one already gone is no error.
+    #[test]
+    fn a_spent_takeover_record_is_removed_and_a_missing_one_is_no_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = TakeoverRecord::through(Txid::new(4).unwrap());
+        write_takeover(dir.path(), record).unwrap();
+        assert!(dir.path().join(TAKEOVER_FILE).exists());
+        remove_takeover(dir.path()).unwrap();
+        assert!(!dir.path().join(TAKEOVER_FILE).exists());
+        remove_takeover(dir.path()).unwrap();
+    }
 
     #[test]
     fn a_second_lock_on_one_meta_directory_is_refused_until_the_first_goes() {

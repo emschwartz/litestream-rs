@@ -272,3 +272,128 @@ fn a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits() {
     assert!(waited, "an unanswered ask waits its backoff");
     assert_eq!(staged(&rig), before, "nothing is deleted unrecorded");
 }
+
+/// A takeover record is a bare transaction id, so once the replica state it was written for is
+/// gone (a rollback) it would vouch for any file at those ids. This engine publishing a
+/// transaction the record covers spends it: the engine stops holding it and asks the driver to
+/// delete the durable copy. Another writer's file at a covered id is then refused at the next
+/// start, as with no record.
+#[test]
+fn publishing_a_covered_transaction_spends_the_takeover_record() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    let record = TakeoverRecord::through(tx(2));
+    actor.remember_takeover(record);
+    rig.settle(&mut actor, T0);
+    assert!(!Rig::files(&rig.remote, Level::ZERO).is_empty());
+    assert_eq!(actor.takeover_spent(), Some(record));
+    actor.forget_takeover(record);
+    assert_eq!(actor.takeover_spent(), None);
+    super::second_writer::put_foreign(&rig, 2);
+    let mut restarted = go_like_actor();
+    let seen = rig.follow(&mut restarted, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+    assert_eq!(restarted.refused_through(), Some(tx(2)));
+}
+
+/// A running engine holding a takeover that reaches past what it confirmed publishes a
+/// transaction the record covers: with no loss seen, the record still describes the replica
+/// and is kept. Then the replica loses files under it: the regression arms the record, and the
+/// engine's next covered publish spends it, so the record vouches for nothing a second writer
+/// puts at its ids afterwards.
+#[test]
+fn a_rollback_seen_while_running_arms_the_takeover_for_the_next_publish() {
+    let mut rig = three();
+    let mut actor = go_like_actor();
+    let record = TakeoverRecord::through(tx(10));
+    rig.settle(&mut actor, T0 + 2);
+    // Handed over while running, as the driver hands back a record the engine asked for
+    // before a drop: no boot listing judged the replica against it.
+    actor.remember_takeover(record);
+    rig.commit(4);
+    rig.settle(&mut actor, T0 + 3);
+    assert!(
+        Rig::files(&rig.remote, Level::ZERO)
+            .iter()
+            .any(|info| info.key.range().max() == tx(4))
+    );
+    assert_eq!(
+        actor.takeover_spent(),
+        None,
+        "a publish with no loss seen spends nothing"
+    );
+    let lost: Vec<FileKey> = Level::ALL
+        .iter()
+        .flat_map(|level| Rig::files(&rig.remote, *level))
+        .map(|info| info.key)
+        .filter(|key| key.range().max() >= tx(2))
+        .collect();
+    assert!(!lost.is_empty());
+    block_on(rig.remote.inner.delete(&lost)).unwrap();
+    rig.follow(&mut actor, T0 + 100_000, 60);
+    rig.commit(5);
+    rig.follow(&mut actor, T0 + 200_000, 60);
+    assert_eq!(actor.takeover_spent(), Some(record));
+}
+
+/// Transactions 4 to 6 are staged while the replica refuses every put, so the
+/// engine has sent a put for 4 alone; 5 and 6 never left this host. Staged 4
+/// then reads back damaged twice and the running engine drops 4 to 6. The
+/// record it keeps first reaches 4, the newest put it sent, and no further:
+/// another writer that then puts 5 is refused at the next boot. A record
+/// through 6 used to let that boot build on the other writer's 5.
+#[test]
+fn a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    for _ in 0..50 {
+        rig.remote.inner.inject_failure(
+            StoreOp::Upload,
+            StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: std::io::ErrorKind::ConnectionReset,
+            },
+        );
+    }
+    for n in 4..=6 {
+        rig.commit(n);
+        rig.settle(&mut actor, T0 + 2);
+    }
+    assert!(staged(&rig).ends_with(&[4, 5, 6]), "{:?}", staged(&rig));
+    super::tear(&rig, 4, super::flipped);
+    let seen = rig.follow(&mut actor, T0 + 2, 40);
+    let dropped = seen.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Resnapshot(SnapshotCause::NewestStagedFileUnreadable))
+        )
+    });
+    assert!(dropped, "{seen:?}");
+    assert_eq!(rig.takeover.map(TakeoverRecord::txid), Some(tx(4)));
+    // The replica takes puts again: the refusals left queued are spent.
+    let probe = FileKey::new(Level::ZERO, TxidRange::single(tx(99)));
+    let begin = || {
+        block_on(
+            rig.remote
+                .inner
+                .begin_upload(&probe, ts(T0), WriteMode::New),
+        )
+    };
+    let open = std::iter::repeat_with(begin).find_map(Result::ok).unwrap();
+    block_on(open.abort()).unwrap();
+    super::second_writer::put_foreign(&rig, 5);
+    let mut next = go_like_actor();
+    next.remember_takeover(rig.takeover.unwrap());
+    let seen = rig.follow(&mut next, T0 + 3, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+    assert_eq!(next.refused_through(), Some(tx(5)));
+}

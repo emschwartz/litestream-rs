@@ -78,6 +78,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D122 | Run the simulator's histories on real SQLite: how, when the world draws page-level commits of arbitrary bytes? | A backend in lsr-sqlite behind the sim's seam; each drawn page a row, SQLite decides the pages, the world reads back what changed through SQLite | Claude (sim-real-sqlite), **delegated** | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
 | D162 | `databases` with a `dir` entry: print the working directory, as Go does? | No: print the entry's directory, unscanned | Claude (dropin-readonly), **delegated** | 2026-11-23 | open to owner review |
+| D53 | When does the engine's own publish spend a takeover record? | When it publishes a covered transaction after its own evidence the replica held less than the record covers | Claude (agent), **delegated** | 2026-11-23 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -773,6 +774,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the guard is a scan of the source, not the type system: it reads call names, so a store call written another way (a function pointer, a macro) would pass it, and it covers lsr-core only. Staging and replica still share one store trait and one error type (the next step makes them distinct). A key a read shows already holds our bytes is not yet a `Published`; item 4 of #171 adds it with the proof types that consume it.
 - **Revisit if:** another crate writes to a store for the engine, or the store trait can be split so that raw writes are unreachable by type.
 - **Links:** issue #171 item 1; D74; `crates/core/src/publish.rs`.
+## D53. When the engine's own publish spends a takeover record (delegated)
+
+- **Question:** a takeover record is a bare transaction id and outlives the replica state it was written for. After a bucket rollback it vouched for a second writer's file at a covered id, and the engine later put its own copy: one id, two contents (seed 0x1e84c8). When does the record stop vouching?
+- **Choice (delegated to an agent):** the engine stops holding it, and the replicator deletes `<meta>/lsr-takeover`, when the engine confirms a level-0 put of a transaction the record covers after its own evidence that the replica held less than the record covers: a boot or running listing ending below the record's transaction, or `RemoteRegressed`. The evidence is kept in memory only and found again by each boot's listing. Separately, a record the engine asks for before a running drop reaches no further than the newer of the confirmed transaction and the newest level-0 put it sent (seed 0x1eb).
+- **Options considered:** spend on any covered publish; never spend.
+- **Why:** every covered publish after a rollback follows such evidence, so the defect is closed. A covered publish without it is a put again of the engine's own unconfirmed upload, where the record still describes the replica and still shields the engine's file if a lying disk later loses the staged copy; spending there stopped an ordinary power-loss boot with `OtherWriter` until an operator ran `lsr take-over`, against the owner's rule that stops must not trip unnecessarily.
+- **Cost accepted:** a rollback followed by a lost staged copy still stops until `lsr take-over`. A rollback while the engine is down, followed by a second writer before any publish, is still vouched for, as is a second writer at an id the record reaches through an attempted put that never landed.
+- **Revisit if:** the engine journal's confirmed high-water mark lands (#171 item 4), which vouches for the engine's own files exactly and can retire the record.
+- **Links:** `docs/BEHAVIOR.md` BOOT-30, CFG-45; `crates/core/src/actor.rs` (`spend_takeover`, `arm_takeover_below`, `vouch_before_drop`); D12, D50.
 
 ## D162. `databases` prints a `dir` entry's directory (delegated)
 

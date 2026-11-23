@@ -95,9 +95,18 @@ impl KnownWrong {
     #[must_use]
     pub fn matches(self, violation: &Violation) -> bool {
         match self {
+            // Before the boot check the mixed file was staged as a commit, and the model check or
+            // a restore caught it; with the check the engine raises its verdict, which the
+            // simulator does not yet expect, since its world does not adopt the mixed file.
             Self::DatabaseAheadOfWal => {
                 matches!(violation, Violation::CorruptionRestored { .. })
                     || matches!(violation, Violation::BugFault { context } if context == MODEL_DIVERGED)
+                    || matches!(
+                        violation,
+                        Violation::UnexpectedDegraded {
+                            cause: lsr_core::PersistentCause::DatabaseAheadOfWal { .. }
+                        }
+                    )
             }
             Self::HaltForgottenAtRestart => matches!(violation, Violation::HealthBlind { .. }),
         }
