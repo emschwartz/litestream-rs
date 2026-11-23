@@ -6,13 +6,16 @@
 //! transaction that pins the WAL from before the application's first write, and returns a handle.
 //!
 //! - Each connection the application opens goes through [`Replicator::app_connection`] (feature
-//!   `rusqlite`) or [`app_connection_raw`], which sets `SQLITE_FCNTL_PERSIST_WAL` and
-//!   `wal_autocheckpoint = 0` after checking it opens this database (PLAN section 6).
+//!   `rusqlite`) or [`app_connection_raw`], which sets `wal_autocheckpoint = 0` after checking
+//!   it opens this database (PLAN section 6).
 //! - Each long read the application starts holds a [`ReaderGuard`] from [`Replicator::long_reader`];
 //!   under [`ReaderTracking::Tracked`] no TRUNCATE checkpoint runs while one lives.
 //! - [`Replicator::health`] can be read at any time: one lock, no I/O.
-//! - [`Replicator::stop`] runs at shutdown, after the application's writers close, and reports
-//!   whether everything committed reached the replica ([`Stopped`]).
+//! - [`Replicator::stop`] runs at shutdown, after the application's connections close, and reports
+//!   whether everything committed reached the replica ([`Stopped`]). The replicator's own
+//!   connections keep the WAL when they close last, and the next start continues from it. An
+//!   application connection that closes after them deletes the WAL, as SQLite does by default,
+//!   and the next start takes a snapshot (`WalMissing`).
 //!
 //! Nothing runs on the application's threads, no async runtime is required, and time, waiting and
 //! chance come in through [`Runtime`], so tests drive all of them ([`Runtime::fake`], feature
@@ -50,6 +53,7 @@ mod error;
 mod events;
 mod exec;
 mod health;
+pub mod local;
 mod meta;
 mod readers;
 mod replicator;

@@ -1,0 +1,4 @@
+name = "bool-checked-after-help"
+fix = "claude/dropin-cli"
+package = "lsr-sidecar"
+tests = ["flags::tests::a_bad_boolean_before_help_is_the_error"]

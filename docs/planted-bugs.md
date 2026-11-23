@@ -4,7 +4,9 @@
 checks it again every night: each defect fixed on `main` is put back into a scratch tree and the tests
 that caught it must fail.
 
-- `docs/planted-bugs.toml` lists the entries: the fix commit, the package, and the tests that must fail.
+- `docs/planted-bugs/entries/<name>.toml` holds one entry each: the fix commit, the package, and the
+  tests that must fail (fields below). One file per entry, so adding an entry never edits a file
+  another open branch also appends to.
 - `docs/planted-bugs/<name>.patch` re-introduces the defect. It is the fix's production change reversed
   and re-expressed against the current tree, because later renames stop the fix commit's own diff
   applying. Only production code is touched; the tests stay as they are.
@@ -17,17 +19,49 @@ that caught it must fail.
   comment added) must report `SURVIVED` and `canary-fatal` (the wrong CRC table) must report
   `killed`. Before every verdict the runner also checks that the scratch tree is at this checkout's
   HEAD. A canary that misreports, or a tree at another commit, fails the run.
+- One run at a time. The scratch tree and its target dir are shared, so a run first takes a lock on
+  `target/planted-bugs/lock` and waits for any holder (`--no-wait` refuses instead, with exit 2).
+  Every build and test process inherits the lock, so a run killed mid-way holds it until the last
+  process it left exits; a new run never applies its patches under an old run's cargo or tests.
+  Each build and test command runs in a session of its own, emptied when it ends or times out, so
+  a test's child that a planted bug never stopped does not outlive it (Linux, through `/proc`).
 - `just planted-bugs-unaided [seeds]` asks a different question: with no named test run, how many
   swarm seeds does the simulator need to fail on each plant? It prints a table (seeds to first
   failure, or `none`); a plant no seed finds is a listed generator gap, not a failure.
 - A new fix adds an entry and a patch in the same commit as the fix. A `STALE` patch is re-expressed
-  against the current tree, or the entry is retired with a reason in the ledger's header.
+  against the current tree, or the entry is retired with a reason under "Absent and retired entries" below.
 - `just planted-bugs-apply`, part of `just check`, runs `git apply --check` on every patch, so a change
   that makes a patch stale fails its own gate in seconds instead of the nightly run.
 
 Mutation testing covers the lines a pull request changes: `just mutants-diff` (CI job `mutants-diff`)
 runs `cargo mutants --in-diff` over `lsr-core` and `lsr-ltx`. A missed mutant fails the job unless
 `docs/mutants-escapes.txt` lists it with its reason in `docs/mutants.md`.
+
+## Entry fields
+
+An entry file's name is its `name` with `.toml` appended; the runner refuses one that differs.
+
+```
+  name     short unique name; the patch is docs/planted-bugs/<name>.patch
+  fix      the commit that fixed it (provenance; the patch is its production change re-expressed
+           against the current tree, because later renames stop the commit's own diff applying)
+  package  the cargo package whose tests are run
+  tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
+  test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+  patch    optional: the patch's name when it is not `name`, so one defect can be planted
+           against the tests of a second package
+  (an entry whose `fix` is "plant" is no fixed defect: it proves a checker catches a bug class
+  it was built for, with the checker's own test named)
+  canary   optional, on the two canary entries only: the verdict the runner must report,
+           `survived` (the no-op patch) or `killed` (the patch that breaks a test for certain).
+           Any other verdict on a canary fails the run: the runner itself is broken.
+  bin      optional: run the unit tests of one binary target (cargo `--bin`), for a package
+           with no library, such as lsr-cli
+```
+
+## Absent and retired entries
+
+Not here, with the reason: a6e3e38 (level-0 retention oracle: it fixed the test, retention code is unchanged, so there is nothing to plant), the verify hang fix (test-only: no production code to plant) ab0021d (a feature: reverting it does not compile). Retired with the code they planted into: staged-file-cannot-follow (bf78f6d) and staged-snapshot-of-earlier-wal (be104a7), the listing's header link between a staged file and the replica's newest, which the boot witness replaced (2fb603f); the rules they guarded are planted as the witness-* entries. page-size-after-vacuum (b352aba): its arm (an unusable newest staged file still names its page size) decides only with an empty replica, where every staged file is pending and the boot witness now deletes an unusable one first. other-writer-stop-forgotten-sim (a9da6c6): since a boot refuses replica files that neither the WAL nor a takeover record vouches for, a restart after a stop for another writer's file above staging stops again with or without the stop record, so the scenario cannot tell; the record still decides the case of another writer at the engine's next id, which the core entry plants. replica-page-size-unread-sim (7bf9707): seed 0x13's run no longer reaches the boot it pinned once the engine asks for a takeover record before deleting staged files (one more tick changes the interleaving); the test stays as a regression run, and the core entry plants the defect. other-writer-stop-forgotten (a9da6c6) and stop-record-not-kept (a939338): the stop record they planted into is gone (68d2d90). A restart after a stop for another writer now stops by the boot's refusal: of files above staging (boot-gate-refuses-nothing) or of a divergence under the engine's next id (boot-divergence-snapshots-above-another-writer).
 
 ## Plants cited by behaviour rows
 

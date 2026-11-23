@@ -453,6 +453,32 @@ fn a_page_rewritten_above_the_safe_frame_is_not_copied() {
     );
 }
 
+/// Each commit mark of the generation gives the database a reader stopped there sees: the
+/// first mark's pages before the second commit overwrote them, the last the whole database.
+/// A regrowth keeps the marks, so it keeps one image per mark, each from the new bytes.
+#[test]
+fn commit_images_give_the_database_at_each_commit_mark() {
+    let db = sim();
+    db.commit(&tx(&[2], 1), 4).unwrap();
+    db.commit(&tx(&[2, 3], 2), 4).unwrap();
+    let images = db.commit_images();
+    let ends: Vec<u32> = images.iter().map(|(end, _)| *end).collect();
+    assert_eq!(ends, [1, 3]);
+    let page = |image: &[u8], n: usize| image[(n - 1) * 512..n * 512].to_vec();
+    assert_eq!(page(&images[0].1, 2), vec![1; 512]);
+    assert_eq!(page(&images[1].1, 2), vec![2; 512]);
+    assert_eq!(images[1].1, db.image());
+    assert!(db.regrow_same_salts(9));
+    let regrown = db.commit_images();
+    assert_eq!(
+        regrown.len(),
+        3,
+        "both old marks and the regrowth's own commit"
+    );
+    assert_ne!(page(&regrown[0].1, 2), vec![1; 512], "the regrown bytes");
+    assert_eq!(regrown[2].1, db.image());
+}
+
 /// Linux reports a writeback error to every file description open when it happened: after our
 /// failed sync, the app's own connection's first WAL sync fails too, so its first checkpoint
 /// backfills nothing and only the next one does. A process that opens the WAL afterwards (the
@@ -476,4 +502,121 @@ fn the_apps_first_checkpoint_after_our_failed_sync_backfills_nothing() {
         .other_process_checkpoint(OtherProcessMode::Passive)
         .unwrap();
     assert_eq!(run.checkpointed, run.log);
+}
+
+/// A database with page 1..=4 committed, a reader holding that commit's end, and a second
+/// commit of page 1 above it: a PASSIVE checkpoint now backfills only the first commit.
+fn partially_backfilled() -> (SimSqlite, Vec<u8>, Vec<u8>) {
+    let db = sim();
+    db.commit(&tx(&[1, 2, 3, 4], 0x11), 4).unwrap();
+    let _reader = db.other_process_reader_begin();
+    db.commit(&tx(&[1], 0x22), 4).unwrap();
+    let before = db.db_file();
+    db.other_process_checkpoint(OtherProcessMode::Passive);
+    assert!(db.backfilled() > 0 && db.backfilled() < db.mx_frame());
+    let partial = db.db_file();
+    assert_ne!(partial, before, "the partial backfill wrote database pages");
+    (db, before, partial)
+}
+
+/// A partial PASSIVE backfill writes database pages and advances `nBackfill` without syncing
+/// the database file (`walCheckpoint` syncs it only after a backfill to `mxFrame`). Under the
+/// block law a power loss keeps each of those blocks or not; under all-or-nothing it keeps
+/// none. Either way the WAL, synced before the copy, still carries every frame, so the
+/// recovered database is the committed one.
+#[test]
+fn a_power_loss_after_a_partial_backfill_can_tear_the_database_file() {
+    let mut torn = 0;
+    for seed in 0..16 {
+        let (db, before, partial) = partially_backfilled();
+        db.crash_by_law(CrashLaw::drawn(seed));
+        db.crash(CrashKind::Power);
+        assert_eq!(db.db_torn_losses(), 1);
+        let after = db.db_file();
+        if after != before && after != partial {
+            torn += 1;
+        }
+        let image = db.image();
+        assert_eq!(image.get(..512), Some(&[0x22; 512][..]));
+        assert_eq!(image.get(512..2048), Some(&[0x11; 1536][..]));
+    }
+    assert!(torn > 0, "no seed tore the database file");
+
+    let (db, before, _partial) = partially_backfilled();
+    db.crash(CrashKind::Power);
+    assert_eq!(
+        db.db_file(),
+        before,
+        "all-or-nothing keeps no unsynced database write"
+    );
+}
+
+/// A backfill to `mxFrame` syncs the database file: a power loss right after leaves it whole.
+#[test]
+fn a_full_backfill_leaves_nothing_of_the_database_file_to_tear() {
+    let db = sim();
+    db.commit(&tx(&[1, 2, 3, 4], 0x11), 4).unwrap();
+    db.other_process_checkpoint(OtherProcessMode::Passive);
+    assert_eq!(db.backfilled(), db.mx_frame());
+    let synced = db.db_file();
+    db.crash_by_law(CrashLaw::drawn(3));
+    db.crash(CrashKind::Power);
+    assert_eq!(db.db_torn_losses(), 0);
+    assert_eq!(db.db_file(), synced);
+}
+
+/// Two commits, the first synced by our sync and the second not.
+fn second_commit_unsynced() -> SimSqlite {
+    let db = sim();
+    db.commit(&tx(&[1], 0x11), 4).unwrap();
+    db.source().sync().unwrap();
+    db.commit(&tx(&[2], 0x22), 4).unwrap();
+    db
+}
+
+/// The database SQLite serves after page 2's frame was evicted: page 1 as committed, page 2 not.
+fn assert_page_two_evicted(db: &SimSqlite) {
+    let after = db.image();
+    assert_eq!(
+        after.get(..512),
+        Some(&[0x11; 512][..]),
+        "the synced commit is untouched"
+    );
+    assert_ne!(
+        after.get(512..1024),
+        Some(&[0x22; 512][..]),
+        "page 2 lost its frame's bytes"
+    );
+    assert!(db.take_evicted());
+    assert!(!db.take_evicted(), "told once");
+}
+
+/// After a failed fsync of the WAL the kernel calls the pages it covered clean and may evict
+/// them: a later read finds the disk's older bytes, so the database SQLite serves loses the
+/// commit those frames carried. With pages already lost they go at once.
+#[test]
+fn an_evicted_page_cache_after_a_failed_wal_sync_serves_the_disks_bytes() {
+    let db = second_commit_unsynced();
+    db.inject(SourceOp::Sync, SourceError::FsyncFailed);
+    assert_eq!(db.source().sync(), Err(SourceError::FsyncFailed));
+    assert_eq!(
+        db.image().get(512..1024),
+        Some(&[0x22; 512][..]),
+        "still cached"
+    );
+    assert!(db.evict_page_cache());
+    assert_page_two_evicted(&db);
+}
+
+/// With nothing lost yet the eviction is armed: the next failed sync's pages go as it fails.
+/// A second arming while one is armed has nothing to act on.
+#[test]
+fn an_armed_eviction_takes_the_next_failed_syncs_pages() {
+    let db = second_commit_unsynced();
+    assert!(db.evict_page_cache());
+    assert!(!db.evict_page_cache(), "armed already");
+    assert!(!db.take_evicted());
+    db.inject(SourceOp::Sync, SourceError::FsyncFailed);
+    assert_eq!(db.source().sync(), Err(SourceError::FsyncFailed));
+    assert_page_two_evicted(&db);
 }

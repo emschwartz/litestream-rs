@@ -64,6 +64,10 @@ pub enum EnvFault {
     /// The next driver start writes no WAL header, as the real driver's open
     /// does not once `_litestream_seq` exists. Scenarios only.
     DriverWritesNothing,
+    /// The kernel evicts the WAL pages a failed fsync of ours lost, so later reads find the
+    /// disk's older bytes (`SimSqlite::evict_page_cache`). Drawn by its own weight
+    /// ([`Weights::evict_page_cache`]), never by `env_fault`'s.
+    EvictPageCache,
 }
 
 /// One step of a history.
@@ -87,6 +91,14 @@ pub enum Op {
     },
     /// The app writes frames of a transaction and does not commit.
     Spill,
+    /// Another application connection, which stays open (another process: a second writer, a
+    /// replicator writing its own table), commits `pages` random pages. It keeps its own
+    /// checkpoint count, so the WAL header it writes after a restart whose writer rolled back
+    /// carries the same salts and another seed.
+    OtherConnectionCommit {
+        /// How many pages it writes; it never grows the database.
+        pages: u8,
+    },
     /// The app rolls its open transaction back.
     Rollback,
     /// The app vacuums: into pages of `page_size`, or (`None`) at the same size,
@@ -391,6 +403,8 @@ pub struct Weights {
     pub shrink: u32,
     /// [`Op::SecondWriter`].
     pub second_writer: u32,
+    /// [`Op::OtherConnectionCommit`].
+    pub other_connection_commit: u32,
     /// [`Op::Remote`] with [`RemoteOp::RollBack`].
     pub roll_back: u32,
     /// [`Op::Remote`] with [`RemoteOp::DropCreatedAt`].
@@ -467,6 +481,9 @@ pub struct Weights {
     pub app_in_tick: u32,
     /// [`Op::Verify`].
     pub verify: u32,
+    /// [`EnvFault::EvictPageCache`]: a step that does anything only after a failed fsync of
+    /// the WAL, in its generation.
+    pub evict_page_cache: u32,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -528,6 +545,7 @@ impl Default for Weights {
             restore: 2,
             shrink: 2,
             second_writer: 1,
+            other_connection_commit: 0,
             roll_back: 1,
             // Off in the shared mixes so their recorded histories keep their
             // shape; `tests/sim/dropped_created_at.rs` turns it on.
@@ -560,6 +578,7 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             verify: 0,
+            evict_page_cache: 0,
         }
     }
 }
@@ -592,10 +611,12 @@ enum Kind {
     AppInTick,
     Verify,
     LaggingListings,
+    OtherConnectionCommit,
+    EvictPageCache,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 26] {
+    fn table(&self) -> [(Kind, u32); 28] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -623,6 +644,8 @@ impl Weights {
             (Kind::AppInTick, self.app_in_tick),
             (Kind::Verify, self.verify),
             (Kind::LaggingListings, self.lagging_listings),
+            (Kind::OtherConnectionCommit, self.other_connection_commit),
+            (Kind::EvictPageCache, self.evict_page_cache),
         ]
     }
 
@@ -685,6 +708,7 @@ impl Weights {
             restore: weight(false),
             shrink: weight(false),
             second_writer: 0,
+            other_connection_commit: 0,
             roll_back: weight(false),
             drop_created_at: 0,
             wal_damage: weight(false),
@@ -704,6 +728,7 @@ impl Weights {
             overlap: false,
             app_in_tick: 0,
             verify: 0,
+            evict_page_cache: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -751,6 +776,11 @@ impl Weights {
         mix.verify = weight(false);
         // And lagging listings after that.
         mix.lagging_listings = weight(false);
+        // And after that, for the same reason: a second application connection that commits,
+        // with its own checkpoint count (a WAL header written again with the same salts).
+        mix.other_connection_commit = weight(false);
+        // And after that, for the same reason: page-cache eviction after a failed WAL fsync.
+        mix.evict_page_cache = weight(false);
         mix
     }
 
@@ -1010,6 +1040,10 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         },
         Kind::Spill => Op::Spill,
         Kind::Rollback => Op::Rollback,
+        Kind::OtherConnectionCommit => Op::OtherConnectionCommit {
+            pages: small(entropy, 4).saturating_add(1),
+        },
+        Kind::EvictPageCache => Op::EnvFault(EnvFault::EvictPageCache),
         Kind::Vacuum => vacuum(entropy, weights.vacuum_resizes),
         Kind::OtherProcessReader => Op::OtherProcessReader {
             begin: below(entropy, 2) == 0,

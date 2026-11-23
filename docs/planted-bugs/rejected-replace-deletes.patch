@@ -1,13 +1,13 @@
-diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index d9605e77..44e7773d 100644
---- a/crates/core/src/upload.rs
-+++ b/crates/core/src/upload.rs
-@@ -808,7 +808,7 @@ async fn settle_put<S: ObjectStore>(
-             // so a failed delete costs only visibility. A write that may
-             // have replaced an object deletes nothing: a delete after a
-             // failed write never takes a key that held something before it.
--            if mode == WriteMode::New {
-+            if mode == WriteMode::New || mode == WriteMode::Replace {
-                 drop(remote.delete(&[key]).await);
-             }
-             Err(fail(state, fault))
+diff --git a/crates/core/src/publish.rs b/crates/core/src/publish.rs
+index 8989cfff..1fd14ae8 100644
+--- a/crates/core/src/publish.rs
++++ b/crates/core/src/publish.rs
+@@ -192,7 +192,7 @@ fn unpublished(err: StoreError, key: FileKey, mode: WriteMode) -> Unpublished {
+             Unpublished::Taken(err)
+         }
+         _ if rejected => {
+-            let own = (mode == WriteMode::New).then_some(Rejected(key));
++            let own = Some(Rejected(key));
+             Unpublished::Rejected(err, own)
+         }
+         _ => Unpublished::Failed(err),

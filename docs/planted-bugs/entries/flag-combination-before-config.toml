@@ -1,0 +1,5 @@
+name = "flag-combination-before-config"
+fix = "claude/dropin-cli"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["a_missing_config_is_reported_before_a_flag_combination"]

@@ -3,7 +3,7 @@
 //!
 //! A recorded history can still stop reaching its bug when the runner or the engine around it
 //! changes, and then it passes for nothing. So every history names, in [`GUARDS`], the planted
-//! bug in `docs/planted-bugs.toml` its test must fail under (`just planted-bugs` runs each one
+//! bug in `docs/planted-bugs/entries/` its test must fail under (`just planted-bugs` runs each one
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
@@ -23,8 +23,11 @@ pub mod seed_0x2d;
 pub mod seed_0x31c;
 pub mod seed_0x330;
 pub mod seed_0x46;
+pub mod seed_0x4c;
 pub mod seed_0x585;
 pub mod seed_0x753;
+pub mod seed_0x80e;
+pub mod seed_0x82;
 pub mod seed_0x8ef;
 pub mod seed_0x9f9;
 pub mod seed_0xa4d;
@@ -51,6 +54,16 @@ pub enum Guard {
 /// Every recorded history: its module, the test that runs it, and its guard.
 pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
+        "seed_0x82",
+        "a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82",
+        Guard::Own("written-snapshot-unwatched"),
+    ),
+    (
+        "seed_0x80e",
+        "an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e",
+        Guard::Own("hold-as-of-demands-the-raw-answer-sim"),
+    ),
+    (
         "seed_0x25",
         "a_torn_staged_file_is_dropped_seed_0x25",
         Guard::OnPath("always-snapshot-at-boot"),
@@ -64,6 +77,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0x46",
         "a_torn_staged_file_is_dropped_seed_0x46",
         Guard::OnPath("always-snapshot-at-boot"),
+    ),
+    (
+        "seed_0x4c",
+        "a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c",
+        Guard::Own("sim-short-object-damage"),
     ),
     (
         "seed_0x126d68ef1c07",
@@ -205,11 +223,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
 
 /// The ledger's entries, by name, with the test-name substrings each lists.
 fn ledger() -> Vec<(String, Vec<String>)> {
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs.toml");
-    let text = std::fs::read_to_string(&path).unwrap();
-    text.split("[[bug]]")
-        .skip(1)
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs/entries");
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
         .map(|entry| {
             let quoted = |line: &str| -> Vec<String> {
                 line.split('"')
@@ -230,7 +248,13 @@ fn ledger() -> Vec<(String, Vec<String>)> {
                 .unwrap_or_default();
             (name, tests)
         })
-        .collect()
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "no ledger entries under {}",
+        dir.display()
+    );
+    entries
 }
 
 #[test]

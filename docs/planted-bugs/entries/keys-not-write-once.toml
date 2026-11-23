@@ -1,0 +1,4 @@
+name = "keys-not-write-once"
+fix = "checker-holes (write-once keys)"
+package = "lsr-sim"
+tests = ["oracle::tests::a_key_put_again_with_other_bytes_is_a_rewrite"]

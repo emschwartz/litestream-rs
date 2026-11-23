@@ -342,6 +342,19 @@ impl FakeWal {
         lock(&self.state).restart_in_place();
     }
 
+    /// Writes the header again with the same salts and checkpoint sequence `seq`, so another
+    /// chain seed: what SQLite's next writer does to a generation whose wal-index holds no frame,
+    /// with its own connection's checkpoint count. Only an empty generation can see it, so
+    /// frames written since are dropped from the index and the file.
+    pub fn rewrite_header(&self, seq: u32) {
+        let mut state = lock(&self.state);
+        state.checkpoint_seq = seq;
+        state.written = 0;
+        state.mx_frame = 0;
+        state.backfilled = 0;
+        state.write_header();
+    }
+
     /// Takes the read transaction the way SQLite picks a mark: 0 when the WAL is
     /// fully backfilled, the frame count otherwise.
     pub fn hold_reader(&self) {

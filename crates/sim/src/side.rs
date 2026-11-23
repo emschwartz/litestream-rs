@@ -11,9 +11,15 @@
 //! The engine's handles are boxed ([`SideSource`], [`SidePages`], [`SideCheckpointer`]) so
 //! that the world names one type whatever the backend: each call goes through one dynamic
 //! dispatch to the backend's own method and changes nothing it answers.
+//!
+//! A real backend cannot write the world's page bytes as given: it makes each commit as SQL,
+//! and SQLite decides which pages change. [`SqliteSide::take_written`] then reports what the
+//! commit wrote, read back through SQLite, and the world records that in the model instead of
+//! what it asked for.
 
 use std::fmt::Debug;
 use std::io::{Read, Seek};
+use std::sync::Arc;
 
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
@@ -22,6 +28,7 @@ use lsr_core::{
 use lsr_ltx::{DbPages, PageNo, PageSize};
 use lsr_wal::Salts;
 
+use crate::Seed;
 use crate::crash_law::CrashLaw;
 use crate::sqlite::{
     AppCommit, AutoTally, CheckpointNumbers, CrashKind, CreatedAt, InTickAt, InTickCommit,
@@ -177,6 +184,48 @@ impl Checkpointer for SideCheckpointer {
     }
 }
 
+/// Builds a run's SQLite from the run's seed, its page size and its database's first size.
+pub type MakeSide = dyn Fn(Seed, PageSize, u32) -> Arc<dyn SqliteSide> + Send + Sync;
+
+/// Which SQLite a run's world uses: the rule model ([`SimSqlite`]) unless a maker is given.
+#[derive(Clone, Default)]
+pub struct SideMaker(Option<Arc<MakeSide>>);
+
+impl Debug for SideMaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "SideMaker(given)"
+        } else {
+            "SideMaker(model)"
+        })
+    }
+}
+
+impl SideMaker {
+    /// Runs use what `make` builds.
+    pub fn new(make: Arc<MakeSide>) -> Self {
+        Self(Some(make))
+    }
+
+    /// The SQLite for a run of `seed` over `db_pages` pages of `page_size`.
+    #[must_use]
+    pub fn make(&self, seed: Seed, page_size: PageSize, db_pages: u32) -> Arc<dyn SqliteSide> {
+        match &self.0 {
+            Some(make) => make(seed, page_size, db_pages),
+            None => Arc::new(SimSqlite::new(page_size, db_pages, seed.stream(1))),
+        }
+    }
+}
+
+/// What a backend's commit actually wrote ([`SqliteSide::take_written`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Written {
+    /// Every page whose bytes changed, with its new bytes, and every page past the old end.
+    pub pages: Vec<(PageNo, Vec<u8>)>,
+    /// The database size the change left.
+    pub db_size: u32,
+}
+
 /// Declares [`SqliteSide`] and implements it for [`SimSqlite`] by delegation, from one list,
 /// so the two cannot drift apart. Each method means what the model's method of the same name
 /// says it means.
@@ -190,6 +239,13 @@ macro_rules! side {
             fn pages(&self) -> SidePages;
             /// The engine's checkpointer.
             fn checkpointer(&self) -> SideCheckpointer;
+            /// What changed in the database a new reader sees since the last call, as SQLite
+            /// reads it back: a backend whose commits write other pages than the world asked
+            /// for (real SQLite, through SQL) reports them here, and the model takes these up
+            /// instead. `None` from a backend that writes exactly what it is asked (the model).
+            fn take_written(&self) -> Option<Written> {
+                None
+            }
             $( #[doc = $doc] fn $name(&self $(, $arg: $ty)*) $(-> $ret)?; )*
         }
 
@@ -217,6 +273,8 @@ side! {
     fn our_reader_end(&self) -> bool;
     /// The application commits `pages`, leaving `db_size` pages.
     fn commit(&self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit>;
+    /// Another application connection, which stays open, commits `pages` under its own checkpoint count.
+    fn other_writer_commit(&self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit>;
     /// Arms a commit the application makes inside the next tick.
     fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32, site: InTickSite, created_at: CreatedAt);
     /// The commit armed for the last tick, once.
@@ -287,6 +345,12 @@ side! {
     fn crash_by_law(&self, law: CrashLaw);
     /// Power losses under the block law that kept a block, and those with a hole.
     fn block_losses(&self) -> (u32, u32);
+    /// Power losses under the block law that found unsynced database blocks.
+    fn db_torn_losses(&self) -> u32;
+    /// The kernel evicts the WAL pages a failed sync lost, now or at the next failed sync.
+    fn evict_page_cache(&self) -> bool;
+    /// Whether evicted pages changed what SQLite serves since the last call.
+    fn take_evicted(&self) -> bool;
     /// Every recovery the engine's parser and SQLite disagreed on.
     fn recovery_disagreements(&self) -> Vec<String>;
     /// Power losses that kept unsynced bytes, and those that cut a frame.
@@ -295,6 +359,8 @@ side! {
     fn crash(&self, kind: CrashKind);
     /// The database as a new reader sees it.
     fn image(&self) -> Vec<u8>;
+    /// The database at each commit mark of the WAL's generation, ascending, with its frame end.
+    fn commit_images(&self) -> Vec<(u32, Vec<u8>)>;
     /// The database file's bytes.
     fn db_file(&self) -> Vec<u8>;
     /// The WAL file's bytes, if there is a file.

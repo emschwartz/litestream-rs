@@ -3,13 +3,13 @@
 //!
 //! [`Placement::InProcess`] is the original form of the suite: the application's connections live in
 //! the test process, through the rig's fault VFS, set up as replication asks
-//! (`crate::app_connection`: `PERSIST_WAL` on, automatic checkpoints off).
+//! (`crate::app_connection`: automatic checkpoints off).
 //!
 //! [`Placement::SeparateProcess`] moves only the application. The test binary runs itself again as
 //! `<exe> child_process_entry --exact --nocapture --test-threads=1` with the database in
 //! [`APP_DB`]; that test's first statement is `if lsr_sqlite::testing::serve_app() { return;
 //! }`, so the child serves the application and nothing else. Its connections keep SQLite's defaults
-//! (automatic checkpoint every 1000 frames, no `PERSIST_WAL`, the default VFS, busy timeout
+//! (automatic checkpoint every 1000 frames, the default VFS, busy timeout
 //! zero, which is also SQLite's default) and only `synchronous` is set, as the rig's in-process
 //! application sets it. The read lock, the engine, the stores and the oracle stay in the test process, so
 //! every lock the application takes or drops is another process's, as with a sidecar.
@@ -17,7 +17,7 @@
 //! The protocol is one request line on the child's stdin and one reply line on its stdout,
 //! marked with [`MARK`] so libtest's own lines are skipped: `<conn> open`, `<conn> close`,
 //! `<conn> exec <sql>`, `<conn> query <sql>` (the first row's integer columns),
-//! `<conn> persist-wal-off`, `0 touch` (the application process opens and closes the database and
+//! `0 touch` (the application process opens and closes the database and
 //! `-shm` with `std::fs`, dropping its own POSIX locks), `0 writers <n> <rows>` (concurrent
 //! writers on threads of their own, while the application keeps serving) and `0 exit`. A reply is
 //! `ok`, `row <ints>`, or `err <extended code> <message>`, which becomes the same `rusqlite`
@@ -211,14 +211,6 @@ impl App {
         }
     }
 
-    /// Turns `SQLITE_FCNTL_PERSIST_WAL` off on connection `id`.
-    pub(super) fn persist_wal_off(&mut self, id: u32) -> Result<(), RigError> {
-        match self {
-            Self::Local { conns, .. } => Ok(persist_wal_off(local(conns, id)?)?),
-            Self::Child(child) => child.request(id, "persist-wal-off", "").map(drop),
-        }
-    }
-
     /// The application's process opens and closes the database and `-shm` with `std::fs`. In this
     /// process that would drop the read lock's locks too, which is the hazard the descriptor rule
     /// exists for, so only the separate application does it.
@@ -244,14 +236,6 @@ fn first_row(conn: &Connection, sql: &str) -> Result<Vec<i64>, rusqlite::Error> 
             .map(|i| row.get::<_, i64>(i))
             .collect()
     })
-}
-
-fn persist_wal_off(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let mut off = 0;
-    conn.file_control(
-        Some(rusqlite::MAIN_DB),
-        rusqlite::FileControl::PersistWal(&mut off),
-    )
 }
 
 fn reply_error(reply: &str) -> RigError {
@@ -447,7 +431,6 @@ impl Server {
                 let row: Vec<String> = row.iter().map(i64::to_string).collect();
                 format!("row {}", row.join(" "))
             }),
-            "persist-wal-off" => self.conn(id).and_then(persist_wal_off).map(ok),
             "touch" => Ok(touch(&self.db)),
             "writers" => self.writers(arg),
             other => Ok(format!("bad verb {other:?}")),

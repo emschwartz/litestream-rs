@@ -1,0 +1,4 @@
+name = "failstop-healthz-ignores-trips"
+fix = "c5881f5"
+package = "lsr-sidecar"
+tests = ["health::tests::a_trip_is_503_while_the_database_runs"]

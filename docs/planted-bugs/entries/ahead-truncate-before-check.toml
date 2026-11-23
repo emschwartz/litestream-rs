@@ -1,0 +1,7 @@
+# The TRUNCATE that pays the debt runs before the check and copies the WAL into the database file, evidence and all.
+name = "ahead-truncate-before-check"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
+]

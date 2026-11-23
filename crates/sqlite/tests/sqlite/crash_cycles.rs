@@ -732,7 +732,7 @@ impl Run {
         let to = target;
         let target = self.root.join(name);
         drop(std::fs::remove_file(&target));
-        let sink = lsr_local::FileSink::create(&target)
+        let sink = lsr_replica::local::FileSink::create(&target)
             .map_err(|err| Anomaly::RestoredCorrupt(format!("sink: {err}")))?;
         let options = RestoreOptions {
             as_of_inside: AsOfInside::TakeEarlier,

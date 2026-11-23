@@ -1,0 +1,6 @@
+# The simulator's own judges. A checker that cannot see a class of bug reads as green, so their
+# fixes are planted too: each puts back an exemption that switched a check off.
+name = "oracle-reuse-after-any-power-loss"
+fix = "checker-holes (oracle exemptions)"
+package = "lsr-sim"
+tests = ["oracle::tests::a_power_loss_that_cut_nothing_covered_does_not_excuse_a_reused_id"]

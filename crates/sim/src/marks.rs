@@ -139,6 +139,7 @@ classes! {
     Commit = "Commit", Input;
     CommitInTick = "CommitInTick", Input;
     AppInTick = "AppInTick", Input;
+    OtherConnectionCommit = "OtherConnectionCommit", Input;
     Spill = "Spill", Input;
     Rollback = "Rollback", Input;
     Vacuum = "Vacuum", Input;
@@ -175,6 +176,7 @@ classes! {
     EnvDeleteWal = "EnvFault.DeleteWal", Once;
     EnvWipeStaging = "EnvFault.WipeStaging", Once;
     EnvSource = "EnvFault.Source", Once;
+    EnvEvictPageCache = "EnvFault.EvictPageCache", Once;
     // Undrawn: these EnvFault variants are scenario steps (see their docs in generate.rs).
     // A finding of issue #127 row 42 and others: they never meet another fault by chance.
     EnvShmMidUpdate = "EnvFault.ShmMidUpdate", Undrawn;
@@ -324,6 +326,7 @@ impl Class {
             Op::Commit { .. } => Self::Commit,
             Op::CommitInTick { .. } => Self::CommitInTick,
             Op::AppInTick { .. } => Self::AppInTick,
+            Op::OtherConnectionCommit { .. } => Self::OtherConnectionCommit,
             Op::Spill => Self::Spill,
             Op::Rollback => Self::Rollback,
             Op::Vacuum { .. } => Self::Vacuum,
@@ -385,6 +388,7 @@ impl Class {
             EnvFault::TruncateFails => Self::EnvTruncateFails,
             EnvFault::FlipDatabasePage(_) => Self::EnvFlipDatabasePage,
             EnvFault::DriverWritesNothing => Self::EnvDriverWritesNothing,
+            EnvFault::EvictPageCache => Self::EnvEvictPageCache,
         }
     }
 

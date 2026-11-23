@@ -1,0 +1,6 @@
+name = "boot-page-size-stale-staged"
+fix = "138f575"
+package = "lsr-core"
+tests = [
+    "a_replica_ahead_of_staging_names_the_page_size",
+]

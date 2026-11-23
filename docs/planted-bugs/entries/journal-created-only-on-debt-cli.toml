@@ -1,0 +1,5 @@
+name = "journal-created-only-on-debt-cli"
+fix = "6f700f9a"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::a_deleted_journal_is_reported_on_the_next_start"]

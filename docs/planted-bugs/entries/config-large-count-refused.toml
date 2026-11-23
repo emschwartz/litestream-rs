@@ -1,0 +1,8 @@
+# Config parsing made to agree with Go's (claude/dropin-config): found by the Go differential
+# (compat `dropin_config`), which needs the Go dumper and so is ignored; the tests below are
+# its Go-free counterparts.
+name = "config-large-count-refused"
+fix = "claude/dropin-config"
+package = "lsr-config"
+test_bin = "config"
+tests = ["min_checkpoint_page_count_must_be_above_zero"]

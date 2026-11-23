@@ -1,0 +1,9 @@
+# A boot that refuses nothing: replica files nothing vouches for are snapshotted above, as before
+# the fix.
+name = "boot-gate-refuses-nothing"
+fix = "aa1165d"
+package = "lsr-core"
+tests = [
+    "vouch::a_foreign_file_put_while_the_engine_was_down_stops_the_boot",
+    "vouch::a_takeover_does_not_cover_a_foreign_file_above_it",
+]

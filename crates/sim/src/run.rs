@@ -228,6 +228,8 @@ pub struct Opts {
     pub staging_fs: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
+    /// Which SQLite the engine runs against: the rule model by default.
+    pub sqlite: crate::side::SideMaker,
 }
 
 /// Which judges a run consults. Both by default; one alone measures what it catches unaided.
@@ -430,7 +432,7 @@ const SETTLE_AFTER_RESTART: usize = 8;
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
     fn configured(seed: Seed, opts: &Opts) -> Self {
-        let mut runner = Self::new(seed).with_staging_fs(seed, opts);
+        let mut runner = Self::new(seed, &opts.sqlite).with_staging_fs(seed, opts);
         runner.lenient = opts.drawn;
         if opts.drawn {
             runner.draw_power_law(seed, opts);
@@ -451,9 +453,9 @@ impl Runner {
         runner
     }
 
-    fn new(seed: Seed) -> Self {
+    fn new(seed: Seed, sqlite: &crate::side::SideMaker) -> Self {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
-        let mut w = World::new(seed, page_size, FIRST_DB_PAGES);
+        let mut w = World::over(seed, sqlite.make(seed, page_size, FIRST_DB_PAGES));
         w.start_driver();
         let start = w.clock.now();
         let image = crate::history::image_digest(&w.model.newest_image());
@@ -1462,7 +1464,12 @@ impl Runner {
             return now == self.w.sqlite.page_size()
                 && (remembered || self.replica_page_size().ok().flatten() == Some(was));
         }
+        // An object a size mismatch left short and a delete could not remove
+        // is real damage in the replica, as a corrupted publish is.
+        let damaged =
+            cause == StopCause::RemoteCorrupt && !self.w.remote_faults.damaged().is_empty();
         self.allow_stop
+            || damaged
             || self
                 .expected
                 .iter()
@@ -1723,6 +1730,16 @@ impl Runner {
         Ok(())
     }
 
+    /// Another application connection commits: its own pages, never growing the database, and
+    /// not in the app's log (the app does not redo another process's writes).
+    fn other_connection_commit(&mut self, count: u8) {
+        let size = self.w.sqlite.db_size();
+        let pages = self.pick_pages(u32::from(count), size);
+        if self.w.other_writer_commit(&pages, size).is_some() {
+            self.report.reach.bump("commit.other_connection");
+        }
+    }
+
     fn spill(&mut self) {
         let size = self.w.sqlite.db_size();
         let pages = self.pick_pages(small(&self.rng, 3).saturating_add(1), size);
@@ -1863,6 +1880,13 @@ impl Runner {
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
             EnvFault::DriverWritesNothing => self.w.sqlite.driver_writes_nothing_once(),
+            // The database SQLite serves now reads the evicted frames' older bytes: the
+            // model follows it as damage, and the history judge refuses a restore that gives it.
+            EnvFault::EvictPageCache => {
+                let acted = self.w.sqlite.evict_page_cache();
+                self.scenario_bool("EvictPageCache", acted)?;
+                self.w.adopt_evicted();
+            }
             EnvFault::FlipDatabasePage(pgno) => {
                 let flipped = self.w.sqlite.flip_db_page(pgno);
                 self.scenario_bool("FlipDatabasePage", flipped)?;
@@ -2072,11 +2096,12 @@ impl Runner {
             // A flipped bit is no commit: the model follows it, and no restore may give it.
             (WalOp::FlipLastFrameBit, Heal::No) => self.w.adopt_corrupt_state(),
             (WalOp::FlipLastFrameBit, Heal::Yes) => self.w.adopt_local_state(),
+            // A regrowth that kept its commit marks made a commit at each of them.
+            (WalOp::RegrowSameSalts(_), _) => self.w.adopt_regrown(),
             (
                 WalOp::TearHeader
                 | WalOp::TruncateAtFrame(_)
                 | WalOp::RewriteSameLength(_)
-                | WalOp::RegrowSameSalts(_)
                 | WalOp::RegrowWithoutCommitMarks(_),
                 _,
             ) => self.w.adopt_local_state(),
@@ -2185,6 +2210,7 @@ impl Runner {
             Op::CommitInTick { pages } => self.commit_in_tick(*pages)?,
             Op::AppInTick { at, op } => self.app_in_tick(*at, *op)?,
             Op::Spill => self.spill(),
+            Op::OtherConnectionCommit { pages } => self.other_connection_commit(*pages),
             Op::Rollback => {
                 if self.w.sqlite.rollback() {
                     self.spilled.clear();
@@ -2487,6 +2513,10 @@ impl Runner {
         let (kept, holes) = self.w.sqlite.block_losses();
         reach.add("power.block_kept_unsynced", u64::from(kept));
         reach.add("power.block_hole", u64::from(holes));
+        reach.add(
+            "power.db_unsynced_blocks",
+            u64::from(self.w.sqlite.db_torn_losses()),
+        );
         reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
         reach.add(
             "batch.remote_calls",
