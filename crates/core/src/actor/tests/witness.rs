@@ -502,6 +502,39 @@ fn restored_page(rig: &Rig, pgno: u32) -> u8 {
     sink.published().unwrap().page(pgno).unwrap()[0]
 }
 
+/// A power loss on a disk that lies about the engine's WAL barrier drops the frames of the
+/// replica's newest file (still in staging) and of the pending file after it. The application
+/// comes back and writes other bytes into the first file's frames, then the second job again
+/// verbatim. The newest staged file matches the WAL, but the file below it does not: the
+/// boot compares it too, takes a snapshot, and a restore returns what the database holds.
+#[test]
+fn a_staged_file_below_the_newest_that_the_wal_rewrote_costs_a_snapshot() {
+    let (mut rig, mut actor) = caught_up();
+    let kept = rig.wal.committed_end().frame_count();
+    rig.wal.append_tx(&[(pg(2), vec![0xA0; PS.bytes()])], nz(3));
+    rig.settle(&mut actor, T0 + 1);
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+    let job = [(pg(1), vec![0xC0; PS.bytes()])];
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.wal.append_tx(&job, nz(3));
+    rig.settle(&mut actor, T0 + 1);
+    assert_eq!(staged(&rig).last(), Some(&3));
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2)]);
+    rig.wal.lose_frames_from(kept);
+    rig.wal.append_tx(&[(pg(2), vec![0xB0; PS.bytes()])], nz(3));
+    rig.wal.append_tx(&job, nz(3));
+    let mut actor = Actor::new(cfg());
+    rig.tick(&mut actor, T0 + 2);
+    let seen = rig.settle(&mut actor, T0 + 2);
+    no_stop(&seen);
+    assert_eq!(
+        (restored_page(&rig, 1), restored_page(&rig, 2)),
+        (0xC0, 0xB0)
+    );
+}
+
 /// A replica outage longer than the witness cap: the engine stops staging at
 /// the cap and holds its position (the WAL keeps the frames) instead of
 /// staging a file no token vouches for, which the uploader would refuse and a
