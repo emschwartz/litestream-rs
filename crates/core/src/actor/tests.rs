@@ -282,6 +282,7 @@ impl Rig {
         for n in 1..=3 {
             db.write_page(pg(n), &vec![u8::try_from(n).unwrap(); PS.bytes()]);
         }
+        db.link(&wal);
         let ck = FakeCheckpointer::new(wal.clone());
         let rig = Self {
             wal,

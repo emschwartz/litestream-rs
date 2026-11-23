@@ -21,10 +21,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
-use lsr_core::{AheadNotice, Task};
+use lsr_core::{AheadKind, AheadNotice, Task};
 use lsr_core::{Clock, Event as EngineEvent};
 use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
+use crate::health::verdict_name;
 use crate::json::string as json_string;
 
 /// One field's value.
@@ -374,6 +375,20 @@ fn found_ahead_line(pages: NonZeroU32, first: NonZeroU32, until: Timestamp) -> L
     )
 }
 
+/// The first report of commits a checkpoint lost: the database file no longer holds what the
+/// application committed, and the state before it stays restorable.
+fn lost_commits_line(pages: NonZeroU32, first: NonZeroU32, until: Timestamp) -> Line {
+    (
+        LogLevel::Error,
+        "a checkpoint after a failed WAL sync copied evicted WAL pages into the database file, losing commits; replicating it as served; the state before it stays restorable",
+        vec![
+            ("pages", u64::from(pages.get()).into()),
+            ("first_page", u64::from(first.get()).into()),
+            ("retry_at", until.to_string().into()),
+        ],
+    )
+}
+
 /// The first report of an ahead-of-WAL check given up: logged as loudly as a verdict, since the
 /// file may hold pages from commits its WAL lost and nothing marks it in the replica.
 fn unchecked_line(until: Timestamp) -> Line {
@@ -388,20 +403,35 @@ fn unchecked_line(until: Timestamp) -> Line {
 fn ahead_line(notice: AheadNotice) -> Line {
     match notice {
         AheadNotice::Kept {
+            kind,
             restore_point,
             until,
         } => (
             LogLevel::Warn,
-            "the state before pages ran ahead of the WAL stays restorable",
+            match kind {
+                AheadKind::AheadOfWal => {
+                    "the state before pages ran ahead of the WAL stays restorable"
+                }
+                AheadKind::WalLostCommits => {
+                    "the state before a checkpoint lost commits stays restorable"
+                }
+            },
             vec![
+                ("verdict", verdict_name(kind).into()),
                 ("restore_point", restore_point.to_string().into()),
                 ("until", until.to_string().into()),
             ],
         ),
-        AheadNotice::Released { restore_point } => (
+        AheadNotice::Released {
+            kind,
+            restore_point,
+        } => (
             LogLevel::Info,
             "restore point released to normal retention",
-            vec![("restore_point", restore_point.to_string().into())],
+            vec![
+                ("verdict", verdict_name(kind).into()),
+                ("restore_point", restore_point.to_string().into()),
+            ],
         ),
         AheadNotice::UncheckedStands { until } => (
             LogLevel::Warn,
@@ -420,6 +450,7 @@ fn ahead_line(notice: AheadNotice) -> Line {
 fn degraded_line(task: Task, cause: DegradedCause, until: Timestamp) -> Line {
     match cause {
         DegradedCause::DatabaseAheadOfWal { pages, first } => found_ahead_line(pages, first, until),
+        DegradedCause::WalLostCommits { pages, first } => lost_commits_line(pages, first, until),
         DegradedCause::DatabaseAheadOfWalUnchecked => unchecked_line(until),
         DegradedCause::StoreDenied(_)
         | DegradedCause::StoreRefused

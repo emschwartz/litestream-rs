@@ -4,8 +4,8 @@
 use std::num::NonZeroU32;
 
 use lsr_journal::{
-    Ahead, Decoded, Floor, Invalid, Journal, MAGIC, Proof, RECORD_MAX, ReplicaId, SLOT, Seq,
-    StoredBudget, Triple, Unchecked, Unproven, WalChecksum, decode, encode,
+    Ahead, AheadKind, Decoded, Floor, Invalid, Journal, MAGIC, Proof, RECORD_MAX, ReplicaId, SLOT,
+    Seq, StoredBudget, Triple, Unchecked, Unproven, WalChecksum, decode, encode,
 };
 use lsr_ltx::{FileChecksum, Timestamp, Txid};
 use proptest::prelude::*;
@@ -43,8 +43,10 @@ pub fn journal() -> impl Strategy<Value = Journal> {
         triple,
         wal: WalChecksum(a, b),
     });
-    let ahead = (txid(), 1..=u32::MAX, 1..=u32::MAX, any::<i64>()).prop_map(
-        |(restore_point, pages, first, millis)| Ahead {
+    let kind = prop_oneof![Just(AheadKind::AheadOfWal), Just(AheadKind::WalLostCommits)];
+    let ahead = (kind, txid(), 1..=u32::MAX, 1..=u32::MAX, any::<i64>()).prop_map(
+        |(kind, restore_point, pages, first, millis)| Ahead {
+            kind,
             restore_point,
             pages: NonZeroU32::new(pages).unwrap(),
             first: NonZeroU32::new(first).unwrap(),
@@ -213,20 +215,21 @@ fn an_unknown_debt_code_is_refused() {
 
 #[test]
 fn a_newer_version_is_valid_on_magic_length_and_checksum() {
-    let slot = record(4, 9, &[0xff; 40]);
+    let slot = record(5, 9, &[0xff; 40]);
     assert_eq!(
         decode(&slot),
         Ok(Decoded::Newer {
             seq: Seq::new(9).unwrap(),
-            version: 4
+            version: 5
         })
     );
 }
 
-/// A binary that predates the verdict reads every record written while none stands: only a
-/// record holding one is version 2, and only one holding an unchecked notice is version 3.
+/// A binary that predates a fact reads every record written while it does not stand: only a
+/// record holding a verdict is version 2, only one holding an unchecked notice version 3, and
+/// only one holding a lost-commits verdict version 4.
 #[test]
-fn only_a_record_with_a_verdict_is_version_2_and_with_a_notice_version_3() {
+fn each_fact_raises_the_version_only_while_it_stands() {
     let version = |journal: &Journal| {
         let slot = encode(journal, Seq::new(1).unwrap());
         u16::from_le_bytes([slot[8], slot[9]])
@@ -234,6 +237,7 @@ fn only_a_record_with_a_verdict_is_version_2_and_with_a_notice_version_3() {
     assert_eq!(version(&Journal::ABSENT), 1);
     let ahead = Journal {
         ahead: Some(Ahead {
+            kind: AheadKind::AheadOfWal,
             restore_point: Txid::new(4).unwrap(),
             pages: NonZeroU32::new(2).unwrap(),
             first: NonZeroU32::new(3).unwrap(),
@@ -253,6 +257,53 @@ fn only_a_record_with_a_verdict_is_version_2_and_with_a_notice_version_3() {
         }),
         3
     );
+    let lost = ahead.ahead.map(|ahead| Ahead {
+        kind: AheadKind::WalLostCommits,
+        ..ahead
+    });
+    assert_eq!(
+        version(&Journal {
+            ahead: lost,
+            ..ahead
+        }),
+        4
+    );
+    assert_eq!(
+        version(&Journal {
+            ahead: lost,
+            unchecked,
+            ..Journal::ABSENT
+        }),
+        4
+    );
+}
+
+/// The lost-commits kind is version 4's: a version-3 record carrying it is invalid, as a flag no
+/// writer of that version sets, and so is the kind without a verdict. A version-4 record reads
+/// it back; the same verdict without the bit reads as the older kind.
+#[test]
+fn a_lost_commits_verdict_is_version_4_s_and_needs_a_verdict() {
+    let verdict = |flags: u8| {
+        let mut body = vec![flags];
+        body.extend(4_u64.to_le_bytes());
+        body.extend(2_u32.to_le_bytes());
+        body.extend(3_u32.to_le_bytes());
+        body.extend(5_i64.to_le_bytes());
+        body.push(0);
+        body
+    };
+    let kind = |version: u16, flags: u8| match decode(&record(version, 1, &verdict(flags))) {
+        Ok(Decoded::Ours { journal, .. }) => journal.ahead.map(|ahead| ahead.kind),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        decode(&record(3, 1, &verdict(0x50))),
+        Err(Invalid::Flags(0x50))
+    );
+    assert_eq!(kind(4, 0x50), Some(AheadKind::WalLostCommits));
+    assert_eq!(kind(4, 0x10), Some(AheadKind::AheadOfWal));
+    assert_eq!(kind(3, 0x10), Some(AheadKind::AheadOfWal));
+    assert_eq!(decode(&record(4, 1, &[0x40, 0])), Err(Invalid::Flags(0x40)));
 }
 
 /// The unchecked notice's flag is version 3's: a version-2 record carrying it is invalid, as a

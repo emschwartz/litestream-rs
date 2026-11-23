@@ -1983,9 +1983,15 @@ impl Runner {
             // model follows it as damage, and the history judge refuses a restore that gives it.
             EnvFault::EvictPageCache => {
                 // The evicted frames are damage SQLite still counts as committed: the engine
-                // may find the WAL corrupt or cut short, now or once an armed eviction fires.
+                // may find the WAL corrupt or cut short, now or once an armed eviction fires, or,
+                // when it fires between the cure's checked read and its checkpoint, find the
+                // checkpoint copied the disk's older bytes (`lsr_core`'s cure, D108).
                 self.expect(StopCause::WalCorrupt);
                 self.expect(StopCause::WalTruncated);
+                self.expect(StopCause::WalLostCommits {
+                    pages: NonZeroU32::MIN,
+                    first: NonZeroU32::MIN,
+                });
                 let acted = self.w.sqlite.evict_page_cache();
                 self.scenario_bool("EvictPageCache", acted)?;
                 self.w.adopt_evicted();
@@ -2470,6 +2476,7 @@ impl Runner {
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
             | PersistentCause::DatabaseAheadOfWal { .. }
+            | PersistentCause::WalLostCommits { .. }
             | PersistentCause::DatabaseAheadOfWalUnchecked
             | PersistentCause::Bug => true,
         }
@@ -2885,6 +2892,7 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         // A check that could not be made says the file may be ahead of its WAL, as a verdict
         // says it is.
         | PersistentCause::DatabaseAheadOfWal { .. }
+        | PersistentCause::WalLostCommits { .. }
         | PersistentCause::DatabaseAheadOfWalUnchecked => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
@@ -2907,6 +2915,7 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::WalUnlinked
         | StopCause::WalSyncFailed
         | StopCause::DatabaseAheadOfWal { .. }
+        | StopCause::WalLostCommits { .. }
         | StopCause::DatabaseAheadOfWalUnchecked => true,
         StopCause::StoreDenied(_)
         | StopCause::StoreRefused

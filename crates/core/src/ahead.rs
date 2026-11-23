@@ -140,7 +140,7 @@ pub(crate) async fn check<W: WalSource, P: PageSource, R: Role>(
 
 /// `found` with one more page; the pages are visited in ascending order, so the first one
 /// stays the lowest.
-fn tally(found: Option<Found>, pgno: PageNo) -> Found {
+pub(crate) fn tally(found: Option<Found>, pgno: PageNo) -> Found {
     match found {
         None => Found {
             pages: NonZeroU32::MIN,

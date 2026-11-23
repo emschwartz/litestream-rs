@@ -163,13 +163,26 @@ pub struct Proof {
     pub wal: WalChecksum,
 }
 
-/// A boot found the database file ahead of its WAL: pages no recovered WAL frame covers differ
-/// from their images at the newest staged transaction, so a checkpoint copied frames a failed WAL
-/// sync covered and the WAL then lost them (`docs/decisions.md` D103). The engine keeps
-/// `restore_point` restorable until a fixed window after `made` has passed.
+/// What a verdict found wrong with the database file after a failed WAL sync.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum AheadKind {
+    /// A boot found pages no recovered WAL frame covers that differ from their images at the
+    /// newest staged transaction: a checkpoint copied frames the failed sync covered and the WAL
+    /// then lost them (`docs/decisions.md` D103).
+    AheadOfWal,
+    /// The cure read pages back from the database file after its FULL checkpoint and found them
+    /// unlike the WAL frames it had verified: the kernel evicted those frames and the checkpoint
+    /// copied the disk's older bytes, so commits the application made are lost (D108).
+    WalLostCommits,
+}
+
+/// A verdict that the database file holds a state no commit made, after a failed WAL sync. The
+/// engine keeps `restore_point` restorable until a fixed window after `made` has passed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Ahead {
-    /// The newest staged transaction at the check: the last state before the damage.
+    /// What was found.
+    pub kind: AheadKind,
+    /// The newest staged transaction when the damage was found: the last state before it.
     pub restore_point: Txid,
     /// How many pages differed.
     pub pages: NonZeroU32,

@@ -86,6 +86,7 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use lsr_journal::AheadKind;
 use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
@@ -304,11 +305,13 @@ pub enum Event {
     AheadOfWal(AheadNotice),
 }
 
-/// What an operator is told about a standing ahead-of-WAL verdict besides its first report.
+/// What an operator is told about a standing verdict besides its first report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AheadNotice {
     /// A boot found the verdict recorded: the state before the damage is kept until `until`.
     Kept {
+        /// What the verdict found.
+        kind: AheadKind,
         /// The kept restore point.
         restore_point: Txid,
         /// When it goes back to normal retention.
@@ -316,6 +319,8 @@ pub enum AheadNotice {
     },
     /// The window passed: the restore point is back under normal retention.
     Released {
+        /// What the verdict had found.
+        kind: AheadKind,
         /// The restore point no longer kept.
         restore_point: Txid,
     },
@@ -774,7 +779,8 @@ impl Actor {
             // The verdict's restore point goes back to retention, which may now delete its chain.
             self.engine.maintain.stale = true;
             self.kept.ahead_notice = Some(AheadNotice::Released {
-                restore_point: released,
+                kind: released.kind,
+                restore_point: released.restore_point,
             });
         }
         if self.expire_unchecked(now) {
@@ -1480,7 +1486,7 @@ impl Actor {
             return self.check_ahead(env, now).await;
         }
         if self.owes_truncate() {
-            return self.unprove(env);
+            return self.unprove(env, now);
         }
         if !self.staging_has_room() {
             // Marked as a step cut short, so the sync runs again when room

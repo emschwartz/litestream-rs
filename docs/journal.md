@@ -19,12 +19,16 @@ replica. 8192 bytes: slot 0 is bytes 0 to 4096, slot 1 is 4096 to 8192. A slot h
 in its first 512 bytes (magic, version, length, sequence number, body, CRC-32C over all of it)
 and zeros after. The body is the six facts: the floor (destination digest, bound, optional
 anchor), the unproven-WAL debt, the snapshot budget's two numbers, at most one pending proof, at
-most one verdict that the database file was found ahead of its WAL (its restore point, page
-count, first page and time; `docs/decisions.md` D103), and at most one notice that the check for
-that could not be made (its time; D106). A record holding the notice is version 3; one holding
-the verdict and no notice is version 2; every other record is version 1, so a binary that
-predates either reads it as `Newer` only while one stands. While two verdicts stand, the later keeps the earlier's restore point; the
-writer refuses a record that moves it forward.
+most one verdict that the database file holds a state no commit made (its kind, restore point,
+page count, first page and time): found ahead of its WAL at a boot (`docs/decisions.md` D103), or
+missing commits a checkpoint lost, found by the cure's read-back (D108). The kind is a flag bit
+beside the verdict's and adds no bytes. Then at most one notice that the check for a database
+ahead of its WAL could not be made (its time; D106). A record holding a lost-commits verdict is
+version 4; one holding the notice and no such verdict is version 3; one holding an ahead-of-WAL
+verdict and neither is version 2; every other record is version 1, so a binary that predates a
+fact reads the record as `Newer` only while that fact stands. While two verdicts stand, the
+later keeps the earlier's restore point and its own kind; the writer refuses a record that moves
+the restore point forward.
 
 ## The floor in the engine
 

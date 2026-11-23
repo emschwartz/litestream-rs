@@ -1,7 +1,7 @@
 //! Boot reads the journal and reports it; whatever it finds, the engine does what it does with
 //! no journal at all ("the worst journal is main", docs/journal.md).
 
-use lsr_journal::{FILE, Journal, MAGIC, SLOT, Seq, Slot, Why, encode};
+use lsr_journal::{AheadKind, FILE, Journal, MAGIC, SLOT, Seq, Slot, Why, encode};
 
 use super::*;
 use crate::journal::JournalWriter;
@@ -653,6 +653,7 @@ fn the_restore_point_is_kept_for_the_window_across_a_restart() {
     let mut later = Actor::new(go_like());
     let seen = settle(&mut rig, &mut later, until - 1, Some(&mut journal));
     let reminded = Event::AheadOfWal(AheadNotice::Kept {
+        kind: AheadKind::AheadOfWal,
         restore_point: verdict.restore_point,
         until: ts(until),
     });
@@ -670,6 +671,7 @@ fn the_restore_point_is_kept_for_the_window_across_a_restart() {
     assert_eq!(
         event(&ended),
         Some(&Event::AheadOfWal(AheadNotice::Released {
+            kind: AheadKind::AheadOfWal,
             restore_point: verdict.restore_point
         }))
     );

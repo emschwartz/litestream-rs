@@ -72,13 +72,14 @@
 
 use std::fmt::Display;
 
+use lsr_core::AheadKind;
 use lsr_replica::{
     Health, Mismatch, OpCounters, Phase, StoreCounters, Task, Timestamp, VerifyFailure,
 };
 
 use crate::health::{
     DbState, DbView, cause_name, journal_name, notice_name, snapshot_kind_name, snapshot_name,
-    stop_name, task_name,
+    stop_name, task_name, verdict_name,
 };
 
 /// The rendered text.
@@ -532,16 +533,21 @@ pub(crate) fn render(views: &[DbView], now: Timestamp) -> String {
     app_series(&mut out, &dbs);
     counter_series(&mut out, &dbs);
     verify_series(&mut out, &dbs);
-    per_db(
-        &mut out,
-        &dbs,
+    for (kind, help) in [
         (
-            "lsr_database_ahead_of_wal",
-            "gauge",
+            AheadKind::AheadOfWal,
             "1 while the database file was found holding pages from commits its WAL lost, and the state before them is kept",
         ),
-        |h| u8::from(h.ahead_of_wal.is_some()).to_string(),
-    );
+        (
+            AheadKind::WalLostCommits,
+            "1 while a checkpoint was found to have copied evicted WAL pages, losing commits, and the state before them is kept",
+        ),
+    ] {
+        let name = format!("lsr_{}", verdict_name(kind));
+        per_db(&mut out, &dbs, (&name, "gauge", help), |h| {
+            u8::from(h.ahead_of_wal.is_some_and(|ahead| ahead.kind == kind)).to_string()
+        });
+    }
     per_db(
         &mut out,
         &dbs,

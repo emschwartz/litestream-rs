@@ -36,12 +36,12 @@
 
 use std::time::Duration;
 
-use lsr_journal::{Ahead, Unchecked};
+use lsr_journal::{Ahead, AheadKind, Unchecked};
 use lsr_ltx::{Timestamp, Txid};
 
 use super::parts::Course;
 use super::{Actor, Env, Stepped};
-use crate::ahead::CheckError;
+use crate::ahead::{CheckError, Found};
 use crate::fault::role::Role;
 use crate::fault::{Fault, StopCause};
 use crate::source::{Checkpointer, PageSource, WalSource};
@@ -130,19 +130,34 @@ impl Actor {
                 proof: None,
             });
         };
-        self.kept.ahead = Some(Ahead {
-            restore_point: self
-                .kept
-                .ahead
-                .map_or(restore_point, |old| old.restore_point.min(restore_point)),
-            pages: found.pages,
-            first: found.first,
-            made: now,
-        });
-        Ok(Stepped::Stop(StopCause::DatabaseAheadOfWal {
-            pages: found.pages,
-            first: found.first,
-        }))
+        Ok(self.found(AheadKind::AheadOfWal, Some(restore_point), found, now))
+    }
+
+    /// A verdict that the database file holds a state no commit made: kept, with the older of
+    /// its restore point and a standing verdict's, and raised as its stop cause. A verdict with
+    /// no restore point (nothing was ever staged) keeps nothing and is raised all the same.
+    pub(super) fn found(
+        &mut self,
+        kind: AheadKind,
+        restore_point: Option<Txid>,
+        found: Found,
+        now: Timestamp,
+    ) -> Stepped {
+        let held = self.kept.ahead.map(|old| old.restore_point);
+        if let Some(restore_point) = held.into_iter().chain(restore_point).min() {
+            self.kept.ahead = Some(Ahead {
+                kind,
+                restore_point,
+                pages: found.pages,
+                first: found.first,
+                made: now,
+            });
+        }
+        let (pages, first) = (found.pages, found.first);
+        Stepped::Stop(match kind {
+            AheadKind::AheadOfWal => StopCause::DatabaseAheadOfWal { pages, first },
+            AheadKind::WalLostCommits => StopCause::WalLostCommits { pages, first },
+        })
     }
 
     /// The replica could not give the images because it is damaged: reported as such once, and
@@ -199,6 +214,7 @@ impl Actor {
             && let Some(ahead) = self.kept.ahead
         {
             self.kept.ahead_notice = Some(super::AheadNotice::Kept {
+                kind: ahead.kind,
                 restore_point: ahead.restore_point,
                 until: kept_until(ahead),
             });
@@ -206,17 +222,18 @@ impl Actor {
     }
 
     /// Ends a verdict whose window has passed; re-dates one made after `now` (a clock that ran
-    /// ahead), once. Returns the restore point a verdict that ended kept, so retention may
-    /// release its chain and the operator hears of it.
-    pub(super) fn expire_ahead(&mut self, now: Timestamp) -> Option<Txid> {
-        match expired(self.kept.ahead?, now) {
+    /// ahead), once. Returns a verdict that ended, so retention may release the chain it kept
+    /// and the operator hears of it.
+    pub(super) fn expire_ahead(&mut self, now: Timestamp) -> Option<Ahead> {
+        let ahead = self.kept.ahead?;
+        match expired(ahead, now) {
             Ok(kept) => {
                 self.kept.ahead = Some(kept);
                 None
             }
-            Err(released) => {
+            Err(_) => {
                 self.kept.ahead = None;
-                Some(released)
+                Some(ahead)
             }
         }
     }
@@ -296,6 +313,7 @@ mod tests {
 
     fn verdict(restore_point: u64, made: i64) -> Ahead {
         Ahead {
+            kind: AheadKind::AheadOfWal,
             restore_point: Txid::new(restore_point).unwrap(),
             pages: NonZeroU32::MIN,
             first: NonZeroU32::MIN,

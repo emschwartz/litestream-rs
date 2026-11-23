@@ -184,6 +184,10 @@ pub(super) struct Kept {
     pub(super) ahead_notice: Option<super::AheadNotice>,
     /// The confirmed floor for the configured destination, journalled (`super::floor`).
     pub(super) floor: Option<lsr_journal::Floor>,
+    /// The WAL's committed end that the cure's FULL checkpoint copied and its read-back proved
+    /// (`crate::cure`), while the TRUNCATE that empties it is still owed: the TRUNCATE then runs
+    /// without scanning frames the kernel may have evicted since.
+    pub(super) verified: Option<lsr_wal::CommittedEnd>,
 }
 
 impl Kept {
@@ -221,6 +225,7 @@ impl Kept {
             unchecked: None,
             ahead_notice: None,
             floor: None,
+            verified: None,
         }
     }
 
@@ -262,6 +267,7 @@ impl Kept {
             unchecked,
             ahead_notice,
             floor,
+            verified,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -298,6 +304,7 @@ impl Kept {
             unchecked: *unchecked,
             ahead_notice: *ahead_notice,
             floor: *floor,
+            verified: *verified,
         }
     }
 
@@ -679,6 +686,14 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
             Record::EngineJournal,
             "the confirmed floor for the configured destination: every id at or below it is \
              taken, and its anchor names the bytes confirmed there (issue #171, item 4)",
+        ),
+    ),
+    (
+        "verified",
+        Keep::Ephemeral(
+            "the cure's proof of what its checkpoint copied; a restart proves it again; cost: a \
+             frame evicted after the proof reads as WAL corruption until the generation moves \
+             (docs/decisions/D108.md)",
         ),
     ),
 ];

@@ -217,14 +217,17 @@ impl AheadOfWalUnchecked {
     }
 }
 
-/// The database file found ahead of its WAL after a failed WAL sync.
+/// The database file found holding a state no commit made after a failed WAL sync: ahead of
+/// its WAL (`docs/decisions.md` D103), or missing commits a checkpoint lost (D108).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AheadOfWal {
+    /// What was found.
+    pub kind: lsr_core::AheadKind,
     /// How many pages differed from their images at the restore point.
     pub pages: NonZeroU32,
     /// The lowest of them.
     pub first_page: NonZeroU32,
-    /// The newest staged transaction at the check: the state before the damage.
+    /// The newest staged transaction when the damage was found: the state before it.
     pub restore_point: Txid,
     /// When the restore point goes back to normal retention and this ends.
     pub kept_until: Timestamp,
@@ -235,6 +238,7 @@ impl AheadOfWal {
     #[must_use]
     pub fn of(ahead: lsr_core::Ahead) -> Self {
         Self {
+            kind: ahead.kind,
             pages: ahead.pages,
             first_page: ahead.first,
             restore_point: ahead.restore_point,

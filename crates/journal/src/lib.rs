@@ -22,8 +22,8 @@ mod read;
 
 pub use codec::{Decoded, Invalid, MAGIC, RECORD_MAX, SLOT, VERSION, decode, encode};
 pub use facts::{
-    Ahead, Floor, Journal, Lowered, Proof, ReplicaId, StoredBudget, Triple, Unchecked, Unproven,
-    WalChecksum, WouldLower,
+    Ahead, AheadKind, Floor, Journal, Lowered, Proof, ReplicaId, StoredBudget, Triple, Unchecked,
+    Unproven, WalChecksum, WouldLower,
 };
 pub use read::{Opened, Parsed, Seq, Slot, SlotFault, SlotRead, Verdict, Why, parse};
 
