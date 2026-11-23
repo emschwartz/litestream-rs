@@ -79,7 +79,7 @@ impl Runner {
             self.report.trips.push((began, trip));
         }
         let bound = self.actor_bound();
-        let booted = self.life.boot_salts.is_some();
+        let booted = self.booted;
         let excused = self.fail_stop.excused();
         let unstaged_only = matches!(trip, Some(lsr_core::Trip::UnreplicatedTooLong { .. }))
             && self.w.sqlite.mx_frame() > 0

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use super::*;
 use crate::fault::role::{Replica, Staging};
 use crate::layout::{CreatedAt, ListedTime};
-use crate::witness::witness_pending;
+use crate::witness::check_pending;
 
 /// Pages served before the listing gives up with an error, so a pass that reads it all fails
 /// instead of running forever.
@@ -113,19 +113,15 @@ fn the_sweep_judges_the_first_staged_file_without_listing_them_all() {
     assert_eq!(staging.pages(), 1);
 }
 
-/// With no WAL to witness against, boot refuses the first pending file and every one after
-/// it. The pass lists no more than the witness cap's worth of files (one past it), however
-/// many are staged.
+/// Boot refuses the first pending file and every one after it when it does not verify. The
+/// pass lists no more than the witness cap's worth of files (one past it), however many are
+/// staged.
 #[test]
 fn the_witness_pass_refuses_from_the_first_pending_file_without_listing_them_all() {
     let staging = Endless::default();
-    let remote = MemStore::new();
-    let none: Option<crate::witness::LiveDb<'_, std::io::Cursor<Vec<u8>>, crate::source::FakeDb>> =
-        None;
-    let pending = block_on(witness_pending(
+    let pending = block_on(check_pending(
         &Staging(&staging),
-        &Replica(&remote),
-        none,
+        &Replica(&MemStore::new()),
         None,
     ))
     .unwrap();

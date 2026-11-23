@@ -111,13 +111,6 @@ mod fixed {
         }
     }
 
-    // A staging backup from older WAL generations, put back while the
-    // engine was down, was uploaded after a replica file that held a later
-    // state: a listing accepted a staged file starting a new generation's
-    // first frame as following the replica, a hop the boot rules refuse to
-    // prove. Staged files now go up only with a witness bound to their
-    // bytes (`crates/core/src/witness.rs`).
-
     #[test]
     fn a_restored_staging_backup_is_not_uploaded_seed_0x1919f() {
         let opts = Opts {
@@ -529,103 +522,6 @@ mod restored_backup {
             ..Opts::default()
         };
         if let Err(failure) = run_ops(Seed::new(0x5), &ops, &opts) {
-            panic!("{}", failure.violation);
-        }
-    }
-}
-
-#[cfg(test)]
-mod unlinked {
-    use lsr_ltx::PageSize;
-    use lsr_sim::generate::{MetaOp, RemoteOp, WalOp};
-    use lsr_sim::run::run_ops;
-    use lsr_sim::{Op, Opts, Seed};
-
-    /// A staging backup holding 1024-byte files is put back after the
-    /// database was vacuumed to 2048-byte pages and its new history uploaded,
-    /// and the bucket rolled back to that history's first file. The boot
-    /// listing confirmed it and uploaded the backup's next file after it, so
-    /// the replica chained two histories of two page sizes (seed 0x72a,
-    /// shrunk).
-    #[test]
-    fn a_staged_file_from_another_history_is_not_chained_seed_0x72a() {
-        let commit = Op::Commit {
-            pages: 3,
-            grow: false,
-        };
-        let ops = [
-            Op::Vacuum {
-                page_size: PageSize::new(1024),
-            },
-            Op::Shutdown,
-            Op::WalDamage {
-                op: WalOp::FlipLastFrameBit,
-                ticks: 6,
-            },
-            Op::Remote(RemoteOp::RollBack),
-            Op::ClockJump(17060),
-            Op::WalDamage {
-                op: WalOp::TruncateAtFrame(32),
-                ticks: 3,
-            },
-            Op::Remote(RemoteOp::RollBack),
-            Op::Meta(MetaOp::Save),
-            Op::Vacuum {
-                page_size: PageSize::new(2048),
-            },
-            Op::WalDamage {
-                op: WalOp::TearHeader,
-                ticks: 4,
-            },
-            Op::Shutdown,
-            Op::Shutdown,
-            commit,
-            Op::Shutdown,
-            Op::Remote(RemoteOp::RollBack),
-            Op::StagingDamage(MetaOp::Restore),
-            Op::Vacuum {
-                page_size: PageSize::new(1024),
-            },
-        ];
-        let opts = Opts {
-            drawn: true,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(Seed::new(0x72a), &ops, &opts) {
-            panic!("{}", failure.violation);
-        }
-    }
-
-    /// A staging backup holds a file read from the first frame of the WAL.
-    /// The WAL is then rewritten under the same salts, and the engine
-    /// snapshots it as transaction 1 and uploads it. The backup is put back
-    /// and its file for transaction 2, a shorter range of the same WAL, was
-    /// uploaded after 1: transaction 2 held an earlier commit than 1 (seed
-    /// 0x1919f, shrunk).
-    #[test]
-    fn a_staged_file_from_an_earlier_state_of_the_wal_is_not_chained_seed_0x1919f() {
-        use lsr_sim::generate::WalOp;
-        let ops = [
-            Op::WalDamage {
-                op: WalOp::TruncateAtFrame(4),
-                ticks: 2,
-            },
-            Op::Tick,
-            Op::Meta(MetaOp::DeleteAll),
-            Op::CommitInTick { pages: 1 },
-            Op::Meta(MetaOp::Save),
-            Op::Tick,
-            Op::WalDamage {
-                op: WalOp::RegrowSameSalts(9_383_215_839_333_341_487),
-                ticks: 6,
-            },
-            Op::StagingDamage(MetaOp::Restore),
-        ];
-        let opts = Opts {
-            drawn: true,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(Seed::new(0x1919f), &ops, &opts) {
             panic!("{}", failure.violation);
         }
     }
@@ -1100,10 +996,12 @@ mod replaced_staging {
     /// A staging backup holds the pending transaction 2. The WAL is then
     /// written again under the same salts (a disk lost the frames and the
     /// application wrote other ones), and the engine snapshots. The backup is
-    /// put back while the engine is down: the boot's WAL pass does not vouch
-    /// for transaction 2, so the boot refuses it and snapshots.
+    /// put back while the engine is down: the boot reads transaction 2 whole,
+    /// finds it follows the replica's newest file, and uploads it as staged
+    /// (`docs/decisions/D175.md`, the cost accepted); the boot's snapshot
+    /// follows, so a restore of the newest state is right.
     #[test]
-    fn a_staging_backup_put_back_while_down_is_refused_at_boot() {
+    fn a_staging_backup_put_back_while_down_is_uploaded_as_staged() {
         let trace = pending_traced(&[
             Op::Meta(MetaOp::Save),
             Op::WalDamage {
@@ -1115,8 +1013,12 @@ mod replaced_staging {
         assert!(
             trace
                 .iter()
-                .any(|line| line.contains("StagedUnverified { from: Txid(0000000000000002) }")),
-            "the boot did not refuse the put-back file: {trace:#?}"
+                .any(|line| line.contains("Booted { cause: Some(GenerationChanged) }")),
+            "the boot did not snapshot after the generation changed: {trace:#?}"
+        );
+        assert!(
+            !trace.iter().any(|line| line.contains("StagedUnverified")),
+            "the boot refused the put-back file: {trace:#?}"
         );
     }
 }

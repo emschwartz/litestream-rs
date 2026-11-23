@@ -1,0 +1,9 @@
+# A boot accepts every pending staged file whole as it reads it, whether or not it starts where the
+# file before it ended (or at the first frame): a staged file from another place in the WAL goes up.
+name = "pending-chain-unchecked"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "a_pending_file_that_skips_a_range_is_refused",
+    "a_full_file_that_neither_follows_nor_starts_the_generation_is_refused",
+]

@@ -1,6 +1,0 @@
-name = "witness-snapshot-short"
-fix = "beedd48"
-package = "lsr-core"
-tests = [
-    "a_pending_snapshot_short_of_the_replicas_newest_is_refused",
-]

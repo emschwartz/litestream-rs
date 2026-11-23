@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
-index 34670db..1669e43 100644
+index 54b2dc44..a89b46b0 100644
 --- a/crates/core/src/witness.rs
 +++ b/crates/core/src/witness.rs
-@@ -366,7 +366,7 @@ where
-     for info in &pending {
+@@ -321,7 +321,7 @@ pub(crate) async fn check_pending<L: Role, S: Role>(
          // Past the cap a file could get no token: it goes as refused files do,
          // and the WAL stages it again once uploads make room.
--        if tokens.len() >= MAX_WITNESSED {
-+        if tokens.len() >= usize::MAX {
-             return Ok(Pending {
-                 tokens,
-                 refused: Some(info.key.range().min()),
+         let wanted = expect.map(|txid| FileKey::new(Level::ZERO, TxidRange::single(txid)));
+-        let read = if tokens.len() < MAX_WITNESSED && Some(info.key) == wanted {
++        let read = if tokens.len() < usize::MAX && Some(info.key) == wanted {
+             decode(staging, info.key, L::fault).await?
+         } else {
+             None

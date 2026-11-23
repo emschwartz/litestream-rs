@@ -27,7 +27,7 @@ use crate::forcing::Forcing;
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
-use crate::oracle::{Bound, Incarnation, Violation, Windows, bug_fault, judge_put, within};
+use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
@@ -396,9 +396,8 @@ struct Runner {
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
-    /// The engine incarnation running now: what its level-0 puts are judged
-    /// against ([`judge_put`]).
-    life: Incarnation,
+    /// The engine incarnation running now has booted.
+    booted: bool,
     /// The fail-stop judge (`crate::failstop`).
     fail_stop: FailStopJudge,
     /// The sum of every clock step so far: the simulator's time with them taken out is the
@@ -540,7 +539,7 @@ impl Runner {
             kill_armed: false,
             in_hold: false,
             expected_sizes: Vec::new(),
-            life: Incarnation::default(),
+            booted: false,
             // The database's first content is on no replica yet.
             fail_stop: FailStopJudge::starting(start, image),
             fail_stop_image: image,
@@ -568,10 +567,7 @@ impl Runner {
 
     fn reboot(&mut self) {
         self.fail_stop.started();
-        self.life = Incarnation {
-            staged_from: self.w.staging_recorder.len(),
-            ..Incarnation::default()
-        };
+        self.booted = false;
         self.w.start_driver();
         let base = actor_config();
         self.app_before = self.app_seen();
@@ -729,13 +725,12 @@ impl Runner {
         }
     }
 
-    /// Judges every level-0 put the replica took since the last call as
-    /// made by the incarnation running now ([`judge_put`]).
+    /// Judges every level-0 put the replica took since the last call ([`judge_put`]).
     fn judge_puts(&mut self) -> Result<(), Violation> {
         let remote = self.w.remote_recorder.events();
         let staging = self.w.staging_recorder.events();
         for put in remote.iter().skip(self.puts_judged) {
-            let judged = judge_put(&self.w.model, &staging, &self.w.remote_raw, put, self.life)?;
+            let judged = judge_put(&staging, &self.w.remote_raw, put)?;
             self.report.reach.bump(format!("witness.{judged:?}"));
         }
         self.puts_judged = remote.len();
@@ -790,16 +785,14 @@ impl Runner {
         });
     }
 
-    /// After a tick that began unbooted: what the boot that succeeded saw (the WAL's salts
-    /// and the commits so far), or, for a boot that listed the replica whole and failed, one
-    /// more failed boot for the budget.
-    fn note_boot(&mut self, booting: bool, lists_before: u64, salts: Salts, commits: usize) {
+    /// After a tick that began unbooted: that the boot succeeded, or, for a boot that listed
+    /// the replica whole and failed, one more failed boot for the budget.
+    fn note_boot(&mut self, booting: bool, lists_before: u64) {
         if !booting {
             return;
         }
         if self.actor.booted() {
-            self.life.boot_salts = Some(salts);
-            self.life.boot_commits = commits;
+            self.booted = true;
             return;
         }
         let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
@@ -819,9 +812,7 @@ impl Runner {
         let began = self.now();
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
-        self.forcings_before_tick(booting);
-        let salts = self.w.sqlite.salts();
-        let commits = self.w.model.commits().len();
+        self.forcings_before_tick();
         self.staging_moved()?;
         let fired0 = (self.remote_fired(), fired(&self.w.staging_faults));
         let taken0 = self.w.sqlite.taken_injections().len();
@@ -831,7 +822,7 @@ impl Runner {
             self.keep_takeover();
         }
         self.watch_staging()?;
-        self.note_boot(booting, remote0.lists, salts, commits);
+        self.note_boot(booting, remote0.lists);
         self.judge_stores()?;
         self.judge_unguarded()?;
         let crashed = matches!(ended, TickEnd::Crashed { .. });
@@ -1020,19 +1011,12 @@ impl Runner {
         self.judge_staged_durable()
     }
 
-    /// Shows the forcing checks the WAL before a tick, and, before a boot,
-    /// what the boot's witness will find unprovable.
-    fn forcings_before_tick(&mut self, booting: bool) {
+    /// Shows the forcing checks the WAL before a tick.
+    fn forcings_before_tick(&mut self) {
         self.forcings.see_wal(
             self.w.sqlite.wal_header_salts(),
             self.w.sqlite.our_reader_pins_wal(),
         );
-        if booting && let Some(what) = self.w.pending_unprovable() {
-            self.forcings.note(Forcing::PendingUnprovable);
-            self.report
-                .reach
-                .bump(format!("pending_unprovable.{}", variant(&what)));
-        }
     }
 
     /// Takes in a tick that ran: records it, checks its retry wait, and

@@ -299,6 +299,11 @@ fn restored_old_meta() {
 }
 
 #[test]
+fn staging_put_back_with_other_bytes_is_not_written_over_the_replica() {
+    run(scenario::staging_put_back_with_other_bytes_is_not_written_over_the_replica);
+}
+
+#[test]
 fn vm_restore_stops_until_a_take_over() {
     run(scenario::vm_restore_stops_until_a_take_over);
 }
@@ -314,8 +319,8 @@ fn deploy_cycle_after_sigkill() {
 }
 
 #[test]
-fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() {
-    run(scenario::deploy_cycle_sigkill_after_a_wal_restart_snapshots);
+fn deploy_cycle_sigkill_after_a_wal_restart_continues() {
+    run(scenario::deploy_cycle_sigkill_after_a_wal_restart_continues);
 }
 
 #[test]

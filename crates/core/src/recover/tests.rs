@@ -1549,3 +1549,21 @@ fn a_range_past_the_committed_end_is_named_by_its_generation() {
     let same = wal_range(&mut boot, start, past, salts(1)).unwrap();
     assert!(matches!(same, Range::Rewritten), "this generation");
 }
+
+#[test]
+fn keep_newest_holds_the_newest_up_to_the_cap() {
+    let key = |txid: u64| {
+        FileKey::new(
+            Level::ZERO,
+            lsr_ltx::TxidRange::single(Txid::new(txid).unwrap()),
+        )
+    };
+    let mut keys = VecDeque::new();
+    for txid in 1..=3 {
+        keep_newest(&mut keys, key(txid), 2);
+    }
+    assert_eq!(keys, VecDeque::from([key(2), key(3)]));
+    let mut one = VecDeque::new();
+    keep_newest(&mut one, key(1), 1);
+    assert_eq!(one, VecDeque::from([key(1)]));
+}

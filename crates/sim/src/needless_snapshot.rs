@@ -24,10 +24,10 @@ use crate::forcing::Forcing;
 use crate::oracle::Violation;
 use crate::reach::{Reach, variant};
 
-/// What can make the boot's witness delete staged files the live WAL cannot
-/// vouch for (`StagedUnverified`): staging edited or torn, the WAL they came
-/// from changed or lost what they hold, or the replica was rolled back so files
-/// it had taken are pending again against a WAL that has moved on (0x83).
+/// What can make the boot drop pending staged files that do not read whole or chain
+/// (`StagedUnverified`): staging edited or torn, the WAL they came from changed or
+/// lost what they hold, or the replica was rolled back so files it had taken are
+/// pending again against a WAL that has moved on (0x83).
 const FORCES_STAGED_UNVERIFIED: &[Forcing] = &[
     Forcing::RemoteEdited,
     Forcing::StagingEdited,
@@ -171,14 +171,6 @@ impl NeedlessSnapshot {
             // The same debt, announced again after a restart, perhaps
             // under the name of what the boot found first.
             reach.bump("needless_snapshot.owed");
-            return Ok(());
-        }
-        if cause == SnapshotCauseKind::StagedUnverified
-            && at_boot
-            && window.contains(&Forcing::PendingUnprovable)
-        {
-            reach.bump("pending_unprovable.snapshots");
-            self.owed = true;
             return Ok(());
         }
         Err(Violation::NeedlessSnapshot {

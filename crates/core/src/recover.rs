@@ -34,7 +34,7 @@
 //! boot the actor also stops when the newest staged file is not readable but the replica's
 //! newest file names another size than the WAL, before `recover` runs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Seek};
 use std::num::NonZeroU32;
 
@@ -53,6 +53,7 @@ use crate::ltx_read::{LtxRead, ReadFault};
 use crate::position::{Continuity, LastPage, Position, ReadLockHold, WalFileLen};
 use crate::source::CommittedRead;
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError};
+use crate::witness::MAX_WITNESSED;
 
 /// How much of the newest staged file one store read asks for while it is verified.
 const NEWEST_STAGED_READ: ReadLen = ReadLen::CHUNK;
@@ -194,8 +195,44 @@ impl NewestStagedFile {
             key: newest.key,
             fault: L::fault,
         };
-        let view = Self::checked(&file, None, &header, origin, wal).await?;
-        Ok(Some(view.unwrap_or(unreadable)))
+        let mut wal = wal;
+        let older = wal.as_mut().map(|wal| BootWal {
+            reader: &mut *wal.reader,
+            committed: wal.committed,
+        });
+        let view = Self::checked(&file, None, &header, origin, older).await?;
+        let Some(Self::Readable {
+            last_page: LastPageCheck::Match { .. },
+            ..
+        }) = view
+        else {
+            return Ok(Some(view.unwrap_or(unreadable)));
+        };
+        // The newest file matches, but a power loss can have dropped an earlier file's frames and
+        // the application written other pages into them: the same comparison runs over the
+        // staged files below it that are still in staging and in the live WAL.
+        let rewritten = match wal {
+            Some(mut wal) => rewritten_below(staging, &mut wal, newest.key.range().max()).await?,
+            None => false,
+        };
+        Ok(Some(match view {
+            Some(Self::Readable {
+                txid,
+                origin,
+                commit,
+                page_size,
+                timestamp,
+                ..
+            }) if rewritten => Self::Readable {
+                txid,
+                origin,
+                commit,
+                page_size,
+                timestamp,
+                last_page: LastPageCheck::Rewritten,
+            },
+            other => other.unwrap_or(unreadable),
+        }))
     }
 
     /// Checks the newest staged file whose header names a WAL origin against `wal`: the frame
@@ -266,6 +303,79 @@ impl NewestStagedFile {
             last_page,
         }))
     }
+}
+
+/// Adds `key` (keys arrive oldest first) and drops the oldest when more than `cap` are held.
+fn keep_newest(keys: &mut VecDeque<FileKey>, key: FileKey, cap: usize) {
+    keys.push_back(key);
+    if keys.len() > cap {
+        keys.pop_front();
+    }
+}
+
+/// Whether a staged file other than `newest`, made in the generation the live WAL holds, differs from
+/// what the WAL holds in its range (the newest file's comparison, [`NewestStagedFile::checked`]).
+/// The newest [`MAX_WITNESSED`] files below it are read, whole, one at a time; a file that does not
+/// decode is the sweep's and the witness pass's to refuse, not a rewrite.
+async fn rewritten_below<L: Role, R: Read + Seek>(
+    staging: &L,
+    wal: &mut BootWal<'_, R>,
+    newest: Txid,
+) -> Result<bool, Fault> {
+    let live = wal.reader.header().salts();
+    let (mut at, mut keys) = (ListAt::first(Level::ZERO), VecDeque::new());
+    loop {
+        let page = staging
+            .list(at.level, at.after, PageLimit::MAX)
+            .await
+            .map_err(|err| L::fault(&err))?;
+        for info in page
+            .files
+            .iter()
+            .filter(|info| info.key.range().max() != newest)
+        {
+            keep_newest(&mut keys, info.key, MAX_WITNESSED);
+        }
+        match at
+            .following(page.next)
+            .map_err(Fault::from_staging_listing)?
+        {
+            Some(next) => at = next,
+            None => break,
+        }
+    }
+    for key in keys {
+        let Some(header) = read_header(staging, &key, L::fault).await? else {
+            continue;
+        };
+        // An older generation is not comparable (`checked` finds no frame for it); skipping it
+        // saves reading the whole file.
+        let Some(at) = Origin::of(&header).filter(|at| {
+            let (salt1, salt2) = at.origin.salts();
+            Salts { salt1, salt2 } == live
+        }) else {
+            continue;
+        };
+        let file = NewestStagedFileSource {
+            store: staging,
+            key,
+            fault: L::fault,
+        };
+        let reborrow = BootWal {
+            reader: &mut *wal.reader,
+            committed: wal.committed,
+        };
+        if let Some(NewestStagedFile::Readable { last_page, .. }) =
+            NewestStagedFile::checked(&file, None, &header, at, Some(reborrow)).await?
+            && matches!(
+                last_page,
+                LastPageCheck::Rewritten | LastPageCheck::Mismatch
+            )
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The WAL a boot reads and the committed end its one wal-index read gave: every range a

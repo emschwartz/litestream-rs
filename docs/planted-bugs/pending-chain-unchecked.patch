@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
+index 54b2dc44..c81eb26f 100644
+--- a/crates/core/src/witness.rs
++++ b/crates/core/src/witness.rs
+@@ -331,8 +331,7 @@ pub(crate) async fn check_pending<L: Role, S: Role>(
+             let first_frame = WalOffset::start(file.header.page_size()).get();
+             // A file starts where the one before it ended, or starts a new
+             // generation or a snapshot at the first frame.
+-            let starts = link.start == first_frame
+-                || prev.is_some_and(|prev| prev.salts == link.salts && prev.end == link.start);
++            let starts = true;
+             starts.then_some((file, link))
+         });
+         let Some((file, next)) = chained else {

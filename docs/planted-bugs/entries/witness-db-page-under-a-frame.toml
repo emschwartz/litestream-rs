@@ -1,6 +1,0 @@
-name = "witness-db-page-under-a-frame"
-fix = "beedd48"
-package = "lsr-core"
-tests = [
-    "a_pending_snapshot_the_wal_cannot_prove_is_taken_again",
-]

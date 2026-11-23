@@ -1,8 +1,8 @@
 diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
-index 38d8502a..4c9eedc1 100644
+index 9ca31e5f..88c994cf 100644
 --- a/crates/cli/src/run.rs
 +++ b/crates/cli/src/run.rs
-@@ -758,8 +758,13 @@ fn config_replica(
+@@ -767,8 +767,13 @@ fn config_replica(
          .config
          .only_database(&want)
          .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
@@ -15,6 +15,6 @@ index 38d8502a..4c9eedc1 100644
 +        .iter()
 +        .find(|db| !db.from_dir() && db.path() == want)
 +        .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
-     Ok((Opening::of_plan(db.replica()), db.path().to_path_buf()))
- }
- 
+     let opening = Opening {
+         meta: Some(db.meta_dir().to_path_buf()),
+         ..Opening::of_plan(db.replica())

@@ -24,9 +24,8 @@
 //!   newer than the instant (`as_of`);
 //! - with retention windows, no delete removed a file younger than its
 //!   window (`retention`);
-//! - after every tick, each level-0 file the replica took is one the engine
-//!   incarnation that put it staged itself, or holds exactly what the WAL it
-//!   booted on held for its range (`witness`);
+//! - after every tick, each level-0 file the replica took is bytes an engine
+//!   staged (`witness`);
 //! - every staged file the engine gave up before the replica took it was
 //!   forced by something in effect (`lost_restore_points`).
 
@@ -292,15 +291,12 @@ pub enum Violation {
     /// log, does not accept a restore.
     #[error("history judge: {0}")]
     History(lsr_history::Anomaly),
-    /// A level-0 file reached the replica that the engine incarnation which
-    /// put it neither staged itself nor could have re-derived from the WAL
-    /// it booted on: a staged file put back or replaced, uploaded on trust.
-    #[error("{key} was put with bytes nothing witnessed: {why}")]
-    UnwitnessedPut {
+    /// A level-0 file reached the replica that no engine incarnation staged:
+    /// a staged file put back or replaced, uploaded on trust.
+    #[error("{key} was put with bytes no engine staged")]
+    UnstagedPut {
         /// The file.
         key: String,
-        /// The first rule of the boot WAL's range it broke.
-        why: String,
     },
     /// A restore made while a lasting fault held, through the fault as a restore
     /// would meet it, published another database than the replica holds for that
@@ -909,7 +905,7 @@ mod retention;
 mod witness;
 
 pub use retention::Windows;
-pub use witness::{Incarnation, Judged, judge_put};
+pub use witness::{Judged, judge_put};
 
 #[cfg(test)]
 mod tests;

@@ -73,16 +73,6 @@ pub enum Forcing {
     /// engine follows it (`lsr_core::recover_traced`, rule 6; seeds 0xe and
     /// 0xf4846 snapshotted there before).
     ReadLockLapsed,
-    /// The process stopped with a staged file the replica does not hold
-    /// that the boot's witness cannot prove from the live WAL: a snapshot
-    /// with a page taken from the database file that has a WAL frame since,
-    /// or a hop into a new WAL generation, which only the running position
-    /// that held the read lock across it could prove. The boot drops it and
-    /// snapshots (`StagedUnverified`), giving up its restore points. A known
-    /// cost of the witness, not a fault: the local engine journal is to record
-    /// these proofs at staging time and remove it. Counted on its own
-    /// (`pending_unprovable.*`) so the number stays visible.
-    PendingUnprovable,
     /// The operator asked for a snapshot.
     SnapshotRequested,
     /// The disk lies about the engine's own fsync of the WAL: a power loss
@@ -113,8 +103,7 @@ impl Forcing {
             | Self::RemoteFault
             | Self::StagedLost
             | Self::StagingEdited
-            | Self::StagingFault
-            | Self::PendingUnprovable => ForgottenAt::Upload,
+            | Self::StagingFault => ForgottenAt::Upload,
             Self::SnapshotRequested => ForgottenAt::RequestedSnapshot,
             Self::LyingDisk => ForgottenAt::Never,
             Self::RunStart

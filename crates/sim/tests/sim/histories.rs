@@ -224,7 +224,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     ),
     (
         "seed_0x734",
-        "seed_0x734_trips_on_a_snapshot_it_cannot_vouch_for_and_is_excused",
+        "seed_0x734_uploads_the_files_a_rollback_left_and_never_trips",
         Guard::Unguarded(
             "the history checks a judge exemption, not an engine fix: no engine plant can make \
              the judge excuse a trip it would otherwise call false",
