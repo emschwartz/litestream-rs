@@ -400,6 +400,50 @@ mod tests {
         crate::conformance_suite!(conformance::MemHarness::listing_last_modified);
     }
 
+    /// `stored` holds every object with its size and listed time, as a listing of each level
+    /// would, and spends no fault queued for the engine: the simulator's judges read the
+    /// replica through it.
+    #[test]
+    fn stored_holds_every_object_and_spends_no_fault() {
+        let store = MemStore::new();
+        let at = Timestamp::from_unix_millis(5_000);
+        let range = |n| {
+            let txid = Txid::new(n).unwrap();
+            TxidRange::new(txid, txid).unwrap()
+        };
+        let keys = [
+            FileKey::new(Level::ZERO, range(1)),
+            FileKey::new(Level::new(1).unwrap(), range(2)),
+        ];
+        conformance::block_on(async {
+            for (key, body) in keys.iter().zip([&b"one"[..], &b"three"[..]]) {
+                let mut up = store
+                    .begin_upload(key, at, WriteMode::Replace)
+                    .await
+                    .unwrap();
+                up.write(body).await.unwrap();
+                up.commit().await.unwrap();
+            }
+        });
+        store.inject_failure(
+            StoreOp::List,
+            StoreError::Transient {
+                op: StoreOp::List,
+                kind: std::io::ErrorKind::ConnectionReset,
+            },
+        );
+        let stored = store.stored();
+        let seen: Vec<(FileKey, u64)> = stored.iter().map(|info| (info.key, info.size)).collect();
+        assert_eq!(seen, vec![(keys[0], 3), (keys[1], 5)]);
+        assert!(
+            stored
+                .iter()
+                .all(|info| info.listed == ListedTime::Created(CreatedAt::mtime(at)))
+        );
+        let listed = conformance::block_on(store.list(Level::ZERO, None, PageLimit::MAX));
+        assert!(listed.is_err(), "stored spent the engine's fault");
+    }
+
     #[test]
     fn lazy_mode_lists_last_modified() {
         let store = MemStore::with_listed_last_modified();
