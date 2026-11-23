@@ -366,21 +366,6 @@ pub fn window_scenarios() -> &'static [fn() -> Scenario] {
     ]
 }
 
-/// The reads a boot's probe past its listing makes on a replica it lists whole, as a fault's
-/// count of calls ahead. These scenarios boot on a replica whose transaction 1 sits at levels
-/// 0, 1 and 9, so the probe also names a level-1 key from 2 and a level-2 key from 1. With
-/// `staged` the staging directory still holds files and the walk stops at its gap; without, it
-/// walks to its cap.
-fn probe_reads(staged: bool) -> u16 {
-    use lsr_core::Level;
-    let levels = [
-        Level::ZERO,
-        Level::new(1).unwrap_or(Level::ZERO),
-        Level::SNAPSHOT,
-    ];
-    u16::try_from(super::probe_reads_past(&levels, staged)).unwrap_or(u16::MAX)
-}
-
 fn remote_fault(op: StoreOp, ahead: u16, shape: FaultShape) -> Op {
     Op::StoreFault {
         target: Target::Remote,
@@ -697,8 +682,8 @@ fn some_key() -> lsr_core::FileKey {
 }
 
 /// A file the listing named is gone when boot reads it back: another process
-/// deleted it (the read after the probe past the listing, which finds nothing). A compaction that loses an input replans instead, so boot is
-/// where this fault reaches the engine.
+/// deleted it (the first read after the listing). A compaction that loses an input replans
+/// instead, so boot is where this fault reaches the engine.
 #[must_use]
 pub fn remote_file_deleted_externally() -> Scenario {
     build(
@@ -709,7 +694,7 @@ pub fn remote_file_deleted_externally() -> Scenario {
             vec![
                 remote_fault(
                     StoreOp::Read,
-                    probe_reads(true),
+                    0,
                     FaultShape::Error(StoreError::NotFound { key: some_key() }),
                 ),
                 Op::Restart,
@@ -805,9 +790,8 @@ fn deleted_then_put_again(report: &RunReport) -> Result<(), String> {
     Ok(())
 }
 
-/// The staging directory is gone and the replica is read back at boot (after
-/// the probe past the listing, which finds nothing): one byte of the newest
-/// object has rotted, there is no staged copy to compare with, so
+/// The staging directory is gone and the replica is read back at boot (the first read
+/// after the listing): one byte of the newest object has rotted, there is no staged copy to compare with, so
 /// the object must decode, and it does not.
 #[must_use]
 pub fn remote_bitrot_on_list_read() -> Scenario {
@@ -816,11 +800,7 @@ pub fn remote_bitrot_on_list_read() -> Scenario {
         vec![
             live(),
             vec![
-                remote_fault(
-                    StoreOp::Read,
-                    probe_reads(false),
-                    FaultShape::FlipByteOnRead { at: 100 },
-                ),
+                remote_fault(StoreOp::Read, 0, FaultShape::FlipByteOnRead { at: 100 }),
                 Op::EnvFault(EnvFault::WipeStaging),
             ],
             ticks(SETTLE),

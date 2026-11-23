@@ -11,10 +11,6 @@ use std::time::Duration;
 
 pub const OPS: &[Op] = &[
     Op::ClockJump(-37129),
-    Op::LaggingListings {
-        writes: 6,
-        window: 14,
-    },
     Op::Spill,
     Op::StoreFault {
         target: Target::Staging,
@@ -270,10 +266,6 @@ pub const OPS: &[Op] = &[
     Op::Hold {
         hold: Hold::DiskFull,
         ticks: 7,
-    },
-    Op::LaggingListings {
-        writes: 7,
-        window: 13,
     },
     Op::WalDamage {
         op: WalOp::TruncateAtFrame(2),

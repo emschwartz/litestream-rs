@@ -197,8 +197,9 @@ fn the_request_survives_a_rebuild() {
     ));
 }
 
-/// A listing that keeps showing a key after its delete (a listing lagging the delete) would
-/// plan the same delete for ever: the pass stops, named, after a few in a row.
+/// A listing that keeps showing a key after its delete would plan the same delete for ever:
+/// the pass deletes it three times in a row and then stops, named. The count of deleted keys
+/// pins the number of tries: one try fewer deletes one key fewer.
 #[test]
 fn a_listing_that_keeps_a_deleted_key_stops_the_pass() {
     let (mut rig, mut actor) = four_snapshots(RetentionMode::Enforce);
@@ -211,7 +212,7 @@ fn a_listing_that_keeps_a_deleted_key_stops_the_pass() {
         "{seen:?}"
     );
     assert!(
-        matches!(actor.final_retention(), FinalRetention::Stuck { key, .. } if key == oldest.key),
+        matches!(actor.final_retention(), FinalRetention::Stuck { key, deleted: 8 } if key == oldest.key),
         "{:?}",
         actor.final_retention()
     );

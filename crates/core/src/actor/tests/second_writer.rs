@@ -189,24 +189,6 @@ fn a_rollback_while_running_is_seen_by_the_next_maintenance_listing() {
     );
 }
 
-/// A listing that lags the bucket also leaves watched files out, but a read
-/// finds them: nothing is reported, and the watch stands.
-#[test]
-fn a_lagging_listing_is_not_a_regression() {
-    let mut rig = Rig::new();
-    let mut actor = go_like_actor();
-    rig.settle(&mut actor, T0);
-    rig.commit(2);
-    rig.follow(&mut actor, T0 + 10, 50);
-    let newest = newest_l0(&rig).unwrap();
-    let hidden = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(newest).unwrap()));
-    rig.remote.unlisted.lock().unwrap().push(hidden);
-    rig.commit(3);
-    let seen = rig.follow(&mut actor, T0 + 20, 100);
-    assert!(!regressed(&seen), "{seen:?}");
-    assert!(actor.engine.maintain.watch.is_some());
-}
-
 /// Failover with the old host still running: this engine's upload of the
 /// next id lost its answer, and before its relist the new host's file took
 /// the same id with other bytes. The relist finds the replica's object

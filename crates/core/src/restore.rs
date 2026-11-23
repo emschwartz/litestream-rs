@@ -19,26 +19,10 @@
 //! a gap every attempt planned is refused as [RestoreError::NoPlan]. Every other store error ends the restore; retry
 //! with backoff belongs to a store wrapper, and core holds no timer.
 //!
-//! A listing is not trusted to be whole for the newest state. Before a `Latest` or `AsOf`
-//! target's chain is applied, the restore reads one byte of each key a reader can name without
-//! a listing for the transaction after the listing's newest (`crate::probe`, the reads the
-//! engine's uploader makes past its own listings): that transaction's level-0 file, a level-0
-//! file from the first transaction, and the snapshot ending at it (after planning, so an
-//! `AsOf` target's created-at reads come first). A store whose listings lag its writes
-//! would otherwise give an older state as the newest, with success. A key found that way is
-//! listed for again. A file found that way is either hidden by a lagging listing or put by a
-//! replicator after the listing, and one read cannot tell; the next listing can. A listing
-//! that shows the file found before it has caught up, and that round is the writer's progress:
-//! the restore follows it, up to [MAX_CHASE] listings, and then takes the next listing as it
-//! stands ([Restored::writer_outpaced]): restoring the latest state while a writer runs may
-//! answer any committed state, and one at least as new as every file a read found during the
-//! restore is a sound answer, where failing would mean no restore ever finishes against a busy
-//! writer. A listing that still ends below a file found before it began lags, and after
-//! [MAX_ATTEMPTS] such listings the restore fails with [RestoreError::ListingBehind]. A `Txid` target needs no such read: its answer is fixed by
-//! the files that end at or below it, and a hole the lag leaves is a gap the planner refuses.
-//! An empty listing is read past for every target, at the first transaction's key: a replica
-//! that exists must never look like none (the command line's `--if-replica-exists` skips a
-//! restore, with success, only for an empty replica).
+//! The replica's store is required to list its own writes (docs/decisions/D173.md), so the
+//! listing is the replica: no read is made past it. A restore of the newest state inside a
+//! store's listing lag can give an earlier committed state, with success; a store whose
+//! listings lag is unsupported.
 //!
 //! An `AsOf` target plans through [AsOfPlanner], which asks the store for the
 //! exact created-at times it needs one at a time ([resolve]); a created-at time whose file is gone
@@ -283,16 +267,6 @@ pub enum RestoreError {
         /// The file missing on the last attempt.
         missing: FileKey,
     },
-    /// Three listings did not show a level-0 file a read had found before they began: the
-    /// store's listings lag its writes, so the newest state it lists is not the newest it
-    /// holds.
-    #[error("{found} exists past the listed newest after {attempts} listings; the listing lags")]
-    ListingBehind {
-        /// Listings tried.
-        attempts: u8,
-        /// The file the last read found past the listing.
-        found: FileKey,
-    },
     /// Every file verified, but the database they built is not the one the
     /// last file's trailer says it is: the chain does not add up (overlapping
     /// files from diverged writers, or a compactor bug).
@@ -355,7 +329,6 @@ pub struct Restored {
     created_at_read: u64,
     post_apply: Option<DbChecksum>,
     inside_file: Option<FileKey>,
-    writer_outpaced: bool,
 }
 
 impl Restored {
@@ -417,16 +390,6 @@ impl Restored {
     pub const fn inside_file(&self) -> Option<FileKey> {
         self.inside_file
     }
-
-    /// Whether a writer kept putting a new file after each listing for [MAX_CHASE]
-    /// listings, and the restore then took the next listing as it stood: every listing
-    /// had shown the file found before it, so none lagged, and the database is a committed
-    /// state at least as new as every file a read found during the restore, though not
-    /// necessarily the writer's newest by the time it is published.
-    #[must_use]
-    pub const fn writer_outpaced(&self) -> bool {
-        self.writer_outpaced
-    }
 }
 
 /// How one attempt ended without a database.
@@ -437,13 +400,6 @@ enum Abort {
     /// read that races a writer's rename may miss a file and see a later one. Plan again
     /// on a fresh listing; a gap every attempt shows is the replica's.
     Gap(PlanOutcome),
-    /// A file exists past the listing's newest: list again.
-    Behind {
-        /// The file a read found.
-        found: FileKey,
-        /// The newest transaction the listing showed.
-        listed: Option<Txid>,
-    },
     Fatal(RestoreError),
 }
 
@@ -492,7 +448,7 @@ pub async fn restore_with<S: ObjectStore, K: DatabaseSink>(
 
 /// [restore], whose first attempt plans over the borrowed `listed` when given instead of
 /// listing again. A retry after a vanished file always lists afresh. A caller that hands a
-/// listing is checking those files, so no read past it is made ([listed_past]).
+/// listing is checking those files.
 pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     listed: Option<&Inventory>,
@@ -503,8 +459,8 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     restore_within(store, listed, target, options, sink, MAX_ATTEMPTS).await
 }
 
-/// [restore_from] over a fresh listing that plans once: a planned file gone, a gap, or a
-/// listing behind a read ends it at the first attempt, with the error the last attempt would
+/// [restore_from] over a fresh listing that plans once: a planned file gone or a gap ends it at
+/// the first attempt, with the error the last attempt would
 /// give. For a caller that retries on a later tick itself, so one tick spends one listing of the
 /// replica, not [MAX_ATTEMPTS] of them.
 pub(crate) async fn restore_one_plan<S: ObjectStore, K: DatabaseSink>(
@@ -528,14 +484,11 @@ async fn restore_within<S: ObjectStore, K: DatabaseSink>(
     let mut attempt = 1_u8;
     let mut bytes_read = 0_u64;
     let mut created_at_read = 0_u64;
-    let probe = listed.is_none();
     let mut retries = Retries::new(limit);
     loop {
-        let probe = probe && !retries.trusting;
-        let source = listed.take().map_or(Source::List { probe }, Source::Given);
         let applied = attempt_once(
             store,
-            source,
+            listed.take(),
             target,
             options,
             &mut sink,
@@ -560,7 +513,6 @@ async fn restore_within<S: ObjectStore, K: DatabaseSink>(
                     created_at_read,
                     post_apply: last.trailer().post_apply(),
                     inside_file,
-                    writer_outpaced: retries.trusting,
                 });
             }
             Err(Abort::Fatal(err)) => return Err(err),
@@ -577,9 +529,6 @@ async fn restore_within<S: ObjectStore, K: DatabaseSink>(
     }
 }
 
-/// Listings a restore makes while it follows a replicator that keeps uploading, at most.
-const MAX_CHASE: u8 = 64;
-
 /// Why a restore listed again, counted toward the limits on each reason.
 struct Retries {
     /// Attempts each reason is allowed: [MAX_ATTEMPTS], or one for a caller that retries
@@ -589,14 +538,6 @@ struct Retries {
     vanished: u8,
     /// Attempts whose listing planned a gap.
     gaps: u8,
-    /// Attempts whose listing did not show a file a read had found after an earlier
-    /// listing: the store's listing lags.
-    lagged: u8,
-    /// The file the last read past a listing found.
-    chased: Option<FileKey>,
-    /// A writer outpaced [MAX_CHASE] listings that all caught up: the next listing is taken
-    /// as it stands, with no read past it.
-    trusting: bool,
 }
 
 impl Retries {
@@ -605,18 +546,10 @@ impl Retries {
             limit,
             vanished: 0,
             gaps: 0,
-            lagged: 0,
-            chased: None,
-            trusting: false,
         }
     }
 
     /// Counts `abort`, made by attempt `attempt`, or fails when its reason is exhausted.
-    ///
-    /// A file found past a listing is a lagging listing or a writer that put it after the
-    /// listing; one read cannot tell. The next listing can: one that shows the file found
-    /// before it is not behind it, so that round is the writer's progress and is not counted
-    /// as a lag. Only a listing that still ends below a file found before it began counts.
     fn after(&mut self, abort: Abort, attempt: u8) -> Result<(), RestoreError> {
         match abort {
             Abort::Fatal(err) => Err(err),
@@ -637,47 +570,14 @@ impl Retries {
                 }
                 Ok(())
             }
-            Abort::Behind { found, listed } => {
-                let caught_up = self
-                    .chased
-                    .is_some_and(|before| listed >= Some(before.range().max()));
-                if !caught_up {
-                    self.lagged = self.lagged.saturating_add(1);
-                }
-                self.chased = Some(found);
-                // Lagging listings are counted on their own, so past the bound only a
-                // round that caught up remains, and the restore stops reading past the
-                // listing; the last term only bounds the loop if that reasoning is wrong.
-                let exhausted = attempt >= MAX_CHASE.saturating_add(MAX_ATTEMPTS);
-                if self.lagged >= self.limit || exhausted {
-                    return Err(RestoreError::ListingBehind {
-                        attempts: attempt,
-                        found,
-                    });
-                }
-                if caught_up && attempt >= MAX_CHASE {
-                    self.trusting = true;
-                }
-                Ok(())
-            }
         }
     }
-}
-
-/// Where an attempt's listing comes from.
-#[derive(Clone, Copy)]
-enum Source<'a> {
-    /// The caller's, checked as it is: no read past it.
-    Given(&'a Inventory),
-    /// A fresh listing, read past ([listed_past]) when `probe` is set: an empty one for
-    /// every target, any other for `Latest` and `AsOf`.
-    List { probe: bool },
 }
 
 /// One listing, one plan and the chain applied, or why not.
 async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     store: &S,
-    source: Source<'_>,
+    given: Option<&Inventory>,
     target: RestoreTarget,
     options: RestoreOptions,
     sink: &mut K,
@@ -685,25 +585,15 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     created_at_read: &mut u64,
 ) -> Result<(ContiguousChain, Verified, Option<FileKey>), Abort> {
     let loaded;
-    let (inventory, probe) = match source {
-        Source::Given(inventory) => (inventory, false),
-        Source::List { probe } => {
+    let inventory = match given {
+        Some(inventory) => inventory,
+        None => {
             loaded = Inventory::load(store)
                 .await
                 .map_err(RestoreError::Inventory)?;
-            (&loaded, probe)
+            &loaded
         }
     };
-    let empty = inventory.newest().is_none();
-    if probe
-        && empty
-        && let Some(found) = listed_past(store, inventory).await?
-    {
-        return Err(Abort::Behind {
-            found,
-            listed: inventory.newest(),
-        });
-    }
     let (chain, inside_file) = match plan_target(store, inventory, target, created_at_read).await? {
         PlanOutcome::Plan(chain) => (chain, None),
         PlanOutcome::AsOfInsideFile { chain, file }
@@ -721,42 +611,8 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
             return Err(RestoreError::NoPlan(NoPlan(other)).into());
         }
     };
-    if probe
-        && !empty
-        && !matches!(target, RestoreTarget::Txid(_))
-        && let Some(found) = listed_past(store, inventory).await?
-    {
-        return Err(Abort::Behind {
-            found,
-            listed: inventory.newest(),
-        });
-    }
     let last = apply_chain(store, &chain, sink, bytes_read).await?;
     Ok((chain, last, inside_file))
-}
-
-/// A file a read finds past the newest transaction `inventory` lists, if any: the keys a reader
-/// can name without a listing (`crate::probe`), looked for from the next transaction (the
-/// first, for an empty listing) as the engine's own probe walks them, until more than
-/// `PROBE_GAP` transactions in a row are missing. A listing that lags the store's writes is
-/// told from a whole one this way, as far as a reader can name keys; a hole in the replica
-/// wider than that gap right after the listing's end is beyond it (`docs/BEHAVIOR.md`).
-///
-/// # Errors
-/// [RestoreError::Store] for a read that fails other than as not found.
-pub async fn listed_past<S: ObjectStore>(
-    store: &S,
-    inventory: &Inventory,
-) -> Result<Option<FileKey>, RestoreError> {
-    let first = match inventory.newest() {
-        Some(newest) => newest.next(),
-        None => Txid::new(1),
-    };
-    let starts = crate::probe::Starts::of(inventory);
-    let found = crate::probe::walk(store, first, None, &starts, true)
-        .await
-        .map_err(RestoreError::Store)?;
-    Ok(found.first().copied())
 }
 
 /// The plan for [target]: an instant asks for the created-at times it needs, counted

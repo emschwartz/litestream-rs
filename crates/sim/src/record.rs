@@ -129,9 +129,6 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         Op::RequestSnapshot => "Op::RequestSnapshot".to_owned(),
         Op::Restore => "Op::Restore".to_owned(),
         Op::Restart => "Op::Restart".to_owned(),
-        Op::LaggingListings { writes, window } => {
-            format!("Op::LaggingListings {{ writes: {writes}, window: {window} }}")
-        }
         Op::TakeOver => "Op::TakeOver".to_owned(),
         Op::PowerLoss => "Op::PowerLoss".to_owned(),
         Op::LyingWalSync => "Op::LyingWalSync".to_owned(),
@@ -425,7 +422,6 @@ fn hold(hold: Hold) -> String {
         Hold::StoreDown(op) => format!("Hold::StoreDown({})", store_op(op)),
         Hold::CredentialsRevoked => "Hold::CredentialsRevoked".to_owned(),
         Hold::DiskFull => "Hold::DiskFull".to_owned(),
-        Hold::LaggingListing => "Hold::LaggingListing".to_owned(),
         Hold::LyingReads => "Hold::LyingReads".to_owned(),
         Hold::ReadersHeld => "Hold::ReadersHeld".to_owned(),
         Hold::Wal(op) => format!("Hold::Wal({})", wal(op)),

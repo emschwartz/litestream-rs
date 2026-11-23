@@ -174,8 +174,6 @@ struct Log {
     commit_after: VecDeque<StoreError>,
     write_fail: VecDeque<StoreError>,
     lie_about_size: bool,
-    /// Keys a listing leaves out, as a lagging listing does.
-    unlisted: Vec<FileKey>,
     /// The modes uploads were begun with.
     modes: Vec<WriteMode>,
     /// A key whose whole reads from the start are let through this many
@@ -216,17 +214,11 @@ impl ObjectStore for Probe {
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> impl Future<Output = Result<Listing, StoreError>> + Send {
-        let unlisted = {
+        {
             let mut log = self.log();
             log.lists = log.lists.saturating_add(1);
-            log.unlisted.clone()
-        };
-        let listed = self.inner.list(level, after, limit);
-        async move {
-            let mut page = listed.await?;
-            page.files.retain(|info| !unlisted.contains(&info.key));
-            Ok(page)
         }
+        self.inner.list(level, after, limit)
     }
 
     fn read(
@@ -596,8 +588,7 @@ fn a_listing_never_moves_confirmed_backwards_through_a_size_check() {
 }
 
 /// A tail that equals what is already confirmed was confirmed by its own
-/// commit, so the listing does not read it back: its reads are the probe's
-/// misses past the tail, to its cap since nothing is staged.
+/// commit, so the listing does not read it back.
 #[test]
 fn a_listing_does_not_read_back_a_tail_already_confirmed() {
     let (staging, remote) = (MemStore::new(), Probe::default());
@@ -607,23 +598,7 @@ fn a_listing_does_not_read_back_a_tail_already_confirmed() {
     };
     let listed = next(state, &staging, &remote, 1).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
-    assert_eq!(
-        u64::from(remote.log().reads),
-        capped_probe_reads(Some(txid(1)), &starts_of(&remote.inner))
-    );
-}
-
-/// With nothing staged, nothing bounds what the replica holds past a listing, and a bucket
-/// rollback can leave a hole wider than the gap below the files a lagging listing hides: the
-/// probe walks to its cap and finds the file past the hole (seed 0x95a's shape).
-#[test]
-fn with_nothing_staged_the_probe_walks_past_a_wide_hole() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    let past_hole = 3 + u64::from(PROBE_GAP);
-    put_bytes(&remote.inner, key(past_hole), &encode(past_hole));
-    remote.log().unlisted.push(key(past_hole));
-    let listed = next(UploadState::Unknown, &staging, &remote, past_hole).unwrap();
-    assert_eq!(listed.state, UploadState::At(Some(txid(past_hole))));
+    assert_eq!(remote.log().reads, 0);
 }
 
 #[test]
@@ -1179,8 +1154,6 @@ fn steady_state_makes_no_read_call() {
     let mut state = next(UploadState::Unknown, &staging, &remote, 0)
         .unwrap()
         .state;
-    // The boot listing's own reads (the probe past its newest) are not steady state.
-    remote.log().reads = 0;
     for n in 1..=20 {
         stage(&staging, n);
         state = block_on(upload_tick(
@@ -1337,27 +1310,6 @@ fn a_refused_upload_of_other_verifying_bytes_is_never_written_over() {
     assert_eq!(read_all(&remote.inner, &key(2)), theirs);
 }
 
-/// The same, behind a listing that does not show the other object yet: the
-/// relist after the refusal reads the refused key, so the stale listing
-/// cannot send the uploader back to write the same key again.
-#[test]
-fn a_refusal_behind_a_listing_too_stale_to_show_the_key_is_judged_by_reads() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    stage(&staging, 1);
-    let theirs = encode_pages(1, 200);
-    put_bytes(&remote.inner, key(1), &theirs);
-    remote.log().unlisted.push(key(1));
-    let step = next(UploadState::At(None), &staging, &remote, 1).unwrap();
-    assert_eq!(
-        step.did,
-        Did::Diverged {
-            confirmed: txid(1),
-            from: txid(1)
-        }
-    );
-    assert_eq!(read_all(&remote.inner, &key(1)), theirs);
-}
-
 /// The other object stands past what this engine has staged: another writer.
 #[test]
 fn a_refused_upload_with_the_replica_ahead_is_another_writer() {
@@ -1384,60 +1336,6 @@ fn a_refused_upload_over_an_object_that_does_not_verify_replaces_it() {
     assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
 }
 
-/// A listing that lags behind the bucket leaves out the newest uploads, so
-/// its newest is not the replica's. Reads are exact: the level-0 keys past it
-/// are read until one is missing, and what they find is the replica's newest
-/// (on an empty listing too). Without the reads, a boot with nothing staged
-/// takes the replica as ending earlier and later stops on its own files as
-/// another writer's.
-#[test]
-fn a_listing_that_hides_the_newest_uploads_is_corrected_by_reads() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    for n in 1..=3 {
-        put_bytes(&remote.inner, key(n), &encode(n));
-    }
-    remote.log().unlisted.extend([key(2), key(3)]);
-    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Listed {
-            newest: Some(txid(3))
-        }
-    );
-    remote.log().unlisted.push(key(1));
-    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
-    assert_eq!(listed.state, UploadState::At(Some(txid(3))));
-}
-
-/// A level-1 file the listing hides, whose level-0 inputs are gone (retained away, or one
-/// removed by an operator after it was merged), is found by its level key: the listing's
-/// level-1 file ends at 2, so the next one starts at 3. Without that read, the replica looks
-/// as if it ends at 2 and the engine would upload its own 3 and 4 into keys the hidden file
-/// already holds with other pages.
-#[test]
-fn a_hidden_level_one_file_past_the_listing_is_found_by_its_level_key() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    for n in 1..=2 {
-        put_bytes(&remote.inner, key(n), &encode(n));
-    }
-    let level_one = |min, max| {
-        FileKey::new(
-            Level::new(1).unwrap(),
-            TxidRange::new(txid(min), txid(max)).unwrap(),
-        )
-    };
-    put_bytes(&remote.inner, level_one(1, 2), &encode(2));
-    put_bytes(&remote.inner, level_one(3, 4), &encode(4));
-    remote.log().unlisted.push(level_one(3, 4));
-    let listed = next(UploadState::Unknown, &staging, &remote, 4).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Listed {
-            newest: Some(txid(4))
-        }
-    );
-}
-
 /// A level-0 tail the reads judge torn is replaced by its staged copy, which lowers the end
 /// the listing found by one. When a level 1 to 9 file already holds that transaction, the
 /// end would fall below an object the listing shows and the replacement would give the
@@ -1458,92 +1356,6 @@ fn a_torn_tail_a_higher_level_file_already_holds_is_not_replaced() {
     let failed = next(UploadState::Unknown, &staging, &remote, 2).unwrap_err();
     assert_eq!(failed.fault, Fault::RemoteCorrupt);
     assert_eq!(read_all(&remote.inner, &key(2)), b"torn");
-}
-
-/// The residue (BOOT-32 in docs/behavior.toml): a listing that hides level 1's previous file as well hides where
-/// the next one starts, so a level-1 file with no level-0 input left stays unnamed and the
-/// replica looks as if it ends earlier. Pinned so a change that finds it says so.
-#[test]
-fn a_listing_that_hides_two_level_one_files_hides_the_newer_ones_start() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    put_bytes(&remote.inner, key(1), &encode(1));
-    let level_one = |min, max| {
-        FileKey::new(
-            Level::new(1).unwrap(),
-            TxidRange::new(txid(min), txid(max)).unwrap(),
-        )
-    };
-    put_bytes(&remote.inner, level_one(1, 1), &encode(1));
-    put_bytes(&remote.inner, level_one(2, 3), &encode(3));
-    put_bytes(&remote.inner, level_one(4, 5), &encode(5));
-    remote
-        .log()
-        .unlisted
-        .extend([level_one(2, 3), level_one(4, 5)]);
-    let listed = next(UploadState::Unknown, &staging, &remote, 5).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Listed {
-            newest: Some(txid(3))
-        }
-    );
-}
-
-/// A relist after an ambiguous commit whose listing does not show the
-/// confirmed uploads yet is no regression: a read finds the confirmed key.
-#[test]
-fn a_relist_that_hides_confirmed_uploads_is_no_regression() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    for n in 1..=2 {
-        put_bytes(&remote.inner, key(n), &stage(&staging, n));
-    }
-    remote.log().unlisted.push(key(2));
-    let state = UploadState::ListFirst {
-        confirmed: Some(txid(2)),
-    };
-    let listed = next(state, &staging, &remote, 2).unwrap();
-    assert_eq!(listed.state, UploadState::At(Some(txid(2))));
-}
-
-/// The probe costs [`fresh_probe_reads`] past a fresh listing (the missing
-/// keys that end it), reads past a gap of up to [`PROBE_GAP`] free
-/// keys (another writer's file an operator removed), and reads at most
-/// [`PROBE_CAP`] keys however far the listing lags: past that the bucket's
-/// refusal of a taken key is what stops a second upload.
-#[test]
-fn the_probe_past_a_listing_reads_past_short_gaps_and_stops_at_its_cap() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    // Something staged, at the listing's end: the gap, not the cap, ends the walk.
-    let bytes = stage(&staging, 1);
-    put_bytes(&remote.inner, key(1), &bytes);
-    let _ = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
-    // The listed tail's read-back (one chunk) and the probe's misses, two
-    // keys for each transaction.
-    assert_eq!(
-        u64::from(remote.log().reads),
-        1 + fresh_probe_reads(Some(txid(1)), &starts_of(&remote.inner))
-    );
-    let past_gap = 2 + u64::from(PROBE_GAP);
-    put_bytes(&remote.inner, key(past_gap), &encode(past_gap));
-    remote.log().unlisted.push(key(past_gap));
-    let listed = next(UploadState::Unknown, &staging, &remote, past_gap).unwrap();
-    assert_eq!(listed.state, UploadState::At(Some(txid(past_gap))));
-    let too_far = past_gap + 2 + u64::from(PROBE_GAP);
-    put_bytes(&remote.inner, key(too_far), &encode(too_far));
-    remote.log().unlisted.push(key(too_far));
-    let listed = next(UploadState::Unknown, &staging, &remote, too_far).unwrap();
-    assert_eq!(listed.state, UploadState::At(Some(txid(past_gap))));
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    let far = u64::from(PROBE_CAP) + 5;
-    for n in 1..=far {
-        put_bytes(&remote.inner, key(n), &encode(n));
-        remote.log().unlisted.push(key(n));
-    }
-    let listed = next(UploadState::Unknown, &staging, &remote, far).unwrap();
-    assert_eq!(
-        listed.state,
-        UploadState::At(Some(txid(u64::from(PROBE_CAP))))
-    );
 }
 
 /// The replica's object verifies and differs from the staged file, and the
@@ -1567,38 +1379,6 @@ fn one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object() {
             from: txid(1)
         }
     );
-}
-
-/// A snapshot a lagging listing hides is found by a read too: its key is
-/// known from the transaction it ends at, since a snapshot starts at 1. The
-/// replica then ends there even when no level-0 file does (an operator
-/// removed another writer's newest file after a snapshot merged it), so the
-/// key past it is the next to upload, not the freed one.
-#[test]
-fn a_snapshot_a_listing_hides_is_found_by_a_read() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    put_bytes(&remote.inner, key(1), &encode(1));
-    let snapshot = FileKey::new(Level::SNAPSHOT, TxidRange::new(txid(1), txid(2)).unwrap());
-    put_bytes(&remote.inner, snapshot, b"a snapshot through 2");
-    remote.log().unlisted.push(snapshot);
-    let listed = next(UploadState::Unknown, &staging, &remote, 3).unwrap();
-    assert_eq!(listed.state, UploadState::At(Some(txid(2))));
-}
-
-/// A gap wider than [`PROBE_GAP`] below this engine's own upload (a bucket
-/// rollback took everything under it) does not end the probe while staged
-/// files reach past it: this engine may have uploaded any of them.
-#[test]
-fn the_probe_reads_through_the_newest_staged_transaction() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    let far = 3 + u64::from(PROBE_GAP);
-    for n in 1..=far {
-        stage(&staging, n);
-    }
-    put_bytes(&remote.inner, key(far), &encode(far));
-    remote.log().unlisted.push(key(far));
-    let listed = next(UploadState::Unknown, &staging, &remote, far).unwrap();
-    assert_eq!(listed.state, UploadState::At(Some(txid(far))));
 }
 
 /// The same with the replica's copy: its first verifying read comes back
@@ -1628,7 +1408,7 @@ fn one_torn_read_of_the_replica_copy_does_not_write_over_it() {
 /// A listed tail whose size matches the staged file is confirmed by one
 /// compare of the two copies: the verify-each-copy path is for copies that
 /// differ, and a matching tail never pays for it (one read of the replica's
-/// copy, besides the probe's misses past it).
+/// copy).
 #[test]
 fn a_listed_tail_equal_to_the_staged_file_is_confirmed_by_one_compare() {
     let (staging, remote) = (MemStore::new(), Probe::default());
@@ -1636,10 +1416,7 @@ fn a_listed_tail_equal_to_the_staged_file_is_confirmed_by_one_compare() {
     put_bytes(&remote.inner, key(1), &bytes);
     let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(1))));
-    assert_eq!(
-        u64::from(remote.log().reads),
-        1 + fresh_probe_reads(Some(txid(1)), &starts_of(&remote.inner))
-    );
+    assert_eq!(remote.log().reads, 1);
 }
 
 /// A refusal is the bucket saying this key is taken only when it names this
@@ -1719,26 +1496,6 @@ fn a_rejected_write_over_an_object_that_was_there_deletes_nothing() {
     );
 }
 
-/// A relist whose listing ends well below what was confirmed (the files in
-/// between were merged and deleted, and the listing hides the confirmed one)
-/// reads the confirmed key first, not the keys after the listing's end: a gap
-/// wider than [`PROBE_GAP`] there would end the reads before they reached it
-/// and report the replica gone backwards.
-#[test]
-fn a_relist_reads_the_confirmed_key_first_past_a_wide_gap() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    let confirmed = 3 + u64::from(PROBE_GAP);
-    put_bytes(&remote.inner, key(1), &encode(1));
-    // Nothing staged past the listing: the reads are bounded by the gap alone.
-    put_bytes(&remote.inner, key(confirmed), &encode(confirmed));
-    remote.log().unlisted.push(key(confirmed));
-    let state = UploadState::ListFirst {
-        confirmed: Some(txid(confirmed)),
-    };
-    let listed = next(state, &staging, &remote, confirmed).unwrap();
-    assert_eq!(listed.state, UploadState::At(Some(txid(confirmed))));
-}
-
 /// The same after a refused upload: the bucket refuses the create-only commit, the key holds
 /// another verifying object, and the staged copy's own verification read (its third read: the
 /// upload and the compare come first) comes back torn. One read never condemns a file, and it
@@ -1756,115 +1513,4 @@ fn one_torn_read_after_a_refusal_confirms_no_other_object() {
         .expect_err("a torn staged read confirmed the replica's object");
     assert_eq!(failed.fault, Fault::StagedLost);
     assert_eq!(read_all(&remote, &key(1)), theirs);
-}
-
-/// The higher-level starts a listing of `store` implies, as the probe names them.
-fn starts_of(store: &MemStore) -> Starts {
-    Starts::of(&block_on(Inventory::load(store)).unwrap())
-}
-
-proptest! {
-    /// A probe past a listing starts at the first transaction past both what the listing
-    /// shows and what was confirmed short of it: after a listing that ends below what was
-    /// confirmed it starts at the confirmed one (a relist proves it is still there), and
-    /// after one that reaches past it, at the transaction after the listing's end.
-    #[test]
-    fn a_probe_starts_past_the_listing_and_at_what_was_confirmed(
-        listed in proptest::option::of(1_u64..40),
-        confirmed in proptest::option::of(1_u64..40),
-    ) {
-        let first = (1_u64..=41).find(|t| {
-            listed.is_none_or(|listed| *t > listed) && confirmed.is_none_or(|confirmed| *t >= confirmed)
-        });
-        prop_assert_eq!(first_past(listed.map(txid), confirmed.map(txid)), first.map(txid));
-    }
-}
-
-/// The probe's read bounds are its real maxima, reached and not passed. Every level 1 to 8
-/// holds a file with a level-below file two transactions above it, so a listing implies two
-/// starts at each of them, and a snapshot puts the listing's end past every start: each
-/// transaction past it names [`crate::NAMED_KEYS_MAX`] keys. A walk through a staged range
-/// that reaches the cap, with every key missing, then makes [`crate::WALK_READS_MAX`] reads:
-/// all keys inside the gap window, the level-0 and snapshot keys past it.
-#[test]
-fn the_worst_walk_reads_exactly_its_bounds() {
-    let remote = Probe::default();
-    for raw in 1..=8_u8 {
-        let level = Level::new(raw).unwrap();
-        let end = 2 * u64::from(8 - raw) + 1;
-        put_bytes(
-            &remote.inner,
-            FileKey::new(level, TxidRange::single(txid(end))),
-            b"x",
-        );
-    }
-    put_bytes(&remote.inner, key(17), b"x");
-    put_bytes(&remote.inner, FileKey::snapshot(txid(20)), b"x");
-    let starts = starts_of(&remote.inner);
-    let first = txid(21);
-    assert_eq!(
-        crate::probe::reads_per_transaction(first, &starts),
-        crate::NAMED_KEYS_MAX
-    );
-    let through = txid(20 + u64::from(PROBE_CAP));
-    let reads = remote.log().reads;
-    let found = block_on(crate::probe::walk(
-        &remote,
-        Some(first),
-        Some(through),
-        &starts,
-        false,
-    ));
-    assert_eq!(found.unwrap(), Vec::<FileKey>::new());
-    let walked = u64::from(remote.log().reads - reads);
-    assert_eq!(walked, crate::WALK_READS_MAX);
-}
-
-/// A level-0 file at the transaction level 1 already ends at (merged, not yet deleted) is
-/// not the start of a run above level 1: the next compaction into level 1 starts after it,
-/// so the probe names a level-1 file from there and none from inside what level 1 holds.
-#[test]
-fn a_merged_file_still_listed_below_is_not_a_start() {
-    let remote = Probe::default();
-    let level_one = Level::new(1).unwrap();
-    let range = |min, max| TxidRange::new(txid(min), txid(max)).unwrap();
-    put_bytes(&remote.inner, FileKey::new(level_one, range(1, 5)), b"x");
-    put_bytes(&remote.inner, key(5), b"x");
-    put_bytes(&remote.inner, key(6), b"x");
-    let starts = starts_of(&remote.inner);
-    assert!(crate::probe::names(
-        &starts,
-        &FileKey::new(level_one, range(6, 8))
-    ));
-    assert!(!crate::probe::names(
-        &starts,
-        &FileKey::new(level_one, range(5, 8))
-    ));
-}
-
-/// Staging that holds files, all at or below the listing's end, bounds the probe past the
-/// listing by its gap: only an empty staging leaves nothing to bound it, and only then does
-/// the walk go to its cap.
-#[test]
-fn staged_files_below_the_listing_bound_the_probe_by_its_gap() {
-    let (staging, remote) = (MemStore::new(), Probe::default());
-    stage(&staging, 1);
-    for n in 1..=3 {
-        put_bytes(&remote.inner, key(n), &encode(n));
-    }
-    let inventory = block_on(Inventory::load(&remote.inner)).unwrap();
-    let starts = Starts::of(&inventory);
-    let reads = remote.log().reads;
-    let past = block_on(look_past(
-        &inventory,
-        &Staging(&staging),
-        &Replica(&remote),
-        Some(txid(3)),
-        Some(txid(3)),
-    ));
-    assert_eq!(past, Ok(Vec::new()));
-    assert_eq!(
-        u64::from(remote.log().reads - reads),
-        fresh_probe_reads(Some(txid(3)), &starts)
-    );
 }

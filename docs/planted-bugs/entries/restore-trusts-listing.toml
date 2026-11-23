@@ -1,7 +1,0 @@
-name = "restore-trusts-listing"
-fix = "32572b5"
-package = "lsr-core"
-tests = [
-    "restore::tests::a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing",
-    "restore::tests::a_hidden_snapshot_past_the_listing_fails_an_as_of_restore",
-]

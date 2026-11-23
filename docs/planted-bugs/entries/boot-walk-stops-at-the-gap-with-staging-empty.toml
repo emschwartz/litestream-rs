@@ -1,5 +1,0 @@
-# With nothing staged, a boot's walk past a lagging listing stopped at the gap and took a rollback hole as the replica's end.
-name = "boot-walk-stops-at-the-gap-with-staging-empty"
-fix = "9af30d8"
-package = "lsr-core"
-tests = ["with_nothing_staged_the_probe_walks_past_a_wide_hole"]

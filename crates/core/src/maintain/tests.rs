@@ -772,13 +772,6 @@ impl Checker {
                 Some(pair[1].key.range().min())
             );
         }
-        // A listing taken before the job, and lagging its output, still lets a read name it.
-        let starts = crate::probe::Starts::of(before);
-        assert!(
-            crate::probe::names(&starts, &c.output_key()),
-            "{:?} not named from {starts:?}",
-            c.output_key()
-        );
         let dst = before.level(c.level());
         if let Some(last) = dst.last() {
             assert!(

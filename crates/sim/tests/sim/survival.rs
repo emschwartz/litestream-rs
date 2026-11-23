@@ -70,7 +70,6 @@ fn key(hold: Hold) -> String {
         Hold::StoreDown(op) => format!("hold.store_down.{op:?}"),
         Hold::CredentialsRevoked => "hold.CredentialsRevoked".into(),
         Hold::DiskFull => "hold.DiskFull".into(),
-        Hold::LaggingListing => "hold.LaggingListing".into(),
         Hold::LyingReads => "hold.LyingReads".into(),
         Hold::ReadersHeld => "hold.ReadersHeld".into(),
         Hold::Wal(op) => {
@@ -114,15 +113,6 @@ fn a_full_staging_disk_leaves_the_replica_restorable_while_it_lasts() {
     // ENOSPC on staging is a full disk, not unnamed local I/O.
     assert!(report.reach.get("retrying.LocalDiskFull") > 0);
     assert_eq!(report.reach.get("retrying.LocalIo"), 0);
-}
-
-#[test]
-fn a_restore_through_a_lagging_listing_is_the_replica_s_answer_or_an_error() {
-    let report = held(Hold::LaggingListing);
-    assert_eq!(report.reach.get("hold.LaggingListing.judged"), 2);
-    // Commits uploaded under the hold are past what the lagging listing shows, so `Latest`
-    // through it cannot be the replica's answer: it must fail.
-    assert!(report.reach.get("hold.LaggingListing.refused") > 0);
 }
 
 #[test]
@@ -467,31 +457,6 @@ fn a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7() {
         ..Opts::default()
     };
     if let Err(failure) = run_ops(Seed::new(0x2e7), crate::histories::seed_0x2e7::OPS, &opts) {
-        panic!("{failure}");
-    }
-}
-
-/// Seed 0x82's recorded history: maintenance wrote a level-9 snapshot while the replica's
-/// listings lagged, the next listing did not show it, and maintenance wrote it again under the
-/// same key with other bytes (first found as mixed seeds 0x171 and 0x5c, whose draws later
-/// moved). The snapshot it wrote is now watched like the engine's uploads: a listing that
-/// hides it plans nothing and is taken again later.
-#[test]
-fn a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82() {
-    let opts = lsr_sim::Opts {
-        drawn: true,
-        block_crash_law: false,
-        lying_wal_sync: false,
-        after_restart: lsr_sim::AfterRestart::Busy,
-        clock_law: lsr_sim::ClockLaw::EachRead,
-        overlap: true,
-        error_domain: false,
-        known_wrong: false,
-        staging_fs: true,
-        ..lsr_sim::Opts::default()
-    };
-    let ops = crate::histories::seed_0x82::OPS;
-    if let Err(failure) = lsr_sim::run::run_ops(Seed::new(0x82), ops, &opts) {
         panic!("{failure}");
     }
 }

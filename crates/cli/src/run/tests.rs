@@ -362,10 +362,9 @@ fn a_publish_failure_says_whether_the_database_is_visible() {
     }
 }
 
-/// A store whose listings leave out one object that reads still find: a listing that lags.
+/// A store whose next listing of a level leaves out an object that reads still find.
 struct Unlisting<S> {
     inner: S,
-    hidden: Vec<lsr_core::FileKey>,
     /// Left out of the next listing of their level only, as a directory read that races a
     /// writer's rename can miss a file.
     hidden_once: std::sync::Mutex<Vec<lsr_core::FileKey>>,
@@ -386,9 +385,6 @@ impl<S: ObjectStore> ObjectStore for Unlisting<S> {
         limit: lsr_core::PageLimit,
     ) -> Result<lsr_core::Listing, lsr_core::StoreError> {
         let mut listing = self.inner.list(level, after, limit).await?;
-        listing
-            .files
-            .retain(|file| !self.hidden.contains(&file.key));
         let mut once = self.hidden_once.lock().unwrap();
         listing.files.retain(|file| {
             let hide = once.contains(&file.key);
@@ -464,7 +460,6 @@ fn a_dry_run_whose_listing_missed_a_file_once_plans_the_restore() {
         };
         let store = Unlisting {
             inner: dir,
-            hidden: Vec::new(),
             hidden_once: std::sync::Mutex::new(vec![hole]),
         };
         let output = staged.output("dry.db");
@@ -475,99 +470,5 @@ fn a_dry_run_whose_listing_missed_a_file_once_plans_the_restore() {
     assert!(
         planned > 0,
         "no fixture has a level-0 file whose absence is a gap"
-    );
-}
-
-/// A dry run over a listing that hides the newest level-0 file plans nothing and fails as the
-/// restore would: printing the older chain as the plan for `Latest` would be another answer.
-#[test]
-fn a_dry_run_over_a_lagging_listing_fails_like_the_restore() {
-    let mut planned = 0;
-    for staged in staged_fixtures() {
-        let dir = FsStore::new(staged.replica());
-        let files = block_on(Inventory::load(&dir)).unwrap().files().to_vec();
-        let newest = files.iter().map(|f| f.key.range().max()).max().unwrap();
-        let Some(hidden) = files
-            .iter()
-            .map(|f| f.key)
-            .find(|key| key.level().get() == 0 && key.range().max() == newest)
-        else {
-            continue;
-        };
-        let store = Unlisting {
-            inner: dir,
-            hidden: vec![hidden],
-            hidden_once: std::sync::Mutex::new(Vec::new()),
-        };
-        let output = staged.output("dry.db");
-        let got = block_on(plan_on(&store, &output, how(RestoreTarget::Latest)));
-        assert!(
-            matches!(
-                got,
-                Err(CliError::Restore(RestoreError::ListingBehind { found, .. })) if found == hidden
-            ),
-            "{got:?}"
-        );
-        let real = block_on(restore_on(&store, &output, how(RestoreTarget::Latest)));
-        assert!(
-            real.is_err(),
-            "the restore published over a lagging listing"
-        );
-        planned += 1;
-    }
-    assert!(planned > 0, "no fixture ends on a level-0 file");
-}
-
-/// A listing that shows nothing over a replica whose first file exists is not an empty replica:
-/// `--if-replica-exists` must not skip the restore with success, so the application never
-/// starts on an empty database over a replica that holds its history.
-#[test]
-fn if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing() {
-    let first = lsr_core::FileKey::new(
-        lsr_core::Level::ZERO,
-        lsr_ltx::TxidRange::single(lsr_ltx::Txid::new(1).unwrap()),
-    );
-    let mut judged = 0;
-    for staged in staged_fixtures() {
-        let dir = FsStore::new(staged.replica());
-        let files = block_on(Inventory::load(&dir)).unwrap().files().to_vec();
-        if !files.iter().any(|f| f.key == first) {
-            continue;
-        }
-        let store = Unlisting {
-            inner: dir,
-            hidden: files.iter().map(|f| f.key).collect(),
-            hidden_once: std::sync::Mutex::new(Vec::new()),
-        };
-        let output = staged.output("lagging.db");
-        let latest = How {
-            if_replica_exists: true,
-            ..how(RestoreTarget::Latest)
-        };
-        let got = block_on(restore_on(&store, &output, latest));
-        assert!(
-            matches!(
-                got,
-                Err(CliError::Restore(RestoreError::ListingBehind { found, .. })) if found == first
-            ),
-            "{got:?}"
-        );
-        let first_txid = How {
-            if_replica_exists: true,
-            ..how(RestoreTarget::Txid(lsr_ltx::Txid::new(1).unwrap()))
-        };
-        let planned = block_on(plan_on(&store, &output, first_txid));
-        assert!(
-            matches!(
-                planned,
-                Err(CliError::Restore(RestoreError::ListingBehind { .. }))
-            ),
-            "{planned:?}"
-        );
-        judged += 1;
-    }
-    assert!(
-        judged > 0,
-        "no fixture starts with a level-0 file at transaction 1"
     );
 }

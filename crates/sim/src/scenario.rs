@@ -340,9 +340,8 @@ pub fn meta_wiped_remote_kept() -> Scenario {
 
 /// The boot after the wipe (the last before the oracle judged) took no
 /// snapshot and staged none before the oracle, and asked the replica for one
-/// listing per level (the upload task's), the probe's reads past it, the
-/// upload task's read-back of the newest file, and one read of that file as
-/// the newest staged file.
+/// listing per level (the upload task's), the upload task's read-back of the newest file,
+/// and one read of that file as the newest staged file.
 fn last_boot_continues(report: &RunReport) -> Result<(), String> {
     let judged = report
         .seen
@@ -370,12 +369,7 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
             remote_calls,
             remote_lists,
             ..
-        }) if *remote_lists == levels
-            && remote_calls.checked_sub(levels)
-                == Some(2_u64.saturating_add(first_sync_probe_reads())) =>
-        {
-            Ok(())
-        }
+        }) if *remote_lists == levels && remote_calls.checked_sub(levels) == Some(2) => Ok(()),
         other => Err(format!("the boot's replica calls were {other:?}")),
     }
 }
@@ -1167,43 +1161,3 @@ pub fn power_loss_wal_rewind() -> Scenario {
 
 mod faults;
 pub use faults::*;
-
-/// The reads a boot's probe makes, with staging wiped, past a listing that holds what a first
-/// sync wrote: the level-0 file and the snapshot of transaction 1. A first compaction into
-/// level 1 would start at 1, so the probe names a level-1 key for each transaction too, and with
-/// nothing staged it walks to its cap.
-#[must_use]
-pub fn first_sync_probe_reads() -> u64 {
-    probe_reads_past(&[lsr_core::Level::ZERO, lsr_core::Level::SNAPSHOT], false)
-}
-
-/// The reads a boot's probe makes past a listing that holds transaction 1 in each of
-/// `levels` and nothing newer (`lsr_core::Starts` for the higher-level keys it names): to its
-/// gap with `staged`, to its cap with nothing staged. The listing comes from a store holding a
-/// placeholder object under each key.
-#[must_use]
-pub fn probe_reads_past(levels: &[lsr_core::Level], staged: bool) -> u64 {
-    use lsr_core::conformance::block_on;
-    use lsr_core::{ObjectStore, Upload, WriteMode};
-    let one = lsr_ltx::Txid::MIN;
-    let store = lsr_core::MemStore::new();
-    let at = lsr_ltx::Timestamp::from_unix_millis(0);
-    for level in levels {
-        let key = lsr_core::FileKey::new(*level, lsr_ltx::TxidRange::single(one));
-        let put = block_on(store.begin_upload(&key, at, WriteMode::New)).and_then(|mut up| {
-            block_on(Upload::write(&mut up, b"placeholder"))?;
-            block_on(Upload::commit(up))
-        });
-        if put.is_err() {
-            return u64::MAX;
-        }
-    }
-    block_on(lsr_core::Inventory::load(&store)).map_or(u64::MAX, |listed| {
-        let starts = lsr_core::Starts::of(&listed);
-        if staged {
-            lsr_core::fresh_probe_reads(Some(one), &starts)
-        } else {
-            lsr_core::capped_probe_reads(Some(one), &starts)
-        }
-    })
-}

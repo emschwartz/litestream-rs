@@ -25,10 +25,6 @@ pub const OPS: &[Op] = &[
     Op::Tick,
     Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::CommitInTick { pages: 1 },
-    Op::LaggingListings {
-        writes: 7,
-        window: 2,
-    },
     Op::AppInTick {
         at: AppAt::Call(16),
         op: AppOp::Checkpoint(OtherProcessMode::Passive),
@@ -87,15 +83,7 @@ pub const OPS: &[Op] = &[
         pages: 4,
         grow: false,
     },
-    Op::LaggingListings {
-        writes: 8,
-        window: 26,
-    },
     Op::OtherConnectionCommit { pages: 2 },
-    Op::LaggingListings {
-        writes: 1,
-        window: 13,
-    },
     Op::OtherConnectionCommit { pages: 3 },
     Op::Commit {
         pages: 1,
@@ -138,18 +126,6 @@ pub const OPS: &[Op] = &[
         grow: false,
     },
     Op::Vacuum { page_size: None },
-    Op::LaggingListings {
-        writes: 6,
-        window: 32,
-    },
-    Op::LaggingListings {
-        writes: 5,
-        window: 16,
-    },
-    Op::LaggingListings {
-        writes: 8,
-        window: 39,
-    },
     Op::AppInTick {
         at: AppAt::Before(SourceOp::Len),
         op: AppOp::ReaderEnd,
@@ -246,10 +222,6 @@ pub const OPS: &[Op] = &[
     Op::Spill,
     Op::Shutdown,
     Op::Vacuum { page_size: None },
-    Op::LaggingListings {
-        writes: 7,
-        window: 33,
-    },
     Op::OtherConnectionCommit { pages: 3 },
     Op::WalDamage {
         op: WalOp::RegrowWithoutCommitMarks(12268204458122200916),
@@ -304,10 +276,6 @@ pub const OPS: &[Op] = &[
     },
     Op::OtherConnectionCommit { pages: 2 },
     Op::Vacuum { page_size: None },
-    Op::LaggingListings {
-        writes: 2,
-        window: 1,
-    },
     Op::OtherConnectionCommit { pages: 3 },
     Op::Vacuum { page_size: None },
     Op::Shutdown,
@@ -317,10 +285,6 @@ pub const OPS: &[Op] = &[
     },
     Op::Meta(MetaOp::FlipNewestByte),
     Op::ClockJump(41104),
-    Op::LaggingListings {
-        writes: 1,
-        window: 7,
-    },
     Op::CommitInTick { pages: 1 },
     Op::Shutdown,
     Op::WalDamage {
@@ -339,10 +303,6 @@ pub const OPS: &[Op] = &[
     Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
     Op::Spill,
-    Op::LaggingListings {
-        writes: 5,
-        window: 6,
-    },
     Op::Spill,
     Op::Shutdown,
     Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
@@ -351,10 +311,6 @@ pub const OPS: &[Op] = &[
         ticks: 3,
     },
     Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
-    Op::LaggingListings {
-        writes: 7,
-        window: 33,
-    },
     Op::Shutdown,
     Op::Heal,
     Op::WalDamage {
@@ -386,19 +342,7 @@ pub const OPS: &[Op] = &[
         }),
     },
     Op::ClockJump(76645),
-    Op::LaggingListings {
-        writes: 4,
-        window: 33,
-    },
-    Op::LaggingListings {
-        writes: 4,
-        window: 33,
-    },
     Op::OtherConnectionCommit { pages: 3 },
-    Op::LaggingListings {
-        writes: 3,
-        window: 4,
-    },
     Op::WalDamage {
         op: WalOp::FlipLastFrameBit,
         ticks: 1,
@@ -427,10 +371,6 @@ pub const OPS: &[Op] = &[
     Op::Spill,
     Op::OtherConnectionCommit { pages: 3 },
     Op::Spill,
-    Op::LaggingListings {
-        writes: 4,
-        window: 32,
-    },
     Op::Commit {
         pages: 4,
         grow: false,
@@ -456,10 +396,6 @@ pub const OPS: &[Op] = &[
     Op::ClockJump(21807),
     Op::Heal,
     Op::Shutdown,
-    Op::LaggingListings {
-        writes: 1,
-        window: 19,
-    },
     Op::CommitInTick { pages: 3 },
     Op::OtherConnectionCommit { pages: 2 },
     Op::Spill,
@@ -545,10 +481,6 @@ pub const OPS: &[Op] = &[
     Op::Shutdown,
     Op::Vacuum { page_size: None },
     Op::SecondWriter { ticks: 3 },
-    Op::LaggingListings {
-        writes: 5,
-        window: 21,
-    },
     Op::Shutdown,
     Op::SecondWriter { ticks: 6 },
     Op::ClockJump(60132),
@@ -565,10 +497,6 @@ pub const OPS: &[Op] = &[
     Op::Shutdown,
     Op::ClockJump(-47535),
     Op::CommitInTick { pages: 1 },
-    Op::LaggingListings {
-        writes: 8,
-        window: 15,
-    },
     Op::Meta(MetaOp::FlipNewestByte),
     Op::Hold {
         hold: Hold::Wal(WalOp::TearHeader),

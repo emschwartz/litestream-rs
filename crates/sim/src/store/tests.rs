@@ -317,69 +317,6 @@ fn a_late_error_leaves_the_key_volatile_until_a_later_commit_syncs() {
     assert!(handle.volatile().is_empty());
 }
 
-/// A lagging listing hides a new key and keeps showing a deleted one for a
-/// bounded number of list calls, while reads stay exact; writes past the lag
-/// show at once.
-#[test]
-fn a_lagging_listing_hides_writes_and_deletes_for_a_bounded_while() {
-    let raw = MemStore::new();
-    let store = Faults::new(raw.clone(), Vec::new(), 7)
-        .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
-    block_on(upload(&store, 1)).unwrap();
-    store.handle().lag_listings(2, 3);
-    block_on(upload(&store, 2)).unwrap();
-    block_on(store.delete(&[fkey(0, 1, 1)])).unwrap();
-    // Key 2 is hidden and key 1 still shows, for at most three listings.
-    let mut seen = Vec::new();
-    for _ in 0..4 {
-        let page = block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
-        seen.push(page.files.iter().map(|f| f.key).collect::<Vec<_>>());
-    }
-    assert_eq!(seen.first(), Some(&vec![fkey(0, 1, 1)]), "{seen:?}");
-    assert_eq!(seen.last(), Some(&vec![fkey(0, 2, 2)]), "{seen:?}");
-    assert!(store.handle().stale_listings() >= 1);
-    // Reads are exact throughout.
-    let one = ReadLen::new(1).unwrap();
-    block_on(store.read(&fkey(0, 2, 2), 0, one)).unwrap();
-    assert!(matches!(
-        block_on(store.read(&fkey(0, 1, 1), 0, one)),
-        Err(StoreError::NotFound { .. })
-    ));
-    // The lag hid two writes; the third shows at once.
-    block_on(upload(&store, 3)).unwrap();
-    assert_eq!(listed(&store), 2);
-}
-
-/// A key whose write a listing lag hides stays hidden when another writer
-/// replaces it under the wrappers: listings show the key as it was, never the
-/// new object, until the lag runs out. A judge that asks whether the engine
-/// listed that object must see it as hidden.
-#[test]
-fn a_key_the_lag_hides_stays_hidden_when_replaced_under_the_wrappers() {
-    let raw = MemStore::new();
-    let store = Faults::new(raw.clone(), Vec::new(), 7)
-        .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
-    block_on(upload(&store, 1)).unwrap();
-    store.handle().lag_listings(1, 3);
-    block_on(upload(&store, 2)).unwrap();
-    assert!(store.handle().hides(fkey(0, 2, 2)));
-    assert!(!store.handle().hides(fkey(0, 1, 1)));
-    // Another writer replaces key 2 directly in the store.
-    block_on(raw.delete(&[fkey(0, 2, 2)])).unwrap();
-    block_on(upload(&raw, 2)).unwrap();
-    let page = block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
-    let keys: Vec<_> = page.files.iter().map(|f| f.key).collect();
-    assert_eq!(
-        keys,
-        vec![fkey(0, 1, 1)],
-        "the first listing shows key 2 as it was"
-    );
-    for _ in 0..3 {
-        block_on(store.list(Level::ZERO, None, PageLimit::MAX)).unwrap();
-    }
-    assert!(!store.handle().hides(fkey(0, 2, 2)));
-}
-
 /// The boot's scratch removal reaches the store under every simulator wrapper, with its count
 /// and with no fault drawn.
 #[test]

@@ -200,9 +200,7 @@ pub(crate) fn restore_fault<R: Role>(err: &RestoreError) -> CheckError {
         RestoreError::Store(err) | RestoreError::Inventory(InventoryError::Store(err)) => {
             R::fault(err).into()
         }
-        RestoreError::Unstable { .. } | RestoreError::ListingBehind { .. } => {
-            Fault::StoreTransient.into()
-        }
+        RestoreError::Unstable { .. } => Fault::StoreTransient.into(),
         RestoreError::Sink { .. } | RestoreError::Publish { .. } => Fault::LocalIo.into(),
     }
 }

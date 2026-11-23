@@ -1,5 +1,0 @@
-# The sibling: a watched key missing from a listing taken as lost without the read.
-name = "regression-on-listing-alone"
-fix = "5cf9f56"
-package = "lsr-core"
-tests = ["a_lagging_listing_is_not_a_regression"]

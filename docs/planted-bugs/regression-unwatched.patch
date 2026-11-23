@@ -1,13 +1,11 @@
-diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 5097cd9..b13b11c 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1909,7 +1909,7 @@ impl Actor {
-         now: Timestamp,
-     ) -> Option<Tick> {
+@@ -2331,7 +2331,7 @@
+     /// this listing.
+     fn watch_unit(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
          let watch = self.engine.maintain.watch;
--        let Some(key) = watch.and_then(|watch| watch.missing(inventory)) else {
-+        let Some(key) = watch.and_then(|_watch| None::<FileKey>) else {
+-        if watch.and_then(|watch| watch.missing(inventory)).is_none() {
++        if watch.and_then(|_watch| None::<FileKey>).is_none() {
              let published = self.engine.upload.confirmed();
              self.engine.maintain.watch = RegressionWatch::after_listing(inventory, published);
              return None;

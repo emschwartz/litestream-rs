@@ -8,9 +8,7 @@
 //! snapshot planned, one delete job per tick, until it has nothing more to delete. What that
 //! keeps that Go deletes, never the reverse:
 //! - a listing the planner's trust gates refuse is a hold: nothing is deleted and the pass ends
-//!   as [`FinalRetention::Held`], so the caller exits 1 naming it. A listing that misses a file
-//!   this process just wrote is listing lag, not a bad replica, and is listed again up to
-//!   [`LISTINGS`] times before it is called a hold;
+//!   as [`FinalRetention::Held`], so the caller exits 1 naming it;
 //! - ages are measured from the replica's newest created-at time when that is behind the clock
 //!   (the planner's anchor), so on an idle replica snapshots Go would delete are kept;
 //! - each level's last file is kept, as Go keeps it.
@@ -32,8 +30,8 @@ use crate::layout::FileKey;
 use crate::maintain::{OnceRetention, Outcome, RetentionHold, once_retention, run_delete};
 use crate::source::{Checkpointer, PageSource, WalSource};
 
-/// Listings that miss a file this process wrote before the miss is a hold.
-const LISTINGS: u8 = 3;
+/// Delete jobs in a row that begin with the same key before the pass stops as stuck.
+const REPEATS: u8 = 3;
 
 /// Where the retention pass a drain ends with stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,8 +42,6 @@ pub enum FinalRetention {
     Asked {
         /// Keys deleted so far.
         deleted: u64,
-        /// Listings so far that missed a file this process wrote.
-        behind: u8,
         /// The first key of the last delete job, and how many jobs in a row began with it.
         repeated: Option<(FileKey, u8)>,
     },
@@ -66,7 +62,7 @@ pub enum FinalRetention {
         /// Why.
         hold: RetentionHold,
     },
-    /// The listing kept showing a key after it was deleted, [`LISTINGS`] times in a row: the
+    /// The listing kept showing a key after it was deleted, [`REPEATS`] times in a row: the
     /// pass stops rather than delete it again for ever.
     Stuck {
         /// Keys deleted before it stopped.
@@ -90,7 +86,6 @@ impl Actor {
         if self.kept.final_retention == FinalRetention::NotAsked {
             self.kept.final_retention = FinalRetention::Asked {
                 deleted: 0,
-                behind: 0,
                 repeated: None,
             };
         }
@@ -123,12 +118,7 @@ impl Actor {
         L: Role,
         R: Role,
     {
-        let FinalRetention::Asked {
-            deleted,
-            behind,
-            repeated,
-        } = self.kept.final_retention.clone()
-        else {
+        let FinalRetention::Asked { deleted, repeated } = self.kept.final_retention.clone() else {
             return None;
         };
         let inventory = match Inventory::load(env.remote).await {
@@ -160,16 +150,6 @@ impl Actor {
         Some(match decided {
             None => self.retention_ended(FinalRetention::Off),
             Some(OnceRetention::Done) => self.retention_ended(FinalRetention::Done { deleted }),
-            Some(OnceRetention::Held(RetentionHold::ListingBehind { .. }))
-                if behind.saturating_add(1) < LISTINGS =>
-            {
-                self.kept.final_retention = FinalRetention::Asked {
-                    deleted,
-                    behind: behind.saturating_add(1),
-                    repeated,
-                };
-                self.retention_waiting(None, now)
-            }
             Some(OnceRetention::Held(hold)) => {
                 self.retention_ended(FinalRetention::Held { deleted, hold })
             }
@@ -181,11 +161,11 @@ impl Actor {
                     (None, _) => None,
                 };
                 if let Some((key, n)) = repeated
-                    && n > LISTINGS
+                    && n > REPEATS
                 {
                     return Some(self.retention_ended(FinalRetention::Stuck { deleted, key }));
                 }
-                self.delete_step(env.remote, &job, deleted, behind, repeated, now)
+                self.delete_step(env.remote, &job, deleted, repeated, now)
                     .await
             }
         })
@@ -197,7 +177,6 @@ impl Actor {
         remote: &R,
         job: &crate::maintain::DeleteJob,
         deleted: u64,
-        behind: u8,
         repeated: Option<(FileKey, u8)>,
         now: Timestamp,
     ) -> Tick {
@@ -206,7 +185,6 @@ impl Actor {
                 let count64 = u64::try_from(count).unwrap_or(u64::MAX);
                 self.kept.final_retention = FinalRetention::Asked {
                     deleted: deleted.saturating_add(count64),
-                    behind,
                     repeated,
                 };
                 self.ran(

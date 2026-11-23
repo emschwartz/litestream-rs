@@ -124,7 +124,6 @@ use crate::maintain::{
 };
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
-use crate::probe::Starts;
 use crate::publish::Why;
 use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent, Recovered,
@@ -133,13 +132,12 @@ use crate::recover::{
 use crate::regression_watch::RegressionWatch;
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
-use crate::store::{ObjectStore, PageLimit, ReadLen, StoreError};
+use crate::store::{ObjectStore, PageLimit};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
     Did, Guard, Swept, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
-    drop_staged_from, inventory_fault, past_known, plan_upload, probe_past, sweep_staged,
-    upload_next, upload_next_in,
+    drop_staged_from, inventory_fault, plan_upload, sweep_staged, upload_next, upload_next_in,
 };
 use crate::verify::LivePages;
 use crate::witness::{LiveDb, Pending, Witnesses, still_holds, witness_pending};
@@ -2257,10 +2255,10 @@ impl Actor {
         // its position: a file past it is another writer's. In steady state
         // this listing is the first to see one, and nothing may be planned
         // from it (no compaction, snapshot or delete takes it as input).
-        if let Some(tick) = self.listing_untrusted(env.remote, &inventory, now).await {
+        if let Some(tick) = self.listing_untrusted(&inventory, now) {
             return Some(tick);
         }
-        if let Some(tick) = self.watch_unit(env.remote, &inventory, now).await {
+        if let Some(tick) = self.watch_unit(&inventory, now) {
             return Some(tick);
         }
         if self.engine.maintain.read_back_owed
@@ -2326,31 +2324,19 @@ impl Actor {
     }
 
     /// Everything this engine watched since its last maintenance listing must
-    /// be listed (`crate::regression_watch`). One that is not is read: gone, the replica
+    /// be listed (`crate::regression_watch`). One that is not means the replica
     /// lost files this process confirmed, and the uploader lists again (or
-    /// the engine stops, as configured); found, the listing lags and nothing
-    /// is planned from it, so the watch stands for the next listing. With nothing
-    /// missing the watch moves to this listing.
-    async fn watch_unit<R: Role>(
-        &mut self,
-        remote: &R,
-        inventory: &Inventory,
-        now: Timestamp,
-    ) -> Option<Tick> {
+    /// the engine stops, as configured). With nothing missing the watch moves to
+    /// this listing.
+    fn watch_unit(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
         let watch = self.engine.maintain.watch;
-        let Some(key) = watch.and_then(|watch| watch.missing(inventory)) else {
+        if watch.and_then(|watch| watch.missing(inventory)).is_none() {
             let published = self.engine.upload.confirmed();
             self.engine.maintain.watch = RegressionWatch::after_listing(inventory, published);
             return None;
-        };
-        match remote.read(&key, 0, ReadLen::or_chunk(1)).await {
-            Ok(_) => Some(self.list_again_later(now)),
-            Err(StoreError::NotFound { .. }) => {
-                self.floor_regressed();
-                Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
-            }
-            Err(err) => Some(self.fault(Task::Maintenance, R::fault(&err), now)),
         }
+        self.floor_regressed();
+        Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
     }
 
     /// The read-back a boot owes (see `maintain::audit`). `None` when every
@@ -2429,59 +2415,10 @@ impl Actor {
     /// What ends a maintenance tick before anything is planned from `inventory`: a file
     /// past everything this engine staged or confirmed is another writer's, and nothing may
     /// be planned from that listing (no compaction, snapshot or delete takes it as input).
-    /// In steady state this listing is the first to see one. A listing that lags a delete
-    /// shows a file that is gone, so a read must find one before the engine stops; a
-    /// listing a read contradicts plans nothing either, and is taken again later.
-    async fn listing_untrusted<R: Role>(
-        &mut self,
-        remote: &R,
-        inventory: &Inventory,
-        now: Timestamp,
-    ) -> Option<Tick> {
-        let known = self.snapshot_after();
-        if inventory.newest() > known {
-            return Some(match past_known(remote, inventory, known).await {
-                Ok(true) => self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now),
-                Ok(false) => self.list_again_later(now),
-                Err(fault) => self.fault(Task::Maintenance, fault, now),
-            });
-        }
-        self.listing_lags(remote, inventory, now).await
-    }
-
-    /// A listing that ends before what this engine confirmed either lags its
-    /// uploads or shows a replica that lost them. Reads decide: when the
-    /// confirmed key (or a key past it) is there, nothing is planned from
-    /// the listing (a compaction would merge a shorter run and write it again
-    /// later) and maintenance lists again later; when it is gone, the listing
-    /// is the replica's and plans as before (retention holds on it), and the
-    /// upload lane learns of the loss at its next listing.
-    async fn listing_lags<R: Role>(
-        &mut self,
-        remote: &R,
-        inventory: &Inventory,
-        now: Timestamp,
-    ) -> Option<Tick> {
-        let published = self.engine.upload.confirmed();
-        if inventory.newest() >= published || self.engine.maintain.gone == published {
-            return None;
-        }
-        match probe_past(
-            remote,
-            inventory.newest(),
-            published,
-            None,
-            &Starts::of(inventory),
-        )
-        .await
-        {
-            Ok(found) if found.is_empty() => {
-                self.engine.maintain.gone = published;
-                None
-            }
-            Ok(_) => Some(self.list_again_later(now)),
-            Err(fault) => Some(self.fault(Task::Maintenance, fault, now)),
-        }
+    /// In steady state this listing is the first to see one.
+    fn listing_untrusted(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
+        (inventory.newest() > self.staged().max(self.engine.upload.confirmed()))
+            .then(|| self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now))
     }
 
     /// Maintenance plans nothing from this listing and lists again after the
@@ -2815,8 +2752,7 @@ impl BootGate {
     /// staging vouched for once they are gone, unless the held record covers
     /// it already. That is `local`, capped at the replica's newest key: the
     /// confirmed `tip`, or a newer level-0 key judged torn (it may be this
-    /// engine's own upload, read wrong), listed or found by a read past a
-    /// listing that lags. Pending files above every replica key vouch for
+    /// engine's own upload, read wrong), as listed. Pending files above every replica key vouch for
     /// nothing there, so one put back from a backup never raises it.
     async fn vouch<R: Role>(self, remote: &R, tip: Option<Txid>) -> Result<(), BootStep> {
         let Takeover::Vouch(record) = self.takeover else {
@@ -2829,16 +2765,7 @@ impl BootGate {
         let listed = newest_replica_level_zero(remote)
             .await?
             .map(|info| info.key.range().max());
-        // A listing may lag the replica's writes: keys past it are read for, through the
-        // staged position (any staged file may be on the replica), as boot reads past every
-        // listing. A record capped short of a key the listing hid refuses this engine's own
-        // upload at a later boot. The listing here is of level 0 alone, so the probe names
-        // no level 1 to 8 start: a merged file it then misses above `local` caps the record
-        // short, and a later boot refuses the replica's files, a stop and never a silent loss.
-        // Listing every level here would cost each vouch ten more listing calls.
-        let past = probe_past(remote, listed, tip, Some(local), &Starts::default()).await?;
-        let found = past.last().map(|key| key.range().max());
-        let replica = tip.max(listed).max(found);
+        let replica = tip.max(listed);
         match replica.map(|replica| replica.min(local)) {
             Some(through) if !covers(through) => {
                 Err(BootStep::Vouch(TakeoverRecord::through(through)))
@@ -3114,7 +3041,7 @@ async fn boot_witness<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let key = FileKey::new(Level::ZERO, TxidRange::single(from));
     // A read, not a listing: a listing may lag the replica's writes, and one that leaves the
     // key out would let new content take a transaction the replica holds.
-    let held = crate::probe::exists(env.remote, &key)
+    let held = crate::store::exists(env.remote, &key)
         .await
         .map_err(|err| R::fault(&err))?;
     if next == Some(from) && held {

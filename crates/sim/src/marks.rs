@@ -160,7 +160,6 @@ classes! {
     OurReader = "OurReader", Undrawn;
     AppAutocheckpoint = "AppAutocheckpoint", Undrawn;
     CrashProcess = "Crash.Process", Once;
-    LaggingListings = "LaggingListings", Once;
     CrashPower = "Crash.Power", Once;
     ClockJump = "ClockJump", Once;
     SecondWriter = "SecondWriter", Lasting;
@@ -229,7 +228,6 @@ classes! {
     HoldStoreDown = "Hold.StoreDown", Lasting;
     HoldCredentialsRevoked = "Hold.CredentialsRevoked", Lasting;
     HoldDiskFull = "Hold.DiskFull", Lasting;
-    HoldLaggingListing = "Hold.LaggingListing", Lasting;
     HoldLyingReads = "Hold.LyingReads", Lasting;
     HoldReadersHeld = "Hold.ReadersHeld", Lasting;
     HoldWal = "Hold.Wal", Lasting;
@@ -344,7 +342,6 @@ impl Class {
             Op::Heal => Self::Heal,
             Op::Verify => Self::Verify,
             Op::Restart => Self::Restart,
-            Op::LaggingListings { .. } => Self::LaggingListings,
             Op::TakeOver => Self::TakeOver,
             Op::PowerLoss => Self::PowerLoss,
             Op::LyingWalSync => Self::LyingWalSync,
@@ -458,7 +455,6 @@ impl Class {
             Hold::StoreDown(_) => Self::HoldStoreDown,
             Hold::CredentialsRevoked => Self::HoldCredentialsRevoked,
             Hold::DiskFull => Self::HoldDiskFull,
-            Hold::LaggingListing => Self::HoldLaggingListing,
             Hold::LyingReads => Self::HoldLyingReads,
             Hold::ReadersHeld => Self::HoldReadersHeld,
             Hold::Wal(_) => Self::HoldWal,

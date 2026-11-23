@@ -1,6 +1,0 @@
-# A boot drop records only through the newest listed key, short of a torn-looking tail a
-# lagging listing leaves out: a later boot refuses the engine's own upload.
-name = "boot-drop-record-capped-at-listed"
-fix = "df34d0f9"
-package = "lsr-core"
-tests = ["the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides"]

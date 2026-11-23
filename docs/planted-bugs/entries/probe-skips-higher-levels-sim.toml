@@ -1,6 +1,0 @@
-# The same defect planted against the simulator's recorded histories.
-name = "probe-skips-higher-levels-sim"
-fix = "7945943"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["an_id_a_lagging_listing_hides_under_a_merged_file_is_not_reused_seed_0xf4721"]

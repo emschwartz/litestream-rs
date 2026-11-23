@@ -32,10 +32,6 @@ pub const OPS: &[Op] = &[
         ticks: 3,
     },
     Op::ClockJump(70668),
-    Op::Hold {
-        hold: Hold::LaggingListing,
-        ticks: 8,
-    },
     Op::Commit {
         pages: 1,
         grow: false,
@@ -95,10 +91,6 @@ pub const OPS: &[Op] = &[
         grow: false,
     },
     Op::RequestSnapshot,
-    Op::Hold {
-        hold: Hold::LaggingListing,
-        ticks: 2,
-    },
     Op::Commit {
         pages: 3,
         grow: false,

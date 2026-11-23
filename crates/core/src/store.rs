@@ -625,6 +625,19 @@ pub trait Upload: Send {
     fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
+/// Whether the store holds an object under `key`, by a one-byte read. Used where one key is
+/// named without a listing: a compaction's output key, a torn tail's key.
+///
+/// # Errors
+/// The store's error for a read that fails other than as not found.
+pub(crate) async fn exists<S: ObjectStore>(store: &S, key: &FileKey) -> Result<bool, StoreError> {
+    match store.read(key, 0, ReadLen::or_chunk(1)).await {
+        Ok(_) => Ok(true),
+        Err(StoreError::NotFound { .. }) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

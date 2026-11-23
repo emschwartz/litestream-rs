@@ -1,4 +1,0 @@
-name = "empty-listing-is-empty-replica"
-fix = "a5c7d57"
-package = "lsr-core"
-tests = ["restore::tests::a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica"]
