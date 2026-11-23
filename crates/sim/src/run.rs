@@ -409,6 +409,9 @@ struct Runner {
     /// Boots that listed the replica and failed (each is tried again, and
     /// costs the replica a boot's reads).
     failed_boots: u32,
+    /// Transactions the probes past each listing may have looked for, from the listing calls
+    /// the recorder counted and what staging and the replica held around them.
+    walked: crate::budget::Walked,
     /// Bucket rollbacks and removals of the newest file: each may cost the
     /// engine a probe past a listing that ends before what it confirmed, and
     /// a relist once it learns of the loss.
@@ -533,6 +536,7 @@ impl Runner {
             put_back: 0,
             rate_active: false,
             failed_boots: 0,
+            walked: crate::budget::Walked::default(),
             regressions: 0,
             settling: false,
             forcings: crate::forcing::Forcings::new(),
@@ -750,7 +754,14 @@ impl Runner {
         Ok(())
     }
 
-    fn note_tick(&mut self, began: Timestamp, remote0: crate::store::RecorderCounts) {
+    fn note_tick(&mut self, began: Timestamp, remote0: crate::store::RecorderCounts, reach0: u64) {
+        let lists = self
+            .w
+            .remote_recorder
+            .counts()
+            .lists
+            .saturating_sub(remote0.lists);
+        self.walked.add(lists, reach0.max(self.walk_reach()));
         if !self.record {
             return;
         }
@@ -796,6 +807,7 @@ impl Runner {
         let began = self.now();
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
+        let reach0 = self.walk_reach();
         self.forcings_before_tick(booting);
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
@@ -817,7 +829,7 @@ impl Runner {
         self.note_snapshots(newest_commit, in_tick, at);
         self.judge_fail_stop(began, fired0, &ended)?;
         self.judge_denials(&ended)?;
-        self.note_tick(began, remote0);
+        self.note_tick(began, remote0, reach0);
         if self.trace {
             self.report.trace.push(format!("    tick: {ended:?}"));
         }
@@ -1180,6 +1192,16 @@ impl Runner {
             ended,
             &mut self.report.reach,
         )
+    }
+
+    /// How far a probe past a listing may walk now: through the newest transaction staging or
+    /// the replica holds and its gap past that, or, with nothing staged to bound it, its cap.
+    fn walk_reach(&self) -> u64 {
+        use crate::forcing::TickWorld;
+        match TickWorld::newest_staged(&self.w) {
+            None => crate::budget::Walked::CAP,
+            Some(staged) => staged.max(self.w.remote_newest().unwrap_or(0)),
+        }
     }
 
     /// Scheduled faults that hit a call on either store, summed.
@@ -2565,6 +2587,7 @@ impl Runner {
             fault_hits: hits(&self.w.remote_faults)
                 .saturating_add(u64::from(self.w.remote_faults.stale_listings())),
             degraded_retries: self.report.reach.get("event.Degraded"),
+            walked: self.walked,
         };
         crate::budget::check(
             &self.w.remote_recorder.events(),
