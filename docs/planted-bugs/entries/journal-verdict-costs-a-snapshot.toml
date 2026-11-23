@@ -1,0 +1,6 @@
+name = "journal-verdict-costs-a-snapshot"
+fix = "27ef518"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::no_journal_a_boot_can_find_changes_what_the_engine_does",
+]

@@ -5,7 +5,7 @@
 //! local staging directory are both an [`ObjectStore`] (`lsr-store-s3`,
 //! `lsr-store-fs`; `MemStore`, behind the `testing` feature, is the model they are tested against), SQLite
 //! is a [`WalSource`], a [`PageSource`] and a [`Checkpointer`] (`lsr-sqlite`),
-//! a restore writes into a [`DatabaseSink`] (`lsr-local`), and time, waiting
+//! a restore writes into a [`DatabaseSink`] (`lsr_replica::local`), and time, waiting
 //! and chance are [`Clock`], [`Sleeper`] and [`Entropy`].
 //!
 //! What is here:

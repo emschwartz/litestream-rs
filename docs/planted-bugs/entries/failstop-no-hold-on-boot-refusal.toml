@@ -1,0 +1,6 @@
+name = "failstop-no-hold-on-boot-refusal"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "failstop::tests::the_gate_follows_the_table",
+]

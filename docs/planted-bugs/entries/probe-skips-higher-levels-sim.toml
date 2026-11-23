@@ -1,0 +1,6 @@
+# The same defect planted against the simulator's recorded histories.
+name = "probe-skips-higher-levels-sim"
+fix = "7945943"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_merged_file_a_lagging_listing_hides_is_found_by_its_level_key_seed_0x4f4"]

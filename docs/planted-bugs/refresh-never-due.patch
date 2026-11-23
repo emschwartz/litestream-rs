@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/source.rs b/crates/store-s3/src/source.rs
+index e1b0cff3..9c09f44d 100644
+--- a/crates/store-s3/src/source.rs
++++ b/crates/store-s3/src/source.rs
+@@ -64,7 +64,7 @@ impl Expiring {
+     #[must_use]
+     pub fn due(&self, now: Timestamp) -> bool {
+         self.expires
+-            .is_some_and(|expires| now.saturating_add(REFRESH_BEFORE) >= expires)
++            .is_some_and(|expires| now >= expires.saturating_add(REFRESH_BEFORE))
+     }
+ 
+     /// Whether they still work at `now`.

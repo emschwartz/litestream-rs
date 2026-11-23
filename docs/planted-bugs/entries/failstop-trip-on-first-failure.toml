@@ -1,0 +1,9 @@
+# Fail-stop (if-replication-stops, docs/proposals/fail-stop.md section 2): each entry is one of the
+# design's planted bugs, re-planted against the feature as it landed.
+name = "failstop-trip-on-first-failure"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_failure_before_the_bound_never_trips",
+    "failstop::tests::the_clock_never_trips_early",
+]

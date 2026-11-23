@@ -1,0 +1,6 @@
+name = "failstop-trip-on-degraded"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_maintenance_fault_never_trips",
+]

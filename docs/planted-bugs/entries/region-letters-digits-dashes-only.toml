@@ -1,0 +1,4 @@
+name = "region-letters-digits-dashes-only"
+fix = "claude/dropin-config"
+package = "lsr-store-s3"
+tests = ["config::tests::a_region_is_refused_only_when_no_request_could_be_signed_with_it"]

@@ -1,0 +1,8 @@
+# `dir:` scanning made to agree with Go's walk (claude/dropin-dir): each was found by the Go
+# differential (compat `dropin_dir`), which needs the Go dumper and so is ignored; the config
+# tests below are its Go-free counterparts.
+name = "dir-root-link-followed"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_dir_that_is_a_symbolic_link_finds_nothing_as_go"]

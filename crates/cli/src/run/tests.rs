@@ -328,17 +328,17 @@ fn a_publish_failure_says_whether_the_database_is_visible() {
     let output = Path::new("/restore/app.db");
     for (error, visible) in [
         (
-            lsr_local::PublishError::NotVisible {
+            lsr_replica::local::PublishError::NotVisible {
                 target: output.to_owned(),
-                step: lsr_local::PublishStep::Link,
+                step: lsr_replica::local::PublishStep::Link,
                 source: std::io::Error::other("disk full"),
             },
             false,
         ),
         (
-            lsr_local::PublishError::VisibleNotDurable {
+            lsr_replica::local::PublishError::VisibleNotDurable {
                 target: output.to_owned(),
-                step: lsr_local::PublishStep::SyncName,
+                step: lsr_replica::local::PublishStep::SyncName,
                 source: std::io::Error::other("fsync failed"),
             },
             true,
