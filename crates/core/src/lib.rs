@@ -68,8 +68,8 @@ mod verify;
 mod witness;
 
 pub use actor::{
-    AHEAD_KEPT_FOR, Actor, ActorConfig, AheadNotice, Degraded, Env, Event, MaintainedEvent, Phase,
-    Task, Tick, Unfinished,
+    AHEAD_KEPT_FOR, Actor, ActorConfig, AheadNotice, Degraded, Env, Event, FinalSnapshot,
+    FinalSnapshotFailure, MaintainedEvent, Phase, Task, Tick, Unfinished,
 };
 pub use app::{
     AppCheckpoint, AppCheckpointObserver, AppCheckpoints, SQLITE_AUTOCHECKPOINT, Watch, observe,

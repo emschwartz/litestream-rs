@@ -67,6 +67,7 @@ pub(crate) struct State {
 pub(crate) struct Commands {
     pub(crate) stop: Option<Timestamp>,
     pub(crate) snapshot: bool,
+    pub(crate) final_snapshot: bool,
     pub(crate) accept_pages: bool,
     pub(crate) sink: Option<Box<dyn EventSink>>,
 }
@@ -462,6 +463,15 @@ impl Replicator {
     /// Makes the next sync a snapshot.
     pub fn request_snapshot(&self) {
         self.shared.command(|commands| commands.snapshot = true);
+    }
+
+    /// Makes the next stop end with a level-9 snapshot of the whole database once everything
+    /// committed is uploaded, as Go's `replicate -once -force-snapshot` does. It is written
+    /// even when the stop's deadline has passed, and is not retried: [`Health::final_snapshot`]
+    /// says whether it was written. Ask before calling [`Replicator::stop`].
+    pub fn request_final_snapshot(&self) {
+        self.shared
+            .command(|commands| commands.final_snapshot = true);
     }
 
     /// An operator accepts the database file as it is: every page the page checksum table

@@ -17,6 +17,7 @@ mod dropped_created_at;
 mod failstop;
 #[cfg(test)]
 mod faults;
+mod final_snapshot;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]

@@ -311,6 +311,7 @@ pub const fn of_op(op: &Op) -> &'static [Justifier] {
         | Op::ClockJump(_)
         | Op::Tick
         | Op::Shutdown
+        | Op::ShutdownWithSnapshot
         | Op::Restore
         | Op::Restart
         | Op::PowerLoss
