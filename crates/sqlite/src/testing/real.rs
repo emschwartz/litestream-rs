@@ -222,13 +222,9 @@ impl Real {
         let Some(app) = self.app.as_ref() else {
             return false;
         };
-        // With PERSIST_WAL on (`crate::app_connection`) and no size limit, leaving WAL mode
-        // keeps the old WAL, whose frames of the old page size corrupt the vacuumed database
-        // when WAL mode comes back (sqlite3WalClose); a limit of 0 truncates it on the switch.
         let done = app
             .execute_batch(&format!(
-                "PRAGMA journal_size_limit = 0; PRAGMA journal_mode = DELETE; \
-                 PRAGMA page_size = {}; VACUUM; PRAGMA journal_size_limit = -1;",
+                "PRAGMA journal_mode = DELETE; PRAGMA page_size = {}; VACUUM;",
                 new.bytes()
             ))
             .is_ok();
