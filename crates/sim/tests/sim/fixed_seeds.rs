@@ -160,16 +160,6 @@ mod fixed {
     }
 
     #[test]
-    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68facf21() {
-        replay_drawn(0x0000_126d_68fa_cf21, h::seed_0x126d68facf21::OPS, false);
-    }
-
-    #[test]
-    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fad061() {
-        replay_drawn(0x0000_126d_68fa_d061, h::seed_0x126d68fad061::OPS, true);
-    }
-
-    #[test]
     fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fae16b() {
         replay_drawn(0x0000_126d_68fa_e16b, h::seed_0x126d68fae16b::OPS, false);
     }

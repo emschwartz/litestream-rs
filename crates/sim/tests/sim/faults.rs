@@ -329,8 +329,8 @@ fn bucket_rolled_back() {
 }
 
 #[test]
-fn bucket_rolled_back_unseen() {
-    run(scenario::bucket_rolled_back_unseen);
+fn bucket_rolled_back_while_idle() {
+    run(scenario::bucket_rolled_back_while_idle);
 }
 
 #[test]
