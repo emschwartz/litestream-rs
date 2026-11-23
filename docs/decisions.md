@@ -691,6 +691,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Revisit if:** another crate writes to a store for the engine, or the store trait can be split so that raw writes are unreachable by type.
 - **Links:** issue #171 item 1; D74; `crates/core/src/publish.rs`.
 
+## D152. Which SQLite builds the replicator runs on (delegated)
+
+- **Options:** trust whatever SQLite the build links; check the version number only; check the version number and the source id against the bundled build.
+- **Choice:** both. `Sqlite::open_with` first compares `sqlite3_libversion_number()` and `sqlite3_sourceid()` with the 3.54.1 build bundled by `libsqlite3-sys` 0.40.0, and refuses anything else (`OpenError::SqliteBuild`, `StartError::SqliteBuild`).
+- **Why:** the `identity` and `shm` modules read SQLite's private `unixFile` and wal-index layouts directly, and a wrong field is a wrong descriptor or a wrong committed end, never an error (outside review, issue #197, R5). A build that links a system SQLite, SQLCipher or a loadable-extension SQLite could lay them out otherwise. The source id tells two builds of one version apart, which a version number cannot.
+- **Cost accepted:** every bump of the bundled SQLite fails this check until the constants in `crates/sqlite/src/version.rs` are updated, and updating them is the point at which `identity` and `shm` are read against the new source. A second copy of SQLite the application links for its own connections is still not detected; that remains an embedding rule.
+- **Revisit if:** a deployment needs a system SQLite, or the layout reads go away.
+- **Links:** #197.
+
 ## Unverified, not recorded
 
 - Who decided D1 to D5 and when: `docs/PLAN.md` says "Decided" with no name or date. Listed as owner, by 2026-11-20.
@@ -705,3 +714,4 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the answer can be behind the writer by the time it is published, which is true of every restore of a live replica. A listing whose lag grows by exactly one file per listing for 64 listings would also end here; no store is known to do that.
 - **Revisit if:** a store shows listings that lag but always show the previously read file.
 - **Links:** #126, `crates/core/src/restore.rs` (`Retries`).
+

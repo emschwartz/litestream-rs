@@ -20,6 +20,20 @@ pub enum OpenError {
         /// What SQLite said.
         source: rusqlite::Error,
     },
+    /// The SQLite answering at run time is not the build this crate's reads of SQLite's private
+    /// layouts were written for, so those reads cannot be trusted. The process links another
+    /// SQLite (a system library, SQLCipher, a loadable-extension build).
+    #[error(
+        "the SQLite in use is version {found} ({source_id}), not the bundled build {expected} this library requires: link only the SQLite that rusqlite bundles"
+    )]
+    SqliteBuild {
+        /// `sqlite3_libversion_number()` of the running library.
+        found: std::ffi::c_int,
+        /// `sqlite3_sourceid()` of the running library.
+        source_id: String,
+        /// The version the layout reads were written for.
+        expected: std::ffi::c_int,
+    },
     /// `PRAGMA journal_mode = wal` left the database in another mode (an in-memory database, or a
     /// VFS without shared memory). Replication reads the WAL, so there is nothing to replicate.
     #[error("the database is in journal mode {mode:?}, not WAL")]
