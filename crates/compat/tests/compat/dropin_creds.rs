@@ -22,11 +22,11 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use lsr_compat::{
-    Answer, Answers, Dump, DumpEnv, FakeAws, Roles, TokenAnswer, go_dump, go_dump_binary, rust_dump,
+    Answer, Answers, Differential, Dump, DumpEnv, FakeAws, Roles, TokenAnswer, go_dump,
+    go_dump_binary, rust_dump,
 };
 use lsr_core::needs::{Resource, must};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
 
 const PROFILES: &[&str] = &["default", "p1", "p2", "nope", ""];
 
@@ -481,12 +481,11 @@ fn go_and_rust_resolve_the_same_credentials() {
     let go = must(Resource::GoBuilds, || {
         go_dump_binary().map_err(|e| e.to_string())
     });
-    let mut runner = TestRunner::new(Config {
-        cases: 1024,
-        failure_persistence: None,
-        ..Config::default()
+    let run = Differential::new("static credentials");
+    let compared = run.free(1024, &case(), |case| {
+        compare(&go, &case).map(|()| "compared".to_owned())
     });
-    if let Err(error) = runner.run(&case(), |case| compare(&go, &case)) {
+    if let Err(error) = compared {
         panic!("{error}");
     }
 }
