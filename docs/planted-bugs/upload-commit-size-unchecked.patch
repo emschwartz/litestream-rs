@@ -1,18 +1,18 @@
 diff --git a/crates/core/src/publish.rs b/crates/core/src/publish.rs
-index 8989cfff..dc8db4f0 100644
+index dd397f64..e3f77787 100644
 --- a/crates/core/src/publish.rs
 +++ b/crates/core/src/publish.rs
-@@ -167,9 +167,13 @@ impl<'s, S: ObjectStore> Writer<'s, S> {
+@@ -171,9 +171,13 @@ impl<'s, S: ObjectStore> Writer<'s, S> {
              Err(err) => return Err(unpublished(err, key, mode)),
          };
          let keys = [key];
--        let info = settle(info, key, written, || store.delete(&keys))
+-        let info = settle(info, key, written, mode, || store.delete(&keys))
 -            .await
 -            .map_err(Unpublished::Failed)?;
 +        let info = if mode == WriteMode::New {
 +            info
 +        } else {
-+            settle(info, key, written, || store.delete(&keys))
++            settle(info, key, written, mode, || store.delete(&keys))
 +                .await
 +                .map_err(Unpublished::Failed)?
 +        };

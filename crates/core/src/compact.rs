@@ -28,11 +28,11 @@
 //! failed abort never replaces the original error. A commit that fails after
 //! the object became visible is reported as [CompactError::Dest]: the caller
 //! lists before it trusts the destination. Exception: the output's commit is
-//! checked against the bytes written (`checked`), so a `Dest` error holding
-//! `Corrupt { cause: CommitSizeMismatch { removed: true, .. } }` means the
-//! store acknowledged a short object and it was deleted: the destination holds
-//! nothing new. With `removed: false` the caller must not trust a listing of
-//! the output key.
+//! checked against the bytes written (`crate::publish`), so a `Dest` error
+//! holding `Corrupt { cause: CommitSizeMismatch { .. } }` means the store
+//! acknowledged a short object. The output is a replace, so it is left under
+//! its key (`removed: false`): the caller must not trust a listing of the
+//! output key, and removes it under a reason of its own.
 //!
 //! A page whose newest copy sits in an input that a later input shrank below
 //! was not written by SQLite, which writes every page it grows into. Go's

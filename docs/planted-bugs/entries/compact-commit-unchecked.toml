@@ -7,6 +7,6 @@ name = "compact-commit-unchecked"
 fix = "claude/commit-size"
 package = "lsr-core"
 tests = [
-    "compact::tests::an_output_acknowledged_short_is_deleted_and_reported",
+    "compact::tests::an_output_acknowledged_short_is_reported_and_left_to_the_caller",
     "publish::guard::no_engine_module_calls_a_store_write_or_delete_outside_publish",
 ]
