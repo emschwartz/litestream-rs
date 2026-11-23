@@ -78,6 +78,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D122 | Run the simulator's histories on real SQLite: how, when the world draws page-level commits of arbitrary bytes? | A backend in lsr-sqlite behind the sim's seam; each drawn page a row, SQLite decides the pages, the world reads back what changed through SQLite | Claude (sim-real-sqlite), **delegated** | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
 | D162 | `databases` with a `dir` entry: print the working directory, as Go does? | No: print the entry's directory, unscanned | Claude (dropin-readonly), **delegated** | 2026-11-23 | open to owner review |
+| D164 | May runtime dependencies replace hand-written code outside the replication contract? Function length limit? | Yes, named per PR with licence, see entry; limit 150, see entry | owner | 2026-11-23 | decided |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -806,3 +807,13 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** an application that runs at OFF on purpose fails the check; it must raise the level to replicate.
 - **Revisit if:** the `_litestream_seq` bumps become frequent enough that a sync each costs.
 - **Links:** #197.
+
+## D164. Runtime dependencies for non-contract code; function-length limit 150 (owner decision)
+
+- **Options:** keep "prefer no runtime dependencies"; allow them where they replace hand-written code outside the replication contract and the Go-fidelity surface.
+- **Choice:** allow them there, each named in its PR with its licence. Agreed swaps, one PR each, in this order: clap for `lsr`'s own commands (not the Go flag parser); rustls-native-certs with a webpki-roots fallback for both S3 transports' TLS roots, replacing `crates/store-s3/src/trust.rs` (reqwest stays); jiff replacing `crates/ltx/src/time.rs`; serde_json replacing JSON built by `format!` and the hand-written escapers.
+- **Kept hand-written:** the HTTP server for `/metrics` and `/healthz`, the Go flag parser for `replicate` and Go-compatible commands, the shell-words port, the slog format, the YAML pipeline with `os.Expand` and `ParseDuration`, the credential chain (#176), the reqwest transport.
+- **Function length (amends D5):** `too-many-lines-threshold` goes from 70 to 150, still a hard error. A reasoned `#[expect(clippy::too_many_lines)]` is allowed for a function that is one straight-line sequence (boot, the maintenance step, the tick). Companion rule: no function or type that exists only to carry values between two halves of a split; a helper with one caller that names no separate idea is inlined. It applies when a file is next touched, with no repo-wide reflow.
+- **Cost accepted:** more third-party code in the build and its licences to track; the trusted TLS root set may differ from Go's on unusual systems.
+- **Revisit if:** a swap changes bytes a Go reader or sidecar consumer sees, or a dependency's maintenance lapses.
+- **Links:** `AGENTS.md`, `clippy.toml`. D163 is taken by an unmerged branch (`claude/dropin-metrics`).

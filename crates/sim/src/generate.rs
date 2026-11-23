@@ -682,10 +682,6 @@ impl Weights {
     /// rarely overlap. Drawn from the seed's own stream, so the history's
     /// stream is untouched.
     #[must_use]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one draw per field in the order recorded mixes rely on; a split would hide it"
-    )]
     pub fn swarm(seed: Seed) -> Self {
         let entropy = SeededEntropy::new(seed.stream(12));
         let weight = |keep_always: bool| {
