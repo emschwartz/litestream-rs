@@ -239,7 +239,7 @@ pub enum CorruptCause {
         /// Bytes the store reports holding.
         stored: u64,
         /// Whether the object just committed was deleted (every engine
-        /// commit deletes it, `checked.rs`, as [`crate::Retrying`] does).
+        /// commit deletes it, `publish.rs`, as [`crate::Retrying`] does).
         /// `false` only when that delete itself failed; the caller must then
         /// not trust a listing of this key.
         removed: bool,

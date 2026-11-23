@@ -404,7 +404,7 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> 
         let info = self.inner.commit().await?;
         let core = &*self.core;
         let keys = [self.key];
-        crate::checked::settle(info, self.key, self.written, || {
+        crate::publish::settle(info, self.key, self.written, || {
             core.run(|| core.inner.delete(&keys))
         })
         .await

@@ -15,23 +15,36 @@
 //!    it ([`crate::Denied`]). Timeouts, 5xx and throttling never hold. The first successful
 //!    listing ends it for the life of the process.
 //!
-//! **The clock** ([`Lag`]) is the time of the oldest commit not on the replica: the stamp of
-//! the oldest pending staged file, which a restart does not reset, or the first time this
-//! process saw a commit it had not staged, whichever is older. A crash loop therefore cannot
-//! run the application forever in slices shorter than the bound, as long as each life stages
-//! what it reads. WAL frames no life managed to stage carry no time of their own; they count
-//! from the first life that sees them, and a restart restarts that part of the clock
-//! (`docs/decisions.md` D80). A snapshot the engine owes after it wrote unstaged frames into
-//! the database file (a TRUNCATE after a failed WAL sync, a checkpoint past the synced end)
-//! keeps the lag that was there: those commits are in no staged file and in no WAL frame.
+//! **The clock** ([`Lag`]) is the time of the oldest commit not on the replica now, each kind
+//! of lag dated on its own, never the start of an unbroken run of lag: a writer whose uploads
+//! always trail by a tick has lag at the end of every tick, yet no commit older than a tick
+//! or two. The dates, the oldest of which is the clock's start:
+//!
+//! - a pending staged file holding a commit: its stamp, which a restart does not reset, so a
+//!   crash loop cannot run the application forever in slices shorter than the bound;
+//! - WAL frames past the synced position: when this process first saw the WAL end where it
+//!   did ([`WalMark`]). Once the synced position passes that mark, the date moves to the
+//!   files the frames went into and lasts until the replica holds them; frames that arrived
+//!   since date from the observation that saw them. WAL frames no life managed to stage carry
+//!   no time of their own, so a restart restarts that part of the clock (`docs/decisions.md`
+//!   D80);
+//! - a snapshot the engine owes after it wrote unstaged frames into the database file (a
+//!   TRUNCATE after a failed WAL sync, a checkpoint past the synced end): the date those
+//!   frames had, since those commits are now in no staged file and in no WAL frame.
+//!
+//! Lag with no date of its own (a pending file with no stamp known) dates from when this
+//! process first saw it, and only while it lasts. Every rule errs late, never early: a date
+//! moves later when it cannot be kept exactly.
 //!
 //! **The probe.** Backoff alone would trip falsely: the store heals at 260 s and the next retry
 //! is at 511 s. When the age reaches the bound, the actor lets the sync and upload waits go so
 //! they run at once ([`Lag::probe_due`]); only a failure at or after the bound trips.
 //!
-//! **Clearing.** A trip for age clears when the age is zero again, not merely under the bound,
-//! so writes do not flap at the edge. A refusal at boot clears at the first listing. A stop
-//! never clears without an operator.
+//! **Clearing.** A trip for age clears once every commit as old as the clock's start it
+//! tripped on has reached the replica: the start moves on. Not merely when the age falls
+//! under the bound, so writes do not flap at the edge (a new trip needs a new bound and a
+//! failure after it), and not only at zero age, which a busy database may never reach. A
+//! refusal at boot clears at the first listing. A stop never clears without an operator.
 //!
 //! **What the trip does** is [`gate`]'s answer, per [`IfReplicationStops`]: `report` never
 //! holds; `hold-start` holds an application that has not been released yet (an unsafe stop or
@@ -39,7 +52,8 @@
 
 use std::time::Duration;
 
-use lsr_ltx::Timestamp;
+use lsr_ltx::{Timestamp, Txid};
+use lsr_wal::Salts;
 
 use crate::fault::{MAX_BACKOFF, StopCause};
 use crate::store::Denied;
@@ -158,6 +172,7 @@ pub const fn trip(
                 | StopCause::WalSyncFailed
                 | StopCause::PageSizeChanged { .. }
                 | StopCause::DatabasePageMismatch { .. }
+                | StopCause::DatabaseAheadOfWal { .. }
                 | StopCause::Bug),
             ),
             _,
@@ -218,44 +233,150 @@ impl AppGate {
     }
 }
 
+/// Where the committed WAL ended: its generation and frame count. The clock dates WAL frames
+/// by the first observation that saw the WAL end at a mark, until the synced position passes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalMark {
+    salts: Salts,
+    frames: u32,
+}
+
+impl WalMark {
+    /// The WAL of generation `salts`, `frames` frames long.
+    #[must_use]
+    pub const fn new(salts: Salts, frames: u32) -> Self {
+        Self { salts, frames }
+    }
+
+    /// Whether every frame up to this mark is behind the synced position `synced`: it reached
+    /// the mark, or moved to another generation (the frames were staged before the WAL
+    /// restarted, or a checkpoint took them, which leaves a snapshot owed).
+    fn passed_by(self, synced: Option<Self>) -> bool {
+        synced.is_some_and(|synced| synced.salts != self.salts || synced.frames >= self.frames)
+    }
+}
+
+/// What the actor saw after a tick, for the clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Observed {
+    /// The committed WAL end, when it is past the synced position.
+    pub ahead: Option<WalMark>,
+    /// The synced position.
+    pub synced: Option<WalMark>,
+    /// The newest staged file, pending or not.
+    pub staged: Option<Txid>,
+    /// The newest pending staged file holding a commit, if any.
+    pub pending: Option<Txid>,
+    /// The newest transaction the replica holds.
+    pub replicated: Option<Txid>,
+    /// The stamp of the oldest pending staged file holding a commit, when known.
+    pub oldest: Option<Timestamp>,
+    /// The engine owes a snapshot for commits that are only in the database file.
+    pub owed: bool,
+}
+
 /// The clock of the oldest unreplicated commit, and the age trip it drives. Pure: the actor
 /// feeds it what it observes after each tick and every failure of the sync and upload tasks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Lag {
-    /// When this process first saw the current run of lag; `None` while caught up.
+    /// When the WAL frames now past the synced position were first seen, where the WAL ended
+    /// then, and the newest staged file then; kept while a snapshot owed holds those commits.
+    unstaged: Option<Unstaged>,
+    /// The date of frames now staged, until the replica holds the file `.0`, the first file
+    /// staged after they were seen: they may be in later files too, but a date kept longer
+    /// could outlive them, and one dropped early only trips late. One slot, the older kept: a
+    /// later run of frames loses its date to its files' stamps, also a late error.
+    carried: Option<(Txid, Timestamp)>,
+    /// When this process first saw lag with no date of its own, while it lasts.
     seen: Option<Timestamp>,
-    /// The clock's start: `seen` or the oldest pending stamp, the older.
+    /// The clock's start: the oldest of the dates.
     since: Option<Timestamp>,
     /// The bound's instant a probe was made for, so each instant gets one.
     probed: Option<Timestamp>,
     /// The newest failure of the sync or upload task.
     failed: Option<Timestamp>,
-    /// The age trip, latched until the age is zero.
-    tripped: bool,
+    /// The age trip, latched with the clock's start it tripped on until that start has moved
+    /// on: every commit that old has reached the replica.
+    tripped: Option<Timestamp>,
+}
+
+/// WAL frames past the synced position, as the clock dates them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Unstaged {
+    /// The observation that first saw them.
+    at: Timestamp,
+    /// Where the WAL ended then.
+    mark: WalMark,
+    /// The newest staged file then: the frames go into the files after it.
+    after: Option<Txid>,
 }
 
 impl Lag {
-    /// After a tick: whether anything committed is off the replica, the stamp of the oldest
-    /// pending staged file, and the time.
-    pub fn observe(
-        &mut self,
-        behind: bool,
-        oldest: Option<Timestamp>,
-        bound: MaxUnreplicatedAge,
-        now: Timestamp,
-    ) {
-        if !behind {
+    /// After a tick: what is off the replica, and the time.
+    pub fn observe(&mut self, seen: Observed, bound: MaxUnreplicatedAge, now: Timestamp) {
+        self.date_unstaged(seen, now);
+        let undated =
+            seen.pending.is_some() && seen.oldest.is_none() || seen.owed && self.unstaged.is_none();
+        self.seen = if undated {
+            Some(self.seen.unwrap_or(now))
+        } else {
+            None
+        };
+        let dates = [
+            self.unstaged.map(|unstaged| unstaged.at),
+            self.carried.map(|(_, at)| at),
+            seen.oldest.filter(|_| seen.pending.is_some()),
+            self.seen,
+        ];
+        let Some(oldest) = dates.into_iter().flatten().min() else {
             *self = Self::default();
             return;
-        }
-        let seen = *self.seen.get_or_insert(now);
-        // A stamp ahead of now (a clock that stepped back) says nothing older than now.
-        let since = oldest.map_or(seen, |stamp| stamp.min(seen)).min(now);
+        };
+        // A date ahead of now (a clock that stepped back) says nothing older than now.
+        let since = oldest.min(now);
         self.since = Some(since);
+        self.tripped = self.tripped.filter(|tripped| since <= *tripped);
         let at = since.saturating_add(bound.get());
-        if now >= at && self.failed.is_some_and(|failed| failed >= at) {
-            self.tripped = true;
+        if self.tripped.is_none() && now >= at && self.failed.is_some_and(|failed| failed >= at) {
+            self.tripped = Some(since);
         }
+    }
+
+    /// Moves the date of WAL frames the synced position passed to the files they went into,
+    /// drops a carried date the replica has passed, and dates frames newly seen.
+    fn date_unstaged(&mut self, seen: Observed, now: Timestamp) {
+        if let Some(unstaged) = self.unstaged
+            && !seen.owed
+            && unstaged.mark.passed_by(seen.synced)
+        {
+            self.unstaged = None;
+            let first = unstaged.after.map_or(Some(Txid::MIN), Txid::next);
+            if self.carried.is_none() {
+                self.carried = first.map(|first| (first, unstaged.at));
+            }
+        }
+        // Gone once the replica holds the file, or nothing pending holds a commit.
+        self.carried = self.carried.filter(|(txid, _)| {
+            seen.pending.is_some_and(|pending| pending >= *txid)
+                && seen.replicated.is_none_or(|replicated| replicated < *txid)
+        });
+        match (seen.ahead, self.unstaged) {
+            (Some(mark), None) => {
+                self.unstaged = Some(Unstaged {
+                    at: now,
+                    mark,
+                    after: seen.staged,
+                });
+            }
+            (None, Some(_)) if !seen.owed => self.unstaged = None,
+            (Some(_) | None, Some(_)) | (None, None) => {}
+        }
+    }
+
+    /// Where the WAL ended when the frames the clock dates were first seen, while it dates any.
+    #[must_use]
+    pub fn unstaged_mark(&self) -> Option<WalMark> {
+        self.unstaged.map(|unstaged| unstaged.mark)
     }
 
     /// The sync or upload task failed at `now`.
@@ -270,7 +391,7 @@ impl Lag {
             return false;
         };
         let at = since.saturating_add(bound.get());
-        if now < at || self.probed == Some(at) || self.tripped {
+        if now < at || self.probed == Some(at) || self.tripped.is_some() {
             return false;
         }
         self.probed = Some(at);
@@ -282,7 +403,7 @@ impl Lag {
     #[must_use]
     pub fn next_probe(&self, bound: MaxUnreplicatedAge) -> Option<Timestamp> {
         let at = self.since?.saturating_add(bound.get());
-        (!self.tripped && self.probed != Some(at)).then_some(at)
+        (self.tripped.is_none() && self.probed != Some(at)).then_some(at)
     }
 
     /// The clock's start while anything is off the replica.
@@ -294,7 +415,10 @@ impl Lag {
     /// The clock's start, when the age trip holds.
     #[must_use]
     pub const fn tripped(&self) -> Option<Timestamp> {
-        if self.tripped { self.since } else { None }
+        match self.tripped {
+            Some(_) => self.since,
+            None => None,
+        }
     }
 }
 

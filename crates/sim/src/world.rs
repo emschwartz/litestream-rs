@@ -394,8 +394,29 @@ impl World {
     /// holds whatever the rules' file still has, so the model takes it from
     /// their image instead of assuming the app wrote it.
     pub fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<CommitId> {
-        let before = self.model.newest_image().db_size();
         let app = self.sqlite.commit(pages, db_size)?;
+        Some(self.committed(pages, db_size, app))
+    }
+
+    /// As [`Self::app_commit`], by another application connection with a checkpoint count of
+    /// its own ([`SimSqlite::other_writer_commit`]).
+    pub fn other_writer_commit(
+        &mut self,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+    ) -> Option<CommitId> {
+        let app = self.sqlite.other_writer_commit(pages, db_size)?;
+        Some(self.committed(pages, db_size, app))
+    }
+
+    /// Takes a commit SQLite made into the model and the history.
+    fn committed(
+        &mut self,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+        app: crate::sqlite::AppCommit,
+    ) -> CommitId {
+        let before = self.model.newest_image().db_size();
         self.retire_generation(app.salts);
         let (written, db_size) = match self.sqlite.take_written() {
             Some(real) => (real.pages, real.db_size),
@@ -411,7 +432,7 @@ impl World {
             .model
             .commit(&written, db_size, app, self.remote_recorder.len());
         self.log_history();
-        Some(id)
+        id
     }
 
     /// Logs the model's new commits in the history, at the clock's time.
