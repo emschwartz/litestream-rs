@@ -215,6 +215,7 @@ struct Progress {
     replicated: Option<Txid>,
     commits: usize,
     retries: u64,
+    boots: u64,
 }
 
 impl Progress {
@@ -228,6 +229,7 @@ impl Progress {
                 .reach
                 .get("event.Retrying")
                 .saturating_add(runner.report.reach.get("event.Degraded")),
+            boots: runner.report.reach.get("event.Booted"),
         }
     }
 }
@@ -257,6 +259,7 @@ impl Runner {
         Err(Violation::HealthBlind {
             hold: name(hold),
             retries,
+            restarts: now.boots.saturating_sub(before.boots),
         })
     }
 
