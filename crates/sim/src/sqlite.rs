@@ -169,6 +169,10 @@ enum Conn {
     /// cron job). Its checkpoint count dies with it, so the app's next header is written
     /// under the app's own count.
     Cli,
+    /// Another application connection that stays open and commits (another process's writer):
+    /// it keeps a checkpoint count of its own, so after a restart whose writer rolled back it
+    /// writes the header again with the same salts and another seed.
+    OtherWriter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,6 +300,7 @@ struct State {
     readers: BTreeMap<Conn, Mark>,
     writer: Option<Conn>,
     app_checkpoints: u32,
+    other_writer_checkpoints: u32,
     ours_checkpoints: u32,
     writer_checkpoints: u32,
     rng: u64,
@@ -415,14 +420,26 @@ impl State {
     /// The app commits `pages` leaving `db_size` pages, then runs its automatic
     /// checkpoint.
     fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit> {
-        if db_size == 0 || !self.write(Conn::App, pages, Some(db_size)) {
+        self.commit_by(Conn::App, pages, db_size)
+    }
+
+    /// A commit by `by`; only the app's connection runs automatic checkpoints.
+    fn commit_by(
+        &mut self,
+        by: Conn,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+    ) -> Option<AppCommit> {
+        if db_size == 0 || !self.write(by, pages, Some(db_size)) {
             return None;
         }
         let commit = AppCommit {
             salts: self.index.salts,
             end: WalOffset::from_frame_index(self.index.mx_frame, self.page_size),
         };
-        self.autocheckpoint();
+        if by == Conn::App {
+            self.autocheckpoint();
+        }
         Some(commit)
     }
 
@@ -509,6 +526,7 @@ impl State {
     fn checkpoints(&mut self, conn: Conn) -> Option<&mut u32> {
         match conn {
             Conn::App => Some(&mut self.app_checkpoints),
+            Conn::OtherWriter => Some(&mut self.other_writer_checkpoints),
             Conn::Ours => Some(&mut self.ours_checkpoints),
             Conn::Writer => Some(&mut self.writer_checkpoints),
             Conn::OtherProcess(_) | Conn::Cli => None,
@@ -1152,6 +1170,7 @@ impl SimSqlite {
             readers: BTreeMap::new(),
             writer: None,
             app_checkpoints: 0,
+            other_writer_checkpoints: 0,
             ours_checkpoints: 0,
             writer_checkpoints: 0,
             rng: seed,
@@ -1253,6 +1272,16 @@ impl SimSqlite {
     /// connection holds the write lock.
     pub fn commit(&self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit> {
         self.with(|state| state.app_commit(pages, db_size))
+    }
+
+    /// Another application connection, which stays open, commits `pages` with database size
+    /// `db_size` under its own checkpoint count. `None` while another writer holds the lock.
+    pub fn other_writer_commit(
+        &self,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+    ) -> Option<AppCommit> {
+        self.with(|state| state.commit_by(Conn::OtherWriter, pages, db_size))
     }
 
     /// Arms a commit the app makes inside the engine's next tick, at `site`.

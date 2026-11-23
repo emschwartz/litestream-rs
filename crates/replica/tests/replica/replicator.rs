@@ -91,15 +91,43 @@ fn a_stop_before_the_first_boot_drains_without_waiting_for_a_poll() {
     }
 }
 
-/// The awaited form of a stop needs no runtime: a plain executor drives it.
+/// The awaited form of a stop needs no runtime: a plain executor drives it. The fake clock
+/// is released: no test step moves it, so a drain that has to wait (a read busy under the
+/// test's own commit, a failed upload) would otherwise wait for ever.
 #[test]
 fn a_stop_can_be_awaited() {
     let site = Site::new();
     let store = site.store();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
+    clock.release();
     let replicator =
         Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
     site.commit(2);
+    let stopped = lsr_core::conformance::block_on(replicator.stop(PATIENCE));
+    assert!(
+        matches!(stopped, Stopped::Drained { txid: Some(_) }),
+        "{stopped:?}"
+    );
+    site.assert_restores(&*store);
+}
+
+/// The same stop while the engine waits out a failed upload: the drain's retry needs the
+/// clock to move, and on a held fake clock it never does (this hung `just check` under load,
+/// where the engine's first reads met the test's commit).
+#[test]
+fn a_stop_awaited_during_a_retry_wait_drains() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.fail_uploads.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    clock.release();
+    let replicator =
+        Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
+    site.commit(2);
+    let retried = replicator.wait_until(PATIENCE, |health| health.counters.retries > 0);
+    assert!(retried.is_some_and(|health| health.counters.retries > 0));
+    faulty.fail_uploads.store(false, Ordering::SeqCst);
     let stopped = lsr_core::conformance::block_on(replicator.stop(PATIENCE));
     assert!(
         matches!(stopped, Stopped::Drained { txid: Some(_) }),

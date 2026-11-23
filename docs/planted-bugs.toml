@@ -395,6 +395,47 @@ name = "replica-replaced-on-one-read"
 fix = "34f1694"
 package = "lsr-core"
 tests = ["one_torn_read_of_the_replica_copy_does_not_write_over_it"]
+
+# A position at the start of a generation keeps the chain seed of the header it saw, though
+# SQLite wrote that header again with the same salts and another checkpoint sequence: the first
+# frame fails its checksum and the WAL reads as corrupt for good.
+[[bug]]
+name = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-core"
+tests = [
+    "a_step_from_the_start_follows_a_header_written_again_with_the_same_salts",
+]
+
+[[bug]]
+name = "start-seed-from-old-header-sqlite"
+patch = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "a_header_written_again_with_the_same_salts_replicates_what_follows",
+]
+
+[[bug]]
+name = "start-seed-from-old-header-sim"
+patch = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::a_header_written_again_by_another_connection_is_followed"]
+
+# A running position past the start whose frames were regrown from a header written again
+# (same salts, another seed) continues on the old running checksum; the next scan meets the
+# regrown chain as damage below the committed end.
+[[bug]]
+name = "rechained-before-end-ignored"
+fix = "6305fb48"
+package = "lsr-core"
+tests = [
+    "frames_regrown_from_a_header_written_again_are_a_rewind",
+]
+
 # The witness's page count compared with at least, not exactly: a pending file carrying one page
 # its range never wrote is proven and uploaded. Found by a blind recall pilot, which no layer caught.
 [[bug]]
@@ -545,6 +586,19 @@ fix = "claude/boundary-snapshot-pages"
 package = "lsr-sqlite"
 test_bin = "sqlite"
 tests = ["a_commit_between_the_proof_and_the_truncate_is_not_taken_for_damage"]
+
+# `app_connection` turned SQLITE_FCNTL_PERSIST_WAL on, so a connection that left WAL mode kept
+# the WAL and a page-size change made then read back as a corrupt database (docs/decisions.md D123).
+[[bug]]
+name = "app-connection-persists-wal"
+fix = "claude/persist-wal-vacuum"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "a_page_size_change_outside_wal_mode_leaves_a_sound_database",
+    "leaving_wal_mode_removes_the_wal",
+    "a_page_size_change_after_the_replicator_closed_last_leaves_a_sound_database",
+]
 
 [[bug]]
 name = "stamp-before-committed-read"
@@ -1163,10 +1217,9 @@ name = "journal-debt-not-recorded-sim"
 fix = "8ef5a8f"
 package = "lsr-sim"
 test_bin = "sim"
-tests = [
-    "faults::wal_fsync_fails_then_restart",
-    "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf",
-]
+# Seed 0xf's must-pass test (known_wrong.rs) passes with this bug planted too, so it does not
+# catch it and is not listed; why that history no longer reaches the restart is not yet known.
+tests = ["faults::wal_fsync_fails_then_restart"]
 
 [[bug]]
 name = "journal-debt-not-recorded-sqlite"
@@ -1257,7 +1310,10 @@ tests = ["swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss
 name = "rejected-replace-deletes"
 fix = "40f58942"
 package = "lsr-core"
-tests = ["a_rejected_write_over_an_object_that_was_there_deletes_nothing"]
+tests = [
+    "a_rejected_write_over_an_object_that_was_there_deletes_nothing",
+    "publish::tests::only_a_rejected_create_only_write_hands_back_its_object",
+]
 
 # A compaction writes over an output key that already holds an object, so its rejected commit
 # deletes what was there.
@@ -1519,7 +1575,7 @@ fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"
 tests = [
-    "failstop::a_crash_loop_trips_for_age",
+    "failstop::a_store_down_past_the_bound_trips_in_time_and_clears_after",
 ]
 
 [[bug]]
@@ -1565,12 +1621,16 @@ tests = [
 # The compactor took its output's commit acknowledgement as given: a store that acknowledged
 # the output short left a truncated level-N file, maintenance reported it compacted, and a later
 # restore of the latest state could not decode it. Every engine commit is now checked
-# (crates/core/src/checked.rs); this patch opens the compactor's upload around the check.
+# (crates/core/src/publish.rs); this patch opens the compactor's upload raw, around the check, which
+# the source guard also catches.
 [[bug]]
 name = "compact-commit-unchecked"
 fix = "claude/commit-size"
 package = "lsr-core"
-tests = ["compact::tests::an_output_acknowledged_short_is_deleted_and_reported"]
+tests = [
+    "compact::tests::an_output_acknowledged_short_is_deleted_and_reported",
+    "publish::guard::no_engine_module_calls_a_store_write_or_delete_outside_publish",
+]
 
 [[bug]]
 name = "compact-commit-unchecked-sim"
@@ -1587,7 +1647,7 @@ name = "short-commit-object-kept"
 fix = "claude/commit-size"
 package = "lsr-core"
 tests = [
-    "checked::tests::a_commit_acknowledged_short_is_deleted_and_reported",
+    "publish::tests::a_commit_acknowledged_short_is_deleted_and_reported",
     "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
 ]
 
@@ -1610,6 +1670,83 @@ fix = "a8092ab"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_file_staged_from_a_regrown_wal_is_judged_by_the_regrown_commit_seed_0x2b2"]
+
+# Fail-stop false trips on lag the replica did not have: one plant per rule the fix added.
+
+[[bug]]
+name = "failstop-dates-the-run"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "lag::a_steady_writer_whose_uploads_trail_by_a_tick_never_trips",
+]
+
+[[bug]]
+name = "failstop-dates-the-run-sim"
+fix = "87cd10d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::seed_0x330_does_not_trip",
+]
+
+[[bug]]
+name = "failstop-carried-outlives-its-file"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "failstop::tests::staged_frames_carry_their_date_until_the_replica_holds_them",
+]
+
+[[bug]]
+name = "failstop-carries-to-the-newest-file"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "failstop::tests::staged_frames_never_date_a_newer_file",
+]
+
+[[bug]]
+name = "failstop-checkpoint-quiet-forgotten"
+fix = "87cd10d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::seed_0x8ef_does_not_trip",
+]
+
+[[bug]]
+name = "failstop-trip-held-to-zero-age"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "failstop::tests::a_trip_for_age_clears_once_its_commits_land",
+]
+
+[[bug]]
+name = "failstop-doubt-baseline-ignored"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "lag::a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag",
+]
+
+[[bug]]
+name = "failstop-trip-held-to-zero-age-sim"
+fix = "87cd10d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::seed_0xa4d_does_not_trip",
+]
+
+[[bug]]
+name = "failstop-doubt-snapshot-is-lag"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "lag::a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag",
+]
 
 # Writing the journal only when the debt changes leaves a database that never failed a WAL
 # fsync without one, so every restart reports it missing.
@@ -1637,6 +1774,71 @@ fix = "6f700f9a"
 package = "lsr-cli"
 test_bin = "cli"
 tests = ["sidecar::a_deleted_journal_is_reported_on_the_next_start"]
+
+# A boot that restores a WAL-sync debt skips the ahead-of-WAL check, so a database file no commit made is replicated as clean (docs/decisions.md D103).
+[[bug]]
+name = "debt-boot-skips-page-check"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
+]
+
+# The ahead-of-WAL verdict is never written to the journal, so a restart forgets it and the restore point it keeps.
+[[bug]]
+name = "ahead-verdict-not-journaled"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
+    "actor::tests::journal::a_recorded_verdict_stops_once_under_strict_responses",
+]
+
+# The TRUNCATE that pays the debt runs before the check and copies the WAL into the database file, evidence and all.
+[[bug]]
+name = "ahead-truncate-before-check"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
+]
+
+# The check also compares pages a WAL frame covers, so a file the WAL is simply ahead of reads as damaged.
+[[bug]]
+name = "ahead-check-counts-covered-pages"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_whose_file_kept_its_pages_comes_up_clean",
+]
+
+# The verdict's restore point goes back to retention after a minute instead of seven days.
+[[bug]]
+name = "ahead-restore-point-released-early"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::the_restore_point_is_kept_for_the_window_across_a_restart",
+]
+
+# A boot re-dates the recorded verdict, so its window starts again at every restart and never ends.
+[[bug]]
+name = "ahead-window-restarts-at-boot"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::the_restore_point_is_kept_for_the_window_across_a_restart",
+]
+
+# The verdict and its restore point are kept for ever.
+[[bug]]
+name = "ahead-notice-never-ends"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::the_restore_point_is_kept_for_the_window_across_a_restart",
+]
+
 # `dir:` scanning made to agree with Go's walk (claude/dropin-dir): each was found by the Go
 # differential (compat `dropin_dir`), which needs the Go dumper and so is ignored; the config
 # tests below are its Go-free counterparts.
@@ -1784,3 +1986,36 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
+
+# Blind plant 05 of the recall pilot (issue #127): the uploader took a commit's acknowledged size as
+# given. Its original form (upload.rs restamping the size it wrote) cannot be written any more: the
+# size is checked inside publish before a Published exists. Re-expressed at the check, skipped for
+# the uploader's create-only writes.
+[[bug]]
+name = "upload-commit-size-unchecked"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed",
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
+]
+
+[[bug]]
+name = "upload-commit-size-unchecked-sim"
+fix = "plant"
+package = "lsr-sim"
+patch = "upload-commit-size-unchecked"
+tests = ["short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets"]
+
+# Blind plant 10 of the recall pilot (issue #127): a compaction output the store took and then
+# rejected (a digest that does not match) is not deleted, so a listing shows an object that does
+# not decode.
+[[bug]]
+name = "compact-rejected-output-kept"
+fix = "plant"
+package = "lsr-core"
+tests = ["maintain::tests::a_rejected_compaction_output_is_deleted_by_the_executor"]
+
+# Its sim kill was seed 0x14's verify history, which stopped reaching a rejected compaction output
+# when that test was re-pinned to seed 0xd. An unaided search for another is masked while the
+# swarm fails on a clean tree; add a sim entry once it is clean again.
