@@ -2029,7 +2029,7 @@ impl Actor {
     /// be listed (`crate::watch`). One that is not is read: gone, the replica
     /// lost files this process confirmed, and the uploader lists again (or
     /// the engine stops, as configured); found, the listing lags and nothing
-    /// is decided, so the watch stands for the next listing. With nothing
+    /// is planned from it, so the watch stands for the next listing. With nothing
     /// missing the watch moves to this listing.
     async fn watch_unit<R: ObjectStore>(
         &mut self,
@@ -2044,7 +2044,7 @@ impl Actor {
             return None;
         };
         match remote.read(&key, 0, ReadLen::or_chunk(1)).await {
-            Ok(_) => None,
+            Ok(_) => Some(self.list_again_later(now)),
             Err(StoreError::NotFound { .. }) => {
                 Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
             }
@@ -2230,6 +2230,21 @@ impl Actor {
         }
     }
 
+    /// A snapshot the store took: the next listing must show it, so a listing that hides it
+    /// plans nothing (`crate::regression_watch`), and no second snapshot takes its key.
+    fn snapshot_written(&mut self, info: FileInfo, now: Timestamp, created_at_read: u64) -> Tick {
+        self.maintained(now);
+        self.engine.maintain.watch = RegressionWatch::made(self.engine.maintain.watch, info.key);
+        let event = MaintainedEvent::Snapshot(info);
+        self.ran(
+            Event::Maintained {
+                event,
+                created_at_read,
+            },
+            now,
+        )
+    }
+
     /// A level-9 snapshot of a fresh proof. A sync that staged a file first
     /// ends the tick: the upload runs before the snapshot is due again.
     async fn snapshot_job<
@@ -2300,17 +2315,7 @@ impl Actor {
             .state
             .record_snapshot(now, written.as_ref().err().map(|failed| &failed.fault));
         match written {
-            Ok(info) => {
-                self.maintained(now);
-                let event = MaintainedEvent::Snapshot(info);
-                self.ran(
-                    Event::Maintained {
-                        event,
-                        created_at_read,
-                    },
-                    now,
-                )
-            }
+            Ok(info) => self.snapshot_written(info, now, created_at_read),
             Err(failed) => self.snapshot_failed(env.remote, job, failed, now).await,
         }
     }
