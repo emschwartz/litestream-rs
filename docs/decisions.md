@@ -656,7 +656,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 ## D74. Every engine commit checks the size the store acknowledged (delegated)
 
 - **Options:** keep the check in the uploader alone (which retried but left the short object listed) and in `Retrying`, which the engine never wraps its stores in; check in each engine call site; one upload type every engine commit goes through.
-- **Choice:** one type, `Checked` (`crates/core/src/checked.rs`). The uploader, the compactor and the staging writer open uploads only through it. It counts the bytes written; a commit acknowledging another size deletes the object, then reports `CommitSizeMismatch { removed }`. `Retrying` settles its own commits with the same function, so the rule is written once.
+- **Choice:** one type, `Checked` (`crates/core/src/checked.rs`; since D75 `publish::Writer` in `crates/core/src/publish.rs`). The uploader, the compactor and the staging writer open uploads only through it. It counts the bytes written; a commit acknowledging another size deletes the object, then reports `CommitSizeMismatch { removed }`. `Retrying` settles its own commits with the same function, so the rule is written once.
 - **Why:** the compactor took a short acknowledgement as a published output and maintenance then deleted its inputs, so `restore Latest` failed to decode the replica (simulator seed 0x46, once the simulator's size-mismatch fault published a short object). The uploader saw the mismatch but left the object listed until its retry, so restores failed in between.
 - **Cost accepted:** a delete after every mismatched commit. A store that misreports sizes on objects it holds whole loses them to the delete and they are written again; the caller still holds the bytes until a verified listing. The type does not stop a future engine function from calling `begin_upload` directly; the planted bugs `compact-commit-unchecked` and `short-commit-object-kept` catch the two paths that exist.
 - **Revisit if:** a new engine path writes to a store.
@@ -670,6 +670,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** `hit` is exact only for store faults and injected SQLite failures; for every other class it means an engine tick ran with the fault in place or after it, which is not proof the damage was read. A row whose detection sits in a `const fn` mapping arm has no site yet ("not yet placed"). A rare class or row that a short night misses makes that night red until a floor or an exemption says otherwise.
 - **Revisit if:** a night goes red on a key that a longer soak reaches (add a floor per key), or the marks start deriving BEHAVIOR's D, S and R (section 7.3, item 2).
 - **Links:** #127.
+
+## D75. One module writes to and deletes from the stores (delegated)
+
+- **Options:** keep each rule (the size check, delete only what a rejected write created, why a delete is allowed) at the call sites that need it; one module that owns every engine write and delete, enforced by review; the same module enforced by a check that fails the build's gate.
+- **Choice:** `crate::publish` owns them, enforced by a source guard (`publish::guard`, a test `just check` runs). Its `Writer` is the only way to write: it does not implement `Upload`, so its commit can only return a `Published` (the commit checked against the bytes written, saying whether the write created or replaced the object) or an `Unpublished`. Only a rejected create-only write hands back a `Rejected`, and `remove_rejected` deletes nothing else. Every other replica delete names a reason (`Removal`: retention, a rotten object a later file covers, a rejected snapshot or compaction output); staged files go through `remove_staged`. The guard counts calls of a store's `begin_upload` and `delete` in lsr-core's non-test source and lets through only the store implementations and the wrappers that pass calls through, each listed with why.
+- **Why:** three engine bugs were one rule missing on one path (#145, 0x191, the unchecked compaction commit): issue #171 item 1. A rule in one module, with no other path to the store, cannot be missed on a new path.
+- **Cost accepted:** the guard is a scan of the source, not the type system: it reads call names, so a store call written another way (a function pointer, a macro) would pass it, and it covers lsr-core only. Staging and replica still share one store trait and one error type (the next step makes them distinct). A key a read shows already holds our bytes is not yet a `Published`; item 4 of #171 adds it with the proof types that consume it.
+- **Revisit if:** another crate writes to a store for the engine, or the store trait can be split so that raw writes are unreachable by type.
+- **Links:** issue #171 item 1; D74; `crates/core/src/publish.rs`.
 
 ## Unverified, not recorded
 
