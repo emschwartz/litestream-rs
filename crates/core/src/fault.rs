@@ -106,7 +106,8 @@ pub enum Fault {
     /// filesystem; the handling is right either way, since nothing the
     /// replica promised depends on the lost file.
     StagedLost,
-    /// The local disk is full.
+    /// A disk the engine writes to is full: the database's, staging's, or a filesystem
+    /// replica's.
     LocalDiskFull,
     /// A local read or write failed.
     LocalIo,
@@ -1033,6 +1034,12 @@ impl Fault {
     #[must_use]
     pub fn from_remote(err: &StoreError) -> Self {
         match err {
+            // A filesystem replica out of room: the operator frees space, as for staging and
+            // as Go's `no space left on device` asks, whichever disk it is.
+            StoreError::Transient {
+                kind: io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded,
+                ..
+            } => Self::LocalDiskFull,
             StoreError::Transient { .. } => Self::StoreTransient,
             StoreError::Throttled { retry_after, .. } => Self::StoreThrottled {
                 retry_after: retry_after.filter(|wait| !wait.is_zero()),

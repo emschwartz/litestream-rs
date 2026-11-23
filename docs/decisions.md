@@ -59,6 +59,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D105 | How does the simulator kill a process right after an injected fault? | Drawn last in half the swarm; the first tick in which a store fault or SQLite-side failure fires after a fault operation is followed by a process crash, once per operation | Claude (journal), **delegated** | 2026-11-23 | open to owner review |
 | D130 | How does the simulator run the real directory store, and who judges it? | A filesystem trait in store-fs, an in-memory filesystem under the crash law in the sim, half the swarm on it, a staging-contract judge | Claude (sim-real-store-fs), **delegated** | 2026-11-22 | open to owner review |
 | D131 | What does the engine defend against? | Accidents, not deliberate forgery | owner | 2026-11-23 | decided |
+| D132 | What fault is a full disk under a directory replica? | `LocalDiskFull`, as for staging | Claude, **delegated** | 2026-11-23 | open to owner review |
 | D70 | How do simulated runs draw a fault that reaches an open engine defect? | As a known-wrong cell: out of the per-push seeds, drawn by the nightly and campaigns with its failures counted as known, with a pinned seed that fails once the fix lands | parent session; mechanism by Claude (error-domain), **delegated** | 2026-11-22 | decided |
 | D71 | Which errors may a simulated history inject? | Those a shipped implementation returns from that call with the world unchanged; a world fact is drawn as the world change; a cell the model cannot follow is listed as unmodelled, never drawn | Claude (error-domain), **delegated** | 2026-11-22 | open to owner review |
 | D72 | How long may a simulated fault last, and what may happen inside it? | Up to 200 ticks, with a drawn sub-history; a restart inside it is drawn only where known defects are counted, since it reaches D9 | Claude (overlapping-faults), **delegated** | 2026-11-22 | open to owner review |
@@ -806,3 +807,12 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** an application that runs at OFF on purpose fails the check; it must raise the level to replicate.
 - **Revisit if:** the `_litestream_seq` bumps become frequent enough that a sync each costs.
 - **Links:** #197.
+
+## D132. A full disk under a directory replica (delegated)
+
+- **Question:** the directory store turns every I/O error into `StoreError::Transient`, and the replica classifier reported all of them as `StoreTransient`, ENOSPC and EDQUOT included. Staging already maps those two to `LocalDiskFull`, and a replica upload that runs out of scratch names was already `LocalDiskFull`. Should a full replica disk be `StoreTransient`, `LocalDiskFull`, or a new fault?
+- **Choice (Claude, as the parent session asked, delegated):** `LocalDiskFull`. `Fault::from_remote` maps a transient `StorageFull` or `QuotaExceeded` to it.
+- **Why:** the operator's fix is the same whichever disk it is: free space. `StoreTransient` says "wait", which never fixes a full disk. Go reports `no space left on device` for a full replica directory exactly as for a full database disk, and retries on the next sync; it has no separate class. An S3 store never returns these kinds, so only a directory replica, usually on a local or mounted disk, reaches the arm. A new fault would add a variant every exhaustive match and the health table must carry, for an answer no different from `LocalDiskFull`'s.
+- **Cost accepted:** a replica on a network mount that fills is reported as a local disk; the fault's doc now says "a disk the engine writes to", and the stall names the task (upload, maintenance) that hit it.
+- **Revisit if:** the health handle needs to tell the database's disk from the replica's (a separate alert or runbook step), or a store other than the directory store returns these kinds.
+- **Links:** `docs/BEHAVIOR.md` UP-19; `crates/core/src/fault.rs` (`from_remote`); the suspected cause, not reproduced, of a load-sensitive `StoreTransient` in lsr-sqlite `faults::a_read_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing`.
