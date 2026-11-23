@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/run.rs b/crates/sim/src/run.rs
+index f62ff35e..6e4b5624 100644
+--- a/crates/sim/src/run.rs
++++ b/crates/sim/src/run.rs
+@@ -1719,7 +1719,7 @@ impl Runner {
+             (WalOp::FlipLastFrameBit, Heal::No) => self.w.adopt_corrupt_state(),
+             (WalOp::FlipLastFrameBit, Heal::Yes) => self.w.adopt_local_state(),
+             // A regrowth that kept its commit marks made a commit at each of them.
+-            (WalOp::RegrowSameSalts(_), _) => self.w.adopt_regrown(),
++            (WalOp::RegrowSameSalts(_), _) => self.w.adopt_local_state(),
+             (
+                 WalOp::TearHeader
+                 | WalOp::TruncateAtFrame(_)
