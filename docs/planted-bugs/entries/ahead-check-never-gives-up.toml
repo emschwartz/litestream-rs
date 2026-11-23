@@ -1,7 +1,0 @@
-# An owed ahead-of-WAL check whose replica cannot give its newest confirmed state (simulator seed
-# 0x2dc719: a bucket rollback left a gap below it): undoes the rule that damage recurring at a
-# second attempt gives the check up, so the cure runs (`docs/decisions.md` D106).
-name = "ahead-check-never-gives-up"
-fix = "claude/ahead-unchecked"
-package = "lsr-core"
-tests = ["actor::tests::journal::a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs"]

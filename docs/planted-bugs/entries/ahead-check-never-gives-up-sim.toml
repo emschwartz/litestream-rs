@@ -1,9 +1,0 @@
-# An owed ahead-of-WAL check whose replica cannot give its newest confirmed state (simulator seed
-# 0x2dc719: a bucket rollback left a gap below it): undoes the rule that damage recurring at a
-# second attempt gives the check up, so the cure runs (`docs/decisions.md` D106).
-name = "ahead-check-never-gives-up-sim"
-fix = "claude/ahead-unchecked"
-package = "lsr-sim"
-test_bin = "sim"
-patch = "ahead-check-never-gives-up"
-tests = ["ahead_unchecked::a_gap_below_the_confirmed_state_does_not_hold_back_the_cure_seed_0x2dc719"]

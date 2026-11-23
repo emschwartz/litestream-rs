@@ -1,41 +1,62 @@
 //! The boot check for a database file ahead of its WAL (`docs/decisions.md` D103) when the
-//! replica cannot give its own newest confirmed state.
+//! replica cannot give its own newest confirmed state (D106).
 
+use lsr_core::{SourceError, SourceOp};
+use lsr_sim::generate::{AppAt, AppOp, EnvFault, Op, RemoteOp};
 use lsr_sim::run::run_ops;
-use lsr_sim::{AfterRestart, ClockLaw, Op, Opts, Seed};
+use lsr_sim::{AfterRestart, ClockLaw, Opts, Seed};
 
-fn opts(trace: bool) -> Opts {
-    Opts {
-        drawn: true,
-        block_crash_law: true,
-        lying_wal_sync: true,
-        after_restart: AfterRestart::Redo,
-        clock_law: ClockLaw::PerTick,
-        error_domain: true,
-        trace,
-        ..Opts::default()
-    }
-}
-
-/// A bucket rollback leaves a gap below the replica's newest confirmed transaction, then the
-/// WAL sync fails and a boot owes the check. The check cannot restore the state it compares
-/// against; it must not retry that for ever and hold back the TRUNCATE that pays the debt.
+/// A bucket rollback takes the replica's newest level-0 file, and the engine uploads the next
+/// one past the hole, so the replica's newest confirmed state can no longer be restored. Then the
+/// WAL sync fails and a restart owes the check, which compares against exactly that state. Its
+/// first attempt reports the damage, the next one, after the backoff, gives the check up, and
+/// the cure runs: the check must not retry for ever and hold back the TRUNCATE that pays the
+/// debt.
 #[test]
-fn a_gap_below_the_confirmed_state_does_not_hold_back_the_cure_seed_0x2dc719() {
-    // A restart with the debt recorded owes the check; its first attempt meets the gap, and the
-    // second, after the backoff, gives it up so the cure runs.
-    let retry = [
+fn a_gap_below_the_confirmed_state_does_not_hold_back_the_cure() {
+    let ops = [
+        Op::Commit {
+            pages: 1,
+            grow: false,
+        },
+        Op::Shutdown,
+        Op::Shutdown,
+        Op::Tick,
+        Op::Remote(RemoteOp::RollBack),
+        Op::Shutdown,
+        Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
+        Op::AppInTick {
+            at: AppAt::Call(20),
+            op: AppOp::Commit {
+                pages: 4,
+                grow: false,
+            },
+        },
+        Op::Tick,
+        // The restart with the debt recorded owes the check: its first attempt meets the gap.
         Op::Shutdown,
         Op::Tick,
         Op::Tick,
+        // The second attempt, after the backoff, gives the check up; the cure runs after that.
         Op::ClockJump(2_000),
         Op::Tick,
         Op::ClockJump(5_000),
         Op::Tick,
         Op::Tick,
     ];
-    let ops = [crate::histories::seed_0x2dc719::OPS, &retry].concat();
-    let report = match run_ops(Seed::new(0x2dc719), &ops, &opts(true)) {
+    // The disk lies about the engine's WAL syncs and power losses follow the block law; after a
+    // restart the application redoes its unreplicated commits.
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Redo,
+        clock_law: ClockLaw::PerTick,
+        error_domain: true,
+        trace: true,
+        ..Opts::default()
+    };
+    let report = match run_ops(Seed::new(1), &ops, &opts) {
         Ok(report) => report,
         Err(failure) => panic!("{failure}\n{}", failure.trace.join("\n")),
     };
