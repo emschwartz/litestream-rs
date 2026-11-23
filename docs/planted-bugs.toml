@@ -875,7 +875,7 @@ test_bin = "sim"
 tests = [
     "foreign_file_while_down_stops",
     "vm_restore_stops_until_a_take_over",
-    "latest_never_goes_back_after_two_second_writers_seed_0xb9",
+    "a_boot_never_builds_on_files_nothing_local_vouches_for_seed_0xb44",
 ]
 
 # A restore that leaves no takeover record: the replicator started on it refuses the replica.
@@ -1016,7 +1016,7 @@ name = "takeover-before-drop-skipped-sim"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+tests = ["a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7"]
 
 # A running drop of an unreadable staged file records only through the confirmed transaction,
 # short of a file whose upload published with its answer lost.
@@ -1025,7 +1025,7 @@ name = "running-drop-record-capped-at-confirmed"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5"]
+tests = ["a_running_drop_records_past_an_unconfirmed_upload_seed_0x348"]
 
 # A boot drop records only through the confirmed transaction, short of a listed tail the
 # listing judged torn.
@@ -1034,7 +1034,7 @@ name = "boot-drop-record-capped-at-confirmed"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+tests = ["a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7"]
 
 # An unanswered request for the record asks again at once, forever, instead of waiting.
 [[bug]]
@@ -1147,7 +1147,7 @@ name = "success-keeps-a-stall"
 fix = "checker-holes (stall liveness)"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0x31c"]
+tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8"]
 
 [[bug]]
 name = "journal-debt-not-recorded"
@@ -1165,7 +1165,7 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = [
     "faults::wal_fsync_fails_then_restart",
-    "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf",
+    "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0x21",
 ]
 
 [[bug]]
@@ -1233,7 +1233,7 @@ fix = "plant"
 patch = "compact-local-read-as-remote"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["compaction_takes_a_staging_denial_as_staging_seed_0xb9e"]
+tests = ["compaction_takes_a_staging_denial_as_staging_seed_0x68f"]
 
 # The history judge remembers the previous latest restore as the nodes that held its content
 # then, so a redo that rebuilds that content on a new branch reads as an unreported step back.

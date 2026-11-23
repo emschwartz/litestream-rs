@@ -24,7 +24,7 @@
 
 use lsr_sim::generate::WalOp;
 use lsr_sim::run::run_ops;
-use lsr_sim::{Hold, Op, Opts, RunReport, Seed, Weights, replay_line, run};
+use lsr_sim::{AfterRestart, ClockLaw, Hold, Op, Opts, RunReport, Seed, Weights, replay_line, run};
 
 const STEPS: u32 = 300;
 
@@ -384,66 +384,27 @@ fn survival_campaign_swarm() {
     assert_eq!(failed, 0);
 }
 
-/// Swarm seed 0xb9 from the survival campaign, shrunk to 13 operations, every one needed (on
-/// `claude/survival-followup`, with the app doing nothing after a restart; it fails as well
-/// with redone or new work, and under either crash law). Two second writers, each removed by
-/// the operator and followed by a restart, a corrupt publish and a checksum-mismatch upload:
-/// a restore of the latest state goes back from a later node of the history to an earlier one
-/// on the same branch with no rewind recorded, while the oracle passes. The second hold is a
-/// lagging listing only for its commits, ticks and judgments; the engine never sees it. The
-/// same class as D9 in `docs/BEHAVIOR.md`: the engine was down when the second writer's files
-/// appeared, so the boot took them for its own lost staging and snapshotted above them. The
-/// boot now refuses replica files that neither the live WAL nor a takeover record vouches for
-/// (BOOT-22).
+/// Seed 0xb44 of the fixed set's mix, its first 83 operations, recorded: other writers' files
+/// appear while the engine is down, among crashes, lagging listings and bucket rollbacks. With
+/// the boot gate refusing nothing (the plant `boot-gate-refuses-nothing-sim`), the boot builds
+/// on those files and a restore of transaction 10 returns pages no commit made. It replaces
+/// swarm seed 0xb9 (two second writers, then a latest that went back), whose history stopped
+/// at the other writer once the running engine learned to stop on one. The boot refuses replica
+/// files that neither the live WAL nor a takeover record vouches for (BOOT-22).
 #[test]
-fn latest_never_goes_back_after_two_second_writers_seed_0xb9() {
-    use lsr_core::{StoreError, StoreOp};
-    use lsr_sim::{CrashKind, FaultShape, Target};
-    let throttled = StoreError::Throttled {
-        op: StoreOp::Delete,
-        retry_after: None,
-    };
-    let reset = StoreError::Transient {
-        op: StoreOp::List,
-        kind: std::io::ErrorKind::ConnectionReset,
-    };
-    let remote = |op, ahead, shape| Op::StoreFault {
-        target: Target::Remote,
-        op,
-        ahead,
-        shape,
-    };
-    let ops = [
-        remote(StoreOp::Delete, 1, FaultShape::Error(throttled)),
-        Op::Hold {
-            hold: Hold::ReadersHeld,
-            ticks: 4,
-        },
-        Op::Tick,
-        Op::Tick,
-        Op::Crash(CrashKind::Process),
-        remote(StoreOp::Upload, 0, FaultShape::CorruptPublish),
-        Op::SecondWriter { ticks: 5 },
-        Op::SecondWriter { ticks: 6 },
-        remote(StoreOp::Upload, 1, FaultShape::CorruptPublish),
-        remote(StoreOp::Upload, 0, FaultShape::ChecksumMismatch),
-        Op::StoreFault {
-            target: Target::Staging,
-            op: StoreOp::List,
-            ahead: 1,
-            shape: FaultShape::Error(reset),
-        },
-        Op::Tick,
-        Op::Hold {
-            hold: Hold::LaggingListing,
-            ticks: 7,
-        },
-    ];
+fn a_boot_never_builds_on_files_nothing_local_vouches_for_seed_0xb44() {
     let opts = Opts {
         drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: AfterRestart::Busy,
+        clock_law: ClockLaw::EachRead,
+        overlap: false,
+        error_domain: true,
+        staging_fs: false,
         ..Opts::default()
     };
-    if let Err(failure) = run_ops(Seed::new(0xb9), &ops, &opts) {
+    if let Err(failure) = run_ops(Seed::new(0xb44), crate::histories::seed_0xb44::OPS, &opts) {
         panic!("{failure}");
     }
 }
@@ -462,27 +423,50 @@ fn an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd() {
     }
 }
 
-/// Unaided search seed 0xf45b5 under the error-domain generator, which moved seed 0xd off this
-/// path: a running drop of an unreadable staged copy whose upload published with its answer
-/// lost. With the takeover record capped at the confirmed transaction, a later snapshot took
-/// that transaction's id again ("transaction 21 covers commit 89 and then commit 90").
+/// Seed 0x348 of the fixed set's mix, its first 103 operations, recorded: a running drop of an
+/// unreadable staged copy whose upload published with its answer lost. With the takeover
+/// record capped at the confirmed transaction (the plant
+/// `running-drop-record-capped-at-confirmed`), a later boot refuses the engine's own file: "a
+/// boot refused replica files through 8 with staging intact and no other writer". It replaces
+/// unaided seed 0xf45b5, whose history no longer reached the drop on the merged tree.
 #[test]
-fn a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5() {
-    let seed = lsr_sim::Seed::new(0xf45b5);
-    if let Err(failure) = lsr_sim::run(seed, 300, &lsr_sim::Weights::mixed(seed)) {
+fn a_running_drop_records_past_an_unconfirmed_upload_seed_0x348() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Nothing,
+        clock_law: ClockLaw::PerTick,
+        overlap: false,
+        error_domain: false,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x348), crate::histories::seed_0x348::OPS, &opts) {
         panic!("{failure}");
     }
 }
 
-/// Seed 0x3ed of the fixed set's mix, 279 operations. Under lying replica reads a boot judges
-/// the replica's newest level-0 file (the engine's own upload) torn, and drops the staged
-/// copy that a crash left unverifiable. With the takeover capped at the confirmed transaction
-/// the record stopped one short of that file, and once reads were honest the next boot
-/// refused it. The record is now capped at the replica's newest listed level-0 key.
+/// Seed 0x2e7 of the fixed set's mix, its first 198 operations, recorded: a boot drops staged
+/// files the replica holds. Without the takeover kept before the drop (the plant
+/// `takeover-before-drop-skipped-sim`), or with it capped at the confirmed transaction (the
+/// plant `boot-drop-record-capped-at-confirmed`), the next boot refuses the engine's own files:
+/// "a boot refused replica files through 11 with staging intact and no other writer". It
+/// replaces seed 0x3ed, whose history no longer reached the drop on the merged tree.
 #[test]
-fn a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed() {
-    let seed = lsr_sim::Seed::new(0x3ed);
-    if let Err(failure) = lsr_sim::run(seed, 279, &lsr_sim::Weights::mixed(seed)) {
+fn a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Busy,
+        clock_law: ClockLaw::EachRead,
+        overlap: false,
+        error_domain: false,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x2e7), crate::histories::seed_0x2e7::OPS, &opts) {
         panic!("{failure}");
     }
 }
