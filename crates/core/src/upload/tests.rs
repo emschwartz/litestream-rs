@@ -1742,3 +1742,20 @@ fn a_relist_reads_the_confirmed_key_first_past_a_wide_gap() {
 fn starts_of(store: &MemStore) -> Starts {
     Starts::of(&block_on(Inventory::load(store)).unwrap())
 }
+
+proptest! {
+    /// A probe past a listing starts at the first transaction past both what the listing
+    /// shows and what was confirmed short of it: after a listing that ends below what was
+    /// confirmed it starts at the confirmed one (a relist proves it is still there), and
+    /// after one that reaches past it, at the transaction after the listing's end.
+    #[test]
+    fn a_probe_starts_past_the_listing_and_at_what_was_confirmed(
+        listed in proptest::option::of(1_u64..40),
+        confirmed in proptest::option::of(1_u64..40),
+    ) {
+        let first = (1_u64..=41).find(|t| {
+            listed.is_none_or(|listed| *t > listed) && confirmed.is_none_or(|confirmed| *t >= confirmed)
+        });
+        prop_assert_eq!(first_past(listed.map(txid), confirmed.map(txid)), first.map(txid));
+    }
+}
