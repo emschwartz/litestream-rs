@@ -228,6 +228,8 @@ pub struct Opts {
     pub staging_fs: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
+    /// Which SQLite the engine runs against: the rule model by default.
+    pub sqlite: crate::side::SideMaker,
 }
 
 /// Which judges a run consults. Both by default; one alone measures what it catches unaided.
@@ -430,7 +432,7 @@ const SETTLE_AFTER_RESTART: usize = 8;
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
     fn configured(seed: Seed, opts: &Opts) -> Self {
-        let mut runner = Self::new(seed).with_staging_fs(seed, opts);
+        let mut runner = Self::new(seed, &opts.sqlite).with_staging_fs(seed, opts);
         runner.lenient = opts.drawn;
         if opts.drawn {
             runner.draw_power_law(seed, opts);
@@ -451,9 +453,9 @@ impl Runner {
         runner
     }
 
-    fn new(seed: Seed) -> Self {
+    fn new(seed: Seed, sqlite: &crate::side::SideMaker) -> Self {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
-        let mut w = World::new(seed, page_size, FIRST_DB_PAGES);
+        let mut w = World::over(seed, sqlite.make(seed, page_size, FIRST_DB_PAGES));
         w.start_driver();
         let start = w.clock.now();
         let image = crate::history::image_digest(&w.model.newest_image());
@@ -1874,6 +1876,13 @@ impl Runner {
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
             EnvFault::DriverWritesNothing => self.w.sqlite.driver_writes_nothing_once(),
+            // The database SQLite serves now reads the evicted frames' older bytes: the
+            // model follows it as damage, and the history judge refuses a restore that gives it.
+            EnvFault::EvictPageCache => {
+                let acted = self.w.sqlite.evict_page_cache();
+                self.scenario_bool("EvictPageCache", acted)?;
+                self.w.adopt_evicted();
+            }
             EnvFault::FlipDatabasePage(pgno) => {
                 let flipped = self.w.sqlite.flip_db_page(pgno);
                 self.scenario_bool("FlipDatabasePage", flipped)?;
@@ -2499,6 +2508,10 @@ impl Runner {
         let (kept, holes) = self.w.sqlite.block_losses();
         reach.add("power.block_kept_unsynced", u64::from(kept));
         reach.add("power.block_hole", u64::from(holes));
+        reach.add(
+            "power.db_unsynced_blocks",
+            u64::from(self.w.sqlite.db_torn_losses()),
+        );
         reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
         reach.add(
             "batch.remote_calls",

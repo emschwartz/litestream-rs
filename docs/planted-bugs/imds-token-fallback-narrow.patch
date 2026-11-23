@@ -1,0 +1,16 @@
+diff --git a/crates/store-s3/src/chain/remote.rs b/crates/store-s3/src/chain/remote.rs
+index 444ee162..51e7ad5a 100644
+--- a/crates/store-s3/src/chain/remote.rs
++++ b/crates/store-s3/src/chain/remote.rs
+@@ -358,7 +358,10 @@ impl InstanceMetadata {
+             Ok(response) if response.status() == 400 => {
+                 Err(status_error(IMDS, response.status(), None))
+             }
+-            Ok(response) => fallback(status_error(IMDS, response.status(), None)),
++            Ok(response) if matches!(response.status(), 403..=405) => {
++                fallback(status_error(IMDS, response.status(), None))
++            }
++            Ok(response) => Err(status_error(IMDS, response.status(), None)),
+             Err(err) => fallback(source_error(SourceError::Unreachable {
+                 provider: IMDS,
+                 why: err.to_string(),

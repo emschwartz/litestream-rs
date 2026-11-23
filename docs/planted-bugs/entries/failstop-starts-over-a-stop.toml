@@ -1,0 +1,7 @@
+name = "failstop-starts-over-a-stop"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "failstop::tests::the_gate_follows_the_table",
+    "failstop::tests::the_release_latches",
+]

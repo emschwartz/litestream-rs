@@ -1,0 +1,8 @@
+name = "meta-dir-unlocked"
+fix = "a939338"
+package = "lsr-replica"
+test_bin = "replica"
+tests = [
+    "second_writer::a_second_engine_on_one_meta_directory_is_refused",
+    "second_writer::a_second_process_on_one_meta_directory_is_refused",
+]

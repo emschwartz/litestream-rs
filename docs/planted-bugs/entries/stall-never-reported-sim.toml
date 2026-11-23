@@ -1,0 +1,7 @@
+# A stall threshold no outage reaches: a plain-retry fault never degrades, the defect 538bd84
+# fixed, judged by the simulator's health-truth check under a long outage hold.
+name = "stall-never-reported-sim"
+fix = "538bd84"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_halt_long_enough_to_stall_is_reported_degraded"]

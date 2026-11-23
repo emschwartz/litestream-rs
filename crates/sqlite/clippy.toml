@@ -6,7 +6,7 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-dbg-in-tests = true
 
-# TigerStyle's limit; see docs/PLAN.md and docs/function-length.md.
+# TigerStyle's limit; see docs/PLAN.md.
 too-many-lines-threshold = 70
 
 # Time and sleep come in through `Clock`, `Sleeper` and the tick's `now`, so the

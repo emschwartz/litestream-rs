@@ -1,0 +1,7 @@
+# The replicator never copies the journal's signal into its health, so the daemon shows
+# nothing when a journal is lost.
+name = "journal-signal-not-published"
+fix = "6f700f9a"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::a_deleted_journal_is_reported_on_the_next_start"]

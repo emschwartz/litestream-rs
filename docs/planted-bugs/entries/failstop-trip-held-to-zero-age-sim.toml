@@ -1,0 +1,7 @@
+name = "failstop-trip-held-to-zero-age-sim"
+fix = "87cd10d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::seed_0xa4d_does_not_trip",
+]

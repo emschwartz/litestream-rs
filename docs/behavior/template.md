@@ -29,7 +29,7 @@ Rows that earn none of the three carry one of these instead:
 | **known wrong** | A defect is open. Section 6 has it |
 | **accepted, undetected** | A stated limit of the design |
 
-Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "local", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs.toml` and re-planted nightly.
+Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs/` and re-planted nightly.
 
 **Tally of the 176 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
 
@@ -242,7 +242,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Journal mode changed away from WAL while the engine runs | In by SQLite's own rule | The engine's read transaction blocks it | sim `our_reader_blocks_leaving_wal_mode` |
 | Journal mode changed away from WAL while the engine is down | In | Start puts the database back in WAL mode, or refuses with `NotWal` (CFG-4); the first sync is a snapshot | **untested** end to end |
 | The database file replaced by another file at the same path | Partly | While running: the WAL's device and inode no longer match, `wal_unlinked` (RUN-6). While down: a snapshot, since the WAL cannot continue | replica `a_database_replaced_after_a_panic_is_degraded_and_not_reopened`. Inode number reuse making a different file look the same: **unknown** |
-| A process that closes a file descriptor on the database inside the application's process | Out. Reason: POSIX semantics give a library no way to see or stop it; it is an embedding rule | POSIX locks for the whole process drop. Not detected | None. The embedding rules forbid it (`README`, library section) |
+| A process that closes a file descriptor on the database inside the application's process | Out. Reason: POSIX semantics give a library no way to see or stop it; it is an embedding rule | POSIX locks for the whole process drop. Not detected | None. The embedding rules forbid it (`crates/sqlite/src/lib.rs`, module doc) |
 | `synchronous=NORMAL` (the usual WAL setting) and power loss | In | SQLite leaves committed frames unsynced until its next checkpoint, so power loss takes back acknowledged commits: SQLite's contract. The engine fsyncs the WAL before staging, so the replica does not run ahead on an honest disk; after the loss the boot continues or snapshots by the boot rows. The LazyFS rig sees the database lose acknowledged commits in most runs | LazyFS; sqlite `power_loss_at_each_wal_sync_loses_no_acknowledged_transaction` |
 | `synchronous=OFF` | Out. Reason: SQLite itself promises no crash consistency, so there is no committed history to be faithful to | Not detected (A10) | None |
 

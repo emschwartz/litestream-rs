@@ -44,6 +44,7 @@ mod chain;
 mod checks;
 mod dump;
 mod error;
+mod fake_aws;
 mod generate;
 mod golive;
 mod handover;
@@ -72,6 +73,7 @@ pub use dump::{
     DumpReplicaConfig, Parsed, go_dump, go_parse, rust_dump, rust_parse,
 };
 pub use error::CompatError;
+pub use fake_aws::{Answer, Answers, FakeAws, Roles, TokenAnswer};
 pub use generate::generate;
 pub use golive::{
     GoRestore, Schedule, build_verify_helper, go_verify, restore_with_go, rfc3339_millis,

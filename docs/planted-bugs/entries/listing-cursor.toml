@@ -1,0 +1,7 @@
+name = "listing-cursor"
+fix = "1293587"
+package = "lsr-core"
+tests = [
+    "pages::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
+    "recover::tests::a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop",
+]

@@ -1,0 +1,4 @@
+name = "failstop-holds-on-an-unreachable-store"
+fix = "c8b9c90"
+package = "lsr-core"
+tests = ["lag::a_timeout_at_boot_is_no_refusal"]

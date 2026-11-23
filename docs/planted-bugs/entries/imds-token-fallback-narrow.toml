@@ -1,0 +1,4 @@
+name = "imds-token-fallback-narrow"
+fix = "claude/dropin-roles"
+package = "lsr-store-s3"
+tests = ["chain::sources_tests::instance_metadata_falls_back_without_a_token"]

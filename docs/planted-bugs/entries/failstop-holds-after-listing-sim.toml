@@ -1,0 +1,7 @@
+name = "failstop-holds-after-listing-sim"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_refusal_at_boot_holds_until_it_heals",
+]
