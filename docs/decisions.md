@@ -70,13 +70,14 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D45 | Config Go accepts and litestream-rs refuses at load or start (unknown and duplicate keys, values no start could use, schedules core does not run): copy Go under D33? | No: keep refusing, naming the key | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D46 | Two databases on one meta directory, replica or file, which Go starts: copy Go? | No: refuse, since Go loses data there | Claude (dropin-config), **delegated** | 2026-11-22 | open to owner review |
 | D47 | Exit codes of `replicate`: one code for every error, as Go, or one per class? | One code, as Go: 1 for every failure; fail-stop keeps its own 4 | Claude (dropin-cli), from the parent session | 2026-11-22 | decided |
-| D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
+| D48 | Go commands, `restore` arguments, `-once` options and `/metrics` series `lsr` lacks (`restore`, `databases`, `ltx` and `wal` since built) | A gap to build under D33, tracked in #177; refused by name until then | Claude (dropin-cli), from the parent session | 2026-11-22 | gap, open |
 | D49 | Temporary credentials: refresh before expiry, and a source that answers without keys | Refresh five minutes early; refuse an answer without keys or an STS answer without credentials | Claude (dropin-roles), **delegated** | 2026-11-22 | open to owner review |
 | D50 | Boot finds the replica's newest file differing from the staged copy under the same key: snapshot or stop? Keep the stop record? | Stop unless a takeover covers it; delete the stop record | Claude, **delegated** | 2026-11-22 | open to owner review |
 | D160 | `restore` with Go's arguments: delete the output first, refuse a timestamp past the newest file, let `-if-replica-exists` excuse any missing transaction, as Go does? | No to all three: replace only at publish, restore the newest state, skip only an empty replica | Claude (dropin-commands), **delegated** | 2026-11-23 | open to owner review |
 | D62 | What does the simulator's hold judge require of an as-of restore through a fault? | The as-of bound (G3), not the raw replica's answer | Claude, **delegated** (route from the parent session) | 2026-11-22 | open to owner review |
 | D122 | Run the simulator's histories on real SQLite: how, when the world draws page-level commits of arbitrary bytes? | A backend in lsr-sqlite behind the sim's seam; each drawn page a row, SQLite decides the pages, the world reads back what changed through SQLite | Claude (sim-real-sqlite), **delegated** | 2026-11-23 | open to owner review |
 | D123 | Should `app_connection` keep turning `PERSIST_WAL` on, when leaving WAL mode with it on can corrupt the database? | No: it sets `wal_autocheckpoint = 0` only; the replicator's own connections keep the flag | Claude (persist-wal-vacuum), **delegated** | 2026-11-23 | open to owner review |
+| D162 | `databases` with a `dir` entry: print the working directory, as Go does? | No: print the entry's directory, unscanned | Claude (dropin-readonly), **delegated** | 2026-11-23 | open to owner review |
 
 ## D1. Own repository or a crate in the application's workspace
 
@@ -772,6 +773,15 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the guard is a scan of the source, not the type system: it reads call names, so a store call written another way (a function pointer, a macro) would pass it, and it covers lsr-core only. Staging and replica still share one store trait and one error type (the next step makes them distinct). A key a read shows already holds our bytes is not yet a `Published`; item 4 of #171 adds it with the proof types that consume it.
 - **Revisit if:** another crate writes to a store for the engine, or the store trait can be split so that raw writes are unreachable by type.
 - **Links:** issue #171 item 1; D74; `crates/core/src/publish.rs`.
+
+## D162. `databases` prints a `dir` entry's directory (delegated)
+
+- **Question:** Go's `databases` builds each config entry with `NewDBFromConfig`, which expands the entry's `path`. A `dir` entry has none, so Go expands the empty string and prints the working directory as that entry's database. Copy it?
+- **Choice:** no. `lsr databases` prints the `dir` entry's directory, expanded and not scanned, with its replica type, and every `path` entry as Go prints it. It reads the config's entries and never plans them, so a `dir` that holds nothing or does not exist is not refused either, as Go does not refuse it.
+- **Delegated:** decided by the agent building #177 for the owner.
+- **Cost if wrong:** a script that parsed Go's output and relied on the working directory appearing for a `dir` entry sees the directory instead. Scanning the directory and printing each database it holds was the other choice; it can be added later without breaking this one, since a `dir` entry's row then names its directory.
+- **Evidence:** `compat::go_and_lsr_list_the_same_databases_and_files` compares the two outputs with Go's working-directory row mapped to the entry's directory, and every other line byte for byte; `cli::databases_lists_each_entry_without_scanning_a_dir`.
+- **Links:** `docs/BEHAVIOR.md` CFG-44; `crates/cli/src/run.rs` (`databases_command`).
 
 ## Unverified, not recorded
 

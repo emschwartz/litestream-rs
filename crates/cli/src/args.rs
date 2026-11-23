@@ -24,8 +24,10 @@ use lsr_core::Depth;
 use lsr_store_s3::{ConfigError, Endpoint, Region, S3Config};
 use thiserror::Error;
 
+mod inspect;
 mod restore;
 
+pub use inspect::{DatabasesArgs, Inspect, LtxArgs, LtxFrom};
 pub use restore::{Restore, RestoreArgs, RestoreFrom};
 
 /// The three subcommands.
@@ -299,6 +301,10 @@ const S3_ONLY_FLAGS: [&str; 3] = ["--endpoint", "--region", "--force-path-style"
 pub enum Command {
     /// Rebuild a database.
     Restore(Box<RestoreArgs>),
+    /// Go's `databases`: the config's databases and their replica types.
+    Databases(DatabasesArgs),
+    /// Go's `ltx` (or `wal`): a replica's LTX files.
+    Ltx(LtxArgs),
     /// Check a replica.
     Verify(VerifyArgs),
     /// List a replica's files.
@@ -687,6 +693,19 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
             return match restore::parse(args.get(1..).unwrap_or_default())? {
                 Restore::Run(args) => Ok(Command::Restore(args)),
                 Restore::Help => Ok(Command::Help),
+            };
+        }
+        "databases" => {
+            return match inspect::parse_databases(args.get(1..).unwrap_or_default())? {
+                Inspect::Run(args) => Ok(Command::Databases(args)),
+                Inspect::Help => Ok(Command::Help),
+            };
+        }
+        word @ ("ltx" | "wal") => {
+            let as_wal = word == "wal";
+            return match inspect::parse_ltx(args.get(1..).unwrap_or_default(), as_wal)? {
+                Inspect::Run(args) => Ok(Command::Ltx(args)),
+                Inspect::Help => Ok(Command::Help),
             };
         }
         "verify" => CommandName::Verify,
