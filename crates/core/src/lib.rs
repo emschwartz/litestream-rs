@@ -29,6 +29,7 @@ mod compact;
 #[cfg(any(test, feature = "testing"))]
 pub mod conformance;
 mod created_at;
+mod cure;
 mod env;
 mod failstop;
 mod fault;
