@@ -1,0 +1,5 @@
+name = "force-removes-before-restoring"
+fix = "plant"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["a_failed_forced_restore_keeps_the_old_database"]

@@ -1,4 +1,5 @@
 name = "failstop-never-trips-sim"
+patch = "failstop-never-trips"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"

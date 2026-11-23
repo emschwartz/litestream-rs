@@ -1,5 +1,8 @@
 //! Seed 0xa4d's history of 89 operations, as the generator under the seed's own mix drew it before the merge of #188.
 //!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
+//!
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
@@ -32,7 +35,7 @@ pub const OPS: &[Op] = &[
     Op::Vacuum {
         page_size: PageSize::new(2048),
     },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Heal,
     Op::ClockJump(93600000),
     Op::OtherProcessReader { begin: true },
@@ -51,7 +54,7 @@ pub const OPS: &[Op] = &[
     },
     Op::Restore,
     Op::Restore,
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::OtherProcessReader { begin: false },
     Op::Spill,
     Op::ClockJump(-37366),
@@ -99,7 +102,7 @@ pub const OPS: &[Op] = &[
     },
     Op::Spill,
     Op::Vacuum { page_size: None },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Restore,
     Op::Commit {
         pages: 1,

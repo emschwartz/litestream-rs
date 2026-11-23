@@ -2164,6 +2164,7 @@ mod checkpoint_failed;
 mod degraded;
 mod index_reset;
 mod lag;
+mod ledger;
 mod listing;
 mod live;
 mod newest_replica_file;
