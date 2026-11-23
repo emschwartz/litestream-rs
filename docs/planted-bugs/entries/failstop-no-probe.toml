@@ -1,0 +1,6 @@
+name = "failstop-no-probe"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_store_down_past_the_bound_trips_at_the_probe",
+]

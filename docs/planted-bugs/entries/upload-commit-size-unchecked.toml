@@ -1,0 +1,11 @@
+# Blind plant 05 of the recall pilot (issue #127): the uploader took a commit's acknowledged size as
+# given. Its original form (upload.rs restamping the size it wrote) cannot be written any more: the
+# size is checked inside publish before a Published exists. Re-expressed at the check, skipped for
+# the uploader's create-only writes.
+name = "upload-commit-size-unchecked"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed",
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
+]

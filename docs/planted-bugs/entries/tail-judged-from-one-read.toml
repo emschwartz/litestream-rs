@@ -1,0 +1,5 @@
+# One failed read of the staged copy takes it as torn and confirms the replica's differing object.
+name = "tail-judged-from-one-read"
+fix = "34f1694"
+package = "lsr-core"
+tests = ["one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object"]

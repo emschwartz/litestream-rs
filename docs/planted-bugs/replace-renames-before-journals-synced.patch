@@ -1,7 +1,7 @@
-diff --git a/crates/local/src/lib.rs b/crates/local/src/lib.rs
+diff --git a/crates/replica/src/local.rs b/crates/replica/src/local.rs
 index 25ea01c9..082452c5 100644
---- a/crates/local/src/lib.rs
-+++ b/crates/local/src/lib.rs
+--- a/crates/replica/src/local.rs
++++ b/crates/replica/src/local.rs
 @@ -299,10 +299,10 @@ fn replace_steps(fs: &mut impl ReplaceFs, target: &Path) -> Result<(), PublishEr
          );
          return Err(at(check)(source));

@@ -36,7 +36,7 @@ use lsr_core::{
     RestoreTarget, Restored, Severity, VerifyError, listed_past, plan, resolve, restore_with,
     verify,
 };
-use lsr_local::{
+use lsr_replica::local::{
     ClearError, CreateError, Existing, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
     clear_journal_files, preflight,
 };

@@ -1,0 +1,4 @@
+name = "staging-enospc-local-io"
+fix = "cf6ca7f"
+package = "lsr-core"
+tests = ["fault::tests::a_full_staging_disk_is_disk_full"]

@@ -2,8 +2,8 @@ use lsr_store_s3::{Provider, UrlStyle};
 
 use super::*;
 use lsr_core::{AsOfInside, RestoreTarget};
-use lsr_local::IntegrityCheck;
 use lsr_ltx::{Timestamp, Txid};
+use lsr_replica::local::IntegrityCheck;
 
 fn words(line: &str) -> Vec<String> {
     line.split_whitespace().map(str::to_owned).collect()

@@ -1,0 +1,5 @@
+name = "dry-run-checks-the-output"
+fix = "claude/dropin-commands"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["dry_run_plans_whatever_is_at_the_output"]

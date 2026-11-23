@@ -1,0 +1,8 @@
+# Re-expressed: the relist after a refusal now reads the refused key and judges it from two
+# reads, which catches the original patch (dropping the staged copy's own verification) on its
+# own; the defect is a torn staged read confirming the replica's object, planted directly.
+name = "refusal-judged-from-one-read"
+fix = "af8ea2f"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["one_bad_staged_read_after_a_refusal_confirms_no_other_object_seed_0x4ef"]

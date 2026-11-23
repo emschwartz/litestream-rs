@@ -10,8 +10,8 @@
 use std::path::PathBuf;
 
 use lsr_core::{AsOfInside, RestoreTarget};
-use lsr_local::IntegrityCheck;
 use lsr_ltx::{Timestamp, Txid};
+use lsr_replica::local::IntegrityCheck;
 use lsr_sidecar::goflag::{self, Def, FlagError, Scan, Set};
 
 use super::{Replica, UsageError, replica_of};

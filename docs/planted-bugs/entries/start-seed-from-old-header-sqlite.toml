@@ -1,0 +1,8 @@
+name = "start-seed-from-old-header-sqlite"
+patch = "start-seed-from-old-header"
+fix = "1c818f58"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "a_header_written_again_with_the_same_salts_replicates_what_follows",
+]

@@ -24,7 +24,7 @@ use crate::args::{
 };
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedTime;
-use lsr_local::IntegrityCheck;
+use lsr_replica::local::IntegrityCheck;
 use lsr_sidecar::json_string as quote;
 
 /// Appends formatted text to a `String`, which cannot fail.
