@@ -13,6 +13,10 @@ publish.workspace = true
 rusqlite = ["dep:rusqlite"]
 # `Runtime::fake`: a clock that moves when a test says so, and a park that waits on it.
 testing = ["lsr-core/testing"]
+# Test builds only (`just check` turns it on through --all-features): every thread `stack::spawn`
+# starts gets half its shipped stack, so the suites prove the shipped size has twice the depth
+# they reach. A release build refuses it.
+test-half-stack = []
 
 [dependencies]
 lsr-core.workspace = true

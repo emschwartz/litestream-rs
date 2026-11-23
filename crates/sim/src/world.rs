@@ -1135,6 +1135,29 @@ impl World {
         self.log_history();
     }
 
+    /// After the WAL's generation was regrown with its commit marks kept: every mark is a
+    /// commit of the writer that regrew it, so the model takes each one, in order, as a new
+    /// image at its place in the WAL. A file staged up to an earlier mark is then that mark's
+    /// commit, not the one made at the same place before the regrowth, whose pages the WAL no
+    /// longer holds.
+    pub fn adopt_regrown(&mut self) {
+        if self.model_matches_sqlite() {
+            return;
+        }
+        let page_size = self.sqlite.page_size();
+        let salts = self.sqlite.salts();
+        let at = self.remote_recorder.len();
+        for (end, bytes) in self.sqlite.commit_images() {
+            let image = PageImage::from_bytes(page_size, &bytes);
+            let app = AppCommit {
+                salts,
+                end: WalOffset::from_frame_index(end, page_size),
+            };
+            self.model.vacuum(image, app, at);
+        }
+        self.log_history();
+    }
+
     /// The rules' database after a power loss is SQLite's own recovery of the
     /// bytes the loss left, which may bring back a commit a previous loss took
     /// ([`Model::adopt_recovered`]); one no commit made is left for the
