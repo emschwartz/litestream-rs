@@ -91,22 +91,6 @@ fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Opt
     reencoded(bytes, edit, |_| {})
 }
 
-/// The same file, header and all, with every byte of its first page
-/// inverted: a whole, valid file that holds what no commit held.
-fn forged(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut first = true;
-    reencoded(
-        bytes,
-        |_| {},
-        |data| {
-            if first {
-                data.iter_mut().for_each(|byte| *byte = !*byte);
-                first = false;
-            }
-        },
-    )
-}
-
 /// The file re-encoded, with its header through `edit` and each page's
 /// bytes, in order, through `page`.
 fn reencoded(
@@ -1095,23 +1079,6 @@ impl World {
         Ok(found && done)
     }
 
-    /// Rewrites the newest level-0 file as another whole, valid file under
-    /// the same key and header ([`forged`]); false when there is none or it
-    /// does not decode.
-    ///
-    /// # Errors
-    /// As [`Self::edit_newest_staged`].
-    pub fn forge_newest_staged(&self) -> Result<bool, StagedEditError> {
-        let mut done = false;
-        let found = self.edit_newest_staged(|bytes| {
-            if let Some(other) = forged(bytes) {
-                *bytes = other;
-                done = true;
-            }
-        })?;
-        Ok(found && done)
-    }
-
     fn staged_files(&self) -> Result<Vec<FileInfo>, StoreError> {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let mut files = Vec::new();
@@ -1139,22 +1106,6 @@ impl World {
             }
         }
         Ok(None)
-    }
-
-    /// Whether staging holds `key` under bytes the engine never put there: a
-    /// copy an operation rewrote or put back, which stays the operator's for as
-    /// long as it is staged, whatever the replica holds now.
-    ///
-    /// # Errors
-    /// The store's error other than a missing key.
-    pub fn staged_not_the_engines(&self, key: FileKey) -> Result<bool, StoreError> {
-        match read_all(&self.staging_raw, &key) {
-            Ok(bytes) => Ok(!self
-                .engine_puts(0)
-                .contains(&(key, crate::store::content_digest(&bytes)))),
-            Err(StoreError::NotFound { .. }) => Ok(false),
-            Err(other) => Err(other),
-        }
     }
 
     /// Every (key, digest) the staging recorder took a put of since event `since`.

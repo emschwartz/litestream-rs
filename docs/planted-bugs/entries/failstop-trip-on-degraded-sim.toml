@@ -1,0 +1,9 @@
+name = "failstop-trip-on-degraded-sim"
+patch = "failstop-trip-on-degraded"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::permission_revoked_mid_run",
+    "faults::bucket_rolled_back",
+]

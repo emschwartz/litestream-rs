@@ -359,6 +359,8 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,
+        // The law's process crashes are noted as they happen, as a crash operation's are.
+        kill_after_fault: _,
         // The replica on S3: its provider faults are noted as they are drawn.
         remote_s3: _,
         // Which SQLite the engine runs against: each backend's faults are drawn and noted

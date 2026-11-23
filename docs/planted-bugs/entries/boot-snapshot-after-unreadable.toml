@@ -1,0 +1,6 @@
+name = "boot-snapshot-after-unreadable"
+fix = "2c2bd90"
+package = "lsr-core"
+tests = [
+    "a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal",
+]

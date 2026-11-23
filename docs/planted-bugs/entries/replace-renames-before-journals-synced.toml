@@ -1,0 +1,4 @@
+name = "replace-renames-before-journals-synced"
+fix = "plant"
+package = "lsr-replica"
+tests = ["local::replace_tests::journal_removals_are_synced_before_the_rename"]

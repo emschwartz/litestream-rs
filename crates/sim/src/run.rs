@@ -22,7 +22,7 @@ use lsr_wal::{Salts, WalOffset};
 
 use crate::clock::ClockLaw;
 use crate::crash_law::CrashLaw;
-use crate::failstop::{FailStopJudge, fired};
+use crate::failstop::{FailStopJudge, Fired, fired};
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
@@ -226,6 +226,9 @@ pub struct Opts {
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
+    /// The process dies right after every tick in which an injected fault fired
+    /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
+    pub kill_after_fault: bool,
     /// The replica is the S3 store over its in-memory bucket ([`Weights::remote_s3`]).
     /// [`run_with`] sets it.
     pub remote_s3: bool,
@@ -364,6 +367,11 @@ struct Runner {
     expected: Vec<StopCause>,
     /// A drawn step that has nothing to act on is skipped, not a failure.
     lenient: bool,
+    /// The process dies right after a tick in which an injected fault fired.
+    kill_after_fault: bool,
+    /// A fault operation was applied since the last kill: the law kills once per operation, so
+    /// a fault that keeps firing (a rate) does not keep the engine from ever running.
+    kill_armed: bool,
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
@@ -439,6 +447,7 @@ impl Runner {
             .with_staging_fs(seed, opts)
             .with_remote_s3(opts);
         runner.lenient = opts.drawn;
+        runner.kill_after_fault = opts.kill_after_fault;
         if opts.drawn {
             runner.draw_power_law(seed, opts);
             runner.draw_batch_widths(seed);
@@ -500,6 +509,8 @@ impl Runner {
             app_before: AppCheckpoints::NONE,
             expected: Vec::new(),
             lenient: false,
+            kill_after_fault: false,
+            kill_armed: false,
             expected_sizes: Vec::new(),
             life: Incarnation::default(),
             // The database's first content is on no replica yet.
@@ -781,6 +792,7 @@ impl Runner {
         let commits = self.w.model.commits().len();
         self.staging_moved()?;
         let fired0 = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let queued0 = self.w.sqlite.queued_injections();
         let ended = self.run_one(plan);
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
@@ -828,6 +840,7 @@ impl Runner {
         };
         per_tick(&stats, self.limits())?;
         let step = self.after_refusal(step)?;
+        let step = self.kill_after_fault(step, fired0, queued0);
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
         self.verify_ready()?;
         Ok((step, stats))
@@ -900,16 +913,12 @@ impl Runner {
         // With staging intact, everything this engine put on the replica is at
         // or below what staging holds, under the bytes staging holds: a
         // refusal then has no cause. A staged copy that differs from the
-        // replica's object under the same key was edited or forged (an
-        // operation), and the boot refuses that divergence by design. So is
-        // a staged copy the engine never put: the boot may have read the
-        // replica's object before a rollback took it (a lagging listing), so
-        // the replica as it stands now need not show the divergence.
+        // replica's object under the same key was damaged or put back (an
+        // operation), and the boot refuses that divergence by design.
         let key = lsr_core::FileKey::new(lsr_core::Level::ZERO, lsr_ltx::TxidRange::single(tip));
         let read =
             |err: lsr_core::StoreError| bug_fault(format!("reading the stores failed: {err}"));
-        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?
-            || self.w.staged_not_the_engines(key).map_err(read)?;
+        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?;
         if !self.staging_disturbed && !diverged {
             return Err(bug_fault(format!(
                 "a boot refused replica files through {tip} with staging intact and no other writer"
@@ -1217,6 +1226,29 @@ impl Runner {
             }
             *was = now;
         }
+    }
+
+    /// The kill-after-fault law ([`Weights::kill_after_fault`]): the first tick in which a store
+    /// fault or an injected SQLite-side failure fires after a fault operation is followed at once
+    /// by a process crash, before anything else can pay what the fault left owing.
+    fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), queued0: usize) -> Step {
+        let fired_now = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
+        let source = self.w.sqlite.queued_injections() < queued0;
+        let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
+        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) {
+            return step;
+        }
+        self.kill_armed = false;
+        let lost = self.w.crash(CrashKind::Process);
+        self.note_lost(&lost);
+        if self.trace {
+            self.report
+                .trace
+                .push(format!("    then killed after a fault, lost: {lost:?}"));
+        }
+        self.crashed(CrashKind::Process);
+        Step::Crashed
     }
 
     fn crash_tick(&mut self, kind: CrashKind) -> Result<(), Violation> {
@@ -1625,6 +1657,12 @@ impl Runner {
                 stopped_here = true;
                 break;
             }
+            // A process the kill-after-fault law ended in this tick owes no stop for it: what it
+            // listed died with it, and the next boot is recovery's to judge.
+            if step == Step::Crashed {
+                watching = false;
+                continue;
+            }
             // A running engine that listed the replica in this tick while the
             // other writer's file stood past its own position holds the proof
             // of another writer: it must stop. A boot's listing is recovery's to
@@ -1772,6 +1810,7 @@ impl Runner {
         ahead: u8,
         shape: crate::FaultShape,
     ) {
+        self.kill_armed = true;
         if target == Target::Remote
             && matches!(
                 shape,
@@ -1847,6 +1886,7 @@ impl Runner {
     }
 
     fn env_fault(&mut self, fault: EnvFault) -> Result<(), Violation> {
+        self.kill_armed = true;
         match fault {
             EnvFault::DeleteWal => {
                 if self.w.sqlite.delete_wal() {
@@ -2057,7 +2097,6 @@ impl Runner {
                 let half = bytes.len() / 2;
                 bytes.truncate(half);
             }),
-            MetaOp::ForgeNewest => w.forge_newest_staged(),
         };
         self.step_done(&format!("{op:?}"), done)
     }
@@ -2628,6 +2667,7 @@ pub fn run_with(
         error_domain: weights.error_domain,
         known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
+        kill_after_fault: weights.kill_after_fault,
         remote_s3: weights.remote_s3,
         ..opts.clone()
     };

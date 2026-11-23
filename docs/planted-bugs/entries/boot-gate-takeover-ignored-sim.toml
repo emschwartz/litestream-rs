@@ -1,0 +1,6 @@
+name = "boot-gate-takeover-ignored-sim"
+patch = "boot-gate-takeover-ignored"
+fix = "aa1165d"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["vm_restore_stops_until_a_take_over"]

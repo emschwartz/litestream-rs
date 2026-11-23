@@ -1,0 +1,4 @@
+name = "help-exits-zero-without-literal"
+fix = "claude/dropin-cli"
+package = "lsr-sidecar"
+tests = ["flags::tests::help_succeeds_only_when_asked_for_literally"]

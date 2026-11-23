@@ -1,0 +1,4 @@
+name = "restart-abandoned-at-synced-end"
+fix = "9b4a029"
+package = "lsr-core"
+tests = ["recover::tests::an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught"]

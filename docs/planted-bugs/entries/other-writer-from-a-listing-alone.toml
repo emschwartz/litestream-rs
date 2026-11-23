@@ -1,0 +1,5 @@
+# A file a listing shows past the engine's position stops it with no read to find the file.
+name = "other-writer-from-a-listing-alone"
+fix = "8c7d8ce"
+package = "lsr-core"
+tests = ["maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it"]

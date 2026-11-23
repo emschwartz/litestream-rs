@@ -1,0 +1,14 @@
+# The bounded WAL resume (witness, 18cf304) took a wal-index reset ahead of the header as a
+# restart even at the header's first frame: every boot from a file with an empty WAL range
+# snapshotted again. Found by the liveness oracle (seed 0xf85 among others).
+name = "resume-index-reset-ahead"
+fix = "claude/checker-hygiene"
+package = "lsr-wal"
+test_bin = "wal"
+tests = ["synthetic::resume_at_the_first_frame_under_an_index_reset_ahead_starts_there"]
+# The boot witness's anchor held for any tail it decodes. The page proof of each pending file does
+# not cover for it: only the anchor sees a tail range regrown with other bytes before a pending range
+# regrown verbatim. The engine's WAL barrier keeps a staged range from regrowing at all, so the
+# simulator reaches the window only on a lying disk with an app that retries jobs not all idempotent
+# (`unaided.rs`, the retry campaign), in 1 seed of 3000, where a later snapshot hid it; the plant
+# survives every simulator configuration and is killed by the unit tests.

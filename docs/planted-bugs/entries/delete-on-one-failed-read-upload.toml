@@ -1,0 +1,6 @@
+name = "delete-on-one-failed-read-upload"
+fix = "8d820b4"
+package = "lsr-core"
+tests = [
+    "one_bad_read_of_a_staged_file_while_uploading_drops_nothing",
+]

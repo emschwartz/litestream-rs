@@ -1,0 +1,4 @@
+name = "refresh-never-due"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["signer::tests::fetches_once_within_the_margin_before_expiry"]
