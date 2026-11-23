@@ -55,8 +55,9 @@
 //!   condemns a file; the next tick puts it again);
 //! - an object that is not a whole LTX file naming the key is replaced, as a
 //!   listing's read-back replaces one;
-//! - a verifying object with other bytes, on a second compare too, is another
-//!   writer's or an earlier run's: the replica is listed at once and judged by
+//! - a verifying object with other bytes, on a second compare too, and a read of each copy
+//!   that verifies whole with a different file checksum (a compare alone may be a read that
+//!   lied), is another writer's or an earlier run's: the replica is listed at once and judged by
 //!   the listing's rules above ([`Did::Diverged`], or
 //!   `Fault::RemoteAheadOfLocal` when the replica is ahead).
 //!
@@ -69,13 +70,13 @@
 
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Decoder, Header, Txid, TxidRange};
+use lsr_ltx::{Decoder, Header, Txid, TxidRange, Verified};
 
 use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::ltx_read::verifies;
+use crate::ltx_read::{verified, verifies};
 use crate::publish::{self, Unpublished, Writer};
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, WriteMode};
 use crate::witness::{ByteTally, Witnessed, Witnesses};
@@ -414,11 +415,26 @@ async fn judge_tail<L: Role, S: Role>(
     // Both copies verify on their own reads, so the first compare read
     // something wrong or they differ: a second compare decides, as one read
     // never condemns a file.
-    Ok(if same_bytes(staging, remote, &key).await? {
-        TailVerdict::Sound
-    } else {
-        TailVerdict::Diverged
-    })
+    if same_bytes(staging, remote, &key).await? {
+        return Ok(TailVerdict::Sound);
+    }
+    // A compare that differs may be a read that lied, so it proves nothing about the replica's
+    // object: only a read of each that verifies whole can show another writer's file. The
+    // trailer's checksum covers the whole file. A copy that does not verify on this read is
+    // one more bad read, and the step is retried.
+    let ours = staged_verified(staging, &key)
+        .await?
+        .ok_or(Fault::StagedLost)?;
+    let theirs = verified(remote, &key, CHUNK, S::fault)
+        .await?
+        .ok_or(Fault::StoreTransient)?;
+    Ok(
+        if ours.trailer().file_checksum() == theirs.trailer().file_checksum() {
+            TailVerdict::Sound
+        } else {
+            TailVerdict::Diverged
+        },
+    )
 }
 
 /// Streams both copies and compares them chunk by chunk.
@@ -478,10 +494,16 @@ async fn remote_torn<S: Role>(remote: &S, key: &FileKey) -> Result<bool, Fault> 
 /// Whether the staged file `key` verifies whole and names exactly `key`.
 /// A missing or unusable one does not; any other store error is the fault.
 async fn staged_verifies<L: Role>(staging: &L, key: &FileKey) -> Result<bool, Fault> {
-    match verifies(staging, key, CHUNK, L::fault).await {
-        Ok(verifies) => Ok(verifies),
-        Err(Fault::StagedLost) => Ok(false),
-        Err(fault) => Err(fault),
+    staged_verified(staging, key)
+        .await
+        .map(|summary| summary.is_some())
+}
+
+/// What verified of the staged file `key`, as [`staged_verifies`] reads it.
+async fn staged_verified<L: Role>(staging: &L, key: &FileKey) -> Result<Option<Verified>, Fault> {
+    match verified(staging, key, CHUNK, L::fault).await {
+        Err(Fault::StagedLost) => Ok(None),
+        other => other,
     }
 }
 
