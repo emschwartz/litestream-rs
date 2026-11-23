@@ -42,6 +42,13 @@ fn header_decodes_every_field() {
     assert_eq!(header.byte_order(), ByteOrder::Little);
     assert_eq!(header.page_size(), size(4096));
     assert_eq!(header.checkpoint_seq(), 0);
+    let mut counted = wal.bytes[..HEADER_LEN].to_vec();
+    counted[12..16].copy_from_slice(&7_u32.to_be_bytes());
+    let (c0, c1) = sum(false, (0, 0), &counted[..24]);
+    counted[24..28].copy_from_slice(&c0.to_be_bytes());
+    counted[28..32].copy_from_slice(&c1.to_be_bytes());
+    let counted = WalHeader::decode(counted.as_slice().try_into().unwrap()).unwrap();
+    assert_eq!(counted.checkpoint_seq(), 7);
     assert_eq!(header.salts(), salts(SALTS));
     assert_eq!(
         Some(header.checksum()),
@@ -50,6 +57,9 @@ fn header_decodes_every_field() {
     let big = Wal::new(512, true, SALTS);
     let header = WalHeader::decode(big.bytes.as_slice().try_into().unwrap()).unwrap();
     assert_eq!(header.byte_order(), ByteOrder::Big);
+    // Offsets are named in error messages by byte and frame.
+    let at = WalOffset::from_frame_index(1, size(PS));
+    assert_eq!(at.to_string(), "byte 568 (frame 1)");
 }
 
 #[test]
@@ -108,6 +118,35 @@ fn open_header() {
         matches!(err, OpenError::Header(HeaderError::BadMagic { .. })),
         "{err}"
     );
+}
+
+/// A read the OS interrupted is asked again, as `std::io::Read` allows.
+#[test]
+fn open_retries_an_interrupted_read() {
+    struct InterruptedOnce {
+        inner: Cursor<Vec<u8>>,
+        interrupted: bool,
+    }
+    impl Read for InterruptedOnce {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            self.inner.read(buf)
+        }
+    }
+    impl Seek for InterruptedOnce {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+    let reader = InterruptedOnce {
+        inner: Cursor::new(Wal::new(PS, false, SALTS).bytes),
+        interrupted: false,
+    };
+    let opened = WalReader::open(reader).unwrap();
+    assert_eq!(opened.header().salts(), salts(SALTS));
 }
 
 #[test]

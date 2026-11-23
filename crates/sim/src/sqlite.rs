@@ -48,7 +48,11 @@
 //!
 //! Durability follows `synchronous=NORMAL`: a commit is not fsynced; the WAL is
 //! fsynced when a header is written (frame 1 of a generation) and before a
-//! checkpoint copies frames, and a checkpoint's database writes are durable. Our
+//! checkpoint copies frames. A checkpoint that backfills to `mxFrame` truncates and
+//! fsyncs the database file before it returns; a partial one (a reader holds back the
+//! safe frame) writes database pages and advances `nBackfill` without syncing them
+//! (`walCheckpoint`), so a power loss can tear the database file, under the same law as
+//! the WAL, until the next full backfill. Our
 //! own `WalSource::sync` (the engine's barrier before staging) makes the whole
 //! WAL durable too. A power crash keeps the WAL as of its last fsync, or a drawn prefix of the
 //! later writes ([`SimSqlite::tear_on_power_loss`]), or the block law's draw
@@ -97,6 +101,14 @@ const CHECKSUMMED_FRAME_HEADER_LEN: usize = 8;
 /// Another process's read transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReaderId(u32);
+
+impl ReaderId {
+    /// The reader numbered `n`: a backend other than the model numbers its own readers.
+    #[must_use]
+    pub const fn new(n: u32) -> Self {
+        Self(n)
+    }
+}
 
 /// A checkpoint mode as another process can ask for it (core's
 /// [`CheckpointMode`] has no RESTART).
@@ -276,6 +288,8 @@ impl LostWriteback {
 struct State {
     page_size: PageSize,
     db: Vec<u8>,
+    // The database file as of its last fsync: a partial backfill's pages are not in it.
+    db_durable: Vec<u8>,
     wal: Vec<u8>,
     // The WAL as of its last fsync.
     durable: Vec<u8>,
@@ -286,6 +300,11 @@ struct State {
     // writes them (Linux's "fsyncgate"): until the generation ends they stay as they were.
     lost_writeback: Option<LostWriteback>,
     // The app's own connection has not yet fsynced the WAL since our sync failed. Linux reports
+    // The next failed sync of ours has its lost pages evicted at once
+    // ([`SimSqlite::evict_page_cache`]).
+    evict_armed: bool,
+    // The lost pages were evicted since the world last asked ([`SimSqlite::take_evicted`]).
+    evicted: bool,
     // a writeback error to every file description open when it happened (errseq, since 4.13), so
     // the app's first WAL sync after ours fails too, and that checkpoint backfills nothing. A
     // process that opens the WAL after our sync saw the error (the CLI) is told nothing.
@@ -332,6 +351,9 @@ struct State {
     // Power losses under the block law that kept some unsynced block, and those
     // that lost a block before one they kept (a hole).
     block_kept: (u32, u32),
+    // Power losses under the block law that found database blocks a partial backfill had
+    // written and not synced.
+    db_torn: u32,
     // Where the engine's WAL parser and SQLite's own recovery disagreed.
     recovery_disagreements: Vec<String>,
     app: in_tick::AppInTick,
@@ -721,9 +743,12 @@ impl State {
             let at = self.page_at(pgno);
             write_at(&mut self.db, at, &data);
         }
+        // Only a backfill to `mxFrame` truncates and syncs the database file; a partial one
+        // leaves its pages unsynced, and `nBackfill` advances either way.
         if upto == self.index.mx_frame {
             let len = self.page_at(self.index.db_size.saturating_add(1));
             self.db.resize(len, 0);
+            self.db_durable.clone_from(&self.db);
         }
         self.index.backfilled = upto;
     }
@@ -784,11 +809,16 @@ impl State {
 
     /// Page `pgno` as a new reader sees it.
     fn image_page(&self, pgno: u32) -> Vec<u8> {
+        self.image_page_through(pgno, self.index.mx_frame)
+    }
+
+    /// Page `pgno` as a reader whose snapshot ends after `frames` frames sees it.
+    fn image_page_through(&self, pgno: u32, frames: u32) -> Vec<u8> {
         let newest = self
             .index
             .pgnos
             .iter()
-            .take(byte_pos(u64::from(self.index.mx_frame)))
+            .take(byte_pos(u64::from(frames.min(self.index.mx_frame))))
             .rposition(|frame| *frame == pgno)
             .and_then(|at| u32::try_from(at).ok());
         newest.map_or_else(
@@ -1019,7 +1049,57 @@ impl State {
             self.ghost.clear();
         }
         self.wal = self.surviving_wal();
+        self.db = self.surviving_db();
         self.recover();
+    }
+
+    /// What of the database file a power loss leaves: under the block law each block a
+    /// partial backfill wrote since the last full one survives or not, as the WAL's do;
+    /// otherwise none of those writes survive.
+    fn surviving_db(&mut self) -> Vec<u8> {
+        let out = match self.blocks.as_mut() {
+            Some((block, rng)) => {
+                let dirty = crash_law::differing_blocks(&self.db_durable, &self.db, *block);
+                if !dirty.is_empty() {
+                    self.db_torn = self.db_torn.saturating_add(1);
+                }
+                crash_law::crash_image(
+                    &self.db_durable,
+                    &self.db,
+                    &dirty,
+                    &self.db_durable,
+                    *block,
+                    rng,
+                )
+            }
+            None => self.db_durable.clone(),
+        };
+        self.db_durable.clone_from(&out);
+        out
+    }
+
+    /// Puts back, in the WAL as reads find it, the disk's bytes under every byte a failed sync
+    /// of this generation covered and nothing rewrote since; whether any changed.
+    fn evict_lost(&mut self) -> bool {
+        let Some(lost) = self.lost_writeback.take() else {
+            return false;
+        };
+        let mut changed = false;
+        if lost.salts == self.index.salts {
+            for (at, written) in lost.wal.iter().enumerate() {
+                let disk = lost.durable.get(at).copied().unwrap_or(0);
+                if let Some(now) = self.wal.get_mut(at)
+                    && *written != disk
+                    && *now == *written
+                {
+                    *now = disk;
+                    changed = true;
+                }
+            }
+        }
+        self.lost_writeback = Some(lost);
+        self.evicted |= changed;
+        changed
     }
 
     /// Truncates the WAL to nothing, durably, keeping its bytes as the stale
@@ -1034,10 +1114,8 @@ impl State {
 
     /// What of the WAL a power loss leaves under the block law
     /// ([`crate::crash_law`]): the dirty blocks are the ones where the WAL
-    /// differs from its bytes at the last fsync. The database file has no
-    /// unsynced write at any point a crash falls on: every write of it is a
-    /// checkpoint's, which SQLite syncs before the checkpoint returns, and a
-    /// crash falls between calls.
+    /// differs from its bytes at the last fsync. The database file's own
+    /// unsynced blocks, a partial backfill's, are drawn by [`State::surviving_db`].
     fn surviving_blocks(&mut self) -> Option<Vec<u8>> {
         let (block, rng) = self.blocks.as_mut()?;
         let dirty = crash_law::differing_blocks(&self.durable, &self.wal, *block);
@@ -1156,6 +1234,7 @@ impl SimSqlite {
         }
         let state = State {
             page_size,
+            db_durable: db.clone(),
             db,
             wal: Vec::new(),
             durable: Vec::new(),
@@ -1179,6 +1258,8 @@ impl SimSqlite {
             app_autocheckpoint: None,
             our_sync_lies: false,
             lost_writeback: None,
+            evict_armed: false,
+            evicted: false,
             app_unsynced_error: false,
             lost_ranges: Vec::new(),
             app_auto: AutoTally::default(),
@@ -1189,6 +1270,7 @@ impl SimSqlite {
             blocks: None,
             ghost: Vec::new(),
             block_kept: (0, 0),
+            db_torn: 0,
             recovery_disagreements: Vec::new(),
             app: in_tick::AppInTick::default(),
         };
@@ -1365,6 +1447,7 @@ impl SimSqlite {
             state.page_size = new;
             let pages = state.db.len().div_ceil(new.bytes());
             state.db.resize(pages.saturating_mul(new.bytes()), 0);
+            state.db_durable.clone_from(&state.db);
             state.index.db_size = state.db_pages();
             state.present = true;
             true
@@ -1598,6 +1681,10 @@ impl SimSqlite {
                 return false;
             }
             let at = state.page_at(pgno).saturating_add(100);
+            // Damage on the medium: the flipped byte is what the disk holds, synced or not.
+            if let Some(byte) = state.db_durable.get_mut(at) {
+                *byte ^= 0x5a;
+            }
             match state.db.get_mut(at) {
                 Some(byte) => {
                     *byte ^= 0x5a;
@@ -1677,6 +1764,33 @@ impl SimSqlite {
         self.with(|state| state.block_kept)
     }
 
+    /// The kernel evicts the WAL pages a failed sync of ours lost (Linux marks them clean,
+    /// so memory pressure may drop them): a later read of those bytes, by SQLite or the
+    /// engine, finds what the disk held before the writes. With such pages in this
+    /// generation they go now; otherwise the next failed sync's go as it fails, which the
+    /// kernel may also do. False only when an eviction is armed already and nothing is lost.
+    /// [`SimSqlite::take_evicted`] says when bytes changed.
+    pub fn evict_page_cache(&self) -> bool {
+        self.with(|state| {
+            if state.evict_lost() {
+                return true;
+            }
+            !mem::replace(&mut state.evict_armed, true)
+        })
+    }
+
+    /// Whether evicted pages changed what SQLite serves since the last call.
+    pub fn take_evicted(&self) -> bool {
+        self.with(|state| mem::take(&mut state.evicted))
+    }
+
+    /// Power losses under the block law that found database blocks a partial backfill had
+    /// written and not synced, which the law then kept or lost.
+    #[must_use]
+    pub fn db_torn_losses(&self) -> u32 {
+        self.with(|state| state.db_torn)
+    }
+
     /// Every recovery at which the engine's WAL parser and SQLite's own
     /// recovery, run on the same bytes, disagreed.
     #[must_use]
@@ -1705,6 +1819,26 @@ impl SimSqlite {
         self.with(|state| {
             (1..=state.index.db_size)
                 .flat_map(|pgno| state.image_page(pgno))
+                .collect()
+        })
+    }
+
+    /// The database at each commit mark of the WAL's generation, ascending: the frame count
+    /// the mark ends at, and the `db_size` pages a reader that stopped there sees.
+    #[must_use]
+    pub fn commit_images(&self) -> Vec<(u32, Vec<u8>)> {
+        self.with(|state| {
+            state
+                .index
+                .tx_ends
+                .iter()
+                .filter(|end| **end <= state.index.mx_frame)
+                .map(|end| {
+                    let image = (1..=state.index.db_size)
+                        .flat_map(|pgno| state.image_page_through(pgno, *end))
+                        .collect();
+                    (*end, image)
+                })
                 .collect()
         })
     }
@@ -1943,6 +2077,9 @@ impl WalSource for SimSource {
                     durable: state.durable.clone(),
                     wal: state.wal.clone(),
                 });
+                if mem::take(&mut state.evict_armed) {
+                    state.evict_lost();
+                }
             }
             return Err(err);
         }

@@ -17,19 +17,22 @@
 //! With [`DumpEnv::credentials`], each S3 replica also carries the credentials it would sign
 //! with: Go's from `config.LoadDefaultConfig` with the options its S3 client's `Init` passes,
 //! Rust's from the plan's [`Credentials`] and `lsr_store_s3::CredentialChain` over the same
-//! environment. Only fake keys ever reach these tests. Go's chain would go on to ECS and the
-//! EC2 metadata service, which litestream-rs does not build, so [`DumpEnv::credentials`]
-//! also sets `AWS_EC2_METADATA_DISABLED` for both sides.
+//! environment. Only fake keys ever reach these tests. Both chains end at the EC2 metadata
+//! service, which a test host may or may not answer, so [`DumpEnv::credentials`] also sets
+//! `AWS_EC2_METADATA_DISABLED` for both sides unless the variables point the service at a
+//! fake (`AWS_EC2_METADATA_SERVICE_ENDPOINT`, see [`FakeAws`](crate::FakeAws)).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
 
 use lsr_config::{
     Credentials, DbConfig, DbSource, Env, Expand, GoConfig, GoDuration, ReplicaConfig, ReplicaKind,
     ReplicaPlan,
 };
-use lsr_store_s3::{CredentialChain, S3Credentials};
+use lsr_store_s3::{CredentialChain, S3Credentials, SystemClock, Transport, UreqTransport};
 use serde::{Deserialize, Serialize};
 
 use crate::error::CompatError;
@@ -369,18 +372,24 @@ fn dump_replica_config(replica: &ReplicaConfig) -> DumpReplicaConfig {
     }
 }
 
-/// What both sides get for the metadata service: off, so Go's chain ends where Rust's does.
+/// What both sides get for the metadata service unless a case names a fake one: off, so
+/// neither side asks whatever answers on the test host.
 const NO_IMDS: (&str, &str) = ("AWS_EC2_METADATA_DISABLED", "true");
+const IMDS_ENDPOINT: &str = "AWS_EC2_METADATA_SERVICE_ENDPOINT";
 
 impl DumpEnv {
     fn var_or_home(&self, name: &str) -> Option<String> {
         if name == "HOME" {
             return Some(self.home.display().to_string());
         }
-        if self.credentials && name == NO_IMDS.0 {
+        if self.imds_off() && name == NO_IMDS.0 {
             return Some(NO_IMDS.1.to_owned());
         }
         self.vars.get(name).cloned()
+    }
+
+    fn imds_off(&self) -> bool {
+        self.credentials && !self.vars.contains_key(IMDS_ENDPOINT)
     }
 }
 
@@ -413,9 +422,10 @@ pub fn go_dump(binary: &Path, config: &Path, env: &DumpEnv) -> Result<Dump, Comp
         .env("LSR_DUMP", "1")
         .current_dir(&env.cwd);
     if env.credentials {
-        command
-            .env("LSR_DUMP_CREDENTIALS", "1")
-            .env(NO_IMDS.0, NO_IMDS.1);
+        command.env("LSR_DUMP_CREDENTIALS", "1");
+    }
+    if env.imds_off() {
+        command.env(NO_IMDS.0, NO_IMDS.1);
     }
     let output = command.output().map_err(CompatError::io(binary))?;
     let process = |detail: String| CompatError::Process {
@@ -466,7 +476,9 @@ pub fn rust_dump(config: &Path, env: &DumpEnv) -> Dump {
                         kind: "s3".to_owned(),
                         path: config.prefix().as_str().to_owned(),
                         bucket: config.bucket().as_str().to_owned(),
-                        credentials: env.credentials.then(|| resolve(credentials, env)),
+                        credentials: env
+                            .credentials
+                            .then(|| resolve(credentials, config.region().as_str(), env)),
                     },
                 },
             })
@@ -474,10 +486,14 @@ pub fn rust_dump(config: &Path, env: &DumpEnv) -> Dump {
     )
 }
 
-/// What the store would sign with: the config's keys, else the chain over `env`.
-fn resolve(credentials: &Credentials, env: &DumpEnv) -> DumpCredentials {
+/// What the store would sign with: the config's keys, else the chain over `env`, with the
+/// daemon's HTTP client for the sources that fetch.
+fn resolve(credentials: &Credentials, region: &str, env: &DumpEnv) -> DumpCredentials {
     let env = env.clone();
-    let chain = CredentialChain::with_env(move |name| env.var_or_home(name));
+    let transport: Arc<dyn Transport> = Arc::new(UreqTransport::new(Duration::from_secs(5)));
+    let chain = CredentialChain::with_env(move |name| env.var_or_home(name))
+        .with_transport(transport, Arc::new(SystemClock))
+        .with_region(region);
     // The daemon's own construction (`sidecar/src/daemon.rs`): config keys are explicit
     // values on the same chain, so the shared files are still read first.
     let chain = match credentials {

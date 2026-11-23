@@ -40,7 +40,7 @@ use lsr_core::{
     AppCheckpoint, AppCheckpointObserver, CheckpointMode, Checkpointer, Event, RestoreTarget,
     SQLITE_AUTOCHECKPOINT, SnapshotCause, Tick, WalSource,
 };
-use lsr_local::FileSink;
+use lsr_replica::local::FileSink;
 use lsr_sqlite::Sqlite;
 use lsr_sqlite::testing::harness::open_app;
 use lsr_sqlite::testing::{Rig, RigConfig};

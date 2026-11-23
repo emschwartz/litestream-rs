@@ -1,7 +1,7 @@
-# A boot drop records only through the confirmed transaction, short of a listed tail the
-# listing judged torn.
+# A boot drop records only through the confirmed transaction, short of a tail judged torn.
+# Seed 0x3ed killed it until the boot witness's read of a refused key moved that history; the
+# core test that hides the tail from the listing kills it now.
 name = "boot-drop-record-capped-at-confirmed"
 fix = "88577ff"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+package = "lsr-core"
+tests = ["the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides"]
