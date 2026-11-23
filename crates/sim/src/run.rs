@@ -896,9 +896,13 @@ impl Runner {
             .map_err(|err| bug_fault(format!("listing staging failed: {err}")))?
             .map(|info| info.key.range().max());
         self.staged_high = staged;
+        // While a listing is pending the engine confirms nothing, and any
+        // staged file is "at least" that: the mark stays until a listing says
+        // what the replica holds.
         if self.staging_disturbed
             && self.actor.booted()
             && staged.is_some()
+            && self.actor.replicated().is_some()
             && staged >= self.actor.replicated()
         {
             self.staging_disturbed = false;
