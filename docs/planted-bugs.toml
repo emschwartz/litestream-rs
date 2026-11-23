@@ -1628,7 +1628,7 @@ name = "compact-commit-unchecked"
 fix = "claude/commit-size"
 package = "lsr-core"
 tests = [
-    "compact::tests::an_output_acknowledged_short_is_deleted_and_reported",
+    "compact::tests::an_output_acknowledged_short_is_reported_and_left_to_the_caller",
     "publish::guard::no_engine_module_calls_a_store_write_or_delete_outside_publish",
 ]
 
@@ -1647,7 +1647,7 @@ name = "short-commit-object-kept"
 fix = "claude/commit-size"
 package = "lsr-core"
 tests = [
-    "publish::tests::a_commit_acknowledged_short_is_deleted_and_reported",
+    "publish::tests::a_create_only_commit_acknowledged_short_is_deleted_and_reported",
     "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
 ]
 
@@ -2026,3 +2026,15 @@ fix = "claude/sim-remote-corrupt"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c"]
+
+# A replace acknowledged short deleted the key, which may have held an acknowledged object: the
+# replica then ended a transaction early with no error (simulator seed 0x1dc, D78).
+[[bug]]
+name = "replace-short-deleted"
+fix = "claude/replace-keeps"
+package = "lsr-core"
+tests = [
+    "publish::tests::a_replace_acknowledged_short_is_reported_and_never_deleted",
+    "retry::tests::a_replace_commit_size_mismatch_never_deletes_the_key",
+    "compact::tests::an_output_acknowledged_short_is_reported_and_left_to_the_caller",
+]
