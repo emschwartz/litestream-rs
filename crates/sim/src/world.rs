@@ -388,8 +388,29 @@ impl World {
     /// holds whatever the rules' file still has, so the model takes it from
     /// their image instead of assuming the app wrote it.
     pub fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<CommitId> {
-        let before = self.model.newest_image().db_size();
         let app = self.sqlite.commit(pages, db_size)?;
+        Some(self.committed(pages, db_size, app))
+    }
+
+    /// As [`Self::app_commit`], by another application connection with a checkpoint count of
+    /// its own ([`SimSqlite::other_writer_commit`]).
+    pub fn other_writer_commit(
+        &mut self,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+    ) -> Option<CommitId> {
+        let app = self.sqlite.other_writer_commit(pages, db_size)?;
+        Some(self.committed(pages, db_size, app))
+    }
+
+    /// Takes a commit SQLite made into the model and the history.
+    fn committed(
+        &mut self,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+        app: crate::sqlite::AppCommit,
+    ) -> CommitId {
+        let before = self.model.newest_image().db_size();
         self.retire_generation(app.salts);
         let mut written = pages.to_vec();
         if db_size > before {
@@ -399,7 +420,7 @@ impl World {
             .model
             .commit(&written, db_size, app, self.remote_recorder.len());
         self.log_history();
-        Some(id)
+        id
     }
 
     /// Logs the model's new commits in the history, at the clock's time.
@@ -1159,6 +1180,29 @@ impl World {
             end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
         };
         self.model.vacuum(image, app, self.remote_recorder.len());
+        self.log_history();
+    }
+
+    /// After the WAL's generation was regrown with its commit marks kept: every mark is a
+    /// commit of the writer that regrew it, so the model takes each one, in order, as a new
+    /// image at its place in the WAL. A file staged up to an earlier mark is then that mark's
+    /// commit, not the one made at the same place before the regrowth, whose pages the WAL no
+    /// longer holds.
+    pub fn adopt_regrown(&mut self) {
+        if self.model_matches_sqlite() {
+            return;
+        }
+        let page_size = self.sqlite.page_size();
+        let salts = self.sqlite.salts();
+        let at = self.remote_recorder.len();
+        for (end, bytes) in self.sqlite.commit_images() {
+            let image = PageImage::from_bytes(page_size, &bytes);
+            let app = AppCommit {
+                salts,
+                end: WalOffset::from_frame_index(end, page_size),
+            };
+            self.model.vacuum(image, app, at);
+        }
         self.log_history();
     }
 

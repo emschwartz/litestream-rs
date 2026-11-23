@@ -1498,7 +1498,12 @@ impl Runner {
             return now == self.w.sqlite.page_size()
                 && (remembered || self.replica_page_size().ok().flatten() == Some(was));
         }
+        // An object a size mismatch left short and a delete could not remove
+        // is real damage in the replica, as a corrupted publish is.
+        let damaged =
+            cause == StopCause::RemoteCorrupt && !self.w.remote_faults.damaged().is_empty();
         self.allow_stop
+            || damaged
             || self
                 .expected
                 .iter()
@@ -1763,6 +1768,16 @@ impl Runner {
         self.w.crash(CrashKind::Process);
         self.crashed(CrashKind::Process);
         Ok(())
+    }
+
+    /// Another application connection commits: its own pages, never growing the database, and
+    /// not in the app's log (the app does not redo another process's writes).
+    fn other_connection_commit(&mut self, count: u8) {
+        let size = self.w.sqlite.db_size();
+        let pages = self.pick_pages(u32::from(count), size);
+        if self.w.other_writer_commit(&pages, size).is_some() {
+            self.report.reach.bump("commit.other_connection");
+        }
     }
 
     fn spill(&mut self) {
@@ -2116,11 +2131,12 @@ impl Runner {
             // A flipped bit is no commit: the model follows it, and no restore may give it.
             (WalOp::FlipLastFrameBit, Heal::No) => self.w.adopt_corrupt_state(),
             (WalOp::FlipLastFrameBit, Heal::Yes) => self.w.adopt_local_state(),
+            // A regrowth that kept its commit marks made a commit at each of them.
+            (WalOp::RegrowSameSalts(_), _) => self.w.adopt_regrown(),
             (
                 WalOp::TearHeader
                 | WalOp::TruncateAtFrame(_)
                 | WalOp::RewriteSameLength(_)
-                | WalOp::RegrowSameSalts(_)
                 | WalOp::RegrowWithoutCommitMarks(_),
                 _,
             ) => self.w.adopt_local_state(),
@@ -2229,6 +2245,7 @@ impl Runner {
             Op::CommitInTick { pages } => self.commit_in_tick(*pages)?,
             Op::AppInTick { at, op } => self.app_in_tick(*at, *op)?,
             Op::Spill => self.spill(),
+            Op::OtherConnectionCommit { pages } => self.other_connection_commit(*pages),
             Op::Rollback => {
                 if self.w.sqlite.rollback() {
                     self.spilled.clear();

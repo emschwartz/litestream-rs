@@ -2347,6 +2347,42 @@ fn maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload() {
     assert!(planned(&seen), "{seen:?}");
 }
 
+/// The first maintenance listing after a boot has no regression watch to check it against:
+/// the boot confirmed the replica's newest file, and a listing that hides it ends before that.
+/// Planned from, it would compact or snapshot a shorter run; a read finds the confirmed key,
+/// so maintenance plans nothing and lists again, and plans once the listing shows the file.
+#[test]
+fn the_first_listing_after_a_boot_plans_nothing_while_it_hides_the_confirmed_upload() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert!(
+        matches!(event(&boot), Some(Event::Booted { cause: None })),
+        "{boot:?}"
+    );
+    rig.remote.hidden.lock().unwrap().push(l0(2));
+    let planned = |seen: &[Tick]| {
+        seen.iter().any(|tick| {
+            matches!(
+                event(tick),
+                Some(Event::Maintained {
+                    event: MaintainedEvent::Compacted(_)
+                        | MaintainedEvent::Snapshot(_)
+                        | MaintainedEvent::Deleted(_),
+                    ..
+                })
+            )
+        })
+    };
+    let seen = rig.follow(&mut actor, T0 + 40_000, 40);
+    assert!(!planned(&seen), "{seen:?}");
+    rig.remote.hidden.lock().unwrap().clear();
+    let seen = rig.follow(&mut actor, T0 + 100_000, 40);
+    no_stop(&seen);
+    assert!(planned(&seen), "{seen:?}");
+}
+
 /// A boot removes what killed uploads left, in staging and in the replica, before it reads
 /// anything else; the stores' wrappers forward the call.
 #[test]

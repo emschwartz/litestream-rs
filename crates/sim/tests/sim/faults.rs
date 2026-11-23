@@ -489,3 +489,45 @@ fn vacuum_page_size_change_and_back() {
 fn bit_flip_in_committed_frame_healed() {
     run(scenario::bit_flip_in_committed_frame_healed);
 }
+
+/// A WAL header written again with the same salts and another seed. With our read lock lapsed,
+/// another application connection restarts the WAL once (its checkpoint count becomes 1), the
+/// app restarts it twice more by its commits and a third time by a spill it rolls back, which
+/// leaves the wal-index at no frame of the newest generation under the app's header. The engine
+/// takes its position at the start of that generation; then the other connection commits frame
+/// 1 and writes the header again, same salts, its own count. The engine follows the new header
+/// and replicates the commit (it called the WAL corrupt for good while it kept the old seed).
+#[test]
+fn a_header_written_again_by_another_connection_is_followed() {
+    let commit = || Op::Commit {
+        pages: 2,
+        grow: false,
+    };
+    let other = || Op::OtherConnectionCommit { pages: 2 };
+    let backfill = || Op::OtherProcessCheckpoint(lsr_sim::OtherProcessMode::Passive);
+    let ticks = |n| vec![Op::Tick; n];
+    let ops: Vec<Op> = [
+        vec![commit(), commit()],
+        ticks(6),
+        vec![Op::OurReader { begin: false }],
+        vec![
+            backfill(),
+            other(),
+            backfill(),
+            commit(),
+            backfill(),
+            commit(),
+        ],
+        vec![backfill(), Op::Spill, Op::Rollback],
+        ticks(6),
+        vec![other()],
+        ticks(12),
+        vec![Op::Restore],
+    ]
+    .concat();
+    if let Err(failure) =
+        lsr_sim::run::run_ops(lsr_sim::Seed::new(1), &ops, &lsr_sim::Opts::default())
+    {
+        panic!("{}", failure.message(failure.steps));
+    }
+}

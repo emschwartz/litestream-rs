@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/run/hold.rs b/crates/sim/src/run/hold.rs
+index 71d59303..088e6b98 100644
+--- a/crates/sim/src/run/hold.rs
++++ b/crates/sim/src/run/hold.rs
+@@ -481,7 +481,7 @@ impl Runner {
+             // As of an instant, the bound is the promise, not the raw replica's answer: a view
+             // that hides a merged file plans from the finer files under it and may answer newer
+             // than the raw replica's earlier-taken state, and both meet the bound.
+-            (Ok((got, _)), Ok(_)) => match target {
++            (Ok((got, _)), Ok(_)) => match RestoreTarget::Latest {
+                 RestoreTarget::AsOf(instant) => {
+                     self.w
+                         .history

@@ -506,16 +506,20 @@ impl WalSource for Sqlite {
     }
 }
 
-/// Sets up one application connection as replication needs it (PLAN section 6): `SQLITE_FCNTL_PERSIST_WAL`
-/// on, so the last connection to close keeps the WAL the replica follows, and
-/// `wal_autocheckpoint = 0`, so only the replicator checkpoints. Call it on every connection a
+/// Sets up one application connection as replication needs it (PLAN section 6):
+/// `wal_autocheckpoint = 0`, so only the replicator checkpoints. Call it on every connection an
 /// application opens, pooled ones included.
 ///
+/// It leaves `SQLITE_FCNTL_PERSIST_WAL` alone, and an application should too: with the flag on,
+/// a connection that leaves WAL mode keeps the WAL, SQLite goes on reading it, and a page-size
+/// change made then corrupts the database (docs/decisions.md D123). The replicator's own
+/// connections keep the WAL when they close last, so an application closes its connections
+/// before it stops the replicator; one that closes last deletes the WAL, and the next start
+/// takes a snapshot.
+///
 /// # Errors
-/// [`SetupError::PersistWal`] when the connection's database has no file; [`SetupError::Sqlite`]
-/// when the pragma fails.
+/// [`SetupError::Sqlite`] when the pragma fails.
 pub fn app_connection(conn: &Connection) -> Result<(), SetupError> {
-    persist_wal(conn).map_err(SetupError::PersistWal)?;
     conn.pragma_update(None, "wal_autocheckpoint", 0)
         .map_err(SetupError::Sqlite)
 }
@@ -608,19 +612,9 @@ pub unsafe fn app_connection_raw(
 /// Reads back what [`app_connection`] sets.
 ///
 /// # Errors
-/// [`SetupError::PersistWalOff`] or [`SetupError::AutocheckpointOn`] for a connection that is
-/// not set up; the other variants when the read itself fails.
+/// [`SetupError::AutocheckpointOn`] for a connection that is not set up; [`SetupError::Sqlite`]
+/// when the read itself fails.
 pub fn check_app_connection(conn: &Connection) -> Result<(), SetupError> {
-    // -1 asks for the current setting, which SQLite writes back.
-    let mut persist: c_int = -1;
-    conn.file_control(
-        Some(rusqlite::MAIN_DB),
-        FileControl::PersistWal(&mut persist),
-    )
-    .map_err(SetupError::PersistWal)?;
-    if persist == 0 {
-        return Err(SetupError::PersistWalOff);
-    }
     let pages: i64 = conn
         .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
         .map_err(SetupError::Sqlite)?;
