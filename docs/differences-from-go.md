@@ -14,6 +14,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | S3 errors, throttles or is down | Retry, waiting up to 5 minutes between tries, for as long as it takes |
 | SQLite changes the WAL: a checkpoint from outside, a WAL restart, `VACUUM`, a deleted WAL | Continue, or take a snapshot |
 | S3's list of files is out of date | Trust the list. Object storage that lists behind its writes is unsupported |
+| The replicator restarts while replication is failing | Not covered: the failure is forgotten. The count of failed tries and the degraded report start again from zero, so a replicator that keeps restarting can stay quiet. litestream-rs carries one number across the restart, the age of the oldest change that was staged and not yet in S3 (`lsr_unreplicated_age_seconds`) |
 | An S3 replica with no path inside the bucket † | Works, with keys that start with `/` |
 | Retry counts and warnings after a restart | Start again from zero (under review) |
 | `replicate` and `restore` fail | Exit 1 |
@@ -58,7 +59,6 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 ## Under review
 
 - Holding the application when replication stops (`if-replication-stops`, default `hold-start`). Go has nothing like it.
-- Whether a degraded state must survive a restart.
 
 ## What `main` does today for the rows marked †
 
