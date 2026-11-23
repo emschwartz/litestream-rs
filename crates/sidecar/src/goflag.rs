@@ -9,11 +9,11 @@
 //! help, which Go's `main` then treats as success only when an argument is literally `-h`,
 //! `-help` or `--help` (`cmd/litestream/main.go:89-96`).
 
-/// A value check and the reason Go gives when it refuses.
-pub type Check = (fn(&str) -> bool, &'static str);
+/// A value check: `Err` carries the reason Go gives when it refuses.
+pub type Check = fn(&str) -> Result<(), &'static str>;
 
 /// One flag a command defines.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Def {
     /// The name, without dashes.
     pub name: &'static str,
@@ -34,13 +34,13 @@ pub const fn value(name: &'static str) -> Def {
 }
 
 /// A value flag Go parses as it reads it (an int, a duration, a `flag.Value`), so a bad
-/// value stops the scan there with `why`.
+/// value stops the scan there with the check's reason.
 #[must_use]
-pub const fn checked(name: &'static str, check: fn(&str) -> bool, why: &'static str) -> Def {
+pub const fn checked(name: &'static str, check: Check) -> Def {
     Def {
         name,
         value: true,
-        check: Some((check, why)),
+        check: Some(check),
     }
 }
 
@@ -204,8 +204,8 @@ pub fn scan(defs: &[Def], args: &[String]) -> Result<Scan, FlagError> {
                 .ok_or(FlagError::MissingValue { name })?,
             (false, None) => "true".to_owned(),
         };
-        if let Some((check, why)) = def.check
-            && !check(&value)
+        if let Some(check) = def.check
+            && let Err(why) = check(&value)
         {
             return Err(FlagError::BadValue { name, value, why });
         }
