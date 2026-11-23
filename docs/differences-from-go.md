@@ -36,7 +36,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 |---|---|---|
 | Power loss | Never syncs the WAL, so the bucket can hold commits the database then loses | Syncs the WAL before copying from it. If the disk loses them anyway, the next start takes a snapshot |
 | A write of the WAL to disk fails † | Does not notice | Reports `wal_sync_failed` and retries |
-| Files are deleted from the bucket, or it is rolled back † | Does not notice. Restores fail until the next snapshot | The same, and reports `remote_regressed` |
+| Files are deleted from the bucket, or it is rolled back | Does not notice. Restores fail until the next snapshot | The same, and reports `remote_regressed` |
 | The WAL is damaged below the last commit | Reads it as the end of the WAL | Reports `wal_corrupt` and replicates nothing past the damage |
 | A writer stopped mid-commit left frames in the WAL | Releases through v0.5.18 can replicate them | Never reads past the last commit |
 | A failure that persists | A log line | A named degraded state in `health()`, `/healthz` and `/metrics` |
@@ -64,5 +64,4 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 
 - **S3 replica with no path:** refused at load.
 - **WAL write fails:** the engine remembers the failure in a journal and runs a verified repair.
-- **Bucket files deleted or rolled back:** the engine watches files it uploaded and tries to heal.
 - **Two replicators on one working folder:** the second refuses to start.

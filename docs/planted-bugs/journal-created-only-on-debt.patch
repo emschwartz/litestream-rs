@@ -1,13 +1,11 @@
-diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 9d28208c..1c3a3a5c 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2760,7 +2760,7 @@ impl Actor {
-             // own until this engine has one (`floor`).
-             self.kept.floor.or(held.and_then(|held| held.floor)),
+@@ -2802,7 +2802,7 @@
+             self.kept.ahead,
+             self.kept.unchecked,
          );
--        if held.map(|held| (held.unproven, held.ahead, held.unchecked, held.floor)) == Some(wanted)
-+        if held.map_or((lsr_journal::Unproven::No, None, None, None), |held| (held.unproven, held.ahead, held.unchecked, held.floor)) == wanted
-         {
+-        if held.map(|held| (held.unproven, held.ahead, held.unchecked)) == Some(wanted) {
++        if held.map_or((lsr_journal::Unproven::No, None, None), |held| (held.unproven, held.ahead, held.unchecked)) == wanted {
              // Nothing the engine holds is missing from the journal: nothing lags it.
              self.kept.journal_write = Ok(());
+             return tick;
