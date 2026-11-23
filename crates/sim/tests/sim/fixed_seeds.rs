@@ -28,11 +28,20 @@ mod fixed {
         );
     }
 
+    /// `weights` with the replica on `MemStore` and no provider faults: the per-push seeds keep
+    /// the histories they had before the S3 replica was drawn (`docs/decisions.md` D124), and
+    /// `remote_s3` runs S3 seeds of its own.
+    fn on_mem(mut weights: Weights) -> Weights {
+        weights.remote_s3 = false;
+        weights.http_fault = 0;
+        weights
+    }
+
     fn batch(first: u64) {
         let mut ticks = Vec::new();
         for n in (first..).take(8) {
             let seed = Seed::new(n);
-            match run(seed, STEPS, &Weights::mixed(seed)) {
+            match run(seed, STEPS, &on_mem(Weights::mixed(seed))) {
                 Ok(report) => ticks.push(report.ticks),
                 Err(failure) => panic!("{failure}"),
             }

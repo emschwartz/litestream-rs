@@ -2,8 +2,9 @@
 //! history draws for it ([`crate::Op::HttpFault`]).
 
 use super::{Opts, Runner};
-use lsr_store_s3::Shape;
+use lsr_store_s3::{Fault, Shape};
 
+use crate::failstop::{Fired, fired};
 use crate::generate::HttpFault;
 use crate::oracle::Violation;
 
@@ -43,6 +44,31 @@ impl Runner {
             .filter(|fault| matches!(fault.on(), Shape::List | Shape::Head | Shape::Get))
             .count();
         u32::try_from(reads).unwrap_or(u32::MAX)
+    }
+
+    /// The replica's fault fires for the fail-stop judge (`crate::failstop::fired`): the
+    /// object-level layer's, and the provider faults the S3 store's requests met. A provider
+    /// fault is doubtful when the bucket took the write before the answer went wrong.
+    pub(super) fn remote_fired(&self) -> Fired {
+        let object = fired(&self.w.remote_faults);
+        let provider = self
+            .w
+            .remote_raw
+            .wire()
+            .map_or_else(Vec::new, |wire| wire.fired());
+        provider.iter().fold(object, |was, fault| {
+            let doubtful = matches!(
+                fault,
+                Fault::AfterPublish { .. }
+                    | Fault::WrongEtag { on: Shape::Put }
+                    | Fault::TruncateBody { on: Shape::Put, .. }
+            );
+            Fired {
+                all: was.all.saturating_add(1),
+                refused: was.refused,
+                doubtful: was.doubtful.saturating_add(u64::from(doubtful)),
+            }
+        })
     }
 
     /// The provider faults pushed and not yet met by a request, at the end of a run.

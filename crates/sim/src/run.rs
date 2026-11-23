@@ -791,7 +791,7 @@ impl Runner {
         let salts = self.w.sqlite.salts();
         let commits = self.w.model.commits().len();
         self.staging_moved()?;
-        let fired0 = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let fired0 = (self.remote_fired(), fired(&self.w.staging_faults));
         let queued0 = self.w.sqlite.queued_injections();
         let ended = self.run_one(plan);
         if matches!(ended, TickEnd::Done(_)) {
@@ -1232,7 +1232,7 @@ impl Runner {
     /// fault or an injected SQLite-side failure fires after a fault operation is followed at once
     /// by a process crash, before anything else can pay what the fault left owing.
     fn kill_after_fault(&mut self, step: Step, fired0: (Fired, Fired), queued0: usize) -> Step {
-        let fired_now = (fired(&self.w.remote_faults), fired(&self.w.staging_faults));
+        let fired_now = (self.remote_fired(), fired(&self.w.staging_faults));
         let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
         let source = self.w.sqlite.queued_injections() < queued0;
         let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));

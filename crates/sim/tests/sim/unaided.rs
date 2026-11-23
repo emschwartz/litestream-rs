@@ -13,7 +13,7 @@
 //! error domain's known-wrong cells are drawn too and a failure matching a drawn defect's
 //! signature is printed as known and not counted as failed (`lsr_sim::domain::KnownWrong`); with
 //! `LSR_SIM_REMOTE_S3` set, every seed's replica is the S3 store over its in-memory bucket
-//! (`lsr_sim::remote`), and with `LSR_SIM_HTTP_FAULT` set to a weight, every seed draws provider
+//! (`lsr_sim::remote`), with `LSR_SIM_REMOTE_MEM` set none is, and with `LSR_SIM_HTTP_FAULT` set to a weight, every seed draws provider
 //! faults on its requests at it.
 //! Prints every failing seed and the number of seeds run to
 //! the first. The generator, weights and step count are the soak's, fixed here so a count of
@@ -104,6 +104,7 @@ pub fn weights(seed: Seed) -> Weights {
         weights.app_in_tick = weight.parse().expect("LSR_SIM_APP_IN_TICK is a weight");
     }
     weights.remote_s3 |= std::env::var("LSR_SIM_REMOTE_S3").is_ok();
+    weights.remote_s3 &= std::env::var("LSR_SIM_REMOTE_MEM").is_err();
     if let Ok(weight) = std::env::var("LSR_SIM_HTTP_FAULT") {
         weights.http_fault = weight.parse().expect("LSR_SIM_HTTP_FAULT is a weight");
     }
