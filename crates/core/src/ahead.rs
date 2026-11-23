@@ -31,13 +31,14 @@ use lsr_ltx::{PageChecksum, PageNo, Txid};
 use lsr_wal::{OpenError, WalReader};
 
 use crate::fault::Fault;
+use crate::fault::role::Role;
 use crate::inventory::InventoryError;
 use crate::pages::PageChecksumTable;
 use crate::plan::RestoreTarget;
 use crate::position::Position;
 use crate::restore::{RestoreError, RestoreOptions, restore_one_plan};
 use crate::source::{PageSource, WalSource};
-use crate::store::{ObjectStore, StoreError};
+use crate::store::StoreError;
 use crate::sync::scan_whole;
 use crate::verify::DigestSink;
 
@@ -72,7 +73,7 @@ impl From<Fault> for CheckError {
 /// # Errors
 /// [`CheckError::Fault`] for what a read met (the WAL moved, a page could not be read, a store
 /// call failed); [`CheckError::Unrestorable`] when the replica's state at `confirmed` is damaged.
-pub(crate) async fn check<W: WalSource, P: PageSource, R: ObjectStore>(
+pub(crate) async fn check<W: WalSource, P: PageSource, R: Role>(
     position: &Position,
     wal: &mut W,
     db: &mut P,
@@ -161,7 +162,7 @@ fn open_fault(err: OpenError) -> Fault {
 }
 
 /// The replica's state at `txid`, one checksum a page, into `pages`, from one plan.
-async fn digests_at<R: ObjectStore>(
+async fn digests_at<R: Role>(
     remote: &R,
     txid: Txid,
     pages: &mut BTreeMap<u32, PageChecksum>,
@@ -178,7 +179,7 @@ async fn digests_at<R: ObjectStore>(
     .await
     {
         Ok(_) => Ok(()),
-        Err(err) => Err(restore_fault(&err)),
+        Err(err) => Err(restore_fault::<R>(&err)),
     }
 }
 
@@ -186,7 +187,7 @@ async fn digests_at<R: ObjectStore>(
 /// call (a read, a listing page) or a replica changing under the restore is the store's fault,
 /// retried as such; a history that does not plan, a file or database that does not verify, or a
 /// listing no real store returns is the replica's damage.
-fn restore_fault(err: &RestoreError) -> CheckError {
+fn restore_fault<R: Role>(err: &RestoreError) -> CheckError {
     match err {
         RestoreError::Store(StoreError::Corrupt { .. })
         | RestoreError::Inventory(
@@ -197,7 +198,7 @@ fn restore_fault(err: &RestoreError) -> CheckError {
         | RestoreError::DatabaseChecksum { .. }
         | RestoreError::CreatedAtRepeated { .. } => CheckError::Unrestorable,
         RestoreError::Store(err) | RestoreError::Inventory(InventoryError::Store(err)) => {
-            Fault::from_remote(err).into()
+            R::fault(err).into()
         }
         RestoreError::Unstable { .. } | RestoreError::ListingBehind { .. } => {
             Fault::StoreTransient.into()

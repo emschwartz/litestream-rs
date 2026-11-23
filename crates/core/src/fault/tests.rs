@@ -635,6 +635,19 @@ fn no_staging_error_is_blamed_on_the_replica() {
     }
 }
 
+/// ENOSPC (and EDQUOT) from a filesystem replica is a full disk, as on staging: the operator's
+/// fix is to free space, and an unnamed transient error would hide that. Go reports the same
+/// `no space left on device` for a full replica directory as for a full database disk.
+#[test]
+fn a_full_replica_disk_is_disk_full() {
+    for op in [StoreOp::Upload, StoreOp::Read, StoreOp::Delete] {
+        for kind in [ErrorKind::StorageFull, ErrorKind::QuotaExceeded] {
+            let err = StoreError::Transient { op, kind };
+            assert_eq!(store_fault(&err), Fault::LocalDiskFull, "{op:?} {kind:?}");
+        }
+    }
+}
+
 #[test]
 fn from_remote_scratch_exhausted_is_local_disk_full() {
     assert_eq!(

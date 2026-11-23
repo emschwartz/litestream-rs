@@ -452,6 +452,13 @@ pub(super) struct Engine {
     /// replica went backwards: an acknowledged id is never taken again for
     /// other pages, so a snapshot always goes above it.
     pub(super) acknowledged: Option<Txid>,
+    /// The newest transaction a running drop of this engine's own staged
+    /// files vouched for, through the takeover record it kept first: the
+    /// replica may hold those files unconfirmed (an upload whose answer was
+    /// lost), so a listing never calls them another writer's; one that finds
+    /// them confirms them, and the snapshot goes above them. Only this
+    /// engine's own drops set it, never an operator's or a boot's record.
+    pub(super) dropped_through: Option<Txid>,
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
@@ -471,6 +478,7 @@ impl Engine {
             maintain: Maintain::default(),
             pruned: None,
             acknowledged: None,
+            dropped_through: None,
             witnesses: Witnesses::new(),
         }
     }
@@ -697,5 +705,11 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
     (
         "witnesses",
         Keep::Derived("witnessed again at boot against the live WAL (crate::witness)"),
+    ),
+    (
+        "dropped_through",
+        Keep::Derived(
+            "the takeover record kept before the drop vouches for the same ids at the next boot",
+        ),
     ),
 ];
