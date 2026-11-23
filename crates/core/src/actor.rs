@@ -76,6 +76,7 @@
 
 mod ahead;
 mod clock;
+mod floor;
 mod lag;
 mod parts;
 mod state;
@@ -205,6 +206,10 @@ pub struct ActorConfig {
     /// How long a commit may stay off the replica before fail-stop trips for it
     /// (`crate::failstop`), and when the probe at the bound runs.
     pub max_unreplicated_age: MaxUnreplicatedAge,
+    /// The replica's destination, as the engine journal names it (`lsr_journal::ReplicaId::of`
+    /// over its canonical name): the confirmed floor is read back for this destination only.
+    /// `None` keeps no floor.
+    pub destination: Option<lsr_journal::ReplicaId>,
 }
 
 /// What a maintenance tick did.
@@ -1287,6 +1292,7 @@ impl Actor {
     fn set_upload(&mut self, state: UploadState) {
         self.engine.upload = state;
         self.engine.acknowledged = self.engine.acknowledged.max(state.confirmed());
+        self.raise_floor(state.confirmed());
         self.engine.witnesses.confirmed(state.confirmed());
     }
 
@@ -2050,6 +2056,7 @@ impl Actor {
         match remote.read(&key, 0, ReadLen::or_chunk(1)).await {
             Ok(_) => Some(self.list_again_later(now)),
             Err(StoreError::NotFound { .. }) => {
+                self.floor_regressed();
                 Some(self.fault(Task::Upload, Fault::RemoteRegressed, now))
             }
             Err(err) => Some(self.fault(Task::Maintenance, R::fault(&err), now)),
@@ -2599,7 +2606,9 @@ impl Actor {
         if let Some(read) = self.kept.journal_read {
             self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
             self.adopt_ahead(read.ahead);
+            self.adopt_floor(read.floor);
         }
+        self.raise_floor(upload.confirmed());
         self.kept.writer = Some(writer);
     }
 
@@ -2614,12 +2623,26 @@ impl Actor {
         tick: Tick,
         now: Timestamp,
     ) -> Tick {
-        let (Some(file), Some(writer)) = (file, self.kept.writer.as_mut()) else {
+        let Some(file) = file else {
             return tick;
         };
-        let held = writer.durable().copied().or(self.kept.journal_read);
-        let wanted = (self.kept.unproven.recorded(), self.kept.ahead);
-        if held.map(|held| (held.unproven, held.ahead)) == Some(wanted) {
+        let Some(held) = self
+            .kept
+            .writer
+            .as_ref()
+            .map(|writer| writer.durable().copied())
+        else {
+            return tick;
+        };
+        let held = held.or(self.kept.journal_read);
+        let wanted = (
+            self.kept.unproven.recorded(),
+            self.kept.ahead,
+            // A floor is never dropped, another destination's included: the record keeps its
+            // own until this engine has one (`floor`).
+            self.kept.floor.or(held.and_then(|held| held.floor)),
+        );
+        if held.map(|held| (held.unproven, held.ahead, held.floor)) == Some(wanted) {
             // Nothing the engine holds is missing from the journal: nothing lags it.
             self.kept.journal_write = Ok(());
             return tick;
@@ -2627,7 +2650,11 @@ impl Actor {
         let record = lsr_journal::Journal {
             unproven: wanted.0,
             ahead: wanted.1,
+            floor: wanted.2,
             ..held.unwrap_or(lsr_journal::Journal::ABSENT)
+        };
+        let Some(writer) = self.kept.writer.as_mut() else {
+            return tick;
         };
         match writer.write(file, &record) {
             Ok(()) => self.kept.journal_write = Ok(()),

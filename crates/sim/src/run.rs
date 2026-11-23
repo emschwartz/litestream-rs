@@ -275,6 +275,8 @@ pub fn actor_config() -> ActorConfig {
         shutdown_grace: Duration::from_secs(10),
         responses: Responses::GO_LIKE,
         max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
+        // One destination for the whole run: the floor is written and read back at every boot.
+        destination: Some(lsr_journal::ReplicaId::of(b"sim")),
     }
 }
 

@@ -102,7 +102,7 @@ pub use layout::{
     ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
 /// The ahead-of-WAL verdict [`Actor::ahead`] returns.
-pub use lsr_journal::Ahead;
+pub use lsr_journal::{Ahead, Floor, ReplicaId, Triple};
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
     MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionHold, RetentionMode,
