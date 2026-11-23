@@ -1,4 +1,4 @@
-//! Go's trust rules, checked against a local TLS server whose certificate
+//! The store's trust rules, checked against a local TLS server whose certificate
 //! chains to a private certificate authority made here with the `openssl`
 //! command (on Linux and macOS by default). Nothing leaves 127.0.0.1.
 
@@ -14,9 +14,6 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use url::Url;
 
-// The root loader, for the Linux and BSD tests in `go_unix`.
-#[cfg(all(unix, not(target_vendor = "apple")))]
-use super::*;
 use crate::request::{HttpRequest, Method};
 use crate::transport::{Transport, TransportError};
 
@@ -233,9 +230,16 @@ fn env_child() {
     );
 }
 
-/// Runs `env_child` in a fresh process with `SSL_CERT_FILE` as given and
-/// `SSL_CERT_DIR` unset, expecting `expect` from every client the store builds.
-fn run_child(url: &Url, cert_file: Option<&Path>, expect: &str) {
+/// What `run_child` sets: `SSL_CERT_FILE` and `SSL_CERT_DIR` as given, or unset.
+#[derive(Default, Clone, Copy)]
+struct Vars<'a> {
+    file: Option<&'a Path>,
+    dir: Option<&'a Path>,
+}
+
+/// Runs `env_child` in a fresh process with the variables as given, expecting
+/// `expect` from every client the store builds.
+fn run_child(url: &Url, vars: Vars<'_>, expect: &str) {
     let mut child = Command::new(std::env::current_exe().expect("test binary"));
     child
         .args([
@@ -246,10 +250,13 @@ fn run_child(url: &Url, cert_file: Option<&Path>, expect: &str) {
         ])
         .env("LSR_TRUST_CHILD_URL", url.as_str())
         .env("LSR_TRUST_CHILD_EXPECT", expect)
-        .env_remove(CHILD_FILE_VAR)
-        .env_remove(CHILD_DIR_VAR);
-    if let Some(file) = cert_file {
-        child.env(CHILD_FILE_VAR, file);
+        .env_remove("SSL_CERT_FILE")
+        .env_remove("SSL_CERT_DIR");
+    if let Some(file) = vars.file {
+        child.env("SSL_CERT_FILE", file);
+    }
+    if let Some(dir) = vars.dir {
+        child.env("SSL_CERT_DIR", dir);
     }
     let out = child.output().expect("run the child");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -260,23 +267,46 @@ fn run_child(url: &Url, cert_file: Option<&Path>, expect: &str) {
     );
 }
 
-const CHILD_FILE_VAR: &str = "SSL_CERT_FILE";
-const CHILD_DIR_VAR: &str = "SSL_CERT_DIR";
-
-/// `UreqTransport::new` and `ReqwestTransport::new` read the real variables.
-/// On Linux `SSL_CERT_FILE` makes the private CA trusted; on macOS and
-/// Windows Go ignores the variable, and so does the store.
+/// `UreqTransport::new` and `ReqwestTransport::new` read the real variables: a private CA
+/// the system lacks is refused, and trusted once `SSL_CERT_FILE` or `SSL_CERT_DIR` names it.
 #[test]
 fn the_default_clients_read_the_process_environment() {
     let pki = Pki::new();
     let url = pki.serve();
-    run_child(&url, None, "refused");
-    let with_file = if cfg!(all(unix, not(target_vendor = "apple"))) {
-        "trusted"
-    } else {
-        "refused"
-    };
-    run_child(&url, Some(&pki.ca()), with_file);
+    run_child(&url, Vars::default(), "refused");
+    let ca = pki.ca();
+    run_child(
+        &url,
+        Vars {
+            file: Some(&ca),
+            dir: None,
+        },
+        "trusted",
+    );
+    run_child(
+        &url,
+        Vars {
+            file: None,
+            dir: Some(pki.dir.path()),
+        },
+        "trusted",
+    );
+}
+
+/// Variables that name nothing leave no system roots, so Mozilla's are the fallback: they
+/// are not empty (a public site would verify) and still refuse the private CA.
+#[test]
+fn variables_naming_nothing_fall_back_to_mozilla_roots_and_refuse_the_private_ca() {
+    let pki = Pki::new();
+    let missing = pki.dir.path().join("absent");
+    run_child(
+        &pki.serve(),
+        Vars {
+            file: Some(&missing),
+            dir: Some(&missing),
+        },
+        "refused",
+    );
 }
 
 /// An application's reqwest client on native-tls, which refuses the private CA: the
@@ -293,6 +323,3 @@ fn a_native_tls_app_client_refusing_the_certificate_is_tls() {
     let transport = crate::ReqwestTransport::with_client(client, DEADLINE).expect("transport");
     assert_eq!(get(&transport, &pki.serve()), Err(TransportError::Tls));
 }
-
-#[cfg(all(unix, not(target_vendor = "apple")))]
-mod go_unix;

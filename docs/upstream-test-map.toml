@@ -390,7 +390,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_IEC" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
 "TestS3ReplicaConfig_PartSizeAndConcurrency/WithPartSize_SI" = { counterpart = "lsr-config::config::go::part_size_in_iec_and_si_units_and_concurrency" }
 "TestStripSQLitePrefix" = { counterpart = "lsr-config::expand::tests::go_strip_sqlite_prefix_table" }
-"TestX509FallbackRoots" = { counterpart = "lsr-store-s3::trust::tests::go_unix::nothing_found_falls_back_to_mozilla_roots" }
+"TestX509FallbackRoots" = { counterpart = "lsr-store-s3::trust::tests::variables_naming_nothing_fall_back_to_mozilla_roots_and_refuse_the_private_ca" }
 
 ["litestream/cmd/litestream/register_test.go"]
 "TestRegisterCommand_Run" = { reason = "@control-socket-cli" }
