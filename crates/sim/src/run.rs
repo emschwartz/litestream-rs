@@ -1923,6 +1923,10 @@ impl Runner {
             // The database SQLite serves now reads the evicted frames' older bytes: the
             // model follows it as damage, and the history judge refuses a restore that gives it.
             EnvFault::EvictPageCache => {
+                // The evicted frames are damage SQLite still counts as committed: the engine
+                // may find the WAL corrupt or cut short, now or once an armed eviction fires.
+                self.expect(StopCause::WalCorrupt);
+                self.expect(StopCause::WalTruncated);
                 let acted = self.w.sqlite.evict_page_cache();
                 self.scenario_bool("EvictPageCache", acted)?;
                 self.w.adopt_evicted();
