@@ -102,7 +102,7 @@ response = "snapshot, `GenerationChanged`, always"
 signal = "`generation_changed`"
 at_risk = "As BOOT-7"
 recovery = "Automatic"
-detected_by = "core::`go_parity_a_salt_reset_at_boot_snapshots`, sim::`app_checkpoint_while_down`, sim::`meta_wiped_wal_restarted`, sqlite::`the_apps_last_close_while_the_replicator_is_down_keeps_or_deletes_the_wal`"
+detected_by = "core::`go_parity_a_salt_reset_at_boot_snapshots`, sim::`app_checkpoint_while_down`, sim::`meta_wiped_wal_restarted`, sqlite::`the_apps_last_close_while_the_replicator_is_down_deletes_the_wal`"
 recovered_by = "sim::`app_checkpoint_while_down`, sim::`meta_wiped_wal_restarted`"
 
 [[row]]
@@ -2045,7 +2045,7 @@ at_risk = "A lag that hides files past a real hole in the replica: no key past a
 recovery = "Run again"
 detected_by = "core::`a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing`, core::`a_hidden_snapshot_past_the_listing_fails_an_as_of_restore`, core::`a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica`, cli::`a_dry_run_over_a_lagging_listing_fails_like_the_restore`, cli::`if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing`; plant::`restore-trusts-listing`, plant::`empty-listing-is-empty-replica`, plant::`dry-run-trusts-listing`"
 survived_by = "sim::`a_restore_through_a_lagging_listing_is_the_replica_s_answer_or_an_error`"
-notes = "Was **known wrong** in effect: the simulator's lagging-listing hold showed a restore of `Latest` publishing an older database with success on its first written history, and `--if-replica-exists` skipping a restore with success over a listing that showed nothing. Both fixed on this branch. The hold restores through a listing frozen when it began, held to the raw replica's answer or an explained error; the hole case is accepted and counted (`hold.LaggingListing.past_hole`)"
+notes = "Was **known wrong** in effect: the simulator's lagging-listing hold showed a restore of `Latest` publishing an older database with success on its first written history, and `--if-replica-exists` skipping a restore with success over a listing that showed nothing. Both fixed on this branch. The hold restores through a listing frozen when it began, held to the raw replica's answer or an explained error, and an as-of answer that differs from the raw one to the as-of bound (G3; D62); the hole case is accepted and counted (`hold.LaggingListing.past_hole`)"
 
 [[row]]
 table = "Circumstances the code does not distinguish"
@@ -2484,12 +2484,12 @@ no_test = "unknown"
 table = "Circumstances the code does not distinguish"
 id = "WORLD-41"
 mark = "none: a WORLD row: the code does not distinguish it"
-circumstance = "A deploy replaces the machine and keeps the volume (fly.io): every deploy restarts the replicator on the same database and meta directory, maybe with another binary, ending in SIGTERM (final sync, exit, SQLite's last close) or SIGKILL during the final sync"
-response = "Each boot continues from staging: no snapshot, no stop. Two cases snapshot and never stop: an app at SQLite's defaults (no `PERSIST_WAL`), whose last close deletes the WAL (`WalMissing`, BOOT-7); a kill right after the engine's own checkpoint let the WAL restart, before the new generation's first file was staged (`StagedUnverified`, BOOT-11: the proof lives in memory)"
+circumstance = "A deploy replaces the machine and keeps the volume (fly.io): every deploy restarts the replicator on the same database and meta directory, maybe with another binary, ending in SIGTERM (the app's connections close, final sync, the replicator's close is SQLite's last, exit) or SIGKILL during the final sync"
+response = "Each boot continues from staging: no snapshot, no stop. Two cases snapshot and never stop: an app connection that closes after the replicator's, in process or beside a sidecar, whose close deletes the WAL (`WalMissing`, BOOT-7; only the replicator's own connections set `PERSIST_WAL`, D123); a kill right after the engine's own checkpoint let the WAL restart, before the new generation's first file was staged (`StagedUnverified`, BOOT-11: the proof lives in memory)"
 signal = "none; or the snapshot's cause"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`deploy_cycle_after_sigterm`, sim::`deploy_cycle_after_sigkill`, sim::`deploy_cycle_with_the_wal_deleted_at_close`, sim::`deploy_cycle_sigkill_after_a_wal_restart_snapshots`, replica::`deploy::deploys_ending_in_sigterm_continue_with_no_snapshot_and_no_stop`, replica::`deploy::deploys_killed_during_the_final_sync_continue_with_no_snapshot_and_no_stop`"
+detected_by = "sim::`deploy_cycle_after_sigterm`, sim::`deploy_cycle_after_sigkill`, sim::`deploy_cycle_with_the_wal_deleted_at_close`, sim::`deploy_cycle_sigkill_after_a_wal_restart_snapshots`, replica::`deploy::deploys_ending_in_sigterm_continue_with_no_snapshot_and_no_stop`, replica::`deploy::deploys_killed_during_the_final_sync_continue_with_no_snapshot_and_no_stop`, replica::`deploy::a_deploy_whose_application_closes_last_snapshots_once_and_does_not_stop`"
 recovered_by = "sim::`deploy_cycle_after_sigterm`, sim::`deploy_cycle_after_sigkill`"
 notes = "The replica tests run each deploy as a real child process and kill it with SIGKILL. The replica is never ahead of staging after a kill: uploads come only from staging and prune keeps the newest staged file. The snapshot after a kill near a WAL restart needs the checkpoint proof to outlive the process (the engine journal)"
 

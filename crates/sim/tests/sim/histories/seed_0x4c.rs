@@ -1,0 +1,162 @@
+//! Seed 0x4c's first 81 operations under its mixed weights, as the generator drew them on main at d5d92c8.
+
+use lsr_core::{Denied, SourceOp, StoreError, StoreOp};
+use lsr_sim::generate::{AppAt, AppOp, Hold, MetaOp, Op, Target};
+use lsr_sim::{CrashKind, FaultShape, OtherProcessMode};
+
+pub const OPS: &[Op] = &[
+    Op::Tick,
+    Op::Vacuum { page_size: None },
+    Op::Verify,
+    Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+    Op::Vacuum { page_size: None },
+    Op::Rollback,
+    Op::Heal,
+    Op::Vacuum { page_size: None },
+    Op::AppInTick {
+        at: AppAt::Call(17),
+        op: AppOp::Commit {
+            pages: 1,
+            grow: false,
+        },
+    },
+    Op::Rollback,
+    Op::Heal,
+    Op::AppInTick {
+        at: AppAt::Before(SourceOp::Committed),
+        op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+    },
+    Op::Verify,
+    Op::AppInTick {
+        at: AppAt::Before(SourceOp::Open),
+        op: AppOp::ReaderBegin,
+    },
+    Op::Crash(CrashKind::Process),
+    Op::StagingDamage(MetaOp::DeleteNewest),
+    Op::Tick,
+    Op::StagingDamage(MetaOp::FlipNewestByte),
+    Op::AppInTick {
+        at: AppAt::Call(14),
+        op: AppOp::DeleteWal,
+    },
+    Op::AppInTick {
+        at: AppAt::Before(SourceOp::ReadPage),
+        op: AppOp::DeleteWal,
+    },
+    Op::Commit {
+        pages: 1,
+        grow: false,
+    },
+    Op::Verify,
+    Op::AppInTick {
+        at: AppAt::Call(10),
+        op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+    },
+    Op::Verify,
+    Op::Tick,
+    Op::Heal,
+    Op::Commit {
+        pages: 4,
+        grow: false,
+    },
+    Op::Vacuum { page_size: None },
+    Op::Heal,
+    Op::Shrink { pages: 1 },
+    Op::Shrink { pages: 1 },
+    Op::Verify,
+    Op::AppInTick {
+        at: AppAt::Before(SourceOp::BumpSeq),
+        op: AppOp::ReaderEnd,
+    },
+    Op::Tick,
+    Op::Tick,
+    Op::Hold {
+        hold: Hold::ReadersHeld,
+        ticks: 97,
+    },
+    Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
+    Op::Verify,
+    Op::StoreFault {
+        target: Target::Remote,
+        op: StoreOp::Upload,
+        ahead: 1,
+        shape: FaultShape::SizeMismatch,
+    },
+    Op::AppInTick {
+        at: AppAt::Call(12),
+        op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+    },
+    Op::Rollback,
+    Op::Heal,
+    Op::Shrink { pages: 3 },
+    Op::AppInTick {
+        at: AppAt::Before(SourceOp::BeginWriteLock),
+        op: AppOp::ReaderBegin,
+    },
+    Op::Shrink { pages: 3 },
+    Op::Vacuum { page_size: None },
+    Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
+    Op::StagingDamage(MetaOp::StripNewestOrigin),
+    Op::Vacuum { page_size: None },
+    Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
+    Op::Crash(CrashKind::Power),
+    Op::Verify,
+    Op::Shrink { pages: 1 },
+    Op::Crash(CrashKind::Process),
+    Op::StoreFault {
+        target: Target::Staging,
+        op: StoreOp::Read,
+        ahead: 2,
+        shape: FaultShape::Error(StoreError::Denied {
+            op: StoreOp::Read,
+            why: Denied::Permission,
+        }),
+    },
+    Op::AppInTick {
+        at: AppAt::Call(20),
+        op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+    },
+    Op::AppInTick {
+        at: AppAt::Call(10),
+        op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+    },
+    Op::Verify,
+    Op::AppInTick {
+        at: AppAt::Call(5),
+        op: AppOp::ReaderBegin,
+    },
+    Op::Heal,
+    Op::Crash(CrashKind::Process),
+    Op::StagingDamage(MetaOp::StripNewestOrigin),
+    Op::StagingDamage(MetaOp::StripNewestOrigin),
+    Op::Verify,
+    Op::Vacuum { page_size: None },
+    Op::Tick,
+    Op::AppInTick {
+        at: AppAt::Call(1),
+        op: AppOp::Commit {
+            pages: 2,
+            grow: true,
+        },
+    },
+    Op::Vacuum { page_size: None },
+    Op::Vacuum { page_size: None },
+    Op::Vacuum { page_size: None },
+    Op::AppInTick {
+        at: AppAt::Call(7),
+        op: AppOp::DeleteWal,
+    },
+    Op::Tick,
+    Op::Meta(MetaOp::DeleteAll),
+    Op::Heal,
+    Op::Vacuum { page_size: None },
+    Op::Tick,
+    Op::Crash(CrashKind::Process),
+    Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
+    Op::Vacuum { page_size: None },
+    Op::Heal,
+    Op::AppInTick {
+        at: AppAt::Call(2),
+        op: AppOp::ReaderBegin,
+    },
+];
