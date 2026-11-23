@@ -58,6 +58,9 @@
 //!   restarts or faults the replicator cannot see past.
 //! - `lsr_checkpoints_total{db}`, `lsr_checkpoints_busy_total{db}`, `lsr_uploads_total{db}`,
 //!   `lsr_retries_total{db}`, `lsr_panics_total{db}`.
+//! - `lsr_read_lock_violations_total{db}`: recoveries that found commits lost to a WAL restart
+//!   the engine's read lock should have prevented, a broken lock or a bug. Each takes a snapshot
+//!   counted as `generation_changed`; any value above zero is worth a report.
 //! - `lsr_replica_operation_errors_total{replica_type,operation}`.
 //! - `lsr_health_report_age_seconds{db}`: how old the replicator's last health write is; a large
 //!   value means its thread is stuck in a store call.
@@ -428,7 +431,7 @@ fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {
 }
 
 fn counter_series(out: &mut Out, dbs: &[(String, &Health)]) {
-    let series: [CounterSeries; 5] = [
+    let series: [CounterSeries; 6] = [
         ("lsr_checkpoints_total", "Checkpoints run", |h| {
             h.counters.checkpoints
         }),
@@ -449,6 +452,11 @@ fn counter_series(out: &mut Out, dbs: &[(String, &Health)]) {
             "lsr_panics_total",
             "Panics the replicator thread caught",
             |h| h.counters.panics,
+        ),
+        (
+            "lsr_read_lock_violations_total",
+            "Recoveries that found commits lost to a WAL restart the read lock should have prevented",
+            |h| h.counters.read_lock_violations,
         ),
     ];
     for (name, help, value) in series {

@@ -2467,11 +2467,21 @@ impl Runner {
         }
     }
 
+    /// The model no longer matches SQLite's rules: named as the known defect D103 explains it
+    /// when a failed WAL sync's lost writeback is in play, plainly otherwise.
+    fn model_diverged(&self) -> Violation {
+        bug_fault(if self.w.sqlite.writeback_lost() {
+            crate::oracle::MODEL_DIVERGED_AFTER_LOST_WRITEBACK
+        } else {
+            crate::oracle::MODEL_DIVERGED
+        })
+    }
+
     /// The end of a history: drain, judge the replica, check the resources.
     fn finish(&mut self) -> Result<(), Violation> {
         self.report.trips_in_history = self.report.trips.len();
         if self.lenient && !self.w.model_matches_sqlite() {
-            return Err(bug_fault(crate::oracle::MODEL_DIVERGED));
+            return Err(self.model_diverged());
         }
         // Liveness is judged once every fault has cleared.
         self.rate_active = false;
@@ -2703,9 +2713,10 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
             runner.report.trace.push(format!("{step}: {op:?}"));
         }
         if runner.lenient && !runner.w.model_matches_sqlite() {
+            let diverged = runner.model_diverged();
             return Err(Failure {
                 trace: runner.report.trace,
-                ..fail(bug_fault(crate::oracle::MODEL_DIVERGED))
+                ..fail(diverged)
             });
         }
         if let Err(violation) = runner.apply_judged(op) {

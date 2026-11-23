@@ -13,21 +13,26 @@
 //! case take seconds, and both sides end in a refusal anyway. Their classification is a unit
 //! test in `lsr-store-s3`.
 //!
+//! Each source must be shown deciding, so the run is two parts. The free part draws every
+//! field as above. The aimed part draws a case for one source at a time, with every source
+//! before it in the chain left out, the source itself ready and its service answering
+//! credentials, so a fixed share of cases is decided by each source whatever the free part
+//! draws, and each must be decided by the source it aims at. Both run through
+//! [`Differential`], with fixed seeds.
+//!
 //! The profiles litestream-rs does not build yet (an assumed role through `source_profile`
 //! or `credential_source`, IAM Identity Center, a login session) are asserted refused with
 //! the not-built error, not compared: issue #176 tracks them.
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Mutex;
 
 use lsr_compat::{
-    Answer, Answers, CompatError, Dump, DumpEnv, FakeAws, Roles, TokenAnswer, go_dump,
-    go_dump_binary, rust_dump,
+    Answer, Answers, CompatError, Differential, Dump, DumpEnv, FakeAws, Roles, TokenAnswer,
+    go_dump, go_dump_binary, rust_dump,
 };
 use lsr_core::needs::{Resource, must};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
 
 #[derive(Clone, Copy, Debug)]
 enum WebIdentity {
@@ -184,6 +189,81 @@ fn case() -> impl Strategy<Value = Case> {
             },
         )
 }
+
+/// A source the aimed part makes decide, by the key id prefix the fake gives it.
+#[derive(Clone, Copy, Debug)]
+enum Aim {
+    Env,
+    Sts,
+    File,
+    Proc,
+    Container,
+    Imds,
+}
+
+impl Aim {
+    const ALL: [Self; 6] = [
+        Self::Env,
+        Self::Sts,
+        Self::File,
+        Self::Proc,
+        Self::Container,
+        Self::Imds,
+    ];
+
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::Sts => "sts",
+            Self::File => "file",
+            Self::Proc => "proc",
+            Self::Container => "container",
+            Self::Imds => "imds",
+        }
+    }
+
+    /// `case` with every source before this one in the chain left out (environment keys,
+    /// the environment's web identity, the profile, the container URL, the metadata service),
+    /// no profile Go refuses at load, and this one ready, its service answering credentials.
+    fn shape(self, mut case: Case) -> Case {
+        case.env_keys = matches!(self, Self::Env);
+        if !matches!(self, Self::Env) {
+            case.web_identity = match self {
+                Self::Sts => WebIdentity::Ready,
+                Self::Env | Self::File | Self::Proc | Self::Container | Self::Imds => {
+                    WebIdentity::None
+                }
+            };
+        }
+        match self {
+            // A profile both sides refuse at load ends the chain before any source runs.
+            Self::Env | Self::Sts | Self::Container | Self::Imds => case.profile = Profile::None,
+            Self::File => case.profile = Profile::Keys,
+            Self::Proc => case.profile = Profile::Process(Process::Keys),
+        }
+        case.answers.sts = Answer::Credentials;
+        match self {
+            Self::Env | Self::Sts | Self::File | Self::Proc => {}
+            Self::Container => {
+                case.container = Container::Fake;
+                case.container_token = ContainerToken::None;
+                case.answers.container_token = None;
+                case.answers.container = Answer::Credentials;
+            }
+            Self::Imds => {
+                case.container = Container::None;
+                case.imds = true;
+                case.answers.imds_token = TokenAnswer::Token;
+                case.answers.imds_roles = Roles::One;
+                case.answers.imds = Answer::Credentials;
+            }
+        }
+        case
+    }
+}
+
+/// Cases per source in the aimed part.
+const AIMED: u32 = 32;
 
 const ROLE: &str = "arn:aws:iam::000000000000:role/fake";
 
@@ -376,58 +456,50 @@ fn reaches_unbuilt(case: &Case) -> bool {
         )
 }
 
-/// How often each source gave the keys both sides agreed on, by the key id's prefix, and how
-/// often both refused: the run must reach every source, or its pass shows nothing.
-type Tally = Mutex<BTreeMap<String, u32>>;
-
-fn compare(go: &Path, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
+/// Compares one case and names its ending: the source whose key id both sides signed with,
+/// or `refused`.
+fn compare(go: &Path, case: &Case) -> Result<String, TestCaseError> {
     let (go_out, rust_out, report) = answers_for(go, case);
     let won = outcome(&rust_out).map_or_else(
         || "refused".to_owned(),
         |(id, _, _)| id.split('-').next().unwrap_or_default().to_owned(),
     );
-    let mut counts = tally
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let count = counts.entry(won).or_default();
-    *count = count.saturating_add(1);
-    drop(counts);
     if reaches_unbuilt(case) {
         let error = credential_error(&rust_out).unwrap_or_default();
         prop_assert!(
             error.contains("not built in litestream-rs yet"),
             "an unbuilt source must be refused as such\n{report}\nRust: {rust_out:?}"
         );
-        return Ok(());
+        return Ok(won);
     }
     prop_assert!(
         outcome(&go_out) == outcome(&rust_out),
         "Go and Rust disagree\n{report}\nGo:   {go_out:?}\nRust: {rust_out:?}"
     );
-    Ok(())
+    Ok(won)
 }
 
-/// The differential: 1024 generated cases against one fake per case. A disagreement prints
-/// the case, the environment and the shared config file, shrunk, with both answers.
+/// The differential: 1024 free cases and [`AIMED`] cases aimed at each source, against one
+/// fake per case. A disagreement prints the case, the environment and the shared config
+/// file, shrunk, with both answers.
 #[test]
 #[ignore = "runs the pinned Go dumper; just compat"]
 fn go_and_rust_fetch_the_same_temporary_credentials() {
     let go = must(Resource::GoBuilds, || {
         go_dump_binary().map_err(|e| e.to_string())
     });
-    let mut runner = TestRunner::new(Config {
-        cases: 1024,
-        failure_persistence: None,
-        ..Config::default()
-    });
-    let tally = Tally::default();
-    if let Err(error) = runner.run(&case(), |case| compare(&go, &case, &tally)) {
+    let run = Differential::new("temporary credentials");
+    let mut parts = vec![run.free(1024, &case(), |case| compare(&go, &case))];
+    for aim in Aim::ALL {
+        let cases = case().prop_map(move |case| aim.shape(case));
+        parts.push(run.aimed(aim.prefix(), AIMED, &cases, |case| compare(&go, &case)));
+    }
+    if let Some(Err(error)) = parts.into_iter().find(Result::is_err) {
         panic!("{error}");
     }
-    let tally = tally.into_inner().unwrap();
-    eprintln!("decided by: {tally:?}");
-    for source in ["sts", "container", "imds", "proc", "env", "file", "refused"] {
-        let seen = tally.get(source).copied().unwrap_or(0);
-        assert!(seen >= 20, "{source} decided only {seen} cases: {tally:?}");
+    let sources = ["sts", "container", "imds", "proc", "env", "file", "refused"];
+    match run.require(&sources, 20) {
+        Ok(tally) => eprintln!("decided by: {tally:?}"),
+        Err(error) => panic!("{error}"),
     }
 }

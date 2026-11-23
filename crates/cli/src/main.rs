@@ -69,13 +69,15 @@ fn report(error: &CliError) -> Exit {
 }
 
 /// Go's `main` exits 1 on every error (`cmd/litestream/main.go:89-104`), so for Go's own
-/// commands, `replicate` and `restore`, a script written for Go sees the same code (decision
+/// commands (`replicate`, `restore`, `databases`, `ltx`, `wal`), a script written for Go sees the same code (decision
 /// D47). Two codes stay: 0, and fail-stop's own 4, which Go never reaches (decision D84).
 /// `lsr`'s own commands keep a code per class.
 fn is_go_command() -> bool {
-    std::env::args_os()
-        .nth(1)
-        .is_some_and(|word| word == "replicate" || word == "restore")
+    std::env::args_os().nth(1).is_some_and(|word| {
+        ["replicate", "restore", "databases", "ltx", "wal"]
+            .iter()
+            .any(|go| word == *go)
+    })
 }
 
 fn main() -> ExitCode {
