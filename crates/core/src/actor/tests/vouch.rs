@@ -751,3 +751,112 @@ fn a_new_meta_directory_with_no_wal_over_a_different_database_stops() {
         "{seen:?}"
     );
 }
+
+#[test]
+fn publishing_a_covered_transaction_spends_the_takeover_record() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    let record = TakeoverRecord::through(tx(2));
+    actor.remember_takeover(record);
+    rig.settle(&mut actor, T0);
+    assert!(!Rig::files(&rig.remote, Level::ZERO).is_empty());
+    assert_eq!(actor.takeover_spent(), Some(record));
+    actor.forget_takeover(record);
+    assert_eq!(actor.takeover_spent(), None);
+    super::second_writer::put_foreign(&rig, 2);
+    let mut restarted = go_like_actor();
+    let seen = rig.follow(&mut restarted, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+    assert_eq!(restarted.refused_through(), Some(tx(2)));
+}
+
+#[test]
+fn a_rollback_seen_while_running_arms_the_takeover_for_the_next_publish() {
+    let mut rig = three();
+    let mut actor = go_like_actor();
+    let record = TakeoverRecord::through(tx(10));
+    rig.settle(&mut actor, T0 + 2);
+    // Handed over while running, as the driver hands back a record the engine asked for
+    // before a drop: no boot listing judged the replica against it.
+    actor.remember_takeover(record);
+    rig.commit(4);
+    rig.settle(&mut actor, T0 + 3);
+    assert!(
+        Rig::files(&rig.remote, Level::ZERO)
+            .iter()
+            .any(|info| info.key.range().max() == tx(4))
+    );
+    assert_eq!(
+        actor.takeover_spent(),
+        None,
+        "a publish with no loss seen spends nothing"
+    );
+    let lost: Vec<FileKey> = Level::ALL
+        .iter()
+        .flat_map(|level| Rig::files(&rig.remote, *level))
+        .map(|info| info.key)
+        .filter(|key| key.range().max() >= tx(2))
+        .collect();
+    assert!(!lost.is_empty());
+    block_on(rig.remote.inner.delete(&lost)).unwrap();
+    rig.follow(&mut actor, T0 + 100_000, 60);
+    rig.commit(5);
+    rig.follow(&mut actor, T0 + 200_000, 60);
+    assert_eq!(actor.takeover_spent(), Some(record));
+}
+
+#[test]
+fn a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    for _ in 0..50 {
+        rig.remote.inner.inject_failure(
+            StoreOp::Upload,
+            StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: std::io::ErrorKind::ConnectionReset,
+            },
+        );
+    }
+    for n in 4..=6 {
+        rig.commit(n);
+        rig.settle(&mut actor, T0 + 2);
+    }
+    assert!(staged(&rig).ends_with(&[4, 5, 6]), "{:?}", staged(&rig));
+    super::tear(&rig, 4, super::flipped);
+    let seen = rig.follow(&mut actor, T0 + 2, 40);
+    let dropped = seen.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Resnapshot(SnapshotCause::NewestStagedFileUnreadable))
+        )
+    });
+    assert!(dropped, "{seen:?}");
+    assert_eq!(rig.takeover.map(TakeoverRecord::txid), Some(tx(4)));
+    // The replica takes puts again: the refusals left queued are spent.
+    let probe = FileKey::new(Level::ZERO, TxidRange::single(tx(99)));
+    let begin = || {
+        block_on(
+            rig.remote
+                .inner
+                .begin_upload(&probe, ts(T0), WriteMode::New),
+        )
+    };
+    let open = std::iter::repeat_with(begin).find_map(Result::ok).unwrap();
+    block_on(open.abort()).unwrap();
+    super::second_writer::put_foreign(&rig, 5);
+    let mut next = go_like_actor();
+    next.remember_takeover(rig.takeover.unwrap());
+    let seen = rig.follow(&mut next, T0 + 3, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+    assert_eq!(next.refused_through(), Some(tx(5)));
+}

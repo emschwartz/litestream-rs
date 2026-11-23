@@ -3,7 +3,7 @@ index 38d8502a..14f76b42 100644
 --- a/crates/cli/src/run.rs
 +++ b/crates/cli/src/run.rs
 @@ -776,6 +776,7 @@ const fn expand_of(no_expand_env: bool) -> Expand {
- /// `path` and prints the working directory instead (docs/decisions.md D53).
+ /// `path` and prints the working directory instead (docs/decisions/D162.md).
  fn databases_command(args: &DatabasesArgs) -> Result<Done, CliError> {
      let loaded = lsr_sidecar::load_config(args.config.as_deref(), expand_of(args.no_expand_env))?;
 +    lsr_config::plan(&loaded.config, &ProcessEnv).map_err(CliError::Plan)?;

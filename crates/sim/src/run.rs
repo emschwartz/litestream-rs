@@ -894,9 +894,15 @@ impl Runner {
     }
 
     /// A takeover the engine asked for is made durable before the next tick,
-    /// as the real driver writes it, and handed back. A tick a crash cut short
-    /// stored nothing, so the caller calls this only after one that ended.
+    /// as the real driver writes it, and handed back; one it spent is deleted,
+    /// as the real driver deletes it. A tick a crash cut short stored nothing,
+    /// so the caller calls this only after one that ended.
     fn keep_takeover(&mut self) {
+        if let Some(spent) = self.actor.takeover_spent() {
+            self.report.reach.bump("takeover.spent");
+            self.takeover = None;
+            self.actor.forget_takeover(spent);
+        }
         let Some(wanted) = self.actor.takeover_wanted() else {
             return;
         };

@@ -197,6 +197,16 @@ fn a_known_defect_matches_only_its_own_failure() {
         KnownWrong::of(&forgotten, &KnownWrong::ALL),
         Some(KnownWrong::HaltForgottenAtRestart)
     );
+    let verdict = Violation::UnexpectedDegraded {
+        cause: lsr_core::PersistentCause::DatabaseAheadOfWal {
+            pages: std::num::NonZeroU32::MIN,
+            first: std::num::NonZeroU32::new(2).unwrap(),
+        },
+    };
+    assert_eq!(
+        KnownWrong::of(&verdict, &KnownWrong::ALL),
+        Some(KnownWrong::DatabaseAheadOfWal)
+    );
     let another_bug = crate::oracle::bug_fault("something else");
     for unknown in [
         &staged,

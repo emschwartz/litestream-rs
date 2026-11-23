@@ -773,7 +773,7 @@ const fn expand_of(no_expand_env: bool) -> Expand {
 
 /// Go's `databases`: every entry of the config with its replica's type. A `path` entry prints
 /// its path. A `dir` entry prints its directory, unscanned: Go expands the entry's empty
-/// `path` and prints the working directory instead (docs/decisions.md D53).
+/// `path` and prints the working directory instead (docs/decisions/D162.md).
 fn databases_command(args: &DatabasesArgs) -> Result<Done, CliError> {
     let loaded = lsr_sidecar::load_config(args.config.as_deref(), expand_of(args.no_expand_env))?;
     let mut rows = Vec::new();

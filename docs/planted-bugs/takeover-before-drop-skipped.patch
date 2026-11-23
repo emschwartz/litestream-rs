@@ -1,17 +1,16 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 5991223..7506cc2 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -888,7 +888,7 @@ impl Actor {
-     /// of them may be on the replica unconfirmed (an upload whose answer was
-     /// lost), so only a key the replica is known to end at caps it.
+@@ -1035,7 +1035,7 @@
+     /// that vouched for it would let another writer's file there pass the next
+     /// boot. With nothing confirmed and nothing sent, no record is needed.
      fn vouch_before_drop(&mut self, task: Task, cap: Option<Txid>, now: Timestamp) -> Option<Tick> {
 -        if self.kept.cfg.responses.other_writer == OtherWriter::ContinueAndInterleaveHistories {
 +        if self.kept.cfg.responses.other_writer != OtherWriter::Stop || task == task {
              return None;
          }
          let staged = self.staged()?;
-@@ -2223,6 +2223,9 @@ impl BootGate {
+@@ -2500,6 +2500,9 @@
          let Takeover::Vouch(record) = self.takeover else {
              return Ok(());
          };
