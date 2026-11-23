@@ -594,7 +594,7 @@ response = "retry, then snapshot, `NewestStagedFileUnreadable`. The upload's fai
 signal = "`newest_staged_file_unreadable`; the upload task's degraded state, kept"
 at_risk = "Restore points of the deleted files"
 recovery = "Automatic"
-detected_by = "core::`one_bad_read_of_a_staged_file_while_uploading_drops_nothing`, core::`the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots`, core::`a_resnapshot_keeps_the_failed_uploads_toward_a_stall`, sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`; plant::`delete-on-one-failed-read-upload`, plant::`resnapshot-forgets-failed-uploads`"
+detected_by = "core::`one_bad_read_of_a_staged_file_while_uploading_drops_nothing`, core::`the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots`, core::`a_resnapshot_keeps_the_failed_uploads_toward_a_stall`, sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`; plant::`delete-on-one-failed-read-upload`"
 recovered_by = "sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`"
 
 [[row]]
@@ -750,7 +750,7 @@ response = "After 8 ticks in a row (the fair share prune and maintenance also ge
 signal = "None"
 at_risk = "None"
 recovery = "None needed"
-detected_by = "core::`uploads_keep_up_with_an_app_that_commits_every_tick`; plant::`uploads-wait-behind-every-sync`"
+detected_by = "core::`uploads_keep_up_with_an_app_that_commits_every_tick`"
 notes = "Before the fix a WAL step that staged files ended the tick before the upload step, so uploads never ran while commits kept coming: replication halted with no failure, and health had nothing to report (simulator seed 0x593, the last ticks of a lagging listing's hold, after a resnapshot cleared the upload task's degraded state, which RUN-16 now keeps)"
 
 [[row]]

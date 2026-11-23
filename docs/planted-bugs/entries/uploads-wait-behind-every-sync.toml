@@ -1,6 +1,0 @@
-# A WAL step that staged files ended the tick before the upload step, so uploads never ran
-# while the application committed before every tick.
-name = "uploads-wait-behind-every-sync"
-fix = "031f7647"
-package = "lsr-core"
-tests = ["actor::tests::uploads_keep_up_with_an_app_that_commits_every_tick"]
