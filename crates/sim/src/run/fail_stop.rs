@@ -1,11 +1,11 @@
 //! The fail-stop judge's place in the run loop (`crate::failstop`): after every tick it learns
 //! what fired, whether the replica now holds everything, and judges the engine's trip.
 
-use lsr_core::{Did, Event, RestoreTarget, Tick};
+use lsr_core::{Did, Event, RestoreTarget, SnapshotCause, Tick};
 use lsr_ltx::Timestamp;
 
 use super::Runner;
-use crate::failstop::{Fired, TickSeen, data_path, fired};
+use crate::failstop::{Excused, Fired, TickSeen, data_path, fired};
 use crate::generate::Op;
 use crate::history::{image_digest, restored_digest};
 use crate::oracle::Violation;
@@ -55,6 +55,13 @@ impl Runner {
                     ..
                 })
             ),
+            unvouched_boot: matches!(
+                ended,
+                TickEnd::Done(Tick::Ran {
+                    event: Event::Booted { cause: Some(cause) },
+                    ..
+                }) if breaks_continuity(*cause)
+            ),
         };
         self.fail_stop.saw(tick);
         let believed = matches!(
@@ -80,10 +87,21 @@ impl Runner {
         let judged = self
             .fail_stop
             .judge(trip, tick, bound, booted, unstaged_only);
-        if self.fail_stop.excused() > excused {
+        self.count_excused(excused);
+        judged
+    }
+
+    /// Counts each exemption the judge used since it had excused `was`, under its own key.
+    fn count_excused(&mut self, was: Excused) {
+        let now = self.fail_stop.excused();
+        if now.unread_wal > was.unread_wal {
             self.report.reach.bump("failstop.excused.unread_wal");
         }
-        judged
+        if now.unvouched_snapshot > was.unvouched_snapshot {
+            self.report
+                .reach
+                .bump("failstop.excused.unvouched_snapshot");
+        }
     }
 
     /// When the replica changed while the judge thinks something is off it, restores
@@ -151,5 +169,25 @@ impl Runner {
     /// The bound the engines of this run are built with.
     fn actor_bound(&self) -> std::time::Duration {
         lsr_core::MaxUnreplicatedAge::DEFAULT.get()
+    }
+}
+
+/// Whether a boot's logged snapshot cause says continuity broke, so the snapshot may hold
+/// commits that were never staged and the engine has nothing to compare it with.
+const fn breaks_continuity(cause: SnapshotCause) -> bool {
+    match cause {
+        SnapshotCause::StagedUnverified { .. } | SnapshotCause::LocalRewound { .. } => true,
+        // No replica yet, or one ahead of us (D81 keeps it out); a checkpoint or a failed WAL
+        // sync is a mid-run cause; the rest the engine never counts as lag.
+        SnapshotCause::FirstSync
+        | SnapshotCause::BehindRemote { .. }
+        | SnapshotCause::CheckpointBoundary
+        | SnapshotCause::WalSyncFailed
+        | SnapshotCause::OperatorRequested
+        | SnapshotCause::GenerationChanged
+        | SnapshotCause::WalMissing
+        | SnapshotCause::PrevFrameMismatch
+        | SnapshotCause::LastPageMismatch
+        | SnapshotCause::NewestStagedFileUnreadable => false,
     }
 }
