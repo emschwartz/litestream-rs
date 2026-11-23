@@ -442,13 +442,20 @@ impl SqliteSide for RealSide {
     fn page_size(&self) -> PageSize {
         self.with(|real| real.page_size)
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "test support: a WAL the VFS never saw is a harness bug, not an answer"
+    )]
     fn wal_range_durable(&self, salts: Salts, start: u64, end: u64) -> bool {
         // As the model answers: frames of another generation are no longer SQLite's, and a
         // disk lying about our sync is the scenario's point.
         self.with(|real| {
             real.lie_ours
                 || header_salts(real.wal_file().as_deref()) != Some((salts.salt1, salts.salt2))
-                || real.vfs.durable(&real.wal_path(), start, end)
+                || real
+                    .vfs
+                    .durable(&real.wal_path(), start, end)
+                    .expect("the VFS has seen the WAL")
         })
     }
     fn wal_synced(&self) -> bool {

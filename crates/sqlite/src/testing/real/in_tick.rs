@@ -150,7 +150,13 @@ impl Real {
     }
 
     /// Whether a power loss now would keep the whole WAL.
+    #[expect(
+        clippy::expect_used,
+        reason = "test support: a WAL the VFS never saw is a harness bug, not an answer"
+    )]
     pub(super) fn wal_synced(&self) -> bool {
-        self.vfs.durable(&self.wal_path(), 0, u64::MAX)
+        self.vfs
+            .durable(&self.wal_path(), 0, u64::MAX)
+            .expect("the VFS has seen the WAL")
     }
 }
