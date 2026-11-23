@@ -11,15 +11,36 @@
 //! replicators and restores), the HTTP listener and its connections, the `-exec` reaper
 //! ([`WAIT_STACK`] each). So N databases take N to 2N long-lived threads; a pool is issue #17.
 //!
-//! **How the sizes were chosen** (2026-11-21, x86-64 Linux, a debug build of the workspace,
-//! whose own code runs unoptimised and so deeper than a release build; dependencies are at
-//! opt-level 3 in both). With every engine thread at a probed size, the replica, CLI and
-//! sidecar suites (full syncs, compaction, snapshots, restores over the file and in-memory S3
-//! stores, scheduled verifies, the daemon's waiter) overflowed the replicator thread at
-//! 160 KiB and passed at 192 KiB; an HTTPS request through ureq and rustls alone needs 48 KiB
-//! (it fails at 32). [`ENGINE_STACK`] is 512 KiB: about twice the two together. The waiting
-//! threads passed at 16 KiB, the smallest stack the platform gives; [`WAIT_STACK`] is four
-//! times that.
+//! **How the sizes were chosen.** Measured on 2026-11-23, x86-64 Linux, on main 079ceb3.
+//! [`ENGINE_STACK`] was set to each probed size, then the replica, sidecar and CLI suites were
+//! run. They cover full syncs, compaction, snapshots, scheduled verifies, the daemon's waiter,
+//! and restores over the file and in-memory S3 stores, through real SQLite. An overflow aborts
+//! the test.
+//!
+//! | build | passes at | fails at |
+//! |---|---|---|
+//! | debug (the workspace's own code unoptimised, dependencies at opt-level 3) | 240 KiB | 232 KiB |
+//! | release | 64 KiB | 48 KiB |
+//!
+//! The depth is ordinary call frames, about four times shallower in release: the largest
+//! future `block_on` holds on the stack is the engine's tick, 4.4 KiB. An HTTPS request through
+//! ureq and rustls needed 48 KiB alone when last measured (it fails at 32); it is not in these
+//! suites, which need no network. [`ENGINE_STACK`] is 512 KiB: about twice the debug peak and
+//! eight times the release peak, with room for the HTTPS path on top of either.
+//! [`WAIT_STACK`] is 64 KiB; the waiting threads passed at 16 KiB, the smallest stack the
+//! platform gives.
+//!
+//! **The headroom gate.** Under the `test-half-stack` feature, which `just check` turns on,
+//! [`spawn`] gives every thread half the stack it asks for, so every suite runs with half the
+//! shipped size and a path that grows past it fails a test before it can overflow in the
+//! field. The debug peak sat 16 KiB under that half when measured: the gate trips early as
+//! the code grows, which is when to measure again (`docs/decisions.md` D87). The feature does
+//! not compile without debug assertions, so it cannot reach a release build.
+
+#[cfg(all(feature = "test-half-stack", not(debug_assertions)))]
+compile_error!(
+    "`test-half-stack` halves every thread's stack for tests; never build it into a release"
+);
 
 use std::io;
 use std::thread::{Builder, JoinHandle};
@@ -41,6 +62,12 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    // The headroom gate (see the module docs): tests run with half the shipped stack.
+    let stack = if cfg!(feature = "test-half-stack") {
+        stack / 2
+    } else {
+        stack
+    };
     Builder::new()
         .name(name.to_owned())
         .stack_size(stack)
