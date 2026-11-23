@@ -1799,3 +1799,25 @@ fn the_worst_walk_reads_exactly_its_bounds() {
     let walked = u64::from(remote.log().reads - reads);
     assert_eq!(walked, crate::WALK_READS_MAX);
 }
+
+/// A level-0 file at the transaction level 1 already ends at (merged, not yet deleted) is
+/// not the start of a run above level 1: the next compaction into level 1 starts after it,
+/// so the probe names a level-1 file from there and none from inside what level 1 holds.
+#[test]
+fn a_merged_file_still_listed_below_is_not_a_start() {
+    let remote = Probe::default();
+    let level_one = Level::new(1).unwrap();
+    let range = |min, max| TxidRange::new(txid(min), txid(max)).unwrap();
+    put_bytes(&remote.inner, FileKey::new(level_one, range(1, 5)), b"x");
+    put_bytes(&remote.inner, key(5), b"x");
+    put_bytes(&remote.inner, key(6), b"x");
+    let starts = starts_of(&remote.inner);
+    assert!(crate::probe::names(
+        &starts,
+        &FileKey::new(level_one, range(6, 8))
+    ));
+    assert!(!crate::probe::names(
+        &starts,
+        &FileKey::new(level_one, range(5, 8))
+    ));
+}
