@@ -28,9 +28,9 @@ mod kill_after_fault;
 #[cfg(test)]
 mod known_wrong;
 #[cfg(test)]
-mod liveness;
-#[cfg(test)]
 mod marks;
+#[cfg(test)]
+mod needless_snapshot;
 #[cfg(test)]
 mod replay;
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # The bounded WAL resume (witness, 18cf304) took a wal-index reset ahead of the header as a
 # restart even at the header's first frame: every boot from a file with an empty WAL range
-# snapshotted again. Found by the liveness oracle (seed 0xf85 among others).
+# snapshotted again. Found by the needless-snapshot check (seed 0xf85 among others).
 name = "resume-index-reset-ahead"
 fix = "claude/checker-hygiene"
 package = "lsr-wal"

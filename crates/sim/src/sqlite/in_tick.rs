@@ -77,8 +77,8 @@ pub enum InTickDone {
     WalDeleted(bool),
 }
 
-/// What an operation inside the tick did, and what it did to the WAL file: the liveness
-/// oracle must know before it judges the tick's snapshots.
+/// What an operation inside the tick did, and what it did to the WAL file: the forcing
+/// checks must know before they judge the tick's snapshots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InTickRan {
     /// What it did.

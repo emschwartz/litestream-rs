@@ -26,7 +26,9 @@
 //!   window (`retention`);
 //! - after every tick, each level-0 file the replica took is one the engine
 //!   incarnation that put it staged itself, or holds exactly what the WAL it
-//!   booted on held for its range (`witness`).
+//!   booted on held for its range (`witness`);
+//! - every staged file the engine gave up before the replica took it was
+//!   forced by something in effect (`lost_restore_points`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -160,24 +162,24 @@ pub enum Violation {
         key: String,
     },
     /// The engine announced or staged a snapshot that no fault, damage or
-    /// request since the evidence it overturns justifies (see
-    /// `crate::liveness`).
-    #[error("a snapshot for {cause:?} with nothing to justify it; in the window: {window:?}")]
-    UnjustifiedSnapshot {
+    /// request since the evidence it overturns forces: a needless full upload
+    /// (see `crate::needless_snapshot`).
+    #[error("a needless snapshot for {cause:?}: nothing forces it; in effect: {window:?}")]
+    NeedlessSnapshot {
         /// The cause.
         cause: lsr_core::SnapshotCauseKind,
-        /// What the window held.
-        window: Vec<crate::liveness::Justifier>,
+        /// The forcings in effect.
+        window: Vec<crate::forcing::Forcing>,
     },
     /// The engine deleted staged files no replica file holds, giving up
-    /// their restore points, with no fault in the window that could force
-    /// it (see `crate::liveness`).
-    #[error("{lost} staged files given up with nothing to justify it; in the window: {window:?}")]
-    UnjustifiedGiveUp {
+    /// their restore points, with nothing in effect that could force it
+    /// (see `crate::oracle::lost_restore_points`).
+    #[error("{lost} staged files given up with nothing forcing it; in effect: {window:?}")]
+    UnforcedGiveUp {
         /// How many.
         lost: u64,
-        /// What the window held.
-        window: Vec<crate::liveness::Justifier>,
+        /// The forcings in effect.
+        window: Vec<crate::forcing::Forcing>,
     },
     /// A running engine listed the replica while another writer's file stood
     /// past its own position, and did not stop.
@@ -883,6 +885,7 @@ pub fn newest_of(files: &[FileInfo]) -> Option<Txid> {
 }
 
 mod as_of;
+pub mod lost_restore_points;
 mod retention;
 mod witness;
 
