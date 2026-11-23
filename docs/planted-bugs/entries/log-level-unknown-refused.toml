@@ -1,0 +1,8 @@
+# `replicate`'s command line made to read as Go's (claude/dropin-cli): found by the Go
+# differential (compat `dropin_cli`), which needs the Go builds and so is ignored; the
+# tests below are its Go-free counterparts.
+name = "log-level-unknown-refused"
+fix = "claude/dropin-cli"
+package = "lsr-config"
+test_bin = "config"
+tests = ["log_level_from_the_environment_wins"]

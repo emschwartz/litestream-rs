@@ -90,7 +90,7 @@ fn restore_matches(rig: Rig<Sqlite>, root: &Path) {
     let (db, replica) = (rig.db().to_owned(), rig.replica_root().to_owned());
     drop(rig);
     let target = root.join("restored.db");
-    let sink = lsr_local::FileSink::create(&target).unwrap();
+    let sink = lsr_replica::local::FileSink::create(&target).unwrap();
     block_on(lsr_core::restore(
         &lsr_store_fs::FsStore::new(&replica),
         RestoreTarget::Latest,

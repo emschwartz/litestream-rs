@@ -1,0 +1,7 @@
+name = "clock-step-back-freezes-timers"
+fix = "48aee1d"
+package = "lsr-core"
+tests = [
+    "a_backward_clock_step_does_not_freeze_a_retry_wait",
+    "actor::clock::tests::a_step_back_holds_then_slews_at_half_speed_until_it_rejoins",
+]

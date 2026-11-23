@@ -27,22 +27,26 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use lsr_config::ReplicaKind;
+use lsr_config::{
+    Credentials, Expand, GoConfig, ProcessEnv, ReplicaKind, ReplicaPlan, expand_path,
+};
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
     MAX_ATTEMPTS, ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions,
     RestoreTarget, Restored, Severity, VerifyError, listed_past, plan, resolve, restore_with,
     verify,
 };
-use lsr_local::{
-    ClearError, CreateError, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
+use lsr_replica::local::{
+    ClearError, CreateError, Existing, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
     clear_journal_files, preflight,
 };
 use lsr_store_fs::FsStore;
-use lsr_store_s3::{ConfigError, CredentialError};
+use lsr_store_s3::{ConfigError, CredentialError, S3Credentials};
 use thiserror::Error;
 
-use crate::args::{Command, FilesArgs, Replica, RestoreArgs, TakeOverArgs, UsageError, VerifyArgs};
+use crate::args::{
+    Command, FilesArgs, Replica, RestoreArgs, RestoreFrom, TakeOverArgs, UsageError, VerifyArgs,
+};
 use crate::render;
 use crate::replica::{self, Remote};
 
@@ -145,6 +149,21 @@ impl Source {
         }
     }
 
+    /// A replica URL not opened (Go's early skip): its scheme and nothing else, since the
+    /// rest may hold credentials.
+    fn of_url(url: &str) -> Self {
+        let scheme = url.split_once("://").map_or("", |(scheme, _)| scheme);
+        let kind = if scheme.eq_ignore_ascii_case("s3") {
+            ReplicaKind::S3
+        } else {
+            ReplicaKind::File
+        };
+        Self {
+            kind,
+            name: format!("{scheme}://"),
+        }
+    }
+
     /// The store's kind.
     #[must_use]
     pub const fn kind(&self) -> ReplicaKind {
@@ -213,6 +232,8 @@ pub struct RestoreDone {
     pub json: bool,
     /// How it ended.
     pub finished: Finished,
+    /// `-parallelism` was given: Go warns that it has no effect.
+    pub parallelism: bool,
 }
 
 /// What a command produced.
@@ -344,6 +365,31 @@ pub enum CliError {
     /// Writing the result failed.
     #[error("writing the result: {0}")]
     Output(#[source] io::Error),
+    /// A replica URL `restore` was given is not a usable replica (Go's `NewReplicaFromConfig`).
+    #[error("{0}")]
+    Config(lsr_config::ConfigError),
+    /// The config, or the replica a URL names, cannot be planned.
+    #[error("{0}")]
+    Plan(lsr_config::MapError),
+    /// The planned config holds no database (a URL plan always holds one).
+    #[error("no database to restore")]
+    NoDatabase,
+    /// A `DB_PATH` that cannot be made absolute.
+    #[error("{0}")]
+    DatabasePath(lsr_config::PathError),
+    /// A `DB_PATH` no `path` entry of the config names (Go's `DBConfig`).
+    #[error("database not found in config: {}", .path.display())]
+    NotInConfig {
+        /// The path, expanded.
+        path: PathBuf,
+    },
+    /// A replica URL with a timestamp and a replica that holds nothing (Go's
+    /// `CalcRestoreTarget`, which `-if-replica-exists` does not excuse).
+    #[error("no backups found")]
+    NoBackupsFound,
+    /// The output's parent directory could not be created.
+    #[error("create parent directory: {0}")]
+    Parent(#[source] io::Error),
     /// The daemon did not start: its command line, its config, or its signal handlers.
     #[error("replicate: {0}")]
     Daemon(#[from] lsr_sidecar::SidecarError),
@@ -456,6 +502,13 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         CliError::NoPlan(_) | CliError::NoLtxFolder { .. } | CliError::Integrity(_) => {
             Exit::Refused
         }
+        CliError::Config(_)
+        | CliError::Plan(_)
+        | CliError::NoDatabase
+        | CliError::DatabasePath(_)
+        | CliError::NotInConfig { .. } => Exit::Refused,
+        CliError::Parent(_) => Exit::Environment,
+        CliError::NoBackupsFound => Exit::Refused,
         CliError::Restore(err) => match err {
             RestoreError::NoPlan(_)
             | RestoreError::File { .. }
@@ -519,10 +572,11 @@ fn open(replica: &Replica) -> Result<Opened, CliError> {
     }
 }
 
-async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
+async fn restore_command(args: Box<RestoreArgs>) -> Result<Done, CliError> {
     let RestoreArgs {
-        replica,
+        from,
         output,
+        no_expand_env,
         target,
         as_of_inside,
         clear_journal_files,
@@ -531,29 +585,146 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
         if_replica_exists,
         dry_run,
         json,
-    } = args;
-    let source = Source::of(&replica);
+        force,
+        parallelism,
+        txid_and_timestamp,
+        timestamp_given,
+    } = *args;
+    let url_timestamp = timestamp_given && matches!(from, RestoreFrom::Url(_));
     let how = How {
         target,
         as_of_inside,
         clear_journal_files_first: clear_journal_files,
         integrity_check,
         if_replica_exists,
+        existing: if force {
+            Existing::Any
+        } else {
+            Existing::Empty
+        },
+        txid_and_timestamp,
+        url_timestamp,
     };
-    let finished = if if_db_not_exists && output_exists(&output)? {
+    let (opening, output) = match resolve_from(from, output, no_expand_env, if_db_not_exists)? {
+        Resolution::Open(opening, output) => (opening, output),
+        Resolution::OutputExists(output, source) => {
+            return Ok(Done::Restore(Box::new(RestoreDone {
+                output,
+                source,
+                json,
+                finished: Finished::Skipped {
+                    skip: Skip::OutputExists,
+                    cleared: Vec::new(),
+                },
+                parallelism,
+            })));
+        }
+    };
+    let source = Source::of(&opening.replica);
+    let finished = if if_db_not_exists && output_exists(&output, how.existing)? {
         Finished::Skipped {
             skip: Skip::OutputExists,
             cleared: Vec::new(),
         }
     } else {
-        restore_or_plan(&replica, &output, how, dry_run).await?
+        restore_or_plan(&opening, &output, how, dry_run).await?
     };
     Ok(Done::Restore(Box::new(RestoreDone {
         output,
         source,
         json,
         finished,
+        parallelism,
     })))
+}
+
+/// A replica to restore from, with the keys its config gave, if any.
+struct Opening {
+    replica: Replica,
+    keys: Option<S3Credentials>,
+}
+
+impl Opening {
+    fn of_plan(plan: &ReplicaPlan) -> Self {
+        match plan {
+            ReplicaPlan::File(dir) => Self {
+                replica: Replica::Dir(dir.clone()),
+                keys: None,
+            },
+            ReplicaPlan::S3 {
+                config,
+                credentials,
+            } => Self {
+                replica: Replica::S3(config.clone()),
+                keys: match credentials {
+                    Credentials::FromConfig(keys) => Some(keys.clone()),
+                    Credentials::FromEnvironment => None,
+                },
+            },
+        }
+    }
+}
+
+/// Where a restore reads from and writes to, or Go's early skip of a URL restore whose
+/// output exists (`loadFromURL` checks `-if-db-not-exists` before it builds the replica).
+enum Resolution {
+    Open(Opening, PathBuf),
+    OutputExists(PathBuf, Source),
+}
+
+/// Go's `loadFromURL` and `loadFromConfig` (`cmd/litestream/restore.go:302-361`), in order.
+fn resolve_from(
+    from: RestoreFrom,
+    output: Option<PathBuf>,
+    no_expand_env: bool,
+    if_db_not_exists: bool,
+) -> Result<Resolution, CliError> {
+    let expand = if no_expand_env {
+        Expand::Off
+    } else {
+        Expand::Env
+    };
+    match from {
+        RestoreFrom::Replica(replica) => {
+            let output = output.ok_or(UsageError::MissingFlag {
+                command: "restore",
+                flag: "--output",
+            })?;
+            Ok(Resolution::Open(
+                Opening {
+                    replica,
+                    keys: None,
+                },
+                output,
+            ))
+        }
+        RestoreFrom::Url(url) => {
+            let output = output.ok_or(UsageError::GoOutputRequired)?;
+            if if_db_not_exists && output.symlink_metadata().is_ok() {
+                let source = Source::of_url(&url);
+                return Ok(Resolution::OutputExists(output, source));
+            }
+            let loaded = GoConfig::for_one_database(&output.to_string_lossy(), &url, &ProcessEnv)
+                .map_err(CliError::Config)?;
+            let plan = lsr_config::plan(&loaded.config, &ProcessEnv).map_err(CliError::Plan)?;
+            let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
+            Ok(Resolution::Open(Opening::of_plan(db.replica()), output))
+        }
+        RestoreFrom::Database { path, config } => {
+            let loaded = lsr_sidecar::load_config(config.as_deref(), expand)?;
+            let want = expand_path(&path, &ProcessEnv).map_err(CliError::DatabasePath)?;
+            // Go's `DBConfig` reads only the `path` entries: `dir` entries are not scanned
+            // and the other entries are not built.
+            let narrowed = loaded
+                .config
+                .only_database(&want)
+                .ok_or_else(|| CliError::NotInConfig { path: want.clone() })?;
+            let plan = lsr_config::plan(&narrowed, &ProcessEnv).map_err(CliError::Plan)?;
+            let db = plan.dbs().first().ok_or(CliError::NoDatabase)?;
+            let output = output.unwrap_or_else(|| db.path().to_path_buf());
+            Ok(Resolution::Open(Opening::of_plan(db.replica()), output))
+        }
+    }
 }
 
 /// The restore, or with `dry_run` its plan. A directory with no `ltx/` folder is opened
@@ -561,17 +732,23 @@ async fn restore_command(args: RestoreArgs) -> Result<Done, CliError> {
 /// (`file/replica_client.go:98-100`): the output is checked as for any replica, and the
 /// empty-replica ending then names the missing folder.
 async fn restore_or_plan(
-    replica: &Replica,
+    opening: &Opening,
     output: &Path,
     how: How,
     dry_run: bool,
 ) -> Result<Finished, CliError> {
-    let (opened, bare) = match replica {
+    let (opened, bare) = match &opening.replica {
         Replica::Dir(path) => {
             let bare = (!path.join("ltx").is_dir()).then(|| path.clone());
             (Opened::Dir(FsStore::new(path)), bare)
         }
-        Replica::S3(_) => (open(replica)?, None),
+        Replica::S3(config) => (
+            Opened::S3(replica::open_s3_with(
+                (**config).clone(),
+                opening.keys.clone(),
+            )?),
+            None,
+        ),
     };
     let finished = match (opened, dry_run) {
         (Opened::Dir(store), false) => restore_on(&store, output, how).await,
@@ -604,6 +781,13 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
             source: Box::new(no_ltx_folder(*source, path)),
         },
         other @ (CliError::NoPlan(_)
+        | CliError::Parent(_)
+        | CliError::NoBackupsFound
+        | CliError::Config(_)
+        | CliError::Plan(_)
+        | CliError::NoDatabase
+        | CliError::DatabasePath(_)
+        | CliError::NotInConfig { .. }
         | CliError::Usage(_)
         | CliError::NoReplica { .. }
         | CliError::Credentials(_)
@@ -626,7 +810,10 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
 
 /// Whether anything is at the output, as the sink judges it: a path that
 /// cannot be inspected is an error, not a reason to skip.
-fn output_exists(output: &Path) -> Result<bool, CliError> {
+fn output_exists(output: &Path, existing: Existing) -> Result<bool, CliError> {
+    if existing != Existing::Refuse && output.symlink_metadata().is_ok() {
+        return Ok(true);
+    }
     match preflight(output) {
         Ok(_) => Ok(false),
         Err(CreateError::TargetExists(_)) => Ok(true),
@@ -641,6 +828,11 @@ struct How {
     clear_journal_files_first: bool,
     integrity_check: IntegrityCheck,
     if_replica_exists: bool,
+    existing: Existing,
+    txid_and_timestamp: bool,
+    /// A `-timestamp` with a replica URL: Go's `loadFromURL` then refuses an empty replica
+    /// first (`CalcRestoreTarget`, "no backups found"), whatever `-if-replica-exists` says.
+    url_timestamp: bool,
 }
 
 #[expect(
@@ -662,19 +854,27 @@ async fn restore_on<S: ObjectStore>(
         clear_journal_files_first,
         integrity_check,
         if_replica_exists,
+        existing,
+        txid_and_timestamp,
+        url_timestamp,
     } = how;
+    refuse_empty_for_timestamp(store, url_timestamp).await?;
     let start = started();
     let cleared = if clear_journal_files_first {
         clear_journal_files(output)?
     } else {
         Vec::new()
     };
+    let created = create_parents(output).map_err(CliError::Parent)?;
     let attempt = async {
         // A replicator started on the restored database builds on the replica it came from,
         // through the takeover record: an output with no meta directory is refused before
         // anything is written, never restored without one.
         let meta = meta_dir_of(output)?;
-        let sink = FileSink::create(output)?.with_integrity_check(integrity_check);
+        let sink = FileSink::create_over(output, existing)?.with_integrity_check(integrity_check);
+        if txid_and_timestamp {
+            return Err(UsageError::GoTxidAndTimestamp.into());
+        }
         let options = RestoreOptions { as_of_inside };
         let restored = restore_with(store, target, options, sink).await?;
         lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
@@ -686,6 +886,9 @@ async fn restore_on<S: ObjectStore>(
         Ok::<_, CliError>(restored)
     }
     .await;
+    if attempt.is_err() {
+        remove_created(&created);
+    }
     match attempt {
         Ok(restored) => Ok(Finished::Restored {
             restored,
@@ -707,17 +910,65 @@ async fn restore_on<S: ObjectStore>(
     }
 }
 
+/// Go's refusal of an empty replica when a URL restore names a timestamp.
+async fn refuse_empty_for_timestamp<S: ObjectStore>(
+    store: &S,
+    asked: bool,
+) -> Result<(), CliError> {
+    if asked && Inventory::load(store).await?.newest().is_none() {
+        return Err(CliError::NoBackupsFound);
+    }
+    Ok(())
+}
+
+/// Creates the output's missing parent directories, as Go's restore does (mode 0700,
+/// `replica.go:728`), and fsyncs the directory that holds each new one, so the output's own
+/// directory sync later makes a durable path. Returns what it created, outermost first.
+fn create_parents(output: &Path) -> io::Result<Vec<PathBuf>> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let mut missing = Vec::new();
+    let mut at = output.parent();
+    while let Some(dir) = at.filter(|d| !d.as_os_str().is_empty()) {
+        if dir.symlink_metadata().is_ok() {
+            break;
+        }
+        missing.push(dir.to_path_buf());
+        at = dir.parent();
+    }
+    missing.reverse();
+    let mut created = Vec::new();
+    for dir in missing {
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        created.push(dir.clone());
+        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(created)
+}
+
+/// Removes the directories [`create_parents`] made for a restore that failed, innermost
+/// first; a directory something else has written into since stays.
+fn remove_created(created: &[PathBuf]) {
+    for dir in created.iter().rev() {
+        if std::fs::remove_dir(dir).is_err() {
+            break;
+        }
+    }
+}
+
 /// The restore's checks and plan, without its writes: the output is checked
 /// as [`FileSink::create`] would, journal files are listed instead of removed, and
 /// the replica is listed and planned as [`restore`] plans its first attempt.
 async fn plan_on<S: ObjectStore>(store: &S, output: &Path, how: How) -> Result<Finished, CliError> {
-    let journal_files_to_remove = preflight(output)?;
-    if let Some(path) = journal_files_to_remove
-        .first()
-        .filter(|_| !how.clear_journal_files_first)
-    {
-        return Err(CliError::JournalFile { path: path.clone() });
+    // Go's dry run plans and prints without looking at the output (`restore.go:119-136`):
+    // an output a restore would refuse is not a reason to refuse the plan. The journal files
+    // are listed for --clear-journal-files, when they can be.
+    refuse_empty_for_timestamp(store, how.url_timestamp).await?;
+    if how.txid_and_timestamp {
+        return Err(UsageError::GoTxidAndTimestamp.into());
     }
+    let journal_files_to_remove = preflight(output).unwrap_or_default();
     // As the restore does: a listing that shows a gap may have raced a writer's rename (a
     // directory read can miss the new file and see a later one), so the plan is made again
     // on a fresh listing, and a gap every listing shows is the answer.

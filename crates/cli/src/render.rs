@@ -24,7 +24,7 @@ use crate::args::{
 };
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedTime;
-use lsr_local::IntegrityCheck;
+use lsr_replica::local::IntegrityCheck;
 use lsr_sidecar::json_string as quote;
 
 /// Appends formatted text to a `String`, which cannot fail.
@@ -206,6 +206,7 @@ fn restore(done: &RestoreDone) -> String {
         source,
         json,
         finished,
+        ..
     } = done;
     match (finished, *json) {
         (
@@ -275,7 +276,12 @@ pub fn warnings(done: &Done) -> String {
     let Done::Restore(done) = done else {
         return String::new();
     };
-    match &done.finished {
+    let parallelism = if done.parallelism {
+        "warning: -parallelism is deprecated and has no effect; accepted for compatibility only\n"
+    } else {
+        ""
+    };
+    let rest = match &done.finished {
         Finished::Restored { restored, .. } => {
             let mut out = restored.inside_file().map_or_else(String::new, |file| {
                 inside_warning(&file, restored.reached())
@@ -286,7 +292,8 @@ pub fn warnings(done: &Done) -> String {
             out
         }
         Finished::Planned { .. } | Finished::Skipped { .. } => String::new(),
-    }
+    };
+    format!("{parallelism}{rest}")
 }
 
 fn outpaced_warning(reached: Txid) -> String {

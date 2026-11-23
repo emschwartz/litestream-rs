@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use lsr_core::{RetryPolicy, Retrying, Sleeper};
 use lsr_replica::OsEntropy;
-use lsr_store_s3::{CredentialChain, S3Config, S3Store, Transport, UreqTransport};
+use lsr_store_s3::{CredentialChain, S3Config, S3Credentials, S3Store, Transport, UreqTransport};
 
 use crate::run::CliError;
 
@@ -50,10 +50,23 @@ pub fn remote<T: Transport>(store: S3Store<T>) -> Remote<T> {
 /// [`CliError::Credentials`], or [`CliError::S3Config`] when the endpoint
 /// cannot address the bucket.
 pub fn open_s3(config: S3Config) -> Result<Remote, CliError> {
-    let credentials = CredentialChain::from_process()
+    open_s3_with(config, None)
+}
+
+/// [`open_s3`], with a config file's keys as the chain's explicit values (as the daemon
+/// builds it, so the shared files are still read first).
+///
+/// # Errors
+/// As [`open_s3`].
+pub fn open_s3_with(config: S3Config, keys: Option<S3Credentials>) -> Result<Remote, CliError> {
+    let chain = match keys {
+        Some(keys) => CredentialChain::from_process().with_explicit(keys),
+        None => CredentialChain::from_process(),
+    };
+    let resolved = chain
+        .with_region(config.region().as_str())
         .resolve()
-        .map_err(CliError::Credentials)?
-        .into_credentials();
-    let store = S3Store::new(config, credentials).map_err(CliError::S3Config)?;
+        .map_err(CliError::Credentials)?;
+    let store = S3Store::resolved(config, &resolved).map_err(CliError::S3Config)?;
     Ok(remote(store))
 }

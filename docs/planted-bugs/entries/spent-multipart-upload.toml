@@ -1,0 +1,5 @@
+name = "spent-multipart-upload"
+fix = "ce35d57"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_retried_complete_finding_its_upload_spent_is_settled_by_a_head"]

@@ -1,0 +1,5 @@
+name = "dir-header-read-exact"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["a_short_header_read_counts_the_missing_bytes_as_zero"]

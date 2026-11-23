@@ -196,7 +196,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestLTXCommand_UsageOmitsReplicaFlag" = { counterpart = "lsr-cli::bin/lsr::args::tests::help_documents_every_flag_command_and_exit_code" }
 "TestLevelVarParsing" = { counterpart = "lsr-cli::bin/lsr::args::tests::files_takes_replica_and_json" }
 "TestLevelVarString" = { reason = "Go-only: the String method of the -level flag type in Go's CLI." }
-"TestTXIDVarParsing" = { counterpart = "lsr-cli::bin/lsr::args::tests::bad_txid" }
+"TestTXIDVarParsing" = { counterpart = "lsr-cli::bin/lsr::args::tests::txid_as_go_reads_it" }
 "TestTXIDVarString" = { counterpart = "lsr-ltx::ids::tests::display_is_the_object_key_form" }
 
 ["litestream/cmd/litestream/main_cli_test.go"]
@@ -442,15 +442,15 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestRestoreCommand_FollowIntervalFlag" = { reason = "@restore-follow" }
 "TestRestoreCommand_ParallelismDeprecated" = { reason = "Go-only: a deprecated -parallelism flag kept for old scripts. Rust's restore reads sequentially and never had the flag." }
 "TestRestoreCommand_RestoreReportsAdvancedTXID" = { reason = "Rust deliberately differs: a restore plans from one listing snapshot (docs/PLAN.md phase 1, restore planner) and reports the txid it planned (lsr-core restore::tests::restore_reports_created_at_read), so a replica that advances mid-restore does not change the answer." }
-"TestRestoreCommand_RunAllowsEmptyOutput" = { reason = "Rust deliberately differs: restore refuses any existing target, even an empty file (lsr-local tests::create_refuses_a_target_that_exists), because publish never overwrites (docs/PLAN.md phase 1, restore executor)." }
+"TestRestoreCommand_RunAllowsEmptyOutput" = { reason = "Rust deliberately differs: restore refuses any existing target, even an empty file (lsr-replica local::tests::create_refuses_a_target_that_exists), because publish never overwrites (docs/PLAN.md phase 1, restore executor)." }
 "TestRestoreCommand_RunDryRunJSONOutput" = { counterpart = ["lsr-cli::cli::cli::dry_run_json_lists_the_chain_the_restore_applies", "lsr-cli::cli::cli::dry_run_prints_the_plan_and_writes_nothing", "lsr-cli::bin/lsr::run::tests::dry_run_over_s3_plans_what_the_restore_applies"] }
-"TestRestoreCommand_RunForceOverwritesExistingOutput" = { reason = "Rust deliberately differs: there is no -force; restore never overwrites an existing target (lsr-cli::cli an_existing_output_exits_3_and_stays_byte_identical) and the caller removes it first." }
+"TestRestoreCommand_RunForceOverwritesExistingOutput" = { counterpart = "lsr-cli::cli::cli::force_replaces_an_existing_database_and_its_journal_files" }
 "TestRestoreCommand_RunIfReplicaExists" = { counterpart = ["lsr-cli::cli::cli::if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing", "lsr-cli::cli::cli::if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet", "lsr-cli::cli::cli::if_replica_exists_skips_a_path_without_ltx_as_go_does", "lsr-cli::cli::cli::dry_run_refuses_an_empty_replica_even_with_if_replica_exists"] }
 "TestRestoreCommand_RunJSONOutput" = { counterpart = "lsr-cli::cli::cli::restore_json_reports_go_s_fields" }
 "TestRestoreCommand_RunMissingOutputPathForReplicaURL" = { counterpart = "lsr-cli::bin/lsr::args::tests::missing_required_flag_for_every_required_flag" }
-"TestRestoreCommand_RunOrphanedSidecars" = { counterpart = ["lsr-cli::cli::cli::a_stale_journal_file_refuses_until_clear_journal_files", "lsr-local::tests::create_refuses_each_journal_file_and_removes_nothing"] }
-"TestRestoreCommand_RunRequiresForceForExistingJournal" = { counterpart = "lsr-local::tests::a_stale_journal_blocks_the_restore_until_cleared" }
-"TestRestoreCommand_RunRequiresForceForExistingOutput" = { counterpart = "lsr-cli::cli::cli::an_existing_output_exits_3_and_stays_byte_identical" }
+"TestRestoreCommand_RunOrphanedSidecars" = { counterpart = ["lsr-cli::cli::cli::a_stale_journal_file_refuses_until_clear_journal_files", "lsr-replica::local::tests::create_refuses_each_journal_file_and_removes_nothing"] }
+"TestRestoreCommand_RunRequiresForceForExistingJournal" = { counterpart = "lsr-replica::local::tests::a_stale_journal_blocks_the_restore_until_cleared" }
+"TestRestoreCommand_RunRequiresForceForExistingOutput" = { counterpart = "lsr-cli::cli::cli::an_existing_output_exits_1_and_stays_byte_identical" }
 "TestRestoreCommand_RunSuggestedOutputArgs" = { counterpart = "lsr-cli::cli::cli::usage_errors_exit_64_with_one_stderr_line_and_no_stdout" }
 "TestRestoreCommand_RunUnavailableTarget" = { counterpart = ["lsr-cli::cli::cli::every_target_matches_the_manifest", "lsr-cli::cli::cli::dry_run_json_lists_the_chain_the_restore_applies", "lsr-core::plan::tests::a_transaction_beyond_the_newest_is_its_own_outcome"] }
 
@@ -624,9 +624,9 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 
 ["litestream/db_test.go"]
 "TestCompaction_PreservesLastTimestamp" = { counterpart = "lsr-core::compact::tests::the_output_header_takes_the_first_and_last_inputs_as_go_does" }
-"TestDB_CRC64" = { counterpart = "lsr-local::tests::checksum_reads_back_what_the_file_holds" }
-"TestDB_CRC64/DB" = { counterpart = "lsr-local::tests::checksum_reads_back_what_the_file_holds" }
-"TestDB_CRC64/ErrNotExist" = { reason = "Go-only helper: DB.CRC64 of a missing file returns os.ErrNotExist. Rust checksums only the restore scratch it created (lsr-local FileSink::checksum)." }
+"TestDB_CRC64" = { counterpart = "lsr-replica::local::tests::checksum_reads_back_what_the_file_holds" }
+"TestDB_CRC64/DB" = { counterpart = "lsr-replica::local::tests::checksum_reads_back_what_the_file_holds" }
+"TestDB_CRC64/ErrNotExist" = { reason = "Go-only helper: DB.CRC64 of a missing file returns os.ErrNotExist. Rust checksums only the restore scratch it created (lsr-replica local::FileSink::checksum)." }
 "TestDB_Compact" = { counterpart = "lsr-core::maintain::tests::level_one_compacts_the_whole_source_when_the_destination_is_empty" }
 "TestDB_Compact/L1" = { counterpart = "lsr-core::maintain::tests::level_one_compacts_the_whole_source_when_the_destination_is_empty" }
 "TestDB_Compact/L2+" = { counterpart = ["lsr-core::maintain::tests::only_files_above_the_destination_max_are_inputs", "lsr-core::maintain::tests::a_higher_level_reads_only_the_replica"] }
@@ -865,10 +865,10 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestApplyLTXFile_MultiplePages" = { reason = "@restore-follow" }
 "TestApplyLTXFile_OpenConnection" = { reason = "@restore-follow" }
 "TestApplyLTXFile_TruncatesAfterWrite" = { reason = "@restore-follow" }
-"TestCheckIntegrity_CorruptDB" = { counterpart = ["lsr-local::tests::quick_and_full_refuse_a_corrupt_b_tree_and_leave_nothing", "lsr-cli::cli::cli::integrity_check_refuses_a_corrupt_b_tree_with_exit_2"] }
-"TestCheckIntegrity_Full_ValidDB" = { counterpart = ["lsr-local::tests::every_check_publishes_a_valid_database_and_nothing_beside_it", "lsr-cli::cli::cli::integrity_check_publishes_a_valid_database_in_every_mode"] }
-"TestCheckIntegrity_None_Skips" = { counterpart = ["lsr-local::tests::off_publishes_the_corrupt_b_tree_as_restored", "lsr-cli::bin/lsr::args::tests::integrity_check_takes_go_s_three_words"] }
-"TestCheckIntegrity_Quick_ValidDB" = { counterpart = ["lsr-local::tests::every_check_publishes_a_valid_database_and_nothing_beside_it", "lsr-cli::cli::cli::integrity_check_publishes_a_valid_database_in_every_mode"] }
+"TestCheckIntegrity_CorruptDB" = { counterpart = ["lsr-replica::local::tests::quick_and_full_refuse_a_corrupt_b_tree_and_leave_nothing", "lsr-cli::cli::cli::integrity_check_refuses_a_corrupt_b_tree_with_exit_1"] }
+"TestCheckIntegrity_Full_ValidDB" = { counterpart = ["lsr-replica::local::tests::every_check_publishes_a_valid_database_and_nothing_beside_it", "lsr-cli::cli::cli::integrity_check_publishes_a_valid_database_in_every_mode"] }
+"TestCheckIntegrity_None_Skips" = { counterpart = ["lsr-replica::local::tests::off_publishes_the_corrupt_b_tree_as_restored", "lsr-cli::bin/lsr::args::tests::integrity_check_takes_go_s_three_words"] }
+"TestCheckIntegrity_Quick_ValidDB" = { counterpart = ["lsr-replica::local::tests::every_check_publishes_a_valid_database_and_nothing_beside_it", "lsr-cli::cli::cli::integrity_check_publishes_a_valid_database_in_every_mode"] }
 "TestNewRestoreCompactor" = { reason = "Go-only: Go restores by streaming every planned file through an ltx.Compactor with a spill directory. Rust's executor applies files oldest first with the newest page winning (lsr-core restore::tests::applies_files_oldest_first_and_newest_page_wins)." }
 "TestNewRestoreCompactor_ConsumerAbort" = { reason = "Go-only: the restore compactor's pipe; see TestNewRestoreCompactor. A failing Rust sink never publishes (lsr-core restore::tests::a_sink_failing_at_each_operation_never_publishes)." }
 "TestNewRestoreCompactor_InvalidSpillDir" = { reason = "@go-ltx-spill" }
@@ -950,7 +950,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplica_Restore_InvalidFileSize/EmptyFile" = { counterpart = "lsr-core::restore::tests::a_file_cut_short_is_truncated_not_a_shorter_database" }
 "TestReplica_Restore_InvalidFileSize/TruncatedFile" = { counterpart = "lsr-core::restore::tests::a_file_cut_short_is_truncated_not_a_shorter_database" }
 "TestReplica_Restore_OpensPlanConcurrently" = { reason = "Go-only: opening every planned file concurrently. Rust restores read files one bounded range at a time (docs/PLAN.md phase 1, restore executor; AGENTS.md: no parallelism without a measurement)." }
-"TestReplica_Restore_RemovesTempFileOnFailure" = { counterpart = "lsr-local::tests::a_failed_restore_leaves_no_target_and_no_scratch" }
+"TestReplica_Restore_RemovesTempFileOnFailure" = { counterpart = "lsr-replica::local::tests::a_failed_restore_leaves_no_target_and_no_scratch" }
 "TestReplica_Sync" = { counterpart = "lsr-compat::compat::live_source::live_sync_chain_restores" }
 "TestReplica_TimeBounds" = { reason = "@go-replica-helper" }
 "TestReplica_TimeBounds/ErrorOnLevel" = { reason = "@go-replica-helper" }
@@ -1515,13 +1515,13 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplicaClient_Type" = { reason = "@backend-webdav" }
 
 ["ltx/checksum_test.go"]
-"TestChecksumPages" = { reason = "Go-only helper: ltx.ChecksumPages checksums a database file's pages in parallel workers, padding a short last page. Rust has no parallel scanner (AGENTS.md: no parallelism without a measurement); page checksums come one page at a time from Checksum::of_page (lsr-ltx checksum::tests::page_checksum_matches_go) and the restore sink's read-back (lsr-local tests::checksum_reads_back_what_the_file_holds)." }
-"TestChecksumPages_LockPage" = { counterpart = ["lsr-core::restore::tests::the_lock_page_is_never_written_and_reads_as_zeros", "lsr-local::tests::checksum_reads_back_what_the_file_holds"] }
+"TestChecksumPages" = { reason = "Go-only helper: ltx.ChecksumPages checksums a database file's pages in parallel workers, padding a short last page. Rust has no parallel scanner (AGENTS.md: no parallelism without a measurement); page checksums come one page at a time from Checksum::of_page (lsr-ltx checksum::tests::page_checksum_matches_go) and the restore sink's read-back (lsr-replica local::tests::checksum_reads_back_what_the_file_holds)." }
+"TestChecksumPages_LockPage" = { counterpart = ["lsr-core::restore::tests::the_lock_page_is_never_written_and_reads_as_zeros", "lsr-replica::local::tests::checksum_reads_back_what_the_file_holds"] }
 
 ["ltx/cmd/ltx/apply_test.go"]
 "TestApplyCommand_NoChecksumIncremental" = { reason = "Go-only: the `ltx apply` debugging command, which writes one LTX file's pages into a database. Rust applies files only through restore, which verifies the whole chain first (lsr-core restore::tests::an_untracked_chain_is_not_checksummed)." }
 "TestApplyCommand_NoChecksumSnapshot" = { reason = "Go-only: the `ltx apply` debugging command. Rust applies files only through restore (lsr-core restore::tests::a_chain_with_no_level_nine_file_restores_to_the_model)." }
-"TestApplyCommand_SnapshotOverExistingDatabase" = { reason = "Go-only: `ltx apply` writing over an existing database. Rust restore never writes over an existing file (lsr-local tests::create_refuses_a_target_that_exists)." }
+"TestApplyCommand_SnapshotOverExistingDatabase" = { reason = "Go-only: `ltx apply` writing over an existing database. Rust restore never writes over an existing file (lsr-replica local::tests::create_refuses_a_target_that_exists)." }
 
 ["ltx/cmd/ltx/encode_db_test.go"]
 "TestEncodeDBCommand" = { reason = "@go-ltx-encode" }
@@ -1625,9 +1625,9 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestEncoder/OK" = { counterpart = ["lsr-ltx::ltx::roundtrip::encode_then_decode_is_identity", "lsr-compat::compat::pinned::go_verifies_every_file_rust_encoded"] }
 
 ["ltx/ltx_test.go"]
-"TestChecksumReader" = { counterpart = "lsr-local::tests::checksum_reads_back_what_the_file_holds" }
+"TestChecksumReader" = { counterpart = "lsr-replica::local::tests::checksum_reads_back_what_the_file_holds" }
 "TestChecksumReader/ErrUnexpectedEOF" = { counterpart = "lsr-core::restore::tests::a_sink_failing_its_checksum_read_never_publishes" }
-"TestChecksumReader/OK" = { counterpart = "lsr-local::tests::checksum_reads_back_what_the_file_holds" }
+"TestChecksumReader/OK" = { counterpart = "lsr-replica::local::tests::checksum_reads_back_what_the_file_holds" }
 "TestChecksum_MarshalJSON" = { reason = "@go-json-methods" }
 "TestChecksum_MarshalJSON/Map" = { reason = "@go-json-methods" }
 "TestChecksum_MarshalJSON/OK" = { reason = "@go-json-methods" }

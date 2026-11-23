@@ -22,6 +22,8 @@ mod fixed_seeds;
 #[cfg(test)]
 mod histories;
 #[cfg(test)]
+mod kill_after_fault;
+#[cfg(test)]
 mod known_wrong;
 #[cfg(test)]
 mod liveness;

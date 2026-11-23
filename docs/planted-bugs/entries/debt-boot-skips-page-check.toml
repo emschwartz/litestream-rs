@@ -1,0 +1,7 @@
+# A boot that restores a WAL-sync debt skips the ahead-of-WAL check, so a database file no commit made is replicated as clean (docs/decisions.md D103).
+name = "debt-boot-skips-page-check"
+fix = "6ed52046"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
+]

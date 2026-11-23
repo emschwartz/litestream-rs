@@ -1,0 +1,10 @@
+# The same defect against the simulator: under the each-read clock law the swarm kills it with
+# nothing written for it (crates/sim/tests/sim/clock_reads.rs records the shortest such seed).
+name = "stamp-before-committed-read-sim"
+patch = "stamp-before-committed-read"
+fix = "847521a"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681",
+]

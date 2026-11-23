@@ -1,0 +1,10 @@
+# The uploader saw a short acknowledgement and retried, but left the short object listed until
+# the retry replaced it, so a restore in between failed to decode it. The checked commit now
+# deletes it first; this patch skips that delete.
+name = "short-commit-object-kept"
+fix = "claude/commit-size"
+package = "lsr-core"
+tests = [
+    "publish::tests::a_create_only_commit_acknowledged_short_is_deleted_and_reported",
+    "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
+]
