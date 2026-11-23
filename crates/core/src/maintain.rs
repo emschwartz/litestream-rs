@@ -92,6 +92,46 @@ pub const MAX_DELETE: usize = 1000;
 // A job must fit one DeleteObjects call, or a retried job would not converge on one request.
 const _: () = assert!(MAX_DELETE >= 1 && MAX_DELETE <= 1000);
 
+/// What a one-off retention pass does next (`replicate -once -enforce-retention`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum OnceRetention {
+    /// Delete these keys, list again, ask again.
+    Delete(DeleteJob),
+    /// Nothing more to delete.
+    Done,
+    /// Deletions are refused.
+    Held(RetentionHold),
+}
+
+/// The retention rules alone, with level-0 deletion off, as Go's `-once -enforce-retention`
+/// runs them: no compaction and no snapshot is planned (both are off in Go's one-off run).
+/// `None` when retention is switched off.
+pub(crate) fn once_retention(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &MaintainState,
+    resolved: &ResolvedCreatedAt,
+) -> Resolve<Option<OnceRetention>> {
+    match config.retention() {
+        RetentionMode::Off => Resolve::Done(None),
+        RetentionMode::Enforce => {
+            let config = config.without_level_zero();
+            match retention(inventory, now, &config, published, state, resolved) {
+                Resolve::Done(Retention::Delete(job)) => {
+                    Resolve::Done(Some(OnceRetention::Delete(job)))
+                }
+                Resolve::Done(Retention::Wait { .. }) => Resolve::Done(Some(OnceRetention::Done)),
+                Resolve::Done(Retention::Held(hold)) => {
+                    Resolve::Done(Some(OnceRetention::Held(hold)))
+                }
+                Resolve::Need(file) => Resolve::Need(file),
+            }
+        }
+    }
+}
+
 /// Go's zero time, 0001-01-01 UTC, in Unix milliseconds.
 const GO_ZERO_UNIX_MILLIS: i128 = -62_135_596_800_000;
 

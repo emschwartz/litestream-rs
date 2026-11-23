@@ -375,6 +375,16 @@ impl Maintenance {
         self
     }
 
+    /// The same schedule with level-0 deletion off: what Go's one-off retention pass deletes
+    /// (`store.go:863-883` skips level 0), for `replicate -once -enforce-retention`.
+    #[must_use]
+    pub(crate) fn without_level_zero(&self) -> Self {
+        Self {
+            l0: L0Retention::Keep,
+            ..self.clone()
+        }
+    }
+
     /// Switches retention on or off in place, as Go's `SetRetentionEnabled`
     /// does on a running store (`store.go:573-581`).
     pub const fn set_retention(&mut self, retention: RetentionMode) {

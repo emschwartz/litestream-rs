@@ -36,8 +36,8 @@ use std::time::Duration;
 use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
 use lsr_replica::{
-    Config, DynStore, Gate, IfReplicationStops, Replicator, RestoreError, Runtime, Stopped, Trip,
-    record_takeover, restore_if_missing,
+    Config, DynStore, FinalRetention, Gate, IfReplicationStops, Replicator, RestoreError, Runtime,
+    Stopped, Trip, record_takeover, restore_if_missing,
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{CredentialChain, CredentialError, S3Store};
@@ -56,6 +56,14 @@ pub enum End {
     DidNotStart,
     /// Its file never appeared.
     NeverAppeared,
+    /// It drained, through `txid`, but the retention pass `-enforce-retention` asked for did not
+    /// finish: how it ended instead.
+    RetentionNotEnforced {
+        /// The newest transaction on the replica.
+        txid: Option<lsr_ltx::Txid>,
+        /// How the pass ended.
+        ended: FinalRetention,
+    },
 }
 
 /// Every database's end, in config order, and the `-exec` child's.
@@ -81,7 +89,8 @@ impl Finished {
             End::Stopped(
                 Stopped::DeadlineReached { .. } | Stopped::Stopped(_) | Stopped::Gone(_),
             )
-            | End::DidNotStart => false,
+            | End::DidNotStart
+            | End::RetentionNotEnforced { .. } => false,
         });
         dbs && self.child.is_none_or(ChildEnd::clean)
     }
@@ -437,7 +446,14 @@ impl Daemon {
     /// Drains every running database within what is left of the one deadline begun at
     /// `begun` (the signal, the child's exit, or now), and reports each.
     #[must_use]
-    pub(crate) fn stop(&self, waiter: Option<Waiter>, begun: lsr_ltx::Timestamp) -> Finished {
+    /// Drains every database; with `retention`, each running one ends with a retention pass
+    /// (`-once -enforce-retention`).
+    pub(crate) fn stop(
+        &self,
+        waiter: Option<Waiter>,
+        begun: lsr_ltx::Timestamp,
+        retention: bool,
+    ) -> Finished {
         if let Some(waiter) = waiter {
             waiter.end();
         }
@@ -445,7 +461,12 @@ impl Daemon {
         let syncs: Vec<_> = slots
             .iter()
             .map(|slot| match &slot.state {
-                State::Running(replicator) => Some(replicator.stop(self.left(begun))),
+                State::Running(replicator) => {
+                    if retention {
+                        replicator.request_final_retention();
+                    }
+                    Some(replicator.stop(self.left(begun)))
+                }
                 State::Waiting | State::Failed => None,
             })
             .collect();
@@ -453,7 +474,10 @@ impl Daemon {
         for (slot, sync) in slots.iter().zip(syncs) {
             let path = slot.plan.path().to_owned();
             let end = match (sync, &slot.state) {
-                (Some(sync), _) => End::Stopped(sync.wait()),
+                (Some(sync), State::Running(replicator)) => {
+                    ending(sync.wait(), replicator.health().final_retention)
+                }
+                (Some(sync), State::Waiting | State::Failed) => End::Stopped(sync.wait()),
                 (None, State::Waiting) => End::NeverAppeared,
                 (None, State::Failed | State::Running(_)) => End::DidNotStart,
             };
@@ -537,6 +561,16 @@ impl Daemon {
                 let fields = [at, ("cause", format!("{gone:?}").into())];
                 self.log.error("database replicator is gone", &fields);
             }
+            End::RetentionNotEnforced { txid, ended } => {
+                let txid = txid.map_or_else(|| "none".to_owned(), |t| t.to_string());
+                let fields = [
+                    at,
+                    ("txid", txid.into()),
+                    ("error", retention_text(ended).into()),
+                ];
+                self.log
+                    .error("database drained, retention not enforced", &fields);
+            }
             End::DidNotStart => self.log.error("database did not start", &[at]),
             End::NeverAppeared => self.log.info("database never appeared", &[at]),
         }
@@ -610,6 +644,48 @@ fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreError
             let store = S3Store::resolved((**config).clone(), &resolved)?;
             Ok(Arc::new(store))
         }
+    }
+}
+
+/// A drained database's end, with the retention pass it was asked to end with: a pass that
+/// did not finish is not clean. Retention switched off finishes, as in Go.
+fn ending(stopped: Stopped, retention: FinalRetention) -> End {
+    match (stopped, retention) {
+        (
+            Stopped::Drained { txid },
+            ended @ (FinalRetention::Held { .. }
+            | FinalRetention::Failed { .. }
+            | FinalRetention::Stuck { .. }),
+        ) => End::RetentionNotEnforced { txid, ended },
+        (
+            stopped,
+            FinalRetention::NotAsked
+            | FinalRetention::Asked { .. }
+            | FinalRetention::Done { .. }
+            | FinalRetention::Off
+            | FinalRetention::Held { .. }
+            | FinalRetention::Failed { .. }
+            | FinalRetention::Stuck { .. },
+        ) => End::Stopped(stopped),
+    }
+}
+
+/// Why a retention pass did not finish, for the log.
+fn retention_text(ended: &FinalRetention) -> String {
+    match ended {
+        FinalRetention::Held { deleted, hold } => {
+            format!("deletions refused after {deleted} keys: {hold}")
+        }
+        FinalRetention::Failed { deleted, fault } => {
+            format!("failed after {deleted} keys: {fault:?}")
+        }
+        FinalRetention::Stuck { deleted, key } => format!(
+            "stopped after {deleted} keys: the listing kept showing {key} after it was deleted"
+        ),
+        FinalRetention::NotAsked
+        | FinalRetention::Asked { .. }
+        | FinalRetention::Done { .. }
+        | FinalRetention::Off => "none".to_owned(),
     }
 }
 

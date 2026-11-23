@@ -2194,6 +2194,7 @@ mod listing;
 mod live;
 mod newest_replica_file;
 mod no_wal_yet;
+mod once_retention;
 mod pages;
 mod rejected_snapshot;
 mod rewound;

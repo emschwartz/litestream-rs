@@ -24,6 +24,8 @@ mod dropin_inspect;
 #[cfg(test)]
 mod dropin_restore;
 #[cfg(test)]
+mod dropin_retention;
+#[cfg(test)]
 mod dropin_roles;
 #[cfg(test)]
 mod fixtures;

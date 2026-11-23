@@ -67,6 +67,7 @@ pub(crate) struct State {
 pub(crate) struct Commands {
     pub(crate) stop: Option<Timestamp>,
     pub(crate) snapshot: bool,
+    pub(crate) final_retention: bool,
     pub(crate) accept_pages: bool,
     pub(crate) sink: Option<Box<dyn EventSink>>,
 }
@@ -462,6 +463,15 @@ impl Replicator {
     /// Makes the next sync a snapshot.
     pub fn request_snapshot(&self) {
         self.shared.command(|commands| commands.snapshot = true);
+    }
+
+    /// Makes the next stop end with a retention pass once everything committed is uploaded, as
+    /// Go's `replicate -once -enforce-retention` does: the daemon's retention rules with level-0
+    /// deletion off, until nothing more is to be deleted. [`Health::final_retention`] says how it
+    /// ended. Ask before calling [`Replicator::stop`].
+    pub fn request_final_retention(&self) {
+        self.shared
+            .command(|commands| commands.final_retention = true);
     }
 
     /// An operator accepts the database file as it is: every page the page checksum table

@@ -169,7 +169,7 @@ pub(crate) fn supervise(
     if let Some(end) = end {
         ended(daemon, end);
     }
-    let mut finished = daemon.stop(waiter, begun);
+    let mut finished = daemon.stop(waiter, begun, false);
     finished.child = end;
     finished.app_held = held;
     finished

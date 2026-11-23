@@ -18,10 +18,14 @@
 //! `-once` starts every database and drains it at once: everything committed is
 //! synced and uploaded, as Go's `runOnce` syncs the database and then the replica.
 //!
+//! With `-enforce-retention` each drain then ends with a retention pass
+//! (`Replicator::request_final_retention`, docs/decisions/D167.md): the retention rules with
+//! level-0 deletion off, until nothing more is to be deleted; a pass that is refused, fails or
+//! cannot finish ends the run unclean.
+//!
 //! What this build refuses rather than ignores, since ignoring would change what
 //! runs: `-force-snapshot` (Go writes a level-9 snapshot; the replicator's API can
-//! only make the next sync start from page 1 at level 0) and `-enforce-retention`
-//! (no one-off retention pass exists in the replicator's API). An `exec` line Go
+//! only make the next sync start from page 1 at level 0). An `exec` line Go
 //! would run differently from what it says, and an `addr` Go cannot bind, are
 //! refused before any database is touched.
 //!
@@ -122,7 +126,7 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
         board,
     ));
     let finished = if flags.once {
-        daemon.stop(None, daemon.now())
+        daemon.stop(None, daemon.now(), flags.enforce_retention)
     } else {
         supervise::supervise(&daemon, command.as_ref(), &control, &wake)
     };
@@ -229,12 +233,6 @@ fn refuse_unbuilt(flags: &Flags) -> Result<(), SidecarError> {
         return Err(SidecarError::NotBuilt {
             what: "-force-snapshot",
             instead: "a snapshot is taken on the configured snapshot interval",
-        });
-    }
-    if flags.enforce_retention {
-        return Err(SidecarError::NotBuilt {
-            what: "-enforce-retention",
-            instead: "retention runs in the background while the daemon replicates",
         });
     }
     Ok(())

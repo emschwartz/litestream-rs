@@ -136,6 +136,9 @@ pub struct RunReport {
     pub power_losses: u32,
     /// Drains the operator asked for.
     pub shutdowns: u32,
+    /// How each drain asked to end with a retention pass (`Op::ShutdownWithRetention`) ended
+    /// it, in order.
+    pub final_retentions: Vec<lsr_core::FinalRetention>,
     /// Commits the app made inside a tick, before a checkpoint's barrier.
     pub commits_in_tick: u32,
     /// Oracle restores of the whole replica.
@@ -2014,6 +2017,25 @@ impl Runner {
 
     /// After a drain that finished: `Latest` is the local head, unless a bucket rollback
     /// took files the engine had already confirmed.
+    /// The operator stops the engine, with the retention pass `-once -enforce-retention` ends
+    /// with when `retention`, then a fresh engine boots later. The history judge runs as the
+    /// drain ends, after the pass; how the pass ended is the report's.
+    fn shutdown(&mut self, retention: bool) -> Result<(), Violation> {
+        self.report.shutdowns = self.report.shutdowns.saturating_add(1);
+        if retention {
+            self.actor.request_final_retention();
+        }
+        self.drain()?;
+        if retention {
+            self.report
+                .final_retentions
+                .push(self.actor.final_retention());
+        }
+        self.reboot();
+        self.app.restarted(self.op_began_at);
+        Ok(())
+    }
+
     fn judge_drained(&mut self) -> Result<(), Violation> {
         let drained = self.w.lost.is_empty();
         self.judge_history(crate::history::Ask {
@@ -2305,12 +2327,8 @@ impl Runner {
             Op::EnvFault(fault) => self.env_fault(*fault)?,
             Op::ClockJump(millis) => self.clock_jump(*millis),
             Op::Tick => self.tick()?,
-            Op::Shutdown => {
-                self.report.shutdowns = self.report.shutdowns.saturating_add(1);
-                self.drain()?;
-                self.reboot();
-                self.app.restarted(self.op_began_at);
-            }
+            Op::Shutdown => self.shutdown(false)?,
+            Op::ShutdownWithRetention => self.shutdown(true)?,
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),

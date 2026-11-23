@@ -173,6 +173,7 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::ClockJump(_)
         | Op::Tick
         | Op::Shutdown
+        | Op::ShutdownWithRetention
         | Op::Restore
         | Op::Restart
         | Op::PowerLoss

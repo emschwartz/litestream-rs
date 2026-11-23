@@ -185,6 +185,9 @@ pub enum Op {
     Tick,
     /// The operator stops the engine: it drains, then a fresh one boots later.
     Shutdown,
+    /// The operator stops the engine as `replicate -once -enforce-retention` does: it drains
+    /// and ends with a retention pass, then a fresh one boots later. Scenarios only.
+    ShutdownWithRetention,
     /// The operator asks for a snapshot.
     RequestSnapshot,
     /// The oracle restores every transaction and `Latest` and judges them.

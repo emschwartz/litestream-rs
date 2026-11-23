@@ -23,6 +23,7 @@ use lsr_wal::CommittedEnd;
 use super::ActorConfig;
 use super::ahead::AheadCheck;
 use super::clock::EngineClock;
+use super::once_retention::FinalRetention;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
@@ -127,6 +128,9 @@ pub(super) struct Kept {
     pub(super) suspect_staged: Option<FileKey>,
     /// Snapshots staged since the actor began, per cause: a report.
     pub(super) snapshots: SnapshotCounts,
+    /// The retention pass a drain was asked to end with (`once_retention`): a request of this
+    /// process.
+    pub(super) final_retention: FinalRetention,
     /// How far the engine is past a failed sync of the WAL (`unproven`). Kept across boots:
     /// a frame that sync covered is no truer after a rebuild.
     pub(super) unproven: Unproven,
@@ -195,6 +199,7 @@ impl Kept {
             app: AppCheckpointObserver::default(),
             suspect_staged: None,
             snapshots: SnapshotCounts::default(),
+            final_retention: FinalRetention::NotAsked,
             unproven: Unproven::No,
             takeover: None,
             wanted_takeover: None,
@@ -234,6 +239,7 @@ impl Kept {
             app: _,
             suspect_staged,
             snapshots,
+            final_retention,
             unproven,
             takeover,
             wanted_takeover: _,
@@ -266,6 +272,7 @@ impl Kept {
             app: observer,
             suspect_staged: *suspect_staged,
             snapshots: *snapshots,
+            final_retention: final_retention.clone(),
             unproven: *unproven,
             takeover: *takeover,
             // A rebuilt engine boots again and asks again for what it needs.
@@ -542,6 +549,12 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "snapshots",
         Keep::Ephemeral("snapshots staged since the process began: a report"),
+    ),
+    (
+        "final_retention",
+        Keep::Ephemeral(
+            "a -once request of this process: a restart is a new run, which asks again or not",
+        ),
     ),
     (
         "unproven",

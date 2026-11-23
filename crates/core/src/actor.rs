@@ -77,6 +77,7 @@
 mod ahead;
 mod clock;
 mod lag;
+mod once_retention;
 mod parts;
 mod state;
 mod unproven;
@@ -90,6 +91,7 @@ use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 pub use ahead::AHEAD_KEPT_FOR;
 use clock::EngineClock;
+pub use once_retention::FinalRetention;
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
 pub use state::{Degraded, Phase, Task};
 use state::{Gate, Live};
@@ -1181,9 +1183,11 @@ impl Actor {
         now: Timestamp,
         deadline: Timestamp,
     ) -> Tick {
+        // A retention pass the drain was asked to end with is not cut by the deadline once
+        // everything is uploaded (`once_retention`).
         if now >= deadline {
             return if self.settled(env.wal) {
-                self.drained()
+                self.drain_ends(env, now).await
             } else {
                 self.missed(env, now).await
             };
@@ -1195,9 +1199,28 @@ impl Actor {
             return tick;
         }
         if self.settled(env.wal) {
-            self.drained()
+            self.drain_ends(env, now).await
         } else {
             self.ran(Event::Idle, now)
+        }
+    }
+
+    /// Everything is uploaded: the work the drain was asked to end with, then the end.
+    async fn drain_ends<W, P, C, L, R>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Tick
+    where
+        W: WalSource,
+        P: PageSource,
+        C: Checkpointer,
+        L: Role,
+        R: Role,
+    {
+        match self.final_retention_unit(env, now).await {
+            Some(tick) => tick,
+            None => self.drained(),
         }
     }
 
