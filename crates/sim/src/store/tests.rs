@@ -357,7 +357,8 @@ fn a_lagging_listing_hides_writes_and_deletes_for_a_bounded_while() {
 #[test]
 fn a_key_the_lag_hides_stays_hidden_when_replaced_under_the_wrappers() {
     let raw = MemStore::new();
-    let store = Faults::new(raw.clone(), Vec::new(), 7).corrupting_through(raw.clone());
+    let store = Faults::new(raw.clone(), Vec::new(), 7)
+        .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
     block_on(upload(&store, 1)).unwrap();
     store.handle().lag_listings(1, 3);
     block_on(upload(&store, 2)).unwrap();
