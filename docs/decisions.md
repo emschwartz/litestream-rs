@@ -50,6 +50,7 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 | D84 | Fail-stop's user-visible names | As approved, with `refused_at_start`, `held_by` and `allowed` | owner, after a Fable review | 2026-11-22 | decided |
 | D85 | How does the fail-stop clock date lag? | Each kind on its own date, never the start of an unbroken run; a date that cannot be kept exactly moves later | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
 | D86 | When does a trip for age clear? | Once the commits it tripped on reach the replica, not at zero age | Claude (fail-stop), **delegated** | 2026-11-22 | open to owner review |
+| D87 | How big is an engine thread's stack, and what keeps it big enough? | 512 KiB, about twice the measured debug peak and eight times the release peak; every suite runs at half of it | parent session; numbers and gate by Claude (fail-stop) | 2026-11-23 | decided |
 | D100 | How does the journal hold the unproven-WAL debt, and when is it written? | Written at the end of the tick that changes it; a new failure may raise it at any step; `JournalUnwritable` while the journal lags | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
 | D101 | Does a run with nothing to record still create the journal? | Yes: a process that neither read nor wrote a record writes one, so `JournalMissing` means the journal was lost | Claude (journal), **delegated** | 2026-11-22 | open to owner review |
 | D102 | Are the journal's signals a degraded state? | No: a notice in `/healthz` and `lsr_journal_signal`, unwritable included; `/healthz` stays 200 | parent session, names reviewed for the owner | 2026-11-22 | decided |
@@ -596,6 +597,17 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** after a long outage heals, a new trip can follow as soon as newer lag reaches the bound and fails again, without the age touching zero in between.
 - **Revisit if:** operators see a trip clear and come back within one bound.
 - **Links:** `crates/core/src/failstop.rs` (`Lag::observe`), core::`failstop::tests::a_trip_for_age_clears_once_its_commits_land`.
+
+## D87. The engine thread's stack and its headroom gate
+
+- **Question:** an outside review (#197) found the 512 KiB engine stack sized from one debug measurement. A stack overflow is a SIGSEGV that `catch_unwind` cannot catch, so it would take the application down. What size, and what keeps it right as the code grows?
+- **Measured** (2026-11-23, x86-64 Linux, main 079ceb3; the replica, sidecar and CLI suites at each size): debug passes at 240 KiB and fails at 232; release passes at 64 KiB and fails at 48. The first measurement had passed debug at 192, so the code grew about 48 KiB deeper. The depth is ordinary frames, not large futures (the engine's tick is 4.4 KiB) and not recursion, so there is nothing to remove.
+- **Choice:** keep 512 KiB, about twice the debug peak and eight times the release peak, with an HTTPS request's 48 KiB on top of either. Every suite runs at half the shipped size under the `test-half-stack` feature, which `just check`'s `--all-features` turns on, so a path that grows past the margin fails a test before it can overflow in the field. The feature refuses to compile without debug assertions.
+- **Cost accepted:** the debug peak sits 16 KiB under the gate's half, so the gate will trip as the code grows; that is when to measure again. A path no suite reaches is not covered.
+- **Options considered:** a runtime setting for the stack (`Runtime`), which tests would set: a public name to approve and wider churn. Sizing far larger: address space per thread for a process with thousands of databases.
+- **Revisit if:** the gate trips, or an HTTPS store path is added to the suites.
+- **Links:** #197, `crates/replica/src/stack.rs`.
+
 ## D42. A lone `access-key-id` or `secret-access-key` (delegated)
 
 - **Question:** Go builds static credentials only when the config file gives both keys; with one, it ignores it and signs with whatever the AWS SDK's default chain finds (environment, shared files, the instance role). litestream-rs refuses the file. D33 asks for Go's behaviour unless Go is wrong.
