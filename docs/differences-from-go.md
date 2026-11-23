@@ -36,7 +36,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | Situation | Go | litestream-rs |
 |---|---|---|
 | Power loss | Never syncs the WAL, so the bucket can hold commits the database then loses | Syncs the WAL before copying from it. If the disk loses them anyway, the next start takes a snapshot |
-| A write of the WAL to disk fails † | Does not notice | Reports `wal_sync_failed` and retries |
+| A write of the WAL to disk fails | Does not notice | Reports `wal_sync_failed` and retries |
 | Files are deleted from the bucket, or it is rolled back | Does not notice. Restores fail until the next snapshot | The same, and reports `remote_regressed` |
 | The WAL is damaged below the last commit | Reads it as the end of the WAL | Reports `wal_corrupt` and replicates nothing past the damage |
 | A writer stopped mid-commit left frames in the WAL | Releases through v0.5.18 can replicate them | Never reads past the last commit |
@@ -56,12 +56,11 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 - `/debug/pprof`, and the `/metrics` series the engine cannot count.
 - The v0.3 `generations/` layout.
 
-## Under review
+## litestream-rs has it, Go does not
 
-- Holding the application when replication stops (`if-replication-stops`, default `hold-start`). Go has nothing like it.
+- Holding the application when replication stops (`if-replication-stops`, [decisions/D177.md](decisions/D177.md)). The default, `hold-start`, does not start the application when the replicator stops or S3 refuses it at start. `report` never holds the application, as under Go. `stop-app` also holds a running application's writes when replication stops or changes have waited too long for S3.
 
 ## What `main` does today for the rows marked †
 
 - **S3 replica with no path:** refused at load.
-- **WAL write fails:** as Go does, the engine syncs again and goes on, and keeps nothing across a restart (D173). After a power loss it snapshots if the database fell behind what it staged.
 - **Two replicators on one working folder:** the second refuses to start.
