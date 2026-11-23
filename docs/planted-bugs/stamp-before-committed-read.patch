@@ -1,8 +1,7 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index c9906d0..791603a 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1218,7 +1218,7 @@ impl Actor {
+@@ -1427,7 +1427,7 @@
              Err(verdict) => return Ok(verdict),
          };
          // After the committed read: see `Env::clock`.
@@ -10,4 +9,4 @@ index c9906d0..791603a 100644
 +        let stamp = self.stamp_floor(now);
          let size = reader.header().page_size();
          if let Some(was) = self.engine.page_size.filter(|was| *was != size) {
-             mark!(Run11);
+             return Err(Fault::PageSizeChanged { was, now: size });

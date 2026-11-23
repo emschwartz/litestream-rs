@@ -537,7 +537,6 @@ fn plan_level(
     {
         return Ok(Step::Wait(next));
     }
-    mark!(Maint1);
     let run = contiguous_run(above);
     Ok(
         match CompactionInputs::new(run)
@@ -704,7 +703,6 @@ pub(crate) async fn run_compact<L: ObjectStore, R: ObjectStore>(
         },
         Err(CompactError::InputVanished { key }) => Outcome::Replan { key },
         Err(CompactError::Dest(err)) if leaves_bad_output(&err) => {
-            mark!(Maint5);
             remove_rejected(replica, job.output_key(), err).await
         }
         Err(
@@ -774,7 +772,6 @@ async fn local_is_replica<L: ObjectStore, R: ObjectStore>(
         let theirs = match replica.read(&info.key, at, TAIL).await {
             Ok(bytes) => bytes,
             Err(StoreError::NotFound { .. }) => {
-                mark!(Maint2);
                 return Err(CompactError::InputVanished { key: info.key });
             }
             Err(err) => return Err(CompactError::Source(err)),

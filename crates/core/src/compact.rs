@@ -395,7 +395,6 @@ impl Reader {
             Ok(Next::Event(step)) => Ok(step),
             Ok(Next::End(verified)) => Ok(Step::End(verified)),
             Err(ReadFault::Store(StoreError::NotFound { key })) => {
-                mark!(Maint2);
                 Err(CompactError::InputVanished { key })
             }
             Err(ReadFault::Store(err)) => Err(CompactError::Source(err)),

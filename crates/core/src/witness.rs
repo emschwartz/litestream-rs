@@ -403,7 +403,6 @@ where
         }
         match witness_one(staging, &mut live, info, prev, &mut framed).await? {
             Ok((token, next)) => {
-                mark!(Boot4);
                 tokens.push(token);
                 prev = Before {
                     txid: Some(next.txid),

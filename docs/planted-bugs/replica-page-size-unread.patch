@@ -1,12 +1,11 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index c9906d0..908b786 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2304,6 +2304,7 @@ async fn replica_page_size<R: ObjectStore>(remote: &R) -> Result<Option<PageSize
+@@ -2982,6 +2982,7 @@
          if let Some(header) = read_header(remote, &file.key, Fault::from_remote).await? {
              return Ok(Some(header.page_size()));
          }
 +        return Ok(None);
      }
-     mark!(Boot14);
      Err(Fault::RemoteCorrupt)
+ }

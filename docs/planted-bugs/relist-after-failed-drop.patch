@@ -1,8 +1,7 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index c9906d0..6d7b4a2 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1578,7 +1578,6 @@ impl Actor {
+@@ -1845,7 +1845,6 @@
          from: Txid,
          now: Timestamp,
      ) -> Tick {
@@ -10,9 +9,9 @@ index c9906d0..6d7b4a2 100644
          if let Err(fault) = drop_staged_from(env.staging, from).await {
              // The staged files from `from` on are still there, and the next
              // upload would take the one after the confirmed transaction as
-@@ -1587,7 +1586,6 @@ impl Actor {
+@@ -1853,7 +1852,6 @@
+             // judges the divergence again and this runs again before anything
              // is uploaded; the acknowledged mark is kept apart.
-             mark!(Up9);
              let confirmed = self.engine.upload.confirmed().min(from.prev());
 -            self.set_upload(UploadState::ListFirst { confirmed });
              return self.fault(Task::Upload, fault, now);

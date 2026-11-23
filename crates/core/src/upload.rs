@@ -271,7 +271,6 @@ pub(crate) fn inventory_fault(err: &InventoryError) -> Fault {
     match err {
         InventoryError::Store(err) => Fault::from_remote(err),
         InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_) => {
-            mark!(Boot17);
             Fault::RemoteCorrupt
         }
     }
@@ -296,11 +295,9 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
     };
     let newest = seen.newest();
     if newest > newest_staged {
-        mark!(Up10);
         return Err(fail(state, Fault::RemoteAheadOfLocal));
     }
     if newest < confirmed {
-        mark!(Up11);
         return Err(fail(state, Fault::RemoteRegressed));
     }
     let known = match newest {
@@ -545,7 +542,6 @@ async fn judge_tail<L: ObjectStore, S: ObjectStore>(
             .map(|()| TailVerdict::Sound);
     }
     if remote_torn(remote, &key).await? {
-        mark!(Boot16);
         return Ok(TailVerdict::Replace);
     }
     // Both copies verify on their own reads, so the first compare read
@@ -592,7 +588,6 @@ async fn remote_decodes<S: ObjectStore>(remote: &S, key: &FileKey) -> Result<(),
     if remote_verifies(remote, key).await? {
         Ok(())
     } else {
-        mark!(Boot14);
         Err(Fault::RemoteCorrupt)
     }
 }
@@ -755,10 +750,8 @@ pub(crate) async fn sweep_staged<L: ObjectStore>(
         for info in page {
             if !staged_verifies(staging, &info.key).await? {
                 if suspect != Some(info.key) {
-                    mark!(Boot5);
                     return Ok(Swept::Suspect(info.key));
                 }
-                mark!(Boot5);
                 return Ok(Swept::Condemned(info.key.range().min()));
             }
         }
@@ -806,7 +799,6 @@ async fn settle_put<S: ObjectStore>(
         Ok(info) => Ok(put_done(key, info)),
         Err(PutError::Before(fault)) => Err(fail(state, fault)),
         Err(PutError::Rejected(fault, own)) => {
-            mark!(Up8);
             // Only a rejected create-only write hands back its object (the
             // bucket refuses a taken key before it takes any bytes), so only
             // that object goes. Best effort: the retry replaces the key either
@@ -899,10 +891,7 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
         Err(Unpublished::Rejected(err, own)) => {
             Err(PutError::Rejected(Fault::from_remote(&err), own))
         }
-        Err(Unpublished::Failed(err)) => {
-            mark!(Up6);
-            Err(PutError::Commit(Fault::from_remote(&err)))
-        }
+        Err(Unpublished::Failed(err)) => Err(PutError::Commit(Fault::from_remote(&err))),
     }
 }
 
