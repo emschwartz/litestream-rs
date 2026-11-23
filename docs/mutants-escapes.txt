@@ -41,3 +41,11 @@ dry_run\.rs:.*DigestSink.*::reset .* with Ok
 dry_run\.rs:.*Counting.*::delete .* with Ok
 # core actor.rs prune_unit: a whole page taken implies a next page, since the newest staged file is listed above the bound; past one page the mutant costs one extra listing.
 replace && with \|\| in Actor::prune_unit
+# wal testing.rs page: the test-data generator's splitmix64 mixing steps; a weaker mixer still gives deterministic pages that differ by seed and page number, and changing it would change every recorded simulator history.
+wal/src/testing\.rs:.* in page$
+# store-fs fsync wrappers: replacing an fsync with Ok(()) shows only after a power loss; the crash tests in docs/planted-bugs.toml check the store makes these calls, and the LazyFS rig checks the real syscalls.
+engine_journal\.rs:.*FsJournalFile>::sync(_dir)? -> .* with Ok\(\(\)\)
+filesystem\.rs:.*for RealFs>::sync_dir -> .* with Ok\(\(\)\)
+filesystem\.rs:.*for File>::sync_all -> .* with Ok\(\(\)\)
+# store-fs engine_journal.rs read_slot: besides end of file, a read of an open journal fails only on a device fault no test can produce.
+replace match guard err.kind\(\) == ErrorKind::UnexpectedEof with true in <impl JournalFile for FsJournalFile>::read_slot

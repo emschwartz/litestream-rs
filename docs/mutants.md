@@ -407,3 +407,40 @@ three it had not reached, and the tally above counts the second result.
 | --- | --- | --- |
 | `pages.rs` `seeded` | `min() > from` becomes `>=` | The extra file it calls pending is the confirmed one; a quiet mark at or below the confirmed transaction is trimmed in `Actor::observe_lag` before any read. |
 | `actor/lag.rs` `Actor::observe_lag` | `retain(txid > replicated)` becomes `>=` | `only_quiet_pending` reads the marks from the transaction after the replicated one, so a kept mark equal to it is never read. |
+
+## wal
+
+`cargo mutants -p lsr-wal --test-package lsr-wal --test-tool nextest --jobs 4 --timeout 240` at commit
+`d5d92c8`: 170 mutants in 6 minutes, 112 caught, 13 missed, 45 unviable, no timeouts. After the fixes below,
+157 mutants, 112 caught, 45 unviable, none missed. No survivor revealed a bug.
+
+| Where | Mutants | Resolution |
+| --- | --- | --- |
+| `scan.rs` `generation_unchanged`, `commit_follows`, `verified_before`, `checksum_before` | 4 (`<` becomes `>` on a short read) | Gone. Five call sites compared `read_at`'s count with the buffer's length, and only `read_page`'s was tested at that boundary; elsewhere a short read leaves zeros that fail the following checksum anyway, so no test told the comparisons apart. One helper, `read_full`, now makes the comparison for all five. |
+| `scan.rs` `read_at` | 1 (the `Interrupted` retry becomes an error) | Caught: `open_retries_an_interrupted_read`. |
+| `header.rs` `WalHeader::checkpoint_seq` | 1 | Caught: `header_decodes_every_field` decodes a header whose sequence is 7, not only 0. |
+| `frame.rs` `WalOffset`'s Display | 1 | Caught: the same test reads it, since error messages name offsets with it. |
+| `testing.rs` `page` | 6 | Equivalent (escape line): the mixing steps of the test-data generator. A weaker mixer still gives deterministic pages that differ by seed and page number, and changing the generator would change every recorded simulator history. The rest of `testing.rs` (the WAL builder and its checksums) stays mutated, since the simulator builds its WALs with it. |
+
+## store-fs
+
+`cargo mutants -p lsr-store-fs --test-package lsr-store-fs --test-tool nextest --jobs 4 --timeout 240` at commit
+`6f7f909`: 140 mutants, 79 caught, 32 missed, 29 unviable, no timeouts. Adding `--test-package lsr-sim`, whose
+`MemFs` drives the same store, caught 2 more. After the tests below: 105 caught, 5 missed (the equivalents
+below), 30 unviable. No survivor revealed a bug.
+
+One class covers 21 of the survivors: each filesystem call the store tolerates one error kind from (a file
+already gone on delete, abort or scratch removal; a directory already made; a scratch name already taken; a
+hard link the filesystem cannot make) was never failed with that kind or with one it must not tolerate. A
+test-only `Faulty` filesystem (`crates/store-fs/src/tests/faults.rs`) fails one chosen call with one chosen
+kind, and seven table tests drive each call both ways. Two getters (`Meta::is_empty`,
+`DirEntryInfo::is_symlink`) and a journal slot read past the end of the file are read back by new
+assertions.
+
+### Equivalent (5)
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `filesystem.rs` `RealFs::sync_dir`, `File::sync_all` | replaced by `Ok(())` | An fsync that does nothing shows only after a power loss. The crash tests in `docs/planted-bugs.toml` (`delete-without-dir-sync` among them) check that the store makes the call, and the LazyFS rig checks the real syscall. |
+| `engine_journal.rs` `FsJournalFile::sync`, `sync_dir` | replaced by `Ok(())` | The same, for the journal file and its directory. |
+| `engine_journal.rs` `read_slot` | guard `err.kind() == UnexpectedEof` becomes `true` | Besides end of file, a read of an open journal fails only on a device fault no test can produce. |

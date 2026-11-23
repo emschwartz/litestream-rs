@@ -27,8 +27,8 @@ use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
-use crate::side::SqliteSide;
-use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode, SimSqlite};
+use crate::side::{SideMaker, SqliteSide};
+use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode};
 use crate::staging::StagingRaw;
 use crate::store::{
     FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
@@ -309,7 +309,13 @@ impl World {
     /// A world with a database of `db_pages` pages, empty stores and no faults.
     #[must_use]
     pub fn new(seed: Seed, page_size: PageSize, db_pages: u32) -> Self {
-        let sqlite = SimSqlite::new(page_size, db_pages, seed.stream(1));
+        Self::over(seed, SideMaker::default().make(seed, page_size, db_pages))
+    }
+
+    /// A world over `sqlite`, with empty stores and no faults.
+    #[must_use]
+    pub fn over(seed: Seed, sqlite: Arc<dyn SqliteSide>) -> Self {
+        let page_size = sqlite.page_size();
         let clock = Arc::new(FakeClock::new(Timestamp::from_unix_millis(EPOCH_MILLIS)));
         let high = HighWater::default();
         let staging_raw = StagingRaw::Mem(MemStore::new());
@@ -349,7 +355,7 @@ impl World {
         ));
         Self {
             seed,
-            sqlite: Arc::new(sqlite),
+            sqlite,
             clock,
             sim_clock,
             high,
@@ -412,10 +418,16 @@ impl World {
     ) -> CommitId {
         let before = self.model.newest_image().db_size();
         self.retire_generation(app.salts);
-        let mut written = pages.to_vec();
-        if db_size > before {
-            written.extend(self.re_added(pages, before, db_size));
-        }
+        let (written, db_size) = match self.sqlite.take_written() {
+            Some(real) => (real.pages, real.db_size),
+            None => {
+                let mut written = pages.to_vec();
+                if db_size > before {
+                    written.extend(self.re_added(pages, before, db_size));
+                }
+                (written, db_size)
+            }
+        };
         let id = self
             .model
             .commit(&written, db_size, app, self.remote_recorder.len());
@@ -528,18 +540,26 @@ impl World {
     pub fn app_shrink(&mut self, db_size: u32) -> Option<CommitId> {
         let app = self.sqlite.shrink(db_size)?;
         self.retire_generation(app.salts);
-        let size = self.sqlite.page_size();
-        let image = self.sqlite.image();
-        let first = image.get(..size.bytes()).unwrap_or_default().to_vec();
-        let pages: Vec<(PageNo, Vec<u8>)> = PageNo::new(1, size)
-            .map(|one| (one, first))
-            .into_iter()
-            .collect();
+        let (pages, db_size) = match self.sqlite.take_written() {
+            Some(real) => (real.pages, real.db_size),
+            None => (self.first_page(), db_size),
+        };
         let id = self
             .model
             .commit(&pages, db_size, app, self.remote_recorder.len());
         self.log_history();
         Some(id)
+    }
+
+    /// Page 1 as the rules hold it now.
+    fn first_page(&self) -> Vec<(PageNo, Vec<u8>)> {
+        let size = self.sqlite.page_size();
+        let image = self.sqlite.image();
+        let first = image.get(..size.bytes()).unwrap_or_default().to_vec();
+        PageNo::new(1, size)
+            .map(|one| (one, first))
+            .into_iter()
+            .collect()
     }
 
     /// VACUUM into pages of `new` with every connection closed: the whole
@@ -566,6 +586,7 @@ impl World {
     /// replica recorder's length when the tick started, so no earlier put can be
     /// taken to cover it.
     pub fn sync_model_at(&mut self, at: usize) {
+        let written = self.sqlite.take_written();
         let frames = self.sqlite.mx_frame();
         let salts = self.sqlite.salts();
         self.retire_generation(salts);
@@ -579,8 +600,12 @@ impl World {
             .and_then(|id| self.model.rec(id))
             .is_some_and(|rec| rec.salts == salts && rec.end.get() == end.get());
         if !known {
+            let (pages, size) = written.map_or_else(
+                || (Vec::new(), self.sqlite.db_size()),
+                |real| (real.pages, real.db_size),
+            );
             self.model
-                .commit(&[], self.sqlite.db_size(), AppCommit { salts, end }, at);
+                .commit(&pages, size, AppCommit { salts, end }, at);
             self.log_history();
         }
     }
@@ -625,6 +650,8 @@ impl World {
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
         self.sync_model_at(at);
+        // A failed sync inside the tick may have had its pages evicted at once.
+        self.adopt_evicted();
         match ran {
             RunEnd::Done(out) => TickEnd::Done(out),
             RunEnd::Crashed { polls } => {
@@ -939,7 +966,8 @@ impl World {
     }
 
     /// Whether staging and the replica both hold `key` with different bytes:
-    /// a staged copy edited or forged under a key the replica took.
+    /// a staged copy damaged or put back from a backup under a key the replica
+    /// took.
     ///
     /// # Errors
     /// Either store's error other than a missing key.
@@ -1074,22 +1102,6 @@ impl World {
         Ok(None)
     }
 
-    /// Whether staging holds `key` under bytes the engine never put there: a
-    /// copy an operation forged or put back, which stays the operator's for as
-    /// long as it is staged, whatever the replica holds now.
-    ///
-    /// # Errors
-    /// The store's error other than a missing key.
-    pub fn staged_not_the_engines(&self, key: FileKey) -> Result<bool, StoreError> {
-        match read_all(&self.staging_raw, &key) {
-            Ok(bytes) => Ok(!self
-                .engine_puts(0)
-                .contains(&(key, crate::store::content_digest(&bytes)))),
-            Err(StoreError::NotFound { .. }) => Ok(false),
-            Err(other) => Err(other),
-        }
-    }
-
     /// Every (key, digest) the staging recorder took a put of since event `since`.
     fn engine_puts(&self, since: usize) -> BTreeSet<(FileKey, u64)> {
         self.staging_recorder
@@ -1155,6 +1167,14 @@ impl World {
         Ok(())
     }
 
+    /// Follows evicted WAL pages (`SimSqlite::evict_page_cache`) when they changed what SQLite
+    /// serves: damage, as [`World::adopt_corrupt_state`] takes it.
+    pub fn adopt_evicted(&mut self) {
+        if self.sqlite.take_evicted() {
+            self.adopt_corrupt_state();
+        }
+    }
+
     /// [`World::adopt_local_state`] for damage that corrupted the database
     /// (a flipped bit): the model follows it, and the history judge refuses
     /// any restore that gives it.
@@ -1180,6 +1200,29 @@ impl World {
             end: WalOffset::from_frame_index(self.sqlite.mx_frame(), page_size),
         };
         self.model.vacuum(image, app, self.remote_recorder.len());
+        self.log_history();
+    }
+
+    /// After the WAL's generation was regrown with its commit marks kept: every mark is a
+    /// commit of the writer that regrew it, so the model takes each one, in order, as a new
+    /// image at its place in the WAL. A file staged up to an earlier mark is then that mark's
+    /// commit, not the one made at the same place before the regrowth, whose pages the WAL no
+    /// longer holds.
+    pub fn adopt_regrown(&mut self) {
+        if self.model_matches_sqlite() {
+            return;
+        }
+        let page_size = self.sqlite.page_size();
+        let salts = self.sqlite.salts();
+        let at = self.remote_recorder.len();
+        for (end, bytes) in self.sqlite.commit_images() {
+            let image = PageImage::from_bytes(page_size, &bytes);
+            let app = AppCommit {
+                salts,
+                end: WalOffset::from_frame_index(end, page_size),
+            };
+            self.model.vacuum(image, app, at);
+        }
         self.log_history();
     }
 

@@ -1,0 +1,4 @@
+name = "unlink-durable-at-once"
+fix = "checker-holes (staged unlinks)"
+package = "lsr-sim"
+tests = ["store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law"]

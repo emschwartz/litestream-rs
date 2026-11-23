@@ -1,0 +1,5 @@
+name = "failstop-health-lag-restarts"
+fix = "c8b9c90"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["failstop::a_restart_keeps_the_age_of_a_commit_off_the_replica"]

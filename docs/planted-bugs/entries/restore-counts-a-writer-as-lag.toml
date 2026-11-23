@@ -1,0 +1,4 @@
+name = "restore-counts-a-writer-as-lag"
+fix = "c497e9e"
+package = "lsr-core"
+tests = ["restore::tests::a_restore_racing_a_writer_follows_it_and_never_calls_the_listing_behind"]

@@ -1,0 +1,5 @@
+name = "dry-run-gap-not-relisted"
+fix = "3e344e6"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["a_dry_run_whose_listing_missed_a_file_once_plans_the_restore"]

@@ -53,6 +53,7 @@ mod error;
 mod events;
 mod exec;
 mod health;
+pub mod local;
 mod meta;
 mod readers;
 mod replicator;

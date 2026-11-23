@@ -1,0 +1,5 @@
+# The ahead-of-WAL check takes a failed listing page as damage to the replica (D106).
+name = "ahead-failed-listing-taken-as-damage"
+fix = "claude/ahead-unchecked"
+package = "lsr-core"
+tests = ["ahead::tests::a_failed_listing_is_the_store_s_fault_not_damage"]

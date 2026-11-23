@@ -64,6 +64,10 @@ pub enum EnvFault {
     /// The next driver start writes no WAL header, as the real driver's open
     /// does not once `_litestream_seq` exists. Scenarios only.
     DriverWritesNothing,
+    /// The kernel evicts the WAL pages a failed fsync of ours lost, so later reads find the
+    /// disk's older bytes (`SimSqlite::evict_page_cache`). Drawn by its own weight
+    /// ([`Weights::evict_page_cache`]), never by `env_fault`'s.
+    EvictPageCache,
 }
 
 /// One step of a history.
@@ -413,9 +417,7 @@ pub struct Weights {
     /// [`Op::Heal`].
     pub heal: u32,
     /// [`Op::Meta`] with the steps that replace staged files under a running
-    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`],
-    /// [`MetaOp::ForgeNewest`]), and [`Op::StagingDamage`] with
-    /// [`MetaOp::ForgeNewest`].
+    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`]).
     pub staging_replace_running: u32,
     /// The chance in a thousand that a step is an [`Op::Hold`] instead of
     /// what the history drew there. Not a weight: holds come from a stream of
@@ -477,6 +479,9 @@ pub struct Weights {
     pub app_in_tick: u32,
     /// [`Op::Verify`].
     pub verify: u32,
+    /// [`EnvFault::EvictPageCache`]: a step that does anything only after a failed fsync of
+    /// the WAL, in its generation.
+    pub evict_page_cache: u32,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -571,6 +576,7 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             verify: 0,
+            evict_page_cache: 0,
         }
     }
 }
@@ -604,10 +610,11 @@ enum Kind {
     Verify,
     LaggingListings,
     OtherConnectionCommit,
+    EvictPageCache,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 27] {
+    fn table(&self) -> [(Kind, u32); 28] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -636,6 +643,7 @@ impl Weights {
             (Kind::Verify, self.verify),
             (Kind::LaggingListings, self.lagging_listings),
             (Kind::OtherConnectionCommit, self.other_connection_commit),
+            (Kind::EvictPageCache, self.evict_page_cache),
         ]
     }
 
@@ -718,6 +726,7 @@ impl Weights {
             overlap: false,
             app_in_tick: 0,
             verify: 0,
+            evict_page_cache: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -768,6 +777,8 @@ impl Weights {
         // And after that, for the same reason: a second application connection that commits,
         // with its own checkpoint count (a WAL header written again with the same salts).
         mix.other_connection_commit = weight(false);
+        // And after that, for the same reason: page-cache eviction after a failed WAL fsync.
+        mix.evict_page_cache = weight(false);
         mix
     }
 
@@ -897,14 +908,13 @@ fn staging_damage(entropy: &SeededEntropy) -> Op {
     }
 }
 
-/// A staged file replaced under a running engine, by a backup put back or by
-/// another valid file, and now and then the same while it is down.
+/// A staged file replaced under a running engine by a backup put back. Five
+/// slots, as when this also drew forged files (out of scope, see
+/// docs/decisions.md D131), so the draws after it are unchanged.
 fn staging_replace_running(entropy: &SeededEntropy) -> Op {
     match below(entropy, 5) {
-        0 => Op::Meta(MetaOp::Save),
-        1 => Op::Meta(MetaOp::Restore),
-        2 | 3 => Op::Meta(MetaOp::ForgeNewest),
-        _ => Op::StagingDamage(MetaOp::ForgeNewest),
+        0 | 2 => Op::Meta(MetaOp::Save),
+        _ => Op::Meta(MetaOp::Restore),
     }
 }
 
@@ -1030,6 +1040,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::OtherConnectionCommit => Op::OtherConnectionCommit {
             pages: small(entropy, 4).saturating_add(1),
         },
+        Kind::EvictPageCache => Op::EnvFault(EnvFault::EvictPageCache),
         Kind::Vacuum => vacuum(entropy, weights.vacuum_resizes),
         Kind::OtherProcessReader => Op::OtherProcessReader {
             begin: below(entropy, 2) == 0,
