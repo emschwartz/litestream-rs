@@ -1739,6 +1739,25 @@ fn a_relist_reads_the_confirmed_key_first_past_a_wide_gap() {
     assert_eq!(listed.state, UploadState::At(Some(txid(confirmed))));
 }
 
+/// The same after a refused upload: the bucket refuses the create-only commit, the key holds
+/// another verifying object, and the staged copy's own verification read (its third read: the
+/// upload and the compare come first) comes back torn. One read never condemns a file, and it
+/// never confirms the replica's object either: the step fails on the staged copy
+/// (`StagedLost`) and the other object is not taken for this engine's.
+#[test]
+fn one_torn_read_after_a_refusal_confirms_no_other_object() {
+    let (staging, remote) = (Probe::default(), MemStore::new());
+    put_bytes(&staging.inner, key(1), &encode(1));
+    let theirs = encode_pages(1, 200);
+    put_bytes(&remote, key(1), &theirs);
+    let witnesses = Witnesses::trust_all(&staging);
+    staging.log().flip_read = Some((key(1), 2));
+    let failed = next_with(UploadState::At(None), &staging, &remote, 1, &witnesses)
+        .expect_err("a torn staged read confirmed the replica's object");
+    assert_eq!(failed.fault, Fault::StagedLost);
+    assert_eq!(read_all(&remote, &key(1)), theirs);
+}
+
 /// The higher-level starts a listing of `store` implies, as the probe names them.
 fn starts_of(store: &MemStore) -> Starts {
     Starts::of(&block_on(Inventory::load(store)).unwrap())
