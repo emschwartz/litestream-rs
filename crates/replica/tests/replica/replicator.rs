@@ -526,6 +526,18 @@ fn verify_and_restore_if_missing_use_the_shared_store() {
     let to = site.path("if-missing");
     assert!(restore_if_missing(&*store, &to).unwrap().is_some());
     assert_same(&site.app, &to);
+    // A target that cannot be looked at is not missing: here a path under a regular file.
+    let under_a_file = to.join("db");
+    let refused = restore_if_missing(&*store, &under_a_file);
+    assert!(
+        matches!(
+            refused,
+            Err(lsr_replica::RestoreError::Destination(
+                lsr_replica::local::CreateError::Inspect { .. }
+            ))
+        ),
+        "{refused:?}"
+    );
 }
 
 /// A panic inside a tick is caught: the engine is rebuilt after the wait and boots again,

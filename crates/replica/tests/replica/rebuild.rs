@@ -301,6 +301,35 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
     ));
 }
 
+/// A database deleted after the panic is gone as a replaced one is: not reopened, and reported
+/// as the WAL unlinked, not retried as a failure to open.
+#[test]
+fn a_database_deleted_after_a_panic_is_degraded_and_not_reopened() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.panics.store(1, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    wait(&replicator, |h| h.counters.panics == 1);
+    std::fs::remove_file(&site.db).unwrap();
+    clock.advance(POLL);
+    let health = wait(&replicator, |h| {
+        h.phase == Phase::Running
+            || h.task(Task::Sync).map(|d| d.cause) == Some(DegradedCause::WalUnlinked)
+    });
+    assert_eq!(
+        health.task(Task::Sync).map(|d| d.cause),
+        Some(DegradedCause::WalUnlinked),
+        "{health:?}"
+    );
+    assert!(!site.db.exists(), "not reopened, which would create it");
+    assert!(matches!(
+        replicator.stop(Duration::ZERO).wait(),
+        Stopped::DeadlineReached { .. }
+    ));
+}
+
 /// Under `wal_unlinked: Stop` the replaced database stops the replicator with that cause.
 #[test]
 fn a_database_replaced_after_a_panic_stops_when_configured_to() {
