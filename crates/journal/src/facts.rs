@@ -167,7 +167,18 @@ pub struct Ahead {
     pub made: Timestamp,
 }
 
-/// The five facts.
+/// A boot owed the check of `docs/decisions.md` D103 and could not make it: the replica could
+/// not give its state at its newest confirmed transaction on two attempts in a row, so the cure
+/// ran unchecked (D106). The notice stands until a fixed window after `made` has passed; no
+/// restore point is kept, since the state the check compares against is the one the replica
+/// cannot give.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Unchecked {
+    /// When the check was given up, on the engine's clock.
+    pub made: Timestamp,
+}
+
+/// The six facts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Journal {
     /// The floor, if any.
@@ -180,6 +191,9 @@ pub struct Journal {
     pub pending: Option<Proof>,
     /// A database file found ahead of its WAL, while its restore point is kept.
     pub ahead: Option<Ahead>,
+    /// A check for a database file ahead of its WAL that could not be made, while its notice
+    /// stands.
+    pub unchecked: Option<Unchecked>,
 }
 
 /// Why a record may not follow another (docs/journal.md, "Writing", rule 5).
@@ -212,13 +226,14 @@ pub enum Lowered {
 
 impl Journal {
     /// What an absent journal means: no floor, no debt known, a full budget, no proof, no
-    /// verdict.
+    /// verdict, no notice.
     pub const ABSENT: Self = Self {
         floor: None,
         unproven: Unproven::No,
         budget: None,
         pending: None,
         ahead: None,
+        unchecked: None,
     };
 
     /// Whether `new` may follow `self` in consecutive records.

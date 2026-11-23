@@ -396,6 +396,18 @@ detected_by = "core::`a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost
 notes = "The simulator reaches it (seed 0x585, known-wrong cell `DatabaseAheadOfWal`); its world does not yet adopt the mixed state as damage, so it is caught by the simulator's model check, and the cell flips once the judge allows a restore at the kept restore point. A page above the newest staged size that no frame covers is not checked. Holding the read mark at the proven frame cannot prevent the mix (D104)"
 
 [[row]]
+table = "Boot"
+id = "BOOT-32"
+mark = "none: not yet placed: an ahead-of-WAL row added after the marks; its branches are in core/src/ahead.rs and core/src/actor/ahead.rs"
+circumstance = "A boot owes BOOT-31's check, and the replica cannot give its state at its newest confirmed transaction because it is damaged (a gap a bucket rollback left, a file that does not verify), not because a call failed (`core/src/ahead.rs`, `docs/decisions.md` D106)"
+response = "The check's restore plans once a tick. The first attempt that finds damage degrades the sync task at `RemoteCorrupt` and retries after the backoff; a failed call or a listing page that fails is a store fault, retried as such and never counted. The next attempt that finds damage gives the check up: the notice is journalled, the sync task is degraded at `AheadOfWalUnchecked` through `database_ahead_of_wal`'s response (under `STRICT`: stop, once), and the cure runs as in RUN-3. No restore point is kept: the state it would keep is the one the replica cannot give"
+signal = "`remote_corrupt`, then `database_ahead_of_wal_unchecked`, in `Health.degraded` while degraded; `Health.ahead_unchecked`, `/healthz` `database_ahead_of_wal_unchecked` and `lsr_database_ahead_of_wal_unchecked` for seven days; the degraded event logged at error level, a boot inside the window and its end logged (`Event::AheadOfWal`, `UncheckedStands` and `UncheckedEnded`)"
+at_risk = "A database file ahead of its WAL is replicated as a clean commit, marked only by the notice, which a lost journal forgets. A crash between giving up and the TRUNCATE makes the next boot check again"
+recovery = "Automatic. The notice ends seven days after the check was given up, across restarts; the snapshot after the cure starts a chain the replica can restore"
+detected_by = "core::`a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs`, core::`the_unchecked_notice_stands_for_the_window_across_a_restart`, core::`a_replica_missing_the_confirmed_state_is_unrestorable`, core::`a_failed_listing_is_the_store_s_fault_not_damage`, sidecar::`an_unchecked_wal_checkpoint_is_a_notice_in_both_outputs`, sim::`ahead_unchecked::a_gap_below_the_confirmed_state_does_not_hold_back_the_cure_seed_0x2dc719`; plant::`ahead-check-never-gives-up`, plant::`ahead-unchecked-not-journaled`, plant::`ahead-failed-listing-taken-as-damage`, plant::`ahead-check-restores-with-retries`"
+notes = "Before D106 the check retried a damaged replica for ever, holding back the TRUNCATE while the WAL grew (seed 0x2dc719, found when the D103 cell was drawn). The simulator expects `RemoteCorrupt` and `AheadOfWalUnchecked` after a bucket rollback that removed files, since the engine may upload past the hole before it lists again"
+
+[[row]]
 table = "Running"
 id = "RUN-1"
 mark = "site"

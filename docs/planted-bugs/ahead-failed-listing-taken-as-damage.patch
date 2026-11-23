@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/ahead.rs b/crates/core/src/ahead.rs
+index e2341e31..09950666 100644
+--- a/crates/core/src/ahead.rs
++++ b/crates/core/src/ahead.rs
+@@ -193,6 +193,7 @@ fn restore_fault(err: &RestoreError) -> CheckError {
+             InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_),
+         )
+         | RestoreError::NoPlan(_)
++        | RestoreError::Inventory(InventoryError::Store(_))
+         | RestoreError::File { .. }
+         | RestoreError::DatabaseChecksum { .. }
+         | RestoreError::CreatedAtRepeated { .. } => CheckError::Unrestorable,

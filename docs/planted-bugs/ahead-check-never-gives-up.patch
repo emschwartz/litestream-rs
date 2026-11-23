@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor/ahead.rs b/crates/core/src/actor/ahead.rs
+index fe7c1e1b..789ffe17 100644
+--- a/crates/core/src/actor/ahead.rs
++++ b/crates/core/src/actor/ahead.rs
+@@ -150,7 +150,6 @@ impl Actor {
+     fn unrestorable(&mut self, now: Timestamp) -> Result<Stepped, Fault> {
+         match self.kept.ahead_check {
+             AheadCheck::Owed => {
+-                self.kept.ahead_check = AheadCheck::OwedAgain;
+                 Err(Fault::RemoteCorrupt)
+             }
+             AheadCheck::OwedAgain | AheadCheck::No => {

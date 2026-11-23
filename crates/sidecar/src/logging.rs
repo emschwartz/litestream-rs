@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
-use lsr_core::AheadNotice;
+use lsr_core::{AheadNotice, Task};
 use lsr_core::{Clock, Event as EngineEvent};
 use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
@@ -374,6 +374,16 @@ fn found_ahead_line(pages: NonZeroU32, first: NonZeroU32, until: Timestamp) -> L
     )
 }
 
+/// The first report of an ahead-of-WAL check given up: logged as loudly as a verdict, since the
+/// file may hold pages from commits its WAL lost and nothing marks it in the replica.
+fn unchecked_line(until: Timestamp) -> Line {
+    (
+        LogLevel::Error,
+        "the replica could not give the state to check the database file against after a failed WAL sync; checkpointing the WAL unchecked, so the database may hold pages from commits its WAL lost",
+        vec![("retry_at", until.to_string().into())],
+    )
+}
+
 /// What an operator is told about a standing ahead-of-WAL verdict after its first report.
 fn ahead_line(notice: AheadNotice) -> Line {
     match notice {
@@ -392,6 +402,45 @@ fn ahead_line(notice: AheadNotice) -> Line {
             LogLevel::Info,
             "restore point released to normal retention",
             vec![("restore_point", restore_point.to_string().into())],
+        ),
+        AheadNotice::UncheckedStands { until } => (
+            LogLevel::Warn,
+            "a check for pages ahead of the WAL could not be made; the notice stands",
+            vec![("until", until.to_string().into())],
+        ),
+        AheadNotice::UncheckedEnded => (
+            LogLevel::Info,
+            "notice of an unchecked WAL checkpoint ended",
+            vec![],
+        ),
+    }
+}
+
+/// A task's degraded event: the two causes that report lost commits are logged on their own.
+fn degraded_line(task: Task, cause: DegradedCause, until: Timestamp) -> Line {
+    match cause {
+        DegradedCause::DatabaseAheadOfWal { pages, first } => found_ahead_line(pages, first, until),
+        DegradedCause::AheadOfWalUnchecked => unchecked_line(until),
+        DegradedCause::StoreDenied(_)
+        | DegradedCause::StoreRefused
+        | DegradedCause::RemoteCorrupt
+        | DegradedCause::OtherWriter
+        | DegradedCause::RemoteRegressed
+        | DegradedCause::WalCorrupt
+        | DegradedCause::WalTruncated
+        | DegradedCause::WalUnlinked
+        | DegradedCause::WalSyncFailed
+        | DegradedCause::PageSizeChanged { .. }
+        | DegradedCause::DatabasePageMismatch { .. }
+        | DegradedCause::Bug
+        | DegradedCause::Stalled(_) => (
+            LogLevel::Warn,
+            "replication degraded",
+            vec![
+                ("task", debug(&task)),
+                ("cause", debug(&cause)),
+                ("retry_at", until.to_string().into()),
+            ],
         ),
     }
 }
@@ -424,21 +473,8 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             vec![("event", debug(event))],
         ),
         EngineEvent::Degraded {
-            cause: DegradedCause::DatabaseAheadOfWal { pages, first },
-            until,
-            ..
-        } => found_ahead_line(*pages, *first, *until),
-        EngineEvent::Degraded {
             task, cause, until, ..
-        } => (
-            LogLevel::Warn,
-            "replication degraded",
-            vec![
-                ("task", debug(task)),
-                ("cause", debug(cause)),
-                ("retry_at", until.to_string().into()),
-            ],
-        ),
+        } => degraded_line(*task, *cause, *until),
         EngineEvent::Retrying { fault, until } => (
             LogLevel::Warn,
             "retrying",

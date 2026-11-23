@@ -2026,3 +2026,44 @@ fix = "claude/sim-remote-corrupt"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c"]
+
+# An owed ahead-of-WAL check whose replica cannot give its newest confirmed state (simulator seed
+# 0x2dc719: a bucket rollback left a gap below it): each entry undoes one part of the rule that
+# damage recurring at a second attempt gives the check up, so the cure runs
+# (`docs/decisions.md` D106).
+[[bug]]
+name = "ahead-check-never-gives-up"
+fix = "claude/ahead-unchecked"
+package = "lsr-core"
+tests = ["actor::tests::journal::a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs"]
+
+[[bug]]
+name = "ahead-check-never-gives-up-sim"
+fix = "claude/ahead-unchecked"
+package = "lsr-sim"
+test_bin = "sim"
+patch = "ahead-check-never-gives-up"
+tests = ["ahead_unchecked::a_gap_below_the_confirmed_state_does_not_hold_back_the_cure_seed_0x2dc719"]
+
+[[bug]]
+name = "ahead-unchecked-not-journaled"
+fix = "claude/ahead-unchecked"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::the_unchecked_notice_stands_for_the_window_across_a_restart",
+    "actor::tests::journal::a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs",
+]
+
+[[bug]]
+name = "ahead-failed-listing-taken-as-damage"
+fix = "claude/ahead-unchecked"
+package = "lsr-core"
+tests = ["ahead::tests::a_failed_listing_is_the_store_s_fault_not_damage"]
+
+# The check's restore planned up to three times in one tick, three listings of every level.
+[[bug]]
+name = "ahead-check-restores-with-retries"
+fix = "claude/ahead-unchecked"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["ahead_unchecked::a_gap_below_the_confirmed_state_does_not_hold_back_the_cure_seed_0x2dc719"]

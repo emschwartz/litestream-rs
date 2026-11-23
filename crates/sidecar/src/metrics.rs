@@ -49,6 +49,9 @@
 //! - `lsr_database_ahead_of_wal{db}` 1 while a boot's finding stands that the database file
 //!   held pages from commits its WAL lost after a failed WAL sync, and the state before them is
 //!   kept restorable (seven days; `docs/decisions.md` D103), else 0.
+//! - `lsr_database_ahead_of_wal_unchecked{db}` 1 while a boot's check for that could not be made
+//!   because the replica could not give its own newest confirmed state, so the WAL was
+//!   checkpointed unchecked (seven days; D106), else 0.
 //! - `lsr_snapshots_total{db,cause}`: snapshots staged since the replicator started, every
 //!   cause listed, zeros included. Each uploads the whole database: a cause other than
 //!   `first_sync`, `checkpoint_boundary` or `operator_requested` that keeps counting up means
@@ -530,6 +533,16 @@ pub(crate) fn render(views: &[DbView], now: Timestamp) -> String {
             "1 while the database file was found holding pages from commits its WAL lost, and the state before them is kept",
         ),
         |h| u8::from(h.ahead_of_wal.is_some()).to_string(),
+    );
+    per_db(
+        &mut out,
+        &dbs,
+        (
+            "lsr_database_ahead_of_wal_unchecked",
+            "gauge",
+            "1 while a check for a database file ahead of its WAL could not be made and the WAL was checkpointed unchecked",
+        ),
+        |h| u8::from(h.ahead_unchecked.is_some()).to_string(),
     );
     out.0
 }

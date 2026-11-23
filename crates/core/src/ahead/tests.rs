@@ -66,7 +66,7 @@ fn run<P: PageSource>(
     wal: &mut FakeWal,
     db: &mut P,
     table: &PageChecksumTable,
-) -> Result<Option<Found>, Fault> {
+) -> Result<Option<Found>, CheckError> {
     block_on(check(position, wal, db, table, &MemStore::new(), None))
 }
 
@@ -105,7 +105,7 @@ fn a_wal_restarted_since_the_staged_file_is_moved() {
     wal.append_tx(&[(pg(1), bytes(8))], NonZeroU32::new(3).unwrap());
     assert_eq!(
         run(&position, &mut wal, &mut db, &table),
-        Err(Fault::WalMoved)
+        Err(CheckError::Fault(Fault::WalMoved))
     );
 }
 
@@ -126,7 +126,7 @@ fn a_wal_index_of_another_generation_is_moved() {
     wal.script_committed(Some(read));
     assert_eq!(
         run(&position, &mut wal, &mut db, &table),
-        Err(Fault::WalMoved)
+        Err(CheckError::Fault(Fault::WalMoved))
     );
 }
 
@@ -151,7 +151,7 @@ impl PageSource for Meddling {
     }
 }
 
-fn meddled(meddle: fn(&FakeWal)) -> Result<Option<Found>, Fault> {
+fn meddled(meddle: fn(&FakeWal)) -> Result<Option<Found>, CheckError> {
     let (mut wal, db, table) = rig();
     let position = staged(&wal);
     let mut db = Meddling {
@@ -168,7 +168,7 @@ fn meddled(meddle: fn(&FakeWal)) -> Result<Option<Found>, Fault> {
 #[test]
 fn a_read_transaction_lost_under_the_reads_is_moved() {
     let lost = meddled(|wal| wal.set_epoch(wal.epoch().next()));
-    assert_eq!(lost, Err(Fault::WalMoved));
+    assert_eq!(lost, Err(CheckError::Fault(Fault::WalMoved)));
 }
 
 /// The WAL restarted in place while the pages are read (a TRUNCATE by another connection when
@@ -179,7 +179,7 @@ fn a_wal_restarted_under_the_reads_is_moved() {
         wal.force_restart();
         wal.append_tx(&[(pg(1), bytes(8))], NonZeroU32::new(3).unwrap());
     });
-    assert_eq!(restarted, Err(Fault::WalMoved));
+    assert_eq!(restarted, Err(CheckError::Fault(Fault::WalMoved)));
 }
 
 /// A read of the database file that fails is that read's fault.
@@ -193,9 +193,9 @@ fn a_failed_page_read_is_its_fault() {
     );
     assert_eq!(
         run(&position, &mut wal, &mut db, &table),
-        Err(Fault::from_source(SourceError::Io(
+        Err(CheckError::Fault(Fault::from_source(SourceError::Io(
             std::io::ErrorKind::Other
-        )))
+        ))))
     );
 }
 
@@ -256,4 +256,53 @@ fn the_images_come_from_the_replica_when_nothing_is_pending() {
             first: NonZeroU32::new(3).unwrap(),
         }))
     );
+}
+
+/// A replica that lost its newest confirmed transaction (a bucket rollback past it) cannot give
+/// the images; retrying does not heal that, so it is told apart from a failed call.
+#[test]
+fn a_replica_missing_the_confirmed_state_is_unrestorable() {
+    let (mut wal, mut db, _) = rig();
+    let position = staged(&wal);
+    let remote = replica_at(4);
+    let empty = PageChecksumTable::new();
+    assert_eq!(
+        block_on(check(
+            &position,
+            &mut wal,
+            &mut db,
+            &empty,
+            &remote,
+            Txid::new(5)
+        )),
+        Err(CheckError::Unrestorable)
+    );
+}
+
+/// A listing page that fails is the store's fault, retried as such: it says nothing about
+/// damage to the replica.
+#[test]
+fn a_failed_listing_is_the_store_s_fault_not_damage() {
+    use crate::store::StoreOp;
+
+    let (mut wal, mut db, _) = rig();
+    let position = staged(&wal);
+    let remote = replica_at(4);
+    remote.inject_failure(
+        StoreOp::List,
+        crate::store::StoreError::Transient {
+            op: StoreOp::List,
+            kind: std::io::ErrorKind::ConnectionReset,
+        },
+    );
+    let empty = PageChecksumTable::new();
+    let got = block_on(check(
+        &position,
+        &mut wal,
+        &mut db,
+        &empty,
+        &remote,
+        Txid::new(4),
+    ));
+    assert_eq!(got, Err(CheckError::Fault(Fault::StoreTransient)));
 }

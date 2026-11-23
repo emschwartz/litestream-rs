@@ -1831,6 +1831,11 @@ impl Runner {
         if matches!(op, RemoteOp::RollBack) {
             if let Some(from) = rolled_from {
                 self.w.acked.forget_from(from);
+                // The engine may upload past the hole before it lists again, so the replica's
+                // chain has a gap until a snapshot: a restore of its newest confirmed state is
+                // damage, truthfully, and an owed ahead-of-WAL check cannot be made (D106).
+                self.expect(StopCause::RemoteCorrupt);
+                self.expect(StopCause::AheadOfWalUnchecked);
             }
             self.expect(StopCause::RemoteRegressed);
         }
@@ -2356,6 +2361,7 @@ impl Runner {
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
             | PersistentCause::DatabaseAheadOfWal { .. }
+            | PersistentCause::AheadOfWalUnchecked
             | PersistentCause::Bug => true,
         }
     }
@@ -2737,7 +2743,10 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
         | PersistentCause::WalSyncFailed
-        | PersistentCause::DatabaseAheadOfWal { .. } => true,
+        // A check that could not be made says the file may be ahead of its WAL, as a verdict
+        // says it is.
+        | PersistentCause::DatabaseAheadOfWal { .. }
+        | PersistentCause::AheadOfWalUnchecked => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
@@ -2758,7 +2767,8 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::WalTruncated
         | StopCause::WalUnlinked
         | StopCause::WalSyncFailed
-        | StopCause::DatabaseAheadOfWal { .. } => true,
+        | StopCause::DatabaseAheadOfWal { .. }
+        | StopCause::AheadOfWalUnchecked => true,
         StopCause::StoreDenied(_)
         | StopCause::StoreRefused
         | StopCause::RemoteCorrupt

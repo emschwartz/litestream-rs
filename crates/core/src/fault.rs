@@ -469,6 +469,11 @@ pub enum StopCause {
         /// The lowest page that differs.
         first: NonZeroU32,
     },
+    /// A boot after a failed WAL sync owed the check for a database file ahead of its WAL and
+    /// could not make it: the replica could not give its state at its newest confirmed
+    /// transaction on two attempts in a row, so the cure runs unchecked (`crate::ahead`,
+    /// `docs/decisions.md` D106).
+    AheadOfWalUnchecked,
     /// The shutdown deadline arrived.
     Shutdown,
     /// A bug in this program.
@@ -519,6 +524,11 @@ pub enum PersistentCause {
         /// The lowest page that differs.
         first: NonZeroU32,
     },
+    /// A boot after a failed WAL sync owed the check for a database file ahead of its WAL and
+    /// could not make it: the replica could not give its state at its newest confirmed
+    /// transaction on two attempts in a row, so the cure runs unchecked (`crate::ahead`,
+    /// `docs/decisions.md` D106).
+    AheadOfWalUnchecked,
     /// A bug in this program.
     Bug,
     /// A fault whose policy is to retry failed [`STALLED_AFTER`] times in a row on one task:
@@ -631,6 +641,7 @@ impl PersistentCause {
             StopCause::DatabaseAheadOfWal { pages, first } => {
                 Some(Self::DatabaseAheadOfWal { pages, first })
             }
+            StopCause::AheadOfWalUnchecked => Some(Self::AheadOfWalUnchecked),
             StopCause::Bug => Some(Self::Bug),
             StopCause::Shutdown => None,
         }
@@ -657,6 +668,7 @@ impl PersistentCause {
             Self::DatabaseAheadOfWal { pages, first } => {
                 StopCause::DatabaseAheadOfWal { pages, first }
             }
+            Self::AheadOfWalUnchecked => StopCause::AheadOfWalUnchecked,
             Self::Bug => StopCause::Bug,
             Self::Stalled(_) => return None,
         })
@@ -729,7 +741,9 @@ pub struct Responses {
     pub database_page_mismatch: Response,
     /// A boot after a failed WAL sync found the database file ahead of its WAL (`crate::ahead`).
     /// Keeping trying replicates the file as the application serves it, keeps the state before
-    /// it restorable for a fixed window, and reports it; nothing an operator does ends it.
+    /// it restorable for a fixed window, and reports it; nothing an operator does ends it. It
+    /// also answers a check that could not be made (`PersistentCause::AheadOfWalUnchecked`):
+    /// keeping trying runs the cure unchecked and reports that for the same window.
     pub database_ahead_of_wal: Response,
     /// A condition the code rules out happened. Keeping trying rebuilds the
     /// engine and boots again after the wait; it never continues from the
@@ -815,7 +829,11 @@ impl Responses {
             PersistentCause::WalSyncFailed => self.wal_sync_failed,
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
             PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
-            PersistentCause::DatabaseAheadOfWal { .. } => self.database_ahead_of_wal,
+            // A check that could not be made is answered as one that found the file ahead: under
+            // `STRICT` the engine stops before the cure, else the cure runs (D106).
+            PersistentCause::DatabaseAheadOfWal { .. } | PersistentCause::AheadOfWalUnchecked => {
+                self.database_ahead_of_wal
+            }
             PersistentCause::Stalled(_) => return Action::Retry,
             PersistentCause::RemoteRegressed => {
                 return match self.remote_regressed {

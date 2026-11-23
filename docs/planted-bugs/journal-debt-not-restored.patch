@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 8b8e7899..286bad96 100644
+index 5c73e256..1f2f06b1 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2195,7 +2195,7 @@ impl Actor {
+@@ -2605,7 +2605,7 @@ impl Actor {
              | lsr_journal::Verdict::Unreadable(_) => None,
          };
          if let Some(read) = self.kept.journal_read {
 -            self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
 +            let _ = read.unproven;
              self.adopt_ahead(read.ahead);
+             self.adopt_unchecked(read.unchecked);
          }
-         self.kept.writer = Some(writer);

@@ -20,6 +20,7 @@ pub mod seed_0x1919f;
 pub mod seed_0x25;
 pub mod seed_0x2c;
 pub mod seed_0x2d;
+pub mod seed_0x2dc719;
 pub mod seed_0x31c;
 pub mod seed_0x330;
 pub mod seed_0x46;
@@ -178,6 +179,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
             "it pins an open defect (KnownWrong::HaltForgottenAtRestart) and passes only while \
              main fails with it, so no plant can be judged by it",
         ),
+    ),
+    (
+        "seed_0x2dc719",
+        "a_gap_below_the_confirmed_state_does_not_hold_back_the_cure_seed_0x2dc719",
+        Guard::Own("ahead-check-never-gives-up-sim"),
     ),
     (
         "seed_0xf488c",

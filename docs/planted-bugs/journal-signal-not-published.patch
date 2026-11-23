@@ -1,13 +1,13 @@
 diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
-index 48f312ac..bbcce72c 100644
+index 00b2a584..e6b7b927 100644
 --- a/crates/replica/src/thread.rs
 +++ b/crates/replica/src/thread.rs
-@@ -682,7 +682,7 @@ impl Worker {
+@@ -728,7 +728,7 @@ impl Worker {
                  ..seen.counters
              };
              health.verification = verification;
 -            health.journal = journal;
 +            health.journal = journal.filter(|_| false);
              health.ahead_of_wal = ahead_of_wal;
+             health.ahead_unchecked = ahead_unchecked;
              state.left = parts.left;
-         });

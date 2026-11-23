@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 5c73e256..b757f757 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2640,7 +2640,7 @@ impl Actor {
+         let record = lsr_journal::Journal {
+             unproven: wanted.0,
+             ahead: wanted.1,
+-            unchecked: wanted.2,
++            unchecked: None,
+             ..held.unwrap_or(lsr_journal::Journal::ABSENT)
+         };
+         match writer.write(file, &record) {
