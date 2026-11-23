@@ -876,6 +876,19 @@ notes = "S: the 5% rate fault on uploads and listings is still active at the jud
 
 [[row]]
 table = "Upload"
+id = "UP-19"
+mark = "none: classified by the store crates; core maps it in a const fn"
+circumstance = "A directory replica's disk is full, or its quota is spent (ENOSPC, EDQUOT on the replica's own filesystem)"
+response = "retry, as `LocalDiskFull` (`Fault::from_remote`), the same fault a full staging or database disk gives; degraded `Stalled(LocalDiskFull)` from the 8th failure in a row. Before, it was `StoreTransient`, which named no fix"
+signal = "\"retrying\"; `lsr_replica_operation_errors_total`"
+at_risk = "Lag, without bound while the disk is full"
+recovery = "An operator frees space on the replica's filesystem"
+detected_by = "core::`a_full_replica_disk_is_disk_full`"
+no_test = "a filled replica disk: untested"
+notes = "Go reports `no space left on device` for a full replica directory as for a full database disk, and retries on the next sync. The suspected cause of a load-sensitive failure of sqlite::`faults::a_read_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing` (a `StoreTransient` while a mutation run filled the disk; not reproduced), which accepts `LocalDiskFull`"
+
+[[row]]
+table = "Upload"
 id = "UP-3"
 mark = "none: classified by the store crates; core maps it in a const fn"
 circumstance = "429 or `SlowDown`"
