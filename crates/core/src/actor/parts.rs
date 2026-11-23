@@ -32,6 +32,8 @@ use crate::failstop::{Lag, WalMark};
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::journal::{JournalSignal, JournalWriter};
 use crate::layout::FileKey;
+#[cfg(test)]
+use crate::obligations::{Keep, Record};
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::store::Denied;
@@ -467,3 +469,215 @@ impl Engine {
         }
     }
 }
+
+/// What each field of [`Kept`] is to a restart of the process (`crate::obligations`).
+#[cfg(test)]
+pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
+    (
+        "cfg",
+        Keep::Derived("the caller's configuration, given to every start"),
+    ),
+    (
+        "stop",
+        Keep::Ephemeral(
+            "a stop holds until a person restarts the process: the restart is the way out \
+             (docs/BEHAVIOR.md section 5)",
+        ),
+    ),
+    (
+        "tasks",
+        Keep::Ephemeral(
+            "retry waits and degraded reports; a restarted engine tries every task at once and \
+             meets a failure that persists again",
+        ),
+    ),
+    (
+        "clock",
+        Keep::Ephemeral(
+            "engine time follows the wall clock from each start; the one journalled fact dated by \
+             it, the ahead-of-WAL verdict, re-dates itself when the clock is behind",
+        ),
+    ),
+    (
+        "task_restore_point",
+        Keep::Ephemeral(
+            "pinned while a task is degraded and pinned again when the failure is met again; \
+             cost: a retention pass that runs before a restarted engine meets the failure keeps \
+             only the newest restore point",
+        ),
+    ),
+    (
+        "verify_restore_point",
+        Keep::Derived("asked for again by the replica thread after every tick, from its verify"),
+    ),
+    (
+        "live",
+        Keep::Ephemeral("a verify's read of the live pages in flight; the verify asks again"),
+    ),
+    (
+        "snapshot_asked",
+        Keep::Ephemeral(
+            "an operator's request to this process; cost: a restart before it is staged drops it",
+        ),
+    ),
+    (
+        "app",
+        Keep::Ephemeral("what the application's checkpoints did between reads: counts reported"),
+    ),
+    (
+        "suspect_staged",
+        Keep::Ephemeral(
+            "one failed read says nothing about the stored bytes; the next boot's sweep reads the \
+             file again",
+        ),
+    ),
+    (
+        "snapshots",
+        Keep::Ephemeral("snapshots staged since the process began: a report"),
+    ),
+    (
+        "unproven",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "a failed WAL sync's debt: a restart before the cure must still pay it \
+             (docs/decisions.md D100)",
+        ),
+    ),
+    (
+        "takeover",
+        Keep::Journalled(
+            Record::TakeoverRecord,
+            "read from the meta directory by the driver and handed in at every start",
+        ),
+    ),
+    (
+        "wanted_takeover",
+        Keep::Ephemeral(
+            "nothing is deleted until the driver hands it back durable; a restart asks again",
+        ),
+    ),
+    (
+        "refused_through",
+        Keep::Ephemeral("what a boot's refusal reports; a restarted boot refuses again"),
+    ),
+    (
+        "lag",
+        Keep::Derived(
+            "the fail-stop clock, started again at boot from the pending staged files \
+             (docs/decisions.md D80)",
+        ),
+    ),
+    (
+        "listed",
+        Keep::Ephemeral("fail-stop's refusal at boot is about this process, not the database"),
+    ),
+    (
+        "refused_at_boot",
+        Keep::Ephemeral("fail-stop's refusal at boot is about this process, not the database"),
+    ),
+    (
+        "boot_failed",
+        Keep::Ephemeral("fail-stop's judgement of this process's boot"),
+    ),
+    (
+        "sync_failed_after_listing",
+        Keep::Ephemeral("fail-stop's judgement of this process's boot"),
+    ),
+    (
+        "quiet",
+        Keep::Derived("judged again by boot from the pending staged files"),
+    ),
+    (
+        "doubt_baseline",
+        Keep::Ephemeral(
+            "lag accounting for this process; cost: frames before a restart count as lag \
+             (docs/decisions.md D80)",
+        ),
+    ),
+    (
+        "journal",
+        Keep::Ephemeral("what the last boot read of the journal: the next boot reads again"),
+    ),
+    (
+        "writer",
+        Keep::Ephemeral("the writer's place in the file: the next process reads the file again"),
+    ),
+    (
+        "journal_read",
+        Keep::Derived("the record this process's boot read"),
+    ),
+    (
+        "journal_write",
+        Keep::Ephemeral("whether the last journal write failed; tried again every tick"),
+    ),
+    (
+        "ahead_check",
+        Keep::Derived(
+            "owed by a boot that restores a debt over the staged generation: judged again from \
+             the journal and recovery at every boot",
+        ),
+    ),
+    (
+        "ahead",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "a database found ahead of its WAL: the restore point before it stays kept for the \
+             window across restarts (docs/decisions.md D103)",
+        ),
+    ),
+    (
+        "ahead_notice",
+        Keep::Ephemeral("what the next tick says; a boot that finds the verdict says it again"),
+    ),
+];
+
+/// What each field of [`Engine`] is to a restart: a rebuild replaces the engine whole, so most
+/// of it is derived at boot.
+#[cfg(test)]
+pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
+    (
+        "course",
+        Keep::Derived("recovered at every boot from the newest staged file and the WAL"),
+    ),
+    (
+        "page_size",
+        Keep::Derived("read from the replica, staging and the WAL"),
+    ),
+    (
+        "pages",
+        Keep::Derived("seeded at boot from the staged files after the replica's newest"),
+    ),
+    (
+        "checkpoint",
+        Keep::Ephemeral("the checkpoint schedule, which starts again at boot"),
+    ),
+    (
+        "gate",
+        Keep::Ephemeral("when to ask about a checkpoint next; asked again after a restart"),
+    ),
+    (
+        "upload",
+        Keep::Derived("listed from the replica at every boot"),
+    ),
+    (
+        "maintain",
+        Keep::Ephemeral("the maintenance schedule and backoffs; the next listing rebuilds it"),
+    ),
+    (
+        "pruned",
+        Keep::Derived("what staging still holds tells the next boot what was pruned"),
+    ),
+    (
+        "acknowledged",
+        Keep::Owed(
+            "never lowered while the process lives, but set at boot from the replica's listing: \
+             a replica that went backwards before a restart lets a snapshot take an \
+             acknowledged id again until the confirmed high-water mark is journalled \
+             (issue #171, item 4)",
+        ),
+    ),
+    (
+        "witnesses",
+        Keep::Derived("witnessed again at boot against the live WAL (crate::witness)"),
+    ),
+];

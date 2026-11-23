@@ -1,4 +1,5 @@
 name = "failstop-trip-held-to-zero-age-sim"
+patch = "failstop-trip-held-to-zero-age"
 fix = "87cd10d"
 package = "lsr-sim"
 test_bin = "sim"

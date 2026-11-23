@@ -1,6 +1,7 @@
 # The same plants against the simulator: the judge of every run catches the early trips unaided
 # (random histories), the named runs catch the late ones.
 name = "failstop-trip-on-first-failure-sim"
+patch = "failstop-trip-on-first-failure"
 fix = "4b388f2"
 package = "lsr-sim"
 test_bin = "sim"

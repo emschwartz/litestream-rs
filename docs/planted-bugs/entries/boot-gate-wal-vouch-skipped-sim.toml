@@ -1,4 +1,5 @@
 name = "boot-gate-wal-vouch-skipped-sim"
+patch = "boot-gate-wal-vouch-skipped"
 fix = "aa1165d"
 package = "lsr-sim"
 test_bin = "sim"

@@ -153,7 +153,7 @@ fn every_target_matches_the_manifest() {
                 }
                 // An instant inside a compacted file has no exact plan; Go answered anyway.
                 Outcome::Restored { .. }
-                    if run.code == 2 && matches!(entry.target, Target::AsOf { .. }) =>
+                    if run.code == 1 && matches!(entry.target, Target::AsOf { .. }) =>
                 {
                     assert!(
                         run.stderr.contains("falls inside"),
@@ -168,7 +168,7 @@ fn every_target_matches_the_manifest() {
                     have_through,
                     next_starts,
                     ..
-                } if run.code == 2 => {
+                } if run.code == 1 => {
                     assert_eq!(run.stdout, "", "{label}");
                     assert_eq!(run.stderr.lines().count(), 1, "{label}: {}", run.stderr);
                     assert!(
@@ -198,7 +198,7 @@ fn every_target_matches_the_manifest() {
 }
 
 #[test]
-fn a_gap_target_exits_2_names_the_hole_and_leaves_no_file() {
+fn a_gap_target_exits_1_names_the_hole_and_leaves_no_file() {
     let mut seen = 0_usize;
     for (fixture, manifest) in fixtures() {
         let Some(entry) = manifest
@@ -212,7 +212,7 @@ fn a_gap_target_exits_2_names_the_hole_and_leaves_no_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let output = dir.path().join("out.db");
         let run = restore(&staged, &output, &[]);
-        assert_eq!((run.code, run.stdout.as_str()), (2, ""), "{}", run.stderr);
+        assert_eq!((run.code, run.stdout.as_str()), (1, ""), "{}", run.stderr);
         assert!(run.stderr.contains("gap"), "{}", run.stderr);
         assert!(
             !output.exists() && dir_is_empty(dir.path()),
@@ -242,13 +242,13 @@ fn latest_pages(manifest: &Manifest) -> &Outcome {
 }
 
 #[test]
-fn an_existing_output_exits_3_and_stays_byte_identical() {
+fn an_existing_output_exits_1_and_stays_byte_identical() {
     let (staged, _) = small_fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("out.db");
     fs::write(&output, b"not a database").expect("plant");
     let run = restore(&staged, &output, &[]);
-    assert_eq!((run.code, run.stdout.as_str()), (3, ""));
+    assert_eq!((run.code, run.stdout.as_str()), (1, ""));
     assert!(run.stderr.contains("already exists"), "{}", run.stderr);
     assert_eq!(fs::read(&output).expect("read"), b"not a database");
     assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1);
@@ -262,7 +262,7 @@ fn a_stale_journal_file_refuses_until_clear_journal_files() {
     let journal = dir.path().join("out.db-journal");
     fs::write(&journal, b"stale").expect("plant");
     let refused = restore(&staged, &output, &[]);
-    assert_eq!((refused.code, refused.stdout.as_str()), (3, ""));
+    assert_eq!((refused.code, refused.stdout.as_str()), (1, ""));
     assert!(
         refused.stderr.contains("out.db-journal"),
         "{}",
@@ -295,7 +295,7 @@ fn clear_journal_files_never_touches_an_existing_target() {
     fs::write(&output, b"live").expect("plant");
     fs::write(&wal, b"belongs to it").expect("plant");
     let run = restore(&staged, &output, &["--clear-journal-files".to_owned()]);
-    assert_eq!(run.code, 3, "{}", run.stderr);
+    assert_eq!(run.code, 1, "{}", run.stderr);
     assert_eq!(fs::read(&wal).expect("read"), b"belongs to it");
     assert_eq!(fs::read(&output).expect("read"), b"live");
 }
@@ -503,7 +503,13 @@ fn usage_errors_exit_64_with_one_stderr_line_and_no_stdout() {
     ];
     for args in cases {
         let run = lsr(args);
-        assert_eq!((run.code, run.stdout.as_str()), (64, ""), "{args:?}");
+        // restore exits 1 for every failure, as Go's commands do (D47).
+        let want = if args.first() == Some(&"restore") {
+            1
+        } else {
+            64
+        };
+        assert_eq!((run.code, run.stdout.as_str()), (want, ""), "{args:?}");
         assert_eq!(run.stderr.lines().count(), 1, "{args:?}: {}", run.stderr);
     }
     let url = lsr(&["verify", "--replica", "https://bucket/path"]);
@@ -656,7 +662,7 @@ fn integrity_check_publishes_a_valid_database_in_every_mode() {
 /// Valid LTX, broken b-tree: quick and full refuse with exit 2 (a refused
 /// restore) naming SQLite's problem and leave nothing; none publishes it.
 #[test]
-fn integrity_check_refuses_a_corrupt_b_tree_with_exit_2() {
+fn integrity_check_refuses_a_corrupt_b_tree_with_exit_1() {
     let mut db = sqlite_pages();
     db[512..1024].fill(0xDE);
     let work = tempfile::tempdir().expect("tempdir");
@@ -666,7 +672,7 @@ fn integrity_check_refuses_a_corrupt_b_tree_with_exit_2() {
         let dir = tempfile::tempdir().expect("tempdir");
         let output = dir.path().join("out.db");
         let run = restore_checked(&replica, &output, check);
-        assert_eq!((run.code, run.stdout.as_str()), (2, ""), "{check}");
+        assert_eq!((run.code, run.stdout.as_str()), (1, ""), "{check}");
         assert!(run.stderr.contains("page 2"), "{check}: {}", run.stderr);
         assert!(
             run.stderr.contains("nothing was published"),
@@ -762,7 +768,7 @@ fn if_replica_exists_exits_0_on_an_empty_replica_and_writes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("out.db");
     let refused = restore_from(&replica, &output, &[]);
-    assert_eq!((refused.code, refused.stdout.as_str()), (2, ""));
+    assert_eq!((refused.code, refused.stdout.as_str()), (1, ""));
     for extra in [
         &["--if-replica-exists"][..],
         &["--if-replica-exists", "--txid", "0000000000000005"],
@@ -820,7 +826,7 @@ fn if_replica_exists_skips_a_path_without_ltx_as_go_does() {
         let refused = restore_from(replica, &output, &[]);
         assert_eq!(
             (refused.code, refused.stdout.as_str()),
-            (2, ""),
+            (1, ""),
             "{replica:?}"
         );
         assert!(
@@ -847,7 +853,7 @@ fn dry_run_refuses_an_empty_replica_even_with_if_replica_exists() {
     for (replica, says) in [(&empty, "no LTX file"), (&bare, "no ltx/ folder")] {
         for extra in [&["--dry-run"][..], &["--dry-run", "--if-replica-exists"]] {
             let run = restore_from(replica, &output, extra);
-            assert_eq!((run.code, run.stdout.as_str()), (2, ""), "{extra:?}");
+            assert_eq!((run.code, run.stdout.as_str()), (1, ""), "{extra:?}");
             assert!(run.stderr.contains(says), "{extra:?}: {}", run.stderr);
         }
     }
@@ -867,7 +873,7 @@ fn if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet() {
         &output,
         &strings(&["--if-replica-exists", "--txid", "7fffffffffffffff"]),
     );
-    assert_eq!((beyond.code, beyond.stdout.as_str()), (2, ""));
+    assert_eq!((beyond.code, beyond.stdout.as_str()), (1, ""));
     assert!(
         beyond.stderr.contains("beyond the newest"),
         "{}",
@@ -880,7 +886,7 @@ fn if_replica_exists_still_refuses_what_a_non_empty_replica_cannot_meet() {
         }
         let staged = stage(&fixture, &manifest).expect("stage");
         let gap = restore(&staged, &output, &strings(&["--if-replica-exists"]));
-        assert_eq!((gap.code, gap.stdout.as_str()), (2, ""), "{}", gap.stderr);
+        assert_eq!((gap.code, gap.stdout.as_str()), (1, ""), "{}", gap.stderr);
         gaps += 1;
     }
     assert!(gaps > 0);
@@ -991,29 +997,29 @@ fn dry_run_json_lists_the_chain_the_restore_applies() {
 /// output as the restore would, and lists the journal files --clear-journal-files would
 /// remove without removing them.
 #[test]
-fn dry_run_checks_the_output_as_a_restore_would() {
+/// Go's dry run plans without looking at the output (`restore.go:119-136`): an output a
+/// restore would refuse, or a stale journal file, does not stop the plan, and nothing is
+/// touched. The journal files `--clear-journal-files` would remove are still listed.
+fn dry_run_plans_whatever_is_at_the_output() {
     let (staged, _) = small_fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("out.db");
     fs::write(&output, b"live").expect("plant");
-    let exists = restore(&staged, &output, &strings(&["--dry-run"]));
-    assert_eq!((exists.code, exists.stdout.as_str()), (3, ""));
+    let planned = restore(&staged, &output, &strings(&["--dry-run"]));
+    assert_eq!(planned.code, 0, "{}", planned.stderr);
     assert!(
-        exists.stderr.contains("already exists"),
+        planned.stdout.contains("Restore plan"),
         "{}",
-        exists.stderr
+        planned.stdout
     );
+    assert_eq!(fs::read(&output).expect("read"), b"live");
     fs::remove_file(&output).expect("remove");
 
     let wal = dir.path().join("out.db-wal");
     fs::write(&wal, b"stale").expect("plant");
-    let refused = restore(&staged, &output, &strings(&["--dry-run"]));
-    assert_eq!((refused.code, refused.stdout.as_str()), (3, ""));
-    assert!(
-        refused.stderr.contains("--clear-journal-files"),
-        "{}",
-        refused.stderr
-    );
+    let planned = restore(&staged, &output, &strings(&["--dry-run"]));
+    assert_eq!(planned.code, 0, "{}", planned.stderr);
+    assert_eq!(fs::read(&wal).expect("read"), b"stale");
     let listed = restore(
         &staged,
         &output,
@@ -1066,6 +1072,161 @@ fn restore_json_reports_go_s_fields() {
     assert!(json["checksum_verified"].is_boolean(), "{json}");
 }
 
+/// A config naming `db` with the staged replica as its `file://` URL.
+fn config_for(dir: &Path, db: &Path, staged: &Staged) -> PathBuf {
+    let config = dir.join("litestream.yml");
+    fs::write(
+        &config,
+        format!(
+            "dbs:\n  - path: {}\n    replica:\n      url: file://{}\n",
+            db.display(),
+            staged.replica().display()
+        ),
+    )
+    .expect("config");
+    config
+}
+
+/// Go's `restore -config <file> DB_PATH`: the database is looked up among the config's path
+/// entries and restored to its own path; a path the config does not name is refused.
+#[test]
+fn a_database_path_restores_its_configured_replica_to_that_path() {
+    let (staged, manifest) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("app.db");
+    let config = config_for(dir.path(), &db, &staged);
+    let run = lsr(&["restore", "-config", path_str(&config), path_str(&db)]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_pages_equal(&db, latest_pages(&manifest), "config restore");
+    let other = dir.path().join("other.db");
+    let run = lsr(&["restore", "-config", path_str(&config), path_str(&other)]);
+    assert_eq!((run.code, run.stdout.as_str()), (1, ""));
+    assert!(
+        run.stderr.contains("database not found in config"),
+        "{}",
+        run.stderr
+    );
+}
+
+/// Go's `restore -o OUT REPLICA_URL`, and `-o` required with a URL.
+#[test]
+fn a_replica_url_restores_to_the_output_it_names() {
+    let (staged, manifest) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("out.db");
+    let url = format!("file://{}", staged.replica().display());
+    let run = lsr(&["restore", "-o", path_str(&output), &url]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_pages_equal(&output, latest_pages(&manifest), "url restore");
+    let run = lsr(&["restore", &url]);
+    assert_eq!((run.code, run.stdout.as_str()), (1, ""));
+    assert!(run.stderr.contains("-o is required"), "{}", run.stderr);
+}
+
+/// An empty output file is replaced, as Go replaces it; any other file only with -force, and
+/// -force removes the old journal files with it.
+#[test]
+fn force_replaces_an_existing_database_and_its_journal_files() {
+    let (staged, manifest) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("out.db");
+    let url = format!("file://{}", staged.replica().display());
+    fs::write(&output, b"").expect("plant");
+    let run = lsr(&["restore", "-o", path_str(&output), &url]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_pages_equal(&output, latest_pages(&manifest), "over an empty file");
+    fs::write(&output, b"old database").expect("plant");
+    fs::write(dir.path().join("out.db-wal"), b"old wal").expect("plant");
+    let refused = lsr(&["restore", "-o", path_str(&output), &url]);
+    assert_eq!(refused.code, 1, "{}", refused.stderr);
+    assert_eq!(fs::read(&output).expect("read"), b"old database");
+    let forced = lsr(&["restore", "-force", "-o", path_str(&output), &url]);
+    assert_eq!(forced.code, 0, "{}", forced.stderr);
+    assert_pages_equal(&output, latest_pages(&manifest), "forced");
+    assert!(!dir.path().join("out.db-wal").exists());
+}
+
+/// A forced restore that fails leaves the old database and its journal files where they were
+/// (Go removes them before it restores).
+#[test]
+fn a_failed_forced_restore_keeps_the_old_database() {
+    let (staged, _) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output = dir.path().join("out.db");
+    let url = format!("file://{}", staged.replica().display());
+    fs::write(&output, b"old database").expect("plant");
+    fs::write(dir.path().join("out.db-wal"), b"old wal").expect("plant");
+    let run = lsr(&[
+        "restore",
+        "-force",
+        "-txid",
+        "ffffffffffffffff",
+        "-o",
+        path_str(&output),
+        &url,
+    ]);
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert_eq!(fs::read(&output).expect("read"), b"old database");
+    assert_eq!(
+        fs::read(dir.path().join("out.db-wal")).expect("read"),
+        b"old wal"
+    );
+}
+
+/// Go creates the output's missing directories; a restore that fails removes the ones it made.
+#[test]
+fn missing_parent_directories_are_created_and_removed_after_a_failure() {
+    let (staged, manifest) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("file://{}", staged.replica().display());
+    let failed = dir.path().join("a/b/out.db");
+    let run = lsr(&[
+        "restore",
+        "-txid",
+        "ffffffffffffffff",
+        "-o",
+        path_str(&failed),
+        &url,
+    ]);
+    assert_eq!(run.code, 1, "{}", run.stderr);
+    assert!(
+        dir_is_empty(dir.path()),
+        "left {:?}",
+        fs::read_dir(dir.path()).unwrap().count()
+    );
+    let nested = dir.path().join("x/y/out.db");
+    let run = lsr(&["restore", "-o", path_str(&nested), &url]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_pages_equal(&nested, latest_pages(&manifest), "nested");
+}
+
+/// Go's URL restore with a timestamp refuses a replica that holds nothing before anything
+/// else (`CalcRestoreTarget`), and -if-replica-exists does not excuse it; without a
+/// timestamp, -if-replica-exists skips it.
+#[test]
+fn a_url_restore_with_a_timestamp_refuses_an_empty_replica() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let empty = dir.path().join("replica");
+    fs::create_dir(&empty).expect("mkdir");
+    let url = format!("file://{}", empty.display());
+    let output = dir.path().join("out.db");
+    let out = path_str(&output);
+    let run = lsr(&[
+        "restore",
+        "-if-replica-exists",
+        "-timestamp",
+        "2026-01-01T00:00:00Z",
+        "-o",
+        out,
+        &url,
+    ]);
+    assert_eq!((run.code, run.stdout.as_str()), (1, ""), "{}", run.stderr);
+    assert!(run.stderr.contains("no backups found"), "{}", run.stderr);
+    let run = lsr(&["restore", "-if-replica-exists", "-o", out, &url]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(!output.exists());
+}
+
 /// `lsr take-over <db>` records a takeover through the replica's newest transaction in the
 /// database's meta directory.
 #[test]
@@ -1092,8 +1253,8 @@ fn take_over_records_the_replicas_newest_transaction() {
     lsr_core::TakeoverRecord::decode(&record).expect("a takeover record");
 }
 
-/// `lsr restore` to an output that names no file is refused with exit 3 before anything is
-/// written: it has no meta directory for the takeover record.
+/// `lsr restore` to an output that names no file is refused with exit 1 (as Go's commands
+/// exit) before anything is written: it has no meta directory for the takeover record.
 #[test]
 fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
     let db = sqlite_pages();
@@ -1103,7 +1264,107 @@ fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = dir.path().join("sub").join("..");
     let run = restore_checked(&replica, &output, "none");
-    assert_eq!(run.code, 3, "{}", run.stderr);
+    assert_eq!(run.code, 1, "{}", run.stderr);
     assert!(run.stderr.contains("no meta directory"), "{}", run.stderr);
     assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
+}
+
+/// Go finds a `DB_PATH` among the config's `path` entries only (`Config.DBConfig`): a `dir`
+/// entry beside it is not scanned, so one that holds no database does not stop the restore.
+#[test]
+fn a_database_path_restores_beside_a_dir_entry_that_holds_nothing() {
+    let (staged, manifest) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("app.db");
+    let empty = dir.path().join("scan");
+    fs::create_dir(&empty).expect("mkdir");
+    let config = config_for(dir.path(), &db, &staged);
+    let mut text = fs::read_to_string(&config).expect("read");
+    text.push_str(&format!(
+        "  - dir: {}\n    pattern: \"*.db\"\n    replica:\n      url: file://{}\n",
+        empty.display(),
+        dir.path().join("scan-replica").display()
+    ));
+    fs::write(&config, text).expect("write");
+    let run = lsr(&["restore", "-config", path_str(&config), path_str(&db)]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_pages_equal(
+        &db,
+        latest_pages(&manifest),
+        "restore beside an empty dir entry",
+    );
+}
+
+/// Go's `databases`: each config entry with its replica type, a `dir` entry by its directory,
+/// unscanned (Go prints the working directory for it; docs/decisions.md D162).
+#[test]
+fn databases_lists_each_entry_without_scanning_a_dir() {
+    let (staged, _) = small_fixture();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("app.db");
+    let config = config_for(dir.path(), &db, &staged);
+    let scan = dir.path().join("scan");
+    let mut text = fs::read_to_string(&config).expect("read");
+    text.push_str(&format!(
+        "  - dir: {}\n    pattern: \"*.db\"\n    replica:\n      url: file://{}\n",
+        scan.display(),
+        dir.path().join("scan-replica").display()
+    ));
+    fs::write(&config, text).expect("write");
+    let run = lsr(&["databases", "-config", path_str(&config)]);
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{}", run.stdout);
+    let rows: Vec<Vec<&str>> = run
+        .stdout
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            vec!["path", "replica"],
+            vec![path_str(&db), "file"],
+            vec![path_str(&scan), "file"]
+        ]
+    );
+    let printed = lsr(&["databases", "-json", "-config", path_str(&config)]);
+    let json: Value = serde_json::from_str(&printed.stdout).expect("Go's indented JSON");
+    assert_eq!(json[0], json!({"path": path_str(&db), "replica": "file"}));
+}
+
+/// Go's `ltx`: level 0 unless `-level` says otherwise, `all` for every level; `wal` is the
+/// same after a deprecation warning on standard error.
+#[test]
+fn ltx_lists_one_level_by_default_and_wal_warns() {
+    let (staged, _) = small_fixture();
+    let url = format!("file://{}", staged.replica().display());
+    let levels = |args: &[&str]| -> Vec<String> {
+        let run = lsr(args);
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        run.stdout
+            .lines()
+            .skip(1)
+            .map(|l| l.split_whitespace().next().unwrap_or_default().to_owned())
+            .collect()
+    };
+    assert!(levels(&["ltx", &url]).iter().all(|l| l == "0"));
+    let all = levels(&["ltx", "-level", "all", &url]);
+    assert!(
+        all.iter().any(|l| l == "0") && all.iter().any(|l| l == "9"),
+        "{all:?}"
+    );
+    assert!(levels(&["ltx", "-level=9", &url]).iter().all(|l| l == "9"));
+    let wal = lsr(&["wal", &url]);
+    assert_eq!(wal.code, 0, "{}", wal.stderr);
+    assert!(
+        wal.stderr.contains("'wal' command is deprecated"),
+        "{}",
+        wal.stderr
+    );
+    let bad = lsr(&["ltx", "-level", "10", &url]);
+    assert_eq!((bad.code, bad.stdout.as_str()), (1, ""));
+    assert!(
+        bad.stderr.contains("level must be between 0 and 9"),
+        "{}",
+        bad.stderr
+    );
 }

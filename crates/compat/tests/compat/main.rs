@@ -20,7 +20,11 @@ mod dropin_creds;
 #[cfg(test)]
 mod dropin_dir;
 #[cfg(test)]
+mod dropin_inspect;
+#[cfg(test)]
 mod dropin_metrics;
+#[cfg(test)]
+mod dropin_restore;
 #[cfg(test)]
 mod dropin_roles;
 #[cfg(test)]

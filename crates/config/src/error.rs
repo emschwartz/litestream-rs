@@ -157,6 +157,17 @@ impl fmt::Display for Found {
 /// Why the file is refused. Each variant says what to change.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ProblemKind {
+    /// A key the walk read as one type was asked for as another: the key schema and the
+    /// build disagree, a defect in litestream-rs, refused rather than read as absent.
+    #[error("internal: {key} was read as {found} and asked for as {expected}")]
+    FieldType {
+        /// The key.
+        key: &'static str,
+        /// The type the build asked for.
+        expected: &'static str,
+        /// The type the walk stored.
+        found: &'static str,
+    },
     /// The file does not exist (Go's `ErrConfigFileNotFound`).
     #[error("config file not found: {}", file.display())]
     NotFound {
