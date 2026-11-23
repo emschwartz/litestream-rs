@@ -262,9 +262,10 @@ pub fn kept_until(ahead: Ahead) -> Timestamp {
 /// Of a notice held and one read, the newer: a later check given up restarts the window.
 fn newer(held: Option<Unchecked>, read: Option<Unchecked>) -> Option<Unchecked> {
     match (held, read) {
-        (Some(held), Some(read)) if read.made > held.made => Some(read),
-        (Some(held), _) => Some(held),
-        (None, read) => read,
+        (Some(held), Some(read)) => Some(Unchecked {
+            made: held.made.max(read.made),
+        }),
+        (held, read) => held.or(read),
     }
 }
 
