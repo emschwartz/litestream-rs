@@ -232,7 +232,7 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::LocalRewound { .. } => &[power_loss_wal_rewind],
         SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
-        SnapshotCause::StagedUnverified { .. } => &[pending_from_a_gone_generation],
+        SnapshotCause::StagedUnverified { .. } => &[pending_file_that_does_not_chain],
         SnapshotCause::WalSyncFailed => &[wal_fsync_fails_then_snapshot],
     }
 }
@@ -485,14 +485,13 @@ pub fn deploy_cycle_after_sigkill() -> Scenario {
 
 /// SIGKILL just after the engine's own PASSIVE checkpoint let the WAL restart,
 /// before the new generation's first file was staged; a file staged in the
-/// old generation was still pending (its upload's answer lost). The proof that
-/// the restart followed the engine's own checkpoint lives in memory, so the
-/// next process cannot tell this WAL from one the app restarted after frames
-/// the engine never saw: it drops the pending file and snapshots
-/// (`StagedUnverified`, BOOT-11 in `docs/BEHAVIOR.md`). It never stops. Closing
-/// this needs that proof to outlive the process (the engine journal).
+/// old generation was still pending (its upload's answer lost, though the
+/// replica holds it). The next process cannot tell this WAL from one the app
+/// restarted after frames the engine never saw, and needs no proof: the
+/// pending file is on the replica, the boot reads it whole and goes on into
+/// the new generation (BOOT-11 in `docs/BEHAVIOR.md`). No snapshot, no stop.
 #[must_use]
-pub fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() -> Scenario {
+pub fn deploy_cycle_sigkill_after_a_wal_restart_continues() -> Scenario {
     let lost_answer = Op::StoreFault {
         target: crate::generate::Target::Remote,
         op: lsr_core::StoreOp::Upload,
@@ -503,7 +502,7 @@ pub fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() -> Scenario {
         }),
     };
     let mut s = build(
-        "deploy_cycle_sigkill_after_a_wal_restart_snapshots",
+        "deploy_cycle_sigkill_after_a_wal_restart_continues",
         vec![
             deploy(vec![Op::Shutdown]),
             vec![commit(2, false), Op::Tick, lost_answer, Op::Tick],
@@ -513,10 +512,7 @@ pub fn deploy_cycle_sigkill_after_a_wal_restart_snapshots() -> Scenario {
             ticks(SETTLE),
             vec![Op::Restore],
         ],
-        vec![
-            Expect::Event(EventMatch::Booted(Some(CauseKind::StagedUnverified))),
-            Expect::Oracle,
-        ],
+        vec![Expect::Event(EventMatch::Booted(None)), Expect::Oracle],
     );
     s.check = Some(no_refusal);
     s
@@ -712,6 +708,42 @@ fn refused_until_removed(report: &RunReport) -> Result<(), String> {
     } else {
         Err("the engine never replicated after the file went".to_owned())
     }
+}
+
+/// A staging backup holding the first transaction 1 is put back after the bucket
+/// rolled back and the engine took transaction 1 again, from a later commit, so the
+/// replica holds other bytes under that key. The boot reads the replica's file against the
+/// staged one, finds them different, deletes the staged copy and snapshots above the
+/// replica's newest file: the replica's object is never written over.
+#[must_use]
+pub fn staging_put_back_with_other_bytes_is_not_written_over_the_replica() -> Scenario {
+    build(
+        "staging_put_back_with_other_bytes_is_not_written_over_the_replica",
+        vec![
+            vec![Op::Shutdown, commit(3, false), Op::Meta(MetaOp::Save)],
+            vec![
+                Op::Remote(RemoteOp::RollBack),
+                Op::EnvFault(EnvFault::WipeStaging),
+            ],
+            ticks(SETTLE),
+            vec![
+                Op::Shutdown,
+                Op::Meta(MetaOp::Restore),
+                Op::OurReader { begin: false },
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+                commit(1, false),
+                Op::Restart,
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        vec![
+            Expect::Event(EventMatch::Booted(Some(
+                CauseKind::NewestStagedFileUnreadable,
+            ))),
+            Expect::Oracle,
+        ],
+    )
 }
 
 /// A backup of the staging directory is put back after the replica moved on,
@@ -932,12 +964,13 @@ pub fn app_checkpoint_while_down() -> Scenario {
 }
 
 /// A file is staged and its upload fails; the process dies, and while it is
-/// down the app checkpoints, the WAL restarts and the app commits. Neither
-/// the replica's tail nor the pending file is in the live WAL any more, so
-/// nothing vouches for the pending file: it is deleted unpublished, and the
-/// boot names it as what the snapshot replaces.
+/// down the pending file's header loses its WAL range, so it chains to
+/// nothing, the app checkpoints, the WAL restarts and the app commits. The
+/// boot reads the pending file whole, finds it does not follow the replica's
+/// newest file, deletes it unpublished, and names it as what the snapshot
+/// replaces.
 #[must_use]
-pub fn pending_from_a_gone_generation() -> Scenario {
+pub fn pending_file_that_does_not_chain() -> Scenario {
     let failed_upload = Op::StoreFault {
         target: crate::generate::Target::Remote,
         op: lsr_core::StoreOp::Upload,
@@ -948,12 +981,13 @@ pub fn pending_from_a_gone_generation() -> Scenario {
         }),
     };
     build(
-        "pending_from_a_gone_generation",
+        "pending_file_that_does_not_chain",
         vec![
             synced(),
             vec![Op::Tick, failed_upload, commit(2, false), Op::Tick],
             vec![
                 Op::Restart,
+                Op::Meta(MetaOp::StripNewestOrigin),
                 Op::OurReader { begin: false },
                 Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
                 commit(2, false),

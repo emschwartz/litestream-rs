@@ -381,15 +381,13 @@ fn seed_0x92d_trips_on_frames_it_never_read_and_is_excused() {
     assert!(report.reach.get("failstop.excused.unread_wal") > 0);
 }
 
-/// Seed 0x734 from the mixed campaign: a rollback of the replica leaves staged files it lacks,
-/// and the boot after cannot vouch for them from the live WAL, so it deletes them and stages a
-/// snapshot of their end state (`SnapshotCause::StagedUnverified`). Uploads are then refused
-/// past the bound, and it trips. The simulator knows that snapshot holds nothing the replica
-/// lacks; the engine cannot (continuity broke, and Go-written files carry no checksum to
-/// compare), so the trip is correct (`docs/decisions.md` D81, amended) and the judge excuses
-/// it, counted.
+/// Seed 0x734 from the mixed campaign: a rollback of the replica leaves staged files it lacks.
+/// The boot after used to delete them, the live WAL not vouching for them, and stage a snapshot
+/// of their end state (`SnapshotCause::StagedUnverified`); uploads were then refused past the
+/// bound and the engine tripped. The boot now reads the files whole and uploads them as staged
+/// (`docs/decisions/D175.md`), so nothing is left to replace and nothing trips.
 #[test]
-fn seed_0x734_trips_on_a_snapshot_it_cannot_vouch_for_and_is_excused() {
+fn seed_0x734_uploads_the_files_a_rollback_left_and_never_trips() {
     let opts = Opts {
         drawn: true,
         after_restart: lsr_sim::AfterRestart::Nothing,
@@ -403,6 +401,5 @@ fn seed_0x734_trips_on_a_snapshot_it_cannot_vouch_for_and_is_excused() {
         Ok(report) => report,
         Err(failure) => panic!("step {}: {}", failure.step, failure.violation),
     };
-    assert!(age_trips(&report) > 0, "{:?}", report.trips);
-    assert!(report.reach.get("failstop.excused.unvouched_snapshot") > 0);
+    assert_eq!(age_trips(&report), 0, "{:?}", report.trips);
 }

@@ -185,8 +185,9 @@ classes! {
     EnvTruncateFails = "EnvFault.TruncateFails", Undrawn;
     EnvFlipDatabasePage = "EnvFault.FlipDatabasePage", Undrawn;
     EnvDriverWritesNothing = "EnvFault.DriverWritesNothing", Undrawn;
-    MetaSave = "Meta.Save", Once;
-    MetaRestore = "Meta.Restore", Once;
+    // Undrawn: a copy put back is an operator's act (docs/decisions/D173.md): scenarios only.
+    MetaSave = "Meta.Save", Undrawn;
+    MetaRestore = "Meta.Restore", Undrawn;
     // Undrawn: the generator draws DeleteNewest, TruncateNewest and StripNewestOrigin only
     // with the engine down (StagingDamage), never under a running engine.
     MetaDeleteNewest = "Meta.DeleteNewest", Undrawn;
@@ -194,9 +195,9 @@ classes! {
     MetaTruncateNewest = "Meta.TruncateNewest", Undrawn;
     MetaStripNewestOrigin = "Meta.StripNewestOrigin", Undrawn;
     MetaDeleteAll = "Meta.DeleteAll", Once;
-    // Undrawn: a copy saved while down changes nothing; the generator saves while running.
+    // Undrawn: a copy put back is an operator's act (docs/decisions/D173.md): scenarios only.
     DamageSave = "StagingDamage.Save", Undrawn;
-    DamageRestore = "StagingDamage.Restore", Once;
+    DamageRestore = "StagingDamage.Restore", Undrawn;
     DamageDeleteNewest = "StagingDamage.DeleteNewest", Once;
     DamageFlipNewestByte = "StagingDamage.FlipNewestByte", Once;
     DamageTruncateNewest = "StagingDamage.TruncateNewest", Once;

@@ -481,9 +481,6 @@ pub struct Weights {
     pub staging_damage: u32,
     /// [`Op::Heal`].
     pub heal: u32,
-    /// [`Op::Meta`] with the steps that replace staged files under a running
-    /// engine ([`MetaOp::Save`], [`MetaOp::Restore`]).
-    pub staging_replace_running: u32,
     /// The chance in a thousand that a step is an [`Op::Hold`] instead of
     /// what the history drew there. Not a weight: holds come from a stream of
     /// their own and replace the drawn step, so a run that draws no hold is
@@ -638,7 +635,6 @@ impl Default for Weights {
             heal: 1,
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
-            staging_replace_running: 0,
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it, and `tests/sim/survival.rs` turns
             // it on.
@@ -695,7 +691,6 @@ enum Kind {
     WalDamage,
     StagingDamage,
     Heal,
-    StagingReplaceRunning,
     AppInTick,
     Verify,
     OtherConnectionCommit,
@@ -704,7 +699,7 @@ enum Kind {
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 27] {
+    fn table(&self) -> [(Kind, u32); 26] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -727,7 +722,6 @@ impl Weights {
             (Kind::WalDamage, self.wal_damage),
             (Kind::StagingDamage, self.staging_damage),
             (Kind::Heal, self.heal),
-            (Kind::StagingReplaceRunning, self.staging_replace_running),
             (Kind::AppInTick, self.app_in_tick),
             (Kind::Verify, self.verify),
             (Kind::OtherConnectionCommit, self.other_connection_commit),
@@ -796,7 +790,6 @@ impl Weights {
             wal_damage: weight(false),
             staging_damage: weight(false),
             heal: weight(false),
-            staging_replace_running: 0,
             hold: 0,
             vacuum_resizes: below(&entropy, 2) == 0,
             block_crash_law: false,
@@ -822,7 +815,6 @@ impl Weights {
         // Drawn after that, for the same reason.
         mix.block_crash_law = below(&entropy, 2) == 0;
         // And after that, for the same reason.
-        mix.staging_replace_running = weight(false);
         // Drawn after that, for the same reason: a third each.
         mix.after_restart = match below(&entropy, 3) {
             0 => AfterRestart::Nothing,
@@ -1065,26 +1057,16 @@ fn wal_damage(entropy: &SeededEntropy) -> Op {
     }
 }
 
+/// Damage to staged files. A copy saved and put back later is an operator's act
+/// (`docs/decisions/D173.md`) and is drawn by no generator; the scenarios have it.
 fn staging_damage(entropy: &SeededEntropy) -> Op {
-    match below(entropy, 8) {
-        0 => Op::Meta(MetaOp::Save),
-        1 => Op::Meta(MetaOp::DeleteAll),
-        2 => Op::StagingDamage(MetaOp::Restore),
-        3 => Op::StagingDamage(MetaOp::DeleteNewest),
-        4 => Op::StagingDamage(MetaOp::FlipNewestByte),
-        5 => Op::StagingDamage(MetaOp::TruncateNewest),
-        6 => Op::StagingDamage(MetaOp::StripNewestOrigin),
+    match below(entropy, 6) {
+        0 => Op::Meta(MetaOp::DeleteAll),
+        1 => Op::StagingDamage(MetaOp::DeleteNewest),
+        2 => Op::StagingDamage(MetaOp::FlipNewestByte),
+        3 => Op::StagingDamage(MetaOp::TruncateNewest),
+        4 => Op::StagingDamage(MetaOp::StripNewestOrigin),
         _ => Op::Meta(MetaOp::FlipNewestByte),
-    }
-}
-
-/// A staged file replaced under a running engine by a backup put back. Five
-/// slots, as when this also drew forged files (out of scope, see
-/// docs/decisions.md D131), so the draws after it are unchanged.
-fn staging_replace_running(entropy: &SeededEntropy) -> Op {
-    match below(entropy, 5) {
-        0 | 2 => Op::Meta(MetaOp::Save),
-        _ => Op::Meta(MetaOp::Restore),
     }
 }
 
@@ -1247,7 +1229,6 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::WalDamage => wal_damage(entropy),
         Kind::StagingDamage => staging_damage(entropy),
         Kind::Heal => Op::Heal,
-        Kind::StagingReplaceRunning => staging_replace_running(entropy),
         Kind::AppInTick => app_in_tick(entropy),
         Kind::Verify => Op::Verify,
     }

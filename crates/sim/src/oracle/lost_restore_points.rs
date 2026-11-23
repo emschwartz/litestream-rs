@@ -26,9 +26,8 @@ use crate::oracle::Violation;
 use crate::reach::Reach;
 
 /// What can force the engine to delete staged files the replica never took.
-/// The WAL's own changes are here because the boot's witness deletes every
-/// pending staged file the live WAL cannot vouch for (`StagedUnverified`): one
-/// staged before a restart, an emptied WAL or damage can no longer be proved.
+/// The WAL's own changes are here because the boot compares the newest staged
+/// file with the live WAL, and a snapshot above it follows a mismatch.
 const FORCES_GIVE_UP: &[Forcing] = &[
     Forcing::StagingEdited,
     Forcing::StagingFault,
@@ -120,9 +119,7 @@ impl LostRestorePoints {
         }
         reach.add("lost_restore_points.counted", lost);
         let forced = FORCES_GIVE_UP.iter().any(|why| window.contains(why));
-        if !forced && window.contains(&Forcing::PendingUnprovable) {
-            reach.add("pending_unprovable.given_up", lost);
-        } else if !forced {
+        if !forced {
             return Err(Violation::UnforcedGiveUp {
                 lost,
                 window: window.iter().copied().collect(),

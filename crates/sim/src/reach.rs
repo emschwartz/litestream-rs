@@ -25,7 +25,6 @@ pub const REQUIRED: &[&str] = &[
     "check.txid.inside",     // a target inside a compacted file (ledger: inside-file-sole-base)
     "check.txid.below_base", // refusals below the retention base (RestoreRefused, WrongAnswer)
     "check.latest",          // LatestLostAck
-    "check.lost",            // acknowledged transactions the replica legitimately lost (roll back)
     "check.asof.planned",    // AsOfTooNew, NotLatest (ledger: asof-straddle)
     "check.asof.inside",     // as-of inside a file's range (ledger: asof-straddle)
     "check.asof.refused",    // as-of refusals the planner's contract judges
@@ -96,6 +95,10 @@ pub const UNREQUIRED: &[(&str, &str)] = &[
     (
         "check.asof.fallback",
         "an as-of with no file at or before it; needs a dropped created-at, weight 0 in the mixes",
+    ),
+    (
+        "check.lost",
+        "acknowledged transactions the replica legitimately lost: only a lying disk or a bucket rollback loses one, and the boot no longer deletes staged files the WAL cannot vouch for",
     ),
     (
         "check.damaged",

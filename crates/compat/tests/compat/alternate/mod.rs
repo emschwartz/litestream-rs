@@ -232,7 +232,8 @@ struct Run {
     /// What the next boot must do, read after the last kill.
     expect: Expect,
     /// The first unpublished staged file outside the WAL's generation, read after the last
-    /// kill (`generation::unpublished_across_restart`).
+    /// kill (`generation::unpublished_across_restart`): the next Rust boot uploads it as
+    /// staged, so its first file is no snapshot though the boot's snapshot follows.
     crossed: Option<Txid>,
     /// Application commits SQLite refused busy and the run tried again.
     busy: u32,
@@ -554,21 +555,15 @@ impl Run {
             self.first_boot(process, &at);
             return None;
         };
-        // After a restart or truncate, Rust deletes unpublished staged files the live WAL
-        // cannot vouch for, and its snapshot takes the first of their transactions.
-        let after = self.unverified_from(process, &at).map_or(prev, |from| {
-            from.prev()
-                .unwrap_or_else(|| panic!("{at}: dropped staged files from {from}"))
-        });
-        let boot = wait_boot_file(process, &self.fixture, after)
-            .unwrap_or_else(|e| panic!("{at}: no file continues {after}: {e}"));
+        let boot = wait_boot_file(process, &self.fixture, prev)
+            .unwrap_or_else(|e| panic!("{at}: no file continues {prev}: {e}"));
         let fields = boot.header.fields();
         let snapshotted = boot.header.is_snapshot() || boot.holds_every_page();
         let cause = self.boot_cause(process, prev, &at);
         let expect = self.expect;
         if !snapshotted {
             assert!(
-                cause.is_none(),
+                cause.is_none() || self.crossed.is_some(),
                 "{at}: the boot continued {prev} but logged a snapshot cause {cause:?}"
             );
             if expect.may_snapshot() {
@@ -577,7 +572,7 @@ impl Run {
             return None;
         }
         assert!(
-            expect.may_snapshot() || self.unverified_crossing(process.kind(), cause.as_deref()),
+            expect.may_snapshot(),
             "{at}: the boot snapshotted after {prev} ({cause:?}): its first file {}-{} holds {} \
              of {} pages, and the position was in the WAL's generation",
             fields.txids.min(),
@@ -631,27 +626,6 @@ impl Run {
         }
     }
 
-    /// The first transaction a Rust boot deleted unpublished because the live WAL could not
-    /// vouch for it (`SnapshotCause::StagedUnverified`), read from its boot line. Only a boot
-    /// after the WAL restarted or was truncated may do that; any other is left to fail on its
-    /// logged cause.
-    fn unverified_from(&self, process: &mut Replicator, at: &str) -> Option<Txid> {
-        if process.kind() != Kind::Rust || !(self.expect.may_snapshot() || self.crossed.is_some()) {
-            return None;
-        }
-        let line = self.rust_boot_line(process, at);
-        let (_, rest) = line.split_once("StagedUnverified")?;
-        let (_, hex) = rest.split_once("Txid(")?;
-        let hex = hex.split(')').next()?;
-        u64::from_str_radix(hex, 16).ok().and_then(Txid::new)
-    }
-
-    /// Whether a Rust boot's `StagedUnverified` snapshot is the one the previous kill called
-    /// for: it left unpublished staged files from before a WAL restart.
-    fn unverified_crossing(&self, kind: Kind, cause: Option<&str>) -> bool {
-        kind == Kind::Rust && self.crossed.is_some() && cause == Some("StagedUnverified")
-    }
-
     /// The Rust daemon's boot line.
     fn rust_boot_line(&self, process: &mut Replicator, at: &str) -> String {
         // The daemon's log sink is in place before its replicator's thread runs,
@@ -681,7 +655,6 @@ impl Run {
                 format!("{:?} (rule 6 or 4; not logged)", self.expect)
             }
             (_, _, Some(cause)) if allowed.contains(&cause.as_str()) => cause,
-            (_, _, Some(cause)) if self.unverified_crossing(kind, Some(&cause)) => cause,
             (_, _, cause) => panic!(
                 "{at}: a boot snapshot after {:?} gave cause {cause:?}, not one of {allowed:?}",
                 self.expect
