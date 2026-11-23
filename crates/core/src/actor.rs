@@ -773,7 +773,10 @@ impl Actor {
             clock: env.clock,
             journal: env.journal.as_deref_mut(),
         };
-        let tick = self.tick_at(&mut roles, now).await;
+        // Boxed: the tick's state machine is the largest future the replicator thread polls,
+        // and on the heap it is not part of every poll frame below `block_on`, which in a
+        // debug build is what the half-stack headroom gate measures (`lsr_replica::stack`).
+        let tick = Box::pin(self.tick_at(&mut roles, now)).await;
         self.kept.work.add_checkpoints(ck.totals());
         let tick = self.reconcile_journal(env.journal.as_deref_mut(), tick, now);
         self.observe_lag(env.wal, now);
