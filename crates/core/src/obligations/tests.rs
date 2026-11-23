@@ -59,3 +59,17 @@ fn each_way_out_of_the_closed_world_is_named() {
         ["struct Missing: not found, or has no fields"]
     );
 }
+
+/// A field line names one identifier and ends with a comma; each part is needed: a line whose
+/// type runs on, a name that is not one identifier, and no name at all declare no field.
+#[test]
+fn a_field_line_is_one_name_and_a_whole_type() {
+    assert_eq!(field_name("one: u8,"), Some("one".to_owned()));
+    assert_eq!(
+        field_name("one: u8"),
+        None,
+        "the type runs on to the next line"
+    );
+    assert_eq!(field_name("one two: u8,"), None, "not one identifier");
+    assert_eq!(field_name(": u8,"), None, "no name");
+}
