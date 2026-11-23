@@ -548,6 +548,10 @@ fn a_staged_file_below_the_newest_that_the_wal_rewrote_costs_a_snapshot() {
         (restored_page(&rig, 1), restored_page(&rig, 2)),
         (0xC0, 0xB0)
     );
+    // The snapshot answered the rewrite: the next boot over the same staged files takes none.
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 3);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
 }
 
 /// A replica outage longer than the witness cap: the engine stops staging at

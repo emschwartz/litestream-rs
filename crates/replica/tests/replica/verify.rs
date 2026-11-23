@@ -342,6 +342,10 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     let replicator =
         Replicator::start_with(&site.db, Arc::clone(&store), verifying_quietly(), runtime).unwrap();
     let events = events(&replicator);
+    // The boot's first file goes up before any commit: a commit that beats the boot is inside
+    // that one file, nothing is left to compact, and the schedule then writes no level-1 file
+    // and no level-9 snapshot for a day (see `settle_maintenance`).
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     site.commit(3);
     advance(&replicator, &clock, POLL);
     let good = replicated(&moved_until(&replicator, &clock, (POLL, 240), caught_up)).unwrap();
@@ -362,7 +366,6 @@ fn a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_l
     ));
     clock.advance(EVERY);
     let failed = wait(&replicator, |h| h.verification.runs.failed == 1);
-    eprintln!("DBG {:?}", failed.verification);
     let failing = failed.verification.failing.unwrap();
     assert_eq!(failing.txid, txid);
     assert!(
@@ -507,6 +510,10 @@ fn a_run_that_restores_but_finds_the_newest_out_of_reach_fails_as_unrestorable()
     let store: Arc<dyn DynStore> = Arc::<Gated>::clone(&gated);
     let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, store, verifying_quietly(), runtime).unwrap();
+    // The boot's first file goes up before any commit: a commit that beats the boot is inside
+    // that one file, nothing is left to compact, and the schedule then writes no level-1 file
+    // and no level-9 snapshot for a day (see `settle_maintenance`).
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
     site.commit(1);
     advance(&replicator, &clock, POLL);
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
