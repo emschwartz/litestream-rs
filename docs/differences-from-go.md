@@ -13,7 +13,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | The replicator crashes, is killed or restarts | Resume from the local files and the WAL. Take a snapshot only when the WAL no longer matches |
 | S3 errors, throttles or is down | Retry, waiting up to 5 minutes between tries, for as long as it takes |
 | SQLite changes the WAL: a checkpoint from outside, a WAL restart, `VACUUM`, a deleted WAL | Continue, or take a snapshot |
-| S3's list of files is out of date † | Trust the list. Object storage that lists behind its writes is unsupported |
+| S3's list of files is out of date | Trust the list. Object storage that lists behind its writes is unsupported |
 | An S3 replica with no path inside the bucket † | Works, with keys that start with `/` |
 | Retry counts and warnings after a restart | Start again from zero (under review) |
 | `replicate` and `restore` fail | Exit 1 |
@@ -62,7 +62,6 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 
 ## What `main` does today for the rows marked †
 
-- **File list out of date:** the engine reads past every listing before it trusts it.
 - **S3 replica with no path:** refused at load.
 - **WAL write fails:** the engine remembers the failure in a journal and runs a verified repair.
 - **Bucket files deleted or rolled back:** the engine watches files it uploaded and tries to heal.
