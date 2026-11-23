@@ -161,7 +161,7 @@ async fn digests_at<R: Role>(
 /// What a restore of the replica's newest confirmed state failing means for the check: a store
 /// error is the store's fault, retried as such; a file that does not verify or a history that
 /// does not plan is the replica's damage.
-fn restore_fault<R: Role>(err: &RestoreError) -> Fault {
+pub(crate) fn restore_fault<R: Role>(err: &RestoreError) -> Fault {
     match err {
         RestoreError::Store(err) => R::fault(err),
         RestoreError::Unstable { .. } | RestoreError::ListingBehind { .. } => Fault::StoreTransient,

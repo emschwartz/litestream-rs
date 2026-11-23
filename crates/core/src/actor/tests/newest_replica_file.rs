@@ -54,8 +54,10 @@ fn with_staging_gone_and_level_zero_retained_away_boot_is_a_first_sync() {
     let newest_staged = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
     block_on(rig.remote.inner.delete(&[newest_staged])).unwrap();
     rig.staging = Counting::default();
-    // No level-0 file for the WAL to vouch for: nothing local tells these
-    // files from another writer's, so the boot stops.
+    // No level-0 file for the WAL to vouch for, and the database is not the
+    // replica's state (page 2 changed while nothing replicated): nothing
+    // local tells these files from another writer's, so the boot stops.
+    rig.db.write_page(pg(2), &vec![9; PS.bytes()]);
     let mut actor = Actor::new(cfg());
     assert_eq!(
         rig.tick(&mut actor, T0 + 2),
