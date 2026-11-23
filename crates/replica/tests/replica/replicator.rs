@@ -828,9 +828,42 @@ fn a_thread_that_dies_is_reported_gone() {
     clock.advance(POLL);
     let health = wait(&replicator, |h| h.phase == Phase::Gone(Gone::ThreadDied));
     assert_eq!(health.phase, Phase::Gone(Gone::ThreadDied));
+    // The file is free for the next replicator at once, without a stop of the dead one.
+    let (runtime, _clock) = fake();
+    let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert_eq!(stopped(&replicator), Stopped::Gone(Gone::ThreadDied));
     assert_eq!(booted(&replicator), Booted::Gone(Gone::ThreadDied));
-    // The file is free for the next replicator.
+    assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    site.assert_restores(&*site.store());
+}
+
+/// A sink whose drop panics: the thread drops it with the engine, after the loop and its exit
+/// guard are done.
+struct ExplodesOnDrop;
+
+impl EventSink for ExplodesOnDrop {
+    fn event(&mut self, _event: &Event) {}
+}
+
+impl Drop for ExplodesOnDrop {
+    fn drop(&mut self) {
+        panic!("the sink's drop panics");
+    }
+}
+
+/// A thread that dies after its loop ended, with no outcome published, is still seen gone by
+/// every handle, and the next replicator of the file takes its place.
+#[test]
+fn a_thread_that_dies_without_an_outcome_is_reported_gone() {
+    let site = Site::new();
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    replicator.set_events(Box::new(ExplodesOnDrop));
+    site.commit(1);
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    assert_eq!(stopped(&replicator), Stopped::Gone(Gone::ThreadDied));
+    assert_eq!(replicator.health().phase, Phase::Gone(Gone::ThreadDied));
     let (runtime, _clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert!(matches!(stopped(&next), Stopped::Drained { .. }));
