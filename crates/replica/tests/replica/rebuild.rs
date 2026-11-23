@@ -119,7 +119,9 @@ fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
     // The engine stages this commit before the retry, whose upload then panics: a retry owed
     // goes first in a tick, so a commit the engine has not yet synced is not staged by it.
     site.commit(1);
-    moved_until(&replicator, &clock, (POLL, 30), |h| h.synced > failing.synced);
+    moved_until(&replicator, &clock, (POLL, 30), |h| {
+        h.synced > failing.synced
+    });
     faulty.panic_always.store(true, Ordering::SeqCst);
     // The clock moves only once the engine is parked on it: a move while it still works is lost.
     let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|_| false);
