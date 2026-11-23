@@ -1,0 +1,4 @@
+name = "creds-empty-aws-var-ignored"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::an_empty_aws_variable_blocks_the_litestream_copy"]

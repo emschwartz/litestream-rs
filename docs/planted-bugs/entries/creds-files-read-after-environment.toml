@@ -1,0 +1,7 @@
+# S3 credentials made to resolve as Go's AWS SDK does (claude/dropin-creds): found by the Go
+# differential (compat `dropin_creds`), which needs the Go dumper and so is ignored; the
+# chain tests below are its Go-free counterparts.
+name = "creds-files-read-after-environment"
+fix = "claude/dropin-creds"
+package = "lsr-store-s3"
+tests = ["chain::tests::a_partial_profile_stops_the_chain_even_with_environment_keys"]

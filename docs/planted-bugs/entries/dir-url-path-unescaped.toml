@@ -1,0 +1,5 @@
+name = "dir-url-path-unescaped"
+fix = "claude/dropin-dir"
+package = "lsr-config"
+test_bin = "config"
+tests = ["odd_names_reach_a_url_replica_unchanged"]

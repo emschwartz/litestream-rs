@@ -1,0 +1,5 @@
+name = "canary-no-op"
+fix = "none"
+package = "lsr-ltx"
+canary = "survived"
+tests = ["checksum::tests::the_crc_is_go_iso_on_its_check_string"]

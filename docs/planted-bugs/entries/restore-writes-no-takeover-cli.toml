@@ -1,0 +1,5 @@
+name = "restore-writes-no-takeover-cli"
+fix = "54e47f8"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["integrity_check_publishes_a_valid_database_in_every_mode"]

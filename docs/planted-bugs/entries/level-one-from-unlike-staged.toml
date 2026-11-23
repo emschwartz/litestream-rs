@@ -1,0 +1,6 @@
+name = "level-one-from-unlike-staged"
+fix = "3ab9b7b"
+package = "lsr-core"
+tests = [
+    "level_one_is_built_from_the_replica_when_the_local_copy_differs",
+]

@@ -1,0 +1,6 @@
+name = "latest-judged-against-old-nodes-sim"
+fix = "plant"
+patch = "latest-judged-against-old-nodes"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss"]
