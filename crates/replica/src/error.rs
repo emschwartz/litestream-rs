@@ -59,6 +59,21 @@ pub enum StartError {
         /// The size SQLite reported.
         bytes: u32,
     },
+    /// The SQLite linked into the process is not the bundled build the replicator reads
+    /// SQLite's private layouts for: the build links another SQLite (a system library through
+    /// pkg-config, SQLCipher, a loadable-extension build). Build with rusqlite's `bundled`
+    /// feature and no other SQLite.
+    #[error(
+        "the SQLite in use is version {found} ({source_id}), not the bundled build {expected} this library requires: link only the SQLite that rusqlite bundles"
+    )]
+    SqliteBuild {
+        /// `sqlite3_libversion_number()` of the running library.
+        found: std::ffi::c_int,
+        /// `sqlite3_sourceid()` of the running library.
+        source_id: String,
+        /// The version the replicator was written for.
+        expected: std::ffi::c_int,
+    },
     /// The replicator thread could not be started. Each database needs its own thread
     /// (`lsr_replica::stack`), so the usual cause is the process's thread limit.
     #[error(
@@ -79,6 +94,15 @@ impl From<lsr_sqlite::OpenError> for StartError {
             lsr_sqlite::OpenError::NotWal { mode } => Self::NotWal { journal_mode: mode },
             lsr_sqlite::OpenError::PageSize { bytes } => Self::PageSize { bytes },
             lsr_sqlite::OpenError::Refused(refusal) => Self::Refused(refusal),
+            lsr_sqlite::OpenError::SqliteBuild {
+                found,
+                source_id,
+                expected,
+            } => Self::SqliteBuild {
+                found,
+                source_id,
+                expected,
+            },
         }
     }
 }

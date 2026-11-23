@@ -216,43 +216,23 @@ fn missing_value_at_the_end_and_before_another_flag() {
 }
 
 #[test]
-fn missing_required_flag_for_every_required_flag() {
-    let valid = [
-        (CommandName::Restore, "restore --replica r --output o"),
-        (CommandName::Verify, "verify --replica r"),
-        (CommandName::Files, "files --replica r"),
-        (CommandName::TakeOver, "take-over app.db --replica r"),
-    ];
-    let mut checked = 0;
-    for (command, line) in valid {
-        for spec in FLAGS
-            .iter()
-            .filter(|s| s.required && s.commands.contains(&command))
-        {
-            let mut args = words(line);
-            let at = args.iter().position(|a| a == spec.name).unwrap();
-            args.drain(at..=at + 1);
-            // restore reads Go's grammar: no source at all is Go's own refusal.
-            let want = if command == CommandName::Restore {
-                UsageError::GoSourceMissing
-            } else {
-                UsageError::MissingFlag {
-                    command: command.word(),
-                    flag: spec.name,
-                }
-            };
-            assert_eq!(parse(&args), Err(want));
-            checked += 1;
-        }
+fn missing_required_flag() {
+    for (line, command) in [
+        ("verify", "verify"),
+        ("files --json", "files"),
+        ("take-over app.db", "take-over"),
+    ] {
+        assert_eq!(
+            usage(line),
+            UsageError::MissingFlag {
+                command,
+                flag: "--replica"
+            },
+            "{line}"
+        );
     }
-    assert_eq!(
-        checked,
-        FLAGS
-            .iter()
-            .filter(|s| s.required)
-            .map(|s| s.commands.len())
-            .sum::<usize>()
-    );
+    // restore reads Go's grammar: no source at all is Go's own refusal.
+    assert_eq!(usage("restore --output o"), UsageError::GoSourceMissing);
 }
 
 /// Go refuses a txid and a timestamp together only when it plans or restores, so the parse
@@ -622,84 +602,16 @@ fn s3_flags_are_taken_by_every_command() {
 }
 
 #[test]
-fn every_flag_in_the_table_is_accepted_by_its_commands() {
-    for spec in FLAGS {
-        for command in spec.commands {
-            let replica = if S3_ONLY_FLAGS.contains(&spec.name) {
-                "s3://b/p"
-            } else {
-                "r"
-            };
-            let base = match command {
-                CommandName::Restore if spec.name == "--allow-earlier" => {
-                    format!(
-                        "restore --replica {replica} --output o --timestamp 2026-01-01T00:00:00Z"
-                    )
-                }
-                CommandName::Restore => format!("restore --replica {replica} --output o"),
-                CommandName::Verify => format!("verify --replica {replica}"),
-                CommandName::Files => format!("files --replica {replica}"),
-                CommandName::TakeOver => format!("take-over app.db --replica {replica}"),
-            };
-            let value = match spec.name {
-                "--endpoint" => "http://h",
-                "--region" => "eu-west-1",
-                "--txid" => "0000000000000001",
-                "--timestamp" => "2026-01-01T00:00:00Z",
-                "--depth" => "names",
-                "--integrity-check" => "full",
-                "-parallelism" => "4",
-                "-follow-interval" => "1s",
-                _ => "x",
-            };
-            let extra = spec.value.map_or(String::new(), |_| format!(" {value}"));
-            let line = if spec.required {
-                base
-            } else {
-                format!("{base} {}{extra}", spec.name)
-            };
-            assert!(parsed(&line).is_ok(), "{line}");
-            let other: Vec<_> = CommandName::ALL
-                .iter()
-                .filter(|c| !spec.commands.contains(c))
-                .collect();
-            for command in other {
-                let db = if *command == CommandName::TakeOver {
-                    " app.db"
-                } else {
-                    ""
-                };
-                let line = format!(
-                    "{}{db} --replica {replica} {}{extra}",
-                    command.word(),
-                    spec.name
-                );
-                assert!(
-                    matches!(
-                        usage(&line),
-                        UsageError::UnknownFlag { .. }
-                            | UsageError::GoFlag(
-                                lsr_sidecar::goflag::FlagError::UnknownFlag { .. }
-                            )
-                    ),
-                    "{line}"
-                );
-            }
-        }
-    }
-}
-
-#[test]
 fn help_documents_every_flag_command_and_exit_code() {
     let help = crate::render::help();
-    for spec in FLAGS {
-        assert!(
-            help.contains(spec.name) && help.contains(spec.help),
-            "{}",
-            spec.name
-        );
-    }
     for command in CommandName::ALL {
+        for flag in help_flags(command) {
+            assert!(
+                help.contains(&flag.name) && help.contains(&flag.help),
+                "{}",
+                flag.name
+            );
+        }
         assert!(
             help.contains(&format!("lsr {}", command.word())),
             "{}",

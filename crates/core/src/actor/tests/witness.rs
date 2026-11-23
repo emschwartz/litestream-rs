@@ -754,3 +754,109 @@ fn a_pending_file_with_one_page_too_many_is_refused() {
     assert!(!replica_holds(&rig, 2, &more));
     assert_eq!(restored(&rig), 2);
 }
+
+/// One read of a pending file that answers with another valid file (a lying read; the stored
+/// bytes are the engine's): the first witness pass refuses the file and the second witnesses
+/// it. Passes that disagree prove nothing, so the boot deletes nothing and retries
+/// (`LocalIo`); the next boot witnesses the stored bytes and uploads them.
+#[test]
+fn witness_passes_that_disagree_retry_the_boot() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let stored = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
+    let other = replace_staged(&rig, 3, 0xEE);
+    put_l0(&rig.staging.inner, 3, &stored);
+    // The boot reads the newest staged file once before it witnesses, so the second read
+    // from its start is the first witness pass's.
+    rig.staging.other_bytes_on_read(key, 2, other);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert!(
+        matches!(
+            event(&boot),
+            Some(Event::Retrying {
+                fault: Fault::LocalIo,
+                ..
+            })
+        ),
+        "{boot:?}"
+    );
+    assert_eq!(
+        rig.staging.reads_of(&key),
+        3,
+        "the boot ran two witness passes"
+    );
+    assert_eq!(staged(&rig), vec![2, 3], "the boot deleted nothing");
+    let seen = rig.settle(&mut actor, T0 + 1_002);
+    no_stop(&seen);
+    assert!(replica_holds(&rig, 3, &stored));
+}
+
+/// Pending files 2 and 3 staged and held; the `nth` read of staged 3 from its start answers
+/// with another valid file, the stored bytes untouched. Returns the rig, the boot's first
+/// tick, the boot's later ticks and the stored bytes of 3.
+fn boot_with_one_lying_read(nth: usize) -> (Rig, Tick, Vec<Tick>, Vec<u8>) {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
+    let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let stored = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
+    let other = replace_staged(&rig, 3, 0xEE);
+    put_l0(&rig.staging.inner, 3, &stored);
+    rig.staging.other_bytes_on_read(key, nth, other);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(staged(&rig), vec![2, 3], "the boot deleted nothing");
+    let seen = rig.settle(&mut actor, T0 + 1_002);
+    (rig, boot, seen, stored)
+}
+
+/// The boot's first two reads of the newest staged file are the sweep's and the witness
+/// passes'; its third is recovery's read of the file's header. One lie there made the file
+/// look unreadable, and the boot snapshotted (`NewestStagedFileUnreadable`) on one failed
+/// read. Now that read is doubted: the boot fails with `StagedLost`, the next boot reads the
+/// stored bytes, continues without a snapshot and uploads them.
+#[test]
+fn one_lying_read_of_the_newest_staged_header_retries_the_boot() {
+    let (rig, boot, seen, stored) = boot_with_one_lying_read(3);
+    let retried = matches!(
+        event(&boot),
+        Some(Event::Retrying {
+            fault: Fault::StagedLost,
+            ..
+        })
+    );
+    assert!(retried, "{boot:?}");
+    no_stop(&seen);
+    let booted = seen.iter().find_map(|tick| match event(tick) {
+        Some(Event::Booted { cause }) => Some(*cause),
+        Some(_) | None => None,
+    });
+    assert_eq!(booted, Some(None), "the next boot continues: {seen:?}");
+    assert!(replica_holds(&rig, 3, &stored));
+}
+
+/// The fourth read is recovery's scan of the file's pages: one lie there made its last page
+/// disagree with the WAL's, and the boot snapshotted (`LastPageMismatch`). It is doubted
+/// the same way.
+#[test]
+fn one_lying_read_of_the_newest_staged_pages_retries_the_boot() {
+    let (rig, boot, seen, stored) = boot_with_one_lying_read(4);
+    let retried = matches!(
+        event(&boot),
+        Some(Event::Retrying {
+            fault: Fault::StagedLost,
+            ..
+        })
+    );
+    assert!(retried, "{boot:?}");
+    no_stop(&seen);
+    let booted = seen.iter().find_map(|tick| match event(tick) {
+        Some(Event::Booted { cause }) => Some(*cause),
+        Some(_) | None => None,
+    });
+    assert_eq!(booted, Some(None), "the next boot continues: {seen:?}");
+    assert!(replica_holds(&rig, 3, &stored));
+}

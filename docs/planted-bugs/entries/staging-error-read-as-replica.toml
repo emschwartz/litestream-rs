@@ -1,0 +1,11 @@
+# The staging role classifies its errors as the replica's: a missing staged file reads as "list
+# again" instead of lost, a failed staging fsync as an ambiguous upload. Since store errors become
+# faults only through a store's role (crates/core/src/fault/role.rs), this is the one place the
+# two stores' meanings can be swapped.
+name = "staging-error-read-as-replica"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "sync::tests::a_staging_commit_error_returns_the_same_step_and_the_retry_overwrites_the_file",
+    "upload::tests::errors_before_the_commit_leave_the_state_and_cost_no_listing",
+]

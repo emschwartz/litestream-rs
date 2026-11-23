@@ -1,7 +1,5 @@
-# The defect the end-of-run stall check exists for, killed by the swarm with nothing written for
-# it: a task's success leaves its stall in place, so health says degraded for nothing.
+# A task's success leaves its stall in place, so health says degraded for nothing.
 name = "success-keeps-a-stall"
 fix = "checker-holes (stall liveness)"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_stall_ends_with_the_fault_that_caused_it_seed_0x31c"]
+package = "lsr-core"
+tests = ["actor::tests::degraded::a_retried_fault_that_persists_ends_degraded_as_a_stall"]

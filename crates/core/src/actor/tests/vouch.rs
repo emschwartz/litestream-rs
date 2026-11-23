@@ -272,3 +272,217 @@ fn a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits() {
     assert!(waited, "an unanswered ask waits its backoff");
     assert_eq!(staged(&rig), before, "nothing is deleted unrecorded");
 }
+
+/// Transaction 4's put lands on the replica but comes back with the wrong
+/// checksum, and the delete that would clear it fails: the replica holds 4,
+/// unconfirmed. Its staged copy then reads back damaged twice in a row
+/// (`flipped`), so the running engine keeps a takeover record through 4 and
+/// drops it, and a snapshot replaces it. Returns the rig, the actor, and when
+/// the snapshot is due.
+fn own_upload_unconfirmed_then_dropped() -> (Rig, Actor, i64) {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    rig.commit(4);
+    rig.remote
+        .inner
+        .inject_failure_after_publish(StoreError::Corrupt {
+            key: None,
+            cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+        });
+    rig.remote.inner.inject_failure(
+        StoreOp::Delete,
+        StoreError::Transient {
+            op: StoreOp::Delete,
+            kind: ErrorKind::ConnectionReset,
+        },
+    );
+    let mut now = T0 + 2;
+    let mut mismatched = false;
+    for _ in 0..20 {
+        let tick = rig.tick(&mut actor, now);
+        if let Some(Event::Retrying { fault, until }) = event(&tick) {
+            now = now.max(until.unix_millis());
+            if *fault == Fault::UploadChecksumMismatch {
+                mismatched = true;
+                break;
+            }
+        }
+    }
+    assert!(mismatched, "the put of 4 reported another checksum");
+    let remote = Rig::files(&rig.remote, Level::ZERO);
+    assert!(
+        remote.iter().any(|f| f.key.range().max() == tx(4)),
+        "{remote:?}"
+    );
+    super::tear(&rig, 4, super::flipped);
+    (rig, actor, now)
+}
+
+/// The staging write of the snapshot that replaces the dropped file fails
+/// once, so a listing runs before the snapshot is staged. It finds 4 above
+/// where staging now stands. That is the engine's own upload, which its
+/// record vouched for: the listing confirms it and the snapshot goes above
+/// it. The listing used to take it for another writer's file and stop.
+#[test]
+fn a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own() {
+    let (mut rig, mut actor, now) = own_upload_unconfirmed_then_dropped();
+    rig.staging.inner.inject_failure(
+        StoreOp::Upload,
+        StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: ErrorKind::ConnectionReset,
+        },
+    );
+    let seen = rig.follow(&mut actor, now, 60);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(rig.takeover.map(TakeoverRecord::txid), Some(tx(4)));
+    assert_eq!(super::restored(&rig), 4);
+}
+
+/// The listing after the drop fails once, so the snapshot is staged first
+/// and takes id 4, which the replica already holds with the engine's own
+/// unconfirmed upload. The next listing finds the two differ. Within the ids
+/// its own drop vouched for, the replica's copy stands and the staged
+/// snapshot goes, as for a staged file that changed. It used to take the
+/// replica's copy for another writer's and stop.
+#[test]
+fn a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy() {
+    let (mut rig, mut actor, now) = own_upload_unconfirmed_then_dropped();
+    rig.remote.inner.inject_failure(
+        StoreOp::List,
+        StoreError::Transient {
+            op: StoreOp::List,
+            kind: ErrorKind::ConnectionReset,
+        },
+    );
+    let seen = rig.follow(&mut actor, now, 60);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(super::restored(&rig), 4);
+}
+
+/// The drop leaves nothing to upload, and the staging write of the
+/// snapshot that replaces it fails once, at a time maintenance is due to
+/// list the replica. Maintenance runs only while uploads are idle, and it
+/// takes a file past everything the engine staged or confirmed for another
+/// writer's. The drop therefore marks the uploads to list first: the
+/// listing confirms 4 as the engine's own before maintenance looks. Without
+/// that, maintenance found 4 and stopped for another writer.
+#[test]
+fn maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload() {
+    let (mut rig, mut actor, now) = own_upload_unconfirmed_then_dropped();
+    rig.staging.inner.inject_failure(
+        StoreOp::Upload,
+        StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: ErrorKind::ConnectionReset,
+        },
+    );
+    let seen = rig.follow(&mut actor, super::listing_due(now), 60);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(rig.takeover.map(TakeoverRecord::txid), Some(tx(4)));
+    assert_eq!(super::restored(&rig), 4);
+}
+
+/// A staging directory put back from a backup taken when it held only
+/// transaction 1, with the replica's own copy of 1.
+fn staging_holding_only_one(rig: &Rig) -> Counting {
+    let old_staging = Counting::default();
+    let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
+    let bytes = block_on(rig.remote.inner.read(&one, 0, ReadLen::CHUNK)).unwrap();
+    block_on(async {
+        let mut up = old_staging
+            .inner
+            .begin_upload(&one, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&bytes).await.unwrap();
+        up.commit().await.unwrap()
+    });
+    old_staging
+}
+
+/// The bucket rolls back: every replica file ending at `newest` is gone.
+fn roll_back_to_before(rig: &Rig, newest: Txid) {
+    let all = block_on(crate::Inventory::load(&rig.remote.inner)).unwrap();
+    let gone: Vec<FileKey> = all
+        .files()
+        .iter()
+        .map(|info| info.key)
+        .filter(|key| key.range().max() == newest)
+        .collect();
+    block_on(rig.remote.inner.delete(&gone)).unwrap();
+}
+
+/// The replica holds transactions 1 to 3, but staging is an old backup put
+/// back holding only 1, and a takeover record covers the replica, so the
+/// boot takes the replica as its base and owes a snapshot above 3. That
+/// snapshot cannot be staged yet (staging refuses writes). After
+/// maintenance's first listing the bucket rolls back and loses 3. The
+/// listing after the regression finds 2: above what staging holds, but a
+/// file this process confirmed as its base, so it is the replica's, not
+/// another writer's. It used to stop the engine for another writer.
+#[test]
+fn a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas() {
+    let mut rig = three();
+    rig.staging = staging_holding_only_one(&rig);
+    rig.wal.force_restart();
+    rig.commit(7);
+    let mut actor = go_like_actor();
+    actor.remember_takeover(TakeoverRecord::through(tx(3)));
+    for _ in 0..200 {
+        rig.staging.inner.inject_failure(
+            StoreOp::Upload,
+            StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: std::io::ErrorKind::ConnectionReset,
+            },
+        );
+    }
+    let boot = rig.tick(&mut actor, T0 + 3);
+    assert!(
+        matches!(
+            booted(&boot),
+            Some(Some(SnapshotCause::BehindRemote { .. }))
+        ),
+        "{boot:?}"
+    );
+    let mut now = T0 + 3;
+    let mut listed = false;
+    for _ in 0..40 {
+        let tick = rig.tick(&mut actor, now);
+        if matches!(event(&tick), Some(Event::Maintained { .. })) {
+            listed = true;
+            break;
+        }
+        if let Some(Next::At(at)) = next_of(&tick) {
+            now = now.max(at.unix_millis());
+        }
+    }
+    assert!(listed, "maintenance listed once before the rollback");
+    roll_back_to_before(&rig, tx(3));
+    let seen = rig.follow(&mut actor, super::listing_due(now), 80);
+    let regressed = seen.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Degraded {
+                cause: PersistentCause::RemoteRegressed,
+                ..
+            })
+        )
+    });
+    assert!(regressed, "{seen:?}");
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+}

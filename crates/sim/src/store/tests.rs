@@ -144,15 +144,11 @@ fn recorder_records_err_after_publish() {
 
 /// One size-mismatch upload through `faults`: the bytes sent and what the
 /// commit acknowledged.
-fn short_write(faults: &Faults<MemStore>) -> (Vec<u8>, FileInfo) {
+fn short_write(faults: &Faults<MemStore>, mode: WriteMode) -> (Vec<u8>, FileInfo) {
     let bytes = ltx(1, 1, 1, 1, None);
     let info = block_on(async {
         let mut up = faults
-            .begin_upload(
-                &fkey(0, 1, 1),
-                Timestamp::from_unix_millis(5),
-                WriteMode::Replace,
-            )
+            .begin_upload(&fkey(0, 1, 1), Timestamp::from_unix_millis(5), mode)
             .await?;
         up.write(&bytes).await?;
         up.commit().await
@@ -169,16 +165,31 @@ fn a_size_mismatch_publishes_a_byte_short_and_acknowledges_what_it_holds() {
         vec![(StoreOp::Upload, 0, FaultShape::SizeMismatch)],
         1,
     )
-    .corrupting_through(raw.clone());
-    let (bytes, info) = short_write(&faults);
+    .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
+    let (bytes, info) = short_write(&faults, WriteMode::New);
     let held = block_on(read_all(&raw, &info.key)).unwrap();
     assert_eq!(held.as_slice(), bytes.split_last().unwrap().1);
     assert_eq!(info.size, u64::try_from(held.len()).unwrap());
     assert!(faults.handle().damaged().is_empty());
 }
 
-/// A short object the engine could not delete is damage the store keeps; one never deleted
-/// is not, so a restore that meets it stays judged.
+/// A short object the engine left after a replace is damage at once: the key may have held an
+/// acknowledged object, so the engine must not delete it, and a restore may stop on it.
+#[test]
+fn a_short_object_a_replace_left_is_damage_the_store_keeps() {
+    let raw = MemStore::new();
+    let faults = Faults::new(
+        raw.clone(),
+        vec![(StoreOp::Upload, 0, FaultShape::SizeMismatch)],
+        1,
+    )
+    .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
+    let (_, info) = short_write(&faults, WriteMode::Replace);
+    assert_eq!(faults.handle().damaged(), vec![info.key]);
+}
+
+/// A short object the engine could not delete after a create-only write is damage the store
+/// keeps; one never deleted is not, so a restore that meets it stays judged.
 #[test]
 fn a_short_object_whose_delete_fails_is_damage_the_store_keeps() {
     let raw = MemStore::new();
@@ -194,8 +205,8 @@ fn a_short_object_whose_delete_fails_is_damage_the_store_keeps() {
         ],
         1,
     )
-    .corrupting_through(raw.clone());
-    let (_, info) = short_write(&faults);
+    .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
+    let (_, info) = short_write(&faults, WriteMode::New);
     assert!(faults.handle().damaged().is_empty());
     assert!(block_on(faults.delete(&[info.key])).is_err());
     assert_eq!(faults.handle().damaged(), vec![info.key]);
@@ -209,7 +220,7 @@ fn a_size_mismatch_without_the_raw_store_only_understates_the_size() {
         vec![(StoreOp::Upload, 0, FaultShape::SizeMismatch)],
         1,
     );
-    let (bytes, info) = short_write(&faults);
+    let (bytes, info) = short_write(&faults, WriteMode::New);
     assert_eq!(block_on(read_all(&raw, &info.key)).unwrap(), bytes);
     assert_eq!(info.size, u64::try_from(bytes.len()).unwrap() - 1);
     assert!(faults.handle().damaged().is_empty());
@@ -312,7 +323,8 @@ fn a_late_error_leaves_the_key_volatile_until_a_later_commit_syncs() {
 #[test]
 fn a_lagging_listing_hides_writes_and_deletes_for_a_bounded_while() {
     let raw = MemStore::new();
-    let store = Faults::new(raw.clone(), Vec::new(), 7).corrupting_through(raw.clone());
+    let store = Faults::new(raw.clone(), Vec::new(), 7)
+        .corrupting_through(crate::remote::Bucket::Mem(raw.clone()));
     block_on(upload(&store, 1)).unwrap();
     store.handle().lag_listings(2, 3);
     block_on(upload(&store, 2)).unwrap();

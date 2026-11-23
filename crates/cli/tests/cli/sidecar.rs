@@ -496,7 +496,13 @@ fn metrics_and_health_are_served_on_exactly_the_given_address() {
 
     let post = get(addr, "POST /metrics HTTP/1.1\r\nHost: test\r\n\r\n");
     assert_eq!(post.0, 405);
-    assert_eq!(fetch(addr, "/debug/pprof/").0, 404);
+    for path in ["/debug/pprof", "/debug/pprof/", "/debug/pprof/heap?debug=1"] {
+        assert_eq!(
+            fetch(addr, path),
+            (404, lsr_sidecar::PPROF_NOT_SERVED.to_owned()),
+            "{path}"
+        );
+    }
     assert_eq!(get(addr, "GET /metrics SPDY/3\r\n\r\n").0, 400);
     // Linux routes all of 127/8 to the loopback: a listener on every interface would
     // answer here too.

@@ -50,7 +50,12 @@ fn fixture() -> Fixture {
 }
 
 fn run(f: &Fixture, acked: &Acked) -> Result<Checked, Violation> {
-    check(&f.model, &f.recorder, &f.raw, acked)
+    check(
+        &f.model,
+        &f.recorder,
+        &crate::remote::Bucket::Mem(f.raw.clone()),
+        acked,
+    )
 }
 
 #[test]
@@ -232,7 +237,13 @@ fn oracle_pairs_a_reissued_snapshot_with_its_newest_note() {
     model.note_snapshot(txid(1), lost, false, recorder.len());
     model.note_snapshot(txid(1), kept, false, recorder.len());
     put(&store, 0, 1, 1, &ltx(1, 1, 1, 20, None));
-    let done = check(&model, &recorder, &raw, &Acked::new()).unwrap();
+    let done = check(
+        &model,
+        &recorder,
+        &crate::remote::Bucket::Mem(raw.clone()),
+        &Acked::new(),
+    )
+    .unwrap();
     assert_eq!(done.restored, 1);
     assert_eq!(done.latest, Some(txid(1)));
 }
@@ -262,4 +273,30 @@ fn acked_reads_a_step_result() {
         newest: Some(txid(2)),
     });
     assert_eq!(acked.highest(), Some(txid(5)));
+}
+
+/// The judges' listing is the store's own contents, not the engine's listing code: a listing
+/// fault queued for the engine neither stops it nor is spent by it, and it finds every file.
+/// Before, the oracle listed through `Inventory::load`, so the fault failed the check as
+/// "listing the replica" and was gone before the engine met it.
+#[test]
+fn the_judges_list_the_replica_without_the_engines_listing() {
+    let f = fixture();
+    let fault = lsr_core::StoreError::Transient {
+        op: lsr_core::StoreOp::List,
+        kind: std::io::ErrorKind::ConnectionReset,
+    };
+    f.raw.inject_failure(lsr_core::StoreOp::List, fault);
+    let files = replica_files(&crate::remote::Bucket::Mem(f.raw.clone()));
+    assert_eq!(
+        files.iter().map(|file| file.key).collect::<Vec<_>>(),
+        vec![fkey(0, 1, 1), fkey(0, 2, 2), fkey(0, 3, 3)]
+    );
+    assert_eq!(newest_of(&files), Some(txid(3)));
+    let listed = block_on(f.raw.list(
+        lsr_core::Level::new(0).unwrap(),
+        None,
+        lsr_core::PageLimit::MAX,
+    ));
+    assert!(listed.is_err(), "the engine's fault was spent by a judge");
 }

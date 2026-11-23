@@ -169,6 +169,9 @@ pub(super) struct Kept {
     pub(super) journal_read: Option<Journal>,
     /// How the last journal write ended: an error is `JournalUnwritable` until one succeeds.
     pub(super) journal_write: Result<(), ErrorKind>,
+    /// Recoveries that found a commit abandoned after the read lock was taken: a report,
+    /// kept across rebuilds, since the snapshot that follows names only the generation change.
+    pub(super) read_lock_violations: u64,
     /// Whether the next sync step is the ahead-of-WAL check (`super::ahead`). A rebuild keeps
     /// it: the rebuilt engine boots over the same files.
     pub(super) ahead_check: AheadCheck,
@@ -176,6 +179,8 @@ pub(super) struct Kept {
     pub(super) ahead: Option<lsr_journal::Ahead>,
     /// What the next tick tells the operator about the verdict, before anything else runs.
     pub(super) ahead_notice: Option<super::AheadNotice>,
+    /// The confirmed floor for the configured destination, journalled (`super::floor`).
+    pub(super) floor: Option<lsr_journal::Floor>,
 }
 
 impl Kept {
@@ -207,9 +212,11 @@ impl Kept {
             writer: None,
             journal_read: None,
             journal_write: Ok(()),
+            read_lock_violations: 0,
             ahead_check: AheadCheck::No,
             ahead: None,
             ahead_notice: None,
+            floor: None,
         }
     }
 
@@ -245,9 +252,11 @@ impl Kept {
             writer,
             journal_read,
             journal_write,
+            read_lock_violations,
             ahead_check,
             ahead,
             ahead_notice,
+            floor,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -278,9 +287,11 @@ impl Kept {
             writer: writer.clone(),
             journal_read: *journal_read,
             journal_write: *journal_write,
+            read_lock_violations: *read_lock_violations,
             ahead_check: *ahead_check,
             ahead: *ahead,
             ahead_notice: *ahead_notice,
+            floor: *floor,
         }
     }
 
@@ -440,6 +451,13 @@ pub(super) struct Engine {
     /// replica went backwards: an acknowledged id is never taken again for
     /// other pages, so a snapshot always goes above it.
     pub(super) acknowledged: Option<Txid>,
+    /// The newest transaction a running drop of this engine's own staged
+    /// files vouched for, through the takeover record it kept first: the
+    /// replica may hold those files unconfirmed (an upload whose answer was
+    /// lost), so a listing never calls them another writer's; one that finds
+    /// them confirms them, and the snapshot goes above them. Only this
+    /// engine's own drops set it, never an operator's or a boot's record.
+    pub(super) dropped_through: Option<Txid>,
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
@@ -459,6 +477,7 @@ impl Engine {
             maintain: Maintain::default(),
             pruned: None,
             acknowledged: None,
+            dropped_through: None,
             witnesses: Witnesses::new(),
         }
     }
@@ -605,6 +624,10 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         Keep::Ephemeral("whether the last journal write failed; tried again every tick"),
     ),
     (
+        "read_lock_violations",
+        Keep::Ephemeral("read-lock violations recovery found since the process began: a report"),
+    ),
+    (
         "ahead_check",
         Keep::Derived(
             "owed by a boot that restores a debt over the staged generation: judged again from \
@@ -622,6 +645,14 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "ahead_notice",
         Keep::Ephemeral("what the next tick says; a boot that finds the verdict says it again"),
+    ),
+    (
+        "floor",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "the confirmed floor for the configured destination: every id at or below it is \
+             taken, and its anchor names the bytes confirmed there (issue #171, item 4)",
+        ),
     ),
 ];
 
@@ -666,12 +697,18 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
         Keep::Owed(
             "never lowered while the process lives, but set at boot from the replica's listing: \
              a replica that went backwards before a restart lets a snapshot take an \
-             acknowledged id again until the confirmed high-water mark is journalled \
-             (issue #171, item 4)",
+             acknowledged id again. The mark is journalled (Kept.floor); the boot rule that \
+             reads it back into this field is the rest of issue #171, item 4",
         ),
     ),
     (
         "witnesses",
         Keep::Derived("witnessed again at boot against the live WAL (crate::witness)"),
+    ),
+    (
+        "dropped_through",
+        Keep::Derived(
+            "the takeover record kept before the drop vouches for the same ids at the next boot",
+        ),
     ),
 ];

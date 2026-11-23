@@ -69,6 +69,8 @@ struct State {
     uploads: BTreeMap<String, Pending>,
     next_upload: u64,
     denied_deletes: BTreeSet<String>,
+    /// Keys a DeleteObjects was refused for, as it refused them.
+    refused_deletes: u64,
     /// Answers a conditional write with 501, as a provider without them.
     no_conditional_writes: bool,
 }
@@ -140,6 +142,43 @@ impl FakeS3 {
             .map(|object| object.body.clone())
     }
 
+    /// An object's metadata as stored, names lower-cased; `None` when absent.
+    #[must_use]
+    pub fn meta_of(&self, key: &str) -> Option<Vec<(String, String)>> {
+        self.state()
+            .objects
+            .get(key)
+            .map(|object| object.meta.clone())
+    }
+
+    /// An object's length in bytes; `None` when absent.
+    #[must_use]
+    pub fn size_of(&self, key: &str) -> Option<usize> {
+        self.state()
+            .objects
+            .get(key)
+            .map(|object| object.body.len())
+    }
+
+    /// What LIST and HEAD report as an object's last-modified time; `None` when absent.
+    #[must_use]
+    pub fn last_modified_of(&self, key: &str) -> Option<Timestamp> {
+        self.state().objects.get(key).map(|object| object.modified)
+    }
+
+    /// Removes an object directly, as an edit of the bucket outside the store.
+    pub fn delete_raw(&self, key: &str) {
+        self.state().objects.remove(key);
+    }
+
+    /// Strips an object's metadata, as a bucket copy that drops it does; its body, ETag and
+    /// last-modified time stay.
+    pub fn drop_meta(&self, key: &str) {
+        if let Some(object) = self.state().objects.get_mut(key) {
+            object.meta.clear();
+        }
+    }
+
     /// Every key, in listing order.
     #[must_use]
     pub fn keys(&self) -> Vec<String> {
@@ -156,6 +195,17 @@ impl FakeS3 {
     /// provider without conditional writes does.
     pub fn refuse_conditional_writes(&self) {
         self.state().no_conditional_writes = true;
+    }
+
+    /// Lifts every [`FakeS3::deny_delete`].
+    pub fn allow_deletes(&self) {
+        self.state().denied_deletes.clear();
+    }
+
+    /// How many keys a DeleteObjects was refused for so far.
+    #[must_use]
+    pub fn refused_deletes(&self) -> u64 {
+        self.state().refused_deletes
     }
 
     /// Makes DeleteObjects report `AccessDenied` for `key` and leave it in place.
@@ -640,6 +690,7 @@ fn delete_objects(state: &mut State, request: &HttpRequest) -> HttpResponse {
         let key = xml_unescape(raw);
         let shown = xml_escape(&key);
         if state.denied_deletes.contains(&key) {
+            state.refused_deletes = state.refused_deletes.saturating_add(1);
             xml.push_str(&format!(
                 "<Error><Key>{shown}</Key><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>"
             ));

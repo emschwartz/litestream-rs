@@ -18,10 +18,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use lsr_compat::{GoVersion, go_binary, lsr_binary};
+use lsr_compat::{Differential, GoVersion, go_binary, lsr_binary};
 use lsr_core::needs::{Resource, must};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
 
 /// One argument of the generated line; `PATH` and `MISSING` are replaced with files.
 const TOKENS: &[&str] = &[
@@ -186,13 +185,12 @@ fn go_and_lsr_read_the_same_replicate_command_lines() {
         go_binary(GoVersion::Head).map_err(|e| e.to_string())
     });
     let lsr = lsr_binary().unwrap();
-    let mut runner = TestRunner::new(Config {
-        cases: 512,
-        failure_persistence: None,
-        ..Config::default()
-    });
     let tokens = prop::collection::vec(proptest::sample::select(TOKENS), 0..5);
-    if let Err(error) = runner.run(&tokens, |tokens| compare(&go, &lsr, &tokens)) {
+    let run = Differential::new("replicate command lines");
+    let compared = run.free(512, &tokens, |tokens| {
+        compare(&go, &lsr, &tokens).map(|()| "compared".to_owned())
+    });
+    if let Err(error) = compared {
         panic!("{error}");
     }
 }

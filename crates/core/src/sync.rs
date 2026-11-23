@@ -33,12 +33,12 @@ use lsr_wal::{
 };
 use std::io::{Read, Seek};
 
-use crate::fault::{BugSite, Clamped, Fault, SnapshotCause, StopCause};
+use crate::fault::role::{Role, Staging};
+use crate::fault::{BugSite, Clamped, Fault, SnapshotCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::publish::Writer;
-use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource, WalSource};
 use crate::store::{ObjectStore, StoreError, WriteMode};
 use crate::witness::{ByteTally, Witnessed};
@@ -85,23 +85,6 @@ pub enum Step {
         /// Why.
         cause: SnapshotCause,
     },
-}
-
-impl TryFrom<Recovered> for Step {
-    type Error = StopCause;
-
-    fn try_from(recovered: Recovered) -> Result<Self, StopCause> {
-        match recovered {
-            Recovered::Continue(position) => Ok(Self::Incremental(position)),
-            Recovered::WalRestarted(position) => Ok(Self::NewGeneration(position)),
-            Recovered::Snapshot { after, cause } => Ok(Self::Snapshot {
-                after,
-                prev_timestamp: None,
-                cause,
-            }),
-            Recovered::Stop(cause) => Err(cause),
-        }
-    }
 }
 
 /// Where a step ended.
@@ -362,11 +345,9 @@ fn below_committed<R: Read + Seek>(wal: &mut WalReader<R>, stop: Fault) -> Fault
 fn scan_fault<R: Read + Seek>(wal: &mut WalReader<R>, err: WalError) -> Fault {
     match err {
         WalError::CorruptBelowCommitted { .. } => {
-            mark!(Run4);
             below_committed(wal, Fault::WalCorruptBelowCommitted)
         }
         WalError::TruncatedBelowCommitted { .. } => {
-            mark!(Run5);
             below_committed(wal, Fault::WalTruncatedBelowCommitted)
         }
         WalError::Io(_)
@@ -534,15 +515,11 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
 
 /// Writes one file into `store`; the upload is aborted when anything before the
 /// commit fails. Every database-file page is checked against `pages` before it
-/// is encoded. `map_store` says which store it is: the staging directory and
-/// the replica read the same error differently (`Fault::from_staging`,
-/// `Fault::from_remote`). The [`Witnessed`] token is minted from the bytes
-/// written and the encoder's own trailer: this process made the file.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "each argument is a distinct source or sink of the file"
-)]
-pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
+/// is encoded. The store's role says which store it is: the staging directory
+/// and the replica read the same error differently ([`Role`]). The
+/// [`Witnessed`] token is minted from the bytes written and the encoder's own
+/// trailer: this process made the file.
+pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: Role>(
     store: &L,
     key: &FileKey,
     header: Header,
@@ -550,8 +527,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     wal: &mut WalReader<R>,
     db: &mut P,
     pages: &mut PageChecksumTable,
-    map_store: fn(&StoreError) -> Fault,
 ) -> Result<(FileInfo, Option<LastPage>, Witnessed), Fault> {
+    let map_store: fn(&StoreError) -> Fault = L::fault;
     // A staged file replaces a torn one under its key, and a snapshot (level 9)
     // shares its key with Go's snapshot of the same transaction: both replace.
     let mut upload = Writer::begin(store, key, header.fields().timestamp, WriteMode::Replace)
@@ -580,8 +557,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
     }
 }
 
-/// The durability barrier: syncs the WAL after the committed read `_after`
-/// was taken and before any frame it counts is staged.
+/// The durability barrier: syncs the WAL after the committed read was taken
+/// and before any frame it counts is staged.
 ///
 /// SQLite under `synchronous = NORMAL` leaves committed frames unsynced until
 /// its next checkpoint. Staging them unsynced would make the replica more
@@ -589,12 +566,12 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
 /// the bucket holds, and the application's next commits fork history under
 /// the same salts. A frame is written before the commit that counts it lands
 /// in the wal-index, so one sync after the read covers every frame the read
-/// counts. The read is an argument so the order is the caller's to show.
+/// counts, so callers take the read first and call this before staging.
 ///
 /// # Errors
 /// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing, and no later sync
 /// of that WAL generation is trusted (`actor::unproven`).
-pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W, _after: &CommittedRead) -> Result<(), Fault> {
+pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W) -> Result<(), Fault> {
     wal.sync().map_err(Fault::from_source)
 }
 
@@ -624,6 +601,24 @@ pub async fn sync_step<R: Read + Seek, P: PageSource, L: ObjectStore>(
     cfg: &SyncConfig,
     now: Timestamp,
 ) -> Result<Synced, StepFailed> {
+    sync_step_in(step, wal, committed, db, pages, &Staging(staging), cfg, now).await
+}
+
+/// [`sync_step`] with each store as its role.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the plan fixes this signature; each argument is a distinct source of the step"
+)]
+pub(crate) async fn sync_step_in<R: Read + Seek, P: PageSource, L: Role>(
+    step: Step,
+    wal: &mut WalReader<R>,
+    committed: CommittedRead,
+    db: &mut P,
+    pages: &mut PageChecksumTable,
+    staging: &L,
+    cfg: &SyncConfig,
+    now: Timestamp,
+) -> Result<Synced, StepFailed> {
     let source = Source { db, pages };
     match run(&step, wal, committed, source, staging, cfg, now).await {
         Ok(synced) => Ok(synced),
@@ -631,7 +626,7 @@ pub async fn sync_step<R: Read + Seek, P: PageSource, L: ObjectStore>(
     }
 }
 
-async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
+async fn run<R: Read + Seek, P: PageSource, L: Role>(
     step: &Step,
     wal: &mut WalReader<R>,
     committed: CommittedRead,
@@ -663,7 +658,6 @@ async fn run<R: Read + Seek, P: PageSource, L: ObjectStore>(
         return Ok(Synced::IndexReset);
     }
     if nothing && let Some(held) = start.held {
-        mark!(Run2);
         return Ok(Synced::Idle(ReachedEnd::new(
             held.with_cursor(scanned.cursor),
             epoch,
@@ -745,7 +739,7 @@ fn forget(pages: &mut PageChecksumTable, step: &Step, page_size: PageSize) {
     clippy::too_many_arguments,
     reason = "stage's arguments, and the size the file commits"
 )]
-async fn stage_recorded<R: Read + Seek, P: PageSource, L: ObjectStore>(
+async fn stage_recorded<R: Read + Seek, P: PageSource, L: Role>(
     staging: &L,
     key: &FileKey,
     header: Header,
@@ -757,17 +751,7 @@ async fn stage_recorded<R: Read + Seek, P: PageSource, L: ObjectStore>(
 ) -> Result<(FileInfo, Option<LastPage>, Witnessed, bool), Fault> {
     let commit = NonZeroU32::new(header.fields().commit).ok_or_else(|| BugSite::Encode.hit())?;
     let changes = changes_pages(pages, plan, prev_commit, commit);
-    let (file, last, witness) = stage(
-        staging,
-        key,
-        header,
-        plan,
-        wal,
-        db,
-        pages,
-        Fault::from_staging,
-    )
-    .await?;
+    let (file, last, witness) = stage(staging, key, header, plan, wal, db, pages).await?;
     record(pages, plan, commit);
     Ok((file, last, witness, changes))
 }

@@ -26,13 +26,14 @@
 //!   window (`retention`);
 //! - after every tick, each level-0 file the replica took is one the engine
 //!   incarnation that put it staged itself, or holds exactly what the WAL it
-//!   booted on held for its range (`witness`).
+//!   booted on held for its range (`witness`);
+//! - every staged file the engine gave up before the replica took it was
+//!   forced by something in effect (`lost_restore_points`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use lsr_core::conformance::block_on;
-use lsr_core::{Did, FileKey, Inventory, MemStore, PlanOutcome, RestoreTarget, is_snapshot_start};
+use lsr_core::{Did, FileInfo, FileKey, PlanOutcome, RestoreTarget, is_snapshot_start};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 use lsr_wal::Salts;
 use thiserror::Error;
@@ -161,24 +162,35 @@ pub enum Violation {
         key: String,
     },
     /// The engine announced or staged a snapshot that no fault, damage or
-    /// request since the evidence it overturns justifies (see
-    /// `crate::liveness`).
-    #[error("a snapshot for {cause:?} with nothing to justify it; in the window: {window:?}")]
-    UnjustifiedSnapshot {
+    /// request since the evidence it overturns forces: a needless full upload
+    /// (see `crate::needless_snapshot`).
+    #[error("a needless snapshot for {cause:?}: nothing forces it; in effect: {window:?}")]
+    NeedlessSnapshot {
         /// The cause.
         cause: lsr_core::SnapshotCauseKind,
-        /// What the window held.
-        window: Vec<crate::liveness::Justifier>,
+        /// The forcings in effect.
+        window: Vec<crate::forcing::Forcing>,
     },
     /// The engine deleted staged files no replica file holds, giving up
-    /// their restore points, with no fault in the window that could force
-    /// it (see `crate::liveness`).
-    #[error("{lost} staged files given up with nothing to justify it; in the window: {window:?}")]
-    UnjustifiedGiveUp {
+    /// their restore points, with nothing in effect that could force it
+    /// (see `crate::oracle::lost_restore_points`).
+    #[error("{lost} staged files given up with nothing forcing it; in effect: {window:?}")]
+    UnforcedGiveUp {
         /// How many.
         lost: u64,
-        /// What the window held.
-        window: Vec<crate::liveness::Justifier>,
+        /// The forcings in effect.
+        window: Vec<crate::forcing::Forcing>,
+    },
+    /// A provider refused a request with an answer an operator fixes one way
+    /// ([`crate::remote::expected_denial`]), and the engine reported no refusal, or another.
+    #[error(
+        "the store refused with what an operator fixes as {expected:?}; the engine reported {got}"
+    )]
+    DenialMisreported {
+        /// The refusal the answer means.
+        expected: lsr_core::Denied,
+        /// What the engine's tasks reported after the tick.
+        got: String,
     },
     /// A running engine listed the replica while another writer's file stood
     /// past its own position, and did not stop.
@@ -307,12 +319,19 @@ pub enum Violation {
     /// engine retried at least twice its stall threshold while the app committed, and at the
     /// end no task reported a degraded state: health said all was well while replication was
     /// halted.
-    #[error("{hold} halted replication through {retries} retries and health reported nothing")]
+    #[error(
+        "{hold} halted replication through {retries} retries and {restarts} restarts and health \
+         reported nothing"
+    )]
     HealthBlind {
         /// The fault that held.
         hold: String,
         /// The retries the engine made under it.
         retries: u64,
+        /// The times the engine booted again under it: a halt that outlasts a restart is the
+        /// known defect D9 ([`crate::domain::KnownWrong::HaltForgottenAtRestart`]), one that
+        /// does not is not.
+        restarts: u64,
     },
     /// A level-0 file was staged from WAL frames a power loss would take back: the engine's
     /// sync of the WAL before staging failed, was skipped, or covered frames an earlier failed
@@ -376,6 +395,13 @@ pub fn within(what: Bound, seen: u64, limit: u64) -> Result<(), Violation> {
 /// SQLite's rules hold: a check of the harness against itself, which a failed WAL sync followed
 /// by a power loss can trip before the world adopts the result as damage.
 pub const MODEL_DIVERGED: &str = "the model no longer matches SQLite's rules";
+
+/// [`MODEL_DIVERGED`] while a failed sync of the WAL has lost a writeback the model still
+/// carries: the one divergence the known defect D103 explains
+/// ([`crate::domain::KnownWrong::DatabaseAheadOfWal`]). Any other divergence keeps the plain
+/// context and fails the run as a harness defect.
+pub const MODEL_DIVERGED_AFTER_LOST_WRITEBACK: &str =
+    "the model no longer matches SQLite's rules after a failed WAL sync lost its writeback";
 
 /// A `BugFault` naming `context`.
 #[must_use]
@@ -782,7 +808,7 @@ impl Default for Ground<'_> {
 pub fn check(
     model: &Model,
     recorder: &RecorderLog,
-    remote: &MemStore,
+    remote: &crate::remote::Bucket,
     acked: &Acked,
 ) -> Result<Checked, Violation> {
     check_with(model, recorder, remote, acked, Ground::default())
@@ -796,15 +822,14 @@ pub fn check(
 pub fn check_with(
     model: &Model,
     recorder: &RecorderLog,
-    remote: &MemStore,
+    remote: &crate::remote::Bucket,
     acked: &Acked,
     ground: Ground<'_>,
 ) -> Result<Checked, Violation> {
     let cover = covers(model, recorder, ground)?;
     write_once(model, recorder, ground)?;
-    let inventory = block_on(Inventory::load(remote))
-        .map_err(|err| bug_fault(format!("listing the replica: {err}")))?;
-    let files = inventory.files();
+    let held = replica_files(remote);
+    let files = held.as_slice();
     let mut out = Checked::default();
     let judge = as_of::Judge {
         remote,
@@ -822,7 +847,7 @@ pub fn check_with(
         .map(|f| f.key.range().max())
         .min();
     let reach = contract::Reach::over(files, |_| true);
-    let newest = inventory.newest().map_or(0, Txid::get);
+    let newest = newest_of(files).map_or(0, Txid::get);
     for txid in (1..=newest).filter_map(Txid::new) {
         judge.txid(txid, &reach, oldest, &mut out)?;
     }
@@ -835,7 +860,7 @@ pub fn check_with(
             None => Ok(out),
         };
     }
-    let Some(latest) = judge.latest(&reach, inventory.newest(), &mut out)? else {
+    let Some(latest) = judge.latest(&reach, newest_of(files), &mut out)? else {
         return Ok(out);
     };
     if let Some(acked) = acked.binding(ground.lost).filter(|a| *a > latest) {
@@ -855,7 +880,23 @@ pub fn check_with(
     Ok(out)
 }
 
+/// The replica's files as the store holds them, ascending by key: read from the store's own
+/// objects ([`crate::remote::Bucket::stored`]), never through the engine's listing code (`Inventory::load`, its
+/// paging and its merge), so a listing defect the engine has cannot also hide a file from the
+/// judges.
+#[must_use]
+pub fn replica_files(remote: &crate::remote::Bucket) -> Vec<FileInfo> {
+    remote.stored()
+}
+
+/// The last transaction any of `files` covers.
+#[must_use]
+pub fn newest_of(files: &[FileInfo]) -> Option<Txid> {
+    files.iter().map(|file| file.key.range().max()).max()
+}
+
 mod as_of;
+pub mod lost_restore_points;
 mod retention;
 mod witness;
 

@@ -46,6 +46,7 @@ use lsr_wal::{
     WalError, WalHeader, WalOffset, WalReader,
 };
 
+use crate::fault::role::{Role, Staging};
 use crate::fault::{Fault, SnapshotCause, StopCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
@@ -168,11 +169,19 @@ impl NewestStagedFile {
         staging: &L,
         wal: Option<BootWal<'_, R>>,
     ) -> Result<Option<Self>, Fault> {
+        Self::load_in(&Staging(staging), wal).await
+    }
+
+    /// [`Self::load`] with each store as its role.
+    pub(crate) async fn load_in<L: Role, R: Read + Seek>(
+        staging: &L,
+        wal: Option<BootWal<'_, R>>,
+    ) -> Result<Option<Self>, Fault> {
         let Some(newest) = newest_level_zero(staging).await? else {
             return Ok(None);
         };
         let txid = newest.key.range().max();
-        let header = read_header(staging, &newest.key, Fault::from_staging).await?;
+        let header = read_header(staging, &newest.key, L::fault).await?;
         let unreadable = Self::Unreadable { txid };
         let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
             return Ok(Some(unreadable));
@@ -183,7 +192,7 @@ impl NewestStagedFile {
         let file = NewestStagedFileSource {
             store: staging,
             key: newest.key,
-            fault: Fault::from_staging,
+            fault: L::fault,
         };
         let view = Self::checked(&file, None, &header, origin, wal).await?;
         Ok(Some(view.unwrap_or(unreadable)))
@@ -471,18 +480,16 @@ fn match_last_page<R: Read + Seek>(
     }
 }
 
-pub(crate) async fn newest_level_zero<L: ObjectStore>(
-    staging: &L,
-) -> Result<Option<FileInfo>, Fault> {
-    newest_listed(staging, Fault::from_staging, Fault::from_staging_listing).await
+pub(crate) async fn newest_level_zero<L: Role>(staging: &L) -> Result<Option<FileInfo>, Fault> {
+    newest_listed(staging, L::fault, Fault::from_staging_listing).await
 }
 
 /// The replica's newest level-0 file as listed, whatever its bytes: a tail a
 /// listing judged torn is still on the replica.
-pub(crate) async fn newest_replica_level_zero<R: ObjectStore>(
+pub(crate) async fn newest_replica_level_zero<R: Role>(
     remote: &R,
 ) -> Result<Option<FileInfo>, Fault> {
-    newest_listed(remote, Fault::from_remote, |_stalled| Fault::RemoteCorrupt).await
+    newest_listed(remote, R::fault, |_stalled| Fault::RemoteCorrupt).await
 }
 
 async fn newest_listed<S: ObjectStore>(
@@ -710,16 +717,6 @@ pub struct Verdict {
     pub event: Option<RecoverEvent>,
 }
 
-/// [`recover_traced] without the event.
-#[must_use]
-pub fn recover(
-    source: Option<PositionSource<'_>>,
-    wal: &WalView,
-    remote: Option<Txid>,
-) -> Recovered {
-    recover_traced(source, wal, remote).recovered
-}
-
 /// Decides, and names the event the decision calls for.
 #[must_use]
 pub fn recover_traced(
@@ -728,7 +725,6 @@ pub fn recover_traced(
     remote: Option<Txid>,
 ) -> Verdict {
     let Some(source) = source else {
-        mark!(Boot1);
         return plain(Recovered::Snapshot {
             after: remote,
             cause: SnapshotCause::FirstSync,
@@ -737,13 +733,10 @@ pub fn recover_traced(
     let txid = source_txid(&source);
     if let Some(ahead) = remote.filter(|remote| *remote > txid) {
         return plain(match source {
-            PositionSource::Boot(_) => {
-                mark!(Boot6);
-                Recovered::Snapshot {
-                    after: Some(ahead),
-                    cause: SnapshotCause::BehindRemote { local: txid },
-                }
-            }
+            PositionSource::Boot(_) => Recovered::Snapshot {
+                after: Some(ahead),
+                cause: SnapshotCause::BehindRemote { local: txid },
+            },
             PositionSource::Running(..) => Recovered::Stop(StopCause::OtherWriter),
         });
     }
@@ -753,10 +746,7 @@ pub fn recover_traced(
         return snapshot(match (&source, wal.header) {
             (PositionSource::Boot(NewestStagedFile::Unreadable { .. }), _)
             | (PositionSource::Boot(_), Some(_)) => SnapshotCause::NewestStagedFileUnreadable,
-            (PositionSource::Boot(_) | PositionSource::Running(..), _) => {
-                mark!(Boot7);
-                SnapshotCause::WalMissing
-            }
+            (PositionSource::Boot(_) | PositionSource::Running(..), _) => SnapshotCause::WalMissing,
         });
     };
     if seen.page_size != header.page_size() {
@@ -851,7 +841,6 @@ fn restarted(
         cause: SnapshotCause::GenerationChanged,
     };
     let PositionSource::Running(position, probes) = source else {
-        mark!(Boot8);
         return plain(changed);
     };
     let pinned = match position.continuity() {
@@ -861,18 +850,15 @@ fn restarted(
     let empty = seen.end == WalOffset::start(seen.page_size);
     let proven = pinned && (empty || header.salts().salt1 == seen.salts.salt1.wrapping_add(1));
     if !proven {
-        mark!(Run8);
         return plain(changed);
     }
     // No end check: frames the restart wrote at the synced end carry new salts and never chain.
     if probes.stale_next {
-        mark!(Run8);
         return Verdict {
             recovered: changed,
             event: Some(RecoverEvent::ReadLockViolated { synced: seen.end }),
         };
     }
-    mark!(Run7);
     plain(Recovered::WalRestarted(Position::new(
         position.txid(),
         FrameCursor::at_start(header),
@@ -920,7 +906,6 @@ fn same_generation(
         | FrameState::Miss(Miss::NotACommit | Miss::Moved) => false,
     };
     if committed.is_some_and(|end| end.get() < seen.end.get()) || short_file || frame_gone {
-        mark!(Boot9);
         let committed = committed.unwrap_or(WalOffset::start(seen.page_size));
         return Err(Refusal {
             cause: SnapshotCause::LocalRewound {
@@ -934,15 +919,9 @@ fn same_generation(
         });
     }
     match frame {
-        FrameState::Miss(Miss::NotACommit) => {
-            mark!(Boot10);
-            Err(refuse(SnapshotCause::PrevFrameMismatch))
-        }
+        FrameState::Miss(Miss::NotACommit) => Err(refuse(SnapshotCause::PrevFrameMismatch)),
         FrameState::Miss(Miss::Moved) => Err(refuse(SnapshotCause::GenerationChanged)),
-        FrameState::Mismatch => {
-            mark!(Boot10);
-            Err(refuse(SnapshotCause::LastPageMismatch))
-        }
+        FrameState::Mismatch => Err(refuse(SnapshotCause::LastPageMismatch)),
         FrameState::Miss(Miss::Truncated) | FrameState::Rewritten | FrameState::Fresh => {
             if let Some(refusal) = reset_past(source, seen, header, wal) {
                 return Err(refusal);
@@ -971,7 +950,6 @@ fn reset_past(
     if !reset || !probes.stale_next {
         return None;
     }
-    mark!(Run10);
     let pinned = position.continuity() == Continuity::Held(wal.epoch);
     Some(Refusal {
         cause: SnapshotCause::GenerationChanged,

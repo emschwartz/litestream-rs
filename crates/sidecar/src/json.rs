@@ -1,5 +1,5 @@
-//! The one JSON string writer, shared by the log lines, `/healthz` and the `lsr` command output
-//! so all three escape the same way.
+//! The JSON string writer of the log lines, which are written by hand in slog's layout.
+//! `/healthz` and `lsr`'s output are built with `serde_json`.
 
 /// A JSON string literal: quotes, backslash and control characters escaped, everything else
 /// as is.
