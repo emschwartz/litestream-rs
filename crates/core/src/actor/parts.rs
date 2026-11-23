@@ -21,12 +21,13 @@ use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
+use super::ahead::AheadCheck;
 use super::clock::EngineClock;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
-use crate::failstop::Lag;
+use crate::failstop::{Lag, WalMark};
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::journal::{JournalSignal, JournalWriter};
 use crate::layout::FileKey;
@@ -154,6 +155,9 @@ pub(super) struct Kept {
     /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
     /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
     pub(super) quiet: BTreeSet<Txid>,
+    /// Where the WAL ended when a snapshot owed for a doubt alone was first observed, with
+    /// every staged file on the replica: frames up to it are not lag (`actor::lag`).
+    pub(super) doubt_baseline: Option<WalMark>,
     /// What the last boot's read of the journal reported. A report, not engine state: nothing
     /// decides on it.
     pub(super) journal: Option<JournalSignal>,
@@ -163,6 +167,13 @@ pub(super) struct Kept {
     pub(super) journal_read: Option<Journal>,
     /// How the last journal write ended: an error is `JournalUnwritable` until one succeeds.
     pub(super) journal_write: Result<(), ErrorKind>,
+    /// Whether the next sync step is the ahead-of-WAL check (`super::ahead`). A rebuild keeps
+    /// it: the rebuilt engine boots over the same files.
+    pub(super) ahead_check: AheadCheck,
+    /// The standing ahead-of-WAL verdict, journalled, while its restore point is kept.
+    pub(super) ahead: Option<lsr_journal::Ahead>,
+    /// What the next tick tells the operator about the verdict, before anything else runs.
+    pub(super) ahead_notice: Option<super::AheadNotice>,
 }
 
 impl Kept {
@@ -189,10 +200,14 @@ impl Kept {
             boot_failed: false,
             sync_failed_after_listing: false,
             quiet: BTreeSet::new(),
+            doubt_baseline: None,
             journal: None,
             writer: None,
             journal_read: None,
             journal_write: Ok(()),
+            ahead_check: AheadCheck::No,
+            ahead: None,
+            ahead_notice: None,
         }
     }
 
@@ -223,10 +238,14 @@ impl Kept {
             boot_failed,
             sync_failed_after_listing,
             quiet: _,
+            doubt_baseline: _,
             journal,
             writer,
             journal_read,
             journal_write,
+            ahead_check,
+            ahead,
+            ahead_notice,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -252,21 +271,30 @@ impl Kept {
             sync_failed_after_listing: *sync_failed_after_listing,
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),
+            doubt_baseline: None,
             journal: *journal,
             writer: writer.clone(),
             journal_read: *journal_read,
             journal_write: *journal_write,
+            ahead_check: *ahead_check,
+            ahead: *ahead,
+            ahead_notice: *ahead_notice,
         }
     }
 
-    /// The restore point retention keeps: the older of the two asked for, a
-    /// degraded task's and a scheduled verify's. Derived on every read, so
-    /// there is no copy to fall behind.
+    /// The restore point retention keeps: the oldest of those asked for, a degraded task's, a
+    /// scheduled verify's and an ahead-of-WAL verdict's. Retention keeps one chain, so while an
+    /// older point is kept the verdict's is not; the older one is also before the damage.
+    /// Derived on every read, so there is no copy to fall behind.
     pub(super) fn kept_restore_point(&self) -> Option<Txid> {
-        match (self.task_restore_point.txid(), self.verify_restore_point) {
-            (Some(task), Some(verify)) => Some(task.min(verify)),
-            (task, verify) => task.or(verify),
-        }
+        [
+            self.task_restore_point.txid(),
+            self.verify_restore_point,
+            self.ahead.map(|ahead| ahead.restore_point),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The cause a snapshot is owed for besides the engine's own, if any.

@@ -40,7 +40,7 @@ use lsr_wal::{OpenError, WalHeader, WalReader};
 
 use crate::env::Clock;
 use crate::fault::{BugSite, Fault, Next, SnapshotCause};
-use crate::layout::FileInfo;
+use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, Position, ReadLockHold, SyncedThrough};
 use crate::source::{CheckpointMode, CheckpointRun, Checkpointer, PageSource, WalSource};
@@ -356,6 +356,7 @@ pub struct Staged {
     reached: Reached,
     files: Vec<FileInfo>,
     witnesses: Vec<Witnessed>,
+    quiet: Vec<FileKey>,
 }
 
 impl Staged {
@@ -396,6 +397,14 @@ impl Staged {
     #[must_use]
     pub fn witnesses(&self) -> &[Witnessed] {
         &self.witnesses
+    }
+
+    /// Those of [`Self::files`] that change no page of the state the files before them left:
+    /// the engine's own writes, such as the frame that moves the WAL past a restart, which
+    /// fail-stop does not count as lag (`crate::failstop`).
+    #[must_use]
+    pub fn quiet(&self) -> &[FileKey] {
+        &self.quiet
     }
 }
 
@@ -444,6 +453,7 @@ struct Protocol<'a, W, P, C, L> {
     good: Reached,
     files: Vec<FileInfo>,
     witnesses: Vec<Witnessed>,
+    quiet: Vec<FileKey>,
     run: Option<CheckpointRun>,
 }
 
@@ -515,8 +525,12 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_, 
                 file,
                 witness,
                 end: StepEnd::Through(through),
+                changes,
                 ..
             } => {
+                if !changes {
+                    self.quiet.push(file.key);
+                }
                 self.files.push(file);
                 self.witnesses.push(witness);
                 through
@@ -656,6 +670,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         good: Reached::Through(proof),
         files: Vec::new(),
         witnesses: Vec::new(),
+        quiet: Vec::new(),
         run: None,
     };
     let result = match mode {
@@ -666,6 +681,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
         reached: protocol.good,
         files: protocol.files,
         witnesses: protocol.witnesses,
+        quiet: protocol.quiet,
     };
     match result {
         Ok(outcome) => Ok(Checkpointed {

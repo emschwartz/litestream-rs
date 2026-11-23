@@ -58,6 +58,8 @@ use crate::store::{ObjectStore, ReadLen, StoreError};
 mod against;
 mod dry_run;
 
+pub(crate) use dry_run::DigestSink;
+
 pub use against::{Compared, LivePages, Verified, verify_against};
 
 #[cfg(test)]
