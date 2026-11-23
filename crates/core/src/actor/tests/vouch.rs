@@ -494,7 +494,8 @@ fn a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas(
 /// replica's real newest, below the acknowledged ids. The uploads must
 /// resume at the snapshot above them. They used to plan the dropped id next,
 /// which has no staged file and no witness, and fail with `StagedLost` on
-/// every tick until a restart.
+/// every tick until a restart. The id stays a hole on the replica, below the
+/// snapshot, so a restore of the latest state is whole.
 #[test]
 fn uploads_resume_above_acknowledged_ids_a_rollback_took() {
     let mut rig = Rig::new();
@@ -529,5 +530,13 @@ fn uploads_resume_above_acknowledged_ids_a_rollback_took() {
         )
     });
     assert!(resnapshot.is_some() && !lost, "{seen:?}");
+    // The replica never gets 2 again: the hole it left sits below the
+    // snapshot at 3, so a restore of the latest state needs nothing from it.
+    let level_zero = Rig::files(&rig.remote, Level::ZERO);
+    assert!(
+        !level_zero.iter().any(|f| f.key.range().contains(tx(2))),
+        "{level_zero:?}"
+    );
+    assert!(super::snapshots(&rig).contains(&3), "{level_zero:?}");
     assert_eq!(super::restored(&rig), 3);
 }
