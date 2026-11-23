@@ -38,10 +38,16 @@
 //!   written here outside SQLite at all, since any descriptor closed on it drops the
 //!   application's locks.
 //!
+//! - evicting the pages a failed WAL sync lost (`evict_page_cache`): the fault VFS keeps no page
+//!   cache of its own, and the kernel's cannot be told to drop one file's pages on demand.
+//!
 //! The application's automatic checkpoints are not counted ([`SqliteSide::app_autocheckpoints`]
 //! is zero), the database file's bytes are not read ([`SqliteSide::db_file`] is empty, for the
-//! reason above), and a power loss's tear counts are zero: SQLite's own recovery is the only
-//! recovery here, so there is nothing to disagree with.
+//! reason above), a power loss's tear counts are zero (the block law still tears the database
+//! file a partial backfill left unsynced, as the fault VFS's own test shows; it is not counted
+//! here), and the commit images of a regrown WAL are never asked for, since no regrowth is
+//! drawn here. No recovery disagreement is ever reported: SQLite's own recovery is the only one
+//! here, so there is nothing to disagree with.
 
 mod doors;
 mod in_tick;
@@ -401,6 +407,18 @@ impl SqliteSide for RealSide {
     }
     fn block_losses(&self) -> (u32, u32) {
         self.with(|real| real.vfs.wal_block_losses())
+    }
+    fn db_torn_losses(&self) -> u32 {
+        0
+    }
+    fn evict_page_cache(&self) -> bool {
+        false
+    }
+    fn take_evicted(&self) -> bool {
+        false
+    }
+    fn commit_images(&self) -> Vec<(u32, Vec<u8>)> {
+        Vec::new()
     }
     fn recovery_disagreements(&self) -> Vec<String> {
         Vec::new()

@@ -1880,6 +1880,13 @@ impl Runner {
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
             EnvFault::DriverWritesNothing => self.w.sqlite.driver_writes_nothing_once(),
+            // The database SQLite serves now reads the evicted frames' older bytes: the
+            // model follows it as damage, and the history judge refuses a restore that gives it.
+            EnvFault::EvictPageCache => {
+                let acted = self.w.sqlite.evict_page_cache();
+                self.scenario_bool("EvictPageCache", acted)?;
+                self.w.adopt_evicted();
+            }
             EnvFault::FlipDatabasePage(pgno) => {
                 let flipped = self.w.sqlite.flip_db_page(pgno);
                 self.scenario_bool("FlipDatabasePage", flipped)?;
@@ -2089,11 +2096,12 @@ impl Runner {
             // A flipped bit is no commit: the model follows it, and no restore may give it.
             (WalOp::FlipLastFrameBit, Heal::No) => self.w.adopt_corrupt_state(),
             (WalOp::FlipLastFrameBit, Heal::Yes) => self.w.adopt_local_state(),
+            // A regrowth that kept its commit marks made a commit at each of them.
+            (WalOp::RegrowSameSalts(_), _) => self.w.adopt_regrown(),
             (
                 WalOp::TearHeader
                 | WalOp::TruncateAtFrame(_)
                 | WalOp::RewriteSameLength(_)
-                | WalOp::RegrowSameSalts(_)
                 | WalOp::RegrowWithoutCommitMarks(_),
                 _,
             ) => self.w.adopt_local_state(),
@@ -2505,6 +2513,10 @@ impl Runner {
         let (kept, holes) = self.w.sqlite.block_losses();
         reach.add("power.block_kept_unsynced", u64::from(kept));
         reach.add("power.block_hole", u64::from(holes));
+        reach.add(
+            "power.db_unsynced_blocks",
+            u64::from(self.w.sqlite.db_torn_losses()),
+        );
         reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
         reach.add(
             "batch.remote_calls",

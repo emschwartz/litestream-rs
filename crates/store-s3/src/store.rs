@@ -37,6 +37,8 @@ use crate::credentials::S3Credentials;
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, Precondition, RequestBuilder, RequestError};
 use crate::response::{Head, parse_created_at_header, parse_delete_failure_codes, parse_head};
+use crate::signer::Signer;
+use crate::source::{CredentialSource, Expiring};
 use crate::transport::{HttpResponse, Transport};
 use crate::upload::S3Upload;
 #[cfg(feature = "ureq")]
@@ -88,7 +90,7 @@ impl<T: Transport> std::fmt::Debug for S3Store<T> {
 
 /// What a store and its uploads share.
 pub(crate) struct Inner<T> {
-    pub(crate) builder: RequestBuilder,
+    signer: Signer,
     transport: T,
     clock: Arc<dyn Clock>,
     pub(crate) part_size: PartSize,
@@ -132,6 +134,22 @@ impl S3Store<UreqTransport> {
         let transport = UreqTransport::new(config.deadline());
         Self::over(config, credentials, transport)
     }
+
+    /// A store over HTTP(S) that signs with what a credential chain resolved, fetching
+    /// them again before they expire.
+    ///
+    /// # Errors
+    /// [`ConfigError`] when the endpoint cannot address the bucket.
+    pub fn resolved(config: S3Config, resolved: &crate::Resolved) -> Result<Self, ConfigError> {
+        let transport = UreqTransport::new(config.deadline());
+        Self::refreshing(
+            config,
+            resolved.expiring(),
+            resolved.refresh(),
+            transport,
+            SystemClock,
+        )
+    }
 }
 
 impl<T: Transport> S3Store<T> {
@@ -159,10 +177,33 @@ impl<T: Transport> S3Store<T> {
         transport: T,
         clock: impl Clock + 'static,
     ) -> Result<Self, ConfigError> {
-        let builder = RequestBuilder::new(&config, &credentials)?;
+        Self::refreshing(
+            config,
+            Expiring::forever(credentials),
+            None,
+            transport,
+            clock,
+        )
+    }
+
+    /// A store that signs with `current` and, when they expire, with what `source`
+    /// fetches: the credentials a [`CredentialChain`](crate::CredentialChain) resolved
+    /// ([`Resolved::expiring`](crate::Resolved::expiring) and
+    /// [`Resolved::refresh`](crate::Resolved::refresh)).
+    ///
+    /// # Errors
+    /// [`ConfigError`] when the endpoint cannot address the bucket.
+    pub fn refreshing(
+        config: S3Config,
+        current: Expiring,
+        source: Option<Arc<dyn CredentialSource>>,
+        transport: T,
+        clock: impl Clock + 'static,
+    ) -> Result<Self, ConfigError> {
+        let signer = Signer::new(&config, current, source)?;
         Ok(Self {
             inner: Arc::new(Inner {
-                builder,
+                signer,
                 transport,
                 clock: Arc::new(clock),
                 part_size: config.part_size(),
@@ -379,7 +420,9 @@ impl<T: Transport> Inner<T> {
         op: StoreOp,
         build: impl FnOnce(&RequestBuilder, Timestamp) -> Result<R, RequestError>,
     ) -> Result<R, StoreError> {
-        build(&self.builder, self.now()).map_err(|err| request_error(op, err))
+        let now = self.now();
+        let builder = self.signer.builder(op, now)?;
+        build(&builder, now).map_err(|err| request_error(op, err))
     }
 
     /// Sends and returns whatever came back, whatever the status.
