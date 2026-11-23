@@ -151,6 +151,9 @@ fn connect(path: &Path, config: &SqliteConfig) -> Result<Connection, rusqlite::E
     };
     conn.busy_timeout(Duration::ZERO)?;
     conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    // These connections run the checkpoints: set, not left to a build default that
+    // `LIBSQLITE3_FLAGS` can lower, so a backfill always syncs the database file.
+    conn.pragma_update(None, "synchronous", "FULL")?;
     Ok(conn)
 }
 
@@ -613,11 +616,13 @@ pub unsafe fn app_connection_raw(
     app_connection_for(&conn, database)
 }
 
-/// Reads back what [`app_connection`] sets.
+/// Reads back what [`app_connection`] sets, and that the connection syncs at all: its
+/// `synchronous` level is the application's to choose, except OFF.
 ///
 /// # Errors
-/// [`SetupError::AutocheckpointOn`] for a connection that is not set up; [`SetupError::Sqlite`]
-/// when the read itself fails.
+/// [`SetupError::AutocheckpointOn`] for a connection that is not set up;
+/// [`SetupError::SynchronousOff`] for one that never syncs; [`SetupError::Sqlite`] when a read
+/// itself fails.
 pub fn check_app_connection(conn: &Connection) -> Result<(), SetupError> {
     let pages: i64 = conn
         .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
@@ -625,12 +630,77 @@ pub fn check_app_connection(conn: &Connection) -> Result<(), SetupError> {
     if pages != 0 {
         return Err(SetupError::AutocheckpointOn { pages });
     }
+    let level: i64 = conn
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(SetupError::Sqlite)?;
+    if level == 0 {
+        return Err(SetupError::SynchronousOff);
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use lsr_core::obligations::{Keep, unclassified};
+
     use super::*;
+
+    /// What each field of the connection state is to a restart of the process
+    /// (`lsr_core::obligations`).
+    const INNER_LEDGER: &[(&str, Keep)] = &[
+        (
+            "raw",
+            Keep::Derived("pointers into the reader's pager and shm node, taken at every open"),
+        ),
+        (
+            "reader",
+            Keep::Derived("the read connection, opened at every start"),
+        ),
+        (
+            "writer",
+            Keep::Derived("the write connection, opened at every start"),
+        ),
+        (
+            "wal_path",
+            Keep::Derived("the database path's WAL, named at every open"),
+        ),
+        (
+            "wal_id",
+            Keep::Ephemeral(
+                "the file the WAL path named at this open; cost: a WAL deleted while no process \
+                 held it is not told from a new one, and recovery judges what it finds",
+            ),
+        ),
+        (
+            "page_size",
+            Keep::Derived("read from the database at every open"),
+        ),
+        (
+            "epoch",
+            Keep::Ephemeral("this open's hold of the read transaction; a new open starts again"),
+        ),
+        (
+            "issued",
+            Keep::Ephemeral("barriers and write locks of this open; SQLite releases them all"),
+        ),
+        (
+            "returned",
+            Keep::Ephemeral("barriers and write locks of this open; SQLite releases them all"),
+        ),
+        (
+            "wal_sync_failed",
+            Keep::Ephemeral(
+                "a failed WAL sync answers every later sync of this open the same; across a \
+                 restart the engine journal's debt carries it (lsr_core::obligations, `unproven`)",
+            ),
+        ),
+    ];
+
+    #[test]
+    fn every_field_of_the_connection_state_is_classified() {
+        let wrong = unclassified(include_str!("conn.rs"), "Inner", INNER_LEDGER);
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
 
     fn opened(dir: &Path) -> Sqlite {
         let db = dir.join("app.db");
@@ -640,6 +710,21 @@ mod tests {
         conn.execute_batch("CREATE TABLE t(x)").unwrap();
         drop(conn);
         Sqlite::open(&db).unwrap()
+    }
+
+    /// The replicator's connections run its checkpoints, so they sync the database file and
+    /// the WAL at FULL whatever the build's default is (`LIBSQLITE3_FLAGS` can change it).
+    #[test]
+    fn the_replicator_s_connections_sync_at_full() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sqlite = opened(dir.path());
+        let inner = sqlite.lock();
+        for conn in [&inner.reader, &inner.writer] {
+            let level: i64 = conn
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(level, 2, "FULL");
+        }
     }
 
     /// A ROLLBACK that fails leaves the writer inside its transaction. When that was tracked

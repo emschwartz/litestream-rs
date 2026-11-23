@@ -58,7 +58,7 @@
 use lsr_ltx::Timestamp;
 
 use super::{Actor, Env, Stepped, Task, Tick};
-use crate::fault::{Fault, SnapshotCause};
+use crate::fault::{Evidence, Fault, Obligation, SnapshotCause, evidence};
 use crate::source::{CheckpointMode, Checkpointer, PageSource, SourceError, WalSource};
 use crate::store::ObjectStore;
 
@@ -97,9 +97,12 @@ impl Actor {
     /// Notes a failed sync of the WAL, wherever it was met. Called from [`Actor::fault`], the
     /// one place every fault passes, so no path can miss it.
     pub(super) fn sync_failed(&mut self, fault: Fault) {
-        if fault == Fault::WalSyncFailed {
-            mark!(Run3);
-            self.kept.unproven = Unproven::Truncate;
+        match evidence(&fault) {
+            Evidence::Once(Obligation::UnprovenWal) => {
+                mark!(Run3);
+                self.kept.unproven = Unproven::Truncate;
+            }
+            Evidence::Repeats => {}
         }
     }
 

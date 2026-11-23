@@ -1,11 +1,11 @@
-diff --git a/crates/sidecar/src/flags.rs b/crates/sidecar/src/flags.rs
-index 76af458..48a7a02 100644
---- a/crates/sidecar/src/flags.rs
-+++ b/crates/sidecar/src/flags.rs
-@@ -179,10 +179,7 @@ fn scan(args: &[String]) -> Result<Option<Scanned>, UsageError> {
-         }
-         let value = match (takes_value, inline) {
-             // Go's `flag` sets a boolean as it reads it, so a bad value stops the scan here.
+diff --git a/crates/sidecar/src/goflag.rs b/crates/sidecar/src/goflag.rs
+index 7eb11100..7b1e6025 100644
+--- a/crates/sidecar/src/goflag.rs
++++ b/crates/sidecar/src/goflag.rs
+@@ -193,10 +193,7 @@ pub fn scan(defs: &[Def], args: &[String]) -> Result<Scan, FlagError> {
+         };
+         let name = def.name;
+         let value = match (def.value, inline) {
 -            (false, Some(value)) => {
 -                parse_bool(name, &value)?;
 -                value

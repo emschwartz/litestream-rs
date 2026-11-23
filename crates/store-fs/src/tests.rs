@@ -472,3 +472,31 @@ fn remove_scratch_bounds_one_call() {
     assert_eq!(block_on(h.store.remove_scratch()), Ok(MAX_SCRATCH_REMOVED));
     assert_eq!(block_on(h.store.remove_scratch()), Ok(extra));
 }
+
+mod faults;
+
+#[test]
+fn a_regular_file_reads_back_as_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("f"), b"abc").unwrap();
+    let entries = RealFs.read_dir(dir.path()).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(!entries[0].is_symlink());
+    let meta = RealFs.metadata(&dir.path().join("f")).unwrap();
+    assert_eq!((meta.len(), meta.is_empty()), (3, false));
+    fs::write(dir.path().join("e"), b"").unwrap();
+    assert!(RealFs.metadata(&dir.path().join("e")).unwrap().is_empty());
+}
+
+/// A journal shorter than a slot (a first run, or a write cut short) reads as no record there.
+#[cfg(unix)]
+#[test]
+fn a_journal_slot_past_the_end_of_the_file_is_empty() {
+    use lsr_core::JournalFile;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join(JOURNAL_NAME), b"short").unwrap();
+    let mut journal = FsJournalFile::new(dir.path());
+    journal.open().unwrap();
+    assert_eq!(journal.read_slot(lsr_journal::Slot::S0), Ok(None));
+    assert_eq!(journal.read_slot(lsr_journal::Slot::S1), Ok(None));
+}
