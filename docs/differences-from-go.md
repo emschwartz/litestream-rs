@@ -11,12 +11,12 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | Situation | What both do |
 |---|---|
 | The replicator crashes, is killed or restarts | Resume from the local files and the WAL. Take a snapshot only when the WAL no longer matches |
+| The replicator restarts with staged files that are not yet in S3 | Upload them as they are. litestream-rs first verifies each file's checksum, checks that it follows on from the file before it, and compares the files the WAL still holds with the WAL (Go checks only the newest). Not covered by either: a working folder put back alone from a copy of another history (its files are uploaded; a restore of the newest state is right, and a restore to a point inside that stretch returns the other history), a file forged to pass the checks, and a disk that loses written data at a power loss when the same part of the WAL is rewritten after the uploaded file's local copy is gone, about 30 seconds after its upload ([decisions/D175.md](decisions/D175.md)) |
 | S3 errors, throttles or is down | Retry, waiting up to 5 minutes between tries, for as long as it takes |
 | SQLite changes the WAL: a checkpoint from outside, a WAL restart, `VACUUM`, a deleted WAL | Continue, or take a snapshot |
 | S3's list of files is out of date | Trust the list. Object storage that lists behind its writes is unsupported |
 | The replicator restarts while replication is failing | Not covered: the failure is forgotten. The count of failed tries and the degraded report start again from zero, so a replicator that keeps restarting can stay quiet. litestream-rs carries one number across the restart, the age of the oldest change that was staged and not yet in S3 (`lsr_unreplicated_age_seconds`) |
 | An S3 replica with no path inside the bucket † | Works, with keys that start with `/` |
-| Retry counts and warnings after a restart | Start again from zero (under review) |
 | `replicate` and `restore` fail | Exit 1 |
 
 ## Different: litestream-rs stops or refuses, Go carries on
@@ -36,7 +36,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | Situation | Go | litestream-rs |
 |---|---|---|
 | Power loss | Never syncs the WAL, so the bucket can hold commits the database then loses | Syncs the WAL before copying from it. If the disk loses them anyway, the next start takes a snapshot |
-| A write of the WAL to disk fails † | Does not notice | Reports `wal_sync_failed` and retries |
+| A write of the WAL to disk fails | Does not notice | Reports `wal_sync_failed` and retries |
 | Files are deleted from the bucket, or it is rolled back | Does not notice. Restores fail until the next snapshot | The same, and reports `remote_regressed` |
 | The WAL is damaged below the last commit | Reads it as the end of the WAL | Reports `wal_corrupt` and replicates nothing past the damage |
 | A writer stopped mid-commit left frames in the WAL | Releases through v0.5.18 can replicate them | Never reads past the last commit |
@@ -56,12 +56,11 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 - `/debug/pprof`, and the `/metrics` series the engine cannot count.
 - The v0.3 `generations/` layout.
 
-## Under review
+## litestream-rs has it, Go does not
 
-- Holding the application when replication stops (`if-replication-stops`, default `hold-start`). Go has nothing like it.
+- Holding the application when replication stops (`if-replication-stops`, [decisions/D177.md](decisions/D177.md)). The default, `hold-start`, does not start the application when the replicator stops or S3 refuses it at start. `report` never holds the application, as under Go. `stop-app` also holds a running application's writes when replication stops or changes have waited too long for S3.
 
 ## What `main` does today for the rows marked †
 
 - **S3 replica with no path:** refused at load.
-- **WAL write fails:** as Go does, the engine syncs again and goes on, and keeps nothing across a restart (D173). After a power loss it snapshots if the database fell behind what it staged.
 - **Two replicators on one working folder:** the second refuses to start.

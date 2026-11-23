@@ -179,6 +179,11 @@ struct Log {
     /// A key whose whole reads from the start are let through this many
     /// times, and then one comes back with a byte flipped.
     flip_read: Option<(FileKey, u32)>,
+    /// The whole reads from the start of any key, counted from one, that come back with a
+    /// byte flipped.
+    flip_whole_reads: Vec<u32>,
+    /// Whole reads from the start of a key seen so far.
+    whole_reads: u32,
 }
 
 /// A [MemStore] that counts calls and can fail a commit before it publishes
@@ -230,7 +235,13 @@ impl ObjectStore for Probe {
         let flip = {
             let mut log = self.log();
             log.reads = log.reads.saturating_add(1);
+            if offset == 0 {
+                log.whole_reads = log.whole_reads.saturating_add(1);
+            }
+            let nth = log.whole_reads;
+            let counted = offset == 0 && log.flip_whole_reads.contains(&nth);
             match log.flip_read {
+                _ if counted => true,
                 Some((at, 0)) if at == *key && offset == 0 => {
                     log.flip_read = None;
                     true
@@ -1403,6 +1414,41 @@ fn one_torn_read_of_the_replica_copy_does_not_write_over_it() {
         }
     );
     assert_eq!(read_all(&remote.inner, &key(1)), theirs);
+}
+
+/// The replica's object is the staged file's own bytes, and the compares of the two copies
+/// read it wrong (the first and the second, with its one clean verification between). A
+/// compare that differs proves nothing about the object: only a read of it that verifies
+/// whole can be another writer's file, so the listing confirms the object as this engine's.
+#[test]
+fn compares_that_read_the_replica_copy_wrong_do_not_make_it_another_writers() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &bytes);
+    // Whole reads of the replica's copy: the first compare, one verification, the second
+    // compare, and the read that verifies and names the file's checksum.
+    remote.log().flip_whole_reads = vec![1, 3];
+    let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
+    assert_eq!(listed.state, UploadState::At(Some(txid(1))));
+    assert_eq!(
+        listed.did,
+        Did::Listed {
+            newest: Some(txid(1))
+        }
+    );
+}
+
+/// The same, with the read that would name the object's checksum wrong too: nothing verified
+/// the replica's copy against the staged file, so the step is a store fault to retry, never a
+/// divergence.
+#[test]
+fn a_replica_copy_that_never_verifies_on_the_deciding_read_is_a_store_fault() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &bytes);
+    remote.log().flip_whole_reads = vec![1, 3, 4];
+    let failed = next(UploadState::Unknown, &staging, &remote, 1).unwrap_err();
+    assert_eq!(failed.fault, Fault::StoreTransient);
 }
 
 /// A listed tail whose size matches the staged file is confirmed by one

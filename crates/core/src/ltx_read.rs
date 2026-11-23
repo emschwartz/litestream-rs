@@ -97,13 +97,29 @@ pub(crate) async fn verifies<S: ObjectStore>(
     len: ReadLen,
     store_fault: fn(&StoreError) -> Fault,
 ) -> Result<bool, Fault> {
+    verified(store, key, len, store_fault)
+        .await
+        .map(|summary| summary.is_some())
+}
+
+/// Reads `key` as [`verifies`] does and hands back what verified: the summary of a file that
+/// decoded whole and names exactly `key`, or `None`.
+///
+/// # Errors
+/// The store's fault when a read fails.
+pub(crate) async fn verified<S: ObjectStore>(
+    store: &S,
+    key: &FileKey,
+    len: ReadLen,
+    store_fault: fn(&StoreError) -> Fault,
+) -> Result<Option<Verified>, Fault> {
     match LtxRead::new(*key, len)
         .read_verified(store, |_| Ok::<(), Infallible>(()))
         .await
     {
-        Ok(verified) => Ok(verified.header().txids() == key.range()),
+        Ok(summary) => Ok((summary.header().txids() == key.range()).then_some(summary)),
         Err(ReadFault::Store(err)) => Err(store_fault(&err)),
-        Err(ReadFault::Decode(_undecodable)) => Ok(false),
+        Err(ReadFault::Decode(_undecodable)) => Ok(None),
         Err(ReadFault::Rejected(never)) => match never {},
     }
 }
