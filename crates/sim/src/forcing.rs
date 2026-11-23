@@ -49,9 +49,9 @@ pub enum Forcing {
     StagingEdited,
     /// A scheduled staging fault hit a call.
     StagingFault,
-    /// A fault failed a step, or a boot ran under a wal-index reset ahead of
-    /// the WAL header, so the position proves no continuity until the next
-    /// step stages a file.
+    /// A fault failed a step, a boot ran under a wal-index reset ahead of
+    /// the WAL header, or a boot continued short of a commit it never staged,
+    /// so the position proves no continuity until the next step stages a file.
     PositionUnproven,
     /// The engine deleted staged files the replica never took
     /// ([`crate::oracle::lost_restore_points`] counted the give-up).
