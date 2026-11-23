@@ -268,7 +268,7 @@ impl Start {
         };
         match step {
             Step::Incremental(position) => Ok(Self {
-                cursor: position.cursor(),
+                cursor: seeded(position.cursor(), from_start),
                 begin: position.cursor().next().get(),
                 txid: next(Some(position.txid()))?,
                 prev_commit: Some(position.commit().get()),
@@ -302,6 +302,20 @@ impl Start {
                 snapshot: true,
             }),
         }
+    }
+}
+
+/// The cursor a step resumes from: `held`, unless it is the start of the header's generation,
+/// where the header as it is now seeds the chain. SQLite writes a restarted WAL's header again,
+/// with the same salts and the writing connection's own checkpoint count, whenever the
+/// wal-index holds no frame (the connection that restarted rolled back, or died, before its
+/// commit), so the seed a position took at the start can be stale; nothing of the generation
+/// was staged from it, and [`WalReader::resume`] reseeds the same way.
+fn seeded(held: FrameCursor, start: FrameCursor) -> FrameCursor {
+    if held.next() == start.next() && held.salts() == start.salts() {
+        start
+    } else {
+        held
     }
 }
 

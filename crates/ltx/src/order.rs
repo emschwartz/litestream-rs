@@ -85,7 +85,10 @@ impl PageSequence {
         }
     }
 
-    pub(crate) fn push(&mut self, pgno: NonZeroU32) -> Result<PageNo, OrderError> {
+    /// Whether `pgno` may appear at all, wherever it falls in the order: at or
+    /// below the commit, and not the lock page. A page above the commit is
+    /// reported as such even when it is also the lock page.
+    pub(crate) const fn fits(&self, pgno: NonZeroU32) -> Result<PageNo, OrderError> {
         let n = pgno.get();
         if n > self.commit {
             return Err(OrderError::AboveCommit {
@@ -96,6 +99,12 @@ impl PageSequence {
         if n == self.lock {
             return Err(OrderError::LockPage { pgno: n });
         }
+        Ok(PageNo::checked(pgno))
+    }
+
+    pub(crate) fn push(&mut self, pgno: NonZeroU32) -> Result<PageNo, OrderError> {
+        let page = self.fits(pgno)?;
+        let n = pgno.get();
         if self.snapshot {
             let expected = self.after(self.last);
             if n != expected {
@@ -108,7 +117,7 @@ impl PageSequence {
             });
         }
         self.last = n;
-        Ok(PageNo::checked(pgno))
+        Ok(page)
     }
 
     pub(crate) fn finish(&self) -> Result<(), OrderError> {

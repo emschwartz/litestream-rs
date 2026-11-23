@@ -1,9 +1,11 @@
 //! The codec: a round trip for every record, one test per decoder error, and a changed byte
 //! anywhere in a record invalidates it.
 
+use std::num::NonZeroU32;
+
 use lsr_journal::{
-    Decoded, Floor, Invalid, Journal, MAGIC, Proof, RECORD_MAX, ReplicaId, SLOT, Seq, StoredBudget,
-    Triple, Unproven, WalChecksum, decode, encode,
+    Ahead, Decoded, Floor, Invalid, Journal, MAGIC, Proof, RECORD_MAX, ReplicaId, SLOT, Seq,
+    StoredBudget, Triple, Unproven, WalChecksum, decode, encode,
 };
 use lsr_ltx::{FileChecksum, Timestamp, Txid};
 use proptest::prelude::*;
@@ -41,17 +43,27 @@ pub fn journal() -> impl Strategy<Value = Journal> {
         triple,
         wal: WalChecksum(a, b),
     });
+    let ahead = (txid(), 1..=u32::MAX, 1..=u32::MAX, any::<i64>()).prop_map(
+        |(restore_point, pages, first, millis)| Ahead {
+            restore_point,
+            pages: NonZeroU32::new(pages).unwrap(),
+            first: NonZeroU32::new(first).unwrap(),
+            made: Timestamp::from_unix_millis(millis),
+        },
+    );
     (
         proptest::option::of(floor),
         unproven,
         proptest::option::of(budget),
         proptest::option::of(proof),
+        proptest::option::of(ahead),
     )
-        .prop_map(|(floor, unproven, budget, pending)| Journal {
+        .prop_map(|(floor, unproven, budget, pending, ahead)| Journal {
             floor,
             unproven,
             budget,
             pending,
+            ahead,
         })
 }
 
@@ -194,12 +206,67 @@ fn an_unknown_debt_code_is_refused() {
 
 #[test]
 fn a_newer_version_is_valid_on_magic_length_and_checksum() {
-    let slot = record(2, 9, &[0xff; 40]);
+    let slot = record(3, 9, &[0xff; 40]);
     assert_eq!(
         decode(&slot),
         Ok(Decoded::Newer {
             seq: Seq::new(9).unwrap(),
-            version: 2
+            version: 3
         })
     );
+}
+
+/// A binary that predates the verdict reads every record written while none stands: only a
+/// record holding one is version 2.
+#[test]
+fn only_a_record_with_a_verdict_is_version_2() {
+    let version = |journal: &Journal| {
+        let slot = encode(journal, Seq::new(1).unwrap());
+        u16::from_le_bytes([slot[8], slot[9]])
+    };
+    assert_eq!(version(&Journal::ABSENT), 1);
+    let ahead = Journal {
+        ahead: Some(Ahead {
+            restore_point: Txid::new(4).unwrap(),
+            pages: NonZeroU32::new(2).unwrap(),
+            first: NonZeroU32::new(3).unwrap(),
+            made: Timestamp::from_unix_millis(5),
+        }),
+        ..Journal::ABSENT
+    };
+    assert_eq!(version(&ahead), 2);
+}
+
+/// The verdict's flag is version 2's: a version-1 record carrying it is invalid, as a flag no
+/// writer of that version sets.
+#[test]
+fn a_verdict_in_a_version_1_record_is_refused() {
+    let mut body = vec![0x10];
+    body.extend(4_u64.to_le_bytes());
+    body.extend(2_u32.to_le_bytes());
+    body.extend(3_u32.to_le_bytes());
+    body.extend(5_i64.to_le_bytes());
+    body.push(0);
+    assert_eq!(decode(&record(1, 1, &body)), Err(Invalid::Flags(0x10)));
+    assert!(matches!(
+        decode(&record(2, 1, &body)),
+        Ok(Decoded::Ours { journal, .. }) if journal.ahead.is_some()
+    ));
+    assert_eq!(decode(&record(2, 1, &[0x20, 0])), Err(Invalid::Flags(0x20)));
+}
+
+#[test]
+fn a_verdict_of_no_pages_or_from_page_zero_is_refused() {
+    for (pages, first) in [(0_u32, 3_u32), (2, 0)] {
+        let mut body = vec![0x10];
+        body.extend(4_u64.to_le_bytes());
+        body.extend(pages.to_le_bytes());
+        body.extend(first.to_le_bytes());
+        body.extend(5_i64.to_le_bytes());
+        body.push(0);
+        assert_eq!(
+            decode(&record(2, 1, &body)),
+            Err(Invalid::Ahead { pages, first })
+        );
+    }
 }

@@ -355,6 +355,34 @@ fn an_idle_new_generation_step_ends_at_the_new_generation() {
     assert_eq!(reached.position().txid(), first.txid());
 }
 
+/// A position at the start of a generation took its chain seed from the header then; SQLite
+/// writes the header of a generation with no frame again, same salts, another checkpoint
+/// sequence, and the frames that follow chain from that header. The step follows the header
+/// as it is now, as a resume at the start does, and stages the commit.
+#[test]
+fn a_step_from_the_start_follows_a_header_written_again_with_the_same_salts() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1, 2], 2);
+    let first = position_of(rig.snapshot(1000));
+    rig.wal.force_restart();
+    let empty = position_of(rig.step_at(Step::NewGeneration(first)).unwrap());
+    assert_eq!(
+        empty.cursor().next().frame_index(),
+        0,
+        "nothing of the generation yet"
+    );
+    let seq = rig.wal.checkpoint_seq();
+    rig.wal.rewrite_header(seq.wrapping_add(5));
+    assert_eq!(rig.wal.salts(), empty.cursor().salts());
+    commit(&rig.wal, &[2], 2);
+    let synced = rig.step_at(Step::Incremental(empty)).unwrap();
+    assert!(matches!(synced, Synced::Wrote { .. }), "{synced:?}");
+    let files = rig.files();
+    let (info, _, pages) = files.last().unwrap();
+    assert_eq!(info.key.range(), TxidRange::single(Txid::new(2).unwrap()));
+    assert_eq!(fills(pages), [(2, 2)]);
+}
+
 // The page checksum table.
 fn operator_snapshot(after: &Position) -> Step {
     Step::Snapshot {

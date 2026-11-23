@@ -67,8 +67,8 @@ pub use error::{RestoreError, StartError, TakeOverError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink, TakeoverUnusable};
 pub use exec::block_on;
 pub use health::{
-    AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase, Stopped,
-    StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
+    AheadOfWal, AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase,
+    Stopped, StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns,
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
