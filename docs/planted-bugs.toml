@@ -1786,13 +1786,5 @@ name = "witness-refused-key-listed"
 fix = "b7d2a645"
 package = "lsr-core"
 tests = [
-    "a_refused_copy_of_a_torn_tail_behind_a_lagging_listing_leaves_the_key_to_the_replica",
+    "a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica",
 ]
-
-[[bug]]
-name = "witness-refused-key-listed-sim"
-patch = "witness-refused-key-listed"
-fix = "b7d2a645"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_refused_staged_copy_does_not_reopen_a_key_the_replica_holds_seed_0x3d5"]

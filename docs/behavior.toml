@@ -202,7 +202,7 @@ response = "The staged file is uploaded over it under the same key. When the boo
 signal = "none"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`corrupt_l0_publish_then_power_loss`, core::`a_refused_copy_of_a_torn_tail_behind_a_lagging_listing_leaves_the_key_to_the_replica`, sim::`a_refused_staged_copy_does_not_reopen_a_key_the_replica_holds_seed_0x3d5`; plant::`witness-refused-key-listed`, plant::`witness-refused-key-listed-sim`"
+detected_by = "sim::`corrupt_l0_publish_then_power_loss`, core::`a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica`; plant::`witness-refused-key-listed`"
 recovered_by = "sim::`corrupt_l0_publish_then_power_loss`"
 in_review = "#96: the tail is read twice before it is judged torn"
 

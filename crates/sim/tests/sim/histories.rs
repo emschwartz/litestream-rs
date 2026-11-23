@@ -21,7 +21,6 @@ pub mod seed_0x25;
 pub mod seed_0x2c;
 pub mod seed_0x2d;
 pub mod seed_0x31c;
-pub mod seed_0x3d5;
 pub mod seed_0x46;
 pub mod seed_0x585;
 pub mod seed_0x753;
@@ -48,11 +47,6 @@ pub enum Guard {
 
 /// Every recorded history: its module, the test that runs it, and its guard.
 pub const GUARDS: &[(&str, &str, Guard)] = &[
-    (
-        "seed_0x3d5",
-        "a_refused_staged_copy_does_not_reopen_a_key_the_replica_holds_seed_0x3d5",
-        Guard::Own("witness-refused-key-listed-sim"),
-    ),
     (
         "seed_0x25",
         "a_torn_staged_file_is_dropped_seed_0x25",

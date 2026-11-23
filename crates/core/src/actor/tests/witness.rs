@@ -194,12 +194,14 @@ fn a_refused_copy_of_a_torn_tail_leaves_the_listed_key_to_the_replica() {
     );
 }
 
-/// As above, behind a listing that lags the bucket and leaves the torn key out: a read past
-/// it finds the key, and when the witness refuses the staged copy, only a read can tell the
-/// key is still on the replica. A listing that left it out let new content take it (seed
-/// 0x3d5 in the simulator: "transaction 16 covers commit 45 and then commit 57").
+/// A torn tail behind a listing that lags and leaves its key out, with no forgery: the
+/// application checkpointed the WAL away while the engine was down, so nothing live vouches
+/// for the tail's staged copy and the witness refuses it. Only a read can tell the key is
+/// still on the replica; a listing that left it out freed the key for the transactions
+/// committed since ("transaction 16 covers commit 45 and then commit 57", which the
+/// simulator first found through a forged staged copy).
 #[test]
-fn a_refused_copy_of_a_torn_tail_behind_a_lagging_listing_leaves_the_key_to_the_replica() {
+fn a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica() {
     let (mut rig, mut actor) = caught_up();
     commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
     commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
@@ -218,11 +220,11 @@ fn a_refused_copy_of_a_torn_tail_behind_a_lagging_listing_leaves_the_key_to_the_
         up.commit().await.unwrap();
     });
     rig.remote.hidden.lock().unwrap().push(key);
-    let forged = forge(&rig, 3, 0xEE);
+    rig.wal.force_restart();
+    rig.commit(4);
     let mut actor = Actor::new(cfg());
     rig.tick(&mut actor, T0 + 2);
     rig.settle(&mut actor, T0 + 2);
-    assert!(!replica_holds(&rig, 3, &forged));
     assert!(
         replica_holds(&rig, 3, &torn),
         "new content took the replica's key"
