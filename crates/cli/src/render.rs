@@ -20,7 +20,7 @@ use lsr_core::{
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::args::{
-    CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, FLAGS,
+    CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, help_flags,
 };
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedTime;
@@ -109,8 +109,11 @@ pub fn help() -> String {
         if let Some(positional) = command.positional() {
             put!(usage, " {positional}");
         }
-        for spec in FLAGS.iter().filter(|s| s.commands.contains(&command)) {
-            let value = spec.value.map_or(String::new(), |v| format!(" {v}"));
+        for spec in help_flags(command) {
+            let value = spec
+                .value
+                .as_ref()
+                .map_or(String::new(), |v| format!(" {v}"));
             let flag = format!("{}{value}", spec.name);
             put!(
                 usage,
@@ -123,7 +126,7 @@ pub fn help() -> String {
             );
         }
         putln!(out, "{usage}\n  {}", command.summary());
-        for spec in FLAGS.iter().filter(|s| s.commands.contains(&command)) {
+        for spec in help_flags(command) {
             putln!(out, "  {:<20}{}", spec.name, spec.help);
         }
     }
