@@ -14,6 +14,8 @@ mod differential;
 #[cfg(test)]
 mod dropped_created_at;
 #[cfg(test)]
+mod evicted_cure;
+#[cfg(test)]
 mod failstop;
 #[cfg(test)]
 mod faults;
