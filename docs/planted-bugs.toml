@@ -1980,6 +1980,13 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
 
+[[bug]]
+name = "hold-as-of-demands-the-raw-answer-sim"
+fix = "53c6bb7"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e"]
+
 # Blind plant 05 of the recall pilot (issue #127): the uploader took a commit's acknowledged size as
 # given. Its original form (upload.rs restamping the size it wrote) cannot be written any more: the
 # size is checked inside publish before a Published exists. Re-expressed at the check, skipped for
@@ -2012,3 +2019,10 @@ tests = ["maintain::tests::a_rejected_compaction_output_is_deleted_by_the_execut
 # Its sim kill was seed 0x14's verify history, which stopped reaching a rejected compaction output
 # when that test was re-pinned to seed 0xd. An unaided search for another is masked while the
 # swarm fails on a clean tree; add a sim entry once it is clean again.
+
+[[bug]]
+name = "sim-short-object-damage"
+fix = "claude/sim-remote-corrupt"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c"]

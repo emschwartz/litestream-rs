@@ -1462,7 +1462,12 @@ impl Runner {
             return now == self.w.sqlite.page_size()
                 && (remembered || self.replica_page_size().ok().flatten() == Some(was));
         }
+        // An object a size mismatch left short and a delete could not remove
+        // is real damage in the replica, as a corrupted publish is.
+        let damaged =
+            cause == StopCause::RemoteCorrupt && !self.w.remote_faults.damaged().is_empty();
         self.allow_stop
+            || damaged
             || self
                 .expected
                 .iter()
