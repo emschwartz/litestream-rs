@@ -416,8 +416,13 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
     common::moved_until(&replicator, &clock, (poll, 240), |h| {
         caught_up(h) && h.synced > full.synced
     });
-    // Once the snapshot above the record is confirmed on the replica, the record is spent and
-    // the replicator deletes it.
+    // The snapshot takes an id the record covers, so the record is still there. A put above it,
+    // once confirmed, spends it and the replicator deletes it.
+    site.commit(1);
+    let synced = full.synced;
+    common::moved_until(&replicator, &clock, (poll, 240), |h| {
+        caught_up(h) && h.synced > synced && !path.exists()
+    });
     assert!(!path.exists());
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
