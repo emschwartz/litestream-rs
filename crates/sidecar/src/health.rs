@@ -176,6 +176,7 @@ pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::PageSizeChanged { .. } => "page_size_changed",
         DegradedCause::DatabasePageMismatch { .. } => "database_page_mismatch",
         DegradedCause::DatabaseAheadOfWal { .. } => "database_ahead_of_wal",
+        DegradedCause::DatabaseAheadOfWalUnchecked => "database_ahead_of_wal_unchecked",
         DegradedCause::Bug => "bug",
         DegradedCause::Stalled(stall) => stall_name(stall),
     }
@@ -312,6 +313,16 @@ fn ahead_json(health: &Health) -> Value {
     o.end()
 }
 
+fn unchecked_json(health: &Health) -> Value {
+    let Some(unchecked) = health.ahead_of_wal_unchecked else {
+        return Value::Null;
+    };
+    let mut o = Object::new();
+    o.text("since", &unchecked.since.to_string());
+    o.text("kept_until", &unchecked.kept_until.to_string());
+    o.end()
+}
+
 fn degraded_json(health: &Health) -> Value {
     let tasks: Vec<Value> = Task::ALL
         .iter()
@@ -367,6 +378,7 @@ fn running_json(o: &mut Object, health: &Health) {
     );
     o.maybe("journal_detail", health.journal.map(|s| format!("{s:?}")));
     o.raw("database_ahead_of_wal", ahead_json(health));
+    o.raw("database_ahead_of_wal_unchecked", unchecked_json(health));
     o.maybe(
         "held_by",
         health
@@ -465,6 +477,55 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("\"app\":\"allowed\""), "{body}");
+    }
+
+    /// A check for a database file ahead of its WAL that could not be made is a notice in both
+    /// outputs while it stands, with `/healthz` still 200, under its own name, and both drop it
+    /// once it ends (D106).
+    #[test]
+    fn an_unchecked_wal_checkpoint_is_a_notice_in_both_outputs() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        health.phase = Phase::Running;
+        let view = |health: &Health| DbView {
+            path: PathBuf::from("/app.db"),
+            replica_type: "file",
+            state: DbState::Running(Box::new(health.clone())),
+        };
+        health.ahead_of_wal_unchecked =
+            Some(lsr_replica::AheadOfWalUnchecked::of(lsr_core::Unchecked {
+                made: at,
+            }));
+        let (up, body) = healthz(&[view(&health)], at);
+        assert!(up, "{body}");
+        let until = at.saturating_add(lsr_core::AHEAD_KEPT_FOR);
+        assert!(
+            body.contains(&format!(
+                "\"database_ahead_of_wal_unchecked\":{{\"since\":\"{at}\",\"kept_until\":\"{until}\"}}"
+            )),
+            "{body}"
+        );
+        assert!(body.contains("\"database_ahead_of_wal\":null"), "{body}");
+        let metrics = crate::metrics::render(&[view(&health)], at);
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal_unchecked{db=\"/app.db\"} 1"),
+            "{metrics}"
+        );
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal{db=\"/app.db\"} 0"),
+            "{metrics}"
+        );
+        health.ahead_of_wal_unchecked = None;
+        let (_, body) = healthz(&[view(&health)], at);
+        assert!(
+            body.contains("\"database_ahead_of_wal_unchecked\":null"),
+            "{body}"
+        );
+        let metrics = crate::metrics::render(&[view(&health)], at);
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal_unchecked{db=\"/app.db\"} 0"),
+            "{metrics}"
+        );
     }
 
     /// A database file found ahead of its WAL is a notice in both outputs while the state

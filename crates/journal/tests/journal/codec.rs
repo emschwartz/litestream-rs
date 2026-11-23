@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 
 use lsr_journal::{
     Ahead, Decoded, Floor, Invalid, Journal, MAGIC, Proof, RECORD_MAX, ReplicaId, SLOT, Seq,
-    StoredBudget, Triple, Unproven, WalChecksum, decode, encode,
+    StoredBudget, Triple, Unchecked, Unproven, WalChecksum, decode, encode,
 };
 use lsr_ltx::{FileChecksum, Timestamp, Txid};
 use proptest::prelude::*;
@@ -51,20 +51,27 @@ pub fn journal() -> impl Strategy<Value = Journal> {
             made: Timestamp::from_unix_millis(millis),
         },
     );
+    let unchecked = any::<i64>().prop_map(|millis| Unchecked {
+        made: Timestamp::from_unix_millis(millis),
+    });
     (
         proptest::option::of(floor),
         unproven,
         proptest::option::of(budget),
         proptest::option::of(proof),
         proptest::option::of(ahead),
+        proptest::option::of(unchecked),
     )
-        .prop_map(|(floor, unproven, budget, pending, ahead)| Journal {
-            floor,
-            unproven,
-            budget,
-            pending,
-            ahead,
-        })
+        .prop_map(
+            |(floor, unproven, budget, pending, ahead, unchecked)| Journal {
+                floor,
+                unproven,
+                budget,
+                pending,
+                ahead,
+                unchecked,
+            },
+        )
 }
 
 fn seq() -> impl Strategy<Value = Seq> {
@@ -206,20 +213,20 @@ fn an_unknown_debt_code_is_refused() {
 
 #[test]
 fn a_newer_version_is_valid_on_magic_length_and_checksum() {
-    let slot = record(3, 9, &[0xff; 40]);
+    let slot = record(4, 9, &[0xff; 40]);
     assert_eq!(
         decode(&slot),
         Ok(Decoded::Newer {
             seq: Seq::new(9).unwrap(),
-            version: 3
+            version: 4
         })
     );
 }
 
 /// A binary that predates the verdict reads every record written while none stands: only a
-/// record holding one is version 2.
+/// record holding one is version 2, and only one holding an unchecked notice is version 3.
 #[test]
-fn only_a_record_with_a_verdict_is_version_2() {
+fn only_a_record_with_a_verdict_is_version_2_and_with_a_notice_version_3() {
     let version = |journal: &Journal| {
         let slot = encode(journal, Seq::new(1).unwrap());
         u16::from_le_bytes([slot[8], slot[9]])
@@ -235,6 +242,41 @@ fn only_a_record_with_a_verdict_is_version_2() {
         ..Journal::ABSENT
     };
     assert_eq!(version(&ahead), 2);
+    let unchecked = Some(Unchecked {
+        made: Timestamp::from_unix_millis(6),
+    });
+    assert_eq!(version(&Journal { unchecked, ..ahead }), 3);
+    assert_eq!(
+        version(&Journal {
+            unchecked,
+            ..Journal::ABSENT
+        }),
+        3
+    );
+}
+
+/// The unchecked notice's flag is version 3's: a version-2 record carrying it is invalid, as a
+/// flag no writer of that version sets.
+#[test]
+fn an_unchecked_notice_in_a_version_2_record_is_refused() {
+    let mut body = vec![0x20];
+    body.extend(7_i64.to_le_bytes());
+    body.push(1);
+    assert_eq!(decode(&record(2, 1, &body)), Err(Invalid::Flags(0x20)));
+    assert_eq!(
+        decode(&record(3, 1, &body)),
+        Ok(Decoded::Ours {
+            seq: Seq::new(1).unwrap(),
+            journal: Journal {
+                unproven: Unproven::Truncate,
+                unchecked: Some(Unchecked {
+                    made: Timestamp::from_unix_millis(7),
+                }),
+                ..Journal::ABSENT
+            },
+        })
+    );
+    assert_eq!(decode(&record(3, 1, &[0x40, 0])), Err(Invalid::Flags(0x40)));
 }
 
 /// The verdict's flag is version 2's: a version-1 record carrying it is invalid, as a flag no

@@ -321,6 +321,14 @@ pub enum AheadNotice {
         /// The restore point no longer kept.
         restore_point: Txid,
     },
+    /// A boot found recorded that an owed check could not be made (`docs/decisions.md` D106):
+    /// the notice stands until `until`.
+    UncheckedStands {
+        /// When the notice ends.
+        until: Timestamp,
+    },
+    /// The window of a check that could not be made passed: the notice ends.
+    UncheckedEnded,
 }
 
 /// How a tick ended.
@@ -770,6 +778,9 @@ impl Actor {
             self.kept.ahead_notice = Some(AheadNotice::Released {
                 restore_point: released,
             });
+        }
+        if self.expire_unchecked(now) {
+            self.kept.ahead_notice = Some(AheadNotice::UncheckedEnded);
         }
         if let Some(notice) = self.kept.ahead_notice.take() {
             return Tick::Ran {
@@ -2521,6 +2532,7 @@ impl Actor {
             self.engine.gate.until(),
             self.engine.maintain.until,
             self.kept.ahead.map(ahead::kept_until),
+            self.kept.unchecked.map(ahead::unchecked_until),
         ];
         [task(Task::Sync), task(Task::Upload), deadline]
             .into_iter()
@@ -2713,6 +2725,7 @@ impl Actor {
         if let Some(read) = self.kept.journal_read {
             self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
             self.adopt_ahead(read.ahead);
+            self.adopt_unchecked(read.unchecked);
             self.adopt_floor(read.floor);
         }
         self.raise_floor(upload.confirmed());
@@ -2745,11 +2758,13 @@ impl Actor {
         let wanted = (
             self.kept.unproven.recorded(),
             self.kept.ahead,
+            self.kept.unchecked,
             // A floor is never dropped, another destination's included: the record keeps its
             // own until this engine has one (`floor`).
             self.kept.floor.or(held.and_then(|held| held.floor)),
         );
-        if held.map(|held| (held.unproven, held.ahead, held.floor)) == Some(wanted) {
+        if held.map(|held| (held.unproven, held.ahead, held.unchecked, held.floor)) == Some(wanted)
+        {
             // Nothing the engine holds is missing from the journal: nothing lags it.
             self.kept.journal_write = Ok(());
             return tick;
@@ -2757,7 +2772,8 @@ impl Actor {
         let record = lsr_journal::Journal {
             unproven: wanted.0,
             ahead: wanted.1,
-            floor: wanted.2,
+            unchecked: wanted.2,
+            floor: wanted.3,
             ..held.unwrap_or(lsr_journal::Journal::ABSENT)
         };
         let Some(writer) = self.kept.writer.as_mut() else {

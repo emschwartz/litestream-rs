@@ -6,7 +6,7 @@ use crc::{CRC_32_ISCSI, Crc};
 use lsr_ltx::{FileChecksum, Timestamp, Txid};
 
 use crate::facts::{
-    Ahead, Floor, Journal, Proof, ReplicaId, StoredBudget, Triple, Unproven, WalChecksum,
+    Ahead, Floor, Journal, Proof, ReplicaId, StoredBudget, Triple, Unchecked, Unproven, WalChecksum,
 };
 use crate::read::Seq;
 
@@ -16,9 +16,12 @@ pub const SLOT: usize = 4096;
 pub const RECORD_MAX: usize = 512;
 /// The record's first eight bytes.
 pub const MAGIC: [u8; 8] = *b"LSRJRNL\0";
-/// The newest version this binary writes: 2 while an ahead-of-WAL verdict stands, 1 otherwise.
-pub const VERSION: u16 = 2;
-/// The version of a record without the verdict, which every binary since the journal reads.
+/// The newest version this binary writes: 3 while an unchecked notice stands, else 2 while an
+/// ahead-of-WAL verdict stands, else 1.
+pub const VERSION: u16 = 3;
+/// The version of a record with a verdict and no unchecked notice.
+const VERSION_2: u16 = 2;
+/// The version of a record with neither, which every binary since the journal reads.
 const VERSION_1: u16 = 1;
 
 /// Magic, version, body length and sequence number.
@@ -36,6 +39,8 @@ const HAS_BUDGET: u8 = 4;
 const HAS_PENDING: u8 = 8;
 /// Version 2.
 const HAS_AHEAD: u8 = 16;
+/// Version 3.
+const HAS_UNCHECKED: u8 = 32;
 
 /// Why a slot holds no record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
@@ -128,6 +133,7 @@ fn body(journal: &Journal) -> Vec<u8> {
         (journal.budget.is_some(), HAS_BUDGET),
         (journal.pending.is_some(), HAS_PENDING),
         (journal.ahead.is_some(), HAS_AHEAD),
+        (journal.unchecked.is_some(), HAS_UNCHECKED),
     ]
     .iter()
     .filter(|(on, _)| *on)
@@ -156,6 +162,9 @@ fn body(journal: &Journal) -> Vec<u8> {
         out.put(&ahead.first.get().to_le_bytes());
         out.put(&ahead.made.unix_millis().to_le_bytes());
     }
+    if let Some(unchecked) = journal.unchecked {
+        out.put(&unchecked.made.unix_millis().to_le_bytes());
+    }
     let debt = match journal.unproven {
         Unproven::No => 0,
         Unproven::Truncate => 1,
@@ -170,10 +179,10 @@ fn body(journal: &Journal) -> Vec<u8> {
 pub fn encode(journal: &Journal, seq: Seq) -> [u8; SLOT] {
     let body = body(journal);
     let len = u16::try_from(body.len()).unwrap_or(u16::MAX);
-    let version = if journal.ahead.is_some() {
-        VERSION
-    } else {
-        VERSION_1
+    let version = match (journal.unchecked, journal.ahead) {
+        (Some(_), _) => VERSION,
+        (None, Some(_)) => VERSION_2,
+        (None, None) => VERSION_1,
     };
     let mut out = Out(Vec::with_capacity(RECORD_MAX));
     out.put(&MAGIC);
@@ -251,6 +260,7 @@ fn body_len(flags: u8) -> usize {
         part(HAS_BUDGET, 9),
         part(HAS_PENDING, 40),
         part(HAS_AHEAD, 24),
+        part(HAS_UNCHECKED, 8),
         1,
     ]
     .iter()
@@ -261,10 +271,13 @@ fn body_len(flags: u8) -> usize {
 fn decode_body(body: &[u8], version: u16) -> Result<Journal, Invalid> {
     let mut input = In(body);
     let [flags] = input.take::<1>();
+    let one = HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING;
     let known = if version >= VERSION {
-        HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING | HAS_AHEAD
+        one | HAS_AHEAD | HAS_UNCHECKED
+    } else if version >= VERSION_2 {
+        one | HAS_AHEAD
     } else {
-        HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING
+        one
     };
     if flags & !known != 0 || (flags & HAS_ANCHOR != 0 && flags & HAS_FLOOR == 0) {
         return Err(Invalid::Flags(flags));
@@ -307,6 +320,9 @@ fn decode_body(body: &[u8], version: u16) -> Result<Journal, Invalid> {
     } else {
         Some(input.ahead()?)
     };
+    let unchecked = (flags & HAS_UNCHECKED != 0).then(|| Unchecked {
+        made: Timestamp::from_unix_millis(i64::from_le_bytes(input.take())),
+    });
     let unproven = match input.take::<1>() {
         [0] => Unproven::No,
         [1] => Unproven::Truncate,
@@ -319,6 +335,7 @@ fn decode_body(body: &[u8], version: u16) -> Result<Journal, Invalid> {
         budget,
         pending,
         ahead,
+        unchecked,
     })
 }
 
