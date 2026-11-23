@@ -1,0 +1,5 @@
+name = "wal-sync-error-as-success"
+fix = "claude/wal-sync-failed"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = ["a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate"]

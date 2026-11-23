@@ -1,0 +1,5 @@
+name = "upload-commit-size-unchecked-sim"
+fix = "plant"
+package = "lsr-sim"
+patch = "upload-commit-size-unchecked"
+tests = ["short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets"]

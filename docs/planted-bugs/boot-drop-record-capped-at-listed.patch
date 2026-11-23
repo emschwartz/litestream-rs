@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2515,7 +2515,7 @@
+         // upload at a later boot.
+         let past = probe_past(remote, listed, tip, Some(local)).await?;
+         let found = past.last().map(|key| key.range().max());
+-        let replica = tip.max(listed).max(found);
++        let replica = tip.max(listed).max(found.filter(|_| false));
+         match replica.map(|replica| replica.min(local)) {
+             Some(through) if !covers(through) => {
+                 Err(BootStep::Vouch(TakeoverRecord::through(through)))

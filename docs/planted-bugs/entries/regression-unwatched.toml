@@ -1,0 +1,5 @@
+# A replica that lost files while the engine ran went unseen by maintenance.
+name = "regression-unwatched"
+fix = "5cf9f56"
+package = "lsr-core"
+tests = ["a_rollback_while_running_is_seen_by_the_next_maintenance_listing"]

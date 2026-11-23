@@ -1,0 +1,11 @@
+# The uploader asks the bucket to refuse a taken level-0 key (If-None-Match: *); the store stops
+# sending the header.
+name = "drop-if-none-match"
+fix = "92613ce"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "a_create_only_put_into_a_taken_key_is_refused_and_changes_nothing",
+    "a_create_only_multipart_into_a_taken_key_is_refused_at_the_complete",
+    "store::cases::conformance_cases::a_new_upload_never_replaces",
+]

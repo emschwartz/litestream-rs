@@ -1,0 +1,6 @@
+name = "failstop-clock-from-process-start"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_crash_loop_does_not_reset_the_clock",
+]

@@ -1,0 +1,9 @@
+name = "failstop-never-trips-sim"
+patch = "failstop-never-trips"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_store_down_past_the_bound_trips_in_time_and_clears_after",
+    "failstop::a_crash_loop_trips_for_age",
+]
