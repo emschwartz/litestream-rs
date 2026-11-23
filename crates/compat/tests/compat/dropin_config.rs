@@ -18,10 +18,11 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use lsr_compat::{Dump, DumpEnv, Parsed, go_dump, go_dump_binary, go_parse, rust_dump, rust_parse};
+use lsr_compat::{
+    Differential, Dump, DumpEnv, Parsed, go_dump, go_dump_binary, go_parse, rust_dump, rust_parse,
+};
 use lsr_core::needs::{Resource, must};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
 
 /// Each kind's spellings: ones Go accepts for that type (drawn most of the time, so most
 /// files parse and their values are compared), then odd ones (types yaml.v2 reads
@@ -707,12 +708,11 @@ fn go_and_rust_parse_the_same_config() {
     let go = must(Resource::GoBuilds, || {
         go_dump_binary().map_err(|e| e.to_string())
     });
-    let mut runner = TestRunner::new(Config {
-        cases: 2048,
-        failure_persistence: None,
-        ..Config::default()
+    let run = Differential::new("config files");
+    let compared = run.free(2048, &case(), |case| {
+        compare(&go, &case).map(|()| "compared".to_owned())
     });
-    if let Err(error) = runner.run(&case(), |case| compare(&go, &case)) {
+    if let Err(error) = compared {
         panic!("{error}");
     }
     let [compared, both, departed, unknown, staged] =

@@ -138,6 +138,10 @@ pub struct Counters {
     /// Snapshots staged, per cause: each one uploads the whole database, so
     /// a cause that keeps counting up is a cost to look into.
     pub snapshots: SnapshotCounts,
+    /// Recoveries that found commits lost to a WAL restart the read lock should have
+    /// prevented: a broken lock or a bug in the continuity proof. Each takes a snapshot, counted
+    /// as `generation_changed`; any count above zero is worth a report.
+    pub read_lock_violations: u64,
 }
 
 /// One copy of the replicator's state, written by its thread after every tick.
@@ -331,6 +335,7 @@ impl Health {
                 retries: 0,
                 panics: 0,
                 sink_panics: 0,
+                read_lock_violations: 0,
                 store: StoreCounters {
                     list: OpCounters::ZERO,
                     read: OpCounters::ZERO,
