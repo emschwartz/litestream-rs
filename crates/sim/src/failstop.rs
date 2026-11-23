@@ -20,6 +20,16 @@
 //!   the bound's instant (a store or staging fault fired, or the engine reported a retry or a
 //!   degraded data-path task on that tick);
 //! - refused at boot: a store refusal fired in this life, and this life has not booted.
+//!
+//! **The one exemption: committed WAL frames the engine never read.** The engine is judged on
+//! what it can know (`docs/decisions.md` D81, amended). When the WAL holds committed frames, no
+//! staged file waits for the replica (so the lag can only be those frames), and the engine has
+//! read the WAL successfully at no point after the clock's start (no tick that booted, synced,
+//! took a snapshot or checkpointed), it cannot tell whether those frames hold commits the
+//! replica lacks, and an age trip is correct even if the simulator knows the
+//! replica holds every commit (a vacuum that rewrote identical pages, say). Such trips are
+//! excused and counted ([`FailStopJudge::excused`]), so a generator change that makes them
+//! common shows.
 
 use std::time::Duration;
 
@@ -44,6 +54,10 @@ pub struct FailStopJudge {
     failed: Option<(Timestamp, i64)>,
     /// A store refusal fired since the last start.
     refused: bool,
+    /// The latest tick on which the engine read the WAL successfully, on its clock.
+    wal_read: Option<Timestamp>,
+    /// Age trips excused because the engine had not read the WAL's committed frames.
+    excused: u64,
     /// The last tick's age trip was one the judge accepted, and how many ticks have passed
     /// since the replica was last seen whole: an accepted trip may take [`CLEAR_TICKS`] to
     /// clear after the catch-up (the engine learns of it at its next sync).
@@ -72,6 +86,9 @@ pub struct TickSeen {
     pub reported_failure: bool,
     /// A store refusal fired in it.
     pub refusal_fired: bool,
+    /// The engine read the WAL successfully in it: it booted, synced, took a snapshot or
+    /// checkpointed.
+    pub read_wal: bool,
 }
 
 impl FailStopJudge {
@@ -152,6 +169,28 @@ impl FailStopJudge {
             self.failed = Some((tick.at, tick.true_at));
         }
         self.refused |= tick.refusal_fired;
+        if tick.read_wal {
+            self.wal_read = Some(tick.at);
+        }
+    }
+
+    /// How many age trips were excused because the engine had not read the WAL's committed
+    /// frames since its clock started.
+    #[must_use]
+    pub const fn excused(&self) -> u64 {
+        self.excused
+    }
+
+    /// Whether `trip` is an age trip the engine could not have avoided: the WAL holds committed
+    /// frames and nothing staged waits for the replica (`unstaged_only`), and the engine has
+    /// read the WAL at no point after its clock began.
+    fn unread_wal(&self, trip: Option<Trip>, unstaged_only: bool) -> bool {
+        let Some(Trip::UnreplicatedTooLong { since }) = trip else {
+            return false;
+        };
+        // A read in the tick that first saw the frames came before the sighting: the engine
+        // reads during the tick and looks at the WAL's end after it.
+        unstaged_only && self.wal_read.is_none_or(|read| read <= since)
     }
 
     /// The age of the first unreplicated commit at `tick`: the larger of the two clocks.
@@ -163,6 +202,7 @@ impl FailStopJudge {
     }
 
     /// Judges the engine's trip after `tick`, for a life that has (`booted`) or has not booted.
+    /// `unstaged_only`: the WAL holds committed frames and no staged file waits for the replica.
     ///
     /// # Errors
     /// [`Violation::FalseTrip`] when nothing the simulator knows explains it.
@@ -172,6 +212,7 @@ impl FailStopJudge {
         tick: TickSeen,
         bound: Duration,
         booted: bool,
+        unstaged_only: bool,
     ) -> Result<(), Violation> {
         let lingering = self.accepted
             && self.since.is_none()
@@ -180,7 +221,13 @@ impl FailStopJudge {
         let judged = if age_trip && lingering {
             Ok(())
         } else {
-            self.judge_now(trip, tick, bound, booted)
+            match self.judge_now(trip, tick, bound, booted) {
+                Err(_) if self.unread_wal(trip, unstaged_only) => {
+                    self.excused = self.excused.saturating_add(1);
+                    Ok(())
+                }
+                verdict => verdict,
+            }
         };
         self.accepted = age_trip && judged.is_ok();
         judged
@@ -283,4 +330,78 @@ pub struct Fired {
     pub refused: u64,
     /// Fires whose commit published the object and answered failed or wrong.
     pub doubtful: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOUND: Duration = Duration::from_secs(600);
+
+    fn ts(millis: i64) -> Timestamp {
+        Timestamp::from_unix_millis(millis)
+    }
+
+    fn tick(at: i64, read_wal: bool) -> TickSeen {
+        TickSeen {
+            at: ts(at),
+            true_at: at,
+            fault_fired: true,
+            reported_failure: true,
+            refusal_fired: false,
+            read_wal,
+        }
+    }
+
+    /// A judge that has seen the replica hold every commit: any age trip is false to it.
+    fn caught_up() -> FailStopJudge {
+        let image = lsr_history::Digest::genesis();
+        let mut judge = FailStopJudge::starting(ts(0), image);
+        judge.caught_up(image);
+        judge
+    }
+
+    fn age_trip(since: i64) -> Option<Trip> {
+        Some(Trip::UnreplicatedTooLong { since: ts(since) })
+    }
+
+    /// Committed frames the engine never read, with nothing staged waiting: excused, counted.
+    #[test]
+    fn a_trip_on_frames_never_read_is_excused_and_counted() {
+        let mut judge = caught_up();
+        judge.saw(tick(1_000, false));
+        judge
+            .judge(age_trip(1_000), tick(700_000, false), BOUND, true, true)
+            .unwrap();
+        assert_eq!(judge.excused(), 1);
+    }
+
+    /// A read in the tick that first saw the frames came before the sighting: still excused.
+    #[test]
+    fn a_read_in_the_sighting_tick_does_not_count() {
+        let mut judge = caught_up();
+        judge.saw(tick(1_000, true));
+        judge
+            .judge(age_trip(1_000), tick(700_000, false), BOUND, true, true)
+            .unwrap();
+    }
+
+    /// A read after the clock's start, or a staged file waiting for the replica: not excused.
+    #[test]
+    fn a_later_read_or_a_waiting_staged_file_is_not_excused() {
+        let mut judge = caught_up();
+        judge.saw(tick(2_000, true));
+        let later = judge.judge(age_trip(1_000), tick(700_000, false), BOUND, true, true);
+        assert!(
+            matches!(later, Err(Violation::FalseTrip { .. })),
+            "{later:?}"
+        );
+        let mut judge = caught_up();
+        let waiting = judge.judge(age_trip(1_000), tick(700_000, false), BOUND, true, false);
+        assert!(
+            matches!(waiting, Err(Violation::FalseTrip { .. })),
+            "{waiting:?}"
+        );
+        assert_eq!(judge.excused(), 0);
+    }
 }
