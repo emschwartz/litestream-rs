@@ -120,17 +120,9 @@ pub enum Refusal {
 /// Why an application connection is not set up as replication needs (PLAN section 6).
 #[derive(Debug, thiserror::Error)]
 pub enum SetupError {
-    /// `SQLITE_FCNTL_PERSIST_WAL` failed: the connection's main database has no file (an
-    /// in-memory database) or its VFS does not know the opcode.
-    #[error("SQLITE_FCNTL_PERSIST_WAL failed: {0}")]
-    PersistWal(rusqlite::Error),
     /// A pragma failed.
     #[error("SQLite refused a setup pragma: {0}")]
     Sqlite(rusqlite::Error),
-    /// The connection would delete the WAL when it closes last, ending the generation the
-    /// replica follows.
-    #[error("SQLITE_FCNTL_PERSIST_WAL is off")]
-    PersistWalOff,
     /// The connection would checkpoint on its own, behind the replicator's back.
     #[error("wal_autocheckpoint is {pages}, not 0")]
     AutocheckpointOn {
@@ -147,6 +139,13 @@ pub enum SetupError {
     /// The connection opens another file than the replicated database.
     #[error("the connection opens another database than the one replicated")]
     OtherDatabase,
+    /// The connection already had a commit hook that was not ours; SQLite holds one per
+    /// connection and cannot hand the old one back, so it is gone and the gate is installed.
+    #[error(
+        "the connection's own commit hook was replaced by the fail-stop gate; call app_connection \
+         before setting a commit hook"
+    )]
+    CommitHookReplaced,
 }
 
 /// Sorts a SQLite result code (primary or extended) the way a sync loop needs it.

@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/failstop.rs b/crates/core/src/failstop.rs
+index 1cfa4a2..b18617b 100644
+--- a/crates/core/src/failstop.rs
++++ b/crates/core/src/failstop.rs
+@@ -357,7 +357,6 @@ impl Lag {
+         // Gone once the replica holds the file, or nothing pending holds a commit.
+         self.carried = self.carried.filter(|(txid, _)| {
+             seen.pending.is_some_and(|pending| pending >= *txid)
+-                && seen.replicated.is_none_or(|replicated| replicated < *txid)
+         });
+         match (seen.ahead, self.unstaged) {
+             (Some(mark), None) => {

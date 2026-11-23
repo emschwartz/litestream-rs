@@ -1,13 +1,21 @@
 diff --git a/crates/core/src/failstop.rs b/crates/core/src/failstop.rs
-index 7a32fca..4725c5d 100644
+index 1cfa4a2..e114bf6 100644
 --- a/crates/core/src/failstop.rs
 +++ b/crates/core/src/failstop.rs
-@@ -231,7 +231,7 @@ impl Lag {
-         bound: MaxUnreplicatedAge,
-         now: Timestamp,
-     ) {
--        if !behind {
-+        if !behind && !self.tripped {
-             *self = Self::default();
+@@ -328,13 +328,14 @@ impl Lag {
+             self.seen,
+         ];
+         let Some(oldest) = dates.into_iter().flatten().min() else {
+-            *self = Self::default();
++            if self.tripped.is_none() {
++                *self = Self::default();
++            }
              return;
-         }
+         };
+         // A date ahead of now (a clock that stepped back) says nothing older than now.
+         let since = oldest.min(now);
+         self.since = Some(since);
+-        self.tripped = self.tripped.filter(|tripped| since <= *tripped);
+         let at = since.saturating_add(bound.get());
+         if self.tripped.is_none() && now >= at && self.failed.is_some_and(|failed| failed >= at) {
+             self.tripped = Some(since);

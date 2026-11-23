@@ -179,13 +179,15 @@ impl<R: Read + Seek> WalReader<R> {
         &self.header
     }
 
-    /// Whether the file's header, read again now, still names the generation this
-    /// reader was opened on.
+    /// Whether the file's header, read again now, is still the one this reader was
+    /// opened on.
     ///
-    /// A short file, an unreadable header or other salts answer `false`: the WAL
-    /// was truncated or restarted since `open`. SQLite writes a restart's header
-    /// before any new frame, so after a failed read below the committed end a
-    /// header that still matches means the bytes are wrong inside one generation.
+    /// A short file, an unreadable header or any other header answers `false`: the WAL
+    /// was truncated or restarted since `open`, or its header was written again with the
+    /// same salts and another seed (SQLite does that once the wal-index holds no frame of
+    /// the generation). SQLite writes a header before any frame chained from it, so after
+    /// a failed read below the committed end a header that still matches means the bytes
+    /// are wrong inside one generation.
     ///
     /// # Errors
     /// An I/O failure reading the header.
@@ -194,7 +196,7 @@ impl<R: Read + Seek> WalReader<R> {
         if read_at(&mut self.reader, 0, &mut bytes)? < HEADER_LEN {
             return Ok(false);
         }
-        Ok(WalHeader::decode(&bytes).is_ok_and(|now| now.salts() == self.header.salts()))
+        Ok(WalHeader::decode(&bytes).is_ok_and(|now| now == self.header))
     }
 
     /// The cursor before the first frame.
@@ -298,12 +300,33 @@ impl<R: Read + Seek> WalReader<R> {
         expected: Salts,
         within: CommittedEnd,
     ) -> Result<FrameRef, ResumeError> {
+        self.chained_before(at, expected, within)
+            .map(|(frame, _checksum)| frame)
+    }
+
+    /// [`Self::frame_before`], with the running checksum that frame carries. A caller that
+    /// remembers the checksum it scanned to `at` tells by it whether the chain before `at` is
+    /// still the one it scanned: SQLite writes a generation's header again, same salts and
+    /// another seed, once its wal-index holds no frame, and frames regrown from that header
+    /// verify on their own while carrying other checksums.
+    ///
+    /// # Errors
+    /// As [`Self::frame_before`].
+    pub fn chained_before(
+        &mut self,
+        at: WalOffset,
+        expected: Salts,
+        within: CommittedEnd,
+    ) -> Result<(FrameRef, WalChecksum), ResumeError> {
         match self.verified_before(at, expected, within)? {
-            Some((offset, frame)) => Ok(FrameRef {
-                pgno: frame.pgno,
-                offset,
-                digest: frame.digest,
-            }),
+            Some((offset, frame)) => Ok((
+                FrameRef {
+                    pgno: frame.pgno,
+                    offset,
+                    digest: frame.digest,
+                },
+                frame.checksum,
+            )),
             None => Err(ResumeError::NotAtCommit { at }),
         }
     }

@@ -27,6 +27,7 @@ use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
+use crate::side::SqliteSide;
 use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode, SimSqlite};
 use crate::staging::StagingRaw;
 use crate::store::{
@@ -233,8 +234,9 @@ pub struct CommittedInTick {
 pub struct World {
     /// The seed the run came from.
     pub seed: Seed,
-    /// SQLite's rules.
-    pub sqlite: SimSqlite,
+    /// The SQLite the engine runs against, through the seam (`crate::side`): the rule model,
+    /// for now the only backend.
+    pub sqlite: Arc<dyn SqliteSide>,
     /// The driver's clock: it moves between ticks, and the recorders read it.
     pub clock: Arc<FakeClock>,
     /// The clock the actor and the app read inside a tick, over [`Self::clock`]
@@ -347,7 +349,7 @@ impl World {
         ));
         Self {
             seed,
-            sqlite,
+            sqlite: Arc::new(sqlite),
             clock,
             sim_clock,
             high,
@@ -386,8 +388,29 @@ impl World {
     /// holds whatever the rules' file still has, so the model takes it from
     /// their image instead of assuming the app wrote it.
     pub fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<CommitId> {
-        let before = self.model.newest_image().db_size();
         let app = self.sqlite.commit(pages, db_size)?;
+        Some(self.committed(pages, db_size, app))
+    }
+
+    /// As [`Self::app_commit`], by another application connection with a checkpoint count of
+    /// its own ([`SimSqlite::other_writer_commit`]).
+    pub fn other_writer_commit(
+        &mut self,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+    ) -> Option<CommitId> {
+        let app = self.sqlite.other_writer_commit(pages, db_size)?;
+        Some(self.committed(pages, db_size, app))
+    }
+
+    /// Takes a commit SQLite made into the model and the history.
+    fn committed(
+        &mut self,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: u32,
+        app: crate::sqlite::AppCommit,
+    ) -> CommitId {
+        let before = self.model.newest_image().db_size();
         self.retire_generation(app.salts);
         let mut written = pages.to_vec();
         if db_size > before {
@@ -397,7 +420,7 @@ impl World {
             .model
             .commit(&written, db_size, app, self.remote_recorder.len());
         self.log_history();
-        Some(id)
+        id
     }
 
     /// Logs the model's new commits in the history, at the clock's time.

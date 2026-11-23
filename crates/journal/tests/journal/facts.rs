@@ -1,7 +1,9 @@
 //! The monotonic rule a record must keep over the one before it.
 
-use lsr_journal::{Floor, Journal, Lowered, ReplicaId, Unproven, WouldLower};
-use lsr_ltx::Txid;
+use std::num::NonZeroU32;
+
+use lsr_journal::{Ahead, Floor, Journal, Lowered, ReplicaId, Unproven, WouldLower};
+use lsr_ltx::{Timestamp, Txid};
 
 fn floor(replica: u8, bound: u64) -> Option<Floor> {
     Some(Floor::new(
@@ -73,4 +75,33 @@ fn withdrawing_the_anchor_keeps_the_bound() {
     let anchored = floor(1, 5).unwrap();
     assert_eq!(anchored.withdraw_anchor().bound(), anchored.bound());
     assert_eq!(anchored.withdraw_anchor().anchor(), None);
+}
+
+fn ahead(restore_point: u64) -> Journal {
+    Journal {
+        ahead: Some(Ahead {
+            restore_point: Txid::new(restore_point).unwrap(),
+            pages: NonZeroU32::new(1).unwrap(),
+            first: NonZeroU32::new(2).unwrap(),
+            made: Timestamp::from_unix_millis(0),
+        }),
+        ..Journal::ABSENT
+    }
+}
+
+/// While a verdict stands, a later one keeps the older restore point, the state before any
+/// damage; the verdict itself may end, since its window is not the record's to see.
+#[test]
+fn a_kept_restore_point_never_moves_forward() {
+    assert_eq!(Journal::ABSENT.monotonic(&ahead(5)), Ok(()));
+    assert_eq!(ahead(5).monotonic(&ahead(5)), Ok(()));
+    assert_eq!(ahead(5).monotonic(&ahead(3)), Ok(()));
+    assert_eq!(ahead(5).monotonic(&Journal::ABSENT), Ok(()));
+    assert_eq!(
+        ahead(5).monotonic(&ahead(6)),
+        Err(Lowered::AheadRestorePoint {
+            from: Txid::new(5).unwrap(),
+            to: Txid::new(6).unwrap(),
+        })
+    );
 }

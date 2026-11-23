@@ -172,6 +172,9 @@ pub struct RunReport {
     /// Each change of the engine's fail-stop trip, with the time of the tick that made it
     /// (`crate::failstop`).
     pub trips: Vec<(Timestamp, Option<lsr_core::Trip>)>,
+    /// How many of [`Self::trips`] the history's own operations made, before the final drain:
+    /// a drain that rebuilds the engine clears its clock whatever the clock would have done.
+    pub trips_in_history: usize,
 }
 
 /// What a run may be told besides its seed.
@@ -1019,6 +1022,7 @@ impl Runner {
             | Event::Retrying { .. }
             | Event::Resnapshot(_)
             | Event::Clamped(_)
+            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => Ok(Step::Ran),
         }
     }
@@ -1048,6 +1052,7 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Clamped(_)
+            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => return Ok(()),
         };
         self.liveness
@@ -1092,6 +1097,7 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Clamped(_)
+            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => {}
         }
     }
@@ -1456,7 +1462,12 @@ impl Runner {
             return now == self.w.sqlite.page_size()
                 && (remembered || self.replica_page_size().ok().flatten() == Some(was));
         }
+        // An object a size mismatch left short and a delete could not remove
+        // is real damage in the replica, as a corrupted publish is.
+        let damaged =
+            cause == StopCause::RemoteCorrupt && !self.w.remote_faults.damaged().is_empty();
         self.allow_stop
+            || damaged
             || self
                 .expected
                 .iter()
@@ -1715,6 +1726,16 @@ impl Runner {
         self.w.crash(CrashKind::Process);
         self.crashed(CrashKind::Process);
         Ok(())
+    }
+
+    /// Another application connection commits: its own pages, never growing the database, and
+    /// not in the app's log (the app does not redo another process's writes).
+    fn other_connection_commit(&mut self, count: u8) {
+        let size = self.w.sqlite.db_size();
+        let pages = self.pick_pages(u32::from(count), size);
+        if self.w.other_writer_commit(&pages, size).is_some() {
+            self.report.reach.bump("commit.other_connection");
+        }
     }
 
     fn spill(&mut self) {
@@ -2179,6 +2200,7 @@ impl Runner {
             Op::CommitInTick { pages } => self.commit_in_tick(*pages)?,
             Op::AppInTick { at, op } => self.app_in_tick(*at, *op)?,
             Op::Spill => self.spill(),
+            Op::OtherConnectionCommit { pages } => self.other_connection_commit(*pages),
             Op::Rollback => {
                 if self.w.sqlite.rollback() {
                     self.spilled.clear();
@@ -2333,6 +2355,7 @@ impl Runner {
             | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
+            | PersistentCause::DatabaseAheadOfWal { .. }
             | PersistentCause::Bug => true,
         }
     }
@@ -2391,6 +2414,7 @@ impl Runner {
 
     /// The end of a history: drain, judge the replica, check the resources.
     fn finish(&mut self) -> Result<(), Violation> {
+        self.report.trips_in_history = self.report.trips.len();
         if self.lenient && !self.w.model_matches_sqlite() {
             return Err(bug_fault(crate::oracle::MODEL_DIVERGED));
         }
@@ -2530,6 +2554,7 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Idle
         | Event::Resnapshot(_)
         | Event::Clamped(_)
+        | Event::AheadOfWal(_)
         | Event::TakeoverWanted(_) => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
@@ -2711,7 +2736,8 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
-        | PersistentCause::WalSyncFailed => true,
+        | PersistentCause::WalSyncFailed
+        | PersistentCause::DatabaseAheadOfWal { .. } => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
@@ -2731,7 +2757,8 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::WalCorrupt
         | StopCause::WalTruncated
         | StopCause::WalUnlinked
-        | StopCause::WalSyncFailed => true,
+        | StopCause::WalSyncFailed
+        | StopCause::DatabaseAheadOfWal { .. } => true,
         StopCause::StoreDenied(_)
         | StopCause::StoreRefused
         | StopCause::RemoteCorrupt

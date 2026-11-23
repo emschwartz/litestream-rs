@@ -499,3 +499,174 @@ fn an_operator_snapshot_that_takes_a_new_commit_is_lag() {
     );
     assert!(actor.unreplicated_since().is_some());
 }
+
+/// A writer that commits while every tick runs keeps something off the replica at the end
+/// of each one, yet every commit lands a tick or two later. The clock is the oldest commit off
+/// the replica now, not the start of that unbroken run: an upload that fails after twenty
+/// minutes of it must not trip.
+#[test]
+fn a_steady_writer_whose_uploads_trail_by_a_tick_never_trips() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    rig.settle(&mut actor, T0);
+    let mut now = T0;
+    for n in 0..120_u8 {
+        now += 10_000;
+        // Lands after the tick's own reads of the WAL end, before the clock's.
+        let reads = if n % 2 == 0 { 2 } else { 1 };
+        rig.wal.append_tx_before_read(
+            reads,
+            &[(pg(1), vec![n.wrapping_add(10); PS.bytes()])],
+            nz(3),
+        );
+        rig.tick(&mut actor, now);
+        assert!(
+            actor.unreplicated_since().is_some(),
+            "the run of lag is unbroken at {now}"
+        );
+    }
+    assert!(
+        actor.replicated().is_some_and(|txid| txid.get() > 50),
+        "commits land: {:?}",
+        actor.replicated()
+    );
+    let since = actor.unreplicated_since().expect("the clock runs");
+    assert!(
+        now - since.unix_millis() <= 60_000,
+        "the clock dates from {since:?}, {} ms before the newest tick, though every older commit landed",
+        now - since.unix_millis()
+    );
+    remote_down(&rig, 1_000);
+    rig.commit(200);
+    let seen = drive(&mut rig, &mut actor, now + 1, now + 60_000);
+    assert_eq!(first_trip(&seen), None, "{seen:?}");
+}
+
+/// A boot that finds the newest staged file unreadable owes a snapshot for that doubt, with no
+/// synced position to say which WAL frames are staged. With every staged file on the replica,
+/// the frames the WAL held then are not lag, nor is the snapshot of them, however long the
+/// replica refuses it (`docs/decisions.md` D81).
+#[test]
+fn a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    assert_eq!(actor.replicated(), actor.staged(), "caught up");
+    tear(&rig, 3, flipped);
+    let mut actor = Actor::new(go_like());
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+    remote_down(&rig, 10_000);
+    let boot = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::NewestStagedFileUnreadable)
+        })
+    );
+    let seen = drive(&mut rig, &mut actor, again, again + 2 * BOUND);
+    assert!(
+        actor.staged() > actor.replicated(),
+        "the snapshot is staged, not uploaded"
+    );
+    assert_eq!(actor.unreplicated_since(), None);
+    assert_eq!(first_trip(&seen), None, "{seen:?}");
+}
+
+/// The same doubt with a commit after the boot: that commit is lag, dated from when it was
+/// first seen, and trips once it has stayed off the replica past the bound. Staging refuses
+/// the snapshot, so only the baseline can tell the commit from the frames before it.
+#[test]
+fn a_commit_after_a_doubt_at_boot_is_lag() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    tear(&rig, 3, flipped);
+    let mut actor = Actor::new(go_like());
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+    remote_down(&rig, 10_000);
+    staging_down(&rig);
+    let boot = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::NewestStagedFileUnreadable)
+        })
+    );
+    rig.tick(&mut actor, again + 1);
+    assert_eq!(
+        actor.unreplicated_since(),
+        None,
+        "the doubt alone is no lag"
+    );
+    rig.commit(9);
+    let seen = drive(&mut rig, &mut actor, again + 1, again + 2 * BOUND);
+    assert!(actor.unreplicated_since().is_some());
+    assert!(first_trip(&seen).is_some(), "{seen:?}");
+}
+
+/// A wal-index that cannot be read says nothing new: frames the clock dated stay dated, not
+/// forgotten, and not dated again from the next sighting.
+#[test]
+fn an_unreadable_wal_index_keeps_the_date_of_unstaged_frames() {
+    let (mut rig, mut actor) = caught_up();
+    rig.commit(9);
+    // The sync's read fails; the clock's own read after it sees the frames.
+    rig.wal.inject(SourceOp::Committed, SourceError::Busy);
+    rig.tick(&mut actor, T0 + 10);
+    let since = actor.unreplicated_since().expect("the frames are dated");
+    // Before the sync's retry: only the clock reads, and that read fails.
+    rig.wal.inject(SourceOp::Committed, SourceError::Busy);
+    rig.tick(&mut actor, T0 + 20);
+    assert_eq!(actor.unreplicated_since(), Some(since));
+}
+
+/// Staging refuses every write: no snapshot can stand in for the frames.
+fn staging_down(rig: &Rig) {
+    for _ in 0..10_000 {
+        rig.staging
+            .inner
+            .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    }
+}
+
+/// The doubt baseline is for a doubt alone: a first boot owes the database's first copy, its
+/// frames are lag from the boot, and a staging disk that never takes the snapshot trips.
+#[test]
+fn a_first_copy_that_never_stages_trips() {
+    let mut rig = Rig::new();
+    rig.commit(2);
+    staging_down(&rig);
+    let mut actor = Actor::new(go_like());
+    let seen = drive(&mut rig, &mut actor, T0, T0 + BOUND + 60_000);
+    assert!(first_trip(&seen).is_some(), "{seen:?}");
+}
+
+/// Nor is it for an engine with a synced position: a commit behind an operator's snapshot
+/// request is lag, and trips when nothing can be staged.
+#[test]
+fn a_commit_behind_an_operator_snapshot_that_never_stages_trips() {
+    let (mut rig, mut actor) = caught_up();
+    actor.request_snapshot();
+    rig.commit(9);
+    staging_down(&rig);
+    let seen = drive(&mut rig, &mut actor, T0 + 10, T0 + 10 + BOUND + 60_000);
+    assert!(first_trip(&seen).is_some(), "{seen:?}");
+}
+
+/// A file that changes nothing staged on top of a pending commit does not hide it: the clock
+/// keeps the commit's date.
+#[test]
+fn a_file_that_changes_nothing_on_top_of_a_commit_keeps_the_commit_dated() {
+    let (mut rig, mut actor) = caught_up();
+    remote_down(&rig, 10_000);
+    rig.commit(7);
+    rig.tick(&mut actor, T0 + 10);
+    let since = actor
+        .unreplicated_since()
+        .expect("the commit is off the replica");
+    // The same page again: a file that changes nothing.
+    rig.commit(7);
+    rig.tick(&mut actor, T0 + 20);
+    assert!(actor.staged() > actor.replicated());
+    assert_eq!(actor.unreplicated_since(), Some(since));
+}

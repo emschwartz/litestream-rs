@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 0841e72..ecaefb5 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1505,9 +1505,6 @@ impl Actor {
+         for token in staged.witnesses() {
+             self.engine.witnesses.insert(*token);
+         }
+-        for key in staged.quiet() {
+-            self.note_quiet_file(*key);
+-        }
+         let position = staged.position();
+         let tail = self.engine.course.tail();
+         self.engine.course.moved(position, tail, false);

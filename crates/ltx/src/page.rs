@@ -300,6 +300,6 @@ mod tests {
             DbPages::new(u32::MAX).bytes(PageSize::MAX),
             u64::from(u32::MAX) * 65536
         );
-        assert_eq!(pages.to_string(), "5");
+        assert_eq!((pages.get(), pages.to_string()), (5, "5".to_owned()));
     }
 }
