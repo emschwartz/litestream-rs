@@ -177,8 +177,15 @@ pub(super) struct Kept {
     pub(super) ahead_check: AheadCheck,
     /// The standing ahead-of-WAL verdict, journalled, while its restore point is kept.
     pub(super) ahead: Option<lsr_journal::Ahead>,
+    /// The standing notice that an owed ahead-of-WAL check could not be made, journalled, for
+    /// its window (`docs/decisions.md` D106).
+    pub(super) unchecked: Option<lsr_journal::Unchecked>,
     /// What the next tick tells the operator about the verdict, before anything else runs.
     pub(super) ahead_notice: Option<super::AheadNotice>,
+    /// The WAL's committed end that the cure's FULL checkpoint copied and its read-back proved
+    /// (`crate::cure`), while the TRUNCATE that empties it is still owed: the TRUNCATE then runs
+    /// without scanning frames the kernel may have evicted since.
+    pub(super) verified: Option<lsr_wal::CommittedEnd>,
 }
 
 impl Kept {
@@ -213,7 +220,9 @@ impl Kept {
             read_lock_violations: 0,
             ahead_check: AheadCheck::No,
             ahead: None,
+            unchecked: None,
             ahead_notice: None,
+            verified: None,
         }
     }
 
@@ -252,7 +261,9 @@ impl Kept {
             read_lock_violations,
             ahead_check,
             ahead,
+            unchecked,
             ahead_notice,
+            verified,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -286,7 +297,9 @@ impl Kept {
             read_lock_violations: *read_lock_violations,
             ahead_check: *ahead_check,
             ahead: *ahead,
+            unchecked: *unchecked,
             ahead_notice: *ahead_notice,
+            verified: *verified,
         }
     }
 
@@ -640,6 +653,22 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
     (
         "ahead_notice",
         Keep::Ephemeral("what the next tick says; a boot that finds the verdict says it again"),
+    ),
+    (
+        "unchecked",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "an owed ahead-of-WAL check given up: the notice stands for its window across \
+             restarts (docs/decisions.md D106)",
+        ),
+    ),
+    (
+        "verified",
+        Keep::Ephemeral(
+            "the cure's proof of what its checkpoint copied; a restart proves it again; cost: a \
+             frame evicted after the proof reads as WAL corruption until the generation moves \
+             (docs/decisions/D108.md)",
+        ),
     ),
 ];
 

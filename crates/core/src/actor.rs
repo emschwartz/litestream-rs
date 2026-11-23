@@ -85,6 +85,7 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use lsr_journal::AheadKind;
 use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
@@ -298,11 +299,13 @@ pub enum Event {
     AheadOfWal(AheadNotice),
 }
 
-/// What an operator is told about a standing ahead-of-WAL verdict besides its first report.
+/// What an operator is told about a standing verdict besides its first report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AheadNotice {
     /// A boot found the verdict recorded: the state before the damage is kept until `until`.
     Kept {
+        /// What the verdict found.
+        kind: AheadKind,
         /// The kept restore point.
         restore_point: Txid,
         /// When it goes back to normal retention.
@@ -310,9 +313,19 @@ pub enum AheadNotice {
     },
     /// The window passed: the restore point is back under normal retention.
     Released {
+        /// What the verdict had found.
+        kind: AheadKind,
         /// The restore point no longer kept.
         restore_point: Txid,
     },
+    /// A boot found recorded that an owed check could not be made (`docs/decisions.md` D106):
+    /// the notice stands until `until`.
+    UncheckedStands {
+        /// When the notice ends.
+        until: Timestamp,
+    },
+    /// The window of a check that could not be made passed: the notice ends.
+    UncheckedEnded,
 }
 
 /// How a tick ended.
@@ -761,8 +774,12 @@ impl Actor {
             // The verdict's restore point goes back to retention, which may now delete its chain.
             self.engine.maintain.stale = true;
             self.kept.ahead_notice = Some(AheadNotice::Released {
-                restore_point: released,
+                kind: released.kind,
+                restore_point: released.restore_point,
             });
+        }
+        if self.expire_unchecked(now) {
+            self.kept.ahead_notice = Some(AheadNotice::UncheckedEnded);
         }
         if let Some(notice) = self.kept.ahead_notice.take() {
             return Tick::Ran {
@@ -1413,7 +1430,7 @@ impl Actor {
             return self.check_ahead(env, now).await;
         }
         if self.owes_truncate() {
-            return self.unprove(env);
+            return self.unprove(env, now);
         }
         if !self.staging_has_room() {
             // Marked as a step cut short, so the sync runs again when room
@@ -2420,6 +2437,7 @@ impl Actor {
             self.engine.gate.until(),
             self.engine.maintain.until,
             self.kept.ahead.map(ahead::kept_until),
+            self.kept.unchecked.map(ahead::unchecked_until),
         ];
         [task(Task::Sync), task(Task::Upload), deadline]
             .into_iter()
@@ -2609,6 +2627,7 @@ impl Actor {
         if let Some(read) = self.kept.journal_read {
             self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
             self.adopt_ahead(read.ahead);
+            self.adopt_unchecked(read.unchecked);
         }
         self.kept.writer = Some(writer);
     }
@@ -2628,8 +2647,12 @@ impl Actor {
             return tick;
         };
         let held = writer.durable().copied().or(self.kept.journal_read);
-        let wanted = (self.kept.unproven.recorded(), self.kept.ahead);
-        if held.map(|held| (held.unproven, held.ahead)) == Some(wanted) {
+        let wanted = (
+            self.kept.unproven.recorded(),
+            self.kept.ahead,
+            self.kept.unchecked,
+        );
+        if held.map(|held| (held.unproven, held.ahead, held.unchecked)) == Some(wanted) {
             // Nothing the engine holds is missing from the journal: nothing lags it.
             self.kept.journal_write = Ok(());
             return tick;
@@ -2637,6 +2660,7 @@ impl Actor {
         let record = lsr_journal::Journal {
             unproven: wanted.0,
             ahead: wanted.1,
+            unchecked: wanted.2,
             ..held.unwrap_or(lsr_journal::Journal::ABSENT)
         };
         match writer.write(file, &record) {

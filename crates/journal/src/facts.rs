@@ -151,13 +151,26 @@ pub struct Proof {
     pub wal: WalChecksum,
 }
 
-/// A boot found the database file ahead of its WAL: pages no recovered WAL frame covers differ
-/// from their images at the newest staged transaction, so a checkpoint copied frames a failed WAL
-/// sync covered and the WAL then lost them (`docs/decisions.md` D103). The engine keeps
-/// `restore_point` restorable until a fixed window after `made` has passed.
+/// What a verdict found wrong with the database file after a failed WAL sync.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum AheadKind {
+    /// A boot found pages no recovered WAL frame covers that differ from their images at the
+    /// newest staged transaction: a checkpoint copied frames the failed sync covered and the WAL
+    /// then lost them (`docs/decisions.md` D103).
+    AheadOfWal,
+    /// The cure read pages back from the database file after its FULL checkpoint and found them
+    /// unlike the WAL frames it had verified: the kernel evicted those frames and the checkpoint
+    /// copied the disk's older bytes, so commits the application made are lost (D108).
+    WalLostCommits,
+}
+
+/// A verdict that the database file holds a state no commit made, after a failed WAL sync. The
+/// engine keeps `restore_point` restorable until a fixed window after `made` has passed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Ahead {
-    /// The newest staged transaction at the check: the last state before the damage.
+    /// What was found.
+    pub kind: AheadKind,
+    /// The newest staged transaction when the damage was found: the last state before it.
     pub restore_point: Txid,
     /// How many pages differed.
     pub pages: NonZeroU32,
@@ -167,7 +180,18 @@ pub struct Ahead {
     pub made: Timestamp,
 }
 
-/// The five facts.
+/// A boot owed the check of `docs/decisions.md` D103 and could not make it: the replica could
+/// not give its state at its newest confirmed transaction on two attempts in a row, so the cure
+/// ran unchecked (D106). The notice stands until a fixed window after `made` has passed; no
+/// restore point is kept, since the state the check compares against is the one the replica
+/// cannot give.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Unchecked {
+    /// When the check was given up, on the engine's clock.
+    pub made: Timestamp,
+}
+
+/// The six facts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Journal {
     /// The floor, if any.
@@ -180,6 +204,9 @@ pub struct Journal {
     pub pending: Option<Proof>,
     /// A database file found ahead of its WAL, while its restore point is kept.
     pub ahead: Option<Ahead>,
+    /// A check for a database file ahead of its WAL that could not be made, while its notice
+    /// stands.
+    pub unchecked: Option<Unchecked>,
 }
 
 /// Why a record may not follow another (docs/journal.md, "Writing", rule 5).
@@ -212,13 +239,14 @@ pub enum Lowered {
 
 impl Journal {
     /// What an absent journal means: no floor, no debt known, a full budget, no proof, no
-    /// verdict.
+    /// verdict, no notice.
     pub const ABSENT: Self = Self {
         floor: None,
         unproven: Unproven::No,
         budget: None,
         pending: None,
         ahead: None,
+        unchecked: None,
     };
 
     /// Whether `new` may follow `self` in consecutive records.
