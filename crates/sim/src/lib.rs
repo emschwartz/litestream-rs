@@ -42,6 +42,7 @@ pub mod resources;
 pub mod run;
 pub mod scenario;
 pub mod seed;
+pub mod side;
 pub mod sqlite;
 pub mod staging;
 pub mod store;

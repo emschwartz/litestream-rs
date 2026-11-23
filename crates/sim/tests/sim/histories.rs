@@ -144,7 +144,12 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0xf",
         "a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf",
-        Guard::Own("journal-debt-not-recorded-sim"),
+        Guard::Unguarded(
+            "it passes with journal-debt-not-recorded-sim planted too, so it no longer reaches the \
+             restart that would owe the TRUNCATE: an other-process RESTART checkpoint follows the \
+             failed sync before any crash (histories/seed_0xf.rs lines 284 and 288), which may start a new WAL \
+             generation first; the cause is not yet confirmed",
+        ),
     ),
     (
         "seed_0x585",

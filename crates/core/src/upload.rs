@@ -88,13 +88,13 @@ use std::num::NonZeroU32;
 
 use lsr_ltx::{Decoder, Header, Txid, TxidRange};
 
-use crate::checked::Checked;
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::verifies;
 use crate::probe;
-use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode};
+use crate::publish::{self, Unpublished, Writer};
+use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, WriteMode};
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
@@ -715,8 +715,7 @@ pub(crate) async fn drop_staged_from<L: ObjectStore>(staging: &L, from: Txid) ->
             return Ok(());
         }
         for info in last.iter().rev() {
-            staging
-                .delete(&[info.key])
+            publish::remove_staged(staging, &[info.key])
                 .await
                 .map_err(|err| Fault::from_staging(&err))?;
         }
@@ -776,9 +775,10 @@ enum PutError {
     Before(Fault),
     /// The commit failed or its answer cannot be believed.
     Commit(Fault),
-    /// The store says the bytes it took are not the bytes sent: the key is
-    /// deleted and written again without asking.
-    Rejected(Fault),
+    /// The store says the bytes it took are not the bytes sent. A
+    /// create-only write's object is its own and goes ([`publish::Rejected`]);
+    /// either way the key is written again without asking.
+    Rejected(Fault, Option<publish::Rejected>),
 }
 
 async fn put_step<L: ObjectStore, S: ObjectStore>(
@@ -791,33 +791,30 @@ async fn put_step<L: ObjectStore, S: ObjectStore>(
     let key = token.key();
     match put_staged(staging, remote, token, WriteMode::New).await {
         Err(PutError::Taken) => taken(state, staging, remote, token, newest_staged).await,
-        outcome => settle_put(state, remote, key, outcome, WriteMode::New).await,
+        outcome => settle_put(state, remote, key, outcome).await,
     }
 }
 
-/// The state and step a put's outcome gives (a refusal is [`taken`]'s);
-/// `mode` is the mode the put was written with.
+/// The state and step a put's outcome gives (a refusal is [`taken`]'s).
 async fn settle_put<S: ObjectStore>(
     state: UploadState,
     remote: &S,
     key: FileKey,
     outcome: Result<FileInfo, PutError>,
-    mode: WriteMode,
 ) -> Result<Uploaded, UploadFailed> {
     match outcome {
         Ok(info) => Ok(put_done(key, info)),
         Err(PutError::Before(fault)) => Err(fail(state, fault)),
-        Err(PutError::Rejected(fault)) => {
+        Err(PutError::Rejected(fault, own)) => {
             mark!(Up8);
-            // A rejected create-only write created the object it rejects (the
-            // bucket refuses a taken key before it takes any bytes), so the
-            // object is this attempt's and it goes. Best effort: the retry
-            // replaces the key either way, and a boot listing reads it back,
-            // so a failed delete costs only visibility. A write that may
-            // have replaced an object deletes nothing: a delete after a
-            // failed write never takes a key that held something before it.
-            if mode == WriteMode::New {
-                drop(remote.delete(&[key]).await);
+            // Only a rejected create-only write hands back its object (the
+            // bucket refuses a taken key before it takes any bytes), so only
+            // that object goes. Best effort: the retry replaces the key either
+            // way, and a boot listing reads it back, so a failed delete costs
+            // only visibility. A write that may have replaced an object
+            // deletes nothing.
+            if let Some(own) = own {
+                drop(publish::remove_rejected(remote, own).await);
             }
             Err(fail(state, fault))
         }
@@ -866,7 +863,7 @@ async fn taken<L: ObjectStore, S: ObjectStore>(
     }
     if remote_torn(remote, &key).await.map_err(relist)? {
         let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
-        return settle_put(state, remote, key, outcome, WriteMode::Replace).await;
+        return settle_put(state, remote, key, outcome).await;
     }
     // Both verify: a second compare decides, as the listing's read-back does.
     if same_bytes(staging, remote, &key).await.map_err(relist)? {
@@ -896,23 +893,16 @@ async fn put_staged<L: ObjectStore, S: ObjectStore>(
         return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
     };
     match open.commit().await {
-        Ok(info) if info.key == *key => Ok(info),
+        Ok(published) if published.key() == *key => Ok(published.info()),
         Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
-        Err(StoreError::AlreadyExists { key: taken })
-            if taken == *key && mode == WriteMode::New =>
-        {
-            Err(PutError::Taken)
+        Err(Unpublished::Taken(_)) => Err(PutError::Taken),
+        Err(Unpublished::Rejected(err, own)) => {
+            Err(PutError::Rejected(Fault::from_remote(&err), own))
         }
-        Err(err) => Err(commit_failed(Fault::from_remote(&err))),
-    }
-}
-
-fn commit_failed(fault: Fault) -> PutError {
-    if fault == Fault::UploadChecksumMismatch {
-        PutError::Rejected(fault)
-    } else {
-        mark!(Up6);
-        PutError::Commit(fault)
+        Err(Unpublished::Failed(err)) => {
+            mark!(Up6);
+            Err(PutError::Commit(Fault::from_remote(&err)))
+        }
     }
 }
 
@@ -942,13 +932,13 @@ fn names_key(header: &Header, key: &FileKey) -> Result<(), PutError> {
 /// verified the whole file and its length and trailer checksum, on this read,
 /// are the ones `token` was minted for: a file replaced after it was
 /// witnessed is refused before the commit. The upload counts the bytes it
-/// writes; its commit checks the store holds them ([`Checked`]).
+/// writes; its commit checks the store holds them ([`Writer`]).
 async fn copy_verified<'s, L: ObjectStore, S: ObjectStore>(
     staging: &L,
     remote: &'s S,
     token: &Witnessed,
     mode: WriteMode,
-    upload: &mut Option<Checked<'s, S>>,
+    upload: &mut Option<Writer<'s, S>>,
 ) -> Result<(), PutError> {
     let key = &token.key();
     let len = CHUNK;
@@ -999,13 +989,16 @@ async fn begin<'s, S: ObjectStore>(
     key: &FileKey,
     header: &Header,
     mode: WriteMode,
-) -> Result<Checked<'s, S>, PutError> {
-    Checked::begin(remote, key, header.fields().timestamp, mode)
+) -> Result<Writer<'s, S>, PutError> {
+    Writer::begin(remote, key, header.fields().timestamp, mode)
         .await
         .map_err(|err| PutError::Before(Fault::from_remote(&err)))
 }
 
-async fn write_chunk<U: Upload>(upload: &mut U, chunk: &[u8]) -> Result<(), PutError> {
+async fn write_chunk<S: ObjectStore>(
+    upload: &mut Writer<'_, S>,
+    chunk: &[u8],
+) -> Result<(), PutError> {
     upload
         .write(chunk)
         .await

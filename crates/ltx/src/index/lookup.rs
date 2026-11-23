@@ -218,15 +218,5 @@ fn check_entry(
 }
 
 fn check_page(pgno: NonZeroU32, header: &Header) -> Result<PageNo, OrderError> {
-    let page = PageNo::new(pgno.get(), header.page_size());
-    match page {
-        Some(page) if header.pages().contains(page) => Ok(page),
-        // The lock page above the commit is reported as above the commit, as
-        // the streaming decoder's order check does.
-        Some(_) | None if pgno.get() > header.commit() => Err(OrderError::AboveCommit {
-            pgno: pgno.get(),
-            commit: header.commit(),
-        }),
-        Some(_) | None => Err(OrderError::LockPage { pgno: pgno.get() }),
-    }
+    PageSequence::new(header).fits(pgno)
 }

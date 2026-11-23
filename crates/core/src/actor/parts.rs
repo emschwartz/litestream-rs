@@ -21,6 +21,7 @@ use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
+use super::ahead::AheadCheck;
 use super::clock::EngineClock;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
@@ -166,6 +167,13 @@ pub(super) struct Kept {
     pub(super) journal_read: Option<Journal>,
     /// How the last journal write ended: an error is `JournalUnwritable` until one succeeds.
     pub(super) journal_write: Result<(), ErrorKind>,
+    /// Whether the next sync step is the ahead-of-WAL check (`super::ahead`). A rebuild keeps
+    /// it: the rebuilt engine boots over the same files.
+    pub(super) ahead_check: AheadCheck,
+    /// The standing ahead-of-WAL verdict, journalled, while its restore point is kept.
+    pub(super) ahead: Option<lsr_journal::Ahead>,
+    /// What the next tick tells the operator about the verdict, before anything else runs.
+    pub(super) ahead_notice: Option<super::AheadNotice>,
 }
 
 impl Kept {
@@ -197,6 +205,9 @@ impl Kept {
             writer: None,
             journal_read: None,
             journal_write: Ok(()),
+            ahead_check: AheadCheck::No,
+            ahead: None,
+            ahead_notice: None,
         }
     }
 
@@ -232,6 +243,9 @@ impl Kept {
             writer,
             journal_read,
             journal_write,
+            ahead_check,
+            ahead,
+            ahead_notice,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -262,17 +276,25 @@ impl Kept {
             writer: writer.clone(),
             journal_read: *journal_read,
             journal_write: *journal_write,
+            ahead_check: *ahead_check,
+            ahead: *ahead,
+            ahead_notice: *ahead_notice,
         }
     }
 
-    /// The restore point retention keeps: the older of the two asked for, a
-    /// degraded task's and a scheduled verify's. Derived on every read, so
-    /// there is no copy to fall behind.
+    /// The restore point retention keeps: the oldest of those asked for, a degraded task's, a
+    /// scheduled verify's and an ahead-of-WAL verdict's. Retention keeps one chain, so while an
+    /// older point is kept the verdict's is not; the older one is also before the damage.
+    /// Derived on every read, so there is no copy to fall behind.
     pub(super) fn kept_restore_point(&self) -> Option<Txid> {
-        match (self.task_restore_point.txid(), self.verify_restore_point) {
-            (Some(task), Some(verify)) => Some(task.min(verify)),
-            (task, verify) => task.or(verify),
-        }
+        [
+            self.task_restore_point.txid(),
+            self.verify_restore_point,
+            self.ahead.map(|ahead| ahead.restore_point),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The cause a snapshot is owed for besides the engine's own, if any.
