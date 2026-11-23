@@ -652,3 +652,48 @@ fn put_level_zero(store: &MemStore, key: FileKey, bytes: &[u8]) {
         up.commit().await.unwrap()
     });
 }
+
+/// The application's last close deleted the WAL: the local state is the database file alone,
+/// its length the page count. Equal to the replica's state, the boot snapshots above it.
+#[test]
+fn a_new_meta_directory_with_no_wal_reads_the_database_file_alone() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    rig.wal.remove_file();
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 50);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(super::restored(&rig), 3);
+}
+
+/// With no WAL, a database file one page longer than the replica's state is not that state.
+#[test]
+fn a_new_meta_directory_with_no_wal_over_a_longer_database_stops() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    rig.wal.remove_file();
+    rig.db.set_page_count(4);
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}
+
+/// With no WAL, one page of the database file differs: the boot stops.
+#[test]
+fn a_new_meta_directory_with_no_wal_over_a_different_database_stops() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    rig.wal.remove_file();
+    rig.db.write_page(pg(3), &vec![7; PS.bytes()]);
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 20);
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+}
