@@ -2105,3 +2105,38 @@ tests = [
     "sync::tests::a_staging_commit_error_returns_the_same_step_and_the_retry_overwrites_the_file",
     "upload::tests::errors_before_the_commit_leave_the_state_and_cost_no_listing",
 ]
+
+# A store without create-only writes (D79): the engine switches its level-0 uploads to replacing
+# writes without raising the cause, so a second writer under the same key goes unreported.
+[[bug]]
+name = "create-only-downgrade-unreported"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::create_only::a_store_without_create_only_writes_degrades_and_uploads_by_replacing",
+    "actor::tests::create_only::the_cause_comes_back_after_another_fault_on_the_upload_task",
+]
+
+[[bug]]
+name = "create-only-downgrade-unreported-sim"
+fix = "plant"
+patch = "create-only-downgrade-unreported"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["create_only::every_replace_on_a_store_without_create_only_writes_is_reported"]
+
+# The engine never switches to replacing writes: every upload is refused, for good.
+[[bug]]
+name = "create-only-never-downgraded"
+fix = "plant"
+package = "lsr-core"
+tests = ["actor::tests::create_only::a_store_without_create_only_writes_degrades_and_uploads_by_replacing"]
+
+# The S3 store drops the create-only condition itself, so a create-only write replaces a key
+# that is taken and nothing says so.
+[[bug]]
+name = "s3-create-only-condition-dropped"
+fix = "plant"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = ["a_provider_without_conditional_writes_fails_every_create_only_write"]

@@ -1,0 +1,21 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 94e00ac1..f99c72f5 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1749,7 +1749,7 @@ impl Actor {
+         let upload = self.kept.tasks.get_mut(Task::Upload);
+         upload.succeed();
+         if let Some(since) = self.kept.unguarded {
+-            upload.stand(PersistentCause::ConditionalWritesUnsupported, since);
++            let _ = since;
+         }
+     }
+ 
+@@ -1788,6 +1788,7 @@ impl Actor {
+             // Raised before any replacing write: `fault` degrades the upload task (or stops),
+             // and only the next put replaces (D79).
+             self.kept.unguarded = self.kept.unguarded.or(Some(now));
++            return self.fault(Task::Upload, Fault::StoreTransient, now);
+         }
+         self.fault(Task::Upload, failed.fault, now)
+     }

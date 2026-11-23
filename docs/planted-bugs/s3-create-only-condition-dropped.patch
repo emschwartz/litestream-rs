@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/store.rs b/crates/store-s3/src/store.rs
+index 20fe367f..c3f00be7 100644
+--- a/crates/store-s3/src/store.rs
++++ b/crates/store-s3/src/store.rs
+@@ -385,7 +385,7 @@ impl<T: Transport> Inner<T> {
+     pub(crate) const fn precondition(&self, mode: WriteMode) -> Precondition {
+         match mode {
+             WriteMode::Replace => Precondition::None,
+-            WriteMode::New => Precondition::KeyIsFree,
++            WriteMode::New => Precondition::None,
+         }
+     }
+ 
