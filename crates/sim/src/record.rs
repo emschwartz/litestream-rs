@@ -75,6 +75,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
         &[
             "AppAt",
             "AppOp",
+            "DenialCode",
             "EnvFault",
             "Hold",
             "HttpFault",
@@ -309,6 +310,10 @@ fn http_fault(fault: HttpFault) -> String {
         HttpFault::TruncateBody(shape) => ("TruncateBody", shape),
         HttpFault::WrongEtag(shape) => ("WrongEtag", shape),
         HttpFault::ConnectionReset(shape) => ("ConnectionReset", shape),
+        HttpFault::Denied(shape, code) => {
+            return format!("HttpFault::Denied(HttpShape::{shape:?}, DenialCode::{code:?})");
+        }
+        HttpFault::DenyDeletes => return "HttpFault::DenyDeletes".to_owned(),
     };
     format!("HttpFault::{name}(HttpShape::{shape:?})")
 }

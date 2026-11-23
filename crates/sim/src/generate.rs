@@ -109,6 +109,36 @@ pub enum HttpFault {
     WrongEtag(HttpShape),
     /// No response: the connection is reset.
     ConnectionReset(HttpShape),
+    /// The provider refuses the request with `code`'s status and S3 error code.
+    Denied(HttpShape, DenialCode),
+    /// A bucket policy refuses deleting each object the replica holds now, key by key inside a
+    /// DeleteObjects that otherwise succeeds, until the next heal.
+    DenyDeletes,
+}
+
+/// An S3 refusal, as a provider answers it: AWS's error codes, and a bare 401.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DenialCode {
+    /// 403 `AccessDenied`.
+    AccessDenied,
+    /// 403 `AllAccessDisabled`.
+    AllAccessDisabled,
+    /// 403 `InvalidAccessKeyId`.
+    InvalidAccessKeyId,
+    /// 403 `SignatureDoesNotMatch`.
+    SignatureDoesNotMatch,
+    /// 400 `ExpiredToken`.
+    ExpiredToken,
+    /// 401 with no code.
+    Unauthorized,
+    /// 403 `RequestTimeTooSkewed`.
+    RequestTimeTooSkewed,
+    /// 404 `NoSuchBucket`.
+    NoSuchBucket,
+    /// 400 `KMS.DisabledException`: the object's KMS key is disabled.
+    KmsDisabled,
+    /// 400 `KMS.NotFoundException`: the object's KMS key is gone.
+    KmsNotFound,
 }
 
 /// One step of a history.
@@ -897,7 +927,32 @@ fn http_fault(entropy: &SeededEntropy) -> HttpFault {
         ],
     )
     .unwrap_or(HttpFault::Internal);
-    make(shape)
+    match below(entropy, 4) {
+        // A refused DeleteObjects comes from `DenyDeletes`: a whole one refused may be the
+        // store's own best-effort cleanup, whose failure it rightly does not report.
+        0 if shape != HttpShape::DeleteObjects => HttpFault::Denied(shape, denial(entropy)),
+        1 if below(entropy, 4) == 0 => HttpFault::DenyDeletes,
+        _ => make(shape),
+    }
+}
+
+fn denial(entropy: &SeededEntropy) -> DenialCode {
+    choose(
+        entropy,
+        &[
+            DenialCode::AccessDenied,
+            DenialCode::AllAccessDisabled,
+            DenialCode::InvalidAccessKeyId,
+            DenialCode::SignatureDoesNotMatch,
+            DenialCode::ExpiredToken,
+            DenialCode::Unauthorized,
+            DenialCode::RequestTimeTooSkewed,
+            DenialCode::NoSuchBucket,
+            DenialCode::KmsDisabled,
+            DenialCode::KmsNotFound,
+        ],
+    )
+    .unwrap_or(DenialCode::AccessDenied)
 }
 
 fn choose<T: Copy>(entropy: &SeededEntropy, from: &[T]) -> Option<T> {

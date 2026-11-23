@@ -2,11 +2,30 @@
 //! history draws for it ([`crate::Op::HttpFault`]).
 
 use super::{Opts, Runner};
+
+/// The refusal a drawn fault must come back as, when it is one.
+const fn expected(fault: HttpFault) -> Option<Denied> {
+    match fault {
+        HttpFault::Denied(_, code) => Some(crate::remote::expected_denial(code)),
+        HttpFault::DenyDeletes => Some(Denied::Permission),
+        HttpFault::SlowDown(_)
+        | HttpFault::TooManyRequests(_)
+        | HttpFault::Internal(_)
+        | HttpFault::RequestTimeout(_)
+        | HttpFault::AfterPublish(_)
+        | HttpFault::TruncateBody(_)
+        | HttpFault::WrongEtag(_)
+        | HttpFault::ConnectionReset(_) => None,
+    }
+}
 use lsr_store_s3::{Fault, Shape};
+
+use lsr_core::{Denied, Event, PersistentCause, StopCause, Task, Tick};
 
 use crate::failstop::{Fired, fired};
 use crate::generate::HttpFault;
 use crate::oracle::Violation;
+use crate::world::TickEnd;
 
 impl Runner {
     /// Puts the replica on S3 when `opts` asks, before the first boot.
@@ -23,7 +42,13 @@ impl Runner {
     pub(super) fn http_fault(&mut self, fault: HttpFault) -> Result<(), Violation> {
         let pushed = match self.w.remote_raw.wire() {
             Some(wire) => {
-                wire.push(crate::remote::provider_fault(fault));
+                match crate::remote::provider_fault(fault) {
+                    Some(provider) => wire.push(provider),
+                    None => self.w.remote_raw.deny_deletes(),
+                }
+                if let Some(why) = expected(fault) {
+                    self.expect(StopCause::StoreDenied(why));
+                }
                 true
             }
             None => false,
@@ -48,7 +73,8 @@ impl Runner {
 
     /// The replica's fault fires for the fail-stop judge (`crate::failstop::fired`): the
     /// object-level layer's, and the provider faults the S3 store's requests met. A provider
-    /// fault is doubtful when the bucket took the write before the answer went wrong.
+    /// fault is doubtful when the bucket took the write before the answer went wrong, and a
+    /// refusal when it denied the request (or a policy refused a key inside a delete).
     pub(super) fn remote_fired(&self) -> Fired {
         let object = fired(&self.w.remote_faults);
         let provider = self
@@ -56,7 +82,14 @@ impl Runner {
             .remote_raw
             .wire()
             .map_or_else(Vec::new, |wire| wire.fired());
+        let refused_deletes = self.w.remote_raw.refused_deletes();
+        let object = Fired {
+            all: object.all.saturating_add(refused_deletes),
+            refused: object.refused.saturating_add(refused_deletes),
+            doubtful: object.doubtful,
+        };
         provider.iter().fold(object, |was, fault| {
+            let refused = crate::remote::denial_of(fault).is_some();
             let doubtful = matches!(
                 fault,
                 Fault::AfterPublish { .. }
@@ -65,9 +98,115 @@ impl Runner {
             );
             Fired {
                 all: was.all.saturating_add(1),
-                refused: was.refused,
+                refused: was.refused.saturating_add(u64::from(refused)),
                 doubtful: was.doubtful.saturating_add(u64::from(doubtful)),
             }
+        })
+    }
+
+    /// A refusal the S3 replica answered in the tick must come back as the engine's report of
+    /// it: a task degraded with it, or a stop for it (the engine takes any store refusal as
+    /// persistent); of several in one tick, at least one. A refusal reported as another, or as a fault to retry, tells the
+    /// operator to fix the wrong thing.
+    ///
+    /// # Errors
+    /// [`Violation::DenialMisreported`].
+    /// Where the refusal judge starts counting, taken just before a tick so that a refusal met
+    /// by the simulator's own reads between ticks is not charged to the engine.
+    pub(super) fn denials_baseline(&mut self) {
+        if let Some(wire) = self.w.remote_raw.wire() {
+            let (fired_now, refused, others) = self.denial_counts(wire);
+            self.denials_seen = (fired_now.len(), refused, others);
+        }
+    }
+
+    fn denial_counts(&self, wire: &crate::remote::Wire) -> (Vec<Fault>, u64, u64) {
+        let others = crate::failstop::fired(&self.w.remote_faults)
+            .all
+            .saturating_add(crate::failstop::fired(&self.w.staging_faults).all);
+        (wire.fired(), self.w.remote_raw.refused_deletes(), others)
+    }
+
+    pub(super) fn judge_denials(&mut self, ended: &TickEnd<Tick>) -> Result<(), Violation> {
+        let Some(owed) = self.owed_denials() else {
+            return Ok(());
+        };
+        if owed.masked || matches!(ended, TickEnd::Crashed { .. }) {
+            self.report.reach.bump("http_fault.denial_masked");
+            return Ok(());
+        }
+        let mut reported: Vec<PersistentCause> = Task::ALL
+            .iter()
+            .filter_map(|task| self.actor.degraded(*task).map(|degraded| degraded.cause))
+            .collect();
+        if let TickEnd::Done(Tick::Stopped(cause)) = ended {
+            reported.extend(PersistentCause::of(*cause));
+        }
+        let failed = !reported.is_empty()
+            || matches!(
+                ended,
+                TickEnd::Done(Tick::Ran {
+                    event: Event::Retrying { .. } | Event::Degraded { .. },
+                    ..
+                })
+            );
+        if owed.may_drop && !failed {
+            self.report.reach.bump("http_fault.denial_read_ahead");
+            return Ok(());
+        }
+        // Requests sent as one batch can meet several refusals; the engine reports the first.
+        if owed
+            .kinds
+            .iter()
+            .any(|why| reported.contains(&PersistentCause::StoreDenied(*why)))
+        {
+            self.report.reach.bump("http_fault.denial_reported");
+            return Ok(());
+        }
+        Err(Violation::DenialMisreported {
+            expected: owed.first,
+            got: format!("{reported:?}"),
+        })
+    }
+
+    /// The refusals met since [`Self::denials_baseline`], and moves the baseline past them.
+    fn owed_denials(&mut self) -> Option<Owed> {
+        let wire = self.w.remote_raw.wire()?;
+        let (fired_now, refused, others) = self.denial_counts(wire);
+        let new = fired_now.get(self.denials_seen.0..).unwrap_or_default();
+        let deletes_refused = refused > self.denials_seen.1;
+        let denials: Vec<&Fault> = new
+            .iter()
+            .filter(|fault| crate::remote::denial_of(fault).is_some())
+            .collect();
+        let mut kinds: Vec<Denied> = denials
+            .iter()
+            .filter_map(|fault| crate::remote::denial_of(fault))
+            .collect();
+        if deletes_refused {
+            kinds.push(Denied::Permission);
+        }
+        // A HEAD may be a created-at time read ahead, whose failure is dropped by design (see
+        // `lsr_core::created_at`): it may go unreported, never misreported.
+        let may_drop = !deletes_refused
+            && denials.iter().all(|fault| {
+                matches!(
+                    fault,
+                    Fault::Status {
+                        on: Shape::Head,
+                        ..
+                    }
+                )
+            });
+        // Another fault met in the same tick may be the one the engine reports: it reports the
+        // first failure a step meets, and which request fails first is not the judge's to pin.
+        let masked = others > self.denials_seen.2 || new.len() > denials.len();
+        self.denials_seen = (fired_now.len(), refused, others);
+        Some(Owed {
+            first: kinds.first().copied()?,
+            kinds,
+            may_drop,
+            masked,
         })
     }
 
@@ -75,4 +214,12 @@ impl Runner {
     pub(super) fn http_faults_pending(&self) -> usize {
         self.w.remote_raw.wire().map_or(0, |wire| wire.pending())
     }
+}
+
+/// The refusals one tick met, as [`Runner::judge_denials`] weighs them.
+struct Owed {
+    first: Denied,
+    kinds: Vec<Denied>,
+    may_drop: bool,
+    masked: bool,
 }

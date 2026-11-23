@@ -180,6 +180,17 @@ pub enum Violation {
         /// What the window held.
         window: Vec<crate::liveness::Justifier>,
     },
+    /// A provider refused a request with an answer an operator fixes one way
+    /// ([`crate::remote::expected_denial`]), and the engine reported no refusal, or another.
+    #[error(
+        "the store refused with what an operator fixes as {expected:?}; the engine reported {got}"
+    )]
+    DenialMisreported {
+        /// The refusal the answer means.
+        expected: lsr_core::Denied,
+        /// What the engine's tasks reported after the tick.
+        got: String,
+    },
     /// A running engine listed the replica while another writer's file stood
     /// past its own position, and did not stop.
     #[error("the engine listed {key}, another writer's file past its position, and kept going")]

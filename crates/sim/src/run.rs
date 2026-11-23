@@ -304,6 +304,9 @@ enum Step {
 struct Runner {
     w: World,
     actor: Actor,
+    // The S3 replica's refusals judged so far: provider faults fired, delete keys refused, and
+    // every other store fault fired (one may mask a refusal in the same tick).
+    denials_seen: (usize, u64, u64),
     rng: SeededEntropy,
     // Where an in-tick commit lands under the each-read clock law.
     sites: SeededEntropy,
@@ -478,6 +481,7 @@ impl Runner {
             w,
             actor: Actor::new(actor_config()),
             rng: SeededEntropy::new(seed.stream(11)),
+            denials_seen: (0, 0, 0),
             sites: SeededEntropy::new(seed.stream(19)),
             slew: None,
             overlap: None,
@@ -793,6 +797,7 @@ impl Runner {
         self.staging_moved()?;
         let fired0 = (self.remote_fired(), fired(&self.w.staging_faults));
         let queued0 = self.w.sqlite.queued_injections();
+        self.denials_baseline();
         let ended = self.run_one(plan);
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
@@ -806,6 +811,7 @@ impl Runner {
         let in_tick = self.took_commit_in_tick();
         self.note_snapshots(newest_commit, in_tick, at);
         self.judge_fail_stop(began, fired0, &ended)?;
+        self.judge_denials(&ended)?;
         self.note_tick(began, remote0);
         if self.trace {
             self.report.trace.push(format!("    tick: {ended:?}"));
@@ -2248,6 +2254,7 @@ impl Runner {
         self.rate_active = false;
         self.w.remote_faults.heal();
         self.w.staging_faults.heal();
+        self.w.remote_raw.allow_deletes();
     }
 
     fn apply_op(&mut self, op: &Op) -> Result<(), Violation> {
@@ -2492,6 +2499,11 @@ impl Runner {
         self.w.remote_faults.heal();
         self.w.staging_faults.heal();
         self.w.remote_faults.end_lag();
+        // Provider faults not yet met, and a policy refusing deletes, heal too.
+        self.w.remote_raw.allow_deletes();
+        if let Some(wire) = self.w.remote_raw.wire() {
+            wire.clear();
+        }
         // Source failures injected and not yet met heal too: a queue of them
         // would otherwise keep a task failing, and its stall would be the
         // world's, not the engine's.
