@@ -87,6 +87,14 @@ pub enum Op {
     },
     /// The app writes frames of a transaction and does not commit.
     Spill,
+    /// Another application connection, which stays open (another process: a second writer, a
+    /// replicator writing its own table), commits `pages` random pages. It keeps its own
+    /// checkpoint count, so the WAL header it writes after a restart whose writer rolled back
+    /// carries the same salts and another seed.
+    OtherConnectionCommit {
+        /// How many pages it writes; it never grows the database.
+        pages: u8,
+    },
     /// The app rolls its open transaction back.
     Rollback,
     /// The app vacuums: into pages of `page_size`, or (`None`) at the same size,
@@ -391,6 +399,8 @@ pub struct Weights {
     pub shrink: u32,
     /// [`Op::SecondWriter`].
     pub second_writer: u32,
+    /// [`Op::OtherConnectionCommit`].
+    pub other_connection_commit: u32,
     /// [`Op::Remote`] with [`RemoteOp::RollBack`].
     pub roll_back: u32,
     /// [`Op::Remote`] with [`RemoteOp::DropCreatedAt`].
@@ -528,6 +538,7 @@ impl Default for Weights {
             restore: 2,
             shrink: 2,
             second_writer: 1,
+            other_connection_commit: 0,
             roll_back: 1,
             // Off in the shared mixes so their recorded histories keep their
             // shape; `tests/sim/dropped_created_at.rs` turns it on.
@@ -592,10 +603,11 @@ enum Kind {
     AppInTick,
     Verify,
     LaggingListings,
+    OtherConnectionCommit,
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 26] {
+    fn table(&self) -> [(Kind, u32); 27] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -623,6 +635,7 @@ impl Weights {
             (Kind::AppInTick, self.app_in_tick),
             (Kind::Verify, self.verify),
             (Kind::LaggingListings, self.lagging_listings),
+            (Kind::OtherConnectionCommit, self.other_connection_commit),
         ]
     }
 
@@ -685,6 +698,7 @@ impl Weights {
             restore: weight(false),
             shrink: weight(false),
             second_writer: 0,
+            other_connection_commit: 0,
             roll_back: weight(false),
             drop_created_at: 0,
             wal_damage: weight(false),
@@ -751,6 +765,9 @@ impl Weights {
         mix.verify = weight(false);
         // And lagging listings after that.
         mix.lagging_listings = weight(false);
+        // And after that, for the same reason: a second application connection that commits,
+        // with its own checkpoint count (a WAL header written again with the same salts).
+        mix.other_connection_commit = weight(false);
         mix
     }
 
@@ -1010,6 +1027,9 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         },
         Kind::Spill => Op::Spill,
         Kind::Rollback => Op::Rollback,
+        Kind::OtherConnectionCommit => Op::OtherConnectionCommit {
+            pages: small(entropy, 4).saturating_add(1),
+        },
         Kind::Vacuum => vacuum(entropy, weights.vacuum_resizes),
         Kind::OtherProcessReader => Op::OtherProcessReader {
             begin: below(entropy, 2) == 0,

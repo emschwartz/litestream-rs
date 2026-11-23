@@ -51,6 +51,9 @@ fn journal_of(facts: &model::Facts) -> Journal {
             },
             wal: WalChecksum(3, 4),
         }),
+        // The model's facts carry no verdict: its storage properties do not depend on what a
+        // record holds, and the verdict's one rule is checked by the codec's own tests.
+        ahead: None,
     }
 }
 
@@ -245,7 +248,7 @@ impl Disk {
             (Slot::S0, s0)
         };
         let mut bytes = MAGIC.to_vec();
-        bytes.extend(2_u16.to_le_bytes());
+        bytes.extend((lsr_journal::VERSION + 1).to_le_bytes());
         bytes.extend(0_u16.to_le_bytes());
         bytes.extend((seq.unwrap() + 1).to_le_bytes());
         let crc = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI).checksum(&bytes);
