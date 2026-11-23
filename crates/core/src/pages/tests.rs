@@ -1,6 +1,8 @@
 use proptest::prelude::*;
 
 use super::*;
+use crate::fault::role::Staging;
+use crate::store::ObjectStore;
 
 const PS: PageSize = PageSize::MIN;
 
@@ -167,7 +169,7 @@ proptest! {
 #[test]
 fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(crate::MemStore::new());
-    let got = crate::conformance::block_on(seeded(&staging, None, nz(1)));
+    let got = crate::conformance::block_on(seeded(&Staging(&staging), None, nz(1)));
     assert_eq!(got.err(), Some(Fault::LocalIo));
 }
 
@@ -221,11 +223,11 @@ fn only_vouched_staged_files_seed_the_table() {
             up.commit().await.unwrap();
         });
     }
-    let all = crate::conformance::block_on(seeded(&staging, None, nz(4)))
+    let all = crate::conformance::block_on(seeded(&Staging(&staging), None, nz(4)))
         .unwrap()
         .table;
     assert_eq!(all.len(), 3);
-    let vouched = crate::conformance::block_on(seeded(&staging, Txid::new(3), nz(4)))
+    let vouched = crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(3), nz(4)))
         .unwrap()
         .table;
     assert_eq!(vouched.len(), 2);
@@ -266,7 +268,8 @@ fn seeding_finds_the_pending_files_that_change_nothing() {
             up.commit().await.unwrap();
         });
     }
-    let seeded = crate::conformance::block_on(seeded(&staging, Txid::new(1), nz(5))).unwrap();
+    let seeded =
+        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(1), nz(5))).unwrap();
     let quiet: Vec<u64> = seeded.quiet.iter().map(|txid| txid.get()).collect();
     assert_eq!(quiet, vec![2]);
 }

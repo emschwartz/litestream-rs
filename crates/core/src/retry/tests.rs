@@ -370,7 +370,7 @@ fn a_commit_reporting_another_size_is_corrupt() {
     );
     let got = conformance::block_on(async {
         let mut up = store
-            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .begin_upload(&key(), created_at(), WriteMode::New)
             .await
             .unwrap();
         up.write(b"ab").await.unwrap();
@@ -513,10 +513,40 @@ mod conformance_over_retrying {
 }
 
 #[test]
-fn a_commit_size_mismatch_leaves_no_object_visible() {
+fn a_create_only_commit_size_mismatch_leaves_no_object_visible() {
     // The wrapper knows the stored object is not what was sent, reports it as
-    // Corrupt, and leaves it published: a caller that lists after a failed
-    // commit (as the compactor's contract asks) finds the key and trusts it.
+    // Corrupt, and deletes it: a create-only write found the key free, so the
+    // object is its own and a caller that lists after the failed commit must
+    // not find it.
+    let inner = MemStore::new();
+    let store = Retrying::new(
+        SizeLiar(inner.clone()),
+        RecordingSleeper::new(),
+        SeededEntropy::new(1),
+        RetryPolicy::DEFAULT,
+    );
+    let got = conformance::block_on(async {
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::New)
+            .await
+            .unwrap();
+        up.write(b"abcd").await.unwrap();
+        up.commit().await
+    });
+    assert!(matches!(got, Err(StoreError::Corrupt { .. })));
+    let listed = conformance::block_on(store.list(Level::ZERO, None, limit()))
+        .unwrap()
+        .files;
+    assert!(
+        listed.is_empty(),
+        "an object the wrapper called corrupt is still visible: {listed:?}"
+    );
+}
+
+/// A replace whose commit is acknowledged short keeps the key: it may have held an acknowledged
+/// object before, and a delete would end the replica a transaction early with no error.
+#[test]
+fn a_replace_commit_size_mismatch_never_deletes_the_key() {
     let inner = MemStore::new();
     let store = Retrying::new(
         SizeLiar(inner.clone()),
@@ -532,14 +562,21 @@ fn a_commit_size_mismatch_leaves_no_object_visible() {
         up.write(b"abcd").await.unwrap();
         up.commit().await
     });
-    assert!(matches!(got, Err(StoreError::Corrupt { .. })));
+    assert_eq!(
+        got,
+        Err(StoreError::Corrupt {
+            key: Some(key()),
+            cause: CorruptCause::CommitSizeMismatch {
+                wrote: 4,
+                stored: 3,
+                removed: false
+            },
+        })
+    );
     let listed = conformance::block_on(store.list(Level::ZERO, None, limit()))
         .unwrap()
         .files;
-    assert!(
-        listed.is_empty(),
-        "an object the wrapper called corrupt is still visible: {listed:?}"
-    );
+    assert_eq!(listed.len(), 1, "a replace's short commit deleted the key");
 }
 
 /// A store whose deletes are refused.
@@ -606,7 +643,7 @@ fn a_mismatch_whose_delete_fails_says_the_object_was_not_removed() {
     );
     let got = conformance::block_on(async {
         let mut up = store
-            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .begin_upload(&key(), created_at(), WriteMode::New)
             .await
             .unwrap();
         up.write(b"abcd").await.unwrap();
@@ -638,7 +675,7 @@ fn a_mismatch_on_an_object_already_gone_counts_as_removed() {
     );
     let got = conformance::block_on(async {
         let mut up = store
-            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .begin_upload(&key(), created_at(), WriteMode::New)
             .await
             .unwrap();
         up.write(b"abcd").await.unwrap();

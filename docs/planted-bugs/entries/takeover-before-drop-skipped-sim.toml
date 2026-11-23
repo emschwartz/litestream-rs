@@ -3,4 +3,4 @@ patch = "takeover-before-drop-skipped"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_tail_judged_torn_and_dropped_from_staging_is_never_refused_seed_0x3ed"]
+tests = ["a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7"]

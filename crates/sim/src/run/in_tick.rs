@@ -4,12 +4,12 @@
 //! them, and every page a growth adds) and armed as [`crate::Op::CommitInTick`] arms its own, so the
 //! model and the snapshot notes take it up the same way. The other operations are SQLite's
 //! own; the runner keeps its list of other readers in step with what ran. A WAL restart or
-//! deletion the operation caused is noted for the liveness oracle inside the tick, before it
+//! deletion the operation caused is noted for the forcing checks inside the tick, before it
 //! judges the tick's snapshots, since the engine can meet it in the same tick.
 
 use super::{Runner, small};
+use crate::forcing::Forcing;
 use crate::generate::{AppAt, AppOp};
-use crate::liveness::Justifier;
 use crate::oracle::Violation;
 use crate::reach::variant;
 use crate::sqlite::{InTickAt, InTickDone, InTickOp};
@@ -77,17 +77,17 @@ impl Runner {
         self.w.arm_app_commit_in_tick(all, new_size);
     }
 
-    /// Tells the liveness oracle, inside the tick, what the app's operation in it did to the
+    /// Tells the forcing checks, inside the tick, what the app's operation in it did to the
     /// WAL file.
     pub(super) fn app_in_tick_seen(&mut self) {
         let Some(ran) = self.w.app_in_tick() else {
             return;
         };
         if ran.restarted {
-            self.liveness.note_in_tick(Justifier::WalRestarted);
+            self.forcings.note_in_tick(Forcing::WalRestarted);
         }
         if ran.emptied {
-            self.liveness.note_in_tick(Justifier::WalEmptied);
+            self.forcings.note_in_tick(Forcing::WalEmptied);
         }
     }
 }

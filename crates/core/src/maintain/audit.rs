@@ -29,10 +29,10 @@
 //! reads, once per boot and never in steady state.
 
 use crate::fault::Fault;
+use crate::fault::role::Role;
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::{KeyTarget, PlanOutcome, plan_without};
-use crate::store::ObjectStore;
 use crate::upload::remote_verifies;
 
 /// What the read-back found.
@@ -82,7 +82,7 @@ pub(crate) fn restores_without(inventory: &Inventory, key: &FileKey) -> bool {
 ///
 /// # Errors
 /// The replica's fault when a read fails; nothing was judged then.
-pub(crate) async fn read_back<R: ObjectStore>(
+pub(crate) async fn read_back<R: Role>(
     remote: &R,
     inventory: &Inventory,
 ) -> Result<ReadBack, Fault> {

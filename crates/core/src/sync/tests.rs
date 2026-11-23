@@ -15,6 +15,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::fault::role::{Role, Staging};
 use crate::mem::MemStore;
 use crate::source::{FakeDb, FakeWal, SourceError};
 use crate::store::Upload;
@@ -504,9 +505,13 @@ fn a_boot_seed_from_the_staged_files_is_the_table_the_steps_built() {
     let (mut rig, position) = recorded();
     commit(&rig.wal, &[1, 3], 3);
     let next = position_of(rig.step_at(Step::Incremental(position)).unwrap());
-    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit()))
-        .unwrap()
-        .table;
+    let seeded = block_on(crate::pages::seeded(
+        &Staging(&rig.store),
+        None,
+        next.commit(),
+    ))
+    .unwrap()
+    .table;
     assert_eq!(seeded, rig.pages);
 }
 
@@ -529,9 +534,13 @@ fn a_staged_file_that_does_not_verify_empties_the_seed_up_to_it() {
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap();
     });
-    let seeded = block_on(crate::pages::seeded(&rig.store, None, next.commit()))
-        .unwrap()
-        .table;
+    let seeded = block_on(crate::pages::seeded(
+        &Staging(&rig.store),
+        None,
+        next.commit(),
+    ))
+    .unwrap()
+    .table;
     assert_eq!(seeded.len(), 1);
     assert_eq!(seeded.get(pg(1)), rig.pages.get(pg(1)));
 }
@@ -887,7 +896,7 @@ fn a_small_file_reaches_the_upload_in_one_write() {
         &mut wal,
         &mut db,
         &mut PageChecksumTable::new(),
-        Fault::from_staging,
+        Staging::<MemStore>::fault,
     ))
     .unwrap();
     assert_eq!(chunks.0.len(), 1);

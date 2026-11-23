@@ -1,9 +1,9 @@
 diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
-index b9eec48d..8d8119f0 100644
+index 4241cbee..d66ae3f6 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
-@@ -56,8 +56,7 @@ use thiserror::Error;
- 
+@@ -57,8 +57,7 @@ use thiserror::Error;
+ use crate::fault::role::{Replica, Role};
  use crate::layout::{FileInfo, FileKey, Level};
  use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 -use crate::publish::Writer;
@@ -12,7 +12,7 @@ index b9eec48d..8d8119f0 100644
  
  #[cfg(test)]
  #[expect(
-@@ -665,7 +664,7 @@ async fn write_output<S: ObjectStore, D: ObjectStore>(
+@@ -666,7 +665,7 @@ async fn write_output<S: Role, D: ObjectStore>(
      merge: &mut Merge<'_, S>,
      mut encoder: Encoder<Vec<u8>>,
      header: &Header,
@@ -21,7 +21,7 @@ index b9eec48d..8d8119f0 100644
  ) -> Result<(Trailer, u32), CompactError> {
      let flush = merge.budget.flush;
      let mut pages = 0_u32;
-@@ -732,22 +731,19 @@ async fn compact_with<S: ObjectStore, D: ObjectStore>(
+@@ -744,22 +743,19 @@ async fn compact_with<S: Role, D: ObjectStore>(
      let created_at = header.fields().timestamp;
      // A compacted file may be written again over itself (a retried
      // compaction, Go's output for the same range), as Go's are.
@@ -49,7 +49,7 @@ index b9eec48d..8d8119f0 100644
      Ok(Compacted {
          info,
          header,
-@@ -760,7 +756,7 @@ async fn compact_with<S: ObjectStore, D: ObjectStore>(
+@@ -772,7 +768,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
  
  /// An abort that fails leaves scratch the store cleans up; the error that made
  /// us abort is the one worth reporting.
