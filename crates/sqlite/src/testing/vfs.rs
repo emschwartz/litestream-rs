@@ -214,6 +214,9 @@ struct State {
     /// Per WAL path, the writes a failed sync covered: the kernel called those pages clean,
     /// so no later sync writes them, until the WAL starts a new generation.
     lost: BTreeMap<usize, Undo>,
+    /// Per open database file (its `sqlite3_file` address), its path and where the unix VFS
+    /// mapped region 0 of its wal-index: live from `xShmMap` until that file's `xShmUnmap`.
+    shm: BTreeMap<usize, (Option<usize>, usize)>,
 }
 
 #[derive(Debug)]
@@ -587,6 +590,7 @@ impl FaultVfs {
                 undo_failed: None,
                 lying_sync: false,
                 lost: BTreeMap::new(),
+                shm: BTreeMap::new(),
             }),
         }));
         let vfs = Self { shared };
@@ -711,6 +715,53 @@ impl FaultVfs {
     /// only, so SQLite's own syncs still hold.
     pub fn lie_on_syncs(&self, on: bool) {
         self.shared.lock().lying_sync = on;
+    }
+
+    /// Whether bytes `[start, end)` of the file at `path` survive a power loss now under
+    /// [`CrashLaw::AllOrNothing`]: no write since its last sync touched them, counting the
+    /// writes a failed sync lost. A file the VFS does not track, or durability not tracked at
+    /// all, loses nothing.
+    #[must_use]
+    pub fn durable(&self, path: &std::path::Path, start: u64, end: u64) -> bool {
+        let Some(at) = self.shared.known(path) else {
+            return true;
+        };
+        let state = self.shared.lock();
+        state.undo.get(&at).is_none_or(|undo| {
+            undo.dirty
+                .iter()
+                .all(|(from, to)| *to <= start || *from >= end)
+        })
+    }
+
+    /// The first `N` bytes of the wal-index of the database at `db`, read from the mapping the
+    /// unix VFS made for a connection that has it open: SQLite's shared memory as every
+    /// connection sees it. `None` while no connection through this VFS has it mapped.
+    #[must_use]
+    #[expect(
+        unsafe_code,
+        reason = "reads the unix VFS's live mapping of wal-index region 0"
+    )]
+    pub fn shm_head<const N: usize>(&self, db: &std::path::Path) -> Option<[u8; N]> {
+        let at = self.shared.known(db)?;
+        let state = self.shared.lock();
+        let (_path, ptr) = state.shm.values().find(|(path, _)| *path == Some(at))?;
+        let mut out = [0; N];
+        if N > 32 * 1024 {
+            return None;
+        }
+        let src = std::ptr::with_exposed_provenance::<u8>(*ptr);
+        // SAFETY: region 0 is 32 KiB and stays mapped until the file's `xShmUnmap`, which
+        // removes the entry under the same lock held here; `N` fits in it.
+        unsafe { std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), N) };
+        Some(out)
+    }
+
+    /// Whether a failed sync of a WAL lost writeback that its next generation has not yet
+    /// overwritten.
+    #[must_use]
+    pub fn writeback_lost(&self) -> bool {
+        !self.shared.lock().lost.is_empty()
     }
 
     /// The power fails now, between calls (module doc): what an [`Effect::PowerLoss`] does
@@ -1253,7 +1304,19 @@ extern "C" fn x_shm_map(
         return ffi::SQLITE_IOERR_SHMMAP;
     };
     // SAFETY: SQLite's own arguments, passed on to the unix file under the header.
-    unsafe { map(real_of(file), region, size, extend, out) }
+    let rc = unsafe { map(real_of(file), region, size, extend, out) };
+    if rc == ffi::SQLITE_OK && region == 0 && !out.is_null() {
+        // SAFETY: `out` is SQLite's own out-pointer, which the unix method just wrote.
+        let at = unsafe { *out };
+        if !at.is_null() {
+            let (shared, _kind, path) = header(file);
+            shared
+                .lock()
+                .shm
+                .insert(file.addr(), (path, at.expose_provenance()));
+        }
+    }
+    rc
 }
 
 #[expect(unsafe_code, reason = "the io method xShmLock")]
@@ -1288,6 +1351,7 @@ extern "C" fn x_shm_barrier(file: *mut ffi::sqlite3_file) {
 
 #[expect(unsafe_code, reason = "the io method xShmUnmap")]
 extern "C" fn x_shm_unmap(file: *mut ffi::sqlite3_file, delete: c_int) -> c_int {
+    header(file).0.lock().shm.remove(&file.addr());
     let Some(unmap) = methods(file).and_then(|m| m.xShmUnmap) else {
         return ffi::SQLITE_OK;
     };

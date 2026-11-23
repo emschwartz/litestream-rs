@@ -98,6 +98,14 @@ const CHECKSUMMED_FRAME_HEADER_LEN: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReaderId(u32);
 
+impl ReaderId {
+    /// The reader numbered `n`: a backend other than the model numbers its own readers.
+    #[must_use]
+    pub const fn new(n: u32) -> Self {
+        Self(n)
+    }
+}
+
 /// A checkpoint mode as another process can ask for it (core's
 /// [`CheckpointMode`] has no RESTART).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
