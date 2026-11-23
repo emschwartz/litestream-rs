@@ -1,4 +1,5 @@
 name = "journal-debt-not-recorded-sqlite"
+patch = "journal-debt-not-recorded"
 fix = "8ef5a8f"
 package = "lsr-sqlite"
 test_bin = "sqlite"

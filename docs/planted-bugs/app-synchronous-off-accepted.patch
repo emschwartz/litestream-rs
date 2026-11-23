@@ -1,0 +1,13 @@
+diff --git a/crates/sqlite/src/conn.rs b/crates/sqlite/src/conn.rs
+index 0d038a6e..548dce71 100644
+--- a/crates/sqlite/src/conn.rs
++++ b/crates/sqlite/src/conn.rs
+@@ -629,7 +629,7 @@ pub fn check_app_connection(conn: &Connection) -> Result<(), SetupError> {
+     let level: i64 = conn
+         .query_row("PRAGMA synchronous", [], |row| row.get(0))
+         .map_err(SetupError::Sqlite)?;
+-    if level == 0 {
++    if level == 0 && false {
+         return Err(SetupError::SynchronousOff);
+     }
+     Ok(())

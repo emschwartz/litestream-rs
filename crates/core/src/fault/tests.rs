@@ -398,7 +398,7 @@ fn a_persistent_cause_and_its_stop_cause_round_trip() {
 
 /// Every fault, pinned by the match in [`every_fault_has_a_named_policy_test`]'s spirit: the
 /// array's length breaks when a variant is added.
-fn every_fault() -> [Fault; 33] {
+pub(crate) fn every_fault() -> [Fault; 33] {
     [
         Fault::StoreTransient,
         Fault::StoreThrottled { retry_after: None },
