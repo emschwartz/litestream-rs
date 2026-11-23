@@ -42,6 +42,7 @@
 mod binaries;
 mod chain;
 mod checks;
+mod differential;
 mod dump;
 mod error;
 mod fake_aws;
@@ -68,6 +69,7 @@ pub use chain::{
     AppFixture, Chain, Outside, Point, STEP_MS, Shape, Written, clock_ending_now, real_now_ms,
 };
 pub use checks::{fresh, go_restore, pages_of, rust_restore};
+pub use differential::{Differential, DifferentialError};
 pub use dump::{
     Dump, DumpConfig, DumpCredentials, DumpDb, DumpDbConfig, DumpEnv, DumpReplica,
     DumpReplicaConfig, Parsed, go_dump, go_parse, rust_dump, rust_parse,
