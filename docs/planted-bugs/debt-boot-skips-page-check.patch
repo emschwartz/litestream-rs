@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/ahead.rs b/crates/core/src/actor/ahead.rs
+index fdb8bca2..9626c7b0 100644
+--- a/crates/core/src/actor/ahead.rs
++++ b/crates/core/src/actor/ahead.rs
+@@ -49,7 +49,7 @@ impl Actor {
+     /// After boot adopted the journal: the check is owed when the WAL is still the newest
+     /// staged file's generation (`continued`), a debt is owed, and no verdict stands already.
+     pub(super) fn owe_ahead_check(&mut self, continued: bool) {
+-        let owed = continued
++        let owed = false && continued
+             && self.kept.unproven != super::unproven::Unproven::No
+             && self.kept.ahead.is_none();
+         self.kept.ahead_check = if owed {

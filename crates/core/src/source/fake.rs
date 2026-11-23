@@ -118,7 +118,17 @@ struct WalState {
     epoch: ReadLockHold,
     restarts: u32,
     forced: Option<CommittedRead>,
+    /// A commit that lands right before the `committed` read the count says (1 is the next):
+    /// a writer committing mid-tick.
+    armed: Option<(u32, Armed)>,
     injections: Injections,
+}
+
+/// A transaction armed to commit at a later read.
+#[derive(Debug)]
+struct Armed {
+    pages: Vec<(PageNo, Vec<u8>)>,
+    db_size: NonZeroU32,
 }
 
 impl WalState {
@@ -267,6 +277,7 @@ impl FakeWal {
             epoch: ReadLockHold::first(),
             restarts: 0,
             forced: None,
+            armed: None,
             injections: Injections::default(),
         };
         state.write_header();
@@ -282,6 +293,23 @@ impl FakeWal {
         let mut state = lock(&self.state);
         state.append(pages, Some(db_size));
         state.end()
+    }
+
+    /// Writes one committed transaction right before the `reads`-th `committed` read from
+    /// now (1 is the next): a writer that commits while a tick runs, after the reads before it.
+    pub fn append_tx_before_read(
+        &self,
+        reads: u32,
+        pages: &[(PageNo, Vec<u8>)],
+        db_size: NonZeroU32,
+    ) {
+        lock(&self.state).armed = Some((
+            reads,
+            Armed {
+                pages: pages.to_vec(),
+                db_size,
+            },
+        ));
     }
 
     /// Writes frames of a transaction that has not committed (a spill): they are in
@@ -502,6 +530,12 @@ impl WalSource for FakeWal {
     fn committed(&mut self) -> Result<CommittedRead, SourceError> {
         let mut state = lock(&self.state);
         state.injections.take(SourceOp::Committed)?;
+        if let Some((reads, armed)) = state.armed.take() {
+            match reads.checked_sub(1).filter(|left| *left > 0) {
+                Some(left) => state.armed = Some((left, armed)),
+                None => state.append(&armed.pages, Some(armed.db_size)),
+            }
+        }
         if let Some(read) = state.forced {
             return Ok(read);
         }
