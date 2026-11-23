@@ -1918,3 +1918,9 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
+
+[[bug]]
+name = "config-type-mismatch-read-as-absent"
+fix = "claude/config-field-types"
+package = "lsr-config"
+tests = ["build::tests::a_value_of_the_wrong_type_is_a_problem_not_an_absent_key"]
