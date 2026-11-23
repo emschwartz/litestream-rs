@@ -582,6 +582,44 @@ mod tests {
 
     lsr_core::conformance_suite!(ErasedHarness::new);
 
+    /// The same suite over the meters, which count each call and must change nothing else.
+    mod metered_conformance {
+        use super::*;
+
+        struct MeteredHarness {
+            mem: Arc<MemStore>,
+            metered: Metered,
+        }
+
+        impl MeteredHarness {
+            fn new() -> Self {
+                let mem = Arc::new(MemStore::new());
+                let store: Arc<dyn DynStore> = mem.clone();
+                let clock: Arc<dyn Clock> =
+                    Arc::new(FakeClock::new(Timestamp::from_unix_millis(0)));
+                Self {
+                    mem,
+                    metered: Metered::new(store, Arc::new(Meters::default()), clock),
+                }
+            }
+        }
+
+        impl Harness for MeteredHarness {
+            type Store = Metered;
+
+            fn store(&self) -> &Metered {
+                &self.metered
+            }
+
+            fn plant_unrecognized(&self, level: Level, name: &str) -> Result<(), Failure> {
+                self.mem.plant_unrecognized(level, name);
+                Ok(())
+            }
+        }
+
+        lsr_core::conformance_suite!(MeteredHarness::new);
+    }
+
     /// The boot's scratch removal reaches the application's store through each layer the
     /// engine sees it by: the type erasure, its dyn view and the meters.
     #[test]

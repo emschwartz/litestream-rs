@@ -131,7 +131,9 @@ impl Progress {
         if self.replicated.map(|(txid, _)| txid) != replicated {
             self.replicated = replicated.map(|txid| (txid, now));
         }
-        let behind = left.unsynced_wal_bytes > 0 || staged > replicated;
+        // Only what is not staged: a staged file the replica lacks is the engine's own lag
+        // clock, dated from that file, which is never later than this reading.
+        let behind = left.unsynced_wal_bytes > 0;
         self.unreplicated_since = if behind {
             self.unreplicated_since.or(Some(now))
         } else {
