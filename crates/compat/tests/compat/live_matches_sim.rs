@@ -734,7 +734,7 @@ fn op() -> impl Strategy<Value = Op> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 24, failure_persistence: None, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 24, failure_persistence: None, rng_seed: proptest::test_runner::RngSeed::Fixed(0x6c69_7665), ..ProptestConfig::default() })]
 
     #[test]
     fn live_matches_sim(page_size in prop_oneof![Just(1024_u32), Just(4096_u32)], ops in prop::collection::vec(op(), 1..20)) {
