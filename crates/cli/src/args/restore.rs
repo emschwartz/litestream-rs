@@ -106,8 +106,12 @@ const DEFINED: [Def; 21] = [
     goflag::value("config"),
     goflag::boolean("no-expand-env"),
     goflag::value("o"),
-    goflag::checked("txid", go_txid, "invalid txid format"),
-    goflag::checked("parallelism", go_int, "parse error"),
+    goflag::checked("txid", |v| {
+        go_txid(v).then_some(()).ok_or("invalid txid format")
+    }),
+    goflag::checked("parallelism", |v| {
+        go_int(v).then_some(()).ok_or("parse error")
+    }),
     goflag::boolean("if-db-not-exists"),
     goflag::boolean("if-replica-exists"),
     goflag::value("timestamp"),
@@ -115,7 +119,9 @@ const DEFINED: [Def; 21] = [
     goflag::boolean("force"),
     goflag::boolean("json"),
     goflag::boolean("f"),
-    goflag::checked("follow-interval", go_duration, "parse error"),
+    goflag::checked("follow-interval", |v| {
+        go_duration(v).then_some(()).ok_or("parse error")
+    }),
     goflag::value("integrity-check"),
     goflag::value("replica"),
     goflag::value("output"),
@@ -127,7 +133,7 @@ const DEFINED: [Def; 21] = [
 ];
 
 /// Go's `litestream.IsURL`: `^\w+://`.
-fn is_url(text: &str) -> bool {
+pub(super) fn is_url(text: &str) -> bool {
     text.split_once("://").is_some_and(|(scheme, _)| {
         !scheme.is_empty() && scheme.chars().all(|c| c.is_alphanumeric() || c == '_')
     })

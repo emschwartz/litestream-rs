@@ -1,6 +1,8 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index 28dae946..551b9b4c 100644
 --- a/crates/core/src/checkpoint.rs
 +++ b/crates/core/src/checkpoint.rs
-@@ -439,6 +439,7 @@
+@@ -441,6 +441,7 @@ struct Protocol<'a, W, P, C, L> {
      cfg: SyncConfig,
      /// Read after each step's committed read for that step's file.
      clock: &'a dyn Clock,
@@ -8,16 +10,16 @@
      good: Reached,
      files: Vec<FileInfo>,
      witnesses: Vec<Witnessed>,
-@@ -482,7 +483,7 @@
+@@ -484,7 +485,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectStore> Protocol<'_,
          let committed = self.wal.committed().map_err(Fault::from_source)?;
          // After the committed read, so the file's created-at time follows every
          // transaction it carries (see `Env::clock`).
 -        let stamp = self.clock.now();
 +        let stamp = self.started;
-         wal_barrier(&mut *self.wal, &committed)?;
+         wal_barrier(&mut *self.wal)?;
          let cfg = SyncConfig {
              cap: None,
-@@ -646,6 +647,7 @@
+@@ -653,6 +654,7 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
          staging,
          cfg: *cfg,
          clock,
