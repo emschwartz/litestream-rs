@@ -27,7 +27,7 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use super::unproven::Unproven;
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
-use crate::failstop::Lag;
+use crate::failstop::{Lag, WalMark};
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::journal::{JournalSignal, JournalWriter};
 use crate::layout::FileKey;
@@ -155,6 +155,9 @@ pub(super) struct Kept {
     /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
     /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
     pub(super) quiet: BTreeSet<Txid>,
+    /// Where the WAL ended when a snapshot owed for a doubt alone was first observed, with
+    /// every staged file on the replica: frames up to it are not lag (`actor::lag`).
+    pub(super) doubt_baseline: Option<WalMark>,
     /// What the last boot's read of the journal reported. A report, not engine state: nothing
     /// decides on it.
     pub(super) journal: Option<JournalSignal>,
@@ -197,6 +200,7 @@ impl Kept {
             boot_failed: false,
             sync_failed_after_listing: false,
             quiet: BTreeSet::new(),
+            doubt_baseline: None,
             journal: None,
             writer: None,
             journal_read: None,
@@ -234,6 +238,7 @@ impl Kept {
             boot_failed,
             sync_failed_after_listing,
             quiet: _,
+            doubt_baseline: _,
             journal,
             writer,
             journal_read,
@@ -266,6 +271,7 @@ impl Kept {
             sync_failed_after_listing: *sync_failed_after_listing,
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),
+            doubt_baseline: None,
             journal: *journal,
             writer: writer.clone(),
             journal_read: *journal_read,
