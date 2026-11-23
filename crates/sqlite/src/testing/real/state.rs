@@ -31,6 +31,9 @@ pub(super) struct Real {
     pub(super) page_size: PageSize,
     /// The application's connection; `None` only inside a power loss.
     pub(super) app: Option<Connection>,
+    /// A second application connection that stays open and commits on its own; opened at
+    /// its first commit.
+    pub(super) other_writer: Option<Connection>,
     /// The application holds a write transaction it has not committed (a spill).
     pub(super) app_tx: bool,
     /// Other processes' read transactions.
@@ -49,6 +52,21 @@ pub(super) struct Real {
 
 pub(super) fn lock(real: &Mutex<Real>) -> MutexGuard<'_, Real> {
     real.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Upserts one row per page on `conn`.
+fn upsert_on(
+    conn: &Connection,
+    pages: &[(PageNo, Vec<u8>)],
+    size: PageSize,
+    copies: usize,
+) -> Option<()> {
+    let mut stmt = conn.prepare(UPSERT).ok()?;
+    for (pgno, bytes) in pages {
+        let row = blob(bytes, size, copies);
+        stmt.execute(rusqlite::params![pgno.get(), row]).ok()?;
+    }
+    Some(())
 }
 
 /// The first quarter of `bytes`, or `copies` times all of it for a spill, which must outgrow
@@ -132,13 +150,28 @@ impl Real {
     }
 
     fn upsert_all(&self, pages: &[(PageNo, Vec<u8>)], copies: usize) -> Option<()> {
-        let app = self.app.as_ref()?;
-        let mut stmt = app.prepare(UPSERT).ok()?;
-        for (pgno, bytes) in pages {
-            let row = blob(bytes, self.page_size, copies);
-            stmt.execute(rusqlite::params![pgno.get(), row]).ok()?;
+        upsert_on(self.app.as_ref()?, pages, self.page_size, copies)
+    }
+
+    /// The second application connection commits `pages` in a transaction of its own;
+    /// `None` when SQLite refuses (another connection holds the write lock).
+    pub(super) fn other_writer_commit(&mut self, pages: &[(PageNo, Vec<u8>)]) -> Option<AppCommit> {
+        if pages.is_empty() {
+            return None;
         }
-        Some(())
+        if self.other_writer.is_none() {
+            self.other_writer = super::open_app_conn(&self.db, self.vfs);
+        }
+        let conn = self.other_writer.as_ref()?;
+        conn.execute_batch("BEGIN IMMEDIATE").ok()?;
+        let done = upsert_on(conn, pages, self.page_size, 0)
+            .and_then(|()| conn.execute_batch("COMMIT").ok());
+        if done.is_none() {
+            // A rollback that fails leaves nothing open: SQLite ends the transaction either way.
+            let _rolled_back = conn.execute_batch("ROLLBACK").is_ok();
+            return None;
+        }
+        Some(self.mark())
     }
 
     /// Opens the application's write transaction unless it holds one; false when SQLite

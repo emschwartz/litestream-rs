@@ -116,6 +116,14 @@ fn create(
     Ok(app)
 }
 
+/// An application connection as the backend's application opens it: replication's setup at
+/// `synchronous = NORMAL`, with a page cache small enough for a spill to reach the WAL.
+fn open_app_conn(db: &Path, vfs: super::vfs::FaultVfs) -> Option<Connection> {
+    let app = open_app(db, &vfs, "NORMAL").ok()?;
+    app.pragma_update(None, "cache_size", 10).ok()?;
+    Some(app)
+}
+
 impl RealSide {
     /// A database of about `db_pages` pages of `page_size` at `dir/app.db`, which must not
     /// exist yet, with SQLite's random numbers pinned to `seed`.
@@ -149,6 +157,7 @@ impl RealSide {
             vfs,
             page_size,
             app: Some(app),
+            other_writer: None,
             app_tx: false,
             readers: BTreeMap::new(),
             next_reader: 0,
@@ -192,14 +201,12 @@ impl Real {
         }
         self.vfs.cut_power();
         self.readers.clear();
+        self.other_writer = None;
         self.app = None;
         self.app_tx = false;
         // A loss whose undo failed still leaves files to open; the model check reports what differs.
         let _restored = self.vfs.restore_power().is_ok();
-        self.app = open_app(&self.db, &self.vfs, "NORMAL").ok();
-        if let Some(app) = self.app.as_ref() {
-            let _small = app.pragma_update(None, "cache_size", 10).is_ok();
-        }
+        self.app = open_app_conn(&self.db, self.vfs);
         self.owed.clear();
         self.seen = self.image();
     }
@@ -211,6 +218,7 @@ impl Real {
             return false;
         }
         self.engine = None;
+        self.other_writer = None;
         let Some(app) = self.app.as_ref() else {
             return false;
         };
@@ -263,6 +271,9 @@ impl SqliteSide for RealSide {
     }
     fn commit(&self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit> {
         self.with(|real| real.commit(pages, db_size))
+    }
+    fn other_writer_commit(&self, pages: &[(PageNo, Vec<u8>)], _db_size: u32) -> Option<AppCommit> {
+        self.with(|real| real.other_writer_commit(pages))
     }
     fn arm_commit_in_tick(
         &self,
