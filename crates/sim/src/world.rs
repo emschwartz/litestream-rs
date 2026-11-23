@@ -90,22 +90,6 @@ fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Opt
     reencoded(bytes, edit, |_| {})
 }
 
-/// The same file, header and all, with every byte of its first page
-/// inverted: a whole, valid file that holds what no commit held.
-fn forged(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut first = true;
-    reencoded(
-        bytes,
-        |_| {},
-        |data| {
-            if first {
-                data.iter_mut().for_each(|byte| *byte = !*byte);
-                first = false;
-            }
-        },
-    )
-}
-
 /// The file re-encoded, with its header through `edit` and each page's
 /// bytes, in order, through `page`.
 fn reencoded(
@@ -1050,23 +1034,6 @@ impl World {
         let found = self.edit_newest_staged(|bytes| {
             if let Some(stripped) = without_origin(bytes) {
                 *bytes = stripped;
-                done = true;
-            }
-        })?;
-        Ok(found && done)
-    }
-
-    /// Rewrites the newest level-0 file as another whole, valid file under
-    /// the same key and header ([`forged`]); false when there is none or it
-    /// does not decode.
-    ///
-    /// # Errors
-    /// As [`Self::edit_newest_staged`].
-    pub fn forge_newest_staged(&self) -> Result<bool, StagedEditError> {
-        let mut done = false;
-        let found = self.edit_newest_staged(|bytes| {
-            if let Some(other) = forged(bytes) {
-                *bytes = other;
                 done = true;
             }
         })?;

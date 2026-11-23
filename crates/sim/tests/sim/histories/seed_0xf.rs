@@ -1,5 +1,8 @@
 //! Seed 0xf's history of 300 operations, as the live generator under the seed's own mix with the known-wrong cells drawn drew it.
 //!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
+//!
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
@@ -10,14 +13,14 @@ use std::io::ErrorKind;
 
 pub const OPS: &[Op] = &[
     Op::SecondWriter { ticks: 0 },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::CommitInTick { pages: 1 },
     Op::WalDamage {
         op: WalOp::TruncateAtFrame(26),
         ticks: 7,
     },
     Op::RequestSnapshot,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Heal,
     Op::Tick,
     Op::SecondWriter { ticks: 0 },
@@ -62,7 +65,7 @@ pub const OPS: &[Op] = &[
     Op::EnvFault(EnvFault::DeleteWal),
     Op::Vacuum { page_size: None },
     Op::Tick,
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Spill,
     Op::Vacuum { page_size: None },
     Op::Commit {
@@ -90,7 +93,7 @@ pub const OPS: &[Op] = &[
     },
     Op::Vacuum { page_size: None },
     Op::RequestSnapshot,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Spill,
     Op::RequestSnapshot,
     Op::EnvFault(EnvFault::Source(
@@ -104,12 +107,12 @@ pub const OPS: &[Op] = &[
         ticks: 3,
     },
     Op::Spill,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::CommitInTick { pages: 1 },
     Op::Heal,
     Op::Heal,
     Op::Rollback,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::CommitInTick { pages: 3 },
     Op::Restore,
@@ -150,7 +153,7 @@ pub const OPS: &[Op] = &[
     Op::SecondWriter { ticks: 2 },
     Op::SecondWriter { ticks: 1 },
     Op::CommitInTick { pages: 1 },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Tick,
     Op::Commit {
         pages: 4,
@@ -220,7 +223,7 @@ pub const OPS: &[Op] = &[
         ticks: 5,
     },
     Op::Spill,
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::SecondWriter { ticks: 0 },
     Op::Tick,
     Op::WalDamage {
@@ -270,8 +273,8 @@ pub const OPS: &[Op] = &[
     Op::EnvFault(EnvFault::DeleteWal),
     Op::SecondWriter { ticks: 1 },
     Op::Shutdown,
-    Op::Meta(MetaOp::ForgeNewest),
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::RequestSnapshot,
     Op::Crash(CrashKind::Process),
     Op::Heal,
@@ -284,7 +287,7 @@ pub const OPS: &[Op] = &[
     Op::EnvFault(EnvFault::Source(SourceOp::Sync, SourceError::FsyncFailed)),
     Op::Vacuum { page_size: None },
     Op::Heal,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::OtherProcessCheckpoint(OtherProcessMode::Restart),
     Op::Tick,
     Op::EnvFault(EnvFault::Source(
@@ -404,7 +407,7 @@ pub const OPS: &[Op] = &[
     Op::Vacuum { page_size: None },
     Op::Tick,
     Op::Vacuum { page_size: None },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::CommitInTick { pages: 1 },
     Op::Tick,
     Op::EnvFault(EnvFault::Source(
@@ -419,7 +422,7 @@ pub const OPS: &[Op] = &[
     Op::Heal,
     Op::Meta(MetaOp::Save),
     Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::Tick,
     Op::Rollback,
     Op::Crash(CrashKind::Process),
@@ -437,7 +440,7 @@ pub const OPS: &[Op] = &[
         op: WalOp::RegrowWithoutCommitMarks(15497129569853455572),
         ticks: 1,
     },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::SecondWriter { ticks: 0 },
     Op::Vacuum { page_size: None },
     Op::StagingDamage(MetaOp::TruncateNewest),
@@ -474,7 +477,7 @@ pub const OPS: &[Op] = &[
     Op::Crash(CrashKind::Power),
     Op::RequestSnapshot,
     Op::Spill,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Vacuum { page_size: None },
     Op::Shutdown,
 ];

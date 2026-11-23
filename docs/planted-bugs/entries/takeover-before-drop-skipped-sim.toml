@@ -1,4 +1,5 @@
 name = "takeover-before-drop-skipped-sim"
+patch = "takeover-before-drop-skipped"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"

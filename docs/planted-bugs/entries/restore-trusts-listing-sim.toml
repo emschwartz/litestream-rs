@@ -1,6 +1,7 @@
 # The same plant, judged by the simulator: a restore made through a lagging listing while the
 # hold lasts must be the raw replica's answer or an error.
 name = "restore-trusts-listing-sim"
+patch = "restore-trusts-listing"
 fix = "32572b5"
 package = "lsr-sim"
 test_bin = "sim"

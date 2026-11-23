@@ -2164,6 +2164,7 @@ mod checkpoint_failed;
 mod degraded;
 mod index_reset;
 mod lag;
+mod ledger;
 mod listing;
 mod live;
 mod newest_replica_file;
@@ -2452,4 +2453,22 @@ fn an_env_prints_its_parts_and_whether_it_has_a_journal() {
     ] {
         assert!(text.contains(part), "{part} in {text}");
     }
+}
+
+/// A commit after the synced position that a WAL restart then abandoned breaks the read lock
+/// the position was pinned under. The snapshot that follows is named for the generation
+/// change, so the violation itself must reach the operator another way: it is counted.
+#[test]
+fn an_abandoned_commit_after_a_restart_is_counted_as_a_read_lock_violation() {
+    let (mut rig, mut actor) = caught_up();
+    assert_eq!(actor.read_lock_violations(), 0);
+    rig.commit(2);
+    rig.wal.force_restart();
+    let tick = rig.tick(&mut actor, T0 + 1);
+    assert_eq!(
+        event(&tick),
+        Some(&Event::Resnapshot(SnapshotCause::GenerationChanged)),
+        "{tick:?}"
+    );
+    assert_eq!(actor.read_lock_violations(), 1);
 }

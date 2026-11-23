@@ -85,7 +85,7 @@ pub enum Justifier {
     /// The WAL changed generation while our read transaction was not held.
     /// A change under a hold on read mark zero is no reason: the hold blocks
     /// every backfill, so no commit can go with the old generation and the
-    /// engine follows it (`lsr_core::recover`, rule 6; seeds 0xe and
+    /// engine follows it (`lsr_core::recover_traced`, rule 6; seeds 0xe and
     /// 0xf4846 snapshotted there before).
     ReadLockLapsed,
     /// The process stopped with a staged file the replica does not hold
@@ -357,6 +357,8 @@ pub const fn of_opts(opts: &crate::run::Opts) -> &'static [Justifier] {
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,
+        // The law's process crashes are noted as they happen, as a crash operation's are.
+        kill_after_fault: _,
         // Which SQLite the engine runs against: each backend's faults are drawn and noted
         // as the model's are.
         sqlite: _,

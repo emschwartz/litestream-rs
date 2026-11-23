@@ -10,7 +10,7 @@
 //!
 //! What is here:
 //! - the replica's layout and the store contract (`layout`, `store`,
-//!   `inventory`, `resolved`);
+//!   `inventory`);
 //! - reading a replica: the restore planner and executor and the verifier
 //!   (`plan`, `restore`, `verify`);
 //! - writing one: position recovery, the sync step, the checkpoint policy
@@ -44,6 +44,7 @@ mod maintain;
 mod mem;
 #[cfg(any(test, feature = "testing"))]
 pub mod needs;
+pub mod obligations;
 mod pages;
 mod plan;
 mod position;
@@ -122,7 +123,7 @@ pub use position::{
 };
 pub use recover::{
     BootWal, FrameCheck, LastPageCheck, Miss, NewestStagedFile, PositionSource, Probes,
-    RecoverEvent, Recovered, Verdict, WalView, recover, recover_traced,
+    RecoverEvent, Recovered, Verdict, WalView, recover_traced,
 };
 pub use restore::{
     AsOfInside, DatabaseSink, FileFault, MAX_ATTEMPTS, NoPlan, PublishFailure, PublishLeft,

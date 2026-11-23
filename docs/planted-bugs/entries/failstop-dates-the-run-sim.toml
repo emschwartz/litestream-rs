@@ -1,4 +1,5 @@
 name = "failstop-dates-the-run-sim"
+patch = "failstop-dates-the-run"
 fix = "87cd10d"
 package = "lsr-sim"
 test_bin = "sim"
