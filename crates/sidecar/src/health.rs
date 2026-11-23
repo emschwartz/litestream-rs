@@ -21,7 +21,7 @@ use lsr_replica::{
     SnapshotCause, SnapshotCauseKind, Stall, StopCause, Task, Timestamp,
 };
 
-use crate::json::string as json_string;
+use serde_json::{Map, Value};
 
 /// Where one database stands, as the board holds it.
 #[derive(Clone, Debug)]
@@ -284,60 +284,51 @@ pub(crate) const fn notice_name(notice: AppNotice) -> &'static str {
     }
 }
 
-/// A JSON object, built field by field.
-struct Object(String);
+/// A JSON object, built field by field; its keys come out in the order they were added.
+struct Object(Map<String, Value>);
 
 impl Object {
     fn new() -> Self {
-        Self(String::from("{"))
+        Self(Map::new())
     }
 
-    fn raw(&mut self, key: &str, value: &str) {
-        if self.0.len() > 1 {
-            self.0.push(',');
-        }
-        self.0.push_str(&json_string(key));
-        self.0.push(':');
-        self.0.push_str(value);
+    fn raw(&mut self, key: &str, value: Value) {
+        self.0.insert(key.to_owned(), value);
     }
 
     fn text(&mut self, key: &str, value: &str) {
-        self.raw(key, &json_string(value));
+        self.raw(key, value.into());
     }
 
-    fn num(&mut self, key: &str, value: impl std::fmt::Display) {
-        self.raw(key, &value.to_string());
+    fn num(&mut self, key: &str, value: impl Into<Value>) {
+        self.raw(key, value.into());
     }
 
     fn maybe(&mut self, key: &str, value: Option<String>) {
-        match value {
-            Some(text) => self.text(key, &text),
-            None => self.raw(key, "null"),
-        }
+        self.raw(key, value.map_or(Value::Null, Value::from));
     }
 
-    fn end(mut self) -> String {
-        self.0.push('}');
-        self.0
+    fn end(self) -> Value {
+        Value::Object(self.0)
     }
 }
 
 /// The standing verdict of `kind`, or `null`.
-fn ahead_json(health: &Health, kind: AheadKind) -> String {
+fn ahead_json(health: &Health, kind: AheadKind) -> Value {
     let Some(ahead) = health.ahead_of_wal.filter(|ahead| ahead.kind == kind) else {
-        return "null".to_owned();
+        return Value::Null;
     };
     let mut o = Object::new();
-    o.num("pages", ahead.pages);
-    o.num("first_page", ahead.first_page);
+    o.num("pages", ahead.pages.get());
+    o.num("first_page", ahead.first_page.get());
     o.text("restore_point", &ahead.restore_point.to_string());
     o.text("kept_until", &ahead.kept_until.to_string());
     o.end()
 }
 
-fn unchecked_json(health: &Health) -> String {
+fn unchecked_json(health: &Health) -> Value {
     let Some(unchecked) = health.ahead_of_wal_unchecked else {
-        return "null".to_owned();
+        return Value::Null;
     };
     let mut o = Object::new();
     o.text("since", &unchecked.since.to_string());
@@ -345,8 +336,8 @@ fn unchecked_json(health: &Health) -> String {
     o.end()
 }
 
-fn degraded_json(health: &Health) -> String {
-    let tasks: Vec<String> = Task::ALL
+fn degraded_json(health: &Health) -> Value {
+    let tasks: Vec<Value> = Task::ALL
         .iter()
         .filter_map(|task| {
             let degraded = health.task(*task)?;
@@ -359,7 +350,7 @@ fn degraded_json(health: &Health) -> String {
             Some(o.end())
         })
         .collect();
-    format!("[{}]", tasks.join(","))
+    Value::Array(tasks)
 }
 
 fn running_json(o: &mut Object, health: &Health) {
@@ -369,10 +360,10 @@ fn running_json(o: &mut Object, health: &Health) {
             o.text("stop_detail", &format!("{cause:?}"));
         }
         Phase::Booting | Phase::Running | Phase::Draining | Phase::Gone(_) => {
-            o.raw("stop_cause", "null");
+            o.raw("stop_cause", Value::Null);
         }
     }
-    o.raw("degraded", &degraded_json(health));
+    o.raw("degraded", degraded_json(health));
     o.maybe("synced_txid", health.synced.map(|(t, _)| t.to_string()));
     o.maybe("synced_at", health.synced.map(|(_, at)| at.to_string()));
     o.maybe(
@@ -400,9 +391,9 @@ fn running_json(o: &mut Object, health: &Health) {
     );
     o.maybe("journal_detail", health.journal.map(|s| format!("{s:?}")));
     for kind in [AheadKind::AheadOfWal, AheadKind::WalLostCommits] {
-        o.raw(verdict_name(kind), &ahead_json(health, kind));
+        o.raw(verdict_name(kind), ahead_json(health, kind));
     }
-    o.raw("database_ahead_of_wal_unchecked", &unchecked_json(health));
+    o.raw("database_ahead_of_wal_unchecked", unchecked_json(health));
     o.maybe(
         "held_by",
         health
@@ -417,12 +408,12 @@ fn running_json(o: &mut Object, health: &Health) {
 /// The `/healthz` body, and whether every database is up.
 #[must_use]
 pub(crate) fn healthz(views: &[DbView], now: Timestamp) -> (bool, String) {
-    let down: Vec<String> = views
+    let down: Vec<Value> = views
         .iter()
         .filter(|v| v.down())
-        .map(|v| json_string(&v.path.display().to_string()))
+        .map(|v| v.path.display().to_string().into())
         .collect();
-    let dbs: Vec<String> = views
+    let dbs: Vec<Value> = views
         .iter()
         .map(|view| {
             let mut o = Object::new();
@@ -439,14 +430,44 @@ pub(crate) fn healthz(views: &[DbView], now: Timestamp) -> (bool, String) {
     let mut o = Object::new();
     o.text("status", if up { "ok" } else { "down" });
     o.text("time", &now.to_string());
-    o.raw("down", &format!("[{}]", down.join(",")));
-    o.raw("dbs", &format!("[{}]", dbs.join(",")));
-    (up, o.end())
+    o.raw("down", Value::Array(down));
+    o.raw("dbs", Value::Array(dbs));
+    (up, o.end().to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `/healthz` bytes an orchestrator or script reads: compact, keys in the order the
+    /// daemon has always written them, a quote escaped.
+    #[test]
+    fn the_healthz_body_is_pinned_byte_for_byte() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let view = |path: &str, replica_type, state| DbView {
+            path: PathBuf::from(path),
+            replica_type,
+            state,
+        };
+        let (up, body) = healthz(
+            &[
+                view("/a.db", "file", DbState::Waiting),
+                view("/b\"d.db", "s3", DbState::Failed),
+            ],
+            at,
+        );
+        assert!(!up);
+        assert_eq!(
+            body,
+            r#"{"status":"down","time":"2023-11-14T22:13:20.000Z","down":["/b\"d.db"],"dbs":[{"path":"/a.db","replica_type":"file","state":"waiting"},{"path":"/b\"d.db","replica_type":"s3","state":"failed"}]}"#
+        );
+        let (up, body) = healthz(&[], at);
+        assert!(up);
+        assert_eq!(
+            body,
+            r#"{"status":"ok","time":"2023-11-14T22:13:20.000Z","down":[],"dbs":[]}"#
+        );
+    }
 
     /// A fail-stop trip is 503 whatever the phase and the mode: a database still running, its
     /// commit off the replica too long, is down; the same database untripped is up.

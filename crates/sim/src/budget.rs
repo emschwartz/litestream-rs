@@ -25,8 +25,8 @@
 //!   from the replica to compare it with the staged copy, then the whole
 //!   input from one of the two); a boot reads back the newest file of each level and
 //!   the replica's newest level-0 file, a header first then the file, and
-//!   its listing is followed by reads of the missing level-0 keys past it
-//!   ([`PROBE_READS`]). So replica reads are at most two per compaction
+//!   its listing is followed by reads of the keys past it, through what is staged or, with
+//!   nothing staged, up to the walk's cap ([`PROBE_READS`]). So replica reads are at most two per compaction
 //!   input, plus [`READS_PER_BOOT`] per boot, plus one per fault that failed
 //!   a call (each such failure is retried) and [`PROBE_READS`] more for the
 //!   listing that may follow it, plus [`READS_PER_DEGRADED_RETRY`] per retry
@@ -55,14 +55,10 @@ pub const PER_FILE: u64 = 1024;
 /// newest file of each of the ten levels, and the upload lane's read-back.
 pub const READS_PER_BOOT: u64 = 24 + PROBE_READS;
 
-/// The most reads that end a probe past a listing: the keys named for each
-/// missing transaction it reads past before it stops, three per transaction
-/// (`lsr_core::fresh_probe_reads` is the exact count).
-#[expect(
-    clippy::as_conversions,
-    reason = "a u32 widens to a u64 losslessly; `From` is not const"
-)]
-pub const PROBE_READS: u64 = 3 * (lsr_core::PROBE_GAP as u64 + 1);
+/// The most reads one probe past a listing makes ([`lsr_core::WALK_READS_MAX`]): every key
+/// for the transactions in its gap window, the level-0 and snapshot keys for the rest of the
+/// staged range it reads through, or up to its cap when nothing is staged to bound it.
+pub const PROBE_READS: u64 = lsr_core::WALK_READS_MAX;
 
 /// Reads one retry of a degraded task may make of the replica: a header and
 /// the newest file it names.

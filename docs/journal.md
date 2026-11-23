@@ -30,6 +30,19 @@ fact reads the record as `Newer` only while that fact stands. While two verdicts
 later keeps the earlier's restore point and its own kind; the writer refuses a record that moves
 the restore point forward.
 
+## The floor in the engine
+
+The engine raises the floor with its uploader's confirmed transaction, for the destination its
+configuration names (`ActorConfig::destination`: the sidecar's digest of the replica's endpoint,
+bucket and prefix, or its directory), anchored on the confirmed file's length, raw-byte digest and
+file checksum when this process holds that file's witness, and writes it at the end of the tick
+(`crates/core/src/actor/floor.rs`). A boot reads it back for the same destination only; a listing
+that ends lower does not lower it. A rollback seen while running withdraws the anchor and keeps
+the bound: the ids stay taken. Another destination's floor stays in the record until this one
+has its own, since a floor is never dropped; with no destination named the engine keeps none and
+a recorded one passes through (`docs/decisions.md` D107). What a boot does with the floor it
+reads is issue #171, item 4's boot rule.
+
 ## Reading
 
 - `open`. ENOENT is `Missing`. Any other error is `Unreadable(Io)`, never `Missing`.

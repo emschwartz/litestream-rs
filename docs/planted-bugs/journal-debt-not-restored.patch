@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 5c73e256..1f2f06b1 100644
+index 84e54b99..507ec229 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2605,7 +2605,7 @@ impl Actor {
+@@ -2653,7 +2653,7 @@ impl Actor {
              | lsr_journal::Verdict::Unreadable(_) => None,
          };
          if let Some(read) = self.kept.journal_read {
@@ -10,4 +10,4 @@ index 5c73e256..1f2f06b1 100644
 +            let _ = read.unproven;
              self.adopt_ahead(read.ahead);
              self.adopt_unchecked(read.unchecked);
-         }
+             self.adopt_floor(read.floor);

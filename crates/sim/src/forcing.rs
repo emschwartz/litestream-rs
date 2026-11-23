@@ -49,9 +49,9 @@ pub enum Forcing {
     StagingEdited,
     /// A scheduled staging fault hit a call.
     StagingFault,
-    /// A fault failed a step, or a boot ran under a wal-index reset ahead of
-    /// the WAL header, so the position proves no continuity until the next
-    /// step stages a file.
+    /// A fault failed a step, a boot ran under a wal-index reset ahead of
+    /// the WAL header, or a boot continued short of a commit it never staged,
+    /// so the position proves no continuity until the next step stages a file.
     PositionUnproven,
     /// The engine deleted staged files the replica never took
     /// ([`crate::oracle::lost_restore_points`] counted the give-up).
@@ -139,6 +139,8 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         }
         Op::EnvFault(_) | Op::Wal(_) | Op::WalDamage { .. } => &[Forcing::WalDamaged],
         Op::Remote(_) | Op::SecondWriter { .. } => &[Forcing::RemoteEdited],
+        // A provider fault on one request, noted as a store fault that hit is.
+        Op::HttpFault(_) => &[Forcing::RemoteFault],
         // A lasting fault, noted as it begins and again as it is lifted.
         Op::Hold { hold, .. } => match hold {
             crate::generate::Hold::StoreDown(_)
@@ -219,6 +221,8 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         staging_fs: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
+        // The replica on S3: its provider faults are noted as they are drawn.
+        remote_s3: _,
         // Which SQLite the engine runs against: each backend's faults are drawn and noted
         // as the model's are.
         sqlite: _,

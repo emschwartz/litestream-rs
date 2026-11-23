@@ -550,7 +550,6 @@ async fn restore_within<S: ObjectStore, K: DatabaseSink>(
                     left: err.left(),
                     source: Box::new(err),
                 })?;
-                mark!(Rest1);
                 return Ok(Restored {
                     reached: chain.reaches(),
                     page_size: last.header().page_size(),
@@ -622,10 +621,8 @@ impl Retries {
         match abort {
             Abort::Fatal(err) => Err(err),
             Abort::Vanished(missing) => {
-                mark!(Rest4);
                 self.vanished = self.vanished.saturating_add(1);
                 if self.vanished >= self.limit {
-                    mark!(World28);
                     return Err(RestoreError::Unstable {
                         attempts: attempt,
                         missing,
@@ -653,7 +650,6 @@ impl Retries {
                 // listing; the last term only bounds the loop if that reasoning is wrong.
                 let exhausted = attempt >= MAX_CHASE.saturating_add(MAX_ATTEMPTS);
                 if self.lagged >= self.limit || exhausted {
-                    mark!(World4);
                     return Err(RestoreError::ListingBehind {
                         attempts: attempt,
                         found,
@@ -722,7 +718,6 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
         | PlanOutcome::AsOfInsideFile { .. }
         | PlanOutcome::InsideFile { .. }
         | PlanOutcome::MalformedSnapshot { .. }) => {
-            mark!(Rest3);
             return Err(RestoreError::NoPlan(NoPlan(other)).into());
         }
     };
@@ -740,10 +735,12 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     Ok((chain, last, inside_file))
 }
 
-/// A file a read finds past the newest transaction `inventory` lists, if any: one of the keys
-/// a reader can name without a listing for the next transaction (the first transaction, for an
-/// empty listing), as the engine's own probe reads them (`crate::probe`). A listing that lags
-/// the store's writes is told from a whole one this way, as far as a reader can name keys.
+/// A file a read finds past the newest transaction `inventory` lists, if any: the keys a reader
+/// can name without a listing (`crate::probe`), looked for from the next transaction (the
+/// first, for an empty listing) as the engine's own probe walks them, until more than
+/// `PROBE_GAP` transactions in a row are missing. A listing that lags the store's writes is
+/// told from a whole one this way, as far as a reader can name keys; a hole in the replica
+/// wider than that gap right after the listing's end is beyond it (`docs/BEHAVIOR.md`).
 ///
 /// # Errors
 /// [RestoreError::Store] for a read that fails other than as not found.
@@ -751,16 +748,15 @@ pub async fn listed_past<S: ObjectStore>(
     store: &S,
     inventory: &Inventory,
 ) -> Result<Option<FileKey>, RestoreError> {
-    let next = match inventory.newest() {
+    let first = match inventory.newest() {
         Some(newest) => newest.next(),
         None => Txid::new(1),
     };
-    let Some(next) = next else {
-        return Ok(None);
-    };
-    crate::probe::holder(store, next)
+    let starts = crate::probe::Starts::of(inventory);
+    let found = crate::probe::walk(store, first, None, &starts, true)
         .await
-        .map_err(RestoreError::Store)
+        .map_err(RestoreError::Store)?;
+    Ok(found.first().copied())
 }
 
 /// The plan for [target]: an instant asks for the created-at times it needs, counted
@@ -863,7 +859,6 @@ fn check_header(key: FileKey, header: &Header, previous: Previous<'_>) -> Result
         return Err(FileFault::NotASnapshot);
     }
     if header.txids() != key.range() {
-        mark!(Rest5);
         return Err(FileFault::RangeMismatch {
             header: header.txids(),
         });

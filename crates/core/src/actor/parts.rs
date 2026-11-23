@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 
-use lsr_ltx::{PageSize, Timestamp, Txid};
+use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
@@ -182,6 +182,8 @@ pub(super) struct Kept {
     pub(super) unchecked: Option<lsr_journal::Unchecked>,
     /// What the next tick tells the operator about the verdict, before anything else runs.
     pub(super) ahead_notice: Option<super::AheadNotice>,
+    /// The confirmed floor for the configured destination, journalled (`super::floor`).
+    pub(super) floor: Option<lsr_journal::Floor>,
     /// The WAL's committed end that the cure's FULL checkpoint copied and its read-back proved
     /// (`crate::cure`), while the TRUNCATE that empties it is still owed: the TRUNCATE then runs
     /// without scanning frames the kernel may have evicted since.
@@ -222,6 +224,7 @@ impl Kept {
             ahead: None,
             unchecked: None,
             ahead_notice: None,
+            floor: None,
             verified: None,
         }
     }
@@ -263,6 +266,7 @@ impl Kept {
             ahead,
             unchecked,
             ahead_notice,
+            floor,
             verified,
         } = self;
         Self {
@@ -299,6 +303,7 @@ impl Kept {
             ahead: *ahead,
             unchecked: *unchecked,
             ahead_notice: *ahead_notice,
+            floor: *floor,
             verified: *verified,
         }
     }
@@ -466,9 +471,20 @@ pub(super) struct Engine {
     /// them confirms them, and the snapshot goes above them. Only this
     /// engine's own drops set it, never an operator's or a boot's record.
     pub(super) dropped_through: Option<Txid>,
+    /// Acknowledged ids whose staged copies a running drop removed, with the
+    /// snapshot staged above them. The replica lost them (a rollback) and
+    /// they are never taken again, so an upload planned at one moves past
+    /// them; a listing that confirms less than they reach would otherwise
+    /// leave the uploader asking for files staging no longer has.
+    pub(super) dropped_acknowledged: Option<TxidRange>,
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
+    /// Ticks in a row that ended in the WAL step since the upload step last ran; at
+    /// [`super::state::FAIR_SHARE`] the upload step runs first. An app that commits before
+    /// every tick keeps the WAL step busy on each one, and the upload step that follows it
+    /// would otherwise never run.
+    pub(super) syncs_ahead: u32,
 }
 
 impl Engine {
@@ -486,7 +502,9 @@ impl Engine {
             pruned: None,
             acknowledged: None,
             dropped_through: None,
+            dropped_acknowledged: None,
             witnesses: Witnesses::new(),
+            syncs_ahead: 0,
         }
     }
 }
@@ -663,6 +681,14 @@ pub(super) const KEPT_LEDGER: &[(&str, Keep)] = &[
         ),
     ),
     (
+        "floor",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "the confirmed floor for the configured destination: every id at or below it is \
+             taken, and its anchor names the bytes confirmed there (issue #171, item 4)",
+        ),
+    ),
+    (
         "verified",
         Keep::Ephemeral(
             "the cure's proof of what its checkpoint copied; a restart proves it again; cost: a \
@@ -713,13 +739,24 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
         Keep::Owed(
             "never lowered while the process lives, but set at boot from the replica's listing: \
              a replica that went backwards before a restart lets a snapshot take an \
-             acknowledged id again until the confirmed high-water mark is journalled \
-             (issue #171, item 4)",
+             acknowledged id again. The mark is journalled (Kept.floor); the boot rule that \
+             reads it back into this field is the rest of issue #171, item 4",
         ),
     ),
     (
         "witnesses",
         Keep::Derived("witnessed again at boot against the live WAL (crate::witness)"),
+    ),
+    (
+        "syncs_ahead",
+        Keep::Ephemeral("a fairness count between two steps; a restart starts it at zero"),
+    ),
+    (
+        "dropped_acknowledged",
+        Keep::Derived(
+            "a boot confirms from the replica's listing and acknowledges nothing above it, \
+             so no acknowledged id lacks its staged copy",
+        ),
     ),
     (
         "dropped_through",

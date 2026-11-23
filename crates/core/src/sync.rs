@@ -345,11 +345,9 @@ fn below_committed<R: Read + Seek>(wal: &mut WalReader<R>, stop: Fault) -> Fault
 fn scan_fault<R: Read + Seek>(wal: &mut WalReader<R>, err: WalError) -> Fault {
     match err {
         WalError::CorruptBelowCommitted { .. } => {
-            mark!(Run4);
             below_committed(wal, Fault::WalCorruptBelowCommitted)
         }
         WalError::TruncatedBelowCommitted { .. } => {
-            mark!(Run5);
             below_committed(wal, Fault::WalTruncatedBelowCommitted)
         }
         WalError::Io(_)
@@ -660,7 +658,6 @@ async fn run<R: Read + Seek, P: PageSource, L: Role>(
         return Ok(Synced::IndexReset);
     }
     if nothing && let Some(held) = start.held {
-        mark!(Run2);
         return Ok(Synced::Idle(ReachedEnd::new(
             held.with_cursor(scanned.cursor),
             epoch,
