@@ -710,16 +710,6 @@ pub struct Verdict {
     pub event: Option<RecoverEvent>,
 }
 
-/// [`recover_traced] without the event.
-#[must_use]
-pub fn recover(
-    source: Option<PositionSource<'_>>,
-    wal: &WalView,
-    remote: Option<Txid>,
-) -> Recovered {
-    recover_traced(source, wal, remote).recovered
-}
-
 /// Decides, and names the event the decision calls for.
 #[must_use]
 pub fn recover_traced(
