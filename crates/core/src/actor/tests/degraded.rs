@@ -554,51 +554,6 @@ fn booted_follows_the_engines_own_rebuild() {
     assert!(actor.booted());
 }
 
-/// The bucket rolls back past transaction 2, which the engine had
-/// acknowledged (by uploading it, or by finding it on the replica at boot),
-/// and the staged copy of 2 is gone too. The relist must not forget that 2
-/// was acknowledged: the replacement snapshot takes 3, never 2 again with a
-/// later state, so a restore to 2 refuses rather than returning pages 2
-/// never held.
-#[test]
-fn a_relist_never_takes_an_acknowledged_transaction_again() {
-    for rebooted in [false, true] {
-        let (mut rig, mut actor) = caught_up_go_like();
-        rig.commit(2);
-        rig.settle(&mut actor, T0 + 10);
-        assert_eq!(newest_replica_file(&rig), Some(2));
-        if rebooted {
-            actor = Actor::new(go_like());
-            rig.settle(&mut actor, T0 + 10);
-        }
-        let gone: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
-            .unwrap()
-            .files()
-            .iter()
-            .map(|f| f.key)
-            .filter(|key| key.range().max().get() == 2)
-            .collect();
-        block_on(rig.remote.inner.delete(&gone)).unwrap();
-        let staged: Vec<FileKey> = Rig::files(&rig.staging, Level::ZERO)
-            .iter()
-            .map(|f| f.key)
-            .filter(|key| key.range().max().get() == 2)
-            .collect();
-        block_on(rig.staging.inner.delete(&staged)).unwrap();
-        actor.fault(Task::Upload, Fault::RemoteRegressed, ts(T0 + 20));
-        rig.follow(&mut actor, T0 + 20, 50);
-        let reput: Vec<FileKey> = block_on(Inventory::load(&rig.remote.inner))
-            .unwrap()
-            .files()
-            .iter()
-            .map(|f| f.key)
-            .filter(|key| key.range().max().get() == 2)
-            .collect();
-        assert!(reput.is_empty(), "rebooted {rebooted}: {reput:?}");
-        assert_eq!(newest_replica_file(&rig), Some(3), "rebooted {rebooted}");
-    }
-}
-
 /// A retried fault that keeps failing one task becomes a stall at the [`STALLED_AFTER`]th
 /// failure in a row: the task is degraded with that cause, health shows it, the strict
 /// responses do not stop on it, and the task's next success clears it.

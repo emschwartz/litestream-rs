@@ -87,9 +87,9 @@ pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CallTotals, CheckpointConfig, CheckpointMode, Clock,
     Degraded, Denied, Depth, Entropy, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
     IfReplicationStops, JournalSignal, L0Retention, Maintenance, MaxUnreplicatedAge, OtherWriter,
-    PersistentCause as DegradedCause, ReplicaId, Report, Response, Responses, RestoreOptions,
-    RestoreTarget, Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
-    StopCause, TakeoverRecord, Task, Trip, WorkCounts,
+    PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
+    Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause,
+    TakeoverRecord, Task, Trip, WorkCounts,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

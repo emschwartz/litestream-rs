@@ -1,11 +1,11 @@
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2331,7 +2331,7 @@
-     /// this listing.
-     fn watch_unit(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
-         let watch = self.engine.maintain.watch;
--        if watch.and_then(|watch| watch.missing(inventory)).is_none() {
-+        if watch.and_then(|_watch| None::<FileKey>).is_none() {
-             let published = self.engine.upload.confirmed();
-             self.engine.maintain.watch = RegressionWatch::after_listing(inventory, published);
-             return None;
+@@ -2253,7 +2253,7 @@
+     /// comparison the uploader's own listing makes, with nothing remembered: a hole below
+     /// the newest file is not seen here, and restore reports it.
+     fn listing_regressed(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
+-        (inventory.newest() < self.engine.upload.confirmed())
++        (inventory.newest() < None::<Txid>)
+             .then(|| self.fault(Task::Upload, Fault::RemoteRegressed, now))
+     }
+ 

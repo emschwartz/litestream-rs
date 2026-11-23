@@ -14,7 +14,6 @@ use super::Actor;
 use crate::fault::{Next, PersistentCause, StopCause};
 use crate::layout::FileKey;
 use crate::maintain::{MaintainState, RetentionMode};
-use crate::regression_watch::RegressionWatch;
 use crate::verify::LivePages;
 
 /// What the actor is doing.
@@ -390,9 +389,6 @@ pub(super) struct Maintain {
     /// read says nothing about the stored bytes, so the read-back acts on the
     /// file only when a read on a later maintenance tick fails too.
     pub(super) suspect: Option<FileKey>,
-    /// What this process is sure stands on the replica until the next
-    /// listing (`crate::regression_watch`): checked by every maintenance listing.
-    pub(super) watch: Option<RegressionWatch>,
     /// Uploads run since prune or a maintenance listing last did work; at [`FAIR_SHARE`]
     /// they take the next unit ahead of uploads. Counted per process, so a boot with a
     /// backlog gets its first turn after that many uploads.
@@ -417,7 +413,6 @@ impl Default for Maintain {
             level_one: None,
             read_back_owed: true,
             suspect: None,
-            watch: None,
             passed_over: 0,
             snapshot_waits: false,
         }

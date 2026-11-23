@@ -206,7 +206,8 @@ classes! {
     // Undrawn: SecondWriter is the drawn form of these two.
     RemotePutUnrecognized = "Remote.PutUnrecognized", Undrawn;
     RemoteRemoveUnrecognized = "Remote.RemoveUnrecognized", Undrawn;
-    RemoteRollBack = "Remote.RollBack", Once;
+    // Undrawn: scenarios and recorded histories only; the generators do not draw it.
+    RemoteRollBack = "Remote.RollBack", Undrawn;
     // Undrawn: weight 0 in the default and swarm mixes; `dropped_created_at` draws it.
     RemoteDropCreatedAt = "Remote.DropCreatedAt", Undrawn;
     // Undrawn as an op: the swarm draws it as Weights::no_create_only, for the whole run.

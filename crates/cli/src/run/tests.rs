@@ -199,6 +199,7 @@ fn outcome(output: &Path, done: Result<Finished, CliError>) -> Outcome {
 
 fn how(target: RestoreTarget) -> How {
     How {
+        meta: None,
         target,
         as_of_inside: AsOfInside::Refuse,
         clear_journal_files_first: false,

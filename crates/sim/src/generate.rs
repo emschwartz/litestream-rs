@@ -405,7 +405,8 @@ pub enum RemoteOp {
     RemoveUnrecognized,
     /// The bucket rolls back to an earlier version: every file, at every level,
     /// that ends at the newest transaction is gone, and the replica
-    /// legitimately loses what the engine had acknowledged.
+    /// legitimately loses what the engine had confirmed. Only scenarios and recorded
+    /// histories use it: the generators do not draw it (`docs/decisions/D173.md`).
     RollBack,
     /// A bucket copy that keeps no metadata (or a writer before Go v0.5.1)
     /// leaves the newest-ending level 0-8 file without its stored created-at
@@ -471,8 +472,6 @@ pub struct Weights {
     pub second_writer: u32,
     /// [`Op::OtherConnectionCommit`].
     pub other_connection_commit: u32,
-    /// [`Op::Remote`] with [`RemoteOp::RollBack`].
-    pub roll_back: u32,
     /// [`Op::Remote`] with [`RemoteOp::DropCreatedAt`].
     pub drop_created_at: u32,
     /// [`Op::WalDamage`].
@@ -631,7 +630,6 @@ impl Default for Weights {
             shrink: 2,
             second_writer: 1,
             other_connection_commit: 0,
-            roll_back: 1,
             // Off in the shared mixes so their recorded histories keep their
             // shape; `tests/sim/dropped_created_at.rs` turns it on.
             drop_created_at: 0,
@@ -693,7 +691,6 @@ enum Kind {
     Restore,
     Shrink,
     SecondWriter,
-    RollBack,
     DropCreatedAt,
     WalDamage,
     StagingDamage,
@@ -707,7 +704,7 @@ enum Kind {
 }
 
 impl Weights {
-    fn table(&self) -> [(Kind, u32); 28] {
+    fn table(&self) -> [(Kind, u32); 27] {
         [
             (Kind::Tick, self.tick),
             (Kind::Commit, self.commit),
@@ -726,7 +723,6 @@ impl Weights {
             (Kind::Restore, self.restore),
             (Kind::Shrink, self.shrink),
             (Kind::SecondWriter, self.second_writer),
-            (Kind::RollBack, self.roll_back),
             (Kind::DropCreatedAt, self.drop_created_at),
             (Kind::WalDamage, self.wal_damage),
             (Kind::StagingDamage, self.staging_damage),
@@ -796,7 +792,6 @@ impl Weights {
             shrink: weight(false),
             second_writer: 0,
             other_connection_commit: 0,
-            roll_back: weight(false),
             drop_created_at: 0,
             wal_damage: weight(false),
             staging_damage: weight(false),
@@ -1248,7 +1243,6 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::SecondWriter => Op::SecondWriter {
             ticks: small(entropy, 8),
         },
-        Kind::RollBack => Op::Remote(RemoteOp::RollBack),
         Kind::DropCreatedAt => Op::Remote(RemoteOp::DropCreatedAt),
         Kind::WalDamage => wal_damage(entropy),
         Kind::StagingDamage => staging_damage(entropy),

@@ -122,11 +122,6 @@ pub struct Config {
     /// How long a commit may stay off the replica before fail-stop trips for it (decision
     /// D22): 10 minutes by default, at least 5.
     pub max_unreplicated_age: MaxUnreplicatedAge,
-    /// The replica's destination, as a digest of its canonical name
-    /// ([`lsr_core::ReplicaId::of`]): the engine journal's confirmed floor is kept and read back
-    /// for this destination only, so a replica moved elsewhere starts with no floor. `None` (the
-    /// default) keeps no floor; the sidecar names the configured replica.
-    pub destination: Option<lsr_core::ReplicaId>,
 }
 
 impl Default for Config {
@@ -145,7 +140,6 @@ impl Default for Config {
             verify_interval: None,
             if_replication_stops: IfReplicationStops::HoldStart,
             max_unreplicated_age: MaxUnreplicatedAge::DEFAULT,
-            destination: None,
         }
     }
 }
@@ -186,7 +180,6 @@ impl Config {
             shutdown_grace: self.shutdown_grace,
             responses: self.responses,
             max_unreplicated_age: self.max_unreplicated_age,
-            destination: self.destination,
         }
     }
 }

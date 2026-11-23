@@ -25,6 +25,13 @@
 //! files vouched for, so a crash before the replacing snapshot does not make
 //! the next boot refuse its own files.
 //!
+//! The engine spends a record once a put of its own above the record's transaction is
+//! confirmed on the replica ([`crate::Actor::takeover_spent`]): the snapshot a boot over the
+//! record takes is the first. The record vouches only for files through its transaction, so
+//! after that it has nothing left to vouch for, and a record that outlived a bucket rolled
+//! back would vouch for another writer's file at one of its ids. A put at or below the
+//! record spends nothing.
+//!
 //! The record is local state Go never reads, a candidate fact for the engine
 //! journal (`docs/journal.md`); nothing is released, so this format can then
 //! simply go.

@@ -393,24 +393,6 @@ fn maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_uplo
     assert_eq!(super::restored(&rig), 4);
 }
 
-/// A staging directory put back from a backup taken when it held only
-/// transaction 1, with the replica's own copy of 1.
-fn staging_holding_only_one(rig: &Rig) -> Counting {
-    let old_staging = Counting::default();
-    let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
-    let bytes = block_on(rig.remote.inner.read(&one, 0, ReadLen::CHUNK)).unwrap();
-    block_on(async {
-        let mut up = old_staging
-            .inner
-            .begin_upload(&one, ts(T0), WriteMode::Replace)
-            .await
-            .unwrap();
-        up.write(&bytes).await.unwrap();
-        up.commit().await.unwrap()
-    });
-    old_staging
-}
-
 /// The bucket rolls back: every replica file ending at `newest` is gone.
 fn roll_back_to_before(rig: &Rig, newest: Txid) {
     let all = block_on(crate::Inventory::load(&rig.remote.inner)).unwrap();
@@ -423,81 +405,13 @@ fn roll_back_to_before(rig: &Rig, newest: Txid) {
     block_on(rig.remote.inner.delete(&gone)).unwrap();
 }
 
-/// The replica holds transactions 1 to 3, but staging is an old backup put
-/// back holding only 1, and a takeover record covers the replica, so the
-/// boot takes the replica as its base and owes a snapshot above 3. That
-/// snapshot cannot be staged yet (staging refuses writes). After
-/// maintenance's first listing the bucket rolls back and loses 3. The
-/// listing after the regression finds 2: above what staging holds, but a
-/// file this process confirmed as its base, so it is the replica's, not
-/// another writer's. It used to stop the engine for another writer.
+/// The bucket rolls back past two confirmed transactions while the put of the newer one had
+/// its answer lost. The engine reports `RemoteRegressed` and goes on: the staged copy of the lost
+/// id is dropped once, a snapshot is staged, and the uploads resume with it, with no spin on
+/// `StagedLost`. The snapshot takes the id the rollback freed, as the next snapshot makes the
+/// replica whole (`docs/decisions/D173.md`), so a restore of the latest state is whole.
 #[test]
-fn a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas() {
-    let mut rig = three();
-    rig.staging = staging_holding_only_one(&rig);
-    rig.wal.force_restart();
-    rig.commit(7);
-    let mut actor = go_like_actor();
-    actor.remember_takeover(TakeoverRecord::through(tx(3)));
-    for _ in 0..200 {
-        rig.staging.inner.inject_failure(
-            StoreOp::Upload,
-            StoreError::Transient {
-                op: StoreOp::Upload,
-                kind: std::io::ErrorKind::ConnectionReset,
-            },
-        );
-    }
-    let boot = rig.tick(&mut actor, T0 + 3);
-    assert!(
-        matches!(
-            booted(&boot),
-            Some(Some(SnapshotCause::BehindRemote { .. }))
-        ),
-        "{boot:?}"
-    );
-    let mut now = T0 + 3;
-    let mut listed = false;
-    for _ in 0..40 {
-        let tick = rig.tick(&mut actor, now);
-        if matches!(event(&tick), Some(Event::Maintained { .. })) {
-            listed = true;
-            break;
-        }
-        if let Some(Next::At(at)) = next_of(&tick) {
-            now = now.max(at.unix_millis());
-        }
-    }
-    assert!(listed, "maintenance listed once before the rollback");
-    roll_back_to_before(&rig, tx(3));
-    let seen = rig.follow(&mut actor, super::listing_due(now), 80);
-    let regressed = seen.iter().any(|tick| {
-        matches!(
-            event(tick),
-            Some(Event::Degraded {
-                cause: PersistentCause::RemoteRegressed,
-                ..
-            })
-        )
-    });
-    assert!(regressed, "{seen:?}");
-    assert!(
-        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
-        "{seen:?}"
-    );
-}
-
-/// The bucket rolls back past two acknowledged transactions while the put of
-/// the newer one had its answer lost. The staged copy of the lost id is
-/// dropped and a snapshot takes the next id up, since acknowledged ids are
-/// never taken again; the listing after the drop then confirms only the
-/// replica's real newest, below the acknowledged ids. The uploads must
-/// resume at the snapshot above them. They used to plan the dropped id next,
-/// which has no staged file and no witness, and fail with `StagedLost` on
-/// every tick until a restart. The id stays a hole on the replica, below the
-/// snapshot, so a restore of the latest state is whole.
-#[test]
-fn uploads_resume_above_acknowledged_ids_a_rollback_took() {
+fn uploads_resume_with_a_snapshot_after_a_rollback_took_confirmed_ids() {
     let mut rig = Rig::new();
     let mut actor = go_like_actor();
     rig.settle(&mut actor, T0);
@@ -516,6 +430,15 @@ fn uploads_resume_above_acknowledged_ids_a_rollback_took() {
     roll_back_to_before(&rig, tx(3));
     roll_back_to_before(&rig, tx(2));
     let seen = rig.follow(&mut actor, now, 200);
+    let regressed = seen.iter().any(|tick| {
+        matches!(
+            event(tick),
+            Some(Event::Degraded {
+                cause: PersistentCause::RemoteRegressed,
+                ..
+            })
+        )
+    });
     let resnapshot = seen
         .iter()
         .position(|tick| matches!(event(tick), Some(Event::Resnapshot(_))));
@@ -529,15 +452,12 @@ fn uploads_resume_above_acknowledged_ids_a_rollback_took() {
             })
         )
     });
+    assert!(regressed, "{seen:?}");
     assert!(resnapshot.is_some() && !lost, "{seen:?}");
-    // The replica never gets 2 again: the hole it left sits below the
-    // snapshot at 3, so a restore of the latest state needs nothing from it.
-    let level_zero = Rig::files(&rig.remote, Level::ZERO);
     assert!(
-        !level_zero.iter().any(|f| f.key.range().contains(tx(2))),
-        "{level_zero:?}"
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
     );
-    assert!(super::snapshots(&rig).contains(&3), "{level_zero:?}");
     assert_eq!(super::restored(&rig), 3);
 }
 
@@ -752,61 +672,84 @@ fn a_new_meta_directory_with_no_wal_over_a_different_database_stops() {
     );
 }
 
+/// A takeover record is spent when a put above it is confirmed on the replica (the snapshot a
+/// boot over the record takes is the first), and not before: with the replica refusing puts the
+/// snapshot is staged and the record stays.
 #[test]
-fn publishing_a_covered_transaction_spends_the_takeover_record() {
-    let mut rig = Rig::new();
+fn a_takeover_record_is_spent_once_a_snapshot_above_it_is_confirmed() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    let record = TakeoverRecord::through(tx(3));
     let mut actor = go_like_actor();
-    let record = TakeoverRecord::through(tx(2));
     actor.remember_takeover(record);
-    rig.settle(&mut actor, T0);
-    assert!(!Rig::files(&rig.remote, Level::ZERO).is_empty());
-    assert_eq!(actor.takeover_spent(), Some(record));
-    actor.forget_takeover(record);
-    assert_eq!(actor.takeover_spent(), None);
-    super::second_writer::put_foreign(&rig, 2);
-    let mut restarted = go_like_actor();
-    let seen = rig.follow(&mut restarted, T0 + 2, 20);
-    assert_eq!(
-        seen.last(),
-        Some(&Tick::Stopped(StopCause::OtherWriter)),
-        "{seen:?}"
-    );
-    assert_eq!(restarted.refused_through(), Some(tx(2)));
-}
-
-#[test]
-fn a_rollback_seen_while_running_arms_the_takeover_for_the_next_publish() {
-    let mut rig = three();
-    let mut actor = go_like_actor();
-    let record = TakeoverRecord::through(tx(10));
-    rig.settle(&mut actor, T0 + 2);
-    // Handed over while running, as the driver hands back a record the engine asked for
-    // before a drop: no boot listing judged the replica against it.
-    actor.remember_takeover(record);
-    rig.commit(4);
-    rig.settle(&mut actor, T0 + 3);
+    for _ in 0..2 {
+        rig.remote.inner.inject_failure(
+            StoreOp::Upload,
+            StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: std::io::ErrorKind::ConnectionReset,
+            },
+        );
+    }
+    for _ in 0..10 {
+        rig.tick(&mut actor, T0 + 2);
+    }
     assert!(
+        staged(&rig).iter().any(|txid| *txid > 3),
+        "the boot staged a snapshot above the record: {:?}",
+        staged(&rig)
+    );
+    assert_eq!(
         Rig::files(&rig.remote, Level::ZERO)
-            .iter()
-            .any(|info| info.key.range().max() == tx(4))
+            .last()
+            .map(|f| f.key.range().max()),
+        Some(tx(3))
     );
     assert_eq!(
         actor.takeover_spent(),
         None,
-        "a publish with no loss seen spends nothing"
+        "nothing above the record is confirmed yet"
     );
-    let lost: Vec<FileKey> = Level::ALL
-        .iter()
-        .flat_map(|level| Rig::files(&rig.remote, *level))
-        .map(|info| info.key)
-        .filter(|key| key.range().max() >= tx(2))
-        .collect();
-    assert!(!lost.is_empty());
-    block_on(rig.remote.inner.delete(&lost)).unwrap();
     rig.follow(&mut actor, T0 + 100_000, 60);
-    rig.commit(5);
-    rig.follow(&mut actor, T0 + 200_000, 60);
+    assert!(
+        Rig::files(&rig.remote, Level::ZERO)
+            .last()
+            .is_some_and(|f| f.key.range().max() > tx(3))
+    );
     assert_eq!(actor.takeover_spent(), Some(record));
+    actor.forget_takeover(record);
+    assert_eq!(actor.takeover_spent(), None);
+}
+
+/// Puts at or below the record spend nothing, so an ordinary power-loss boot that finds staging
+/// behind the replica and a WAL that cannot vouch still builds on the replica through the
+/// record, and does not stop with `OtherWriter`.
+#[test]
+fn a_power_loss_boot_over_puts_the_record_covers_does_not_stop() {
+    let (mut rig, mut actor) = caught_up();
+    let record = TakeoverRecord::through(tx(3));
+    actor.remember_takeover(record);
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    assert_eq!(
+        actor.takeover_spent(),
+        None,
+        "puts the record covers spend nothing"
+    );
+    let keys: Vec<FileKey> = Rig::files(&rig.staging, Level::ZERO)
+        .iter()
+        .map(|info| info.key)
+        .filter(|key| key.range().max() > Txid::MIN)
+        .collect();
+    block_on(rig.staging.inner.delete(&keys)).unwrap();
+    rig.wal.force_restart();
+    let mut next = go_like_actor();
+    next.remember_takeover(record);
+    let seen = rig.follow(&mut next, T0 + 3, 30);
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
+    assert_eq!(next.refused_through(), None);
 }
 
 #[test]

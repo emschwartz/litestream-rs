@@ -217,13 +217,13 @@ notes = "A cut made on purpose: the read-past machinery (the probe, the restore'
 table = "Boot"
 id = "BOOT-19"
 circumstance = "The bucket was rolled back to an earlier state while the engine was down"
-response = "**Trusted**: the engine keeps no record of what it once confirmed, so the short bucket is the bucket. A freed transaction id is put again with other bytes"
+response = "**Trusted**: the engine keeps no record of what it once confirmed, so the short bucket is the bucket, as with Go. A freed transaction id is put again with other bytes"
 signal = "none"
 at_risk = "One transaction id with two contents over time. If the first was merged upward before the rollback took it, a restore could combine both. Counts against G1. No wrong restore has been shown"
 recovery = "None"
-no_test = "known wrong"
-notes = "Expected-fail test on main: sim `a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed_0x484` (`#[ignore]`). The three \"latest went back\" seeds that earlier drafts cited pass on main since b812e0f and are pinned as passing tests in `sim/tests/sim/restored_staging.rs`"
-in_review = "None open. Needs a durable record of what was confirmed"
+no_test = "accepted, undetected"
+notes = "A documented limit (docs/decisions/D173.md): Go does not notice a rollback either, and the next snapshot makes the replica whole. The expected-fail seed is retired. The three \"latest went back\" seeds that earlier drafts cited pass and are pinned in `sim/tests/sim/restored_staging.rs`"
+in_review = "None open"
 
 [[row]]
 table = "Boot"
@@ -343,11 +343,11 @@ notes = "Boot reads and reports, and nothing decides on it yet. The signal stand
 table = "Boot"
 id = "BOOT-30"
 circumstance = "The engine is about to delete staged files the replica may hold: a staged copy that turned unreadable (BOOT-5), a divergence (BOOT-13), a pending file the WAL no longer vouches for (BOOT-11), at boot or while running"
-response = "It asks the driver for a takeover record through what staging vouched for (`Actor::takeover_wanted`, `Event::TakeoverWanted`) and deletes nothing until the driver hands it back. At boot: the newest staged transaction, capped at the replica's newest listed level-0 key (a key judged torn counts). While running: the newest staged transaction, capped by a key the replica is known to end at and by the newest of the confirmed transaction and the newest level-0 put this engine sent (`Engine::attempted`): past both, nothing of this engine's can be on the replica, since a boot's listing showed what earlier processes put, so a record that reached further would let another writer's file at such an id pass the next boot. A record is spent when the engine publishes a transaction it covers after its own evidence that the replica held less than the record covers (a listing below it, including the relist after `RemoteRegressed`; D172): the engine stops holding it and the replicator deletes `<meta>/lsr-takeover` (CFG-46), so after a rollback it cannot vouch for another writer's file at its ids. A record already held that covers it is enough. The replicator writes `<meta>/lsr-takeover` by scratch, fsync, rename and directory fsync, then hands it back"
+response = "It asks the driver for a takeover record through what staging vouched for (`Actor::takeover_wanted`, `Event::TakeoverWanted`) and deletes nothing until the driver hands it back. At boot: the newest staged transaction, capped at the replica's newest listed level-0 key (a key judged torn counts). While running: the newest staged transaction, capped by a key the replica is known to end at and by the newest of the confirmed transaction and the newest level-0 put this engine sent (`Engine::attempted`): past both, nothing of this engine's can be on the replica, since a boot's listing showed what earlier processes put, so a record that reached further would let another writer's file at such an id pass the next boot. A record is spent when a put above its transaction is confirmed on the replica (the snapshot a boot over the record takes is the first; `docs/decisions/D173.md`): the engine stops holding it and the replicator deletes `<meta>/lsr-takeover` (CFG-46), so after a rollback it cannot vouch for another writer's file at its ids. A put at or below the record spends nothing, so an ordinary power-loss boot still finds it. A record already held that covers it is enough. The replicator writes `<meta>/lsr-takeover` by scratch, fsync, rename and directory fsync, then hands it back"
 signal = "`TakeoverWanted`; `TakeoverNotRecorded` when the write fails"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::publishing_a_covered_transaction_spends_the_takeover_record`, core::`vouch::a_rollback_seen_while_running_arms_the_takeover_for_the_next_publish`, core::`vouch::a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`, sim::`survival::a_running_drop_records_past_an_unconfirmed_upload_seed_0x348`, sim::`survival::a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7`, core::`the_takeover_before_a_witness_drop_covers_a_torn_looking_tail`; plant::`takeover-before-drop-skipped`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`takeover-ask-spins`"
+detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::a_takeover_record_is_spent_once_a_snapshot_above_it_is_confirmed`, core::`vouch::a_power_loss_boot_over_puts_the_record_covers_does_not_stop`, core::`vouch::a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`, sim::`survival::a_running_drop_records_past_an_unconfirmed_upload_seed_0x348`, sim::`survival::a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7`, core::`the_takeover_before_a_witness_drop_covers_a_torn_looking_tail`; plant::`takeover-before-drop-skipped`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`takeover-ask-spins`"
 recovered_by = "sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`"
 notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and waits its backoff, and nothing is deleted unrecorded. Pending files above every replica key vouch for nothing there, so one put back from a backup never raises the record"
 
@@ -373,17 +373,6 @@ at_risk = "A database file ahead of its WAL is replicated as a clean commit, mar
 recovery = "Automatic. The notice ends seven days after the check was given up, across restarts; the snapshot after the cure starts a chain the replica can restore"
 detected_by = "core::`a_check_the_replica_cannot_answer_is_given_up_and_the_cure_runs`, core::`the_unchecked_notice_stands_for_the_window_across_a_restart`, core::`a_replica_missing_the_confirmed_state_is_unrestorable`, core::`a_failed_listing_is_the_store_s_fault_not_damage`, sidecar::`an_unchecked_wal_checkpoint_is_a_notice_in_both_outputs`, sim::`ahead_unchecked::a_gap_below_the_confirmed_state_does_not_hold_back_the_cure`"
 notes = "Before D106 the check retried a damaged replica for ever, holding back the TRUNCATE while the WAL grew (seed 0x2dc719, found when the D103 cell was drawn). The simulator expects `RemoteCorrupt` and `DatabaseAheadOfWalUnchecked` after a bucket rollback that removed files, since the engine may upload past the hole before it lists again"
-
-[[row]]
-table = "Boot"
-id = "BOOT-33"
-circumstance = "The engine confirms an upload, boots, or sees its replica roll back, with a destination named (`ActorConfig::destination`, from the replica's endpoint, bucket and prefix or directory; `core/src/actor/floor.rs`, `docs/decisions.md` D107)"
-response = "Every confirmed upload raises the confirmed floor to its transaction, anchored on the uploaded file's length, raw-byte digest and file checksum when this process holds its witness, and the end of the tick journals it. A boot reads it back for the same destination only and keeps it when its listing ends lower. A rollback seen while running withdraws the anchor and keeps the bound. Another destination's floor stays in the record, unadopted, until this destination has one; with no destination named the record's floor passes through"
-signal = "None of its own: the floor is in the journal and `Actor::floor`. A floor the journal cannot record keeps `JournalUnwritable` up"
-at_risk = "A boot does not yet act on the floor it reads: taking no id at or below it is the boot rule of issue #171, item 4, built on this. A journal lost, unwritable or unread forgets it, as every journalled fact. A changed region changes an S3 replica's default endpoint, so that boot adopts no floor"
-recovery = "Automatic"
-detected_by = "core::`a_confirmed_upload_raises_the_floor_anchored_on_the_bytes_it_put`, core::`the_floor_is_read_back_and_a_rollback_before_the_boot_does_not_lower_it`, core::`another_destination_s_floor_is_kept_in_the_record_but_not_adopted`, core::`no_destination_keeps_no_floor_and_leaves_the_record_s`, core::`a_rollback_seen_while_running_withdraws_the_anchor_and_keeps_the_bound`, core::`an_unwritable_journal_reports_a_floor_it_does_not_hold`, core::`a_rebuild_keeps_the_floor_a_lagging_journal_does_not_hold`, config::`each_replica_plan_names_its_destination_for_the_journal`"
-notes = "The floor was in the journal's format, model and writer rules from the start; until this row the engine passed a recorded one through and wrote none"
 
 [[row]]
 table = "Running"
@@ -579,7 +568,7 @@ response = "retry, then snapshot, `NewestStagedFileUnreadable`. The upload's fai
 signal = "`newest_staged_file_unreadable`; the upload task's degraded state, kept"
 at_risk = "Restore points of the deleted files"
 recovery = "Automatic"
-detected_by = "core::`one_bad_read_of_a_staged_file_while_uploading_drops_nothing`, core::`the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots`, core::`a_resnapshot_keeps_the_failed_uploads_toward_a_stall`, core::`uploads_resume_above_acknowledged_ids_a_rollback_took`, sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`; plant::`delete-on-one-failed-read-upload`"
+detected_by = "core::`one_bad_read_of_a_staged_file_while_uploading_drops_nothing`, core::`the_upload_task_drops_a_staged_file_that_turned_unreadable_and_snapshots`, core::`a_resnapshot_keeps_the_failed_uploads_toward_a_stall`, core::`vouch::uploads_resume_with_a_snapshot_after_a_rollback_took_confirmed_ids`, sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`; plant::`delete-on-one-failed-read-upload`"
 recovered_by = "sim::`staged_byte_flip_before_upload`, sim::`meta_dir_deleted_mid_run`"
 
 [[row]]
@@ -948,7 +937,7 @@ response = "**stop**, `OtherWriter` (default). No upload, compaction or delete f
 signal = "`other_writer`; `/healthz` 503"
 at_risk = "Everything committed after the stop is unreplicated until an operator acts. The steady state makes no listing, so the other writer is seen only at the next maintenance listing or after an ambiguous commit. A maintenance listing follows this engine's own upload by at most one compaction window (30 s by default) once uploads are idle; an engine with nothing to upload lists only when its next scheduled job is due. No bound on detection is asserted: **code only**"
 recovery = "An operator removes the other writer, then restarts"
-detected_by = "core::`maintenance_stops_on_a_file_past_its_position`, core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer_seed_0x50c`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`, core::`vouch::a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy`, core::`vouch::maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload`, core::`vouch::a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas`; oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
+detected_by = "core::`maintenance_stops_on_a_file_past_its_position`, core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer_seed_0x50c`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`, core::`vouch::a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy`, core::`vouch::maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload`, oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
 recovered_by = "sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`"
 notes = "R only after the other writer's files were removed. No restore is judged with two writers' files in the bucket"
 in_review = "#96"
@@ -956,15 +945,15 @@ in_review = "#96"
 [[row]]
 table = "Upload"
 id = "UP-11"
-circumstance = "The replica lost files this process confirmed (a bucket rolled back, files deleted under the engine). Seen two ways: an uploader listing shows the replica's newest transaction below what was confirmed (`upload.rs`; the uploader lists only at boot and after an ambiguous commit), or a maintenance listing misses a file this process watched since its last one (`core/src/regression_watch.rs`: the last listing's anchor and every level-0 upload since, none of which the engine itself deletes before the next listing). A store that lags is unsupported, so a missing watched file is taken as lost"
-response = "degraded, `RemoteRegressed`: list again and continue from what the replica holds now. Transaction ids this process already acknowledged are never used again by this process, and a file at or below them is not another writer's (UP-10)"
+circumstance = "The replica's newest file is gone (a bucket rolled back, files deleted under the engine). Seen two ways, by one comparison with nothing remembered: an uploader listing, or a maintenance listing, ends below the transaction this process confirmed (`upload.rs`, `actor.rs` `listing_regressed`). The uploader lists only at boot and after an ambiguous commit; maintenance lists after uploads go idle. A store that lags is unsupported"
+response = "degraded, `RemoteRegressed`: list again and continue from what the replica holds now. The staged files above it are sent again, and a snapshot takes any id the rollback freed (D173)"
 signal = "`remote_regressed`"
-at_risk = "The files that vanished. The engine does not re-upload them. Until the next snapshot, restores of the latest state refuse with `Gap`. Detection waits for the next maintenance listing, which follows the engine's own upload by at most one compaction window once uploads are idle; uploads above the hole go on until then"
+at_risk = "Files that no staged copy can send again. Until the next snapshot, restores of the latest state refuse with `Gap`, as with Go. A hole below the newest file (a lost middle file, an expiry rule shorter than the snapshot interval), or an upload above the hole that lands before a listing, is not seen by the engine: restore reports it and the scheduled verify degrades"
 recovery = "Automatic"
-detected_by = "sim::`bucket_rolled_back`, sim::`bucket_rolled_back_unseen`, core::`a_relist_never_takes_an_acknowledged_transaction_again`, core::`a_rollback_while_running_is_seen_by_the_next_maintenance_listing`, core::`regression_watch::tests::missing_names_exactly_the_first_dropped_object`; plant::`relist-acknowledged-mark`, plant::`regression-unwatched`, plant::`regression-unwatched-sim`"
-recovered_by = "sim::`bucket_rolled_back`, sim::`bucket_rolled_back_unseen`"
-no_test = "a loss between a boot and its first maintenance listing that removes only what the boot listed: untested"
-notes = "That window has no anchor; a loss while the engine is down is BOOT-19. The watch's anchor is the seam for the engine journal, which would let a boot run the same check"
+detected_by = "sim::`bucket_rolled_back`, sim::`bucket_rolled_back_while_idle`, core::`a_rollback_while_running_is_seen_by_the_next_maintenance_listing`, core::`vouch::uploads_resume_with_a_snapshot_after_a_rollback_took_confirmed_ids`; plant::`regression-unwatched`, plant::`regression-unwatched-sim`"
+recovered_by = "sim::`bucket_rolled_back`, sim::`bucket_rolled_back_while_idle`"
+no_test = "a hole below the newest file: accepted, undetected"
+notes = "The engine remembers nothing about what the replica once held: the comparison needs only the confirmed transaction"
 
 [[row]]
 table = "Upload"
@@ -1287,12 +1276,12 @@ notes = "Accepted limit (L1). It is why BOOT-18 and BOOT-19 are silent at restor
 [[row]]
 table = "Restore"
 id = "REST-11"
-circumstance = "Every restore that publishes writes a takeover record through the restored transaction into the target's default meta directory (`.<name>-litestream`); the sidecar's `-restore-if-db-not-exists` writes it into the configured one. Failing to write it is an error after the database is in place (`RestoreError::TakeoverRecord`, `CliError::Takeover`). A destination that names no file has no meta directory and is refused before anything is written (`RestoreError::NoMetaDir`, `CliError::NoMetaDir`, exit 3)"
+circumstance = "Every restore that publishes writes a takeover record through the restored transaction into the meta directory the database uses: `lsr restore` of a configured database (`-config`, to its own path) and the sidecar's `-restore-if-db-not-exists` write it into the configured one (`meta-path` or `meta-dir`), and every other restore into the target's default one (`.<name>-litestream`). Failing to write it is an error after the database is in place (`RestoreError::TakeoverRecord`, `CliError::Takeover`). A destination that names no file has no meta directory and is refused before anything is written (`RestoreError::NoMetaDir`, `CliError::NoMetaDir`, exit 3)"
 response = "A replicator started on the restored database snapshots above the replica it came from instead of refusing it (BOOT-22). The CLI prints \"takeover recorded through {txid}\""
 signal = "exit 0; exit 3 when the record cannot be written"
 at_risk = "None"
 recovery = "Run `lsr take-over`"
-detected_by = "replica::`second_writer::a_restored_database_replicates_without_a_refusal`, cli::`integrity_check_publishes_a_valid_database_in_every_mode`, replica::`restored::a_restore_to_a_path_with_no_file_name_is_refused_before_writing`, cli::`restore_to_an_output_with_no_file_name_is_refused_before_writing`; plant::`restore-writes-no-takeover`, plant::`restore-writes-no-takeover-cli`"
+detected_by = "replica::`second_writer::a_restored_database_replicates_without_a_refusal`, cli::`integrity_check_publishes_a_valid_database_in_every_mode`, replica::`restored::a_restore_to_a_path_with_no_file_name_is_refused_before_writing`, cli::`restore_to_an_output_with_no_file_name_is_refused_before_writing`, cli::`a_restore_by_config_records_the_takeover_in_the_configured_meta_directory`; plant::`restore-writes-no-takeover`, plant::`restore-writes-no-takeover-cli`"
 notes = "The record failing to write after a publish is **code only**"
 
 [[row]]
@@ -1993,7 +1982,7 @@ notes = "Go runs database by database and stops at the first error; every databa
 [[row]]
 table = "Config and startup"
 id = "CFG-46"
-circumstance = "The engine spent its takeover record (it published a transaction the record covers after seeing the replica hold less, BOOT-30), and the record cannot be deleted from the meta directory"
+circumstance = "The engine spent its takeover record (a put above it was confirmed, BOOT-30), and the record cannot be deleted from the meta directory"
 response = "The engine holds the record no longer; the replicator retries the delete every turn"
 signal = "`TakeoverNotRemoved` (sidecar: an error line)"
 at_risk = "A restart before the delete succeeds reads the stale record back, and it may vouch for another writer's file at its ids"
@@ -2504,12 +2493,12 @@ detected_by = "history::`judge::a_rewind_the_engine_did_not_report_does_not_excu
 table = "The checkers themselves"
 id = "CHK-4"
 circumstance = "A regression the driver excused (a bucket rollback) is never reported by the engine"
-response = "Counted (`history.excused.unreported`), not fatal: only an uploader listing raises `RemoteRegressed` (D17)"
+response = "Counted (`history.excused.unreported`), not fatal: only a listing that ends below what the engine confirmed raises `RemoteRegressed` (D17)"
 signal = "None"
 at_risk = "Latest goes back with no signal"
 recovery = "None"
-no_test = "known wrong"
-notes = "About one excused rollback in four in the unaided campaign"
+no_test = "accepted, undetected"
+notes = "Scenarios and recorded histories only: the generators no longer draw a rollback (D173)"
 
 [[row]]
 table = "The checkers themselves"
@@ -2674,3 +2663,4 @@ at_risk = "None (a checker)"
 recovery = "None"
 detected_by = "sim::`kill_after_fault::half_the_swarm_draws_the_law_and_the_default_mix_never`, sim::`kill_after_fault::a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116`, core::`actor::tests::ledger::every_field_of_the_actor_s_state_is_classified`, core::`actor::tests::ledger::every_journalled_field_is_read_at_boot_and_written_at_the_end_of_a_tick`, core::`actor::tests::ledger::a_fault_reported_once_leaves_a_journalled_obligation`; plant::`journal-debt-not-recorded-sim`"
 notes = "On 2000 swarm seeds with the error domain and its known-wrong cells drawn, the debt plant failed 197 runs with the law and 170 without it, and none without the plant. The law also showed the second-writer judge charging a stop to a process it had just killed (fixed: a crash ends the watch, as a boot does), and a lost acknowledged transaction on seed 0x1dc, under triage. The ahead-of-WAL verdict's plant needs the simulator's adoption of the mixed state (D103) before the law can be its proof"
+

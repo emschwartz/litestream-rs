@@ -1,4 +1,4 @@
-# A replica that lost files while the engine ran went unseen by maintenance.
+# A maintenance listing that ends below what the engine confirmed went unreported.
 name = "regression-unwatched"
 fix = "5cf9f56"
 package = "lsr-core"

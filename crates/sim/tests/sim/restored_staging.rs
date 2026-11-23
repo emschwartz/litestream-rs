@@ -109,35 +109,6 @@ fn a_staging_copy_put_back_after_a_truncated_wal_never_restores_an_older_latest_
     );
 }
 
-/// Seed 0x484 on main, with the witness: the history judge passes, but transaction 2 is put
-/// twice with different contents (4370 bytes, then 164 after the second rollback and a
-/// restart). Within one process the in-memory confirmed id makes a rolled-back bucket
-/// `RemoteRegressed`; across a restart nothing remembers it, so a rolled-back bucket is just a
-/// short one and the freed id is taken again.
-#[test]
-#[ignore = "needs a confirmed high-water mark that outlives the process: pending the engine-journal \
-            decision (beyond-go.md section 1)"]
-fn a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed_0x484() {
-    let report = run(0x484, false, &seed_0x484());
-    let mut put: Vec<(String, String)> = Vec::new();
-    for line in &report.trace {
-        let Some(rest) = line.split("Uploaded(Put(FileInfo { key: FileKey(").nth(1) else {
-            continue;
-        };
-        let key = rest.split(')').next().unwrap_or_default().to_owned();
-        let size = rest
-            .split("size: ")
-            .nth(1)
-            .and_then(|s| s.split(',').next())
-            .unwrap_or_default()
-            .to_owned();
-        if let Some((_, was)) = put.iter().find(|(k, _)| *k == key) {
-            assert_eq!(*was, size, "{key} put twice with different contents");
-        }
-        put.push((key, size));
-    }
-}
-
 /// Seed 0xb6b of the unaided campaign, found once the oracle stopped switching its id check off
 /// after a power loss: transaction 18 is uploaded and drained (164 bytes), then, with the store's
 /// reads lying (`Hold::LyingReads`) and an old staging backup put back, the engine snapshots the

@@ -14,9 +14,7 @@ pub mod seed_0x126d68ef1c07;
 pub mod seed_0x126d68ef545f;
 pub mod seed_0x126d68fac4b6;
 pub mod seed_0x126d68fac789;
-pub mod seed_0x126d68facf21;
 pub mod seed_0x126d68facf74;
-pub mod seed_0x126d68fad061;
 pub mod seed_0x126d68fae16b;
 pub mod seed_0x1919f;
 pub mod seed_0x21;
@@ -114,22 +112,6 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x126d68fac789",
         "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789",
-        Guard::Unguarded(
-            "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
-             converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x126d68facf21",
-        "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68facf21",
-        Guard::Unguarded(
-            "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
-             converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x126d68fad061",
-        "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fad061",
         Guard::Unguarded(
             "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
              converted to an explicit scenario under docs/decisions/D165.md",
