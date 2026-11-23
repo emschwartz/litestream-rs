@@ -35,7 +35,6 @@ base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 clap = { version = "4", default-features = false, features = ["std", "error-context"] }
 crc = "3.4.0"
 jiff = { version = "1.0", default-features = false, features = ["std"] }
-libc = { version = "0.2.191", default-features = false }
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 md-5 = { version = "0.11", default-features = false }
 # Recognising a TLS failure from an application's native-tls reqwest client (the S3 store's optional
