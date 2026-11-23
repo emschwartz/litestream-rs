@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
-index 8ec87834..61d9de7c 100644
+index e7edd781..ea2e7bc5 100644
 --- a/crates/core/src/restore.rs
 +++ b/crates/core/src/restore.rs
-@@ -593,7 +593,7 @@ impl Retries {
+@@ -635,7 +635,7 @@ impl Retries {
              }
              Abort::Gap(outcome) => {
                  self.gaps = self.gaps.saturating_add(1);
--                if self.gaps >= MAX_ATTEMPTS {
+-                if self.gaps >= self.limit {
 +                if self.gaps >= 1 {
                      return Err(RestoreError::NoPlan(NoPlan(outcome)));
                  }

@@ -32,8 +32,9 @@ impl Door {
         if let Some(op) = kind
             && let Some(at) = real.injected.iter().position(|(of, _)| *of == op)
         {
-            let (_, err) = real.injected.remove(at);
-            return Err(err);
+            let taken = real.injected.remove(at);
+            real.taken.push(taken);
+            return Err(taken.1);
         }
         real.engine().ok_or(CLOSED)
     }

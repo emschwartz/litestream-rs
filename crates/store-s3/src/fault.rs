@@ -197,6 +197,11 @@ impl<T: Transport> FaultTransport<T> {
         self.script().pending.push_back(fault);
     }
 
+    /// Drops every fault pushed and not yet used.
+    pub fn clear(&self) {
+        self.script().pending.clear();
+    }
+
     /// Faults pushed and not yet used.
     #[must_use]
     pub fn pending(&self) -> usize {

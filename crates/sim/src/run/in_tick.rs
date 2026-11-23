@@ -46,6 +46,9 @@ impl Runner {
         self.report
             .reach
             .bump(format!("app_in_tick.{}.{outcome}", variant(&op)));
+        if let Some(point) = crate::domain::points::point_of(at, op) {
+            self.report.reach.bump(format!("{point}.{outcome}"));
+        }
         match ran.map(|ran| ran.done) {
             Some(InTickDone::ReaderBegan(id)) => self.readers.push(id),
             Some(InTickDone::ReaderEnded { id, .. }) => self.readers.retain(|held| *held != id),

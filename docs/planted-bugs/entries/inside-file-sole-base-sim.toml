@@ -1,6 +1,0 @@
-name = "inside-file-sole-base-sim"
-fix = "plant"
-patch = "inside-file-sole-base"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["a_restored_staging_backup_is_not_uploaded_seed_0x1919f"]

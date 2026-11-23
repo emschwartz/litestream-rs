@@ -72,6 +72,7 @@ impl CallTotals {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CheckpointTotals {
     passive: CallTotals,
+    full: CallTotals,
     truncate: CallTotals,
 }
 
@@ -83,6 +84,7 @@ impl CheckpointTotals {
     const fn get(&self, mode: CheckpointMode) -> CallTotals {
         match mode {
             CheckpointMode::Passive => self.passive,
+            CheckpointMode::Full => self.full,
             CheckpointMode::Truncate => self.truncate,
         }
     }
@@ -90,6 +92,7 @@ impl CheckpointTotals {
     const fn get_mut(&mut self, mode: CheckpointMode) -> &mut CallTotals {
         match mode {
             CheckpointMode::Passive => &mut self.passive,
+            CheckpointMode::Full => &mut self.full,
             CheckpointMode::Truncate => &mut self.truncate,
         }
     }
@@ -163,6 +166,7 @@ impl WorkCounts {
         disk_full: false,
         checkpoints: CheckpointTotals {
             passive: CallTotals::ZERO,
+            full: CallTotals::ZERO,
             truncate: CallTotals::ZERO,
         },
     };
@@ -208,7 +212,11 @@ impl WorkCounts {
     }
 
     pub(crate) fn add_checkpoints(&mut self, tick: CheckpointTotals) {
-        for mode in [CheckpointMode::Passive, CheckpointMode::Truncate] {
+        for mode in [
+            CheckpointMode::Passive,
+            CheckpointMode::Full,
+            CheckpointMode::Truncate,
+        ] {
             self.checkpoints.get_mut(mode).add(tick.get(mode));
         }
     }

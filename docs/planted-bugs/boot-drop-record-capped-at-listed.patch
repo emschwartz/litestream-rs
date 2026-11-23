@@ -1,9 +1,10 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index ae5289a1..2dfb74ed 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2515,7 +2515,7 @@
-         // upload at a later boot.
-         let past = probe_past(remote, listed, tip, Some(local)).await?;
+@@ -2532,7 +2532,7 @@ impl BootGate {
+         // Listing every level here would cost each vouch ten more listing calls.
+         let past = probe_past(remote, listed, tip, Some(local), &Starts::default()).await?;
          let found = past.last().map(|key| key.range().max());
 -        let replica = tip.max(listed).max(found);
 +        let replica = tip.max(listed).max(found.filter(|_| false));

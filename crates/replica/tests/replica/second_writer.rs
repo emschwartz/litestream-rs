@@ -378,3 +378,41 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
     assert_eq!(newest_l0(&site), Some(foreign.range().max()));
     assert_eq!(stopped(&third), Stopped::Stopped(StopCause::OtherWriter));
 }
+
+/// A staged file lost before its upload is dropped only after the takeover record through
+/// staging is on disk, so a crash after the drop still knows the replica's files as its own;
+/// the snapshot that replaces it then catches the replica up.
+#[test]
+fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    let store: std::sync::Arc<dyn lsr_replica::DynStore> =
+        std::sync::Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let poll = Duration::from_secs(1);
+    let full = common::moved_until(&replicator, &clock, (poll, 240), caught_up);
+    faulty
+        .fail_uploads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    site.commit(1);
+    let errors = full.counters.store.begin_upload.errors;
+    common::moved_until(&replicator, &clock, (poll, 240), |h| {
+        h.synced > full.synced && h.counters.store.begin_upload.errors > errors
+    });
+    let staging = FsStore::new(meta_of(&site));
+    let staged = block_on(staging.list(Level::ZERO, None, lsr_core::PageLimit::MAX)).unwrap();
+    let lost = staged.files.last().unwrap().key;
+    block_on(staging.delete(&[lost])).unwrap();
+    assert!(!meta_of(&site).join("lsr-takeover").exists());
+    faulty
+        .fail_uploads
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    common::moved_until(&replicator, &clock, (poll, 240), |h| {
+        caught_up(h) && h.synced > full.synced
+    });
+    let record = std::fs::read(meta_of(&site).join("lsr-takeover")).unwrap();
+    lsr_replica::TakeoverRecord::decode(&record).unwrap();
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    site.assert_restores(&*site.store());
+}

@@ -27,7 +27,7 @@ use lsr_store_s3::{
     S3Config, S3Credentials, S3Store, S3Upload, SecretString, Shape, Transport, TransportError,
 };
 
-use crate::generate::{HttpFault, HttpShape};
+use crate::generate::{DenialCode, HttpFault, HttpShape};
 
 /// The bucket's fault layer, shared by the store that owns a transport and the harness that
 /// scripts faults and reads the bucket.
@@ -111,16 +111,17 @@ pub fn s3(clock: &Arc<FakeClock>) -> Option<(RemoteBackend, Bucket)> {
     Some((RemoteBackend::S3(Arc::new(store)), Bucket::S3(wire)))
 }
 
-/// The store's fault layer's form of a drawn provider fault.
+/// The store's fault layer's form of a drawn provider fault; `None` for a bucket policy
+/// ([`HttpFault::DenyDeletes`]), which the bucket itself applies.
 #[must_use]
-pub fn provider_fault(fault: HttpFault) -> Fault {
+pub fn provider_fault(fault: HttpFault) -> Option<Fault> {
     let status = |on, status, code| Fault::Status {
         on,
         status,
         code: Some(code),
         retry_after: None,
     };
-    match fault {
+    Some(match fault {
         HttpFault::SlowDown(on) => status(shape(on), 503, "SlowDown"),
         HttpFault::TooManyRequests(on) => Fault::Status {
             on: shape(on),
@@ -143,6 +144,95 @@ pub fn provider_fault(fault: HttpFault) -> Fault {
             on: shape(on),
             err: TransportError::ConnectionReset,
         },
+        HttpFault::Denied(on, code) => {
+            let (status, code) = if matches!(on, HttpShape::Head) {
+                head_answer(code)
+            } else {
+                denial_answer(code)
+            };
+            Fault::Status {
+                on: shape(on),
+                status,
+                code,
+                retry_after: None,
+            }
+        }
+        HttpFault::DenyDeletes => return None,
+    })
+}
+
+/// The status and S3 error code a provider answers a refusal with.
+const fn denial_answer(code: DenialCode) -> (u16, Option<&'static str>) {
+    match code {
+        DenialCode::AccessDenied => (403, Some("AccessDenied")),
+        DenialCode::AllAccessDisabled => (403, Some("AllAccessDisabled")),
+        DenialCode::InvalidAccessKeyId => (403, Some("InvalidAccessKeyId")),
+        DenialCode::SignatureDoesNotMatch => (403, Some("SignatureDoesNotMatch")),
+        DenialCode::ExpiredToken => (400, Some("ExpiredToken")),
+        DenialCode::Unauthorized => (401, None),
+        DenialCode::RequestTimeTooSkewed => (403, Some("RequestTimeTooSkewed")),
+        DenialCode::NoSuchBucket => (404, Some("NoSuchBucket")),
+        DenialCode::KmsDisabled => (400, Some("KMS.DisabledException")),
+        DenialCode::KmsNotFound => (400, Some("KMS.NotFoundException")),
+    }
+}
+
+/// A HEAD's answer has no body, so a refusal shows only its status: KMS is not consulted
+/// for metadata, and a missing bucket reads as a missing object, so both are drawn as the
+/// bare 403 a policy refusal gives.
+const fn head_answer(code: DenialCode) -> (u16, Option<&'static str>) {
+    match denial_answer(code) {
+        (401, _) => (401, None),
+        _ => (403, None),
+    }
+}
+
+/// The refusal a fired fault answered with, when it was one.
+#[must_use]
+pub fn denial_of(fault: &Fault) -> Option<lsr_core::Denied> {
+    let Fault::Status { status, code, .. } = fault else {
+        return None;
+    };
+    if (*status, *code) == (403, None) {
+        return Some(lsr_core::Denied::Permission);
+    }
+    ALL_DENIALS
+        .iter()
+        .find(|denial| denial_answer(**denial) == (*status, *code))
+        .map(|denial| expected_denial(*denial))
+}
+
+const ALL_DENIALS: [DenialCode; 10] = [
+    DenialCode::AccessDenied,
+    DenialCode::AllAccessDisabled,
+    DenialCode::InvalidAccessKeyId,
+    DenialCode::SignatureDoesNotMatch,
+    DenialCode::ExpiredToken,
+    DenialCode::Unauthorized,
+    DenialCode::RequestTimeTooSkewed,
+    DenialCode::NoSuchBucket,
+    DenialCode::KmsDisabled,
+    DenialCode::KmsNotFound,
+];
+
+/// What an operator must fix for each refusal, as the engine must report it: the simulator's
+/// own reading of AWS's codes, kept apart from the store's classifier so a misreading there is
+/// not agreed with. A KMS key that is disabled or gone is the bucket owner's to fix, as a
+/// policy refusal is.
+#[must_use]
+pub const fn expected_denial(code: DenialCode) -> lsr_core::Denied {
+    use lsr_core::Denied;
+    match code {
+        DenialCode::AccessDenied
+        | DenialCode::AllAccessDisabled
+        | DenialCode::KmsDisabled
+        | DenialCode::KmsNotFound => Denied::Permission,
+        DenialCode::InvalidAccessKeyId
+        | DenialCode::SignatureDoesNotMatch
+        | DenialCode::ExpiredToken
+        | DenialCode::Unauthorized => Denied::Credentials,
+        DenialCode::RequestTimeTooSkewed => Denied::ClockSkew,
+        DenialCode::NoSuchBucket => Denied::BucketMissing,
     }
 }
 
@@ -313,6 +403,35 @@ impl Bucket {
         match self {
             Self::Mem(store) => store.set_last_modified(key, at),
             Self::S3(wire) => wire.inner().set_last_modified(&object_key(key), at),
+        }
+    }
+
+    /// A bucket policy refuses deleting each replica object the bucket holds now
+    /// ([`HttpFault::DenyDeletes`]); nothing with `MemStore`.
+    pub fn deny_deletes(&self) {
+        if let Self::S3(wire) = self {
+            let fake = wire.inner();
+            for object in fake.keys() {
+                if replica_key(&object).is_some() {
+                    fake.deny_delete(&object);
+                }
+            }
+        }
+    }
+
+    /// Lifts every delete refusal: the policy is gone.
+    pub fn allow_deletes(&self) {
+        if let Self::S3(wire) = self {
+            wire.inner().allow_deletes();
+        }
+    }
+
+    /// How many keys a DeleteObjects was refused for so far.
+    #[must_use]
+    pub fn refused_deletes(&self) -> u64 {
+        match self {
+            Self::Mem(_) => 0,
+            Self::S3(wire) => wire.inner().refused_deletes(),
         }
     }
 

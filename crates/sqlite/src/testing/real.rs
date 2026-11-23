@@ -171,6 +171,7 @@ impl RealSide {
             seen: Vec::new(),
             owed: VecDeque::new(),
             injected: Vec::new(),
+            taken: Vec::new(),
             lie_ours: false,
             tick: Tick::default(),
         };
@@ -396,8 +397,8 @@ impl SqliteSide for RealSide {
     fn inject(&self, op: SourceOp, err: SourceError) {
         self.with(|real| real.injected.push((op, err)));
     }
-    fn queued_injections(&self) -> usize {
-        self.with(|real| real.injected.len())
+    fn taken_injections(&self) -> Vec<(SourceOp, SourceError)> {
+        self.with(|real| real.taken.clone())
     }
     fn tear_on_power_loss(&self, seed: u64) {
         self.with(|real| real.vfs.set_crash_law(CrashLaw::drawn(seed)));

@@ -237,6 +237,7 @@ pub fn rig_actor_config() -> ActorConfig {
         shutdown_grace: secs(30),
         responses: Responses::STRICT,
         max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
+        destination: Some(lsr_core::ReplicaId::of(b"rig")),
     }
 }
 

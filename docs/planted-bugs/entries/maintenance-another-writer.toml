@@ -1,11 +1,5 @@
+# Maintenance continues past a file another writer put beyond its position.
 name = "maintenance-another-writer"
 fix = "bc34b37"
-package = "lsr-sim"
-test_bin = "sim"
-tests = [
-    "maintenance_stops_on_another_writer_seed_0x50c",
-    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789",
-    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68facf21",
-    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fad061",
-    "another_writer_s_files_fit_the_level_bytes_budget_seed_0x126d68facf74",
-]
+package = "lsr-core"
+tests = ["actor::tests::maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it"]

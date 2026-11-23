@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use lsr_journal::{Ahead, Floor, Journal, Lowered, ReplicaId, Unproven, WouldLower};
+use lsr_journal::{Ahead, AheadKind, Floor, Journal, Lowered, ReplicaId, Unproven, WouldLower};
 use lsr_ltx::{Timestamp, Txid};
 
 fn floor(replica: u8, bound: u64) -> Option<Floor> {
@@ -80,6 +80,7 @@ fn withdrawing_the_anchor_keeps_the_bound() {
 fn ahead(restore_point: u64) -> Journal {
     Journal {
         ahead: Some(Ahead {
+            kind: AheadKind::AheadOfWal,
             restore_point: Txid::new(restore_point).unwrap(),
             pages: NonZeroU32::new(1).unwrap(),
             first: NonZeroU32::new(2).unwrap(),
@@ -103,5 +104,23 @@ fn a_kept_restore_point_never_moves_forward() {
             from: Txid::new(5).unwrap(),
             to: Txid::new(6).unwrap(),
         })
+    );
+}
+
+/// A destination's id is the FNV-1a 64 digest of its name: fixed for a name, different for
+/// names that differ in one byte.
+#[test]
+fn a_destination_id_is_the_digest_of_its_name() {
+    assert_eq!(
+        lsr_journal::ReplicaId::of(b""),
+        lsr_journal::ReplicaId(0xcbf2_9ce4_8422_2325_u64.to_le_bytes())
+    );
+    assert_eq!(
+        lsr_journal::ReplicaId::of(b"a"),
+        lsr_journal::ReplicaId(0xaf63_dc4c_8601_ec8c_u64.to_le_bytes())
+    );
+    assert_ne!(
+        lsr_journal::ReplicaId::of(b"s3://b/p"),
+        lsr_journal::ReplicaId::of(b"s3://b/q")
     );
 }

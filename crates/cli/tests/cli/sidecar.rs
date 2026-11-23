@@ -585,7 +585,7 @@ fn go_s_sync_and_checkpoint_values(samples: &[Sample], db: &str) {
             .abs()
             < f64::EPSILON
     );
-    for mode in ["PASSIVE", "TRUNCATE"] {
+    for mode in ["PASSIVE", "FULL", "TRUNCATE"] {
         let labels = [("db", db), ("mode", mode)];
         for name in [
             "litestream_checkpoint_count",

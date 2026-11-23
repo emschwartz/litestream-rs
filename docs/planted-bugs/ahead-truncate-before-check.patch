@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 8b8e7899..823375d0 100644
+index 9d28208c..8dfa010c 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1239,12 +1239,12 @@ impl Actor {
+@@ -1482,12 +1482,12 @@ impl Actor {
          env: &mut Env<'_, W, P, C, L, R>,
          now: Timestamp,
      ) -> Result<Stepped, Fault> {
@@ -10,7 +10,7 @@ index 8b8e7899..823375d0 100644
 -            return self.check_ahead(env, now).await;
 -        }
          if self.owes_truncate() {
-             return self.unprove(env);
+             return self.unprove(env, now);
          }
 +        if self.owes_ahead_check() {
 +            return self.check_ahead(env, now).await;

@@ -173,6 +173,7 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::ClockJump(_)
         | Op::Tick
         | Op::Shutdown
+        | Op::ShutdownWithSnapshot
         | Op::Restore
         | Op::Restart
         | Op::PowerLoss
@@ -219,6 +220,8 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,
+        // The engine's own configuration.
+        truncate_pages: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
         // The replica on S3: its provider faults are noted as they are drawn.

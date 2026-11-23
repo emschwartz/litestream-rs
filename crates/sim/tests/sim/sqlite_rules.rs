@@ -130,6 +130,7 @@ mod rules {
             OtherProcessMode::Passive => "PASSIVE",
             OtherProcessMode::Restart => "RESTART",
             OtherProcessMode::Truncate => "TRUNCATE",
+            OtherProcessMode::Full => "FULL",
         };
         conn.query_row(&format!("PRAGMA wal_checkpoint({name})"), [], |row| {
             Ok((
@@ -333,8 +334,10 @@ mod rules {
             1 => Just(Op::AppCheckpoint(OtherProcessMode::Passive)),
             1 => Just(Op::AppCheckpoint(OtherProcessMode::Restart)),
             1 => Just(Op::AppCheckpoint(OtherProcessMode::Truncate)),
+            1 => Just(Op::AppCheckpoint(OtherProcessMode::Full)),
             1 => Just(Op::OurCheckpoint(CheckpointMode::Passive)),
             1 => Just(Op::OurCheckpoint(CheckpointMode::Truncate)),
+            1 => Just(Op::OurCheckpoint(CheckpointMode::Full)),
             1 => Just(Op::BumpSeq),
         ]
     }

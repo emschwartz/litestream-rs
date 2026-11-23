@@ -31,7 +31,9 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::generate::{EnvFault, Hold, MetaOp, Op, RemoteOp, WalOp};
+use lsr_core::{SourceError, SourceOp, StoreOp};
+
+use crate::generate::{EnvFault, Hold, MetaOp, Op, RemoteOp, Target, WalOp};
 use crate::reach::Reach;
 use crate::sqlite::CrashKind;
 use crate::store::FaultShape;
@@ -234,6 +236,12 @@ classes! {
     HoldSecondWriter = "Hold.SecondWriter", Lasting;
 }
 
+const WRITE_LOCK_RARE: &str =
+    "the engine takes the write lock only after its own TRUNCATE (152 of 3063 seeds); a finding";
+
+const PAGE_COUNT_RARE: &str =
+    "the engine reads the page count in few ticks, and an app step arms for one tick; a finding";
+
 /// A count the gate would require that a class cannot earn, with the reason. Each is a known gap in what the soak
 /// exercises, not a pass.
 pub const EXEMPT: &[(&str, &str)] = &[
@@ -262,6 +270,54 @@ pub const EXEMPT: &[(&str, &str)] = &[
         "fault.WalDamage.FlipLastFrameBit.judged_during",
         "drawn WAL damage is not judged while in place; Hold.Wal judges this shape",
     ),
+    // Error-domain cells and app action points the soak rarely or never reaches (measured over
+    // 3063 seeds of one night with the nightly's TRUNCATE law, docs/decisions.md D112). The
+    // engine takes the write lock only for the snapshot after its own TRUNCATE, which ran in
+    // 152 of them; an injection queued for the lock waits for one, an app step arms for one
+    // tick.
+    ("cell.source.EndWriteLock.Io.hit", WRITE_LOCK_RARE),
+    ("point.BeginWriteLock.ReaderBegin.ran", WRITE_LOCK_RARE),
+    ("point.BeginWriteLock.ReaderEnd.ran", WRITE_LOCK_RARE),
+    (
+        "point.BeginWriteLock.Checkpoint.Passive.ran",
+        WRITE_LOCK_RARE,
+    ),
+    (
+        "point.BeginWriteLock.Checkpoint.Restart.ran",
+        WRITE_LOCK_RARE,
+    ),
+    (
+        "point.BeginWriteLock.Checkpoint.Truncate.ran",
+        WRITE_LOCK_RARE,
+    ),
+    ("point.BeginWriteLock.DeleteWal.ran", WRITE_LOCK_RARE),
+    ("point.EndWriteLock.Commit.ran", WRITE_LOCK_RARE),
+    ("point.EndWriteLock.ReaderBegin.ran", WRITE_LOCK_RARE),
+    ("point.EndWriteLock.ReaderEnd.ran", WRITE_LOCK_RARE),
+    ("point.EndWriteLock.Checkpoint.Passive.ran", WRITE_LOCK_RARE),
+    ("point.EndWriteLock.Checkpoint.Restart.ran", WRITE_LOCK_RARE),
+    (
+        "point.EndWriteLock.Checkpoint.Truncate.ran",
+        WRITE_LOCK_RARE,
+    ),
+    ("point.EndWriteLock.DeleteWal.ran", WRITE_LOCK_RARE),
+    // The engine reads the page count only on a snapshot's growth path, and an app step arms
+    // for one tick: these ran in no night measured (DeleteWal ran twice in one).
+    ("point.PageCount.Commit.ran", PAGE_COUNT_RARE),
+    ("point.PageCount.ReaderBegin.ran", PAGE_COUNT_RARE),
+    ("point.PageCount.ReaderEnd.ran", PAGE_COUNT_RARE),
+    ("point.PageCount.Checkpoint.Passive.ran", PAGE_COUNT_RARE),
+    ("point.PageCount.Checkpoint.Restart.ran", PAGE_COUNT_RARE),
+    ("point.PageCount.Checkpoint.Truncate.ran", PAGE_COUNT_RARE),
+    // Ran in one night (3 and 1 times in 2967 seeds) and not in the next.
+    (
+        "point.ReadPage.ReaderEnd.ran",
+        "rare: an app reader ends right before a page read a few times a night",
+    ),
+    (
+        "point.EndBarrier.Checkpoint.Passive.ran",
+        "rare: a PASSIVE right before the barrier ends ran once in one night",
+    ),
 ];
 
 impl Class {
@@ -280,7 +336,7 @@ impl Class {
             Op::OtherProcessReader { .. } => Self::OtherProcessReader,
             Op::OtherProcessCheckpoint(_) => Self::OtherProcessCheckpoint,
             Op::Tick => Self::Tick,
-            Op::Shutdown => Self::Shutdown,
+            Op::Shutdown | Op::ShutdownWithSnapshot => Self::Shutdown,
             Op::RequestSnapshot => Self::RequestSnapshot,
             Op::Restore => Self::Restore,
             Op::Heal => Self::Heal,
@@ -462,8 +518,8 @@ pub struct FaultMarks {
     current: Option<(Class, u64)>,
     ticks: u64,
     skipped: Cell<bool>,
-    /// Failures injected into our SQLite handles, applied.
-    injected: u64,
+    /// The error domain's cells, counted apart from their classes.
+    cells: crate::domain::marks::CellMarks,
 }
 
 impl FaultMarks {
@@ -478,7 +534,7 @@ impl FaultMarks {
             current: None,
             ticks: 0,
             skipped: Cell::new(false),
-            injected: 0,
+            cells: crate::domain::marks::CellMarks::default(),
         }
     }
 
@@ -491,6 +547,7 @@ impl FaultMarks {
     pub fn begin(&mut self, op: &Op) {
         let class = Self::class(op);
         self.add(class, Count::Drawn, 1);
+        self.cells.begin(op);
         self.skipped.set(false);
         self.current = Some((class, self.ticks));
         if matches!(class.kind(), Kind::Lasting) {
@@ -515,9 +572,6 @@ impl FaultMarks {
             return;
         }
         self.add(class, Count::Applied, 1);
-        if class == Class::EnvSource {
-            self.injected = self.injected.saturating_add(1);
-        }
         if class == Class::Heal {
             self.lift_rates();
         }
@@ -566,24 +620,24 @@ impl FaultMarks {
         }
     }
 
-    /// Adds the run's counts to `reach`, with the store faults that hit a
-    /// call (`store_hits`, from both stores) and the injected SQLite failures
-    /// still waiting for a call (`queued`).
+    /// Adds the run's counts to `reach`, with the calls each store fault
+    /// hit (`store_hits`, with the store it was scheduled on) and the failures
+    /// injected into our SQLite handles that a call took (`taken`).
     pub fn tally(
         &mut self,
         reach: &mut Reach,
-        store_hits: impl IntoIterator<Item = (FaultShape, u32)>,
-        queued: usize,
+        store_hits: &[(Target, StoreOp, FaultShape, u32)],
+        taken: &[(SourceOp, SourceError)],
     ) {
-        for (shape, hits) in store_hits {
-            self.add(Class::of_shape(&shape), Count::Hit, u64::from(hits));
+        for (_, _, shape, hits) in store_hits {
+            self.add(Class::of_shape(shape), Count::Hit, u64::from(*hits));
         }
-        let queued = u64::try_from(queued).unwrap_or(u64::MAX);
-        let taken = self.injected.saturating_sub(queued);
-        self.add(Class::EnvSource, Count::Hit, taken);
+        let taken_n = u64::try_from(taken.len()).unwrap_or(u64::MAX);
+        self.add(Class::EnvSource, Count::Hit, taken_n);
         for ((class, count), n) in &self.counts {
             reach.add(class.key(*count), *n);
         }
+        self.cells.tally(reach, store_hits, taken);
     }
 }
 
@@ -600,7 +654,8 @@ pub struct Gate {
     pub zeros: Vec<String>,
     /// Exempt keys that were reached after all: the exemption is stale.
     pub stale: Vec<String>,
-    /// Classes written by scenarios only that a history drew.
+    /// Classes written by scenarios only that a history drew, and error-domain cells marked
+    /// impossible or unmodelled that a history drew.
     pub drawn_undrawn: Vec<String>,
 }
 
@@ -621,6 +676,8 @@ pub fn required_keys() -> Vec<String> {
     for class in Class::ALL {
         keys.extend(class.required().iter().map(|count| class.key(*count)));
     }
+    keys.extend(crate::domain::marks::required_keys());
+    keys.extend(crate::domain::points::required_keys());
     keys.retain(|key| !EXEMPT.iter().any(|(exempt, _)| exempt == key));
     keys
 }
@@ -641,6 +698,7 @@ pub fn gate(reach: &Reach) -> Gate {
         .iter()
         .filter(|class| class.kind() == Kind::Undrawn)
         .map(|class| class.key(Count::Drawn))
+        .chain(crate::domain::marks::undrawn_keys())
         .filter(|key| reach.get(key) > 0)
         .collect();
     Gate {
@@ -684,6 +742,8 @@ mod tests {
         for class in Class::ALL {
             all.extend(class.required().iter().map(|count| class.key(*count)));
         }
+        all.extend(crate::domain::marks::required_keys());
+        all.extend(crate::domain::points::required_keys());
         for (key, why) in EXEMPT {
             assert!(all.iter().any(|k| k == key), "{key} is not a gated key");
             assert!(!why.is_empty() && *key != CANARY, "{key}");
