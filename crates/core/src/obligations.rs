@@ -68,11 +68,9 @@ pub fn fields_of(source: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// The name a field line declares: `name: Type,` after an optional visibility.
+/// The name a field line declares: `name: Type,` after an optional visibility. A comment or an
+/// attribute declares none, since what comes before its first colon is not one identifier.
 fn field_name(line: &str) -> Option<String> {
-    if line.starts_with("//") || line.starts_with('#') {
-        return None;
-    }
     let line = line
         .strip_prefix("pub(crate) ")
         .or_else(|| line.strip_prefix("pub(super) "))

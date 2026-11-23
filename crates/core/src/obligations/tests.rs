@@ -72,4 +72,11 @@ fn a_field_line_is_one_name_and_a_whole_type() {
     );
     assert_eq!(field_name("one two: u8,"), None, "not one identifier");
     assert_eq!(field_name(": u8,"), None, "no name");
+    assert_eq!(field_name("// one: u8,"), None, "a comment");
+    assert_eq!(field_name("/// one: u8,"), None, "a doc comment");
+    assert_eq!(
+        field_name("#[cfg(test)] one: u8,"),
+        None,
+        "an attribute first"
+    );
 }
