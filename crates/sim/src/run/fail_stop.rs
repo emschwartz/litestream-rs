@@ -34,6 +34,7 @@ impl Runner {
                 | Event::Idle
                 | Event::Resnapshot(_)
                 | Event::Clamped(_)
+                | Event::AheadOfWal(_)
                 | Event::TakeoverWanted(_) => false,
             },
             TickEnd::Done(_) | TickEnd::Crashed { .. } => false,

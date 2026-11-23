@@ -54,6 +54,18 @@ test, not a survivor, but it is reported separately and slower than a catch.
 | `decoder.rs` `read_retrying` | match guard becomes `true` | every read error is retried forever |
 | `index.rs` `put_uvarint` `value >= 0x80` | `>=` becomes `<` | the shift loop never ends for a multi-byte value |
 
+### Second run: the whole crate
+
+`cargo mutants -p lsr-ltx --test-package lsr-ltx --test-tool nextest --jobs 4 --timeout 240` at commit
+`b754be6`: 714 mutants in 23 minutes, 610 caught, 8 missed, 96 unviable, no timeouts. The loops in the table
+above now end as failures, not timeouts: nextest's own deadline (`.config/nextest.toml`) kills the hanging
+test before cargo-mutants' timeout. No survivor revealed a bug.
+
+| Where | Mutation | Resolution |
+| --- | --- | --- |
+| `index/lookup.rs` `check_page` (6 mutants) | its guards and its `pgno > commit` comparison | Gone. `check_page` restated `PageSequence::push`'s first two checks (above the commit, then the lock page) for an entry `decode_frame` is handed; index entries come from an index already checked against the header, so no test reached the copy. Both now call `PageSequence::fits`, which the streaming decoder's tests pin. |
+| `page.rs` `DbPages::get` (2 mutants) | returns `0` or `1` | Caught: `a_database_holds_the_pages_up_to_its_length` now reads the length back. lsr-core and lsr-sqlite read it, but this crate's tests did not. |
+
 ## core
 
 **Status: met.** The first run was stopped at 899 of 1463 mutants (about eight hours on four shared
@@ -395,3 +407,17 @@ three it had not reached, and the tally above counts the second result.
 | --- | --- | --- |
 | `pages.rs` `seeded` | `min() > from` becomes `>=` | The extra file it calls pending is the confirmed one; a quiet mark at or below the confirmed transaction is trimmed in `Actor::observe_lag` before any read. |
 | `actor/lag.rs` `Actor::observe_lag` | `retain(txid > replicated)` becomes `>=` | `only_quiet_pending` reads the marks from the transaction after the replicated one, so a kept mark equal to it is never read. |
+
+## wal
+
+`cargo mutants -p lsr-wal --test-package lsr-wal --test-tool nextest --jobs 4 --timeout 240` at commit
+`d5d92c8`: 170 mutants in 6 minutes, 112 caught, 13 missed, 45 unviable, no timeouts. After the fixes below,
+157 mutants, 112 caught, 45 unviable, none missed. No survivor revealed a bug.
+
+| Where | Mutants | Resolution |
+| --- | --- | --- |
+| `scan.rs` `generation_unchanged`, `commit_follows`, `verified_before`, `checksum_before` | 4 (`<` becomes `>` on a short read) | Gone. Five call sites compared `read_at`'s count with the buffer's length, and only `read_page`'s was tested at that boundary; elsewhere a short read leaves zeros that fail the following checksum anyway, so no test told the comparisons apart. One helper, `read_full`, now makes the comparison for all five. |
+| `scan.rs` `read_at` | 1 (the `Interrupted` retry becomes an error) | Caught: `open_retries_an_interrupted_read`. |
+| `header.rs` `WalHeader::checkpoint_seq` | 1 | Caught: `header_decodes_every_field` decodes a header whose sequence is 7, not only 0. |
+| `frame.rs` `WalOffset`'s Display | 1 | Caught: the same test reads it, since error messages name offsets with it. |
+| `testing.rs` `page` | 6 | Equivalent (escape line): the mixing steps of the test-data generator. A weaker mixer still gives deterministic pages that differ by seed and page number, and changing the generator would change every recorded simulator history. The rest of `testing.rs` (the WAL builder and its checksums) stays mutated, since the simulator builds its WALs with it. |

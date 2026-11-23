@@ -34,7 +34,8 @@
 //! later sync until a TRUNCATE checkpoint completes), and `Io` for the rest.
 //!
 //! [`app_connection`] and [`check_app_connection`] set up and check the application's own connections
-//! (`SQLITE_FCNTL_PERSIST_WAL` on, `wal_autocheckpoint = 0`, PLAN section 6).
+//! (`wal_autocheckpoint = 0`, PLAN section 6; never `SQLITE_FCNTL_PERSIST_WAL`, which only the
+//! replicator's own two connections set, see [`app_connection`]).
 //! [`app_connection_for`] first checks that the connection opens a given [`DatabaseFile`]
 //! (device and inode), and [`app_connection_raw`] does the same on a raw handle, for an application
 //! whose connections are not rusqlite's; it is here because only this crate may use `unsafe`.

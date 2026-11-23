@@ -493,28 +493,40 @@ impl Replicator {
         &self.shared.database
     }
 
-    /// Sets `SQLITE_FCNTL_PERSIST_WAL` on and `wal_autocheckpoint = 0` on one of the application's
+    /// Sets `wal_autocheckpoint = 0` on one of the application's
     /// connections, after checking that it opens this replicator's database (device and
     /// inode). Call it on every connection the application opens, pooled ones included.
     ///
     /// # Errors
     /// [`lsr_sqlite::SetupError`]: the connection has no file or opens another one, or a
-    /// setting failed.
+    /// setting failed; `CommitHookReplaced` when the connection already had a commit hook,
+    /// which SQLite cannot keep beside the gate's.
     ///
-    /// It also installs a commit hook (`sqlite3_commit_hook`, replacing any the application set)
-    /// that refuses every commit while fail-stop holds the application
-    /// ([`crate::Health::held_by`], `Config::if_replication_stops`): SQLite rolls the
-    /// transaction back and the application's COMMIT fails with
-    /// `SQLITE_CONSTRAINT_COMMITHOOK`. Reads go on. Connections not set up here are not
-    /// covered; an application on another binding reads the gate from [`Self::health`].
+    /// It also installs a commit hook (`sqlite3_commit_hook`) that refuses every commit while
+    /// fail-stop holds the application ([`crate::Health::held_by`],
+    /// `Config::if_replication_stops`): SQLite rolls the transaction back and the
+    /// application's COMMIT fails with `SQLITE_CONSTRAINT_COMMITHOOK`. Reads go on.
+    ///
+    /// Known limits: the gate holds only on connections this call set up and whose hook is
+    /// still the gate's. These writers commit whatever fail-stop says, and nothing reports it:
+    /// - a connection not set up here, pooled ones the application forgot included;
+    /// - a connection whose commit hook the application set after this call, which silently
+    ///   removes the gate (SQLite allows one commit hook per connection and offers no way to
+    ///   read it back, so nothing can notice; a hook set before this call makes it fail with
+    ///   `CommitHookReplaced` instead);
+    /// - another SQLite library linked into the process, which never sees this hook;
+    /// - another process writing the database: a second program, the `sqlite3` shell, an
+    ///   application on another binding (it can read the gate from [`Self::health`]).
+    ///
+    /// The sidecar's `stop-app` stops its `-exec` child, every connection of it included, but
+    /// not a process it did not start.
     #[cfg(feature = "rusqlite")]
     pub fn app_connection(
         &self,
         conn: &rusqlite::Connection,
     ) -> Result<(), lsr_sqlite::SetupError> {
         lsr_sqlite::app_connection_for(conn, &self.shared.database)?;
-        lsr_sqlite::refuse_commits_while(conn, &self.shared.writes_refused);
-        Ok(())
+        lsr_sqlite::refuse_commits_while(conn, &self.shared.writes_refused)
     }
 }
 

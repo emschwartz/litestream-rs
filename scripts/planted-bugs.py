@@ -10,7 +10,16 @@ HEAD, then must each fail once the entry's patch is applied. Exits 1 when a plan
 (a defect in the tests), a patch no longer applies (re-express the entry's patch against the
 current tree, or retire the entry with a reason), a test does not run, or a build breaks.
 
-    uv run scripts/planted-bugs.py [--only NAME]... [--keep]
+    uv run scripts/planted-bugs.py [--only NAME]... [--keep] [--no-wait]
+
+One run at a time: the scratch tree and its target dir are shared, so a run takes a lock on
+`target/planted-bugs/lock` before it touches them, and waits for one already held (`--no-wait`
+refuses instead). Every build and test process the run starts inherits the lock, so a run
+killed mid-way still holds it until the last process it left behind exits: a new run never
+applies its patches under an old run's cargo or tests, nor builds into a target dir they are
+still reading. Each build and test command also runs in a session of its own, and every process
+still in that session when the command ends is killed (where `/proc` exists): a planted bug can
+leave a test's child process running, and an orphan must not outlive the run.
 
 `--unaided` asks another question: would the simulator's swarm find each planted bug with no
 test written for it? The named tests are not run. Each patch is applied and the swarm runs
@@ -22,10 +31,13 @@ this mode reports and exits 0 unless the clean tree fails or a plant does not ap
 """
 
 import argparse
+import fcntl
 import os
+import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -35,6 +47,7 @@ LEDGER = ROOT / "docs" / "planted-bugs.toml"
 PATCHES = ROOT / "docs" / "planted-bugs"
 SCRATCH = ROOT / "target" / "planted-bugs"
 TREE = SCRATCH / "tree"
+LOCK = SCRATCH / "lock"
 # Wall-clock bound for one nextest invocation (build excluded). Each test also has nextest's own
 # 90 s limit from docs/planted-bugs/nextest.toml.
 RUN_BOUND = 300
@@ -43,8 +56,84 @@ BUILD_BOUND = 1800
 MEM_CAP_KIB = 8 * 1024 * 1024
 
 
+# The lock's descriptor, once taken: passed to every process the run starts, which keeps the lock
+# held while any of them lives (flock belongs to the open file, not to this process).
+LOCK_FD: int | None = None
+
+
+class Busy(Exception):
+    """Another run holds the lock and this one was told not to wait."""
+
+
+def take_lock(wait: bool) -> None:
+    """Takes the run lock, waiting for a holder unless `wait` is false (then raises Busy)."""
+    global LOCK_FD
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = os.pread(fd, 64, 0).decode(errors="replace").strip() or "unknown"
+        if not wait:
+            os.close(fd)
+            raise Busy(f"another run holds {LOCK} (pid {holder}, or processes it left)")
+        print(f"planted-bugs: waiting for another run (pid {holder}, or processes it left) "
+              f"to release {LOCK}", file=sys.stderr, flush=True)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+    os.set_inheritable(fd, True)
+    LOCK_FD = fd
+
+
+def held() -> tuple[int, ...]:
+    """The descriptors a started process must inherit: the lock's."""
+    return () if LOCK_FD is None else (LOCK_FD,)
+
+
+def reap_session(sid: int) -> None:
+    """Kills every process left in session `sid`: a test's child a planted bug never stopped.
+    Linux only (it reads /proc); elsewhere such a process outlives the command."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            # Fields after the parenthesised command name: state, ppid, pgrp, session, ...
+            stat = (entry / "stat").read_text()
+            fields = stat[stat.rindex(")") + 2:].split()
+            if int(fields[3]) == sid:
+                os.kill(int(entry.name), signal.SIGKILL)
+        except (OSError, ValueError, IndexError):
+            continue
+
+
+def run(args: list[str], timeout: float, **kw) -> subprocess.CompletedProcess:
+    """`subprocess.run` for a build or test command, holding the lock, in a session of its own
+    that is emptied when the command ends, whether it finished, timed out or failed. Output goes
+    to files, not pipes: a process left behind holding a pipe would keep the read open until the
+    timeout, though the command itself had finished."""
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        p = subprocess.Popen(args, text=True, stdout=out, stderr=err, start_new_session=True,
+                             pass_fds=held(), **kw)
+        try:
+            p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            reap_session(p.pid)
+            p.wait()
+            raise
+        finally:
+            reap_session(p.pid)
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(args, p.returncode, out.read(), err.read())
+
+
 def git(*args: str, cwd: Path = ROOT, check: bool = True, **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, check=check, text=True, capture_output=True, **kw)
+    return subprocess.run(["git", *args], cwd=cwd, check=check, text=True, capture_output=True,
+                          pass_fds=held(), **kw)
 
 
 def checkout_head() -> str:
@@ -110,7 +199,7 @@ def build(bug: dict) -> str | None:
     """None when the tests build, else the tail of the compiler output."""
     args = nextest_args(bug) + ["--no-run"]
     try:
-        p = subprocess.run(args, cwd=TREE, env=env(), text=True, capture_output=True, timeout=BUILD_BOUND)
+        p = run(args, BUILD_BOUND, cwd=TREE, env=env())
     except subprocess.TimeoutExpired:
         return "build timed out"
     return None if p.returncode == 0 else "\n".join((p.stdout + p.stderr).splitlines()[-25:])
@@ -121,8 +210,7 @@ def run_test(bug: dict, test: str) -> tuple[str, str]:
     args = nextest_args(bug) + ["--no-fail-fast", "-E", f"test(~{test})"]
     cmd = f"ulimit -v {MEM_CAP_KIB}; exec \"$@\""
     try:
-        p = subprocess.run(["bash", "-c", cmd, "bash", *args], cwd=TREE, env=env(), text=True,
-                           capture_output=True, timeout=RUN_BOUND)
+        p = run(["bash", "-c", cmd, "bash", *args], RUN_BOUND, cwd=TREE, env=env())
     except subprocess.TimeoutExpired:
         return "timeout", f"no verdict within {RUN_BOUND}s"
     out = p.stdout + p.stderr
@@ -162,6 +250,8 @@ def main() -> int:
                     help="seeds the swarm needs to find each plant, with no named test run")
     ap.add_argument("--seeds", type=int, default=1000, help="--unaided: swarm seeds per plant")
     ap.add_argument("--base", type=int, default=1_000_001, help="--unaided: first swarm seed")
+    ap.add_argument("--no-wait", action="store_true",
+                    help="refuse to start while another run holds the lock, instead of waiting")
     opts = ap.parse_args()
     bugs = tomllib.loads(LEDGER.read_text())["bug"]
     names = [b["name"] for b in bugs]
@@ -179,6 +269,11 @@ def main() -> int:
         return 1
     # The canaries always run: they are what says the verdicts below mean anything.
     bugs = [b for b in bugs if not opts.only or b["name"] in opts.only or "canary" in b]
+    try:
+        take_lock(wait=not opts.no_wait)
+    except Busy as busy:
+        print(f"planted-bugs: {busy}", file=sys.stderr)
+        return 2
 
     if opts.unaided:
         return unaided([b for b in bugs if "canary" not in b], opts.seeds, opts.base)
@@ -268,8 +363,7 @@ def swarm(seeds: int, base: int) -> str:
         e = env()
         e["LSR_SIM_TALLY_SEEDS"], e["LSR_SIM_BASE_SEED"] = str(count), str(base + start)
         try:
-            p = subprocess.run(["bash", "-c", cmd, "bash", *args], cwd=TREE, env=e, text=True,
-                               capture_output=True, timeout=RUN_BOUND)
+            p = run(["bash", "-c", cmd, "bash", *args], RUN_BOUND, cwd=TREE, env=e)
         except subprocess.TimeoutExpired:
             return f"timeout in seeds {base + start}..{base + start + count - 1}"
         lines = (p.stdout + p.stderr).splitlines()

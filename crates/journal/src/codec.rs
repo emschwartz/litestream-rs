@@ -1,9 +1,13 @@
 //! One slot's bytes, both ways (crate doc for the layout).
 
+use std::num::NonZeroU32;
+
 use crc::{CRC_32_ISCSI, Crc};
 use lsr_ltx::{FileChecksum, Timestamp, Txid};
 
-use crate::facts::{Floor, Journal, Proof, ReplicaId, StoredBudget, Triple, Unproven, WalChecksum};
+use crate::facts::{
+    Ahead, Floor, Journal, Proof, ReplicaId, StoredBudget, Triple, Unproven, WalChecksum,
+};
 use crate::read::Seq;
 
 /// A slot's length.
@@ -12,8 +16,10 @@ pub const SLOT: usize = 4096;
 pub const RECORD_MAX: usize = 512;
 /// The record's first eight bytes.
 pub const MAGIC: [u8; 8] = *b"LSRJRNL\0";
-/// The version this binary writes.
-pub const VERSION: u16 = 1;
+/// The newest version this binary writes: 2 while an ahead-of-WAL verdict stands, 1 otherwise.
+pub const VERSION: u16 = 2;
+/// The version of a record without the verdict, which every binary since the journal reads.
+const VERSION_1: u16 = 1;
 
 /// Magic, version, body length and sequence number.
 const HEAD: usize = 20;
@@ -28,6 +34,8 @@ const HAS_FLOOR: u8 = 1;
 const HAS_ANCHOR: u8 = 2;
 const HAS_BUDGET: u8 = 4;
 const HAS_PENDING: u8 = 8;
+/// Version 2.
+const HAS_AHEAD: u8 = 16;
 
 /// Why a slot holds no record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
@@ -47,19 +55,27 @@ pub enum Invalid {
     /// A sequence number of zero, which no writer uses.
     #[error("sequence number 0")]
     Seq,
-    /// Version 1: a flag no version-1 writer sets, or an anchor without a floor.
+    /// A flag no writer of the version sets, or an anchor without a floor.
     #[error("flags {0:#04x}")]
     Flags(u8),
-    /// Version 1: a transaction id of zero.
+    /// A transaction id of zero.
     #[error("transaction id 0")]
     Txid,
-    /// Version 1: a file checksum without its flag bit.
+    /// A file checksum without its flag bit.
     #[error("file checksum {0:#018x}")]
     FileChecksum(u64),
-    /// Version 1: a debt code no writer uses.
+    /// A debt code no writer uses.
     #[error("debt code {0}")]
     Unproven(u8),
-    /// Version 1: the body is not exactly as long as its flags say.
+    /// A verdict counting zero pages or naming page zero.
+    #[error("a verdict of {pages} pages from page {first}")]
+    Ahead {
+        /// The stored page count.
+        pages: u32,
+        /// The stored first page.
+        first: u32,
+    },
+    /// The body is not exactly as long as its flags say.
     #[error("body of {len} bytes where the flags make {want}")]
     BodyLength {
         /// The stored length.
@@ -111,6 +127,7 @@ fn body(journal: &Journal) -> Vec<u8> {
         (anchor.is_some(), HAS_ANCHOR),
         (journal.budget.is_some(), HAS_BUDGET),
         (journal.pending.is_some(), HAS_PENDING),
+        (journal.ahead.is_some(), HAS_AHEAD),
     ]
     .iter()
     .filter(|(on, _)| *on)
@@ -133,6 +150,12 @@ fn body(journal: &Journal) -> Vec<u8> {
         out.put(&proof.wal.0.to_le_bytes());
         out.put(&proof.wal.1.to_le_bytes());
     }
+    if let Some(ahead) = journal.ahead {
+        out.put(&ahead.restore_point.get().to_le_bytes());
+        out.put(&ahead.pages.get().to_le_bytes());
+        out.put(&ahead.first.get().to_le_bytes());
+        out.put(&ahead.made.unix_millis().to_le_bytes());
+    }
     let debt = match journal.unproven {
         Unproven::No => 0,
         Unproven::Truncate => 1,
@@ -147,9 +170,14 @@ fn body(journal: &Journal) -> Vec<u8> {
 pub fn encode(journal: &Journal, seq: Seq) -> [u8; SLOT] {
     let body = body(journal);
     let len = u16::try_from(body.len()).unwrap_or(u16::MAX);
+    let version = if journal.ahead.is_some() {
+        VERSION
+    } else {
+        VERSION_1
+    };
     let mut out = Out(Vec::with_capacity(RECORD_MAX));
     out.put(&MAGIC);
-    out.put(&VERSION.to_le_bytes());
+    out.put(&version.to_le_bytes());
     out.put(&len.to_le_bytes());
     out.put(&seq.get().to_le_bytes());
     out.put(&body);
@@ -183,6 +211,22 @@ impl In<'_> {
         Txid::new(self.u64()).ok_or(Invalid::Txid)
     }
 
+    fn ahead(&mut self) -> Result<Ahead, Invalid> {
+        let restore_point = self.txid()?;
+        let pages = u32::from_le_bytes(self.take());
+        let first = u32::from_le_bytes(self.take());
+        let made = Timestamp::from_unix_millis(i64::from_le_bytes(self.take()));
+        match (NonZeroU32::new(pages), NonZeroU32::new(first)) {
+            (Some(pages), Some(first)) => Ok(Ahead {
+                restore_point,
+                pages,
+                first,
+                made,
+            }),
+            (None, _) | (_, None) => Err(Invalid::Ahead { pages, first }),
+        }
+    }
+
     fn triple(&mut self) -> Result<Triple, Invalid> {
         let len = self.u64();
         let digest = self.u64();
@@ -196,7 +240,7 @@ impl In<'_> {
     }
 }
 
-/// The length of a version-1 body with `flags`.
+/// The length of a body with `flags`.
 fn body_len(flags: u8) -> usize {
     let part = |bit: u8, len: usize| if flags & bit == 0 { 0 } else { len };
     // The flags byte and the debt byte, and each part present.
@@ -206,17 +250,22 @@ fn body_len(flags: u8) -> usize {
         part(HAS_ANCHOR, 24),
         part(HAS_BUDGET, 9),
         part(HAS_PENDING, 40),
+        part(HAS_AHEAD, 24),
         1,
     ]
     .iter()
     .sum()
 }
 
-/// Decodes a version-1 body.
-fn decode_body(body: &[u8]) -> Result<Journal, Invalid> {
+/// Decodes a body of `version`, this binary's or older.
+fn decode_body(body: &[u8], version: u16) -> Result<Journal, Invalid> {
     let mut input = In(body);
     let [flags] = input.take::<1>();
-    let known = HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING;
+    let known = if version >= VERSION {
+        HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING | HAS_AHEAD
+    } else {
+        HAS_FLOOR | HAS_ANCHOR | HAS_BUDGET | HAS_PENDING
+    };
     if flags & !known != 0 || (flags & HAS_ANCHOR != 0 && flags & HAS_FLOOR == 0) {
         return Err(Invalid::Flags(flags));
     }
@@ -253,6 +302,11 @@ fn decode_body(body: &[u8]) -> Result<Journal, Invalid> {
         );
         Some(Proof { txid, triple, wal })
     };
+    let ahead = if flags & HAS_AHEAD == 0 {
+        None
+    } else {
+        Some(input.ahead()?)
+    };
     let unproven = match input.take::<1>() {
         [0] => Unproven::No,
         [1] => Unproven::Truncate,
@@ -264,6 +318,7 @@ fn decode_body(body: &[u8]) -> Result<Journal, Invalid> {
         unproven,
         budget,
         pending,
+        ahead,
     })
 }
 
@@ -302,6 +357,6 @@ pub fn decode(slot: &[u8; SLOT]) -> Result<Decoded, Invalid> {
     if version > VERSION {
         return Ok(Decoded::Newer { seq, version });
     }
-    let journal = decode_body(body)?;
+    let journal = decode_body(body, version)?;
     Ok(Decoded::Ours { seq, journal })
 }

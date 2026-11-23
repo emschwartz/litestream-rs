@@ -1086,11 +1086,128 @@ mod replaced_staging {
 }
 
 #[cfg(test)]
+mod wal_regrown {
+    use lsr_sim::generate::{RemoteOp, WalOp};
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{CrashKind, Hold, Op, Opts, Seed, Weights};
+
+    /// The WAL generation is regrown with the same salts: its frames get new bytes, its
+    /// commit marks stay, and one more commit follows. Before it, a bucket rollback and a
+    /// power loss left the engine's position at the start of the generation, so it staged the
+    /// next file from the regrown frames, up to a regrown commit mark. The model knew only the
+    /// regrown generation's last commit, so the oracle took that file for the commit made
+    /// there before the regrowth, whose pages the WAL no longer holds, and failed a restore
+    /// the replica answered right (seed 0x2b2 under its mixed mix, 64 operations of its
+    /// history). The model now records a commit at every regrown commit mark.
+    #[test]
+    fn a_file_staged_from_a_regrown_wal_is_judged_by_the_regrown_commit_seed_0x2b2() {
+        let seed = Seed::new(0x2b2);
+        let weights = Weights::mixed(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, &history(), &opts) {
+            panic!("{failure}");
+        }
+    }
+
+    /// `p` a process crash, `w` a power loss, `v` a vacuum in place, `s` a spill.
+    fn simple(code: &str) -> Vec<Op> {
+        code.chars()
+            .map(|c| match c {
+                'p' => Op::Crash(CrashKind::Process),
+                'w' => Op::Crash(CrashKind::Power),
+                'v' => Op::Vacuum { page_size: None },
+                _ => Op::Spill,
+            })
+            .collect()
+    }
+
+    /// The 64 operations of seed 0x2b2's drawn history that still fail without the fix.
+    fn history() -> Vec<Op> {
+        let mut ops = Vec::new();
+        ops.extend(simple("vvvvpspw"));
+        ops.push(Op::Commit {
+            pages: 3,
+            grow: true,
+        });
+        ops.extend(simple("wpvppp"));
+        ops.push(Op::WalDamage {
+            op: WalOp::RegrowWithoutCommitMarks(2844455044579060045),
+            ticks: 2,
+        });
+        ops.extend(simple("vp"));
+        ops.push(Op::WalDamage {
+            op: WalOp::RegrowSameSalts(11569191237653921190),
+            ticks: 4,
+        });
+        ops.extend(simple("ppppppppwppwppppppvw"));
+        ops.push(Op::WalDamage {
+            op: WalOp::TruncateAtFrame(32),
+            ticks: 5,
+        });
+        ops.extend(simple("p"));
+        ops.push(Op::Commit {
+            pages: 3,
+            grow: true,
+        });
+        ops.push(Op::Hold {
+            hold: Hold::LyingDisk,
+            ticks: 11,
+        });
+        ops.extend(simple("pwppwpppppppppppw"));
+        ops.push(Op::Hold {
+            hold: Hold::LyingDisk,
+            ticks: 9,
+        });
+        ops.push(Op::Remote(RemoteOp::RollBack));
+        ops.extend(simple("w"));
+        ops.push(Op::WalDamage {
+            op: WalOp::RegrowSameSalts(6923337998852091411),
+            ticks: 6,
+        });
+        ops
+    }
+}
+
+#[cfg(test)]
 mod lagging_listings {
     use lsr_core::{StopCause, StoreError, StoreOp};
     use lsr_sim::generate::WalOp;
     use lsr_sim::run::run_ops;
     use lsr_sim::{EnvFault, FaultShape, Op, Opts, Seed, Target, Weights};
+
+    /// A lagging listing hides a merged level-1 file, so an as-of restore through the hold's
+    /// view plans from the finer level-0 files under it, while the raw replica plans from the
+    /// merged file and takes the earlier state for an instant inside it. Both answers meet the
+    /// as-of bound, which promises only that nothing begun after the instant is in the answer
+    /// (G3 in `docs/BEHAVIOR.md`), and the hold judge failed the run for not matching the
+    /// raw answer (seed 0x80e under its mixed mix, shrunk to 14 operations). It now holds an
+    /// as-of answer that differs from the raw one to the bound.
+    #[test]
+    fn an_as_of_restore_through_a_lagging_listing_is_held_to_the_as_of_bound_seed_0x80e() {
+        let seed = Seed::new(0x80e);
+        let weights = Weights::mixed(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: weights.block_crash_law,
+            lying_wal_sync: weights.lying_wal_sync,
+            after_restart: weights.after_restart,
+            clock_law: weights.clock_law,
+            overlap: weights.overlap,
+            error_domain: weights.error_domain,
+            known_wrong: weights.known_wrong,
+            staging_fs: weights.staging_fs,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, crate::histories::seed_0x80e::OPS, &opts) {
+            panic!("{failure}");
+        }
+    }
 
     /// The replica's listings lag; the engine uploads transactions 1 and 2,
     /// its staging directory is wiped and it boots again with the WAL intact.
@@ -1258,6 +1375,39 @@ mod refused_upload {
             ..Opts::default()
         };
         if let Err(failure) = run_ops(seed, &ops, &opts) {
+            panic!("{failure}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod short_object_left {
+    use crate::histories as h;
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{Opts, Seed, Weights};
+
+    /// An upload the store kept one byte short, whose delete then failed: the short object
+    /// stays in the replica, damage the engine did not cause and may not remove on one bad
+    /// read. Reading it degrades the sync task with
+    /// `RemoteCorrupt`, which the judge excuses as it does a corrupted publish. Seeds 0x113,
+    /// 0x6c5 and 0xb8b of the mixed weights took the same path.
+    #[test]
+    fn a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c() {
+        let seed = Seed::new(0x4c);
+        let w = Weights::mixed(seed);
+        let opts = Opts {
+            drawn: true,
+            block_crash_law: w.block_crash_law,
+            lying_wal_sync: w.lying_wal_sync,
+            after_restart: w.after_restart,
+            clock_law: w.clock_law,
+            overlap: w.overlap,
+            error_domain: w.error_domain,
+            known_wrong: w.known_wrong,
+            staging_fs: w.staging_fs,
+            ..Opts::default()
+        };
+        if let Err(failure) = run_ops(seed, h::seed_0x4c::OPS, &opts) {
             panic!("{failure}");
         }
     }

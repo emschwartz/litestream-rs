@@ -324,6 +324,23 @@ impl History {
         (self.judge.counts(), self.unjudged)
     }
 
+    /// Holds an `AsOf(instant)` answer whose content is `digest` to the as-of bound alone (G3
+    /// in `docs/BEHAVIOR.md`): a state of the history whose commit began before the instant. The
+    /// bound is an upper one, so a restore that saw finer files than another may answer newer and
+    /// still meet it.
+    ///
+    /// # Errors
+    /// The judge's [`lsr_history::Anomaly`] when the answer breaks the bound.
+    pub fn judge_as_of(
+        &mut self,
+        instant: i64,
+        digest: Digest,
+    ) -> Result<(), lsr_history::Anomaly> {
+        self.judge
+            .as_of(&self.log, instant, digest, None)
+            .map(|_| ())
+    }
+
     /// Adds what the judge counted to `reach`.
     pub fn tally(&self, reach: &mut Reach) {
         let counts = self.judge.counts();

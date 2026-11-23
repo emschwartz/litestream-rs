@@ -217,6 +217,8 @@ side! {
     fn our_reader_end(&self) -> bool;
     /// The application commits `pages`, leaving `db_size` pages.
     fn commit(&self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit>;
+    /// Another application connection, which stays open, commits `pages` under its own checkpoint count.
+    fn other_writer_commit(&self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit>;
     /// Arms a commit the application makes inside the next tick.
     fn arm_commit_in_tick(&self, pages: Vec<(PageNo, Vec<u8>)>, db_size: u32, site: InTickSite, created_at: CreatedAt);
     /// The commit armed for the last tick, once.
@@ -295,6 +297,8 @@ side! {
     fn crash(&self, kind: CrashKind);
     /// The database as a new reader sees it.
     fn image(&self) -> Vec<u8>;
+    /// The database at each commit mark of the WAL's generation, ascending, with its frame end.
+    fn commit_images(&self) -> Vec<(u32, Vec<u8>)>;
     /// The database file's bytes.
     fn db_file(&self) -> Vec<u8>;
     /// The WAL file's bytes, if there is a file.

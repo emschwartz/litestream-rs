@@ -14,7 +14,7 @@ use lsr_ltx::{Timestamp, Txid};
 use lsr_wal::CommittedEnd;
 
 use super::{Actor, Task, Tick, Waiter};
-use crate::failstop::{Trip, trip};
+use crate::failstop::{Observed, Trip, WalMark, trip};
 use crate::fault::{Fault, Next, SnapshotCause};
 use crate::layout::FileKey;
 use crate::source::WalSource;
@@ -39,6 +39,11 @@ const fn doubt_only(cause: SnapshotCause) -> bool {
         | SnapshotCause::WalSyncFailed
         | SnapshotCause::StagedUnverified { .. } => false,
     }
+}
+
+/// The clock's mark of a committed WAL end.
+const fn mark_of(end: CommittedEnd) -> WalMark {
+    WalMark::new(end.salts(), end.offset().frame_index())
 }
 
 /// Whether a failure of the task can keep a commit off the replica: the tasks a commit passes
@@ -100,38 +105,69 @@ impl Actor {
         if let Some(replicated) = self.replicated() {
             self.kept.quiet.retain(|txid| *txid > replicated);
         }
-        let was_behind = self.kept.lag.since().is_some();
         let end = wal.committed().ok().map(|read| read.end());
-        let behind = self.behind(end, was_behind);
-        let oldest = self.engine.witnesses.oldest_stamp_but(&self.kept.quiet);
+        self.note_doubt_baseline(end);
+        let seen = self.observed(end);
         let bound = self.kept.cfg.max_unreplicated_age;
-        self.kept.lag.observe(behind, oldest, bound, now);
+        self.kept.lag.observe(seen, bound, now);
     }
 
-    /// Whether anything committed is off the replica: WAL frames past the synced position, a
-    /// staged file not confirmed on the replica, or a snapshot owed while lag was already
-    /// running for a cause that found commits past staging (they are in the database file
-    /// only). A wal-index that cannot be read
-    /// says nothing new: the lag stands as it was.
-    fn behind(&self, end: Option<CommittedEnd>, was_behind: bool) -> bool {
-        let wal_ahead = end.map_or(was_behind, |end| self.wal_ahead(end));
-        let unconfirmed = self.staged() > self.replicated() && !self.only_quiet_pending();
-        let owed = was_behind && self.pending().is_some_and(|cause| !doubt_only(cause));
-        wal_ahead || unconfirmed || owed
+    /// While a snapshot is owed for a doubt alone, with no synced position and every staged
+    /// file on the replica, notes where the WAL ended when the doubt was first observed: the
+    /// engine cannot tell which of those frames the replica holds, and a doubt is not a finding
+    /// of commits (`docs/decisions.md` D81), so only frames past that end are lag. Noted only
+    /// while no clock runs; a commit that landed between the boot and this observation is
+    /// missed until the snapshot stages it, a late trip, never a false one.
+    fn note_doubt_baseline(&mut self, end: Option<CommittedEnd>) {
+        let doubting = self.position().is_none()
+            && self.pending().is_some_and(doubt_only)
+            && self.staged() <= self.replicated();
+        if !doubting {
+            self.kept.doubt_baseline = None;
+        } else if self.kept.doubt_baseline.is_none() && self.kept.lag.since().is_none() {
+            self.kept.doubt_baseline = end.map(mark_of);
+        }
     }
 
-    /// Whether every staged file the replica lacks holds no commit of the application's.
-    fn only_quiet_pending(&self) -> bool {
-        let (Some(staged), replicated) = (self.staged(), self.replicated()) else {
-            return false;
+    /// What is off the replica after a tick: WAL frames past the synced position (or past the
+    /// doubt's baseline), the newest and the oldest pending staged file holding a commit, and
+    /// a snapshot owed while lag was already running for a cause that found commits past
+    /// staging (they are in the database file only). A wal-index that cannot be read says
+    /// nothing new: frames the clock dated stay dated.
+    fn observed(&self, end: Option<CommittedEnd>) -> Observed {
+        let was_behind = self.kept.lag.since().is_some();
+        let ahead = match end {
+            Some(end) => Some(mark_of(end))
+                .filter(|mark| self.wal_ahead(end) && self.kept.doubt_baseline != Some(*mark)),
+            None => self.kept.lag.unstaged_mark(),
         };
-        let first = replicated.map_or(Some(Txid::MIN), Txid::next);
-        let Some(first) = first.filter(|first| *first <= staged) else {
-            return false;
-        };
-        let pending = staged.get().saturating_sub(first.get()).saturating_add(1);
-        let quiet = self.kept.quiet.range(first..=staged).count();
-        u64::try_from(quiet).is_ok_and(|quiet| quiet == pending)
+        let synced = self.position().map(|position| {
+            WalMark::new(
+                position.cursor().salts(),
+                position.synced().offset().frame_index(),
+            )
+        });
+        Observed {
+            ahead,
+            synced,
+            staged: self.staged(),
+            pending: self.newest_pending_with_commits(),
+            replicated: self.replicated(),
+            oldest: self.engine.witnesses.oldest_stamp_but(&self.kept.quiet),
+            owed: was_behind && self.pending().is_some_and(|cause| !doubt_only(cause)),
+        }
+    }
+
+    /// The newest staged file the replica lacks that is not known to hold no commit.
+    fn newest_pending_with_commits(&self) -> Option<Txid> {
+        let staged = self.staged()?;
+        let first = self.replicated().map_or(Some(Txid::MIN), Txid::next)?;
+        let mut at = staged;
+        // Bounded by the quiet marks: each step down passes one.
+        while self.kept.quiet.contains(&at) {
+            at = at.prev().filter(|prev| *prev >= first)?;
+        }
+        (at >= first).then_some(at)
     }
 
     /// Notes the snapshot a step just staged as `key` as quiet when it was staged while nothing
@@ -149,7 +185,8 @@ impl Actor {
         // No clock running: the last observation found every staged file on the replica, or
         // only quiet ones.
         let caught_up = self.kept.lag.since().is_none();
-        if doubt_only(cause) && caught_up && self.ended_where_synced(end) {
+        let quiet_end = self.ended_where_synced(end) || self.ended_at_doubt_baseline(end);
+        if doubt_only(cause) && caught_up && quiet_end {
             self.kept.quiet.insert(key.range().max());
         }
     }
@@ -167,6 +204,20 @@ impl Actor {
         };
         self.position()
             .is_some_and(|was| at(&was) == at(reached.position()))
+    }
+
+    /// Whether a snapshot step with no synced position before it ended where the WAL ended when
+    /// its doubt was first observed: it holds the frames the doubt was about and nothing newer.
+    fn ended_at_doubt_baseline(&self, end: &StepEnd) -> bool {
+        let StepEnd::Through(reached) = end else {
+            return false;
+        };
+        let position = reached.position();
+        let mark = WalMark::new(
+            position.cursor().salts(),
+            position.synced().offset().frame_index(),
+        );
+        self.kept.doubt_baseline == Some(mark)
     }
 
     /// Notes a file a sync step just staged as `key` as quiet: it changes no page of the state
