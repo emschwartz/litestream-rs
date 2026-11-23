@@ -1,0 +1,6 @@
+name = "failstop-boot-timeout-holds"
+fix = "d14e6e4"
+package = "lsr-core"
+tests = [
+    "lag::a_timeout_at_boot_is_no_refusal",
+]

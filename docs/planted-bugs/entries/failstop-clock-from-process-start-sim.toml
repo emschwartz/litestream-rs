@@ -1,0 +1,8 @@
+name = "failstop-clock-from-process-start-sim"
+patch = "failstop-clock-from-process-start"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_crash_loop_trips_for_age",
+]

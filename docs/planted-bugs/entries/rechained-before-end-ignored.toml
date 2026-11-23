@@ -1,0 +1,9 @@
+# A running position past the start whose frames were regrown from a header written again
+# (same salts, another seed) continues on the old running checksum; the next scan meets the
+# regrown chain as damage below the committed end.
+name = "rechained-before-end-ignored"
+fix = "6305fb48"
+package = "lsr-core"
+tests = [
+    "frames_regrown_from_a_header_written_again_are_a_rewind",
+]

@@ -1,0 +1,4 @@
+name = "web-identity-before-env-keys"
+fix = "plant"
+package = "lsr-store-s3"
+tests = ["chain::sources_tests::environment_keys_come_before_web_identity_and_web_identity_before_the_host"]

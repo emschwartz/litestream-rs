@@ -1,0 +1,4 @@
+name = "park-ignores-callers-reading"
+fix = "af15d43"
+package = "lsr-replica"
+tests = ["a_park_returns_for_a_step_back_between_the_callers_reading_and_the_park"]

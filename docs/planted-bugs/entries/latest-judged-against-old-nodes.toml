@@ -1,0 +1,7 @@
+# The history judge remembers the previous latest restore as the nodes that held its content
+# then, so a redo that rebuilds that content on a new branch reads as an unreported step back.
+name = "latest-judged-against-old-nodes"
+fix = "5f49ebf"
+package = "lsr-history"
+test_bin = "history"
+tests = ["judge::a_restore_past_a_state_the_redo_rebuilt_went_forward"]

@@ -1,0 +1,8 @@
+name = "failstop-no-clear-sim"
+patch = "failstop-no-clear"
+fix = "4b388f2"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "failstop::a_store_down_past_the_bound_trips_in_time_and_clears_after",
+]

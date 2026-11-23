@@ -27,8 +27,8 @@ use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
 use crate::seed::Seed;
-use crate::side::SqliteSide;
-use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode, SimSqlite};
+use crate::side::{SideMaker, SqliteSide};
+use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode};
 use crate::staging::StagingRaw;
 use crate::store::{
     FaultHandle, Faults, HighWater, Lost, Recorder, RecorderLog, Volatile, VolatileHandle,
@@ -88,22 +88,6 @@ fn without_origin(bytes: &[u8]) -> Option<Vec<u8>> {
 /// The same pages under a header `edit` changed.
 fn rewritten(bytes: &[u8], edit: impl FnOnce(&mut lsr_ltx::HeaderFields)) -> Option<Vec<u8>> {
     reencoded(bytes, edit, |_| {})
-}
-
-/// The same file, header and all, with every byte of its first page
-/// inverted: a whole, valid file that holds what no commit held.
-fn forged(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut first = true;
-    reencoded(
-        bytes,
-        |_| {},
-        |data| {
-            if first {
-                data.iter_mut().for_each(|byte| *byte = !*byte);
-                first = false;
-            }
-        },
-    )
 }
 
 /// The file re-encoded, with its header through `edit` and each page's
@@ -309,7 +293,13 @@ impl World {
     /// A world with a database of `db_pages` pages, empty stores and no faults.
     #[must_use]
     pub fn new(seed: Seed, page_size: PageSize, db_pages: u32) -> Self {
-        let sqlite = SimSqlite::new(page_size, db_pages, seed.stream(1));
+        Self::over(seed, SideMaker::default().make(seed, page_size, db_pages))
+    }
+
+    /// A world over `sqlite`, with empty stores and no faults.
+    #[must_use]
+    pub fn over(seed: Seed, sqlite: Arc<dyn SqliteSide>) -> Self {
+        let page_size = sqlite.page_size();
         let clock = Arc::new(FakeClock::new(Timestamp::from_unix_millis(EPOCH_MILLIS)));
         let high = HighWater::default();
         let staging_raw = StagingRaw::Mem(MemStore::new());
@@ -349,7 +339,7 @@ impl World {
         ));
         Self {
             seed,
-            sqlite: Arc::new(sqlite),
+            sqlite,
             clock,
             sim_clock,
             high,
@@ -412,10 +402,16 @@ impl World {
     ) -> CommitId {
         let before = self.model.newest_image().db_size();
         self.retire_generation(app.salts);
-        let mut written = pages.to_vec();
-        if db_size > before {
-            written.extend(self.re_added(pages, before, db_size));
-        }
+        let (written, db_size) = match self.sqlite.take_written() {
+            Some(real) => (real.pages, real.db_size),
+            None => {
+                let mut written = pages.to_vec();
+                if db_size > before {
+                    written.extend(self.re_added(pages, before, db_size));
+                }
+                (written, db_size)
+            }
+        };
         let id = self
             .model
             .commit(&written, db_size, app, self.remote_recorder.len());
@@ -528,18 +524,26 @@ impl World {
     pub fn app_shrink(&mut self, db_size: u32) -> Option<CommitId> {
         let app = self.sqlite.shrink(db_size)?;
         self.retire_generation(app.salts);
-        let size = self.sqlite.page_size();
-        let image = self.sqlite.image();
-        let first = image.get(..size.bytes()).unwrap_or_default().to_vec();
-        let pages: Vec<(PageNo, Vec<u8>)> = PageNo::new(1, size)
-            .map(|one| (one, first))
-            .into_iter()
-            .collect();
+        let (pages, db_size) = match self.sqlite.take_written() {
+            Some(real) => (real.pages, real.db_size),
+            None => (self.first_page(), db_size),
+        };
         let id = self
             .model
             .commit(&pages, db_size, app, self.remote_recorder.len());
         self.log_history();
         Some(id)
+    }
+
+    /// Page 1 as the rules hold it now.
+    fn first_page(&self) -> Vec<(PageNo, Vec<u8>)> {
+        let size = self.sqlite.page_size();
+        let image = self.sqlite.image();
+        let first = image.get(..size.bytes()).unwrap_or_default().to_vec();
+        PageNo::new(1, size)
+            .map(|one| (one, first))
+            .into_iter()
+            .collect()
     }
 
     /// VACUUM into pages of `new` with every connection closed: the whole
@@ -566,6 +570,7 @@ impl World {
     /// replica recorder's length when the tick started, so no earlier put can be
     /// taken to cover it.
     pub fn sync_model_at(&mut self, at: usize) {
+        let written = self.sqlite.take_written();
         let frames = self.sqlite.mx_frame();
         let salts = self.sqlite.salts();
         self.retire_generation(salts);
@@ -579,8 +584,12 @@ impl World {
             .and_then(|id| self.model.rec(id))
             .is_some_and(|rec| rec.salts == salts && rec.end.get() == end.get());
         if !known {
+            let (pages, size) = written.map_or_else(
+                || (Vec::new(), self.sqlite.db_size()),
+                |real| (real.pages, real.db_size),
+            );
             self.model
-                .commit(&[], self.sqlite.db_size(), AppCommit { salts, end }, at);
+                .commit(&pages, size, AppCommit { salts, end }, at);
             self.log_history();
         }
     }
@@ -1031,23 +1040,6 @@ impl World {
         Ok(found && done)
     }
 
-    /// Rewrites the newest level-0 file as another whole, valid file under
-    /// the same key and header ([`forged`]); false when there is none or it
-    /// does not decode.
-    ///
-    /// # Errors
-    /// As [`Self::edit_newest_staged`].
-    pub fn forge_newest_staged(&self) -> Result<bool, StagedEditError> {
-        let mut done = false;
-        let found = self.edit_newest_staged(|bytes| {
-            if let Some(other) = forged(bytes) {
-                *bytes = other;
-                done = true;
-            }
-        })?;
-        Ok(found && done)
-    }
-
     fn staged_files(&self) -> Result<Vec<FileInfo>, StoreError> {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let mut files = Vec::new();
@@ -1075,22 +1067,6 @@ impl World {
             }
         }
         Ok(None)
-    }
-
-    /// Whether staging holds `key` under bytes the engine never put there: a
-    /// copy an operation rewrote or put back, which stays the operator's for as
-    /// long as it is staged, whatever the replica holds now.
-    ///
-    /// # Errors
-    /// The store's error other than a missing key.
-    pub fn staged_not_the_engines(&self, key: FileKey) -> Result<bool, StoreError> {
-        match read_all(&self.staging_raw, &key) {
-            Ok(bytes) => Ok(!self
-                .engine_puts(0)
-                .contains(&(key, crate::store::content_digest(&bytes)))),
-            Err(StoreError::NotFound { .. }) => Ok(false),
-            Err(other) => Err(other),
-        }
     }
 
     /// Every (key, digest) the staging recorder took a put of since event `since`.

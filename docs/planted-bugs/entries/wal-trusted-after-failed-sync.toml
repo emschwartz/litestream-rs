@@ -1,0 +1,9 @@
+# After a failed sync of the WAL, the retry syncs again and trusts the success: the generation's
+# frames the failure covered are staged. Only the simulator models the lost writeback (the real
+# kernel's pages stay readable from the page cache), so it is the one that sees bytes a power
+# loss would take.
+name = "wal-trusted-after-failed-sync"
+fix = "claude/wal-sync-failed"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::wal_fsync_fails"]

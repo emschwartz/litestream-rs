@@ -1,0 +1,4 @@
+name = "inside-file-sole-base"
+fix = "b4e89d9"
+package = "lsr-core"
+tests = ["a_target_inside_the_only_transaction_one_file_names_it"]

@@ -1,0 +1,5 @@
+# One failed read of the replica's copy takes it as torn and writes the staged file over it.
+name = "replica-replaced-on-one-read"
+fix = "34f1694"
+package = "lsr-core"
+tests = ["one_torn_read_of_the_replica_copy_does_not_write_over_it"]
