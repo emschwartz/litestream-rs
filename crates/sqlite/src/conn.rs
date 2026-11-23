@@ -151,6 +151,9 @@ fn connect(path: &Path, config: &SqliteConfig) -> Result<Connection, rusqlite::E
     };
     conn.busy_timeout(Duration::ZERO)?;
     conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    // These connections run the checkpoints: set, not left to a build default that
+    // `LIBSQLITE3_FLAGS` can lower, so a backfill always syncs the database file.
+    conn.pragma_update(None, "synchronous", "FULL")?;
     Ok(conn)
 }
 
@@ -609,17 +612,25 @@ pub unsafe fn app_connection_raw(
     app_connection_for(&conn, database)
 }
 
-/// Reads back what [`app_connection`] sets.
+/// Reads back what [`app_connection`] sets, and that the connection syncs at all: its
+/// `synchronous` level is the application's to choose, except OFF.
 ///
 /// # Errors
-/// [`SetupError::AutocheckpointOn`] for a connection that is not set up; [`SetupError::Sqlite`]
-/// when the read itself fails.
+/// [`SetupError::AutocheckpointOn`] for a connection that is not set up;
+/// [`SetupError::SynchronousOff`] for one that never syncs; [`SetupError::Sqlite`] when a read
+/// itself fails.
 pub fn check_app_connection(conn: &Connection) -> Result<(), SetupError> {
     let pages: i64 = conn
         .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
         .map_err(SetupError::Sqlite)?;
     if pages != 0 {
         return Err(SetupError::AutocheckpointOn { pages });
+    }
+    let level: i64 = conn
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(SetupError::Sqlite)?;
+    if level == 0 {
+        return Err(SetupError::SynchronousOff);
     }
     Ok(())
 }
@@ -636,6 +647,21 @@ mod tests {
         conn.execute_batch("CREATE TABLE t(x)").unwrap();
         drop(conn);
         Sqlite::open(&db).unwrap()
+    }
+
+    /// The replicator's connections run its checkpoints, so they sync the database file and
+    /// the WAL at FULL whatever the build's default is (`LIBSQLITE3_FLAGS` can change it).
+    #[test]
+    fn the_replicator_s_connections_sync_at_full() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sqlite = opened(dir.path());
+        let inner = sqlite.lock();
+        for conn in [&inner.reader, &inner.writer] {
+            let level: i64 = conn
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(level, 2, "FULL");
+        }
     }
 
     /// A ROLLBACK that fails leaves the writer inside its transaction. When that was tracked

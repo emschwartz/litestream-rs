@@ -705,3 +705,12 @@ Note: `docs/BEHAVIOR.md` section "open items" also uses ids D1 to D11 for defect
 - **Cost accepted:** the answer can be behind the writer by the time it is published, which is true of every restore of a live replica. A listing whose lag grows by exactly one file per listing for 64 listings would also end here; no store is known to do that.
 - **Revisit if:** a store shows listings that lag but always show the previously read file.
 - **Links:** #126, `crates/core/src/restore.rs` (`Retries`).
+
+## D151. The `synchronous` level of the replicator's and the application's connections (delegated)
+
+- **Options:** leave both to the build's default; set the replicator's own connections to NORMAL or FULL; set the application's too, or only refuse a level that cannot work.
+- **Choice:** the replicator's two connections set `synchronous = FULL` when they open. `check_app_connection` refuses an application connection at OFF (`SetupError::SynchronousOff`) and accepts NORMAL, FULL and EXTRA; `app_connection` does not change the level.
+- **Why:** the replicator's connections run the checkpoints, and a backfill syncs the database file only at NORMAL or above. Their level came from the compile default, which `LIBSQLITE3_FLAGS` can lower (outside review, issue #197, R3). FULL over NORMAL costs one WAL sync per commit on these connections, which commit only the rare `_litestream_seq` bump. The application's level is its own durability choice, and the engine's barrier (it syncs the WAL before staging) covers NORMAL; OFF syncs nothing, so a power loss takes back commits the replica holds and the application forks history.
+- **Cost accepted:** an application that runs at OFF on purpose fails the check; it must raise the level to replicate.
+- **Revisit if:** the `_litestream_seq` bumps become frequent enough that a sync each costs.
+- **Links:** #197.

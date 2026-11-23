@@ -129,6 +129,10 @@ pub enum SetupError {
         /// The configured page threshold.
         pages: i64,
     },
+    /// The connection never syncs (`synchronous = OFF`): a power loss can take back commits
+    /// the replica already holds, and the application then forks history under the same WAL.
+    #[error("synchronous is OFF: set NORMAL or FULL")]
+    SynchronousOff,
     /// The connection has no database file (in-memory or temporary), so it cannot be the
     /// replicated database.
     #[error("the connection has no database file")]

@@ -2012,3 +2012,10 @@ tests = ["maintain::tests::a_rejected_compaction_output_is_deleted_by_the_execut
 # Its sim kill was seed 0x14's verify history, which stopped reaching a rejected compaction output
 # when that test was re-pinned to seed 0xd. An unaided search for another is masked while the
 # swarm fails on a clean tree; add a sim entry once it is clean again.
+
+[[bug]]
+name = "app-synchronous-off-accepted"
+fix = "claude/sqlite-synchronous"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = ["check_refuses_a_connection_that_never_syncs"]
