@@ -29,7 +29,7 @@ mod fixed {
     }
 
     /// `weights` with the replica on `MemStore` and no provider faults: the per-push seeds keep
-    /// the histories they had before the S3 replica was drawn (`docs/decisions.md` D124), and
+    /// the histories they had before the S3 replica was drawn (`docs/decisions/D124.md`), and
     /// `remote_s3` runs S3 seeds of its own.
     fn on_mem(mut weights: Weights) -> Weights {
         weights.remote_s3 = false;

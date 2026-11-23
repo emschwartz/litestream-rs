@@ -1,4 +1,4 @@
-//! The replica on the real S3 store (`lsr_sim::remote`, `docs/decisions.md` D124): swarm seeds
+//! The replica on the real S3 store (`lsr_sim::remote`, `docs/decisions/D124.md`): swarm seeds
 //! run with the replica on `S3Store` over its in-memory bucket and provider faults drawn, and
 //! each must pass wherever the same history passes on `MemStore` (HTTP faults are skipped there,
 //! so the two runs draw the same operations). A seed that fails on both is an engine defect
