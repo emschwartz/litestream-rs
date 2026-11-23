@@ -1,11 +1,15 @@
-# Killed unaided: no test was written for this defect. The swarm's own history (seed 44's drawn
-# mix) fails under it. The same plant at the witness's own anchor is witness-anchor-held below. It
-# re-expresses on main the plant the history
-# judge's work measured on the boot-witness branch: the boot accepts the newest staged file as
-# its position whenever the WAL holds a commit frame at its end in the same generation, without
-# comparing its last page or the range it covers.
+# The boot accepts the newest staged file as its position whenever the WAL holds a commit frame
+# at its end in the same generation, without comparing its last page or the range it covers.
+# Once killed only by the swarm (seed 44); the direct recovery and witness tests below catch it.
 name = "anchor-any-tail"
 fix = "plant"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["unaided::swarm_seed_44_restores_only_committed_states"]
+package = "lsr-core"
+tests = [
+    "actor::tests::witness::a_pending_file_regrown_after_another_tail_is_not_uploaded_on_the_old_one",
+    "actor::tests::witness::a_tail_whose_pages_the_wal_does_not_hold_anchors_nothing",
+    "recover::remote::tests::the_replicas_newest_staged_file_decides_as_the_same_file_staged_would",
+    "recover::tests::a_newest_staged_file_lacking_a_page_the_range_holds_is_a_rewind",
+    "recover::tests::a_range_regrown_with_another_commit_size_is_a_rewind",
+    "recover::tests::a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued",
+    "recover::tests::the_loader_calls_a_page_with_other_bytes_a_mismatch_and_a_missing_one_not_in_newest_staged_file",
+]

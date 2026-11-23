@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 8eb785b1..b88f9f18 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -310,7 +310,7 @@ async fn list_step<L: ObjectStore, S: ObjectStore>(
+                 TailVerdict::Sound => newest,
+                 // Replacing the tail would end the replica below a file the listing shows that
+                 // already holds it: an end the boot cannot prove, so it stops.
+-                TailVerdict::Replace if held_above(&inventory, tail) => {
++                TailVerdict::Replace if false && held_above(&inventory, tail) => {
+                     return Err(fail(state, Fault::RemoteCorrupt));
+                 }
+                 TailVerdict::Replace => tail.prev().max(confirmed),

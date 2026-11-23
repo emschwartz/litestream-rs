@@ -54,12 +54,12 @@ recovered_by = "sim::`a_staging_backup_put_back_while_down_is_refused_at_boot`"
 [[row]]
 table = "Boot"
 id = "BOOT-5"
-circumstance = "A staged file the replica may still need fails verification. First failed read: nothing is deleted, the boot fails with `StagedLost` and runs again. Same file fails on the next try: it and every staged file after it are deleted (`upload.rs`, `actor.rs`)"
+circumstance = "A staged file the replica may still need fails verification. First failed read: nothing is deleted, the boot fails with `StagedLost` and runs again. Same file fails on the next try: it and every staged file after it are deleted (`upload.rs`, `actor.rs`). Recovery's own read of the newest staged file is held to the same rule: one that makes it look unreadable fails the boot with `StagedLost` first (D168)"
 response = "retry once, then: if recovery continues from the newest file left, continue, and the WAL stages the deleted range again; otherwise snapshot, `NewestStagedFileUnreadable` Before deleting, the engine has the driver keep a takeover record through what the deleted files vouched for (`Event::TakeoverWanted`, BOOT-30), so a crash before the snapshot does not make the next boot refuse them. While running, the same drop leaves its record's ids to the uploader's next listing, never to another-writer judgement (UP-10)."
 signal = "\"retrying\", then none or `newest_staged_file_unreadable`"
 at_risk = "When a snapshot follows: the restore points of the deleted, unpublished files. Their end state is in the snapshot. No committed data is lost"
 recovery = "Automatic"
-detected_by = "core::`one_bad_read_of_a_staged_file_at_boot_drops_nothing`, core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`, core::`a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot`, core::`a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next`, sim::`a_torn_staged_file_is_dropped_seed_0x25`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`; plant::`delete-on-one-failed-read-boot`, plant::`boot-snapshot-after-unreadable`"
+detected_by = "core::`one_bad_read_of_a_staged_file_at_boot_drops_nothing`, core::`witness::one_lying_read_of_the_newest_staged_header_retries_the_boot`, core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`, core::`a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot`, core::`a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next`, sim::`a_torn_staged_file_is_dropped_seed_0x25`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`; plant::`delete-on-one-failed-read-boot`, plant::`boot-snapshot-after-unreadable`"
 recovered_by = "sim::`a_torn_staged_file_is_dropped_seed_0x25`"
 notes = "A deleted file the replica already holds leaves staging behind the replica, which recovery answers with `BehindRemote`, so continuing never stages new content under a transaction the replica shows. Before, the snapshot was taken even when the WAL could regenerate the files (D14)"
 
@@ -113,11 +113,11 @@ in_review = "#89 keeps the staged snapshot if the process dies before uploading 
 table = "Boot"
 id = "BOOT-10"
 circumstance = "Same salts and length, but the frame before the staged end is not a commit frame, or its page differs from the staged file's"
-response = "snapshot, `PrevFrameMismatch` or `LastPageMismatch`"
+response = "snapshot, `PrevFrameMismatch` or `LastPageMismatch`. A `LastPageMismatch` that nothing the sweep or the witness passes proved explains rests on one read of the newest staged file: the first boot fails with `StagedLost` and only the next boot that reads the same snapshots (D168)"
 signal = "`prev_frame_mismatch`, `last_page_mismatch`"
 at_risk = "As BOOT-7"
 recovery = "Automatic"
-detected_by = "core::`rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch`, core::`rule_9_a_last_page_that_differs_snapshots`, sim::`wal_rewritten_same_length`, sim::`wal_regrown_same_salts_diff_bytes`"
+detected_by = "core::`rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch`, core::`rule_9_a_last_page_that_differs_snapshots`, core::`witness::one_lying_read_of_the_newest_staged_pages_retries_the_boot`, sim::`wal_rewritten_same_length`, sim::`wal_regrown_same_salts_diff_bytes`"
 recovered_by = "sim::`wal_rewritten_same_length`, sim::`wal_regrown_same_salts_diff_bytes`"
 
 [[row]]
@@ -182,11 +182,11 @@ notes = "Fixed on this branch (`claude/survival-tests`): with staging gone and t
 table = "Boot"
 id = "BOOT-16"
 circumstance = "The replica's newest level-0 object is a short or torn object, beside a staged file that verifies"
-response = "The staged file is uploaded over it under the same key. When the boot witness then refuses that staged file (BOOT-11), a read (never a listing, which may lag) that finds the key on the replica confirms it as the replica holds it, and the snapshot goes above it: new content never takes a transaction the replica holds"
-signal = "none"
+response = "The staged file is uploaded over it under the same key, unless a level 1 to 9 file already holds that transaction: then the boot stops with `RemoteCorrupt` (D63), since the replacement would give it a second content. When the boot witness then refuses that staged file (BOOT-11), a read (never a listing, which may lag) that finds the key on the replica confirms it as the replica holds it, and the snapshot goes above it: new content never takes a transaction the replica holds"
+signal = "none; `remote_corrupt` when a higher level holds the transaction"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`corrupt_l0_publish_then_power_loss`, core::`a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica`; plant::`witness-refused-key-listed`"
+detected_by = "sim::`corrupt_l0_publish_then_power_loss`, core::`a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica`, core::`a_torn_tail_a_higher_level_file_already_holds_is_not_replaced`; plant::`witness-refused-key-listed`, plant::`torn-tail-replaced-under-a-held-file`"
 recovered_by = "sim::`corrupt_l0_publish_then_power_loss`"
 in_review = "#96: the tail is read twice before it is judged torn"
 
@@ -205,15 +205,14 @@ notes = "The plant covers the stalled cursor only, through the core tests that k
 [[row]]
 table = "Boot"
 id = "BOOT-18"
-circumstance = "The boot's listing lags the bucket and hides the engine's own newest uploads or a snapshot"
-response = "**Read past.** After the listing the engine reads the keys a reader can name for each transaction past the listed newest (its level-0 file, a level-0 file from the first transaction, the snapshot ending at it; `core/src/probe.rs`), through the newest staged transaction and then until 3 transactions in a row are missing (at most 64). What the reads find is the replica's newest. Level-0 uploads are conditional, so a key the reads missed is refused by the bucket"
+circumstance = "The boot's listing lags the bucket and hides the engine's own newest uploads, a snapshot, or a level 1 to 8 file"
+response = "**Read past.** After the listing the engine reads the keys a reader can name for each transaction past the listed newest (its level-0 file, a level-0 file from the first transaction or from where the listed level 0 ends, the level 1 to 8 files from each start the listing implies, the snapshot ending at it; `core/src/probe.rs` `walk` and `Starts`), through the newest staged transaction and then until 3 transactions in a row are missing; with nothing staged, to its cap of 64 transactions (D63). Past the first 4 transactions only the level-0 and snapshot keys are read. A level's starts are the transaction after its newest listed file and the first file of the level below above it, where any compaction into it begins. What the reads find is the replica's newest. Level-0 uploads are conditional, so a key the reads missed is refused by the bucket"
 signal = "none"
-at_risk = "None for the engine's own hidden files. Open: a level 1 to 8 file whose level-0 inputs someone else deleted (an operator removing another writer's merged file) has a start no read can name; a lag that hides it lets the next upload reuse the freed id. Violates G1 in that case (#99)"
-recovery = "None needed; the open case: none"
-detected_by = "core::`a_listing_that_hides_the_newest_uploads_is_corrected_by_reads`, core::`a_snapshot_a_listing_hides_is_found_by_a_read`, sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`; plant::`listing-trusted-without-probe`, plant::`boot-trusts-a-stale-listing`"
-survived_by = "sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`"
-no_test = "open case: known wrong"
-notes = "The operator case fails in the swarm's lag seeds (0x4dc and 0x517 on the merged tree) and has no pinned test (#99). A probe gap wider than 3 below a hidden upload, with staging wiped, ends in a false `OtherWriter` stop"
+at_risk = "None for the engine's own hidden files, or for a hidden merged file whose level-0 inputs an operator removed while that level's previous file is listed. The case where the lag hides that previous file too is BOOT-32"
+recovery = "None needed"
+detected_by = "core::`a_listing_that_hides_the_newest_uploads_is_corrected_by_reads`, core::`a_snapshot_a_listing_hides_is_found_by_a_read`, core::`a_hidden_level_one_file_past_the_listing_is_found_by_its_level_key`, sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`, sim::`an_id_a_lagging_listing_hides_under_a_merged_file_is_not_reused_seed_0xf4721`, core::`with_nothing_staged_the_probe_walks_past_a_wide_hole`, sim::`a_boot_with_staging_wiped_walks_past_a_wide_hole_seed_0x95a`; plant::`listing-trusted-without-probe`, plant::`boot-trusts-a-stale-listing`, plant::`probe-skips-higher-levels`, plant::`probe-skips-higher-levels-sim`, plant::`boot-walk-stops-at-the-gap-with-staging-empty`, plant::`boot-walk-stops-at-the-gap-with-staging-empty-sim`"
+survived_by = "sim::`a_stale_boot_listing_does_not_stop_the_engine_on_its_own_files`, sim::`an_id_a_lagging_listing_hides_under_a_merged_file_is_not_reused_seed_0xf4721`"
+notes = "Seeds 0x517 and 0x4dc (an operator removes another writer's level-0 file after it was merged into level 1, and the lag hides the level-1 file) failed before the level keys were read; their recorded histories stopped reaching the defect on later trees, as 0x4c5's and 0x4f4's did, and swarm seed 0xf4721's recorded history (the same case: the engine reused id 2 under a hidden level-1 2-2) is the one its plant now fails. The planner's property test checks that the probe names every compaction it plans. A probe gap wider than 3 below a hidden upload, with staging wiped, ends in a false `OtherWriter` stop"
 
 [[row]]
 table = "Boot"
@@ -305,7 +304,7 @@ response = "continue"
 signal = "none"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`a_missing_journal_on_a_first_run_reports_nothing`, core::`a_restart_after_a_run_with_no_debt_reports_nothing`, cli::`a_deleted_journal_is_reported_on_the_next_start`; plant::`journal-first-run-reported`, plant::`journal-created-only-on-debt`, plant::`journal-created-only-on-debt-cli`"
+detected_by = "core::`a_missing_journal_on_a_first_run_reports_nothing`, core::`a_restart_after_a_run_with_no_debt_reports_nothing`, cli::`a_deleted_journal_is_reported_on_the_next_start`; plant::`journal-first-run-reported`, plant::`journal-created-only-on-debt`"
 notes = "Boot reads and reports, and nothing decides on it yet. The signal stands until the next boot; the first tick writes a record, so the next boot reads one (D101)"
 
 [[row]]
@@ -353,6 +352,18 @@ detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapsh
 recovered_by = "sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`"
 notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and waits its backoff, and nothing is deleted unrecorded. Pending files above every replica key vouch for nothing there, so one put back from a backup never raises the record"
 
+
+[[row]]
+table = "Boot"
+id = "BOOT-32"
+circumstance = "A lagging listing hides a level 1 to 8 file whose level-0 inputs are gone (an operator removed another writer's file after maintenance merged it) **and** hides that level's previous file, so the listing implies no start for it"
+response = "**Trusted.** No read can name the file: its start is the end of a file the listing does not show. The engine takes the replica as ending below it and uploads its next transactions into ids the hidden file holds"
+signal = "none"
+at_risk = "Each id of the hidden file past the listed newest can hold two contents, and a restore that combines the hidden file with the new level-0 files gives a state no commit made. Violates G1. Bound: two files of one level written after the listing's view (two compactions of one level inside the lag window) and level-0 inputs removed by someone other than this engine, since nothing this engine runs deletes the replica's newest level-0 file"
+recovery = "None. The scheduled verify or a test restore may notice"
+detected_by = "core::`a_listing_that_hides_two_level_one_files_hides_the_newer_ones_start`"
+no_test = "known wrong"
+notes = "The cited test pins the residue: the newer file stays unnamed. Residue of BOOT-18's level keys, accepted with them (D60 in `docs/decisions.md`, open to owner review)"
 [[row]]
 table = "Boot"
 id = "BOOT-31"
@@ -363,6 +374,17 @@ at_risk = "The commits the WAL lost, which no restore brings back. The latest st
 recovery = "Automatic. The notice and the kept restore point end seven days after the verdict, across restarts"
 detected_by = "core::`a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost`, core::`a_boot_with_a_debt_whose_file_kept_its_pages_comes_up_clean`, core::`a_recorded_verdict_stops_once_under_strict_responses`, core::`the_restore_point_is_kept_for_the_window_across_a_restart`, sidecar::`a_database_ahead_of_its_wal_is_a_notice_in_both_outputs`; plant::`debt-boot-skips-page-check`, plant::`ahead-verdict-not-journaled`, plant::`ahead-truncate-before-check`, plant::`ahead-check-counts-covered-pages`, plant::`ahead-restore-point-released-early`, plant::`ahead-window-restarts-at-boot`, plant::`ahead-notice-never-ends`"
 notes = "The simulator reaches it (seed 0x585, known-wrong cell `DatabaseAheadOfWal`); its world does not yet adopt the mixed state as damage, so it is caught by the simulator's model check, and the cell flips once the judge allows a restore at the kept restore point. A page above the newest staged size that no frame covers is not checked. Holding the read mark at the proven frame cannot prevent the mix (D104)"
+
+[[row]]
+table = "Boot"
+id = "BOOT-33"
+circumstance = "The engine confirms an upload, boots, or sees its replica roll back, with a destination named (`ActorConfig::destination`, from the replica's endpoint, bucket and prefix or directory; `core/src/actor/floor.rs`, `docs/decisions.md` D107)"
+response = "Every confirmed upload raises the confirmed floor to its transaction, anchored on the uploaded file's length, raw-byte digest and file checksum when this process holds its witness, and the end of the tick journals it. A boot reads it back for the same destination only and keeps it when its listing ends lower. A rollback seen while running withdraws the anchor and keeps the bound. Another destination's floor stays in the record, unadopted, until this destination has one; with no destination named the record's floor passes through"
+signal = "None of its own: the floor is in the journal and `Actor::floor`. A floor the journal cannot record keeps `JournalUnwritable` up"
+at_risk = "A boot does not yet act on the floor it reads: taking no id at or below it is the boot rule of issue #171, item 4, built on this. A journal lost, unwritable or unread forgets it, as every journalled fact. A changed region changes an S3 replica's default endpoint, so that boot adopts no floor"
+recovery = "Automatic"
+detected_by = "core::`a_confirmed_upload_raises_the_floor_anchored_on_the_bytes_it_put`, core::`the_floor_is_read_back_and_a_rollback_before_the_boot_does_not_lower_it`, core::`another_destination_s_floor_is_kept_in_the_record_but_not_adopted`, core::`no_destination_keeps_no_floor_and_leaves_the_record_s`, core::`a_rollback_seen_while_running_withdraws_the_anchor_and_keeps_the_bound`, core::`an_unwritable_journal_reports_a_floor_it_does_not_hold`, core::`a_rebuild_keeps_the_floor_a_lagging_journal_does_not_hold`, config::`each_replica_plan_names_its_destination_for_the_journal`"
+notes = "The floor was in the journal's format, model and writer rules from the start; until this row the engine passed a recorded one through and wrote none"
 
 [[row]]
 table = "Running"
@@ -391,9 +413,9 @@ id = "RUN-3"
 circumstance = "The engine's fsync of the WAL before staging fails (`WalSource::sync`, `sqlite/src/conn.rs`)"
 response = "degraded, `WalSyncFailed` (sync task), from wherever it was met: a sync step or a checkpoint's seal (`Actor::fault`). Nothing more is staged from that WAL generation, since a later fsync that succeeds proves nothing about the pages the kernel called clean. The retry runs a TRUNCATE checkpoint in place of a sync (SQLite copies every committed page into the database file and syncs it, then empties the WAL), then a snapshot, cause `WalSyncFailed`. A busy TRUNCATE (readers) is the same fault again. Under `STRICT`: stop"
 signal = "`wal_sync_failed` in `Health.degraded`, `/healthz` and `lsr_degraded`; then `wal_sync_failed` as the snapshot cause"
-at_risk = "Commits after the failure are unreplicated until the TRUNCATE completes, without bound while readers block it. Pages the page cache lost before the TRUNCATE are lost to SQLite too (`actor/unproven.rs` lists the limits); a checkpoint that copied frames the failed sync covered before such a loss leaves the database file ahead of its WAL, which the next boot finds (BOOT-31). The engine journal holds the debt across a restart; a kill inside the failing tick, an unwritable journal or a deleted one still forgets it (D2, narrowed)"
+at_risk = "Commits after the failure are unreplicated until the TRUNCATE completes, without bound while readers block it. Pages the kernel evicted before the cure are found by its checked read of the WAL, and the engine runs no checkpoint over them (`wal_corrupt`, D108); pages lost where the engine cannot see it (a power loss, an eviction inside the checkpoint call, the application's own checkpoint) are lost to SQLite too (`actor/unproven.rs` lists the limits); a checkpoint that copied frames the failed sync covered before such a loss leaves the database file ahead of its WAL, which the next boot finds (BOOT-31). The engine journal holds the debt across a restart; a kill inside the failing tick, an unwritable journal or a deleted one still forgets it (D2, narrowed)"
 recovery = "Automatic once the TRUNCATE completes, in this process or, through the journal, the next. Under `STRICT`: restart"
-detected_by = "sqlite::`a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`, core::`a_failed_wal_sync_stages_nothing_of_its_generation_and_ends_in_a_snapshot`, core::`a_busy_truncate_after_a_failed_wal_sync_stays_degraded_and_stages_nothing`, core::`a_wal_sync_failed_in_a_checkpoint_seal_is_never_retried_past`, core::`a_failed_wal_sync_stops_under_strict_responses`, core::`after_a_completed_truncate_staging_resumes_from_the_new_generation`, sim::`wal_fsync_fails`, sim::`wal_fsync_fails_then_restart`, sqlite::`a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`, core::`a_failed_wal_sync_is_recorded_in_the_tick_that_met_it`, core::`a_restart_after_a_failed_wal_sync_still_owes_the_truncate`, core::`a_recorded_truncate_already_run_is_not_run_again`, core::`an_unwritable_journal_is_reported_and_the_debt_is_paid_from_memory`; oracle::`StagedNotDurable`, plant::`journal-debt-not-recorded`, plant::`journal-debt-not-restored`, plant::`wal-barrier`, plant::`wal-sync-error-as-success`, plant::`wal-trusted-after-failed-sync`"
+detected_by = "core::`a_cure_that_finds_an_evicted_frame_runs_no_checkpoint`, sim::`evicted_cure::an_eviction_before_the_cure_never_ships_the_disk_s_older_bytes`, sqlite::`a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`, core::`a_failed_wal_sync_stages_nothing_of_its_generation_and_ends_in_a_snapshot`, core::`a_busy_truncate_after_a_failed_wal_sync_stays_degraded_and_stages_nothing`, core::`a_wal_sync_failed_in_a_checkpoint_seal_is_never_retried_past`, core::`a_failed_wal_sync_stops_under_strict_responses`, core::`after_a_completed_truncate_staging_resumes_from_the_new_generation`, sim::`wal_fsync_fails`, sim::`wal_fsync_fails_then_restart`, sqlite::`a_restart_after_a_failed_wal_sync_ships_no_unproven_frame`, core::`a_failed_wal_sync_is_recorded_in_the_tick_that_met_it`, core::`a_restart_after_a_failed_wal_sync_still_owes_the_truncate`, core::`a_recorded_truncate_already_run_is_not_run_again`, core::`an_unwritable_journal_is_reported_and_the_debt_is_paid_from_memory`; oracle::`StagedNotDurable`, plant::`journal-debt-not-recorded`, plant::`journal-debt-not-restored`, plant::`wal-barrier`, plant::`wal-sync-error-as-success`, plant::`wal-trusted-after-failed-sync`"
 recovered_by = "sqlite::`a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate`, sim::`wal_fsync_fails_then_snapshot`"
 notes = "The sqlite test judges restores after the snapshot and again after a power cut; the sim scenario after a power loss. No restore is judged while the task is degraded, so no S. The simulator keeps the bytes a failed sync covered off its disk for good, and oracle `StagedNotDurable` fails any level-0 file staged from them. The restart half is closed by the engine journal (`docs/journal.md`): the debt is written at the end of the tick that met the failure and restored at boot"
 
@@ -835,10 +857,10 @@ response = "degraded, `StoreDenied(Credentials \\| Permission \\| ClockSkew \\| 
 signal = "`credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls`"
 at_risk = "Lag without bound; staging grows"
 recovery = "An operator fixes what the name says: the keys, the policy, the host clock, the bucket name, or the TLS trust"
-detected_by = "sim::`creds_revoked_mid_run`, sim::`permission_revoked_mid_run`, sim::`clock_skewed_against_the_store_mid_run`, sim::`bucket_deleted_mid_run`, sim::`tls_fails_mid_run`, store-s3::`classify_denials_by_what_to_fix`, store-s3::`a_delete_refused_for_one_key_is_a_permission_denial`, sidecar::`each_access_refusal_has_its_own_name`; plant::`denial-classes`, plant::`delete-denial-transient`"
+detected_by = "sim::`creds_revoked_mid_run`, sim::`permission_revoked_mid_run`, sim::`clock_skewed_against_the_store_mid_run`, sim::`bucket_deleted_mid_run`, sim::`tls_fails_mid_run`, store-s3::`classify_denials_by_what_to_fix`, store-s3::`a_delete_refused_for_one_key_is_a_permission_denial`, sidecar::`each_access_refusal_has_its_own_name`, sim::`a_refused_upload_is_reported_as_what_the_operator_must_fix`; plant::`denial-classes`, plant::`delete-denial-transient`"
 survived_by = "sim::`revoked_credentials_degrade_and_restores_meanwhile_are_refused_or_exact`"
 recovered_by = "sim::`creds_revoked_mid_run`, sim::`permission_revoked_mid_run`, sim::`clock_skewed_against_the_store_mid_run`, sim::`bucket_deleted_mid_run`, sim::`tls_fails_mid_run`"
-notes = "Each scenario injects one refusal of its kind on one upload, then recovers. The hold in `revoked_credentials_degrade_and_restores_meanwhile_are_refused_or_exact` refuses every call on the replica for 6 ticks while the app commits: the engine reports `credentials` (on the sync task when the boot meets it), the raw replica restores committed states in the middle and at the end, and restores through the revoked store are refused: S, for credentials only. A lasting refusal of the other kinds, and staging growth, are **untested**. The chain from an HTTP response to the health name is shown in pieces: the classifier tests, the scenarios (cause), the sidecar test (name)"
+notes = "Each scenario injects one refusal of its kind on one upload, then recovers. The hold in `revoked_credentials_degrade_and_restores_meanwhile_are_refused_or_exact` refuses every call on the replica for 6 ticks while the app commits: the engine reports `credentials` (on the sync task when the boot meets it), the raw replica restores committed states in the middle and at the end, and restores through the revoked store are refused: S, for credentials only. A lasting refusal of the other kinds, and staging growth, are **untested**. The chain from an HTTP response to the health name is shown in pieces: the classifier tests, the scenarios (cause), the sidecar test (name). With the replica on the S3 store, `a_refused_upload_is_reported_as_what_the_operator_must_fix` answers one upload with a KMS, expired-token, clock-skew and missing-bucket refusal in turn and the simulator's refusal judge (`docs/decisions/D169.md`, its own table of the codes) requires each kind reported; drawn histories refuse any request, or one key of a batch delete, the same way"
 
 [[row]]
 table = "Upload"
@@ -905,7 +927,7 @@ response = "**stop**, `OtherWriter` (default). No upload, compaction or delete f
 signal = "`other_writer`; `/healthz` 503"
 at_risk = "Everything committed after the stop is unreplicated until an operator acts. The steady state makes no listing, so the other writer is seen only at the next maintenance listing or after an ambiguous commit. A maintenance listing follows this engine's own upload by at most one compaction window (30 s by default) once uploads are idle; an engine with nothing to upload lists only when its next scheduled job is due. No bound on detection is asserted: **code only**"
 recovery = "An operator removes the other writer, then restarts"
-detected_by = "core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer_seed_0x50c`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`, core::`vouch::a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy`, core::`vouch::maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload`, core::`vouch::a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas`; oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
+detected_by = "core::`maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_it`, core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer_seed_0x50c`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`, core::`vouch::a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy`, core::`vouch::maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload`, core::`vouch::a_listing_after_a_rollback_takes_the_base_its_boot_confirmed_as_the_replicas`; oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
 recovered_by = "sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`"
 notes = "R only after the other writer's files were removed. No restore is judged with two writers' files in the bucket"
 in_review = "#96"
@@ -1332,7 +1354,7 @@ response = "Replication goes on. The last good restore point is kept from retent
 signal = "`Health.verification.failing`, `lsr_verify_failing`, with the first differing page and the transaction"
 at_risk = "The replica is wrong from some point after the last good run"
 recovery = "The next passing run clears it. An operator requests a snapshot"
-detected_by = "replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_a_rollback_took_seed_0xd`; plant::`verify-no-plan-called-merged`"
+detected_by = "core::`against::a_transaction_the_replica_does_not_hold_fails_to_restore`, replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_a_rollback_took_seed_0xd`; plant::`verify-no-plan-called-merged`"
 
 [[row]]
 table = "Verify"
@@ -1967,11 +1989,11 @@ notes = "The scenario saves the meta directory, commits on, puts the meta direct
 table = "Circumstances the code does not distinguish"
 id = "WORLD-4"
 circumstance = "A restore lists the replica while the listing lags, or while files change under it"
-response = "`restore` lists, plans, and before applying a `Latest` or `AsOf` chain reads one byte of each key a reader can name for the next transaction (its level-0 file, a level-0 file from the first transaction, the snapshot ending at it), the same reads the engine's uploader makes past its listings (`core/src/probe.rs`); an empty listing is read past for every target at the first transaction's key. A key found sends the restore back to list, at most three times, then `RestoreError::ListingBehind` (exit 3). The dry run reads the same keys. A file that vanishes is replanned (REST-4). A level-0 key overwritten mid-read (BOOT-16, BOOT-18) is read as whatever bytes arrive; a mixed read fails decode"
+response = "`restore` lists, plans, and before applying a `Latest` or `AsOf` chain reads one byte of each key a reader can name for each transaction past the listing (its level-0 file, a level-0 file from the first transaction or from where the listed level 0 ends, the level 1 to 8 files from the starts the listing implies, the snapshot ending at it), walking on from the next transaction until a key is found or more than 3 transactions in a row are missing, at most 64: the same walk the engine's uploader makes past its listings (`core/src/probe.rs` `walk`); an empty listing is walked for every target from the first transaction. A key found sends the restore back to list, at most three times, then `RestoreError::ListingBehind` (exit 3). The dry run reads the same keys. A file that vanishes is replanned (REST-4). A level-0 key overwritten mid-read (BOOT-16, BOOT-18) is read as whatever bytes arrive; a mixed read fails decode"
 signal = "exit 3, `ListingBehind`"
-at_risk = "A lag that hides files past a real hole in the replica: no key past a hole can be named, so the older chain is returned as the latest. A replica whose first transaction's file was retained away still looks empty to a listing that hides everything"
+at_risk = "A lag that hides files past a hole in the replica wider than the walk's gap, right after the listing's end: WORLD-42. A replica whose first transaction's file was retained away still looks empty to a listing that hides everything"
 recovery = "Run again"
-detected_by = "core::`a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing`, core::`a_hidden_snapshot_past_the_listing_fails_an_as_of_restore`, core::`a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica`, cli::`a_dry_run_over_a_lagging_listing_fails_like_the_restore`, cli::`if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing`; plant::`restore-trusts-listing`, plant::`empty-listing-is-empty-replica`, plant::`dry-run-trusts-listing`"
+detected_by = "core::`a_newest_file_the_listing_hides_fails_the_restore_and_publishes_nothing`, core::`a_hidden_snapshot_past_the_listing_fails_an_as_of_restore`, core::`a_listing_that_shows_nothing_over_a_first_file_is_not_an_empty_replica`, core::`a_hole_right_after_a_lagging_listing_does_not_hide_the_files_past_it`, core::`a_hidden_level_zero_file_of_several_transactions_is_found_from_where_level_zero_ends`, cli::`a_dry_run_over_a_lagging_listing_fails_like_the_restore`, cli::`if_replica_exists_over_a_listing_that_shows_nothing_skips_nothing`; plant::`restore-trusts-listing`, plant::`empty-listing-is-empty-replica`, plant::`dry-run-trusts-listing`, plant::`restore-reads-one-transaction-past`"
 survived_by = "sim::`a_restore_through_a_lagging_listing_is_the_replica_s_answer_or_an_error`"
 notes = "Was **known wrong** in effect: the simulator's lagging-listing hold showed a restore of `Latest` publishing an older database with success on its first written history, and `--if-replica-exists` skipping a restore with success over a listing that showed nothing. Both fixed on this branch. The hold restores through a listing frozen when it began, held to the raw replica's answer or an explained error, and an as-of answer that differs from the raw one to the as-of bound (G3; D62); the hole case is accepted and counted (`hold.LaggingListing.past_hole`)"
 
@@ -2176,7 +2198,7 @@ signal = "`store_refused` for an archived object, `permission_denied` for a KMS 
 at_risk = "The history through that object is unreadable until it is thawed"
 recovery = "Operator"
 no_test = "untested"
-notes = "store-s3::`classify_denials_by_what_to_fix` asserts the archive tier's class and each KMS code's (plant `kms-codes-by-status`). Nothing drives a read of such an object through the engine"
+notes = "store-s3::`classify_denials_by_what_to_fix` asserts the archive tier's class and each KMS code's (plant `kms-codes-by-status`). Through the engine, sim::`a_refused_upload_is_reported_as_what_the_operator_must_fix` refuses one upload with `KMS.DisabledException` and requires `permission_denied`; drawn S3 histories answer GETs the same way, once each. A lasting refusal, and an archived object, are not driven through the engine"
 
 [[row]]
 table = "Circumstances the code does not distinguish"
@@ -2384,6 +2406,18 @@ detected_by = "sim::`deploy_cycle_after_sigterm`, sim::`deploy_cycle_after_sigki
 recovered_by = "sim::`deploy_cycle_after_sigterm`, sim::`deploy_cycle_after_sigkill`"
 notes = "The replica tests run each deploy as a real child process and kill it with SIGKILL. The replica is never ahead of staging after a kill: uploads come only from staging and prune keeps the newest staged file. The snapshot after a kill near a WAL restart needs the checkpoint proof to outlive the process (the engine journal)"
 
+
+[[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-42"
+circumstance = "A restore of `Latest` or `AsOf` lists through a lagging listing, and more than 3 transactions in a row right after the listing's end have no key a reader can name: a hole a bucket rollback left while the writer went on above it (issue #99's mid-run rollback item), or a narrower hole followed by a merged file whose level-0 inputs are gone and which starts where the hole ends"
+response = "**Trusted.** The walk past the listing stops after 3 missing transactions in a row, so no key past the hole is read, and a snapshot `1-N` past it cannot be named. The listing's chain is published as the newest"
+signal = "none"
+at_risk = "A committed but older state returned as `Latest` with success, while the replica's newest is past the hole. Breaks the rule that a request that cannot be met exactly is an error. Bound: more than 3 unnameable transactions in a row next to what the listing shows, and a listing that hides everything past them; fewer is WORLD-4 and fails `ListingBehind`"
+recovery = "Run again once the listing catches up"
+detected_by = "core::`a_hole_wider_than_the_walk_past_a_lagging_listing_still_hides_the_newest`"
+no_test = "known wrong"
+notes = "The cited test pins the residue: it asserts the older state is published. Found by the simulator's overlapping lagging-listing hold (seed 0x7f8 on the overlapping-faults branch: a hole from 0x22 to 0x72, then level-0 files and a snapshot past it; seed 0x593 of the mixed set: a one-id hole at 0x97, then a merged level-1 file 98-9f whose level-0 inputs are gone, and level 0 from 0x9b). Naming a start after each missing transaction would not reach 0x593, whose first nameable key is the fifth past the listing; the hold counts it as `hold.LaggingListing.past_hole`. A snapshot pointer a restore could read past any hole is D61 in `docs/decisions.md`, an open question for the owner (issue #169); nothing is built"
 [[row]]
 table = "The checkers themselves"
 id = "CHK-1"
@@ -2456,7 +2490,7 @@ response = "The oracle fails the run at the end of the final drain or after idle
 signal = "oracle `StuckRetrying`"
 at_risk = "None (a checker)"
 recovery = "None"
-detected_by = "sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
+detected_by = "core::`degraded::a_retried_fault_that_persists_ends_degraded_as_a_stall`, sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
 notes = "Before, any stall ended a liveness judgment and excused an undrained shutdown, so an engine still retrying a fault nothing caused any more, or reporting degraded for nothing, passed. The run's end now also heals the SQLite source failures still queued"
 
 [[row]]
