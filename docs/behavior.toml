@@ -2469,13 +2469,13 @@ notes = "A boot that deletes pending files that fail its check stages a snapshot
 [[row]]
 table = "Fail-stop"
 id = "FS-4"
-circumstance = "The engine wrote a TRUNCATE (after a checkpoint past the synced end) and owes a snapshot: the commits are in the database file only"
+circumstance = "The engine owes a snapshot for commits that may be in the database file only (a checkpoint past the synced end wrote a TRUNCATE, or a power loss took the WAL and the boot found the database behind what was staged), and a clock was already running"
 response = "the lag that was running keeps running until the snapshot is staged"
 signal = "as FS-2"
 at_risk = "The commits the TRUNCATE moved"
 recovery = "Automatic"
-no_test = "untested"
-notes = "health's own formula read zero in this window before the fix. The test that held it needed a failed WAL sync's TRUNCATE (D173 removed it), and no core test failed when the mutation `owed: false` was applied, so the path is untested until a scenario reaches it"
+detected_by = "core::`a_snapshot_owed_after_a_rewind_keeps_the_lag_once_the_replica_has_the_files`, plant::`failstop-forgets-owed-snapshot`"
+notes = "health's own formula read zero in this window before the fix. Only a non-doubt cause counts as owed (`actor/lag.rs`): after D173 the causes that reach it with a clock running are the boot's rewound database and a boundary snapshot the checkpoint could not stage; a failed WAL sync no longer leads to one"
 
 [[row]]
 table = "Fail-stop"
