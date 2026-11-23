@@ -92,6 +92,23 @@ impl MemStore {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Every stored object as a listing would show it, read straight from the store's map:
+    /// no paging, no merge across pages and no injected fault, so a checker can hold what an
+    /// engine listed to what the store holds without sharing the engine's listing code.
+    #[must_use]
+    pub fn stored(&self) -> Vec<FileInfo> {
+        let state = self.lock();
+        state
+            .objects
+            .iter()
+            .map(|(key, object)| FileInfo {
+                key: *key,
+                size: u64::try_from(object.bytes.len()).unwrap_or(u64::MAX),
+                listed: object.listed(state.lazy),
+            })
+            .collect()
+    }
+
     /// A store whose listings carry `LastModified`, as S3's do, so a reader
     /// must ask for the exact created-at time. The last-modified time is the store's
     /// clock (one logical millisecond per commit), which is not the created-at time.
@@ -381,6 +398,50 @@ mod tests {
         use super::*;
 
         crate::conformance_suite!(conformance::MemHarness::listing_last_modified);
+    }
+
+    /// `stored` holds every object with its size and listed time, as a listing of each level
+    /// would, and spends no fault queued for the engine: the simulator's judges read the
+    /// replica through it.
+    #[test]
+    fn stored_holds_every_object_and_spends_no_fault() {
+        let store = MemStore::new();
+        let at = Timestamp::from_unix_millis(5_000);
+        let range = |n| {
+            let txid = Txid::new(n).unwrap();
+            TxidRange::new(txid, txid).unwrap()
+        };
+        let keys = [
+            FileKey::new(Level::ZERO, range(1)),
+            FileKey::new(Level::new(1).unwrap(), range(2)),
+        ];
+        conformance::block_on(async {
+            for (key, body) in keys.iter().zip([&b"one"[..], &b"three"[..]]) {
+                let mut up = store
+                    .begin_upload(key, at, WriteMode::Replace)
+                    .await
+                    .unwrap();
+                up.write(body).await.unwrap();
+                up.commit().await.unwrap();
+            }
+        });
+        store.inject_failure(
+            StoreOp::List,
+            StoreError::Transient {
+                op: StoreOp::List,
+                kind: std::io::ErrorKind::ConnectionReset,
+            },
+        );
+        let stored = store.stored();
+        let seen: Vec<(FileKey, u64)> = stored.iter().map(|info| (info.key, info.size)).collect();
+        assert_eq!(seen, vec![(keys[0], 3), (keys[1], 5)]);
+        assert!(
+            stored
+                .iter()
+                .all(|info| info.listed == ListedTime::Created(CreatedAt::mtime(at)))
+        );
+        let listed = conformance::block_on(store.list(Level::ZERO, None, PageLimit::MAX));
+        assert!(listed.is_err(), "stored spent the engine's fault");
     }
 
     #[test]

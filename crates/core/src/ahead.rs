@@ -26,12 +26,12 @@ use lsr_ltx::{PageChecksum, PageNo, Txid};
 use lsr_wal::{OpenError, WalReader};
 
 use crate::fault::Fault;
+use crate::fault::role::Role;
 use crate::pages::PageChecksumTable;
 use crate::plan::RestoreTarget;
 use crate::position::Position;
 use crate::restore::{RestoreError, RestoreOptions, restore_from};
 use crate::source::{PageSource, WalSource};
-use crate::store::ObjectStore;
 use crate::sync::scan_whole;
 use crate::verify::DigestSink;
 
@@ -50,7 +50,7 @@ pub struct Found {
 /// # Errors
 /// The [`Fault`] a read met: the WAL moved, a page could not be read, or the replica could not
 /// give its state at `confirmed`.
-pub(crate) async fn check<W: WalSource, P: PageSource, R: ObjectStore>(
+pub(crate) async fn check<W: WalSource, P: PageSource, R: Role>(
     position: &Position,
     wal: &mut W,
     db: &mut P,
@@ -138,7 +138,7 @@ pub(crate) fn open_fault(err: OpenError) -> Fault {
 }
 
 /// The replica's state at `txid`, one checksum a page, into `pages`.
-async fn digests_at<R: ObjectStore>(
+async fn digests_at<R: Role>(
     remote: &R,
     txid: Txid,
     pages: &mut BTreeMap<u32, PageChecksum>,
@@ -154,16 +154,16 @@ async fn digests_at<R: ObjectStore>(
     .await
     {
         Ok(_) => Ok(()),
-        Err(err) => Err(restore_fault(&err)),
+        Err(err) => Err(restore_fault::<R>(&err)),
     }
 }
 
 /// What a restore of the replica's newest confirmed state failing means for the check: a store
 /// error is the store's fault, retried as such; a file that does not verify or a history that
 /// does not plan is the replica's damage.
-fn restore_fault(err: &RestoreError) -> Fault {
+fn restore_fault<R: Role>(err: &RestoreError) -> Fault {
     match err {
-        RestoreError::Store(err) => Fault::from_remote(err),
+        RestoreError::Store(err) => R::fault(err),
         RestoreError::Unstable { .. } | RestoreError::ListingBehind { .. } => Fault::StoreTransient,
         RestoreError::Inventory(_)
         | RestoreError::NoPlan(_)

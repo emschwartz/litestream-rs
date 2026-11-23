@@ -16,6 +16,8 @@ mod dropped_created_at;
 #[cfg(test)]
 mod evicted_cure;
 #[cfg(test)]
+mod evicted_wal;
+#[cfg(test)]
 mod failstop;
 #[cfg(test)]
 mod faults;
@@ -28,9 +30,9 @@ mod kill_after_fault;
 #[cfg(test)]
 mod known_wrong;
 #[cfg(test)]
-mod liveness;
-#[cfg(test)]
 mod marks;
+#[cfg(test)]
+mod needless_snapshot;
 #[cfg(test)]
 mod replay;
 #[cfg(test)]

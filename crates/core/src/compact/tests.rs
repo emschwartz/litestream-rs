@@ -12,6 +12,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
+use crate::fault::role::Replica;
 use crate::layout::CreatedAt;
 use crate::layout::ListedTime;
 use crate::mem::{MemStore, MemUpload};
@@ -966,7 +967,7 @@ fn thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound() {
     };
     let dest = MemStore::new();
     let done = block_on(compact_with(
-        &source,
+        &Replica(&source),
         &dest,
         &inputs(&infos),
         level(9),
@@ -1242,10 +1243,13 @@ fn a_small_output_is_written_to_the_upload_once() {
     assert_eq!(dest.script().writes, 1);
 }
 
-/// A store that acknowledges the output one byte short holds a truncated file: the compactor
-/// deletes it and reports the mismatch, so nothing listable is left that does not decode.
+/// A store that acknowledges the output one byte short holds a truncated file. The output is a
+/// replace (a compaction may write its range again), so the compactor deletes nothing: it
+/// reports the mismatch with `removed: false`, and maintenance's executor removes the output
+/// under a reason of its own while the inputs still cover the range
+/// (`maintain::leaves_bad_output`).
 #[test]
-fn an_output_acknowledged_short_is_deleted_and_reported() {
+fn an_output_acknowledged_short_is_reported_and_left_to_the_caller() {
     let spec = Spec::plain(512, 3, 5, 5, &[(2, 9), (3, 4)]);
     let source = MemStore::new();
     let infos = put_all(&source, 0, std::slice::from_ref(&spec));
@@ -1255,11 +1259,15 @@ fn an_output_acknowledged_short_is_deleted_and_reported() {
         matches!(
             err,
             CompactError::Dest(StoreError::Corrupt {
-                cause: crate::store::CorruptCause::CommitSizeMismatch { removed: true, .. },
+                cause: crate::store::CorruptCause::CommitSizeMismatch { removed: false, .. },
                 ..
             })
         ),
         "{err:?}"
     );
-    assert!(nothing_published(&dest.0));
+    assert_eq!(
+        list(&dest.0, 1).len(),
+        1,
+        "the compactor deleted a replace's key"
+    );
 }
