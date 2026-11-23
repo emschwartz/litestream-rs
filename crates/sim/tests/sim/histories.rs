@@ -92,7 +92,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07",
         Guard::Unguarded(
             "the defect's regression is the direct test of the ledger entry wal-barrier; this \
-             recording is converted to an explicit scenario under docs/decisions/D164.md",
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
         ),
     ),
     (
@@ -113,7 +113,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "a_restored_staging_backup_is_not_uploaded_seed_0x1919f",
         Guard::Unguarded(
             "the defect's regression is the direct test of the ledger entry inside-file-sole-base; this \
-             recording is converted to an explicit scenario under docs/decisions/D164.md",
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
         ),
     ),
     (
@@ -169,7 +169,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss",
         Guard::Unguarded(
             "the defect's regression is the direct test of the ledger entry latest-judged-against-old-nodes; this \
-             recording is converted to an explicit scenario under docs/decisions/D164.md",
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
         ),
     ),
     (
@@ -208,7 +208,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage",
         Guard::Unguarded(
             "the defect's regression is the direct test of the ledger entry boundary-snapshot-keeps-page-table; this \
-             recording is converted to an explicit scenario under docs/decisions/D164.md",
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
         ),
     ),
     (
@@ -216,7 +216,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "compaction_takes_a_staging_denial_as_staging_seed_0xb9e",
         Guard::Unguarded(
             "the defect's regression is the direct test of the ledger entry compact-local-read-as-remote; this \
-             recording is converted to an explicit scenario under docs/decisions/D164.md",
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
         ),
     ),
     (
@@ -249,7 +249,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0x330_does_not_trip",
         Guard::Unguarded(
             "the defect's regression is the direct test of the ledger entry failstop-dates-the-run; this \
-             recording is converted to an explicit scenario under docs/decisions/D164.md",
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
         ),
     ),
     (
@@ -262,7 +262,7 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0xa4d_does_not_trip",
         Guard::Unguarded(
             "the defect's regression is the direct test of the ledger entry failstop-trip-held-to-zero-age; this \
-             recording is converted to an explicit scenario under docs/decisions/D164.md",
+             recording is converted to an explicit scenario under docs/decisions/D165.md",
         ),
     ),
     (
