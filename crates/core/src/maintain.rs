@@ -808,7 +808,7 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
 }
 
 async fn remove_rejected<R: ObjectStore>(replica: &R, key: FileKey, err: StoreError) -> Outcome {
-    match replica.delete(&[key]).await {
+    match crate::publish::remove_one(replica, key, crate::publish::Why::RejectedOutput).await {
         Ok(()) => Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
         Err(_unremoved) => Outcome::Failed(MaintainError::OutputDistrusted {
             key,
@@ -819,7 +819,8 @@ async fn remove_rejected<R: ObjectStore>(replica: &R, key: FileKey, err: StoreEr
 
 /// Runs one delete call. A key already gone is not an error.
 pub async fn run_delete<R: ObjectStore>(job: &DeleteJob, replica: &R) -> Outcome {
-    match replica.delete(job.keys()).await {
+    let removal = crate::publish::Removal::new(job.keys(), crate::publish::Why::Retention);
+    match crate::publish::remove(replica, &removal).await {
         Ok(()) => Outcome::Deleted {
             count: job.keys().len(),
         },

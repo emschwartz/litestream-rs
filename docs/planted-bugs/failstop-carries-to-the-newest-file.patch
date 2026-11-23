@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/failstop.rs b/crates/core/src/failstop.rs
+index 1cfa4a2..4f6d5c3 100644
+--- a/crates/core/src/failstop.rs
++++ b/crates/core/src/failstop.rs
+@@ -351,7 +351,8 @@ impl Lag {
+             self.unstaged = None;
+             let first = unstaged.after.map_or(Some(Txid::MIN), Txid::next);
+             if self.carried.is_none() {
+-                self.carried = first.map(|first| (first, unstaged.at));
++                let _ = first;
++                self.carried = seen.pending.map(|pending| (pending, unstaged.at));
+             }
+         }
+         // Gone once the replica holds the file, or nothing pending holds a commit.

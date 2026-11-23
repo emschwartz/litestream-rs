@@ -243,7 +243,7 @@ fn page_two() -> PageNo {
     PageNo::new(2, PageSize::MIN).unwrap()
 }
 
-fn every_persistent_cause() -> [PersistentCause; 16] {
+fn every_persistent_cause() -> [PersistentCause; 17] {
     [
         PersistentCause::StoreDenied(Denied::Credentials),
         PersistentCause::StoreDenied(Denied::Permission),
@@ -263,6 +263,10 @@ fn every_persistent_cause() -> [PersistentCause; 16] {
             now: ps(),
         },
         PersistentCause::DatabasePageMismatch { pgno: page_two() },
+        PersistentCause::DatabaseAheadOfWal {
+            pages: NonZeroU32::MIN,
+            first: NonZeroU32::MIN.saturating_add(1),
+        },
         PersistentCause::Bug,
     ]
 }
@@ -288,6 +292,7 @@ fn every_persistent_cause_is_listed() {
         | PersistentCause::WalSyncFailed
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::DatabasePageMismatch { .. }
+        | PersistentCause::DatabaseAheadOfWal { .. }
         | PersistentCause::Bug => true,
         // Not configurable: `every_retried_fault_stalls_and_no_stall_stops` covers it.
         PersistentCause::Stalled(_) => false,
@@ -336,6 +341,7 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
             | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
+            | PersistentCause::DatabaseAheadOfWal { .. }
             | PersistentCause::Stalled(_) => Action::Retry,
         };
         assert_eq!(all.action(cause), want, "{cause:?}");
@@ -368,6 +374,9 @@ fn each_field_names_one_cause() {
             PersistentCause::PageSizeChanged { .. } => one.page_size_changed = Response::Stop,
             PersistentCause::DatabasePageMismatch { .. } => {
                 one.database_page_mismatch = Response::Stop;
+            }
+            PersistentCause::DatabaseAheadOfWal { .. } => {
+                one.database_ahead_of_wal = Response::Stop;
             }
             PersistentCause::Bug => one.bug = Response::Stop,
             PersistentCause::Stalled(_) => {}

@@ -8,6 +8,7 @@
 //! notice's text.
 
 use std::fmt;
+use std::num::NonZeroU32;
 
 use lsr_core::{
     AppCheckpoint, AppCheckpoints, Degraded, Gate, JournalSignal, PersistentCause, Severity,
@@ -181,6 +182,36 @@ pub struct Health {
     /// Fail-stop (`Config::if_replication_stops`): whether replication has tripped, and what
     /// that does to the application.
     pub held_by: FailStop,
+    /// A boot after a failed WAL sync found the database file ahead of its WAL: pages from
+    /// commits the WAL lost, replicated as the application serves them. Stands while the state
+    /// before them is kept restorable, then ends on its own (`docs/decisions.md` D103).
+    pub ahead_of_wal: Option<AheadOfWal>,
+}
+
+/// The database file found ahead of its WAL after a failed WAL sync.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AheadOfWal {
+    /// How many pages differed from their images at the restore point.
+    pub pages: NonZeroU32,
+    /// The lowest of them.
+    pub first_page: NonZeroU32,
+    /// The newest staged transaction at the check: the state before the damage.
+    pub restore_point: Txid,
+    /// When the restore point goes back to normal retention and this ends.
+    pub kept_until: Timestamp,
+}
+
+impl AheadOfWal {
+    /// The report of a verdict the engine holds.
+    #[must_use]
+    pub fn of(ahead: lsr_core::Ahead) -> Self {
+        Self {
+            pages: ahead.pages,
+            first_page: ahead.first,
+            restore_point: ahead.restore_point,
+            kept_until: ahead.made.saturating_add(lsr_core::AHEAD_KEPT_FOR),
+        }
+    }
 }
 
 /// Fail-stop's state (`lsr_core::failstop`, `docs/proposals/fail-stop.md`).
@@ -331,6 +362,7 @@ impl Health {
                 },
             },
             journal: None,
+            ahead_of_wal: None,
         }
     }
 
@@ -382,9 +414,8 @@ pub enum AppNotice {
 
 /// What the application changes to stop both: its connections' settings, which a replicator in
 /// another process cannot set.
-const ADVICE: &str = "set wal_autocheckpoint = 0 and SQLITE_FCNTL_PERSIST_WAL on every \
-     connection the application opens (app_connection does both), and tell the replicator \
-     (app_autocheckpoint: None)";
+const ADVICE: &str = "set wal_autocheckpoint = 0 on every connection the application opens \
+     (app_connection does), and tell the replicator (app_autocheckpoint: None)";
 
 impl fmt::Display for AppNotice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

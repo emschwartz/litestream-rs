@@ -33,14 +33,14 @@ use lsr_wal::{
 };
 use std::io::{Read, Seek};
 
-use crate::checked::Checked;
 use crate::fault::{BugSite, Clamped, Fault, SnapshotCause, StopCause};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
+use crate::publish::Writer;
 use crate::recover::Recovered;
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::store::{ObjectStore, StoreError, Upload, WriteMode};
+use crate::store::{ObjectStore, StoreError, WriteMode};
 use crate::witness::{ByteTally, Witnessed};
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
@@ -268,7 +268,7 @@ impl Start {
         };
         match step {
             Step::Incremental(position) => Ok(Self {
-                cursor: position.cursor(),
+                cursor: seeded(position.cursor(), from_start),
                 begin: position.cursor().next().get(),
                 txid: next(Some(position.txid()))?,
                 prev_commit: Some(position.commit().get()),
@@ -302,6 +302,20 @@ impl Start {
                 snapshot: true,
             }),
         }
+    }
+}
+
+/// The cursor a step resumes from: `held`, unless it is the start of the header's generation,
+/// where the header as it is now seeds the chain. SQLite writes a restarted WAL's header again,
+/// with the same salts and the writing connection's own checkpoint count, whenever the
+/// wal-index holds no frame (the connection that restarted rolled back, or died, before its
+/// commit), so the seed a position took at the start can be stale; nothing of the generation
+/// was staged from it, and [`WalReader::resume`] reseeds the same way.
+fn seeded(held: FrameCursor, start: FrameCursor) -> FrameCursor {
+    if held.next() == start.next() && held.salts() == start.salts() {
+        start
+    } else {
+        held
     }
 }
 
@@ -452,8 +466,21 @@ struct Filled {
     checksum: FileChecksum,
 }
 
+/// Where [`fill`] writes a file's bytes: a [`Writer`], which alone can publish
+/// them, or a test's recorder.
+trait FileSink {
+    /// Appends a chunk.
+    fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
+}
+
+impl<S: ObjectStore> FileSink for Writer<'_, S> {
+    fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
+        Writer::write(self, chunk)
+    }
+}
+
 /// Encodes `plan` into `upload` in bounded chunks.
-async fn fill<R: Read + Seek, P: PageSource, U: Upload>(
+async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     upload: &mut U,
     header: Header,
     plan: &[PageFrom],
@@ -527,12 +554,16 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: ObjectStore>(
 ) -> Result<(FileInfo, Option<LastPage>, Witnessed), Fault> {
     // A staged file replaces a torn one under its key, and a snapshot (level 9)
     // shares its key with Go's snapshot of the same transaction: both replace.
-    let mut upload = Checked::begin(store, key, header.fields().timestamp, WriteMode::Replace)
+    let mut upload = Writer::begin(store, key, header.fields().timestamp, WriteMode::Replace)
         .await
         .map_err(|err| map_store(&err))?;
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
         Ok(filled) => {
-            let file = upload.commit().await.map_err(|err| map_store(&err))?;
+            let file = upload
+                .commit()
+                .await
+                .map_err(|err| map_store(err.error()))?
+                .info();
             let token = Witnessed::made_here(
                 *key,
                 filled.bytes,

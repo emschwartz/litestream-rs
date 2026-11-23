@@ -38,7 +38,7 @@ Status: done. Starts after phase 3's public API (task 6, `lsr-replica`) lands; t
 - *No `PERSIST_WAL`.* While the sidecar runs, its open connection keeps the application's last close from deleting the WAL (`the_read_lock_survives_the_apps_last_connection_closing`, now across processes). While the sidecar is down, the application's last close checkpoints and deletes `-wal`; the next boot snapshots with cause `WalMissing`. A WAL unlinked mid-run is `WalUnlinked` (phase 3 task 4).
 - *Any checkpoint while the sidecar is down* is classified at boot by `recover` as in phase 3: continue when the WAL still matches, a snapshot with its cause otherwise.
 
-None of these is silent: each snapshot carries its `SnapshotCause`, and task 7 adds an application-checkpoint notice to `health()`. None is a degraded state: replication stays correct, the cost is snapshots. The plan does not add a way to stop on them (Go does not), and the notice's text tells the operator to set `wal_autocheckpoint = 0` and `PERSIST_WAL` in the application to avoid the cost.
+None of these is silent: each snapshot carries its `SnapshotCause`, and task 7 adds an application-checkpoint notice to `health()`. None is a degraded state: replication stays correct, the cost is snapshots. The plan does not add a way to stop on them (Go does not), and the notice's text tells the operator to set `wal_autocheckpoint = 0` in the application to avoid the cost (it named `PERSIST_WAL` too until decisions D123).
 
 **Shared fate** (PLAN section 7) changes: an OOM kill of the application no longer stops replication, and the sidecar's own crash leaves the application serving with an unpinned WAL until restart.
 

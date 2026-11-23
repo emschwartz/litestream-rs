@@ -175,6 +175,7 @@ pub(crate) const fn cause_name(cause: DegradedCause) -> &'static str {
         DegradedCause::WalSyncFailed => "wal_sync_failed",
         DegradedCause::PageSizeChanged { .. } => "page_size_changed",
         DegradedCause::DatabasePageMismatch { .. } => "database_page_mismatch",
+        DegradedCause::DatabaseAheadOfWal { .. } => "database_ahead_of_wal",
         DegradedCause::Bug => "bug",
         DegradedCause::Stalled(stall) => stall_name(stall),
     }
@@ -308,6 +309,18 @@ impl Object {
     }
 }
 
+fn ahead_json(health: &Health) -> String {
+    let Some(ahead) = health.ahead_of_wal else {
+        return "null".to_owned();
+    };
+    let mut o = Object::new();
+    o.num("pages", ahead.pages);
+    o.num("first_page", ahead.first_page);
+    o.text("restore_point", &ahead.restore_point.to_string());
+    o.text("kept_until", &ahead.kept_until.to_string());
+    o.end()
+}
+
 fn degraded_json(health: &Health) -> String {
     let tasks: Vec<String> = Task::ALL
         .iter()
@@ -362,6 +375,7 @@ fn running_json(o: &mut Object, health: &Health) {
         health.journal.map(|s| journal_name(s).to_owned()),
     );
     o.maybe("journal_detail", health.journal.map(|s| format!("{s:?}")));
+    o.raw("database_ahead_of_wal", &ahead_json(health));
     o.maybe(
         "held_by",
         health
@@ -430,6 +444,49 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("\"app\":\"allowed\""), "{body}");
+    }
+
+    /// A database file found ahead of its WAL is a notice in both outputs while the state
+    /// before it is kept, with `/healthz` still 200, and both drop it once it ends.
+    #[test]
+    fn a_database_ahead_of_its_wal_is_a_notice_in_both_outputs() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        health.phase = Phase::Running;
+        let view = |health: &Health| DbView {
+            path: PathBuf::from("/app.db"),
+            replica_type: "file",
+            state: DbState::Running(Box::new(health.clone())),
+        };
+        health.ahead_of_wal = Some(lsr_replica::AheadOfWal::of(lsr_core::Ahead {
+            restore_point: lsr_replica::Txid::new(7).unwrap(),
+            pages: std::num::NonZeroU32::new(2).unwrap(),
+            first: std::num::NonZeroU32::new(5).unwrap(),
+            made: at,
+        }));
+        let (up, body) = healthz(&[view(&health)], at);
+        assert!(up, "{body}");
+        let kept_until = at.saturating_add(lsr_core::AHEAD_KEPT_FOR);
+        assert!(
+            body.contains(&format!(
+                "\"database_ahead_of_wal\":{{\"pages\":2,\"first_page\":5,\"restore_point\":\"{}\",\"kept_until\":\"{kept_until}\"}}",
+                lsr_replica::Txid::new(7).unwrap()
+            )),
+            "{body}"
+        );
+        let metrics = crate::metrics::render(&[view(&health)], at);
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal{db=\"/app.db\"} 1"),
+            "{metrics}"
+        );
+        health.ahead_of_wal = None;
+        let (_, body) = healthz(&[view(&health)], at);
+        assert!(body.contains("\"database_ahead_of_wal\":null"), "{body}");
+        let metrics = crate::metrics::render(&[view(&health)], at);
+        assert!(
+            metrics.contains("lsr_database_ahead_of_wal{db=\"/app.db\"} 0"),
+            "{metrics}"
+        );
     }
 
     /// Every kind of access refusal reports under a name of its own: one name for
