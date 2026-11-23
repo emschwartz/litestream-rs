@@ -236,15 +236,14 @@ notes = "The operator case fails in the swarm's lag seeds (0x4dc and 0x517 on th
 [[row]]
 table = "Boot"
 id = "BOOT-19"
-mark = "none: no record of an earlier confirmation, so a rollback is not told apart"
-circumstance = "The bucket was rolled back to an earlier state while the engine was down"
-response = "**Trusted**: the engine keeps no record of what it once confirmed, so the short bucket is the bucket. A freed transaction id is put again with other bytes"
-signal = "none"
-at_risk = "One transaction id with two contents over time. If the first was merged upward before the rollback took it, a restore could combine both. Counts against G1. No wrong restore has been shown"
-recovery = "None"
-no_test = "known wrong"
-notes = "Expected-fail test on main: sim `a_rolled_back_bucket_never_gets_a_transaction_id_reused_across_a_restart_seed_0x484` (`#[ignore]`). The three \"latest went back\" seeds that earlier drafts cited pass on main since b812e0f and are pinned as passing tests in `sim/tests/sim/restored_staging.rs`"
-in_review = "None open. Needs a durable record of what was confirmed"
+mark = "none: not yet placed: the boot rule's branches are in core/src/actor.rs (`boot_recover`, the boot's acknowledged mark) and core/src/actor/floor.rs (`boot_floor`)"
+circumstance = "The bucket was rolled back to an earlier state while the engine was down, with a destination named, so the engine journal holds a confirmed floor for it (BOOT-33)"
+response = "The boot takes the floor's bound as the replica's tip whatever the replica lists or reads: recovery from a position below it is behind the replica, a snapshot goes above the floor, and uploads resume past it when staged files below it are gone, so no id at or below the floor is given other bytes. The same holds when a lagging listing or a refused read shows the replica short. The floor says an id is taken, not that the file under it is this engine's: a listed file past what this process staged or confirmed is still another writer's, though the floor covers its id"
+signal = "none: the boot logs its snapshot cause (`BehindRemote`)"
+at_risk = "With no destination named, or a journal lost, unwritable or unread, there is no floor and the short bucket is the bucket, as before: a freed transaction id is put again with other bytes. The files the rollback took are not restored; the replica's history has a gap below the snapshot"
+recovery = "Automatic"
+detected_by = "core::`a_boot_below_the_floor_takes_no_id_at_or_below_it`"
+notes = "Before the boot rule nothing outlived the process, so a rolled-back bucket was just a short one (simulator seed 0x484). Seed 0x8f7 reached the same class through a lagging listing; a read before reopening the refused key (#196) closes that path alone, and the floor closes it without that read"
 
 [[row]]
 table = "Boot"
@@ -402,7 +401,7 @@ mark = "none: not yet placed: a journal row added after the marks; its branches 
 circumstance = "The engine confirms an upload, boots, or sees its replica roll back, with a destination named (`ActorConfig::destination`, from the replica's endpoint, bucket and prefix or directory; `core/src/actor/floor.rs`, `docs/decisions.md` D107)"
 response = "Every confirmed upload raises the confirmed floor to its transaction, anchored on the uploaded file's length, raw-byte digest and file checksum when this process holds its witness, and the end of the tick journals it. A boot reads it back for the same destination only and keeps it when its listing ends lower. A rollback seen while running withdraws the anchor and keeps the bound. Another destination's floor stays in the record, unadopted, until this destination has one; with no destination named the record's floor passes through"
 signal = "None of its own: the floor is in the journal and `Actor::floor`. A floor the journal cannot record keeps `JournalUnwritable` up"
-at_risk = "A boot does not yet act on the floor it reads: taking no id at or below it is the boot rule of issue #171, item 4, built on this. A journal lost, unwritable or unread forgets it, as every journalled fact. A changed region changes an S3 replica's default endpoint, so that boot adopts no floor"
+at_risk = "What a boot does with the floor is BOOT-19. A journal lost, unwritable or unread forgets it, as every journalled fact. A changed region changes an S3 replica's default endpoint, so that boot adopts no floor"
 recovery = "Automatic"
 detected_by = "core::`a_confirmed_upload_raises_the_floor_anchored_on_the_bytes_it_put`, core::`the_floor_is_read_back_and_a_rollback_before_the_boot_does_not_lower_it`, core::`another_destination_s_floor_is_kept_in_the_record_but_not_adopted`, core::`no_destination_keeps_no_floor_and_leaves_the_record_s`, core::`a_rollback_seen_while_running_withdraws_the_anchor_and_keeps_the_bound`, core::`an_unwritable_journal_reports_a_floor_it_does_not_hold`, config::`each_replica_plan_names_its_destination_for_the_journal`; plant::`floor-never-raised`, plant::`floor-unanchored`, plant::`floor-adopted-for-any-destination`, plant::`floor-not-read-back`, plant::`floor-anchor-kept-after-regression`, plant::`floor-record-dropped-unconfigured`, plant::`replica-destination-unnamed`"
 notes = "The floor was in the journal's format, model and writer rules from the start; until this row the engine passed a recorded one through and wrote none"
@@ -2795,7 +2794,7 @@ response = "The simulator's error domain (`sim/src/domain.rs`) lists every SQLit
 signal = "None (a checker)"
 at_risk = "None (a checker)"
 recovery = "None"
-detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`, sim::`known_wrong::a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf`, sim::`known_wrong::a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_0x585`, sim::`known_wrong::compaction_takes_a_staging_denial_as_staging_seed_0xb9e`"
+detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`, sim::`known_wrong::a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0xf`, sim::`known_wrong::compaction_takes_a_staging_denial_as_staging_seed_0xb9e`"
 notes = "Before, histories drew two store errors and two SQLite errors on nine of twelve operations. The whole domain (22 source cells, 40 store cells, drawn last in the swarm mix) found D2 unaided in 85 of 3000 mixed seeds (first at seed 18) and a new defect, compaction classifying staging errors as the replica's (1 seed). D2 was a known-wrong cell until the engine journal fixed it (seed 0xf now must pass). The same cell stays known-wrong for what a failed sync still costs: a checkpoint copies unproven frames into the database file and a power loss leaves a file no commit made (detection at boot is the journal's next step), 1 of 3000 mixed seeds once D2 was fixed (seed 0x585), left out of the per-push seeds and counted as known in the nightly; the compaction cell was too until #145 fixed it, and its seed now must pass. Three cells are unmodelled, gaps in the simulator listed in section 6 (C9): an unlinked WAL. A checkpoint whose read-transaction retake is lost is drawn: the simulated checkpointer ends and retakes the read transaction around a failed checkpoint as lsr-sqlite does. WAL damage while a failed sync's writeback is lost is skipped and counted (`wal.damage_skipped.writeback_lost`)"
 
 [[row]]

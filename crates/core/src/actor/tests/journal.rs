@@ -764,6 +764,79 @@ fn the_floor_is_read_back_and_a_rollback_before_the_boot_does_not_lower_it() {
     assert_eq!(floor_recorded(&mut journal), Some(floor));
 }
 
+/// A bucket rolled back past the floor while the process was down, and a power loss on a disk
+/// that lied about the WAL barrier dropped the frames of that newest file; the application
+/// wrote other bytes in their place. The boot refuses the staged copy, and a read of the replica
+/// finds no file at its key. Without the floor the boot keys the new content with the id the
+/// replica held, so one transaction id names two contents. The boot takes its acknowledged mark
+/// from the floor, so the snapshot goes above it (simulator seed 0x8f7: no boot takes an id at
+/// or below the confirmed floor, whichever path read the replica short).
+#[test]
+fn a_boot_below_the_floor_takes_no_id_at_or_below_it() {
+    let mut journal = MemJournal::default();
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    rig.commit(2);
+    settle(&mut rig, &mut actor, T0, Some(&mut journal));
+    let kept = rig.wal.committed_end().frame_count();
+    rig.wal.append_tx(&[(pg(2), vec![0xA0; PS.bytes()])], nz(3));
+    settle(&mut rig, &mut actor, T0 + 1, Some(&mut journal));
+    let floor = actor.floor().expect("a floor").bound();
+    assert_eq!(roll_back_replica(&rig), floor);
+    let held = remote_keys(&rig);
+    rig.wal.lose_frames_from(kept);
+    rig.wal.append_tx(&[(pg(2), vec![0xB0; PS.bytes()])], nz(3));
+    let mut restarted = Actor::new(go_like());
+    let mut now = T0 + 10;
+    for _ in 0..50 {
+        match tick(&mut rig, &mut restarted, now, Some(&mut journal)) {
+            Tick::Ran {
+                event: Event::TakeoverWanted(wanted),
+                ..
+            } => restarted.remember_takeover(wanted),
+            Tick::Ran {
+                next: Next::Now, ..
+            } => {}
+            Tick::Ran {
+                next: Next::At(at), ..
+            } => now = at.unix_millis(),
+            Tick::Ran {
+                next: Next::OnWalChange,
+                ..
+            }
+            | Tick::Stopped(_)
+            | Tick::Drained { .. }
+            | Tick::DeadlineReached(_) => break,
+        }
+    }
+    let written: Vec<FileKey> = remote_keys(&rig)
+        .into_iter()
+        .filter(|key| !held.contains(key))
+        .collect();
+    assert!(
+        !written.is_empty(),
+        "the restarted engine wrote to the replica"
+    );
+    assert_eq!(super::witness::restored_page(&rig, 2), 0xB0);
+    // A snapshot or a compaction spans from the first transaction; what may never be written is
+    // a file ending at an id the replica held, which gives that id other content.
+    for key in written {
+        assert!(
+            key.range().max() > floor,
+            "{key} ends at an id at or below the floor {floor}"
+        );
+    }
+}
+
+fn remote_keys(rig: &Rig) -> Vec<FileKey> {
+    block_on(Inventory::load(&rig.remote.inner))
+        .unwrap()
+        .files()
+        .iter()
+        .map(|info| info.key)
+        .collect()
+}
+
 /// A floor recorded for another destination is not this engine's: it is not adopted, and it
 /// stays in the record until this engine has a floor of its own, since none is ever dropped.
 #[test]

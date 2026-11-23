@@ -913,7 +913,6 @@ mod one_bad_read {
     }
 }
 
-#[cfg(test)]
 mod second_writer {
     use lsr_sim::run::run_ops;
     use lsr_sim::{Op, Opts, Seed};

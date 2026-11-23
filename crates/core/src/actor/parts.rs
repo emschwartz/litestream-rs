@@ -686,11 +686,13 @@ pub(super) const ENGINE_LEDGER: &[(&str, Keep)] = &[
     ),
     (
         "acknowledged",
-        Keep::Owed(
-            "never lowered while the process lives, but set at boot from the replica's listing: \
-             a replica that went backwards before a restart lets a snapshot take an \
-             acknowledged id again. The mark is journalled (Kept.floor); the boot rule that \
-             reads it back into this field is the rest of issue #171, item 4",
+        Keep::Journalled(
+            Record::EngineJournal,
+            "never lowered while the process lives, and set at boot from the replica's listing; \
+             after a restart the confirmed floor the engine journal records for this destination \
+             (Kept.floor) stands in for it wherever an acknowledged id must stay taken: \
+             recovery's tip, where a snapshot goes, and resuming uploads past lost staged files. \
+             It does not stand in where the engine asks whether a listed file is its own",
         ),
     ),
     (

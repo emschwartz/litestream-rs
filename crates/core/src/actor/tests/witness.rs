@@ -584,7 +584,7 @@ fn a_full_file_that_neither_follows_nor_starts_the_generation_is_refused() {
 }
 
 /// The first byte of page `pgno` in the replica's newest state.
-fn restored_page(rig: &Rig, pgno: u32) -> u8 {
+pub(super) fn restored_page(rig: &Rig, pgno: u32) -> u8 {
     let sink = MemSink::new();
     block_on(restore(
         &rig.remote.inner,

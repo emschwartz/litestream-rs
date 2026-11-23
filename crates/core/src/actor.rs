@@ -1081,6 +1081,7 @@ impl Actor {
         }
         let takeover = self.boot_takeover();
         let journal = read_journal(env.journal.as_deref_mut());
+        let floor = self.boot_floor(journal.as_ref().map(|(_, parsed)| parsed));
         let suspect = &mut self.kept.suspect_staged;
         let listed = boot_listing(env.staging, env.remote, suspect, takeover).await;
         let Listed {
@@ -1101,7 +1102,7 @@ impl Actor {
                     page_size,
                     refused_through,
                 },
-        } = match boot_judge(env, upload, gate).await {
+        } = match boot_judge(env, upload, gate, floor).await {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, now),
         };
@@ -1283,8 +1284,17 @@ impl Actor {
         plan_upload(&self.engine.upload, self.staged()) == UploadPlan::Idle
     }
 
-    /// The newest transaction anything has, or had: a snapshot follows it.
+    /// The newest transaction anything has, or had: a snapshot follows it, and so follows the
+    /// confirmed floor, whose ids stay taken whatever the replica holds now.
     fn snapshot_after(&self) -> Option<Txid> {
+        self.known().max(self.floor().map(|floor| floor.bound()))
+    }
+
+    /// The newest transaction this process staged, confirmed or acknowledged. A listing past it
+    /// shows files this process did not write. The floor is not in it: it says an id was taken,
+    /// not that the file under it now is this engine's, and a replica that lost the file can
+    /// hold another writer's under that key.
+    fn known(&self) -> Option<Txid> {
         self.staged()
             .max(self.engine.upload.confirmed())
             .max(self.engine.acknowledged)
@@ -1877,8 +1887,13 @@ impl Actor {
         }
         // Acknowledged ids from `from` on that the replica lost (a rollback)
         // are gone with their staged copies: they are never taken again, so
-        // the uploads resume with the snapshot above them.
-        let acknowledged = self.engine.acknowledged.filter(|ack| *ack >= from);
+        // the uploads resume with the snapshot above them. The confirmed
+        // floor's are acknowledged ids too, by an earlier process.
+        let acknowledged = self
+            .engine
+            .acknowledged
+            .max(self.floor().map(|floor| floor.bound()))
+            .filter(|ack| *ack >= from);
         if let (Some(ack), UploadState::At(confirmed)) = (acknowledged, self.engine.upload) {
             self.engine.upload = UploadState::At(confirmed.max(Some(ack)));
         }
@@ -2174,7 +2189,7 @@ impl Actor {
         inventory: &Inventory,
         now: Timestamp,
     ) -> Option<Tick> {
-        let known = self.snapshot_after();
+        let known = self.known();
         if inventory.newest() > known {
             return Some(match past_known(remote, inventory, known).await {
                 Ok(true) => {
@@ -2886,11 +2901,13 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: ObjectStore, R: ObjectSto
     env: &mut Env<'_, W, P, C, L, R>,
     upload: UploadState,
     gate: BootGate,
+    floor: Option<Txid>,
 ) -> Result<Judged, BootStep> {
     let committed = env.wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(env.wal)?;
     let (pending, upload) = boot_witness(env, reader.as_mut(), committed, upload, gate).await?;
-    let booted = boot_recover(env, reader.as_mut(), committed, upload.confirmed(), gate).await?;
+    let confirmed = upload.confirmed();
+    let booted = boot_recover(env, reader.as_mut(), committed, (confirmed, floor), gate).await?;
     Ok(Judged {
         pending,
         upload,
@@ -2916,7 +2933,7 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
     env: &mut Env<'_, W, P, C, L, R>,
     mut reader: Option<&mut WalReader<W::Wal>>,
     committed: CommittedRead,
-    confirmed: Option<Txid>,
+    (confirmed, floor): (Option<Txid>, Option<Txid>),
     gate: BootGate,
 ) -> Result<Booted, Fault> {
     let (staging, remote) = (env.staging, env.remote);
@@ -2969,12 +2986,14 @@ async fn boot_recover<W: WalSource, P, C, L: ObjectStore, R: ObjectStore>(
         }
         (None, Some(_)) => Recovered::Stop(StopCause::OtherWriter),
         // A boot position holds no read lock, so no verdict here names a broken one; a
-        // rewound WAL's event repeats what its snapshot cause carries.
+        // rewound WAL's event repeats what its snapshot cause carries. The floor stands for
+        // the replica's tip: no id at or below it is taken again, though the replica lists or
+        // reads shorter (a rollback, a lagging listing, a read refused).
         (None, None) => {
             recover_traced(
                 newest_staged.as_ref().map(PositionSource::Boot),
                 &view,
-                confirmed,
+                confirmed.max(floor),
             )
             .recovered
         }

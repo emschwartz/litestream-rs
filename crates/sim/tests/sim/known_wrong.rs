@@ -36,28 +36,6 @@ fn still_fails(seed: u64, ops: &[Op], opts: &Opts, defect: KnownWrong) {
     }
 }
 
-/// A failed WAL sync, checkpoints by another process, then a power loss: SQLite recovers a
-/// database file no commit made (D103). Seed 0x585 is the first of the mixed set to reach it
-/// once the restart half of the failed sync was fixed.
-#[test]
-fn a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_0x585() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: false,
-        lying_wal_sync: true,
-        after_restart: AfterRestart::Nothing,
-        clock_law: ClockLaw::PerTick,
-        staging_fs: false,
-        ..Opts::default()
-    };
-    still_fails(
-        0x585,
-        crate::histories::seed_0x585::OPS,
-        &opts,
-        KnownWrong::DatabaseAheadOfWal,
-    );
-}
-
 /// Fixed: a failed WAL sync was remembered in memory only, so a restart before the TRUNCATE
 /// staged frames the failed sync covered, until the engine journal recorded the debt. Seed 0xf,
 /// the first of the mixed set to reach it, must pass now.

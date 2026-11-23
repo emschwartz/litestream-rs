@@ -45,6 +45,22 @@ impl Actor {
         self.kept.floor = self.kept.floor.or(ours);
     }
 
+    /// The floor's bound a boot keeps before it adopts the journal: the floor held, or the one
+    /// the journal it just read records for the configured destination, whichever is higher.
+    /// Recovery takes it as the replica's tip, so a staged position below it is behind the
+    /// replica and the boot snapshots above it, whatever a listing or a read found short.
+    pub(super) fn boot_floor(&self, journal: Option<&lsr_journal::Parsed>) -> Option<Txid> {
+        let read = journal.and_then(|parsed| match parsed.verdict {
+            lsr_journal::Verdict::Read { journal, .. } => journal.floor,
+            lsr_journal::Verdict::Newer { .. }
+            | lsr_journal::Verdict::Missing
+            | lsr_journal::Verdict::Unreadable(_) => None,
+        });
+        let ours = read.filter(|floor| Some(floor.replica()) == self.kept.cfg.destination);
+        let bound = |floor: Floor| floor.bound();
+        self.kept.floor.map(bound).max(ours.map(bound))
+    }
+
     /// The replica lost files it held (a bucket rollback): the floor claims nothing about its
     /// bytes any more, and its bound stays.
     pub(super) fn floor_regressed(&mut self) {

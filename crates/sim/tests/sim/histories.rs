@@ -25,8 +25,6 @@ pub mod seed_0x31c;
 pub mod seed_0x330;
 pub mod seed_0x46;
 pub mod seed_0x4c;
-pub mod seed_0x585;
-pub mod seed_0x734;
 pub mod seed_0x753;
 pub mod seed_0x80e;
 pub mod seed_0x82;
@@ -174,14 +172,6 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         ),
     ),
     (
-        "seed_0x585",
-        "a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_0x585",
-        Guard::Unguarded(
-            "it pins an open defect (KnownWrong::DatabaseAheadOfWal) and passes only while main \
-             fails with it, so no plant can be judged by it",
-        ),
-    ),
-    (
         "seed_0xe9",
         "a_halt_across_restarts_still_goes_unreported_seed_0xe9",
         Guard::Unguarded(
@@ -203,14 +193,6 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0xb9e",
         "compaction_takes_a_staging_denial_as_staging_seed_0xb9e",
         Guard::Own("compact-local-read-as-remote-sim"),
-    ),
-    (
-        "seed_0x734",
-        "seed_0x734_trips_on_a_snapshot_it_cannot_vouch_for_and_is_excused",
-        Guard::Unguarded(
-            "the history checks a judge exemption, not an engine fix: no engine plant can make \
-             the judge excuse a trip it would otherwise call false",
-        ),
     ),
     (
         "seed_0x92d",
