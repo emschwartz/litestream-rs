@@ -131,7 +131,7 @@ pub enum SetupError {
     },
     /// The connection never syncs (`synchronous = OFF`): a power loss can take back commits
     /// the replica already holds, and the application then forks history under the same WAL.
-    #[error("synchronous is OFF: set NORMAL or FULL")]
+    #[error("synchronous is OFF, so commits are never synced: set NORMAL or FULL")]
     SynchronousOff,
     /// The connection has no database file (in-memory or temporary), so it cannot be the
     /// replicated database.
