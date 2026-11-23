@@ -132,17 +132,26 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x126d68fac789",
         "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789",
-        Guard::OnPath("maintenance-another-writer"),
+        Guard::Unguarded(
+            "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
+             converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x126d68facf21",
         "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68facf21",
-        Guard::OnPath("maintenance-another-writer"),
+        Guard::Unguarded(
+            "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
+             converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x126d68fad061",
         "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fad061",
-        Guard::OnPath("maintenance-another-writer"),
+        Guard::Unguarded(
+            "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
+             converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x126d68fae16b",
@@ -152,17 +161,26 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x126d68facf74",
         "another_writer_s_files_fit_the_level_bytes_budget_seed_0x126d68facf74",
-        Guard::OnPath("maintenance-another-writer"),
+        Guard::Unguarded(
+            "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
+             converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x2c",
         "swarm_seed_44_restores_only_committed_states",
-        Guard::Own("anchor-any-tail"),
+        Guard::Unguarded(
+            "the ledger entry anchor-any-tail is caught by direct lsr-core tests now; this recording is \
+             converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0x2a8",
         "a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8",
-        Guard::Own("success-keeps-a-stall"),
+        Guard::Unguarded(
+            "the ledger entry success-keeps-a-stall is caught by direct lsr-core tests now; this recording is \
+             converted to an explicit scenario under docs/decisions/D165.md",
+        ),
     ),
     (
         "seed_0xb44",
