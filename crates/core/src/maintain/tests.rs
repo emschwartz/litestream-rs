@@ -12,6 +12,7 @@ use super::*;
 use crate::conformance::block_on;
 use crate::created_at::{Resolve, ResolvedCreatedAt};
 use crate::fault::Fault;
+use crate::fault::role::{Replica, Staging};
 use crate::layout::{CreatedAt, ListedTime};
 use crate::mem::MemStore;
 use crate::plan::{KeyTarget, PlanOutcome, plan};
@@ -1187,7 +1188,8 @@ fn a_compact_job_publishes_its_output_key_and_is_not_planned_again() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
-    let Outcome::Compacted { info, bytes_read } = block_on(run_compact(&job, &local, &replica))
+    let Outcome::Compacted { info, bytes_read } =
+        block_on(run_compact(&job, &Staging(&local), &Replica(&replica)))
     else {
         panic!("not compacted");
     };
@@ -1220,7 +1222,7 @@ fn level_one_reads_the_local_copy_first() {
         });
     }
     let job = l1_job(&replica);
-    let out = block_on(run_compact(&job, &local, &replica));
+    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
 }
 
@@ -1229,7 +1231,7 @@ fn level_one_falls_back_to_the_replica_when_the_local_copy_is_gone() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&MemStore::new(), &replica);
     let job = l1_job(&replica);
-    let out = block_on(run_compact(&job, &local, &replica));
+    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_eq!(listed(&replica, 1), vec![key(1, 1, 3)]);
 }
@@ -1267,11 +1269,15 @@ fn level_one_is_built_from_the_replica_when_the_local_copy_differs() {
         "same size, other bytes"
     );
     let job = l1_job(&replica);
-    let out = block_on(run_compact(&job, &local, &replica));
+    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     let want = MemStore::new();
     three_l0(&MemStore::new(), &want);
-    let built = block_on(run_compact(&job, &MemStore::new(), &want));
+    let built = block_on(run_compact(
+        &job,
+        &Staging(&MemStore::new()),
+        &Replica(&want),
+    ));
     assert!(matches!(built, Outcome::Compacted { .. }), "{built:?}");
     assert_eq!(
         whole(&replica, &job.output_key()),
@@ -1288,7 +1294,7 @@ fn an_input_missing_everywhere_is_a_replan() {
         local.delete(&[key(0, 1, 1)]).await.unwrap();
         replica.delete(&[key(0, 1, 1)]).await.unwrap();
     });
-    let out = block_on(run_compact(&job, &local, &replica));
+    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(
         matches!(out, Outcome::Replan { key: k } if k == key(0, 1, 1)),
         "{out:?}"
@@ -1305,7 +1311,7 @@ fn a_higher_level_reads_only_the_replica() {
     let job = run_job(due_at(&load(&replica), T0));
     let job = compact_job(&job);
     assert_eq!(job.level(), level(2));
-    let out = block_on(run_compact(job, &local, &replica));
+    let out = block_on(run_compact(job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
 }
 
@@ -1319,7 +1325,7 @@ fn a_commit_that_fails_after_publish_is_failed_and_the_next_plan_skips_the_level
         kind: std::io::ErrorKind::TimedOut,
     };
     replica.inject_failure_after_publish(fault);
-    let out = block_on(run_compact(&job, &local, &replica));
+    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(
         matches!(
             &out,
@@ -1341,7 +1347,7 @@ fn a_local_source_read_error_is_failed_and_publishes_nothing() {
         why: crate::store::Denied::Credentials,
     };
     local.inject_failure(StoreOp::Read, fault);
-    let out = block_on(run_compact(&job, &local, &replica));
+    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(
         matches!(
             &out,
@@ -1357,11 +1363,11 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
-    let out = block_on(run_compact(&job, &local, &replica));
+    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
     // The second run finds the output there and writes nothing over it.
-    let again = block_on(run_compact(&job, &local, &replica));
+    let again = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(
         matches!(again, Outcome::Replan { key } if key == job.output_key()),
         "{again:?}"
@@ -1378,14 +1384,14 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
 #[test]
 fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
     let (local, replica, _, job) = rejected_setup();
-    let first = block_on(run_compact(&job, &local, &replica));
+    let first = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
     let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
     replica.inject_failure_after_publish(StoreError::Corrupt {
         key: None,
         cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
     });
-    let again = block_on(run_compact(&job, &local, &replica));
+    let again = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(
         matches!(again, Outcome::Replan { key } if key == job.output_key()),
         "{again:?}"
@@ -1494,7 +1500,7 @@ fn review_a_short_compaction_output_left_by_a_failed_commit_does_not_license_del
             kind: std::io::ErrorKind::TimedOut,
         },
     );
-    let ran = block_on(run_compact(&job, &local, &replica));
+    let ran = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(ran, Outcome::Failed(_)), "{ran:?}");
     state.record(now, &Job::Compact(job.clone()), &ran);
     // What the store holds after a size mismatch it could not remove.
@@ -1512,7 +1518,7 @@ fn review_a_short_compaction_output_left_by_a_failed_commit_does_not_license_del
                 block_on(run_delete(&d, &replica));
             }
             Due::Run(Job::Compact(c)) => {
-                block_on(run_compact(&c, &local, &replica));
+                block_on(run_compact(&c, &Staging(&local), &Replica(&replica)));
             }
             Due::Run(Job::Snapshot(_)) | Due::Wait { .. } => break,
         }
@@ -1554,7 +1560,7 @@ fn review_a_level_one_job_that_always_fails_does_not_starve_the_snapshot_forever
         for _ in 0..3 {
             match due_state(&load(&replica), now, &defaults(), None, &mut state) {
                 Due::Run(Job::Compact(job)) => {
-                    let out = block_on(run_compact(&job, &local, &replica));
+                    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
                     assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
                     state.record(now, &Job::Compact(job), &out);
                 }
@@ -1626,7 +1632,7 @@ fn a_rejected_compaction_output_is_deleted_by_the_executor() {
     ] {
         let (local, replica, _, job) = rejected_setup();
         replica.inject_failure_after_publish(mismatch);
-        let ran = block_on(run_compact(&job, &local, &replica));
+        let ran = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
         assert!(
             matches!(ran, Outcome::Failed(MaintainError::Compact(_))),
             "{ran:?}"
@@ -1640,7 +1646,7 @@ fn a_distrusted_output_holds_retention_until_deleted() {
     let (local, replica, mut state, job) = rejected_setup();
     replica.inject_failure_after_publish(corrupt_output_error(false));
     replica.inject_failure(StoreOp::Delete, delete_fails());
-    let ran = block_on(run_compact(&job, &local, &replica));
+    let ran = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(
         matches!(ran, Outcome::Failed(MaintainError::OutputDistrusted { .. })),
         "{ran:?}"
@@ -1688,7 +1694,7 @@ fn distrusted_setup() -> (MemStore, MaintainState, DeleteJob, Timestamp) {
     let (local, replica, mut state, job) = rejected_setup();
     replica.inject_failure_after_publish(corrupt_output_error(false));
     replica.inject_failure(StoreOp::Delete, delete_fails());
-    let ran = block_on(run_compact(&job, &local, &replica));
+    let ran = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     state.record(at(T0 + 3_600_000), &Job::Compact(job), &ran);
     let later = at(T0 + 3_700_000);
     let Due::Run(Job::Delete(delete)) =
@@ -1805,7 +1811,7 @@ fn a_corrupt_local_input_falls_back_to_the_replica_copy() {
     });
     let inputs = CompactionInputs::new(vec![file(0, 2, 2, T0), file(0, 3, 3, T0)]).unwrap();
     let job = CompactJob::new(inputs, level(1)).unwrap();
-    let ran = block_on(run_compact(&job, &local, &replica));
+    let ran = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(ran, Outcome::Compacted { .. }), "{ran:?}");
 }
 
@@ -1855,7 +1861,7 @@ fn a_local_read_error_comparing_copies_is_a_staging_fault() {
         three_l0(&local, &replica);
         let job = l1_job(&replica);
         local.inject_failure(StoreOp::Read, err.clone());
-        let out = block_on(run_compact(&job, &local, &replica));
+        let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
         assert_eq!(failed_fault(&out), want, "{err}");
         assert!(listed(&replica, 1).is_empty());
     }
@@ -1948,7 +1954,7 @@ fn a_local_read_error_while_compacting_is_a_staging_fault() {
             inner,
             err: err.clone(),
         };
-        let out = block_on(run_compact(&job, &local, &replica));
+        let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
         assert_eq!(failed_fault(&out), want, "{err}");
         assert!(listed(&replica, 1).is_empty());
     }

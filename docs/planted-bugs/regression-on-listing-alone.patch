@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index f42c833f..5c8a128e 100644
+index cef368c4..a87c492a 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2050,8 +2050,7 @@ impl Actor {
+@@ -2069,8 +2069,7 @@ impl Actor {
              return None;
          };
          match remote.read(&key, 0, ReadLen::or_chunk(1)).await {

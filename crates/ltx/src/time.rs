@@ -1,8 +1,15 @@
-//! The instant LTX stores: [`Timestamp`], its RFC 3339 reader and writer, and the civil-date
-//! arithmetic they need. Nothing here reads a clock.
+//! The instant LTX stores: [`Timestamp`], its RFC 3339 reader and writer. The calendar
+//! arithmetic is `jiff`'s; what stays here is the shape Go reads and writes. Nothing here
+//! reads a clock.
 
 use std::fmt;
 use std::time::Duration;
+
+use jiff::civil::{DateTime, date};
+use jiff::{Span, Unit};
+
+/// Milliseconds in a day.
+const MILLIS_PER_DAY: i64 = 86_400_000;
 
 /// A point in time as LTX stores it: milliseconds since the Unix epoch.
 ///
@@ -58,239 +65,47 @@ impl Timestamp {
     }
 }
 
-/// Milliseconds in a day.
-const MILLIS_PER_DAY: i64 = 86_400_000;
-
-/// A field of an RFC 3339 instant, named by a parse error.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TimeField {
-    /// Month, 01 to 12.
-    Month,
-    /// Day of the month, valid for that month and year.
-    Day,
-    /// Hour, 00 to 23.
-    Hour,
-    /// Minute, 00 to 59.
-    Minute,
-    /// Second, 00 to 59; a leap second 60 is not representable.
-    Second,
-    /// Hour of a numeric offset, 00 to 23.
-    OffsetHour,
-    /// Minute of a numeric offset, 00 to 59.
-    OffsetMinute,
-}
-
 /// Why a string is not an RFC 3339 instant this crate reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TimestampParseError {
-    /// The string ends before the field that was expected next.
-    Truncated {
-        /// Byte position where more input was needed.
-        at: usize,
-    },
-    /// A byte that is not an ASCII digit where a digit belongs.
-    Digit {
-        /// Byte position.
-        at: usize,
-    },
-    /// A byte other than the fixed separator (`-`, `T`, `:`) at its position.
-    Separator {
-        /// Byte position.
-        at: usize,
-    },
-    /// A field outside its range.
-    Range {
-        /// The field.
-        field: TimeField,
-    },
-    /// A `.` with no digit after it.
-    EmptyFraction,
-    /// More than nine fractional digits.
-    FractionTooLong,
-    /// No `Z` and no numeric offset after the time.
-    MissingZone,
-    /// A zone that is neither `Z` nor `+HH:MM` or `-HH:MM`.
-    Zone {
-        /// Byte position.
-        at: usize,
-    },
-    /// Bytes after the zone.
-    Trailing {
-        /// Byte position of the first extra byte.
-        at: usize,
+    /// Not `YYYY-MM-DDTHH:MM:SS[.f{1,9}]` followed by `Z` or `+HH:MM` / `-HH:MM`: a lowercase
+    /// `t` or `z`, a space, an offset without its colon, a leap second, a zone name, an
+    /// offset hour past 23, or a year that is not four digits.
+    #[error("timestamp is not YYYY-MM-DDTHH:MM:SS[.f]Z or with +HH:MM")]
+    Shape,
+    /// The calendar rejects it: a month, day, hour, minute, second or fraction out of range.
+    #[error("timestamp is not a valid instant: {reason}")]
+    Calendar {
+        /// What `jiff` says is wrong.
+        reason: String,
     },
 }
 
-impl fmt::Display for TimestampParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Truncated { at } => write!(f, "timestamp ends early at byte {at}"),
-            Self::Digit { at } => write!(f, "timestamp has a non-digit at byte {at}"),
-            Self::Separator { at } => write!(f, "timestamp has a wrong separator at byte {at}"),
-            Self::Range { field } => write!(f, "timestamp {field:?} is out of range"),
-            Self::EmptyFraction => f.write_str("timestamp has a '.' with no fractional digits"),
-            Self::FractionTooLong => f.write_str("timestamp has more than 9 fractional digits"),
-            Self::MissingZone => f.write_str("timestamp has no zone; end it with Z or +HH:MM"),
-            Self::Zone { at } => write!(f, "timestamp zone at byte {at} is not Z or +HH:MM"),
-            Self::Trailing { at } => write!(f, "timestamp has extra bytes from byte {at}"),
-        }
-    }
-}
-
-impl std::error::Error for TimestampParseError {}
-
-/// Reads fixed-width ASCII fields from a string.
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl Cursor<'_> {
-    fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.at).copied()
-    }
-
-    fn bump(&mut self) {
-        self.at = self.at.saturating_add(1);
-    }
-
-    fn separator(&mut self, want: u8) -> Result<(), TimestampParseError> {
-        match self.peek() {
-            Some(byte) if byte == want => {
-                self.bump();
-                Ok(())
-            }
-            Some(_) => Err(TimestampParseError::Separator { at: self.at }),
-            None => Err(TimestampParseError::Truncated { at: self.at }),
-        }
-    }
-
-    fn digit(&mut self) -> Result<i64, TimestampParseError> {
-        let byte = self
-            .peek()
-            .ok_or(TimestampParseError::Truncated { at: self.at })?;
-        if !byte.is_ascii_digit() {
-            return Err(TimestampParseError::Digit { at: self.at });
-        }
-        self.bump();
-        Ok(i64::from(byte.wrapping_sub(b'0')))
-    }
-
-    fn number(&mut self, width: usize) -> Result<i64, TimestampParseError> {
-        let mut value: i64 = 0;
-        for _ in 0..width {
-            value = value.saturating_mul(10).saturating_add(self.digit()?);
-        }
-        Ok(value)
-    }
-
-    fn bounded(&mut self, field: TimeField, max: i64) -> Result<i64, TimestampParseError> {
-        let value = self.number(2)?;
-        (value <= max)
-            .then_some(value)
-            .ok_or(TimestampParseError::Range { field })
-    }
-
-    /// Up to nine digits after a `.`, as whole milliseconds (truncated).
-    fn fraction_millis(&mut self) -> Result<i64, TimestampParseError> {
-        let mut millis: i64 = 0;
-        let mut seen: u32 = 0;
-        while let Some(byte) = self.peek().filter(u8::is_ascii_digit) {
-            if seen >= 9 {
-                return Err(TimestampParseError::FractionTooLong);
-            }
-            if seen < 3 {
-                millis = millis
-                    .saturating_mul(10)
-                    .saturating_add(i64::from(byte.wrapping_sub(b'0')));
-            }
-            seen = seen.saturating_add(1);
-            self.bump();
-        }
-        if seen == 0 {
-            return Err(TimestampParseError::EmptyFraction);
-        }
-        for _ in seen..3 {
-            millis = millis.saturating_mul(10);
-        }
-        Ok(millis)
-    }
-
-    /// The zone as seconds east of UTC.
-    fn zone_seconds(&mut self) -> Result<i64, TimestampParseError> {
-        let sign: i64 = match self.peek() {
-            None => return Err(TimestampParseError::MissingZone),
-            Some(b'Z') => {
-                self.bump();
-                return Ok(0);
-            }
-            Some(b'+') => 1,
-            Some(b'-') => -1,
-            Some(_) => return Err(TimestampParseError::Zone { at: self.at }),
-        };
-        self.bump();
-        let hours = self.bounded(TimeField::OffsetHour, 23)?;
-        self.zone_colon()?;
-        let minutes = self.bounded(TimeField::OffsetMinute, 59)?;
-        Ok(sign.saturating_mul(
-            hours
-                .saturating_mul(3600)
-                .saturating_add(minutes.saturating_mul(60)),
-        ))
-    }
-
-    fn zone_colon(&mut self) -> Result<(), TimestampParseError> {
-        match self.separator(b':') {
-            Err(TimestampParseError::Separator { at }) => Err(TimestampParseError::Zone { at }),
-            other => other,
-        }
-    }
-}
-
-const fn is_leap(year: i64) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-}
-
-const fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        2 if is_leap(year) => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    }
-}
-
-/// Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's algorithm).
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "year is at most four digits here, so every intermediate is far below i64::MAX"
-)]
-const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let mp = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// The inverse of [`days_from_civil`]: (year, month, day).
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "days comes from an i64 of milliseconds, so it is below 1.1e11 and every intermediate is far below i64::MAX"
-)]
-const fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
-    (year, month, day)
+/// Whether `text` has the shape Go's `time.RFC3339` reads, which is narrower than what
+/// `jiff` accepts: an uppercase `T` and `Z`, an offset as `+HH:MM` with the hour below 24,
+/// a four-digit year, and no leap second.
+fn has_go_shape(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let digits = |at: usize, n: usize| {
+        bytes
+            .get(at..at.saturating_add(n))
+            .is_some_and(|run| run.iter().all(u8::is_ascii_digit))
+    };
+    let zone_ok = match bytes.split_last() {
+        Some((b'Z', _)) => true,
+        _ => bytes.len().checked_sub(6).is_some_and(|at| {
+            let hour = bytes.get(at.saturating_add(1)..at.saturating_add(3));
+            matches!(bytes.get(at), Some(b'+' | b'-'))
+                && digits(at.saturating_add(1), 2)
+                && hour <= Some(b"23".as_slice())
+                && bytes.get(at.saturating_add(3)) == Some(&b':')
+                && digits(at.saturating_add(4), 2)
+        }),
+    };
+    digits(0, 4)
+        && bytes.get(10) == Some(&b'T')
+        && bytes.get(17..19) != Some(b"60".as_slice())
+        && zone_ok
 }
 
 impl Timestamp {
@@ -299,97 +114,89 @@ impl Timestamp {
     /// to milliseconds; years are 0000 to 9999; a leap second is refused.
     ///
     /// # Errors
-    /// [`TimestampParseError`] naming the first thing that is wrong.
+    /// [`TimestampParseError`] saying whether the shape or the calendar is wrong.
     pub fn parse_rfc3339(text: &str) -> Result<Self, TimestampParseError> {
-        let mut cur = Cursor {
-            bytes: text.as_bytes(),
-            at: 0,
+        if !has_go_shape(text) {
+            return Err(TimestampParseError::Shape);
+        }
+        let calendar = |error: jiff::Error| TimestampParseError::Calendar {
+            reason: error.to_string(),
         };
-        let year = cur.number(4)?;
-        cur.separator(b'-')?;
-        let month = cur.bounded(TimeField::Month, 12)?;
-        if month == 0 {
-            return Err(TimestampParseError::Range {
-                field: TimeField::Month,
-            });
-        }
-        cur.separator(b'-')?;
-        let day = cur.number(2)?;
-        if day == 0 || day > days_in_month(year, month) {
-            return Err(TimestampParseError::Range {
-                field: TimeField::Day,
-            });
-        }
-        cur.separator(b'T')?;
-        let hour = cur.bounded(TimeField::Hour, 23)?;
-        cur.separator(b':')?;
-        let minute = cur.bounded(TimeField::Minute, 59)?;
-        cur.separator(b':')?;
-        let second = cur.bounded(TimeField::Second, 59)?;
-        let fraction = if cur.peek() == Some(b'.') {
-            cur.bump();
-            cur.fraction_millis()?
-        } else {
-            0
+        // `jiff::Timestamp` stops at 9999-12-30, a day short of Go's last instant, so the
+        // civil date and time are read on their own and the offset applied here.
+        let (civil_text, offset) = match text.strip_suffix('Z') {
+            Some(rest) => (rest, 0_i64),
+            None => {
+                let (rest, zone) = text.split_at(text.len().saturating_sub(6));
+                let number = |at: std::ops::Range<usize>| {
+                    zone.get(at).and_then(|digits| digits.parse::<i64>().ok())
+                };
+                let (hours, minutes) = number(1..3)
+                    .zip(number(4..6))
+                    .ok_or(TimestampParseError::Shape)?;
+                if minutes > 59 {
+                    return Err(TimestampParseError::Calendar {
+                        reason: "offset minute out of range".to_owned(),
+                    });
+                }
+                let sign = if zone.starts_with('-') { -1 } else { 1 };
+                (
+                    rest,
+                    hours
+                        .saturating_mul(3600)
+                        .saturating_add(minutes.saturating_mul(60))
+                        .saturating_mul(sign),
+                )
+            }
         };
-        let offset = cur.zone_seconds()?;
-        if cur.at < text.len() {
-            return Err(TimestampParseError::Trailing { at: cur.at });
-        }
-        Ok(Self::from_parts(
-            year, month, day, hour, minute, second, fraction, offset,
+        let datetime: DateTime = civil_text.parse().map_err(calendar)?;
+        let days = datetime
+            .date()
+            .since((Unit::Day, date(1970, 1, 1)))
+            .map_err(calendar)?
+            .get_days();
+        let of_day = i64::from(datetime.hour())
+            .saturating_mul(3600)
+            .saturating_add(i64::from(datetime.minute()).saturating_mul(60))
+            .saturating_add(i64::from(datetime.second()))
+            .saturating_sub(offset)
+            .saturating_mul(1000)
+            .saturating_add(i64::from(datetime.subsec_nanosecond()).saturating_div(1_000_000));
+        Ok(Self(
+            i64::from(days)
+                .saturating_mul(MILLIS_PER_DAY)
+                .saturating_add(of_day),
         ))
-    }
-
-    /// Fields already checked by the caller; years are four digits, so nothing
-    /// here can overflow.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "private constructor over the seven validated fields of one instant"
-    )]
-    fn from_parts(
-        year: i64,
-        month: i64,
-        day: i64,
-        hour: i64,
-        minute: i64,
-        second: i64,
-        fraction: i64,
-        offset: i64,
-    ) -> Self {
-        let seconds = days_from_civil(year, month, day)
-            .saturating_mul(86_400)
-            .saturating_add(hour.saturating_mul(3600))
-            .saturating_add(minute.saturating_mul(60))
-            .saturating_add(second)
-            .saturating_sub(offset);
-        Self(seconds.saturating_mul(1000).saturating_add(fraction))
     }
 }
 
-/// `YYYY-MM-DDTHH:MM:SS.mmmZ`, always UTC with three fractional digits. A year
-/// outside 0000 to 9999 prints with a sign and at least four digits
-/// (`+10000`, `-0001`); [`Timestamp::parse_rfc3339`] does not read those back.
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ`, always UTC with three fractional digits. A year before 0 prints
+/// with a sign (`-0001`). An instant outside years -9999 to 9999, which `jiff` cannot hold,
+/// prints as its millisecond count and `ms` (`300000000000000ms`);
+/// [`Timestamp::parse_rfc3339`] does not read that.
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let days = self.0.div_euclid(MILLIS_PER_DAY);
         let of_day = self.0.rem_euclid(MILLIS_PER_DAY);
-        let (year, month, day) = civil_from_days(days);
-        let (secs, millis) = (of_day / 1000, of_day % 1000);
-        let sign = if year < 0 {
-            "-"
-        } else if year > 9999 {
-            "+"
-        } else {
-            ""
+        let day = Span::new()
+            .try_days(days)
+            .ok()
+            .and_then(|span| date(1970, 1, 1).checked_add(span).ok());
+        let Some(day) = day else {
+            return write!(f, "{}ms", self.0);
         };
+        let secs = of_day / 1000;
+        let sign = if day.year() < 0 { "-" } else { "" };
         write!(
             f,
-            "{sign}{:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
-            year.unsigned_abs(),
+            "{sign}{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+            day.year().unsigned_abs(),
+            day.month(),
+            day.day(),
             secs / 3600,
             secs % 3600 / 60,
             secs % 60,
+            of_day % 1000,
         )
     }
 }
@@ -516,97 +323,80 @@ mod tests {
             "2100-02-29T00:00:00Z",
             "2023-02-29T00:00:00Z",
         ] {
-            assert_eq!(
-                err(bad),
-                TimestampParseError::Range {
-                    field: TimeField::Day
-                }
+            assert!(
+                matches!(err(bad), TimestampParseError::Calendar { .. }),
+                "{bad}"
             );
         }
     }
 
+    /// What Go's `time.RFC3339` refuses and `jiff` alone would read.
     #[test]
-    fn every_parse_error_is_produced() {
-        use TimestampParseError as E;
-        assert_eq!(err(""), E::Truncated { at: 0 });
-        assert_eq!(err("2024-01-01T00:00"), E::Truncated { at: 16 });
-        assert_eq!(err("20x4-01-01T00:00:00Z"), E::Digit { at: 2 });
-        assert_eq!(err("2024/01/01T00:00:00Z"), E::Separator { at: 4 });
-        assert_eq!(err("2024-01-01 00:00:00Z"), E::Separator { at: 10 });
-        assert_eq!(err("2024-01-01t00:00:00Z"), E::Separator { at: 10 });
-        assert_eq!(
-            err("2024-13-01T00:00:00Z"),
-            E::Range {
-                field: TimeField::Month
-            }
-        );
-        assert_eq!(
-            err("2024-00-01T00:00:00Z"),
-            E::Range {
-                field: TimeField::Month
-            }
-        );
-        assert_eq!(
-            err("2024-01-00T00:00:00Z"),
-            E::Range {
-                field: TimeField::Day
-            }
-        );
-        assert_eq!(
-            err("2024-04-31T00:00:00Z"),
-            E::Range {
-                field: TimeField::Day
-            }
-        );
-        assert_eq!(
-            err("2024-01-01T24:00:00Z"),
-            E::Range {
-                field: TimeField::Hour
-            }
-        );
-        assert_eq!(
-            err("2024-01-01T00:60:00Z"),
-            E::Range {
-                field: TimeField::Minute
-            }
-        );
-        assert_eq!(
-            err("2024-01-01T00:00:60Z"),
-            E::Range {
-                field: TimeField::Second
-            }
-        );
-        assert_eq!(
-            err("2024-01-01T00:00:00+24:00"),
-            E::Range {
-                field: TimeField::OffsetHour
-            }
-        );
-        assert_eq!(
-            err("2024-01-01T00:00:00+00:60"),
-            E::Range {
-                field: TimeField::OffsetMinute
-            }
-        );
-        assert_eq!(err("2024-01-01T00:00:00.Z"), E::EmptyFraction);
-        assert_eq!(err("2024-01-01T00:00:00.1234567890Z"), E::FractionTooLong);
-        assert_eq!(err("2024-01-01T00:00:00"), E::MissingZone);
-        assert_eq!(err("2024-01-01T00:00:00z"), E::Zone { at: 19 });
-        assert_eq!(err("2024-01-01T00:00:00+0100"), E::Zone { at: 22 });
-        assert_eq!(err("2024-01-01T00:00:00Zjunk"), E::Trailing { at: 20 });
-        assert_eq!(err("2024-01-01T00:00:00+01:00 "), E::Trailing { at: 25 });
+    fn only_go_s_shape_is_read() {
+        for bad in [
+            "",
+            "2024-01-01T00:00",
+            "20x4-01-01T00:00:00Z",
+            "2024/01/01T00:00:00Z",
+            "2024-01-01 00:00:00Z",
+            "2024-01-01t00:00:00Z",
+            "2024-01-01T00:00:00z",
+            "2024-01-01T00:00:00",
+            "2024-01-01T00:00:00+0100",
+            "2024-01-01T00:00:00+01",
+            "2024-01-01T00:00:00+24:00",
+            "2024-01-01T00:00:00+01:00:30",
+            "2024-01-01T00:00:00Z[UTC]",
+            "2024-01-01T00:00:00Zjunk",
+            "2024-01-01T00:00:00+01:00 ",
+            "2024-01-01T00:00:60Z",
+            "+10000-01-01T00:00:00Z",
+            "2024-01-01T00:00:00.Z",
+            "2024-01-01T00:00:00.1234567890Z",
+        ] {
+            assert!(Timestamp::parse_rfc3339(bad).is_err(), "{bad:?}");
+        }
+        for bad in [
+            "2024-13-01T00:00:00Z",
+            "2024-00-01T00:00:00Z",
+            "2024-01-00T00:00:00Z",
+            "2024-04-31T00:00:00Z",
+            "2024-01-01T24:00:00Z",
+            "2024-01-01T00:60:00Z",
+            "2024-01-01T00:00:00+00:60",
+        ] {
+            assert!(
+                matches!(err(bad), TimestampParseError::Calendar { .. }),
+                "{bad}"
+            );
+        }
     }
 
+    /// A fraction below a millisecond is dropped toward the earlier millisecond, also
+    /// before the epoch, where the instant is negative.
     #[test]
-    fn display_of_years_outside_four_digits_is_signed() {
-        let far = Timestamp::from_unix_millis(model_days(10_000, 1, 1) * MILLIS_PER_DAY);
-        assert_eq!(far.to_string(), "+10000-01-01T00:00:00.000Z");
-        let before = Timestamp::from_unix_millis(-62_198_755_200_000);
-        assert_eq!(before.to_string(), "-0001-01-01T00:00:00.000Z");
-        err(&far.to_string());
-        // Extremes of the integer print without panicking.
-        let _ = Timestamp::from_unix_millis(i64::MIN).to_string();
-        let _ = Timestamp::from_unix_millis(i64::MAX).to_string();
+    fn sub_millisecond_fractions_floor() {
+        assert_eq!(ts("1969-12-31T23:59:59.9999Z").unix_millis(), -1);
+        assert_eq!(ts("1969-12-31T23:59:59.999Z").unix_millis(), -1);
+        assert_eq!(ts("1969-12-31T23:59:59.0001Z").unix_millis(), -1000);
+    }
+
+    /// Years `jiff` cannot hold print as the millisecond count, never panic.
+    #[test]
+    fn display_outside_jiffs_range_is_the_millisecond_count() {
+        assert_eq!(
+            Timestamp::from_unix_millis(-62_198_755_200_000).to_string(),
+            "-0001-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            Timestamp::from_unix_millis(model_days(10_000, 1, 1) * MILLIS_PER_DAY).to_string(),
+            "253402300800000ms"
+        );
+        assert_eq!(
+            Timestamp::from_unix_millis(i64::MIN).to_string(),
+            format!("{}ms", i64::MIN)
+        );
+        assert_eq!(Timestamp::MAX.to_string(), format!("{}ms", i64::MAX));
     }
 
     proptest::proptest! {
@@ -640,9 +430,10 @@ mod tests {
                     Timestamp::parse_rfc3339(&at(last)).unwrap().unix_millis(),
                     model_days(year, month, last) * MILLIS_PER_DAY
                 );
+                let past = Timestamp::parse_rfc3339(&at(last + 1));
                 proptest::prop_assert_eq!(
-                    Timestamp::parse_rfc3339(&at(last + 1)),
-                    Err(TimestampParseError::Range { field: TimeField::Day })
+                    matches!(past, Err(TimestampParseError::Calendar { .. })),
+                    true
                 );
             }
         }
@@ -698,14 +489,6 @@ mod tests {
         assert_eq!(
             Timestamp::MAX.saturating_duration_since(at(i64::MIN)),
             ms(u64::MAX >> 1)
-        );
-    }
-
-    #[test]
-    fn an_empty_timestamp_ends_early_at_byte_zero() {
-        assert_eq!(
-            Timestamp::parse_rfc3339("").unwrap_err().to_string(),
-            "timestamp ends early at byte 0"
         );
     }
 }

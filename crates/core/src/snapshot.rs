@@ -28,12 +28,12 @@ use lsr_ltx::{Header, HeaderFields, PageChecksum, PageSize, Timestamp};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 use thiserror::Error;
 
+use crate::fault::role::Role;
 use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, SyncedThrough};
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::store::ObjectStore;
 use crate::sync::{PageFrom, clamp, plan_pages, scan_whole, stage};
 use crate::verify::LivePages;
 
@@ -58,7 +58,7 @@ pub struct SnapshotFailed {
 /// # Errors
 /// [`SnapshotFailed`]. Retrying the same call is safe: the key is the same and
 /// a commit replaces whatever an earlier, rejected one left under it.
-pub(crate) async fn write_snapshot<W: WalSource, P: PageSource, S: ObjectStore>(
+pub(crate) async fn write_snapshot<W: WalSource, P: PageSource, S: Role>(
     proof: &SyncedThrough,
     wal: &mut W,
     db: &mut P,
@@ -124,7 +124,7 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
     })
 }
 
-async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
+async fn run<W: WalSource, P: PageSource, S: Role>(
     proof: &SyncedThrough,
     key: &FileKey,
     wal: &mut W,
@@ -152,17 +152,8 @@ async fn run<W: WalSource, P: PageSource, S: ObjectStore>(
         node_id: 0,
     })
     .map_err(|_err| BugSite::Encode.hit())?;
-    let (file, _last, _made_here) = stage(
-        remote,
-        key,
-        header,
-        &plan,
-        &mut reader,
-        db,
-        pages,
-        Fault::from_remote,
-    )
-    .await?;
+    let (file, _last, _made_here) =
+        stage(remote, key, header, &plan, &mut reader, db, pages).await?;
     Ok(file)
 }
 
