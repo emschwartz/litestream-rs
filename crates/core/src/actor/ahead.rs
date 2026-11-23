@@ -41,9 +41,10 @@ use lsr_ltx::{Timestamp, Txid};
 
 use super::parts::Course;
 use super::{Actor, Env, Stepped};
-use crate::ahead::{CheckError, Found};
+use crate::ahead::Found;
 use crate::fault::role::Role;
 use crate::fault::{Fault, StopCause};
+use crate::identity::CheckError;
 use crate::source::{Checkpointer, PageSource, WalSource};
 
 /// How long a verdict keeps the state before the damage restorable: long enough for an operator
