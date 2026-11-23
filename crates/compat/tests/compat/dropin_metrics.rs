@@ -106,11 +106,13 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// One daemon on its own database: the child, its port and the application's connection.
+/// One daemon on its own database: the child, its port, the application's connection and the
+/// file its stdout and stderr go to (the daemon logs to one or the other by configuration).
 struct Side {
     child: Child,
     port: u16,
     app: rusqlite::Connection,
+    log: PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -135,20 +137,23 @@ fn start(binary: &Path) -> Side {
     );
     let config_path = dir.path().join("litestream.yml");
     std::fs::write(&config_path, config).unwrap();
+    let log = dir.path().join("daemon.log");
+    let logfile = std::fs::File::create(&log).unwrap();
     let child = Command::new(binary)
         .args(["replicate", "-config"])
         .arg(&config_path)
         .env("HOME", dir.path())
         .current_dir(dir.path())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(logfile.try_clone().unwrap()))
+        .stderr(Stdio::from(logfile))
         .spawn()
         .unwrap();
     Side {
         child,
         port,
         app,
+        log,
         _dir: dir,
     }
 }
@@ -184,7 +189,12 @@ fn scraped_once_settled(side: &Side) -> String {
             Ok(settled(&last))
         },
     )
-    .unwrap_or_else(|e| panic!("{e}\nlast scrape:\n{last}"));
+    .unwrap_or_else(|e| {
+        let log = std::fs::read_to_string(&side.log).unwrap_or_default();
+        let from = log.len().saturating_sub(4000);
+        let tail = log.get(from..).unwrap_or(&log);
+        panic!("{e}\nlast scrape:\n{last}\ndaemon log tail:\n{tail}")
+    });
     last
 }
 

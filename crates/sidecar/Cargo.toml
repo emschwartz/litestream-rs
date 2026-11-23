@@ -21,6 +21,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 lsr-journal.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

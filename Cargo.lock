@@ -1037,9 +1037,11 @@ dependencies = [
  "lsr-replica",
  "lsr-store-fs",
  "lsr-store-s3",
+ "rusqlite",
  "rustix",
  "serde_json",
  "signal-hook",
+ "tempfile",
  "thiserror",
 ]
 
