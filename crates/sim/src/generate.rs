@@ -481,6 +481,10 @@ pub struct Weights {
     pub app_in_tick: u32,
     /// [`Op::Verify`].
     pub verify: u32,
+    /// The engine checkpoints TRUNCATE at this many synced frames instead of the simulator's
+    /// usual 32, so its TRUNCATE and the snapshot it takes under the write lock (CKPT-4) are
+    /// reached in short runs. Never drawn by a mix: the nightly sets it.
+    pub truncate_pages: Option<std::num::NonZeroU32>,
     /// [`EnvFault::EvictPageCache`]: a step that does anything only after a failed fsync of
     /// the WAL, in its generation.
     pub evict_page_cache: u32,
@@ -578,6 +582,7 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             verify: 0,
+            truncate_pages: None,
             evict_page_cache: 0,
         }
     }
@@ -728,6 +733,7 @@ impl Weights {
             overlap: false,
             app_in_tick: 0,
             verify: 0,
+            truncate_pages: None,
             evict_page_cache: 0,
         };
         // Drawn last, so every other kind keeps the weight it had before
@@ -782,6 +788,27 @@ impl Weights {
         // And after that, for the same reason: page-cache eviction after a failed WAL fsync.
         mix.evict_page_cache = weight(false);
         mix
+    }
+
+    /// The nightly's settings on top of this mix: the known-wrong cells, and the laws no mix
+    /// draws, from the seed's own stream (so a replay line with `LSR_SIM_KNOWN_WRONG` set gets
+    /// them too): with even odds, a TRUNCATE threshold of 2 to 8 frames, with other processes'
+    /// readers drawn at least at weight 10. The engine truncates only after a PASSIVE at the
+    /// threshold that a reader held off, so the readers are what make the low threshold reach
+    /// its TRUNCATE: over seeds 1 to 300 of the mixed set, the engine's TRUNCATE ran in 8 seeds
+    /// as drawn, 25 at a threshold of 4, and 36 at a threshold of 2 with the readers.
+    #[must_use]
+    pub fn with_nightly_laws(mut self, seed: Seed) -> Self {
+        let entropy = SeededEntropy::new(seed.stream(25));
+        self.known_wrong = true;
+        let frames = u32::try_from(below(&entropy, 7).saturating_add(2)).unwrap_or(2);
+        self.truncate_pages = (below(&entropy, 2) == 0)
+            .then_some(frames)
+            .and_then(std::num::NonZeroU32::new);
+        if self.truncate_pages.is_some() {
+            self.other_process_reader = self.other_process_reader.max(10);
+        }
+        self
     }
 
     /// What the rotating seed sets run: the default mix for half the seeds
@@ -843,7 +870,7 @@ fn store_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
     let error = if weights.error_domain {
         crate::domain::draw_store(entropy, target, op, weights.known_wrong)
     } else {
-        store_error(entropy, op)
+        crate::domain::possible_store(target, op, store_error(entropy, op))
     };
     Op::StoreFault {
         target,
@@ -1002,7 +1029,7 @@ fn env_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
             } else {
                 SourceError::Io(ErrorKind::Other)
             };
-            EnvFault::Source(op, err)
+            EnvFault::Source(op, crate::domain::possible_source(op, err))
         }
     };
     Op::EnvFault(fault)

@@ -119,3 +119,28 @@ fn a_halt_across_restarts_still_goes_unreported_seed_0xe9() {
         KnownWrong::HaltForgottenAtRestart,
     );
 }
+
+/// Bucket rollbacks leave a hole below the engine's newest upload, staging is wiped, and a
+/// lagging listing hides that upload: the boot's read past its listing stops in the hole, the
+/// engine uploads a new transaction under the hidden one, and the latest state restores an
+/// older one with no stop (survival campaign, swarm mix with holds at 20; BOOT-18).
+#[test]
+fn a_hole_wider_than_the_probe_below_a_hidden_upload_sends_latest_back_seed_0x95a() {
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: false,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Retry,
+        clock_law: ClockLaw::PerTick,
+        error_domain: true,
+        known_wrong: true,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    still_fails(
+        0x95a,
+        crate::histories::seed_0x95a::OPS,
+        &opts,
+        KnownWrong::ProbeStopsInAHole,
+    );
+}

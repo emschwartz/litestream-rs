@@ -226,6 +226,9 @@ pub struct Opts {
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
+    /// The engine's TRUNCATE threshold, when not the usual ([`Weights::truncate_pages`]).
+    /// [`run_with`] sets it.
+    pub truncate_pages: Option<NonZeroU32>,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
@@ -306,6 +309,8 @@ struct Runner {
     overlap: Option<SeededEntropy>,
     // Whether the one-shot store faults of an overlapping hold draw from the whole domain.
     error_domain: bool,
+    // The engine's TRUNCATE threshold, when the run sets one ([`Opts::truncate_pages`]).
+    truncate_pages: Option<NonZeroU32>,
     // Whether an overlapping hold draws restarts, which reach the open defect D9.
     known_wrong: bool,
     spilled: Vec<(PageNo, Vec<u8>)>,
@@ -448,6 +453,7 @@ impl Runner {
         runner.w.set_clock_law(opts.clock_law);
         runner.overlap = opts.overlap.then(|| SeededEntropy::new(seed.stream(21)));
         runner.error_domain = opts.error_domain;
+        runner.truncate_pages = opts.truncate_pages;
         runner.known_wrong = opts.known_wrong;
         runner.reboot();
         runner
@@ -468,6 +474,7 @@ impl Runner {
             slew: None,
             overlap: None,
             error_domain: false,
+            truncate_pages: None,
             known_wrong: false,
             spilled: Vec::new(),
             unwatched: true,
@@ -535,6 +542,10 @@ impl Runner {
             responses: self.responses,
             max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
             maintenance: base.maintenance.clone().with_retention(self.retention),
+            checkpoint: CheckpointConfig {
+                truncate_pages: self.truncate_pages.or(base.checkpoint.truncate_pages),
+                ..base.checkpoint
+            },
             ..base
         });
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
@@ -2617,6 +2628,7 @@ pub fn run_with(
         error_domain: weights.error_domain,
         known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
+        truncate_pages: weights.truncate_pages,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
