@@ -33,6 +33,7 @@ mod cure;
 mod env;
 mod failstop;
 mod fault;
+mod identity;
 mod inventory;
 mod journal;
 mod layout;
