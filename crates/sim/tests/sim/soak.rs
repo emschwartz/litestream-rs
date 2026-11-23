@@ -18,8 +18,8 @@
 //! The soak is also accountable for what it reached: every passing seed's
 //! reach is summed, written as JSON to `LSR_SIM_REACH_OUT` when it is set
 //! (the nightly workflow uploads it), and judged by [`lsr_sim::marks::gate`].
-//! A behaviour-table row with a mark site, or a fault class's required count,
-//! that no seed reached fails the soak as a failing seed does.
+//! A fault class's required count that no seed reached fails the soak as a
+//! failing seed does.
 
 use std::time::{Duration, Instant};
 

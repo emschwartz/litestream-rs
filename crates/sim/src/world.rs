@@ -763,6 +763,25 @@ impl World {
         Ok(listing.files.last().copied())
     }
 
+    /// Whether the local database holds a commit past the one the newest level-0 file in
+    /// staging holds. A boot then continues from a position short of the WAL's committed end,
+    /// which no read transaction pinned: the generation can restart under it before the engine
+    /// stages the rest. Nothing staged, or staging that cannot be read, is not behind.
+    #[must_use]
+    pub fn staging_behind_newest_commit(&self) -> bool {
+        let Ok(Some(newest)) = self.newest_staged() else {
+            return false;
+        };
+        let Ok(bytes) = self.read_staged(&newest.key) else {
+            return false;
+        };
+        let txid = newest.key.range().max();
+        let staged = self
+            .model
+            .staged_commit(txid, crate::store::wal_end(&bytes));
+        staged.is_some() && staged != self.model.newest_commit()
+    }
+
     /// The level-0 files in staging; none when it cannot be listed.
     #[must_use]
     pub fn staged_level_zero(&self) -> Vec<FileKey> {

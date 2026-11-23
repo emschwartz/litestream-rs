@@ -725,7 +725,6 @@ pub fn recover_traced(
     remote: Option<Txid>,
 ) -> Verdict {
     let Some(source) = source else {
-        mark!(Boot1);
         return plain(Recovered::Snapshot {
             after: remote,
             cause: SnapshotCause::FirstSync,
@@ -734,13 +733,10 @@ pub fn recover_traced(
     let txid = source_txid(&source);
     if let Some(ahead) = remote.filter(|remote| *remote > txid) {
         return plain(match source {
-            PositionSource::Boot(_) => {
-                mark!(Boot6);
-                Recovered::Snapshot {
-                    after: Some(ahead),
-                    cause: SnapshotCause::BehindRemote { local: txid },
-                }
-            }
+            PositionSource::Boot(_) => Recovered::Snapshot {
+                after: Some(ahead),
+                cause: SnapshotCause::BehindRemote { local: txid },
+            },
             PositionSource::Running(..) => Recovered::Stop(StopCause::OtherWriter),
         });
     }
@@ -750,10 +746,7 @@ pub fn recover_traced(
         return snapshot(match (&source, wal.header) {
             (PositionSource::Boot(NewestStagedFile::Unreadable { .. }), _)
             | (PositionSource::Boot(_), Some(_)) => SnapshotCause::NewestStagedFileUnreadable,
-            (PositionSource::Boot(_) | PositionSource::Running(..), _) => {
-                mark!(Boot7);
-                SnapshotCause::WalMissing
-            }
+            (PositionSource::Boot(_) | PositionSource::Running(..), _) => SnapshotCause::WalMissing,
         });
     };
     if seen.page_size != header.page_size() {
@@ -848,7 +841,6 @@ fn restarted(
         cause: SnapshotCause::GenerationChanged,
     };
     let PositionSource::Running(position, probes) = source else {
-        mark!(Boot8);
         return plain(changed);
     };
     let pinned = match position.continuity() {
@@ -858,18 +850,15 @@ fn restarted(
     let empty = seen.end == WalOffset::start(seen.page_size);
     let proven = pinned && (empty || header.salts().salt1 == seen.salts.salt1.wrapping_add(1));
     if !proven {
-        mark!(Run8);
         return plain(changed);
     }
     // No end check: frames the restart wrote at the synced end carry new salts and never chain.
     if probes.stale_next {
-        mark!(Run8);
         return Verdict {
             recovered: changed,
             event: Some(RecoverEvent::ReadLockViolated { synced: seen.end }),
         };
     }
-    mark!(Run7);
     plain(Recovered::WalRestarted(Position::new(
         position.txid(),
         FrameCursor::at_start(header),
@@ -917,7 +906,6 @@ fn same_generation(
         | FrameState::Miss(Miss::NotACommit | Miss::Moved) => false,
     };
     if committed.is_some_and(|end| end.get() < seen.end.get()) || short_file || frame_gone {
-        mark!(Boot9);
         let committed = committed.unwrap_or(WalOffset::start(seen.page_size));
         return Err(Refusal {
             cause: SnapshotCause::LocalRewound {
@@ -931,15 +919,9 @@ fn same_generation(
         });
     }
     match frame {
-        FrameState::Miss(Miss::NotACommit) => {
-            mark!(Boot10);
-            Err(refuse(SnapshotCause::PrevFrameMismatch))
-        }
+        FrameState::Miss(Miss::NotACommit) => Err(refuse(SnapshotCause::PrevFrameMismatch)),
         FrameState::Miss(Miss::Moved) => Err(refuse(SnapshotCause::GenerationChanged)),
-        FrameState::Mismatch => {
-            mark!(Boot10);
-            Err(refuse(SnapshotCause::LastPageMismatch))
-        }
+        FrameState::Mismatch => Err(refuse(SnapshotCause::LastPageMismatch)),
         FrameState::Miss(Miss::Truncated) | FrameState::Rewritten | FrameState::Fresh => {
             if let Some(refusal) = reset_past(source, seen, header, wal) {
                 return Err(refusal);
@@ -968,7 +950,6 @@ fn reset_past(
     if !reset || !probes.stale_next {
         return None;
     }
-    mark!(Run10);
     let pinned = position.continuity() == Continuity::Held(wal.epoch);
     Some(Refusal {
         cause: SnapshotCause::GenerationChanged,

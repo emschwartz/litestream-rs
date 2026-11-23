@@ -99,7 +99,6 @@ impl Actor {
     pub(super) fn sync_failed(&mut self, fault: Fault) {
         match evidence(&fault) {
             Evidence::Once(Obligation::UnprovenWal) => {
-                mark!(Run3);
                 self.kept.unproven = Unproven::Truncate;
             }
             Evidence::Repeats => {}

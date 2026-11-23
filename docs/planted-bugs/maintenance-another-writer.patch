@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2116,7 +2116,7 @@
+@@ -2150,7 +2150,7 @@
          now: Timestamp,
      ) -> Option<Tick> {
          let known = self.snapshot_after();
 -        if inventory.newest() > known {
 +        if false && inventory.newest() > known {
              return Some(match past_known(remote, inventory, known).await {
-                 Ok(true) => {
-                     mark!(Up10);
+                 Ok(true) => self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now),
+                 Ok(false) => self.list_again_later(now),
