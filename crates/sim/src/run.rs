@@ -2087,11 +2087,12 @@ impl Runner {
             // A flipped bit is no commit: the model follows it, and no restore may give it.
             (WalOp::FlipLastFrameBit, Heal::No) => self.w.adopt_corrupt_state(),
             (WalOp::FlipLastFrameBit, Heal::Yes) => self.w.adopt_local_state(),
+            // A regrowth that kept its commit marks made a commit at each of them.
+            (WalOp::RegrowSameSalts(_), _) => self.w.adopt_regrown(),
             (
                 WalOp::TearHeader
                 | WalOp::TruncateAtFrame(_)
                 | WalOp::RewriteSameLength(_)
-                | WalOp::RegrowSameSalts(_)
                 | WalOp::RegrowWithoutCommitMarks(_),
                 _,
             ) => self.w.adopt_local_state(),

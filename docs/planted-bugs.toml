@@ -380,7 +380,7 @@ tests = ["maintenance_stops_on_a_file_past_its_position_only_when_a_read_finds_i
 name = "maintenance-plans-from-a-lagging-listing"
 fix = "8c7d8ce"
 package = "lsr-core"
-tests = ["maintenance_plans_nothing_from_a_listing_that_hides_a_confirmed_upload"]
+tests = ["the_first_listing_after_a_boot_plans_nothing_while_it_hides_the_confirmed_upload"]
 
 # One failed read of the staged copy takes it as torn and confirms the replica's differing object.
 [[bug]]
@@ -1664,6 +1664,13 @@ fix = "9b4a029"
 package = "lsr-core"
 tests = ["recover::tests::an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught"]
 
+[[bug]]
+name = "regrown-wal-one-commit-sim"
+fix = "a8092ab"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_file_staged_from_a_regrown_wal_is_judged_by_the_regrown_commit_seed_0x2b2"]
+
 # Fail-stop false trips on lag the replica did not have: one plant per rule the fix added.
 
 [[bug]]
@@ -2040,6 +2047,15 @@ fix = "claude/sim-remote-corrupt"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c"]
+
+# The snapshot maintenance wrote is not watched: a lagging listing that hides it plans it again,
+# and the same level-9 key is written twice with other bytes.
+[[bug]]
+name = "written-snapshot-unwatched"
+fix = "9f205d69"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["a_snapshot_a_lagging_listing_hides_is_not_written_again_seed_0x82"]
 
 [[bug]]
 name = "read-lock-violation-dropped"

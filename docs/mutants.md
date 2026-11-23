@@ -407,3 +407,17 @@ three it had not reached, and the tally above counts the second result.
 | --- | --- | --- |
 | `pages.rs` `seeded` | `min() > from` becomes `>=` | The extra file it calls pending is the confirmed one; a quiet mark at or below the confirmed transaction is trimmed in `Actor::observe_lag` before any read. |
 | `actor/lag.rs` `Actor::observe_lag` | `retain(txid > replicated)` becomes `>=` | `only_quiet_pending` reads the marks from the transaction after the replicated one, so a kept mark equal to it is never read. |
+
+## wal
+
+`cargo mutants -p lsr-wal --test-package lsr-wal --test-tool nextest --jobs 4 --timeout 240` at commit
+`d5d92c8`: 170 mutants in 6 minutes, 112 caught, 13 missed, 45 unviable, no timeouts. After the fixes below,
+157 mutants, 112 caught, 45 unviable, none missed. No survivor revealed a bug.
+
+| Where | Mutants | Resolution |
+| --- | --- | --- |
+| `scan.rs` `generation_unchanged`, `commit_follows`, `verified_before`, `checksum_before` | 4 (`<` becomes `>` on a short read) | Gone. Five call sites compared `read_at`'s count with the buffer's length, and only `read_page`'s was tested at that boundary; elsewhere a short read leaves zeros that fail the following checksum anyway, so no test told the comparisons apart. One helper, `read_full`, now makes the comparison for all five. |
+| `scan.rs` `read_at` | 1 (the `Interrupted` retry becomes an error) | Caught: `open_retries_an_interrupted_read`. |
+| `header.rs` `WalHeader::checkpoint_seq` | 1 | Caught: `header_decodes_every_field` decodes a header whose sequence is 7, not only 0. |
+| `frame.rs` `WalOffset`'s Display | 1 | Caught: the same test reads it, since error messages name offsets with it. |
+| `testing.rs` `page` | 6 | Equivalent (escape line): the mixing steps of the test-data generator. A weaker mixer still gives deterministic pages that differ by seed and page number, and changing the generator would change every recorded simulator history. The rest of `testing.rs` (the WAL builder and its checksums) stays mutated, since the simulator builds its WALs with it. |
