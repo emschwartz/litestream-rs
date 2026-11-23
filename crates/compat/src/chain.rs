@@ -421,7 +421,6 @@ impl Chain {
                 staging: &self.staging,
                 remote: &self.remote,
                 clock: &clock,
-                journal: None,
             };
             match block_on(self.actor.tick(env, now)) {
                 Tick::Ran {
@@ -623,7 +622,6 @@ impl Chain {
                 staging: &self.staging,
                 remote: &self.remote,
                 clock: &clock,
-                journal: None,
             };
             match block_on(self.actor.tick(env, now)) {
                 Tick::Drained { .. } => {

@@ -1176,12 +1176,34 @@ mod short_object_left {
             clock_law: w.clock_law,
             overlap: w.overlap,
             error_domain: w.error_domain,
-            known_wrong: w.known_wrong,
             staging_fs: w.staging_fs,
             ..Opts::default()
         };
         if let Err(failure) = run_ops(seed, h::seed_0x4c::OPS, &opts) {
             panic!("{failure}");
         }
+    }
+}
+
+/// Fixed: a staging read refused for permission during level-1 compaction degraded maintenance
+/// as the replica's `StoreDenied(Permission)` until #145 routed compaction's local reads through
+/// `Fault::from_staging`. Seed 0x68f of the fixed set's mix (its first 39 operations) reaches it
+/// on the tree that stops at another writer, where seed 0xb9e no longer did; it must pass now.
+#[test]
+fn compaction_takes_a_staging_denial_as_staging_seed_0x68f() {
+    use lsr_sim::run::run_ops;
+    use lsr_sim::{AfterRestart, ClockLaw, Opts, Seed};
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: false,
+        after_restart: AfterRestart::Redo,
+        clock_law: ClockLaw::EachRead,
+        error_domain: true,
+        staging_fs: false,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x68f), crate::histories::seed_0x68f::OPS, &opts) {
+        panic!("{failure}");
     }
 }

@@ -114,10 +114,11 @@ pub enum Fault {
     /// The fsync of a staged file failed: encode and write it again.
     LocalFsyncFailed,
     /// The engine's fsync of the WAL before staging (`WalSource::sync`) failed.
-    /// Nothing is staged, and no later sync of the same WAL generation is
-    /// trusted: the kernel calls the pages clean after reporting the failure
-    /// once, so the frames it covered may never reach the disk however many
-    /// later syncs succeed (`actor::unproven` has the way out).
+    /// Nothing is staged from the frames it covered, and the sync is tried again. The kernel
+    /// may call the pages clean after reporting the failure once, so a later sync that
+    /// succeeds does not prove the frames reached the disk; v1 goes on, as Go does, and a
+    /// power loss then is answered by the boot's check of the database against what was
+    /// staged (`docs/decisions/D173.md`).
     WalSyncFailed,
     /// SQLite is busy, or the wal-index is mid-update.
     SqliteBusy,
@@ -197,11 +198,6 @@ pub enum BugSite {
     WalPageRead,
     /// The page map was fed out of the order one scan produces.
     PageMap,
-    /// The engine asked the journal for a record that is not monotonic over the one before it:
-    /// a floor that falls or is dropped for the same destination, or a debt that moves backward.
-    JournalNotMonotonic,
-    /// The journal's writer reached a record write with no sequence number to follow.
-    JournalSequence,
 }
 
 impl BugSite {
@@ -301,10 +297,6 @@ pub enum SnapshotCause {
     CheckpointBoundary,
     /// An operator asked.
     OperatorRequested,
-    /// The engine's fsync of the WAL failed, so the frames it covered were
-    /// never staged; a TRUNCATE checkpoint then wrote them into the database
-    /// file, and the snapshot takes them from there (`actor::unproven`).
-    WalSyncFailed,
     /// At boot, staged files the replica did not have yet were not vouched
     /// for by the live WAL (a staging backup put back, a file replaced, or a
     /// chain from a WAL generation that is gone), and the WAL could not
@@ -341,13 +333,11 @@ pub enum SnapshotCauseKind {
     OperatorRequested,
     /// [`SnapshotCause::StagedUnverified`].
     StagedUnverified,
-    /// [`SnapshotCause::WalSyncFailed`].
-    WalSyncFailed,
 }
 
 impl SnapshotCauseKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::FirstSync,
         Self::BehindRemote,
         Self::NewestStagedFileUnreadable,
@@ -359,7 +349,6 @@ impl SnapshotCauseKind {
         Self::CheckpointBoundary,
         Self::OperatorRequested,
         Self::StagedUnverified,
-        Self::WalSyncFailed,
     ];
 }
 
@@ -377,7 +366,6 @@ impl From<&SnapshotCause> for SnapshotCauseKind {
             SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
             SnapshotCause::OperatorRequested => Self::OperatorRequested,
             SnapshotCause::StagedUnverified { .. } => Self::StagedUnverified,
-            SnapshotCause::WalSyncFailed => Self::WalSyncFailed,
         }
     }
 }
@@ -468,29 +456,6 @@ pub enum StopCause {
         /// The page.
         pgno: PageNo,
     },
-    /// A boot after a failed WAL sync found database-file pages no WAL frame covers that are
-    /// not their images at the newest staged transaction: a checkpoint copied frames the failed
-    /// sync covered, and the WAL lost them (`crate::ahead`).
-    DatabaseAheadOfWal {
-        /// How many pages differ.
-        pages: NonZeroU32,
-        /// The lowest page that differs.
-        first: NonZeroU32,
-    },
-    /// The cure after a failed WAL sync read pages back from the database file after its FULL
-    /// checkpoint and found them unlike the WAL frames it had verified: the kernel evicted those
-    /// frames and a checkpoint copied the disk's older bytes, so commits are lost (`crate::cure`).
-    WalLostCommits {
-        /// How many pages differ.
-        pages: NonZeroU32,
-        /// The lowest page that differs.
-        first: NonZeroU32,
-    },
-    /// A boot after a failed WAL sync owed the check for a database file ahead of its WAL and
-    /// could not make it: the replica could not give its state at its newest confirmed
-    /// transaction on two attempts in a row, so the cure runs unchecked (`crate::ahead`,
-    /// `docs/decisions.md` D106).
-    DatabaseAheadOfWalUnchecked,
     /// The replica's store cannot make a create-only write, and the response is to stop.
     ConditionalWritesUnsupported,
     /// The shutdown deadline arrived.
@@ -520,7 +485,7 @@ pub enum PersistentCause {
     WalTruncated,
     /// The WAL file is gone.
     WalUnlinked,
-    /// The engine's fsync of the WAL failed: what it covered is unproven.
+    /// The engine's fsync of the WAL failed.
     WalSyncFailed,
     /// The database's page size is not the one its replica holds.
     PageSizeChanged {
@@ -534,29 +499,6 @@ pub enum PersistentCause {
         /// The page.
         pgno: PageNo,
     },
-    /// A boot after a failed WAL sync found database-file pages no WAL frame covers that are
-    /// not their images at the newest staged transaction: a checkpoint copied frames the failed
-    /// sync covered, and the WAL lost them (`crate::ahead`).
-    DatabaseAheadOfWal {
-        /// How many pages differ.
-        pages: NonZeroU32,
-        /// The lowest page that differs.
-        first: NonZeroU32,
-    },
-    /// The cure after a failed WAL sync read pages back from the database file after its FULL
-    /// checkpoint and found them unlike the WAL frames it had verified: the kernel evicted those
-    /// frames and a checkpoint copied the disk's older bytes, so commits are lost (`crate::cure`).
-    WalLostCommits {
-        /// How many pages differ.
-        pages: NonZeroU32,
-        /// The lowest page that differs.
-        first: NonZeroU32,
-    },
-    /// A boot after a failed WAL sync owed the check for a database file ahead of its WAL and
-    /// could not make it: the replica could not give its state at its newest confirmed
-    /// transaction on two attempts in a row, so the cure runs unchecked (`crate::ahead`,
-    /// `docs/decisions.md` D106).
-    DatabaseAheadOfWalUnchecked,
     /// The replica's store cannot make a create-only write: uploads replace, as Go's do, and a
     /// second writer under the same key is no longer refused by the bucket. Stands until the
     /// process restarts, whatever succeeds after it (D79).
@@ -671,13 +613,6 @@ impl PersistentCause {
             StopCause::WalSyncFailed => Some(Self::WalSyncFailed),
             StopCause::PageSizeChanged { was, now } => Some(Self::PageSizeChanged { was, now }),
             StopCause::DatabasePageMismatch { pgno } => Some(Self::DatabasePageMismatch { pgno }),
-            StopCause::DatabaseAheadOfWal { pages, first } => {
-                Some(Self::DatabaseAheadOfWal { pages, first })
-            }
-            StopCause::WalLostCommits { pages, first } => {
-                Some(Self::WalLostCommits { pages, first })
-            }
-            StopCause::DatabaseAheadOfWalUnchecked => Some(Self::DatabaseAheadOfWalUnchecked),
             StopCause::ConditionalWritesUnsupported => Some(Self::ConditionalWritesUnsupported),
             StopCause::Bug => Some(Self::Bug),
             StopCause::Shutdown => None,
@@ -702,11 +637,6 @@ impl PersistentCause {
             Self::WalSyncFailed => StopCause::WalSyncFailed,
             Self::PageSizeChanged { was, now } => StopCause::PageSizeChanged { was, now },
             Self::DatabasePageMismatch { pgno } => StopCause::DatabasePageMismatch { pgno },
-            Self::DatabaseAheadOfWal { pages, first } => {
-                StopCause::DatabaseAheadOfWal { pages, first }
-            }
-            Self::WalLostCommits { pages, first } => StopCause::WalLostCommits { pages, first },
-            Self::DatabaseAheadOfWalUnchecked => StopCause::DatabaseAheadOfWalUnchecked,
             Self::ConditionalWritesUnsupported => StopCause::ConditionalWritesUnsupported,
             Self::Bug => StopCause::Bug,
             Self::Stalled(_) => return None,
@@ -765,10 +695,10 @@ pub struct Responses {
     pub wal_truncated: Response,
     /// The WAL file was deleted.
     pub wal_unlinked: Response,
-    /// The engine's fsync of the WAL failed. Keeping trying never stages a
-    /// frame the failed sync covered: it checkpoints the WAL with TRUNCATE,
-    /// so SQLite writes those pages into the database file again and syncs
-    /// it, and then snapshots from the database file (`actor::unproven`).
+    /// The engine's fsync of the WAL failed. Keeping trying (the default, as Go, which never
+    /// syncs the WAL) reports `wal_sync_failed` and syncs again on the next try: nothing is
+    /// staged from frames the failed sync covered until a sync succeeds, and nothing is
+    /// remembered across a restart (`docs/decisions/D173.md`).
     pub wal_sync_failed: Response,
     /// The database's page size is not the replica's. Keeping trying never
     /// writes the new size: the way out is a restart onto a new prefix.
@@ -778,12 +708,6 @@ pub struct Responses {
     /// serves), keeps the task degraded and retention pinned until a verified
     /// WAL frame rewrites the page or an operator accepts it.
     pub database_page_mismatch: Response,
-    /// A boot after a failed WAL sync found the database file ahead of its WAL (`crate::ahead`).
-    /// Keeping trying replicates the file as the application serves it, keeps the state before
-    /// it restorable for a fixed window, and reports it; nothing an operator does ends it. It
-    /// also answers a check that could not be made (`PersistentCause::DatabaseAheadOfWalUnchecked`):
-    /// keeping trying runs the cure unchecked and reports that for the same window.
-    pub database_ahead_of_wal: Response,
     /// The replica's store cannot make a create-only write. Keeping trying uploads by replacing,
     /// as Go does, with the upload task degraded until the process restarts (D79).
     pub conditional_writes_unsupported: Response,
@@ -813,7 +737,6 @@ impl Responses {
         wal_sync_failed: Response::KeepTrying,
         page_size_changed: Response::KeepTrying,
         database_page_mismatch: Response::KeepTrying,
-        database_ahead_of_wal: Response::KeepTrying,
         conditional_writes_unsupported: Response::KeepTrying,
         bug: Response::KeepTrying,
         other_writer: OtherWriter::Stop,
@@ -835,7 +758,6 @@ impl Responses {
         wal_sync_failed: Response::Stop,
         page_size_changed: Response::Stop,
         database_page_mismatch: Response::Stop,
-        database_ahead_of_wal: Response::Stop,
         conditional_writes_unsupported: Response::Stop,
         bug: Response::Stop,
         other_writer: OtherWriter::Stop,
@@ -873,12 +795,6 @@ impl Responses {
             PersistentCause::WalSyncFailed => self.wal_sync_failed,
             PersistentCause::PageSizeChanged { .. } => self.page_size_changed,
             PersistentCause::DatabasePageMismatch { .. } => self.database_page_mismatch,
-            // A check that could not be made is answered as one that found the file ahead: under
-            // `STRICT` the engine stops before the cure, else the cure runs (D106). Commits a
-            // checkpoint lost are the same damage, found by the cure instead of a boot (D108).
-            PersistentCause::DatabaseAheadOfWal { .. }
-            | PersistentCause::WalLostCommits { .. }
-            | PersistentCause::DatabaseAheadOfWalUnchecked => self.database_ahead_of_wal,
             PersistentCause::ConditionalWritesUnsupported => self.conditional_writes_unsupported,
             PersistentCause::Stalled(_) => return Action::Retry,
             PersistentCause::RemoteRegressed => {
@@ -996,79 +912,6 @@ pub const fn policy(fault: &Fault) -> Policy {
         }
         Fault::ShutdownDeadline => Policy::Shutdown,
         Fault::Bug(_) => Policy::Persistent(PersistentCause::Bug),
-    }
-}
-
-/// Whether meeting a fault's condition again reports it again (`crate::obligations`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Evidence {
-    /// It does: a retry that succeeds shows the condition has passed, or redoes what it covered.
-    Repeats,
-    /// It is reported once and then gone, so a later success proves nothing about what it
-    /// covered: the fault leaves this obligation, which the actor records and the obligation
-    /// ledger shows journalled, and its policy is never a plain retry.
-    Once(Obligation),
-}
-
-/// What a fault reported once leaves the engine owing. A new one does not build until the actor
-/// records it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Obligation {
-    /// A failed WAL sync's debt: a TRUNCATE, then a snapshot (`actor::unproven`).
-    UnprovenWal,
-}
-
-#[cfg(test)]
-impl Obligation {
-    /// The field of the actor's state that holds it, as the obligation ledger names it.
-    #[must_use]
-    pub const fn field(self) -> &'static str {
-        match self {
-            Self::UnprovenWal => "unproven",
-        }
-    }
-}
-
-/// What a fault's report is worth on a second look: the class of fault an obligation held only in
-/// memory comes from.
-#[must_use]
-pub const fn evidence(fault: &Fault) -> Evidence {
-    match fault {
-        // The kernel reports a failed writeback once and then calls the pages clean.
-        Fault::WalSyncFailed => Evidence::Once(Obligation::UnprovenWal),
-        // A retried staged write writes its file again from the WAL, and an uncertain commit is
-        // listed before the next write.
-        Fault::LocalFsyncFailed
-        | Fault::LocalIo
-        | Fault::LocalDiskFull
-        | Fault::StagedLost
-        | Fault::UploadAmbiguous
-        | Fault::UploadChecksumMismatch
-        | Fault::StoreTransient
-        | Fault::StoreThrottled { .. }
-        | Fault::StoreDenied(_)
-        | Fault::StoreRefused
-        // A store without conditional writes refuses every create-only write, and each
-        // process asks again at its first one.
-        | Fault::CreateOnlyUnsupported
-        | Fault::RemoteObjectMissing
-        | Fault::RemoteCorrupt
-        | Fault::RemoteAheadOfLocal
-        | Fault::RemoteRegressed
-        | Fault::SqliteBusy
-        | Fault::ReadersHeld
-        | Fault::WalMoved
-        | Fault::WalIndexInconsistent
-        | Fault::WalChangedUnderRead
-        | Fault::NothingToSnapshot
-        | Fault::ReadTxLost
-        | Fault::PageSizeChanged { .. }
-        | Fault::WalCorruptBelowCommitted
-        | Fault::WalTruncatedBelowCommitted
-        | Fault::WalUnlinked
-        | Fault::DatabasePageMismatch { .. }
-        | Fault::ShutdownDeadline
-        | Fault::Bug(_) => Evidence::Repeats,
     }
 }
 

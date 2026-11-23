@@ -74,24 +74,20 @@
 //! checkpoints it did not run and infers the application's automatic checkpoints that
 //! cannot run ([`Actor::app_checkpoints`]). The count changes no decision.
 
-mod ahead;
 mod clock;
 mod lag;
 mod once;
 mod once_retention;
 mod parts;
 mod state;
-mod unproven;
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use lsr_journal::AheadKind;
 use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
-pub use ahead::AHEAD_KEPT_FOR;
 use clock::EngineClock;
 pub use once::{FinalSnapshot, FinalSnapshotFailure};
 pub use once_retention::FinalRetention;
@@ -115,7 +111,6 @@ use crate::fault::{
 };
 use crate::identity;
 use crate::inventory::Inventory;
-use crate::journal::{JournalFile, JournalSignal, JournalWriteError, JournalWriter, judge};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
     Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due, listing_after_upload,
@@ -161,10 +156,6 @@ pub struct Env<'a, W, P, C, L, R> {
     /// So a stamp is read here, after the committed read that bounds the
     /// file: every transaction the file carries committed before it.
     pub clock: &'a dyn Clock,
-    /// The engine journal (`docs/journal.md`), or `None` to run without one. Boot reads it and
-    /// reports what it found ([`Actor::journal`]); every verdict, the worst included, leaves the
-    /// engine doing exactly what it does with `None`.
-    pub journal: Option<&'a mut (dyn JournalFile + Send + 'static)>,
 }
 
 impl<
@@ -182,7 +173,6 @@ impl<
             .field("ck", &self.ck)
             .field("staging", &self.staging)
             .field("remote", &self.remote)
-            .field("journal", &self.journal.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -300,37 +290,6 @@ pub enum Event {
     /// driver writes it, hands it back with [`Actor::remember_takeover`], and
     /// ticks again. Nothing else ran.
     TakeoverWanted(TakeoverRecord),
-    /// Where a standing ahead-of-WAL verdict is (`docs/decisions.md` D103); nothing else ran.
-    AheadOfWal(AheadNotice),
-}
-
-/// What an operator is told about a standing verdict besides its first report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AheadNotice {
-    /// A boot found the verdict recorded: the state before the damage is kept until `until`.
-    Kept {
-        /// What the verdict found.
-        kind: AheadKind,
-        /// The kept restore point.
-        restore_point: Txid,
-        /// When it goes back to normal retention.
-        until: Timestamp,
-    },
-    /// The window passed: the restore point is back under normal retention.
-    Released {
-        /// What the verdict had found.
-        kind: AheadKind,
-        /// The restore point no longer kept.
-        restore_point: Txid,
-    },
-    /// A boot found recorded that an owed check could not be made (`docs/decisions.md` D106):
-    /// the notice stands until `until`.
-    UncheckedStands {
-        /// When the notice ends.
-        until: Timestamp,
-    },
-    /// The window of a check that could not be made passed: the notice ends.
-    UncheckedEnded,
 }
 
 /// How a tick ended.
@@ -546,16 +505,6 @@ impl Actor {
         self.kept.stop.phase(self.booted())
     }
 
-    /// What the last boot's read of the journal reported, if anything: `None` with no journal,
-    /// a readable one, or none on a first run.
-    #[must_use]
-    pub const fn journal(&self) -> Option<JournalSignal> {
-        match self.kept.journal_write {
-            Err(kind) => Some(JournalSignal::Unwritable(kind)),
-            Ok(()) => self.kept.journal,
-        }
-    }
-
     /// Counts the event a recovery verdict names, and hands on its decision.
     fn noted(&mut self, verdict: Verdict) -> Recovered {
         match verdict.event {
@@ -749,11 +698,7 @@ impl Actor {
     }
 
     /// Runs at most one unit of work.
-    pub async fn tick<W, P, C, L, R>(
-        &mut self,
-        mut env: Env<'_, W, P, C, L, R>,
-        now: Timestamp,
-    ) -> Tick
+    pub async fn tick<W, P, C, L, R>(&mut self, env: Env<'_, W, P, C, L, R>, now: Timestamp) -> Tick
     where
         W: WalSource,
         P: PageSource,
@@ -785,14 +730,12 @@ impl Actor {
             staging: &staging,
             remote: &remote,
             clock: env.clock,
-            journal: env.journal.as_deref_mut(),
         };
         // Boxed: the tick's state machine is the largest future the replicator thread polls,
         // and on the heap it is not part of every poll frame below `block_on`, which in a
         // debug build is what the half-stack headroom gate measures (`lsr_replica::stack`).
         let tick = Box::pin(self.tick_at(&mut roles, now)).await;
         self.kept.work.add_checkpoints(ck.totals());
-        let tick = self.reconcile_journal(env.journal.as_deref_mut(), tick, now);
         self.observe_lag(env.wal, now);
         let tick = self.wake_for_probe(tick);
         self.wake_on_wall(tick)
@@ -812,23 +755,6 @@ impl Actor {
         R: Role,
     {
         self.expire(now);
-        if let Some(released) = self.expire_ahead(now) {
-            // The verdict's restore point goes back to retention, which may now delete its chain.
-            self.engine.maintain.stale = true;
-            self.kept.ahead_notice = Some(AheadNotice::Released {
-                kind: released.kind,
-                restore_point: released.restore_point,
-            });
-        }
-        if self.expire_unchecked(now) {
-            self.kept.ahead_notice = Some(AheadNotice::UncheckedEnded);
-        }
-        if let Some(notice) = self.kept.ahead_notice.take() {
-            return Tick::Ran {
-                event: Event::AheadOfWal(notice),
-                next: Next::Now,
-            };
-        }
         self.probe_at_bound(now);
         if self.engine.pages.mismatch().is_none() {
             self.kept.tasks.page_matches_again();
@@ -913,7 +839,6 @@ impl Actor {
     /// Routes a fault by its policy. The only place `policy` is called.
     fn fault(&mut self, waiter: impl Into<Waiter>, fault: Fault, now: Timestamp) -> Tick {
         let waiter = waiter.into();
-        self.sync_failed(fault);
         self.lag_failed(waiter, Some(fault), now);
         match policy(&fault) {
             Policy::Retry(backoff) => {
@@ -1211,13 +1136,9 @@ impl Actor {
             return self.ran(Event::Idle, now);
         }
         let takeover = self.boot_takeover();
-        let journal = read_journal(env.journal.as_deref_mut());
         let doubted = self.kept.suspect_staged;
         let suspect = &mut self.kept.suspect_staged;
-        let no_journal = journal
-            .as_ref()
-            .is_none_or(|(_, parsed)| parsed.verdict == lsr_journal::Verdict::Missing);
-        let listed = boot_listing(env.staging, env.remote, suspect, takeover, no_journal).await;
+        let listed = boot_listing(env.staging, env.remote, suspect, takeover).await;
         let Listed {
             upload,
             dropped,
@@ -1249,7 +1170,6 @@ impl Actor {
         {
             return tick;
         }
-        let continued = matches!(recovered, Recovered::Continue(_));
         let from = match recovered {
             Recovered::Continue(at) | Recovered::WalRestarted(at) => boot_continues(at),
             Recovered::Snapshot { cause, .. } => Err(cause),
@@ -1258,9 +1178,6 @@ impl Actor {
                 return self.verdict(Task::Sync, cause, now);
             }
         };
-        // A boot that fails later reads the journal again.
-        self.adopt_journal(journal, newest_staged.as_ref(), &upload);
-        self.owe_ahead_check(continued);
         let cause = boot_cause(dropped, refused, from.err());
         let staged = newest_staged.map(|newest_staged| newest_staged.txid());
         let course = boot_course(from, cause, self.kept.asked(), staged);
@@ -1498,11 +1415,8 @@ impl Actor {
         let wants_live = may_checkpoint && self.kept.live.wanted() && self.caught_up();
         let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
         let quiet = !self.wal_moved(committed) && self.pending().is_none() && !self.more_wal();
-        if quiet && !wants_proof && !self.owes_ahead_check() {
+        if quiet && !wants_proof {
             return None;
-        }
-        if self.owes_truncate() && !may_checkpoint {
-            return Some(self.owed_in_drain(now));
         }
         let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
@@ -1558,9 +1472,6 @@ impl Actor {
         match stepped {
             Ok(Stepped::Synced { files, proof }) => {
                 self.kept.tasks.get_mut(Task::Sync).succeed();
-                if files > 0 {
-                    self.staged_after_truncate();
-                }
                 Ok((files, proof))
             }
             Ok(Stepped::Resnapshot(cause)) => {
@@ -1601,12 +1512,6 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Result<Stepped, Fault> {
-        if self.owes_ahead_check() {
-            return self.check_ahead(env, now).await;
-        }
-        if self.owes_truncate() {
-            return self.unprove(env, now);
-        }
         if !self.staging_has_room() {
             // Marked as a step cut short, so the sync runs again when room
             // frees up: no new WAL change may come to wake it.
@@ -2575,8 +2480,6 @@ impl Actor {
             task(Task::Maintenance),
             self.engine.gate.until(),
             self.engine.maintain.until,
-            self.kept.ahead.map(ahead::kept_until),
-            self.kept.unchecked.map(ahead::unchecked_until),
         ];
         [task(Task::Sync), task(Task::Upload), deadline]
             .into_iter()
@@ -2651,8 +2554,6 @@ enum Takeover {
 struct BootGate {
     takeover: Takeover,
     local: Option<Txid>,
-    /// The meta directory holds no journal (or the engine runs without one).
-    no_journal: bool,
 }
 
 impl BootGate {
@@ -2688,12 +2589,12 @@ impl BootGate {
         }
     }
 
-    /// Whether the meta directory is brand new: nothing staged when the boot began, no
-    /// journal and no takeover record. Only then does a refusal ask whether the local
-    /// database is the replica's state (`crate::identity`); any of the three is a record of
-    /// this engine's past, and the gate's own rules judge with it.
+    /// Whether the meta directory is brand new: nothing staged when the boot began and no
+    /// takeover record. Only then does a refusal ask whether the local database is the
+    /// replica's state (`crate::identity`); either is a record of this engine's past, and the
+    /// gate's own rules judge with it (`docs/decisions/D176.md`).
     const fn fresh(self) -> bool {
-        self.no_journal && self.local.is_none() && matches!(self.takeover, Takeover::Vouch(None))
+        self.local.is_none() && matches!(self.takeover, Takeover::Vouch(None))
     }
 
     /// Whether replica files through `tip` that the WAL did not vouch for
@@ -2734,97 +2635,6 @@ enum Dropped {
     Diverged(Txid),
 }
 
-/// The journal as boot reads it, with the writer that continues from it, or `None` with no
-/// journal lent.
-fn read_journal(
-    file: Option<&mut (dyn JournalFile + Send + '_)>,
-) -> Option<(JournalWriter, lsr_journal::Parsed)> {
-    file.map(JournalWriter::open)
-}
-
-impl Actor {
-    /// Takes what boot read of the journal: the report (a missing journal is a first run, and
-    /// reports nothing, only while staging and the replica are both empty), the writer, and a
-    /// recorded unproven-WAL debt, which a restart never forgives (`unproven`).
-    fn adopt_journal(
-        &mut self,
-        journal: Option<(JournalWriter, lsr_journal::Parsed)>,
-        newest_staged: Option<&NewestStagedFile>,
-        upload: &UploadState,
-    ) {
-        let fresh = newest_staged.is_none() && upload.confirmed().is_none();
-        let Some((writer, parsed)) = journal else {
-            self.kept.journal = None;
-            self.kept.writer = None;
-            self.kept.journal_read = None;
-            return;
-        };
-        self.kept.journal = judge(&parsed, fresh);
-        self.kept.journal_read = match parsed.verdict {
-            lsr_journal::Verdict::Read { journal, .. } => Some(journal),
-            lsr_journal::Verdict::Newer { .. }
-            | lsr_journal::Verdict::Missing
-            | lsr_journal::Verdict::Unreadable(_) => None,
-        };
-        if let Some(read) = self.kept.journal_read {
-            self.kept.unproven = self.kept.unproven.with_recorded(read.unproven);
-            self.adopt_ahead(read.ahead);
-            self.adopt_unchecked(read.unchecked);
-        }
-        self.kept.writer = Some(writer);
-    }
-
-    /// Writes the journal when what it holds differs from what the engine holds, at the end of
-    /// every tick: the facts are a function of the engine's state, never a step to remember.
-    /// A process that neither read nor wrote a record writes one, so the next boot finds a
-    /// journal and a missing one means it was lost. A failed write is tried again next tick;
-    /// the engine proceeds as with no journal.
-    fn reconcile_journal(
-        &mut self,
-        file: Option<&mut (dyn JournalFile + Send + '_)>,
-        tick: Tick,
-        now: Timestamp,
-    ) -> Tick {
-        let Some(file) = file else {
-            return tick;
-        };
-        let Some(held) = self
-            .kept
-            .writer
-            .as_ref()
-            .map(|writer| writer.durable().copied())
-        else {
-            return tick;
-        };
-        let held = held.or(self.kept.journal_read);
-        let wanted = (
-            self.kept.unproven.recorded(),
-            self.kept.ahead,
-            self.kept.unchecked,
-        );
-        if held.map(|held| (held.unproven, held.ahead, held.unchecked)) == Some(wanted) {
-            // Nothing the engine holds is missing from the journal: nothing lags it.
-            self.kept.journal_write = Ok(());
-            return tick;
-        }
-        let record = lsr_journal::Journal {
-            unproven: wanted.0,
-            ahead: wanted.1,
-            unchecked: wanted.2,
-            ..held.unwrap_or(lsr_journal::Journal::ABSENT)
-        };
-        let Some(writer) = self.kept.writer.as_mut() else {
-            return tick;
-        };
-        match writer.write(file, &record) {
-            Ok(()) => self.kept.journal_write = Ok(()),
-            Err(JournalWriteError::Unwritable(kind)) => self.kept.journal_write = Err(kind),
-            Err(JournalWriteError::Bug(fault)) => return self.fault(Task::Sync, fault, now),
-        }
-        tick
-    }
-}
-
 /// Boot's scratch removal, listing and staging sweep: the upload state to start from, and
 /// what was deleted.
 ///
@@ -2844,7 +2654,6 @@ async fn boot_listing<L: Role, R: Role>(
     remote: &R,
     suspect: &mut Option<FileKey>,
     takeover: Takeover,
-    no_journal: bool,
 ) -> Result<Listed, BootStep> {
     remove_scratch(staging, remote).await?;
     // Where staging stood before this boot dropped anything of its own: the
@@ -2866,11 +2675,7 @@ async fn boot_listing<L: Role, R: Role>(
         Err(failed) => return Err(failed.fault.into()),
     };
     let tip = upload.confirmed();
-    let gate = BootGate {
-        takeover,
-        local,
-        no_journal,
-    };
+    let gate = BootGate { takeover, local };
     // The staged files from `from` on cannot continue the replica: unless
     // the replica's object is another writer's, they go, and recovery
     // snapshots above what the replica holds.
@@ -3075,7 +2880,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let refused = unvouched.filter(|tip| gate.refuses(*tip));
     let resized = page_size.zip(now).filter(|(was, now)| was != now);
     let refused_through = match refused {
-        Some(tip) if gate.fresh() => {
+        Some(tip) if resized.is_none() && gate.fresh() => {
             let same =
                 identity::local_is_replica(env.wal, reader, committed, env.db, remote, tip).await?;
             (!same).then_some(tip)

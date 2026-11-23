@@ -946,9 +946,7 @@ dependencies = [
 name = "lsr-core"
 version = "0.0.0"
 dependencies = [
- "crc",
  "lsr-core",
- "lsr-journal",
  "lsr-ltx",
  "lsr-spec",
  "lsr-wal",
@@ -989,16 +987,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lsr-journal"
-version = "0.0.0"
-dependencies = [
- "crc",
- "lsr-ltx",
- "proptest",
- "thiserror",
-]
-
-[[package]]
 name = "lsr-ltx"
 version = "0.0.0"
 dependencies = [
@@ -1032,7 +1020,6 @@ version = "0.0.0"
 dependencies = [
  "lsr-config",
  "lsr-core",
- "lsr-journal",
  "lsr-ltx",
  "lsr-replica",
  "lsr-store-fs",
@@ -1051,7 +1038,6 @@ version = "0.0.0"
 dependencies = [
  "lsr-core",
  "lsr-history",
- "lsr-journal",
  "lsr-ltx",
  "lsr-store-fs",
  "lsr-store-s3",
@@ -1091,7 +1077,6 @@ name = "lsr-store-fs"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
- "lsr-journal",
  "lsr-ltx",
  "tempfile",
 ]

@@ -173,7 +173,6 @@ classes! {
     EnvDeleteWal = "EnvFault.DeleteWal", Once;
     EnvWipeStaging = "EnvFault.WipeStaging", Once;
     EnvSource = "EnvFault.Source", Once;
-    EnvEvictPageCache = "EnvFault.EvictPageCache", Once;
     HttpFault = "HttpFault", Once;
     // Undrawn: these EnvFault variants are scenario steps (see their docs in generate.rs).
     // A finding of issue #127 row 42 and others: they never meet another fault by chance.
@@ -392,7 +391,6 @@ impl Class {
             EnvFault::TruncateFails => Self::EnvTruncateFails,
             EnvFault::FlipDatabasePage(_) => Self::EnvFlipDatabasePage,
             EnvFault::DriverWritesNothing => Self::EnvDriverWritesNothing,
-            EnvFault::EvictPageCache => Self::EnvEvictPageCache,
         }
     }
 

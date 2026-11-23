@@ -9,7 +9,6 @@ publish.workspace = true
 
 [dependencies]
 lsr-core.workspace = true
-lsr-journal.workspace = true
 lsr-ltx.workspace = true
 
 [dev-dependencies]

@@ -1,7 +1,0 @@
-name = "journal-checksum-ignored"
-fix = "c9d9d4a"
-package = "lsr-journal"
-tests = [
-    "a_wrong_checksum_is_refused",
-    "a_changed_byte_in_the_record_invalidates_it",
-]

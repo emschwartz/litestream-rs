@@ -253,8 +253,6 @@ pub struct World {
     pub remote_faults: FaultHandle,
     /// Staging's power-loss bookkeeping.
     pub volatile: VolatileHandle,
-    /// The engine journal, on the same disk as staging.
-    pub journal: crate::journal::SimJournal,
     /// What the database really was.
     pub model: Model,
     /// What the engine has acknowledged.
@@ -376,7 +374,6 @@ impl World {
             staging_recorder: staging_recorder_log,
             remote_recorder: remote_recorder_log,
             volatile: volatile_handle,
-            journal: crate::journal::SimJournal::default(),
             model,
             acked: Acked::new(),
             history,
@@ -677,8 +674,6 @@ impl World {
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
         self.sync_model_at(at);
-        // A failed sync inside the tick may have had its pages evicted at once.
-        self.adopt_evicted();
         match ran {
             RunEnd::Done(out) => TickEnd::Done(out),
             RunEnd::Crashed { polls } => {
@@ -695,7 +690,6 @@ impl World {
         match kind {
             CrashKind::Process => Vec::new(),
             CrashKind::Power => {
-                self.journal.power_loss();
                 let lost = block_on(
                     self.staging_raw
                         .power_loss(&self.volatile, &self.crash_entropy),
@@ -1146,14 +1140,6 @@ impl World {
         block_on(up.write(bytes))?;
         block_on(up.commit())?;
         Ok(())
-    }
-
-    /// Follows evicted WAL pages (`SimSqlite::evict_page_cache`) when they changed what SQLite
-    /// serves: damage, as [`World::adopt_corrupt_state`] takes it.
-    pub fn adopt_evicted(&mut self) {
-        if self.sqlite.take_evicted() {
-            self.adopt_corrupt_state();
-        }
     }
 
     /// [`World::adopt_local_state`] for damage that corrupted the database

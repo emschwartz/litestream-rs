@@ -459,11 +459,10 @@ pub(crate) async fn restore_from<S: ObjectStore, K: DatabaseSink>(
     restore_within(store, listed, target, options, sink, MAX_ATTEMPTS).await
 }
 
-/// [restore_from] over a fresh listing that plans once: a planned file gone or a gap ends it at
-/// the first attempt, with the error the last attempt would
-/// give. For a caller that retries on a later tick itself, so one tick spends one listing of the
-/// replica, not [MAX_ATTEMPTS] of them.
-pub(crate) async fn restore_one_plan<S: ObjectStore, K: DatabaseSink>(
+/// [restore_from] for a caller that retries itself: one attempt, so a replica that does not plan
+/// or a file that vanishes is an error at once, not a listing again. The boot's identity check is
+/// one: its refusal stands and the next boot checks afresh.
+pub(crate) async fn restore_once<S: ObjectStore, K: DatabaseSink>(
     store: &S,
     target: RestoreTarget,
     options: RestoreOptions,

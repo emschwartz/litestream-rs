@@ -1,7 +1,0 @@
-# The check also compares pages a WAL frame covers, so a file the WAL is simply ahead of reads as damaged.
-name = "ahead-check-counts-covered-pages"
-fix = "6ed52046"
-package = "lsr-core"
-tests = [
-    "actor::tests::journal::a_boot_with_a_debt_whose_file_kept_its_pages_comes_up_clean",
-]

@@ -2,7 +2,7 @@
 //! directory makes before it builds on replica files nothing else vouches for
 //! (`docs/decisions/D170.md`).
 //!
-//! A deployment that does not keep the meta directory boots with no staged file, no journal
+//! A deployment that does not keep the meta directory boots with no staged file
 //! and no takeover record. Once the WAL has restarted it cannot vouch for the replica's newest
 //! transaction T, and the boot gate (`crate::takeover`) would stop for another writer on every
 //! redeploy. Equality settles it without an operator: when every page of the local committed
@@ -23,14 +23,53 @@ use std::io::{Read, Seek};
 use lsr_ltx::{PageChecksum, PageNo, Txid};
 use lsr_wal::WalReader;
 
-use crate::ahead::{CheckError, restore_fault};
 use crate::fault::Fault;
 use crate::fault::role::Role;
+use crate::inventory::InventoryError;
 use crate::plan::RestoreTarget;
-use crate::restore::{RestoreOptions, restore_from};
+use crate::restore::{RestoreError, RestoreOptions, restore_once};
 use crate::source::{CommittedRead, PageSource, WalSource};
+use crate::store::StoreError;
 use crate::sync::scan_whole;
 use crate::verify::DigestSink;
+
+/// Why the check did not finish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckError {
+    /// A read failed or the WAL moved: retried as any sync step is.
+    Fault(Fault),
+    /// The replica could not give its state at its newest confirmed transaction because it is
+    /// damaged, not because a call failed: retrying does not heal it.
+    Unrestorable,
+}
+
+impl From<Fault> for CheckError {
+    fn from(fault: Fault) -> Self {
+        Self::Fault(fault)
+    }
+}
+
+/// What a restore of the replica's newest confirmed state failing means for the check: a failed
+/// call (a read, a listing page) or a replica changing under the restore is the store's fault,
+/// retried as such; a history that does not plan, a file or database that does not verify, or a
+/// listing no real store returns is the replica's damage.
+pub(crate) fn restore_fault<R: Role>(err: &RestoreError) -> CheckError {
+    match err {
+        RestoreError::Store(StoreError::Corrupt { .. })
+        | RestoreError::Inventory(
+            InventoryError::ConflictingDuplicate { .. } | InventoryError::ListingStalled(_),
+        )
+        | RestoreError::NoPlan(_)
+        | RestoreError::File { .. }
+        | RestoreError::DatabaseChecksum { .. }
+        | RestoreError::CreatedAtRepeated { .. } => CheckError::Unrestorable,
+        RestoreError::Store(err) | RestoreError::Inventory(InventoryError::Store(err)) => {
+            R::fault(err).into()
+        }
+        RestoreError::Unstable { .. } => Fault::StoreTransient.into(),
+        RestoreError::Sink { .. } | RestoreError::Publish { .. } => Fault::LocalIo.into(),
+    }
+}
 
 /// Whether the local committed state, read under `committed` (the boot's wal-index read) with
 /// `reader` on the live WAL, equals the replica's state at `tip`: the same page size, page count
@@ -49,9 +88,8 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
 ) -> Result<bool, Fault> {
     let mut image = BTreeMap::new();
     let sink = DigestSink { pages: &mut image };
-    let restored = restore_from(
+    let restored = restore_once(
         remote,
-        None,
         RestoreTarget::Txid(tip),
         RestoreOptions::default(),
         sink,
@@ -67,7 +105,7 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
     let page_size = restored.page_size();
     let same = match reader {
         Some(reader) if reader.header().page_size() != page_size => false,
-        Some(reader) => {
+        Some(reader) if committed.end().offset().frame_index() > 0 => {
             let covered = scan_whole(reader, committed)?;
             let size = match covered.commit() {
                 Some(size) => size.get(),
@@ -79,7 +117,7 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
             };
             size == restored.commit().get() && local.matches(&image, size, page_size)?
         }
-        None => {
+        Some(_) | None => {
             let size = db.page_count().map_err(Fault::from_source)?.get();
             let local: Local<'_, '_, W::Wal, P> = Local { reader: None, db };
             size == restored.commit().get() && local.matches(&image, size, page_size)?

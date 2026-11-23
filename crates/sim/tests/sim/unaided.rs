@@ -9,10 +9,9 @@
 //! `LSR_SIM_APP_IN_TICK` set to a weight, every seed draws app operations inside a tick at it; with
 //! `LSR_SIM_SWARM` set, every seed runs its swarm mix (`Weights::swarm`) instead, and with
 //! `LSR_SIM_DEFAULT` set the default mix; with `LSR_SIM_HOLD` set to a rate in a thousand, holds
-//! are drawn at least that often (`tests/sim/survival.rs`); with `LSR_SIM_KNOWN_WRONG` set, the
-//! nightly's settings apply (`Weights::with_nightly_laws`: the known-wrong cells and a low TRUNCATE
-//! threshold by the seed's own draw), and a failure matching a drawn defect's signature is
-//! printed as known and not counted as failed (`lsr_sim::domain::KnownWrong`); with
+//! are drawn at least that often (`tests/sim/survival.rs`); with `LSR_SIM_NIGHTLY_LAWS` set, the
+//! nightly's settings apply (`Weights::with_nightly_laws`: a low TRUNCATE threshold by the seed's
+//! own draw); with
 //! `LSR_SIM_REMOTE_S3` set, every seed's replica is the S3 store over its in-memory bucket
 //! (`lsr_sim::remote`), with `LSR_SIM_REMOTE_MEM` set none is, and with `LSR_SIM_HTTP_FAULT` set
 //! to a weight, every seed draws provider faults on its requests at it.
@@ -48,11 +47,8 @@
 //! (126, under the history configuration) had the boot witness accept a pending file on the
 //! anchor alone; a staging fault four steps later forced a snapshot over it.
 
-use lsr_sim::domain::{KnownWrong, known_in};
 use lsr_sim::run::run_ops;
-use lsr_sim::{
-    AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, history, replay_line, run_with,
-};
+use lsr_sim::{AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, replay_line, run_with};
 
 const STEPS: u32 = 300;
 
@@ -99,7 +95,7 @@ pub fn weights(seed: Seed) -> Weights {
             .max(hold.parse().expect("LSR_SIM_HOLD is a rate in 1000"));
     }
     weights.block_crash_law |= std::env::var("LSR_SIM_BLOCK_LAW").is_ok();
-    if std::env::var("LSR_SIM_KNOWN_WRONG").is_ok() {
+    if std::env::var("LSR_SIM_NIGHTLY_LAWS").is_ok() {
         weights = weights.with_nightly_laws(seed);
     }
     weights.lying_wal_sync |= std::env::var("LSR_SIM_LYING_SYNC").is_ok();
@@ -147,7 +143,6 @@ fn seeds_to_first_failure() {
         ..Opts::default()
     };
     let mut failed = Vec::new();
-    let mut known = std::collections::BTreeMap::<String, Vec<u64>>::new();
     let mut reached = [0_u64; REACHED.len()];
     let mut losses = 0_u64;
     for n in base..base.saturating_add(seeds) {
@@ -161,12 +156,6 @@ fn seeds_to_first_failure() {
             losses += u64::from(report.power_losses);
         }
         if let Err(failure) = ran {
-            let drawn = known_in(&history(seed, STEPS, &weights), &weights);
-            if let Some(defect) = KnownWrong::of(&failure.violation, &drawn) {
-                println!("KNOWN {defect:?}: {failure}");
-                known.entry(format!("{defect:?}")).or_default().push(n);
-                continue;
-            }
             println!(
                 "FAILED after {} seeds: {failure}",
                 n.saturating_sub(base).saturating_add(1)
@@ -180,13 +169,6 @@ fn seeds_to_first_failure() {
     }
     let reached: Vec<_> = REACHED.iter().zip(reached).collect();
     println!("passing runs: {losses} power losses; {reached:?}");
-    for (defect, seeds) in &known {
-        println!(
-            "known {defect}: {} seeds, first {:?}",
-            seeds.len(),
-            seeds.first()
-        );
-    }
     println!(
         "{judges:?}: {} failed of seeds from {base}: {failed:?}",
         failed.len()

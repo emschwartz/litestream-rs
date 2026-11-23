@@ -47,12 +47,12 @@ use lsr_core::{
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite};
-use lsr_store_fs::{FsJournalFile, FsStore};
+use lsr_store_fs::FsStore;
 
 use crate::config::Config;
 use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
-use crate::health::{AheadOfWal, AheadOfWalUnchecked, Counters, FailStop, Gone, Phase, Stopped};
+use crate::health::{Counters, FailStop, Gone, Phase, Stopped};
 use crate::meta::{MetaLock, remove_takeover, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
@@ -165,8 +165,6 @@ pub(crate) struct Worker {
     sqlite: Option<Sqlite>,
     database: PathBuf,
     staging: FsStore,
-    /// The engine journal beside staging (`<meta>/lsr-journal`, docs/journal.md).
-    journal: FsJournalFile,
     remote: Metered,
     actor: Actor,
     config: Config,
@@ -240,7 +238,6 @@ impl Worker {
             sqlite: Some(sqlite),
             database: database.to_owned(),
             staging: FsStore::new(meta),
-            journal: FsJournalFile::new(meta),
             remote,
             actor,
             next_poll: later(now, config.poll_interval.get()),
@@ -457,7 +454,6 @@ impl Worker {
             staging: &self.staging,
             remote: &self.remote,
             clock: self.runtime.clock.as_ref(),
-            journal: Some(&mut self.journal),
         };
         Ok(block_on(self.actor.tick(env, now)))
     }
@@ -517,8 +513,7 @@ impl Worker {
             | EngineEvent::Idle
             | EngineEvent::Degraded { .. }
             | EngineEvent::Retrying { .. }
-            | EngineEvent::Clamped(_)
-            | EngineEvent::AheadOfWal(_) => false,
+            | EngineEvent::Clamped(_) => false,
         };
         if !idle {
             self.emit(&Event::Engine(event));
@@ -573,7 +568,6 @@ impl Worker {
             | EngineEvent::Idle
             | EngineEvent::Resnapshot(_)
             | EngineEvent::Clamped(_)
-            | EngineEvent::AheadOfWal(_)
             | EngineEvent::TakeoverWanted(_) => {}
         }
     }
@@ -706,12 +700,6 @@ impl Worker {
 
     fn publish(&self, parts: &SnapshotParts) {
         let resnapshot = self.actor.pending_snapshot();
-        let journal = self.actor.journal();
-        let ahead_of_wal = self.actor.ahead().map(AheadOfWal::of);
-        let ahead_of_wal_unchecked = self
-            .actor
-            .ahead_of_wal_unchecked()
-            .map(AheadOfWalUnchecked::of);
         let snapshots = self.actor.snapshots();
         let final_retention = self.actor.final_retention();
         let work = self.actor.work();
@@ -756,9 +744,6 @@ impl Worker {
             health.final_retention = final_retention;
             health.final_snapshot = final_snapshot;
             health.verification = verification;
-            health.journal = journal;
-            health.ahead_of_wal = ahead_of_wal;
-            health.ahead_of_wal_unchecked = ahead_of_wal_unchecked;
             state.left = parts.left;
         });
     }
@@ -890,93 +875,5 @@ const fn deadline_reached(left: Unfinished) -> Stopped {
     Stopped::DeadlineReached {
         unsynced_wal_bytes: left.unsynced_wal_bytes,
         staged_not_uploaded: left.staged_not_uploaded,
-    }
-}
-
-#[cfg(test)]
-mod ledger {
-    use lsr_core::obligations::{Keep, unclassified};
-
-    /// What each field of the replicator thread's state is to a restart of the process
-    /// (`lsr_core::obligations`).
-    const WORKER_LEDGER: &[(&str, Keep)] = &[
-        (
-            "shared",
-            Keep::Derived("the handle's shared state, made at every start"),
-        ),
-        (
-            "sqlite",
-            Keep::Derived("the connection, opened again at every start"),
-        ),
-        ("database", Keep::Derived("the caller's database path")),
-        (
-            "staging",
-            Keep::Derived("the meta directory's staging store"),
-        ),
-        (
-            "journal",
-            Keep::Derived("the engine journal file, opened at every start"),
-        ),
-        ("remote", Keep::Derived("the caller's replica store")),
-        (
-            "actor",
-            Keep::Derived("the engine, classified field by field in lsr-core's actor ledger"),
-        ),
-        ("config", Keep::Derived("the caller's configuration")),
-        ("runtime", Keep::Derived("the caller's runtime")),
-        ("sink", Keep::Derived("the caller's event sink")),
-        (
-            "next_poll",
-            Keep::Ephemeral("when to poll next; a start polls at once"),
-        ),
-        (
-            "rebuilt",
-            Keep::Ephemeral("the last rebuild of this process, reported in health"),
-        ),
-        (
-            "stopped",
-            Keep::Ephemeral("a stop holds until a person restarts the process"),
-        ),
-        (
-            "stop",
-            Keep::Ephemeral("the caller's drain deadline for this process"),
-        ),
-        (
-            "progress",
-            Keep::Ephemeral(
-                "what health reports of synced and replicated transactions; the engine's own \
-                 fail-stop clock is derived again at boot",
-            ),
-        ),
-        (
-            "seen",
-            Keep::Ephemeral("counters reported since the process began"),
-        ),
-        (
-            "scheduled",
-            Keep::Ephemeral(
-                "the scheduled verify and its standing failure; cost: a restart forgets a \
-                 failing verify's restore point until the next run fails again",
-            ),
-        ),
-        ("meta", Keep::Derived("the caller's meta directory")),
-        (
-            "_meta_lock",
-            Keep::Derived("taken again at every start; the kernel drops it with the process"),
-        ),
-        (
-            "app_gate",
-            Keep::Derived("fail-stop's gate, judged again from the engine at every start"),
-        ),
-        (
-            "last_reading",
-            Keep::Ephemeral("the clock's last reading in this process"),
-        ),
-    ];
-
-    #[test]
-    fn every_field_of_the_replicator_thread_is_classified() {
-        let wrong = unclassified(include_str!("thread.rs"), "Worker", WORKER_LEDGER);
-        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 }

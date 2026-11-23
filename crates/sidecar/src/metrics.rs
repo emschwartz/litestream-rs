@@ -48,15 +48,6 @@
 //! - `lsr_app_checkpoints_total{db,kind}` (`backfilled`, `restarted`, `stalled`) and
 //!   `lsr_app_notice{db,kind}` 1 while the application-checkpoint notice stands.
 //! - `lsr_resnapshot_pending{db,cause}` 1 when the next sync is a snapshot.
-//! - `lsr_journal_signal{db,signal}` 1 while the engine journal reports something
-//!   (`missing`, `unreadable`, `newer_version`, `slot_unreadable`,
-//!   `unwritable`; `docs/journal.md`).
-//! - `lsr_database_ahead_of_wal{db}` 1 while a boot's finding stands that the database file
-//!   held pages from commits its WAL lost after a failed WAL sync, and the state before them is
-//!   kept restorable (seven days; `docs/decisions.md` D103), else 0.
-//! - `lsr_database_ahead_of_wal_unchecked{db}` 1 while a boot's check for that could not be made
-//!   because the replica could not give its own newest confirmed state, so the WAL was
-//!   checkpointed unchecked (seven days; D106), else 0.
 //! - `lsr_snapshots_total{db,cause}`: snapshots staged since the replicator started, every
 //!   cause listed, zeros included. Each uploads the whole database: a cause other than
 //!   `first_sync`, `checkpoint_boundary` or `operator_requested` that keeps counting up means
@@ -78,15 +69,14 @@
 
 use std::fmt::Display;
 
-use lsr_core::AheadKind;
 use lsr_replica::{
     CallTotals, CheckpointMode, Health, Mismatch, OpCounters, Phase, StoreCounters, Task,
     Timestamp, VerifyFailure,
 };
 
 use crate::health::{
-    DbState, DbView, cause_name, journal_name, notice_name, snapshot_kind_name, snapshot_name,
-    stop_name, task_name, verdict_name,
+    DbState, DbView, cause_name, notice_name, snapshot_kind_name, snapshot_name, stop_name,
+    task_name,
 };
 
 /// The rendered text.
@@ -510,17 +500,6 @@ fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {
             out.sample(name, &[("db", db), ("cause", snapshot_name(cause))], 1);
         }
     }
-    let name = "lsr_journal_signal";
-    out.family(
-        name,
-        "gauge",
-        "1 while the engine journal is missing, unreadable, from a newer version or unwritable, by signal",
-    );
-    for (db, health) in dbs {
-        if let Some(signal) = health.journal {
-            out.sample(name, &[("db", db), ("signal", journal_name(signal))], 1);
-        }
-    }
     let name = "lsr_snapshots_total";
     out.family(name, "counter", "Snapshots staged, by cause");
     for (db, health) in dbs {
@@ -637,30 +616,5 @@ pub(crate) fn render(views: &[DbView], now: Timestamp) -> String {
     app_series(&mut out, &dbs);
     counter_series(&mut out, &dbs);
     verify_series(&mut out, &dbs);
-    for (kind, help) in [
-        (
-            AheadKind::AheadOfWal,
-            "1 while the database file was found holding pages from commits its WAL lost, and the state before them is kept",
-        ),
-        (
-            AheadKind::WalLostCommits,
-            "1 while a checkpoint was found to have copied evicted WAL pages, losing commits, and the state before them is kept",
-        ),
-    ] {
-        let name = format!("lsr_{}", verdict_name(kind));
-        per_db(&mut out, &dbs, (&name, "gauge", help), |h| {
-            u8::from(h.ahead_of_wal.is_some_and(|ahead| ahead.kind == kind)).to_string()
-        });
-    }
-    per_db(
-        &mut out,
-        &dbs,
-        (
-            "lsr_database_ahead_of_wal_unchecked",
-            "gauge",
-            "1 while a check for a database file ahead of its WAL could not be made and the WAL was checkpointed unchecked",
-        ),
-        |h| u8::from(h.ahead_of_wal_unchecked.is_some()).to_string(),
-    );
     out.0
 }

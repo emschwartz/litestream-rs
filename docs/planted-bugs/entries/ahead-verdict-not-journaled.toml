@@ -1,8 +1,0 @@
-# The ahead-of-WAL verdict is never written to the journal, so a restart forgets it and the restore point it keeps.
-name = "ahead-verdict-not-journaled"
-fix = "6ed52046"
-package = "lsr-core"
-tests = [
-    "actor::tests::journal::a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost",
-    "actor::tests::journal::a_recorded_verdict_stops_once_under_strict_responses",
-]

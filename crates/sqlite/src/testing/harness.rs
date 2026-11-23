@@ -45,7 +45,7 @@ use lsr_sim::{
     Acked, AppCommit, Checked, CommitId, Model, PageImage, Recorder, RecorderEvent, RecorderLog,
     Recovery, Violation, bug_fault,
 };
-use lsr_store_fs::{FsJournalFile, FsStore};
+use lsr_store_fs::FsStore;
 
 use super::host_fs::HostFs;
 use lsr_wal::{Salts, WalOffset};
@@ -431,9 +431,6 @@ pub struct Rig<B: Backend> {
     actor: Actor,
     clock: FakeClock,
     staging: Recorder<FsStore<HostFs>>,
-    /// The engine journal beside staging, reopened by every restart as a new process would.
-    journal: FsJournalFile,
-    meta: PathBuf,
     remote: Recorder<FsStore<HostFs>>,
     staging_log: RecorderLog,
     remote_log: RecorderLog,
@@ -493,8 +490,6 @@ impl<B: Backend> Rig<B> {
                 seen: None,
             },
             db,
-            journal: FsJournalFile::new(&meta),
-            meta,
             actor: Actor::new(cfg.actor.clone()),
             cfg,
             wal_syncs: vfs.syncs(FileKind::Wal),
@@ -750,7 +745,6 @@ impl<B: Backend> Rig<B> {
             staging: &self.staging,
             remote: &self.remote,
             clock: &self.clock,
-            journal: Some(&mut self.journal),
         };
         let tick = block_on(self.actor.tick(env, now));
         self.vfs.set_window(self.everywhere);
@@ -787,8 +781,7 @@ impl<B: Backend> Rig<B> {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Resnapshot(_)
-            | Event::Clamped(_)
-            | Event::AheadOfWal(_) => {}
+            | Event::Clamped(_) => {}
         }
         match next {
             Next::Now if matches!(event, Event::Idle) => self.clock.advance(SPIN_STEP),
@@ -1074,7 +1067,6 @@ impl<B: Backend> Rig<B> {
                 .map_err(|e| RigError::Open(Box::new(e)))?,
         );
         self.actor = Actor::new(self.cfg.actor.clone());
-        self.journal = FsJournalFile::new(&self.meta);
         if let Some(record) = self.takeover {
             self.actor.remember_takeover(record);
         }

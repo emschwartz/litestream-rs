@@ -32,9 +32,7 @@
 //! back would vouch for another writer's file at one of its ids. A put at or below the
 //! record spends nothing.
 //!
-//! The record is local state Go never reads, a candidate fact for the engine
-//! journal (`docs/journal.md`); nothing is released, so this format can then
-//! simply go.
+//! The record is local state Go never reads; nothing is released, so this format may change.
 //! The stored form is one line, parsed strictly:
 //! `lsr-takeover 1 <through>\n`, `<through>` as 16 lower-case hex digits.
 

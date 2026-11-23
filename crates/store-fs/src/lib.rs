@@ -680,13 +680,8 @@ impl<F: Fs> Upload for FsUpload<F> {
     }
 }
 
-#[cfg(unix)]
-mod engine_journal;
 mod filesystem;
 mod journal;
-
-#[cfg(unix)]
-pub use engine_journal::{FsJournalFile, JOURNAL_NAME};
 
 #[cfg(test)]
 mod tests;

@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 51d7fdd9..3593a55d 100644
+index 9c0c170f..f4c1ce23 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1090,7 +1090,8 @@ impl Actor {
-         // A boot that fails later reads the journal again.
-         self.adopt_journal(journal, newest_staged.as_ref(), &upload);
-         self.owe_ahead_check(continued);
+@@ -1178,7 +1178,8 @@ impl Actor {
+                 return self.verdict(Task::Sync, cause, now);
+             }
+         };
 -        let cause = boot_cause(dropped, refused, from.err());
 +        let cause =
 +            boot_cause(dropped, refused, from.err()).or(Some(SnapshotCause::LastPageMismatch));

@@ -38,9 +38,6 @@
 //!   written here outside SQLite at all, since any descriptor closed on it drops the
 //!   application's locks.
 //!
-//! - evicting the pages a failed WAL sync lost (`evict_page_cache`): the fault VFS keeps no page
-//!   cache of its own, and the kernel's cannot be told to drop one file's pages on demand.
-//!
 //! The application's automatic checkpoints are not counted ([`SqliteSide::app_autocheckpoints`]
 //! is zero), the database file's bytes are not read ([`SqliteSide::db_file`] is empty, for the
 //! reason above), a power loss's tear counts are zero (the block law still tears the database
@@ -391,9 +388,6 @@ impl SqliteSide for RealSide {
         });
     }
     fn driver_writes_nothing_once(&self) {}
-    fn writeback_lost(&self) -> bool {
-        self.with(|real| real.vfs.writeback_lost())
-    }
     fn inject(&self, op: SourceOp, err: SourceError) {
         self.with(|real| real.injected.push((op, err)));
     }
@@ -411,12 +405,6 @@ impl SqliteSide for RealSide {
     }
     fn db_torn_losses(&self) -> u32 {
         0
-    }
-    fn evict_page_cache(&self) -> bool {
-        false
-    }
-    fn take_evicted(&self) -> bool {
-        false
     }
     fn commit_images(&self) -> Vec<(u32, Vec<u8>)> {
         Vec::new()

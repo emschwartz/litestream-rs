@@ -1,6 +1,0 @@
-name = "failstop-forgets-owed-snapshot"
-fix = "d14e6e4"
-package = "lsr-core"
-tests = [
-    "lag::a_snapshot_owed_after_a_truncate_keeps_the_lag",
-]

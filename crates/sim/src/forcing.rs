@@ -203,7 +203,6 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         // happen, as the same operations are outside a hold.
         overlap: _,
         error_domain: _,
-        known_wrong: _,
         // Staging on the directory store: what its power losses take is noted with
         // `StagedLost`, as on `MemStore`; a file it took that it reported durable fails the run.
         staging_fs: _,

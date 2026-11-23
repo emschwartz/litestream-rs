@@ -12,18 +12,6 @@ mod heap;
 #[cfg(test)]
 #[expect(
     clippy::arithmetic_side_effects,
-    clippy::wildcard_enum_match_arm,
-    clippy::unwrap_in_result,
-    clippy::panic_in_result_fn,
-    clippy::large_enum_variant,
-    reason = "the differential walk: slot offsets of at most 8192, a fake file that panics on a \
-              call the model did not make, catch-all arms over the model's labels that panic, and \
-              pages held by value in the walk's frames"
-)]
-mod journal_model;
-#[cfg(test)]
-#[expect(
-    clippy::arithmetic_side_effects,
     reason = "the fixtures size databases and inventories from small bounded counts"
 )]
 mod mem;

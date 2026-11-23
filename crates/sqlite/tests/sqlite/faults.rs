@@ -92,29 +92,12 @@ struct Needed {
 
 /// Settles, or, when the actor keeps retrying `WalMoved`, commits once more and settles again:
 /// the state a checkpoint that reset the wal-index leaves until SQLite writes a WAL header.
-/// When the engine stays degraded by `WalSyncFailed`, the TRUNCATE that pays for the failed
-/// sync waits on the application's long reader, which the cycle then ends.
 fn settle_or_write<B: Backend>(rig: &mut Rig<B>, needed: &mut Needed) -> Result<(), RigError> {
     match rig.settle() {
         Err(RigError::Unsettled(_)) if rig.faults().last() == Some(&Fault::WalMoved) => {
             needed.write = true;
             rig.insert(100)?;
             rig.settle()
-        }
-        // The cycle ends its long reader on seeing this, and the next settle goes on.
-        Err(RigError::Unsettled(_))
-            if matches!(
-                rig.ticks().last(),
-                Some(Tick::Ran {
-                    event: Event::Degraded {
-                        cause: PersistentCause::WalSyncFailed,
-                        ..
-                    },
-                    ..
-                })
-            ) =>
-        {
-            Ok(())
         }
         other => other,
     }
@@ -230,9 +213,9 @@ fn a_short_write_at_each_step_of_a_cycle_is_disk_full_and_loses_nothing() {
 /// A failed fsync of the WAL before a backfill, or of the database after one: the checkpoint
 /// fails and SQLite does not advance `nBackfill`, so nothing is lost and the next one redoes it.
 /// A failed fsync of the WAL by the engine itself, before it stages: the sync task is degraded
-/// with `WalSyncFailed`, nothing of that WAL generation is staged, and the engine checkpoints
-/// with TRUNCATE and snapshots, since a later fsync that succeeds says nothing about the pages
-/// whose writeback failed. Under the strict responses it would stop.
+/// with `WalSyncFailed`, nothing of that WAL generation is staged until a sync succeeds, and the
+/// next try goes on, as Go does (`docs/decisions/D173.md`). Under the strict responses it would
+/// stop.
 #[test]
 fn a_sync_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
     for kind in [FileKind::Main, FileKind::Wal] {

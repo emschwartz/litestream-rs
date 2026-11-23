@@ -251,7 +251,6 @@ fn a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits() {
             staging: &rig.staging,
             remote: &rig.remote,
             clock: &FakeClock::new(ts(now)),
-            journal: None,
         };
         // No driver: nothing is handed back.
         let tick = block_on(actor.tick(env, ts(now)));
@@ -462,7 +461,7 @@ fn uploads_resume_with_a_snapshot_after_a_rollback_took_confirmed_ids() {
 }
 
 /// A redeploy that keeps the database but not the meta directory: staging is empty, there is
-/// no journal and no takeover record, and the application's last close checkpointed the WAL
+/// no takeover record, and the application's last close checkpointed the WAL
 /// into the database file and restarted it, so the WAL cannot vouch for the replica's newest
 /// transaction. The replica holds 1 to 3, and the database file holds exactly its state at 3
 /// (page 1 written by transaction 3, pages 2 and 3 from the start). Returns that rig.
@@ -802,4 +801,77 @@ fn a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent() {
         "{seen:?}"
     );
     assert_eq!(next.refused_through(), Some(tx(5)));
+}
+
+/// The identity check restores the replica's state once per boot: a replica that does not plan
+/// (a file missing below its newest) leaves the refusal standing without listing again for each
+/// retry a restore command would make. Listing is paid for in money on a bucket, and the next
+/// boot checks afresh.
+#[test]
+fn a_new_meta_directory_over_a_replica_that_does_not_plan_lists_it_once_for_the_check() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    let key = FileKey::new(Level::ZERO, lsr_ltx::TxidRange::single(tx(2)));
+    block_on(rig.remote.inner.delete(&[key])).unwrap();
+    let mut actor = go_like_actor();
+    let lists = rig.remote.lists();
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(boot, Tick::Stopped(StopCause::OtherWriter), "{boot:?}");
+    let levels = u32::try_from(Level::ALL.len()).unwrap();
+    // At most the boot's own listing, the page size's, and one for the check's restore: a restore
+    // that lists again on a gap made four.
+    assert!(
+        rig.remote.lists() - lists <= 3 * levels,
+        "{}",
+        rig.remote.lists() - lists
+    );
+}
+
+/// A new meta directory whose database changed page size stops for the page size whatever the
+/// identity check would say, so the boot does not restore the replica to run it: the restore is
+/// a read of every file, and a degraded boot tries again at every backoff.
+#[test]
+fn a_new_meta_directory_over_a_resized_database_does_not_restore_the_replica() {
+    let mut rig = three();
+    rig.staging = Counting::default();
+    resize(&mut rig, big());
+    let mut actor = go_like_actor();
+    let reads = rig.remote.reads.lock().unwrap().len();
+    let seen = rig.follow(&mut actor, T0 + 2, 1);
+    assert!(
+        seen.iter()
+            .any(|tick| matches!(event(tick), Some(Event::Degraded { .. }))),
+        "{seen:?}"
+    );
+    let read = rig.remote.reads.lock().unwrap().len() - reads;
+    // The page size's header, and no file of the replica read whole.
+    assert!(read <= 2, "{read} reads");
+}
+
+/// The wal-index shows no committed frame (an index reset, or one the WAL's header has not caught
+/// up with), so the local state is the database file alone. The identity check reads it as
+/// that, and does not scan a WAL generation the index does not name: that scan fails the same
+/// way at every retry, and each retry restores the replica again.
+#[test]
+fn a_new_meta_directory_under_an_empty_wal_index_reads_the_database_file() {
+    let mut rig = redeployed_with_a_new_meta_directory();
+    let none = Salts { salt1: 0, salt2: 0 };
+    rig.wal.script_committed(Some(
+        CommittedRead::new(lsr_wal::CommittedEnd::new(0, none, PS), 0, rig.wal.epoch()).unwrap(),
+    ));
+    let mut actor = go_like_actor();
+    let seen = rig.follow(&mut actor, T0 + 2, 6);
+    assert!(
+        !seen.iter().any(|tick| matches!(
+            event(tick),
+            Some(Event::Retrying {
+                fault: Fault::WalMoved,
+                ..
+            })
+        )),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|tick| matches!(tick, Tick::Stopped(_))),
+        "{seen:?}"
+    );
 }

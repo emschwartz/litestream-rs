@@ -1,6 +1,0 @@
-name = "journal-recreate-without-zeroing"
-fix = "a64cc50"
-package = "lsr-core"
-tests = [
-    "journal_model::the_writer_matches_the_model_with_unreadable_sectors",
-]

@@ -233,7 +233,6 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
         SnapshotCause::StagedUnverified { .. } => &[pending_file_that_does_not_chain],
-        SnapshotCause::WalSyncFailed => &[wal_fsync_fails_then_snapshot],
     }
 }
 

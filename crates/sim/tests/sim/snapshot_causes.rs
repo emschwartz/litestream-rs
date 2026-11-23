@@ -14,7 +14,7 @@ fn local() -> Txid {
 }
 
 /// Every cause, pinned by an exhaustive match: a new cause fails to compile here.
-fn all() -> [SnapshotCause; 12] {
+fn all() -> [SnapshotCause; 11] {
     let causes = [
         SnapshotCause::FirstSync,
         SnapshotCause::BehindRemote { local: local() },
@@ -30,7 +30,6 @@ fn all() -> [SnapshotCause; 12] {
         SnapshotCause::CheckpointBoundary,
         SnapshotCause::OperatorRequested,
         SnapshotCause::StagedUnverified { from: local() },
-        SnapshotCause::WalSyncFailed,
     ];
     for cause in causes {
         match cause {
@@ -44,8 +43,7 @@ fn all() -> [SnapshotCause; 12] {
             | SnapshotCause::LocalRewound { .. }
             | SnapshotCause::CheckpointBoundary
             | SnapshotCause::OperatorRequested
-            | SnapshotCause::StagedUnverified { .. }
-            | SnapshotCause::WalSyncFailed => {}
+            | SnapshotCause::StagedUnverified { .. } => {}
         }
     }
     causes

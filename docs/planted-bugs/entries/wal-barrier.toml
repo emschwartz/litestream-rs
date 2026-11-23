@@ -4,5 +4,5 @@ package = "lsr-sqlite"
 test_bin = "sqlite"
 tests = [
     "a_power_cut_after_a_settle_leaves_the_database_at_least_as_far_as_the_replica",
-    "a_failed_wal_sync_stages_nothing_of_its_generation_and_snapshots_after_a_truncate",
+    "a_failed_wal_sync_stages_nothing_then_goes_on_and_a_power_loss_snapshots",
 ]

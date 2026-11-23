@@ -106,10 +106,6 @@ pub(crate) struct Inner {
     /// transaction SQLite ended itself on an error, cannot leave a flag saying otherwise.
     issued: u64,
     returned: u64,
-    /// A sync of the WAL failed. The kernel reports a failed writeback once and then calls the
-    /// pages clean, so every later sync answers the same, until a TRUNCATE checkpoint completes
-    /// (`Checkpointer::checkpoint`): nothing the WAL held then is known to be on disk.
-    pub(crate) wal_sync_failed: bool,
 }
 
 /// Which file a path named: device and inode.
@@ -261,7 +257,6 @@ impl Sqlite {
             epoch: ReadLockHold::first(),
             issued: 0,
             returned: 0,
-            wal_sync_failed: false,
         };
         Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -498,17 +493,14 @@ impl WalSource for Sqlite {
 
     fn sync(&mut self) -> Result<(), SourceError> {
         let mut inner = self.lock();
-        if inner.wal_sync_failed {
-            return Err(SourceError::FsyncFailed);
-        }
         inner.ensure_read_lock_held()?;
+        // A failed sync is not remembered: the kernel reports a failed writeback once, so the
+        // next sync may succeed over bytes that never reached the disk. v1 goes on, as Go does
+        // (`docs/decisions/D173.md`).
         match crate::pages::sync_wal(&inner.reader) {
             Ok(()) => Ok(()),
             Err(WalSync::NoWal) => Err(SourceError::Io(io::ErrorKind::NotFound)),
-            Err(WalSync::Failed(_rc)) => {
-                inner.wal_sync_failed = true;
-                Err(SourceError::FsyncFailed)
-            }
+            Err(WalSync::Failed(_rc)) => Err(SourceError::FsyncFailed),
         }
     }
 }
@@ -641,66 +633,7 @@ pub fn check_app_connection(conn: &Connection) -> Result<(), SetupError> {
 
 #[cfg(test)]
 mod tests {
-    use lsr_core::obligations::{Keep, unclassified};
-
     use super::*;
-
-    /// What each field of the connection state is to a restart of the process
-    /// (`lsr_core::obligations`).
-    const INNER_LEDGER: &[(&str, Keep)] = &[
-        (
-            "raw",
-            Keep::Derived("pointers into the reader's pager and shm node, taken at every open"),
-        ),
-        (
-            "reader",
-            Keep::Derived("the read connection, opened at every start"),
-        ),
-        (
-            "writer",
-            Keep::Derived("the write connection, opened at every start"),
-        ),
-        (
-            "wal_path",
-            Keep::Derived("the database path's WAL, named at every open"),
-        ),
-        (
-            "wal_id",
-            Keep::Ephemeral(
-                "the file the WAL path named at this open; cost: a WAL deleted while no process \
-                 held it is not told from a new one, and recovery judges what it finds",
-            ),
-        ),
-        (
-            "page_size",
-            Keep::Derived("read from the database at every open"),
-        ),
-        (
-            "epoch",
-            Keep::Ephemeral("this open's hold of the read transaction; a new open starts again"),
-        ),
-        (
-            "issued",
-            Keep::Ephemeral("barriers and write locks of this open; SQLite releases them all"),
-        ),
-        (
-            "returned",
-            Keep::Ephemeral("barriers and write locks of this open; SQLite releases them all"),
-        ),
-        (
-            "wal_sync_failed",
-            Keep::Ephemeral(
-                "a failed WAL sync answers every later sync of this open the same; across a \
-                 restart the engine journal's debt carries it (lsr_core::obligations, `unproven`)",
-            ),
-        ),
-    ];
-
-    #[test]
-    fn every_field_of_the_connection_state_is_classified() {
-        let wrong = unclassified(include_str!("conn.rs"), "Inner", INNER_LEDGER);
-        assert!(wrong.is_empty(), "{wrong:#?}");
-    }
 
     fn opened(dir: &Path) -> Sqlite {
         let db = dir.join("app.db");

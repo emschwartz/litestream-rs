@@ -22,7 +22,6 @@
 #![forbid(unsafe_code)]
 
 mod actor;
-mod ahead;
 mod app;
 mod checkpoint;
 mod compact;
@@ -30,13 +29,11 @@ mod compact;
 pub mod conformance;
 mod counts;
 mod created_at;
-mod cure;
 mod env;
 mod failstop;
 mod fault;
 mod identity;
 mod inventory;
-mod journal;
 mod layout;
 mod ltx_read;
 mod maintain;
@@ -44,7 +41,6 @@ mod maintain;
 mod mem;
 #[cfg(any(test, feature = "testing"))]
 pub mod needs;
-pub mod obligations;
 mod pages;
 mod plan;
 mod position;
@@ -66,8 +62,8 @@ mod verify;
 mod witness;
 
 pub use actor::{
-    AHEAD_KEPT_FOR, Actor, ActorConfig, AheadNotice, Degraded, Env, Event, FinalRetention,
-    FinalSnapshot, FinalSnapshotFailure, MaintainedEvent, Phase, Task, Tick, Unfinished,
+    Actor, ActorConfig, Degraded, Env, Event, FinalRetention, FinalSnapshot, FinalSnapshotFailure,
+    MaintainedEvent, Phase, Task, Tick, Unfinished,
 };
 pub use app::{
     AppCheckpoint, AppCheckpointObserver, AppCheckpoints, SQLITE_AUTOCHECKPOINT, Watch, observe,
@@ -97,13 +93,10 @@ pub use fault::{
     StopCause, VERIFY, backoff_wait, policy, retry_wait,
 };
 pub use inventory::{Inventory, InventoryError, is_snapshot_start};
-pub use journal::{JournalFile, JournalSignal, JournalWriteError, JournalWriter, judge};
 pub use layout::{
     CreatedAt, CreatedAtSource, Dating, FileInfo, FileKey, Level, ListedTime, NonZeroCreatedAt,
     ParseKeyError, RangeSide, Stamp, cmp_range, file_name, is_scratch_name, parse_file_name,
 };
-/// The ahead-of-WAL verdict [`Actor::ahead`] returns.
-pub use lsr_journal::{Ahead, AheadKind, Unchecked};
 pub use maintain::{
     CompactJob, ConfigError, DeleteJob, Due, Interval, IntervalError, Job, JobError, L0Retention,
     MAX_DELETE, MaintainError, MaintainState, Maintenance, Outcome, RetentionHold, RetentionMode,

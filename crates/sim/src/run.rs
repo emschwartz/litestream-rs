@@ -226,9 +226,6 @@ pub struct Opts {
     /// One-shot store faults drawn inside an overlapping hold come from the whole error domain
     /// ([`Weights::error_domain`]). [`run_with`] sets it.
     pub error_domain: bool,
-    /// Draws that reach an open engine defect are made ([`Weights::known_wrong`]): inside an
-    /// overlapping hold, the restarts that reach D9. [`run_with`] sets it.
-    pub known_wrong: bool,
     /// Staging is the directory store on the in-memory filesystem ([`Weights::staging_fs`]).
     /// [`run_with`] sets it.
     pub staging_fs: bool,
@@ -329,8 +326,6 @@ struct Runner {
     error_domain: bool,
     // The engine's TRUNCATE threshold, when the run sets one ([`Opts::truncate_pages`]).
     truncate_pages: Option<NonZeroU32>,
-    // Whether an overlapping hold draws restarts, which reach the open defect D9.
-    known_wrong: bool,
     spilled: Vec<(PageNo, Vec<u8>)>,
     /// A freshly started driver has not seen the WAL yet, so it ticks once more
     /// before it believes a wait on a WAL change.
@@ -391,8 +386,6 @@ struct Runner {
     /// A fault operation was applied since the last kill: the law kills once per operation, so
     /// a fault that keeps firing (a rate) does not keep the engine from ever running.
     kill_armed: bool,
-    /// A hold is running its ticks: a kill there is a restart inside a hold, which reaches D9.
-    in_hold: bool,
     /// Page sizes the database had before a drawn resize: an engine that
     /// remembers one may stop on the change.
     expected_sizes: Vec<PageSize>,
@@ -482,7 +475,6 @@ impl Runner {
         runner.overlap = opts.overlap.then(|| SeededEntropy::new(seed.stream(21)));
         runner.error_domain = opts.error_domain;
         runner.truncate_pages = opts.truncate_pages;
-        runner.known_wrong = opts.known_wrong;
         if opts.no_create_only {
             runner.refuse_create_only();
         }
@@ -507,7 +499,6 @@ impl Runner {
             overlap: None,
             error_domain: false,
             truncate_pages: None,
-            known_wrong: false,
             spilled: Vec::new(),
             unwatched: true,
             readers: Vec::new(),
@@ -537,7 +528,6 @@ impl Runner {
             lenient: false,
             kill_after_fault: false,
             kill_armed: false,
-            in_hold: false,
             expected_sizes: Vec::new(),
             booted: false,
             // The database's first content is on no replica yet.
@@ -616,7 +606,6 @@ impl Runner {
         self.w.high.note(now);
         self.marks.ticked();
         let actor = &mut self.actor;
-        let mut journal = self.w.journal.clone();
         let fut = async {
             let env = Env {
                 wal: &mut wal,
@@ -625,7 +614,6 @@ impl Runner {
                 staging: &staging,
                 remote: &remote,
                 clock: clock.as_ref(),
-                journal: Some(&mut journal),
             };
             actor.tick(env, now).await
         };
@@ -1067,7 +1055,6 @@ impl Runner {
             | Event::Retrying { .. }
             | Event::Resnapshot(_)
             | Event::Clamped(_)
-            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => Ok(Step::Ran),
         }
     }
@@ -1103,7 +1090,6 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Clamped(_)
-            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => return Ok(()),
         };
         self.forcings
@@ -1148,7 +1134,6 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Clamped(_)
-            | Event::AheadOfWal(_)
             | Event::TakeoverWanted(_) => {}
         }
     }
@@ -1263,14 +1248,9 @@ impl Runner {
         }
     }
 
-    /// The kill-after-fault law ([`Weights::kill_after_fault`]): the first tick in which a store
-    /// fault or an injected SQLite-side failure fires after a fault operation is followed at once
-    /// by a process crash, before anything else can pay what the fault left owing.
-    /// Runs a hold with [`Runner::in_hold`] set for its ticks.
+    /// Runs a hold and marks its end in the trace.
     fn hold_marked(&mut self, hold: crate::generate::Hold, ticks: u8) -> Result<(), Violation> {
-        self.in_hold = true;
         let held = self.hold(hold, ticks);
-        self.in_hold = false;
         if self.trace {
             self.report.trace.push("    hold ended".to_owned());
         }
@@ -1282,11 +1262,7 @@ impl Runner {
         let store = fired_now.0.all > fired0.0.all || fired_now.1.all > fired0.1.all;
         let source = self.w.sqlite.taken_injections().len() > taken0;
         let alive = matches!(step, Step::Ran | Step::Degraded(_) | Step::Stopped(_));
-        // A kill inside a hold is a restart there, which reaches the open defect D9 (retry
-        // counts and degraded states reset at a restart, so a halt that outlasts restarts is never
-        // reported): only where known defects are counted, as the overlapping holds' own restarts.
-        let reaches_d9 = self.in_hold && !self.known_wrong;
-        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) || reaches_d9 {
+        if !(self.kill_after_fault && self.kill_armed && alive && (store || source)) {
             return step;
         }
         self.kill_armed = false;
@@ -1922,9 +1898,8 @@ impl Runner {
                 self.w.acked.forget_from(from);
                 // The engine may upload past the hole before it lists again, so the replica's
                 // chain has a gap until a snapshot: a restore of its newest confirmed state is
-                // damage, truthfully, and an owed ahead-of-WAL check cannot be made (D106).
+                // damage, truthfully.
                 self.expect(StopCause::RemoteCorrupt);
-                self.expect(StopCause::DatabaseAheadOfWalUnchecked);
             }
             self.expect(StopCause::RemoteRegressed);
         }
@@ -1973,23 +1948,6 @@ impl Runner {
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
             EnvFault::DriverWritesNothing => self.w.sqlite.driver_writes_nothing_once(),
-            // The database SQLite serves now reads the evicted frames' older bytes: the
-            // model follows it as damage, and the history judge refuses a restore that gives it.
-            EnvFault::EvictPageCache => {
-                // The evicted frames are damage SQLite still counts as committed: the engine
-                // may find the WAL corrupt or cut short, now or once an armed eviction fires, or,
-                // when it fires between the cure's checked read and its checkpoint, find the
-                // checkpoint copied the disk's older bytes (`lsr_core`'s cure, D108).
-                self.expect(StopCause::WalCorrupt);
-                self.expect(StopCause::WalTruncated);
-                self.expect(StopCause::WalLostCommits {
-                    pages: NonZeroU32::MIN,
-                    first: NonZeroU32::MIN,
-                });
-                let acted = self.w.sqlite.evict_page_cache();
-                self.scenario_bool("EvictPageCache", acted)?;
-                self.w.adopt_evicted();
-            }
             EnvFault::FlipDatabasePage(pgno) => {
                 let flipped = self.w.sqlite.flip_db_page(pgno);
                 self.scenario_bool("FlipDatabasePage", flipped)?;
@@ -2284,14 +2242,6 @@ impl Runner {
         if regrows && self.w.sqlite.backfilled() > 0 {
             return Ok(());
         }
-        // Damage to a WAL whose writeback a failed sync lost: the model's record of the lost
-        // bytes is not rewritten by the damage, so it loses track of the database (seeds 0x80b,
-        // 0x563, 0x1d and 0x3aa of the mixed set, once failed syncs were drawn). A drawn history
-        // skips it and counts the skip; it is a listed gap in the checker.
-        if self.lenient && self.w.sqlite.writeback_lost() {
-            self.report.reach.bump("wal.damage_skipped.writeback_lost");
-            return Ok(());
-        }
         // A cut below the committed end leaves the wal-index naming frames the
         // file no longer holds, which no SQLite reader can make sense of; a
         // drawn cut takes only frames past it (a rolled-back or spilled tail).
@@ -2517,9 +2467,6 @@ impl Runner {
             | PersistentCause::WalSyncFailed
             | PersistentCause::PageSizeChanged { .. }
             | PersistentCause::DatabasePageMismatch { .. }
-            | PersistentCause::DatabaseAheadOfWal { .. }
-            | PersistentCause::WalLostCommits { .. }
-            | PersistentCause::DatabaseAheadOfWalUnchecked
             | PersistentCause::ConditionalWritesUnsupported
             | PersistentCause::Bug => true,
         }
@@ -2553,10 +2500,6 @@ impl Runner {
             self.w.sqlite.crash_by_law(CrashLaw::drawn(seed.stream(17)));
             // The same disk holds the staging directory: its unsynced unlinks may come back.
             self.w.volatile.revert_unsynced_entries();
-            // And the journal: its own stream, so no earlier draw moves.
-            self.w
-                .journal
-                .crash_by_law(CrashLaw::drawn(seed.stream(23)));
         }
         if opts.lying_wal_sync {
             self.w.sqlite.lie_on_our_sync();
@@ -2577,14 +2520,9 @@ impl Runner {
         }
     }
 
-    /// The model no longer matches SQLite's rules: named as the known defect D103 explains it
-    /// when a failed WAL sync's lost writeback is in play, plainly otherwise.
+    /// The model no longer matches SQLite's rules.
     fn model_diverged(&self) -> Violation {
-        bug_fault(if self.w.sqlite.writeback_lost() {
-            crate::oracle::MODEL_DIVERGED_AFTER_LOST_WRITEBACK
-        } else {
-            crate::oracle::MODEL_DIVERGED
-        })
+        bug_fault(crate::oracle::MODEL_DIVERGED)
     }
 
     /// The end of a history: drain, judge the replica, check the resources.
@@ -2733,7 +2671,6 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Idle
         | Event::Resnapshot(_)
         | Event::Clamped(_)
-        | Event::AheadOfWal(_)
         | Event::TakeoverWanted(_) => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
@@ -2780,7 +2717,6 @@ pub fn run_with(
         clock_law: weights.clock_law,
         overlap: weights.overlap,
         error_domain: weights.error_domain,
-        known_wrong: weights.known_wrong,
         staging_fs: weights.staging_fs,
         truncate_pages: weights.truncate_pages,
         kill_after_fault: weights.kill_after_fault,
@@ -2909,8 +2845,7 @@ const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause, over_files: bool
         | C::PrevFrameMismatch
         | C::LastPageMismatch
         | C::LocalRewound { .. }
-        | C::StagedUnverified { .. }
-        | C::WalSyncFailed => true,
+        | C::StagedUnverified { .. } => true,
         C::CheckpointBoundary | C::OperatorRequested => false,
     }
 }
@@ -2925,12 +2860,7 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         | PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
-        | PersistentCause::WalSyncFailed
-        // A check that could not be made says the file may be ahead of its WAL, as a verdict
-        // says it is.
-        | PersistentCause::DatabaseAheadOfWal { .. }
-        | PersistentCause::WalLostCommits { .. }
-        | PersistentCause::DatabaseAheadOfWalUnchecked => true,
+        | PersistentCause::WalSyncFailed => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
@@ -2951,10 +2881,7 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::WalCorrupt
         | StopCause::WalTruncated
         | StopCause::WalUnlinked
-        | StopCause::WalSyncFailed
-        | StopCause::DatabaseAheadOfWal { .. }
-        | StopCause::WalLostCommits { .. }
-        | StopCause::DatabaseAheadOfWalUnchecked => true,
+        | StopCause::WalSyncFailed => true,
         StopCause::StoreDenied(_)
         | StopCause::StoreRefused
         | StopCause::RemoteCorrupt
