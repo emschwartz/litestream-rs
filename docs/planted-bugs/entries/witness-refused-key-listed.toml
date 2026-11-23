@@ -1,0 +1,9 @@
+# Boot confirms a torn-looking replica key whose staged copy the witness refused by a listing,
+# not a read: a listing that lags leaves the key out and new content takes the replica's
+# transaction.
+name = "witness-refused-key-listed"
+fix = "b7d2a645"
+package = "lsr-core"
+tests = [
+    "a_tail_checkpointed_away_behind_a_lagging_listing_leaves_the_key_to_the_replica",
+]

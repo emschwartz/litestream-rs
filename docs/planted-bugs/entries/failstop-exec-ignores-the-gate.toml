@@ -1,0 +1,5 @@
+name = "failstop-exec-ignores-the-gate"
+fix = "c5881f5"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["sidecar::an_unsafe_stop_at_boot_holds_the_child"]

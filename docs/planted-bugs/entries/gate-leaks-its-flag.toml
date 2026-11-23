@@ -1,0 +1,6 @@
+# The fail-stop commit gate leaked one count of its flag per connection, and replaced an
+# application's commit hook without a word.
+name = "gate-leaks-its-flag"
+fix = "70f61c6"
+package = "lsr-sqlite"
+tests = ["gate::tests::the_gate_is_freed_with_its_connection"]

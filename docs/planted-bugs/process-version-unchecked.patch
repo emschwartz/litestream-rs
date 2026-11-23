@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/chain/process.rs b/crates/store-s3/src/chain/process.rs
+index 95fd56b6..3f9ecea7 100644
+--- a/crates/store-s3/src/chain/process.rs
++++ b/crates/store-s3/src/chain/process.rs
+@@ -94,7 +94,7 @@ impl CredentialSource for Process {
+                 })
+             })
+             .and_then(serde_json::Value::as_i64);
+-        if version != Some(1) {
++        if version.is_none() {
+             return Err(failed("wrong version in process output (not 1)".to_owned()));
+         }
+         document_credentials(PROCESS, &value, "SessionToken", None).ok_or_else(|| {

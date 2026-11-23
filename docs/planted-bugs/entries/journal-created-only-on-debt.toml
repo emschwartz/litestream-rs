@@ -1,0 +1,9 @@
+# Writing the journal only when the debt changes leaves a database that never failed a WAL
+# fsync without one, so every restart reports it missing.
+name = "journal-created-only-on-debt"
+fix = "0389151f"
+package = "lsr-core"
+tests = [
+    "actor::tests::journal::a_restart_after_a_run_with_no_debt_reports_nothing",
+    "actor::tests::journal::a_failed_wal_sync_is_recorded_in_the_tick_that_met_it",
+]

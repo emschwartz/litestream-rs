@@ -54,8 +54,12 @@ impl World {
             .is_some_and(|rec| rec.salts == salts && rec.end.get() == end.get());
         if !known {
             let at = self.remote_recorder.len();
+            let (pages, db_size) = self
+                .sqlite
+                .take_written()
+                .map_or_else(|| (Vec::new(), db_size), |real| (real.pages, real.db_size));
             self.model
-                .commit(&[], db_size, AppCommit { salts, end }, at);
+                .commit(&pages, db_size, AppCommit { salts, end }, at);
             self.log_history();
         }
     }

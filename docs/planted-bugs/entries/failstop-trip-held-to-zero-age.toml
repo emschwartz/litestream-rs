@@ -1,0 +1,6 @@
+name = "failstop-trip-held-to-zero-age"
+fix = "87cd10d"
+package = "lsr-core"
+tests = [
+    "failstop::tests::a_trip_for_age_clears_once_its_commits_land",
+]

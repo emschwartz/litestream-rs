@@ -231,6 +231,8 @@ pub struct Opts {
     pub kill_after_fault: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
+    /// Which SQLite the engine runs against: the rule model by default.
+    pub sqlite: crate::side::SideMaker,
 }
 
 /// Which judges a run consults. Both by default; one alone measures what it catches unaided.
@@ -438,7 +440,7 @@ const SETTLE_AFTER_RESTART: usize = 8;
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
     fn configured(seed: Seed, opts: &Opts) -> Self {
-        let mut runner = Self::new(seed).with_staging_fs(seed, opts);
+        let mut runner = Self::new(seed, &opts.sqlite).with_staging_fs(seed, opts);
         runner.lenient = opts.drawn;
         runner.kill_after_fault = opts.kill_after_fault;
         if opts.drawn {
@@ -460,9 +462,9 @@ impl Runner {
         runner
     }
 
-    fn new(seed: Seed) -> Self {
+    fn new(seed: Seed, sqlite: &crate::side::SideMaker) -> Self {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
-        let mut w = World::new(seed, page_size, FIRST_DB_PAGES);
+        let mut w = World::over(seed, sqlite.make(seed, page_size, FIRST_DB_PAGES));
         w.start_driver();
         let start = w.clock.now();
         let image = crate::history::image_digest(&w.model.newest_image());
@@ -906,16 +908,12 @@ impl Runner {
         // With staging intact, everything this engine put on the replica is at
         // or below what staging holds, under the bytes staging holds: a
         // refusal then has no cause. A staged copy that differs from the
-        // replica's object under the same key was edited or forged (an
-        // operation), and the boot refuses that divergence by design. So is
-        // a staged copy the engine never put: the boot may have read the
-        // replica's object before a rollback took it (a lagging listing), so
-        // the replica as it stands now need not show the divergence.
+        // replica's object under the same key was damaged or put back (an
+        // operation), and the boot refuses that divergence by design.
         let key = lsr_core::FileKey::new(lsr_core::Level::ZERO, lsr_ltx::TxidRange::single(tip));
         let read =
             |err: lsr_core::StoreError| bug_fault(format!("reading the stores failed: {err}"));
-        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?
-            || self.w.staged_not_the_engines(key).map_err(read)?;
+        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?;
         if !self.staging_disturbed && !diverged {
             return Err(bug_fault(format!(
                 "a boot refused replica files through {tip} with staging intact and no other writer"
@@ -1922,6 +1920,13 @@ impl Runner {
             EnvFault::EmptyDatabase => self.w.sqlite.empty_database_once(),
             EnvFault::TruncateFails => self.w.sqlite.fail_next_truncate(),
             EnvFault::DriverWritesNothing => self.w.sqlite.driver_writes_nothing_once(),
+            // The database SQLite serves now reads the evicted frames' older bytes: the
+            // model follows it as damage, and the history judge refuses a restore that gives it.
+            EnvFault::EvictPageCache => {
+                let acted = self.w.sqlite.evict_page_cache();
+                self.scenario_bool("EvictPageCache", acted)?;
+                self.w.adopt_evicted();
+            }
             EnvFault::FlipDatabasePage(pgno) => {
                 let flipped = self.w.sqlite.flip_db_page(pgno);
                 self.scenario_bool("FlipDatabasePage", flipped)?;
@@ -2548,6 +2553,10 @@ impl Runner {
         let (kept, holes) = self.w.sqlite.block_losses();
         reach.add("power.block_kept_unsynced", u64::from(kept));
         reach.add("power.block_hole", u64::from(holes));
+        reach.add(
+            "power.db_unsynced_blocks",
+            u64::from(self.w.sqlite.db_torn_losses()),
+        );
         reach.add("power.resurrected_commit", u64::from(self.w.resurrected));
         reach.add(
             "batch.remote_calls",
