@@ -140,6 +140,10 @@ pub struct Counters {
     pub snapshots: SnapshotCounts,
     /// What the engine's sync steps and the checkpoints it asked SQLite for did.
     pub work: WorkCounts,
+    /// Recoveries that found commits lost to a WAL restart the read lock should have
+    /// prevented: a broken lock or a bug in the continuity proof. Each takes a snapshot, counted
+    /// as `generation_changed`; any count above zero is worth a report.
+    pub read_lock_violations: u64,
 }
 
 /// One copy of the replicator's state, written by its thread after every tick.
@@ -337,6 +341,7 @@ impl Health {
                 retries: 0,
                 panics: 0,
                 sink_panics: 0,
+                read_lock_violations: 0,
                 store: StoreCounters {
                     list: OpCounters::ZERO,
                     read: OpCounters::ZERO,

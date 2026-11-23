@@ -14,10 +14,9 @@ use std::fmt::Write as _;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-use lsr_compat::{Dump, DumpEnv, go_dump, go_dump_binary, rust_dump};
+use lsr_compat::{Differential, Dump, DumpEnv, go_dump, go_dump_binary, rust_dump};
 use lsr_core::needs::{Resource, must};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
 
 const NAMES: &[&str] = &[
     "a.db",
@@ -410,12 +409,11 @@ fn go_and_rust_scan_the_same_databases() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-    let mut runner = TestRunner::new(Config {
-        cases: 512,
-        failure_persistence: None,
-        ..Config::default()
+    let run = Differential::new("dir entries");
+    let compared = run.free(512, &case(), |case| {
+        compare(&go, &case).map(|()| "compared".to_owned())
     });
-    if let Err(error) = runner.run(&case(), |case| compare(&go, &case)) {
+    if let Err(error) = compared {
         panic!("{error}");
     }
 }

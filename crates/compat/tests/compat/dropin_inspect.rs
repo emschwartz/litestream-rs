@@ -7,15 +7,14 @@
 //! `UTC` on both sides: Go prints a file replica's times in the local zone, litestream-rs in
 //! UTC.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 
-use lsr_compat::{GoVersion, Manifest, Staged, all_fixtures, go_binary, lsr_binary, stage};
+use lsr_compat::{
+    Differential, GoVersion, Manifest, Staged, all_fixtures, go_binary, lsr_binary, stage,
+};
 use lsr_core::needs::{Resource, must};
 use proptest::prelude::*;
-use proptest::test_runner::{Config, TestRunner};
 
 const COMMANDS: &[(u32, &str)] = &[(4, "databases"), (4, "ltx"), (1, "wal")];
 
@@ -164,8 +163,6 @@ fn run(binary: &Path, args: &[String], dir: &Path) -> Ran {
     )
 }
 
-type Tally = Mutex<BTreeMap<String, u32>>;
-
 fn answers(rig: &Rig, case: &Case) -> (Vec<String>, Ran, Ran) {
     let args = rig.line(&case.tokens);
     let go = run(&rig.go, &args, rig.dir.path());
@@ -173,7 +170,8 @@ fn answers(rig: &Rig, case: &Case) -> (Vec<String>, Ran, Ran) {
     (args, go, lsr)
 }
 
-fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
+/// Compares one case and names how Go's run ended.
+fn compare(rig: &Rig, case: &Case) -> Result<String, TestCaseError> {
     let (args, (go_code, go_err, go_out), (lsr_code, lsr_err, lsr_out)) = answers(rig, case);
     let with_dir = args.iter().any(|a| a.ends_with("with-dir.yml"));
     let ending = if go_code == Some(0) {
@@ -183,12 +181,6 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
     } else {
         format!("{:?}", failure(&go_err, &go_out))
     };
-    let mut counts = tally
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let count = counts.entry(ending).or_default();
-    *count = count.saturating_add(1);
-    drop(counts);
     let report = format!(
         "args: {args:?}\nGo  ({go_code:?}): {go_err}{go_out}\nlsr ({lsr_code:?}): {lsr_err}{lsr_out}"
     );
@@ -233,7 +225,42 @@ fn compare(rig: &Rig, case: &Case, tally: &Tally) -> Result<(), TestCaseError> {
             "failure classes {classes:?}\n{report}"
         );
     }
-    Ok(())
+    Ok(ending)
+}
+
+/// Endings the run must reach, each with a line built to reach it.
+const AIMED: &[(&str, &[&str])] = &[
+    ("databases-ok", &["databases", "-config", "@CONFIG@"]),
+    (
+        "databases-with-dir-ok",
+        &["databases", "-config", "@DIRCONFIG@"],
+    ),
+    ("ltx-ok", &["ltx", "-config", "@CONFIG@", "@DB@"]),
+    (
+        "ltx-with-dir-ok",
+        &["ltx", "-config", "@DIRCONFIG@", "@DB@"],
+    ),
+    ("wal-ok", &["wal", "@URL@"]),
+    ("Usage", &["ltx", "-bogus", "@DB@"]),
+    ("NoConfig", &["databases", "-config=@MISSING@"]),
+    (
+        "NotInConfig",
+        &["ltx", "-config", "@CONFIG@", "@NOTINCONFIG@"],
+    ),
+];
+
+/// Cases per aimed ending.
+const AIMED_CASES: u32 = 4;
+
+/// Cases for one aimed line: its tokens, with `-json` or not after the command.
+fn aimed(tokens: &'static [&'static str]) -> impl Strategy<Value = Case> {
+    any::<bool>().prop_map(move |json| {
+        let mut tokens = tokens.to_vec();
+        if json {
+            tokens.insert(1, "-json");
+        }
+        Case { tokens }
+    })
 }
 
 fn rig() -> Rig {
@@ -272,33 +299,24 @@ fn rig() -> Rig {
     }
 }
 
-/// The differential: 512 generated lines per run, shrunk to the shortest that disagrees.
+/// The differential: 512 free lines and [`AIMED_CASES`] aimed at each ending in [`AIMED`],
+/// shrunk to the shortest that disagrees.
 #[test]
 #[ignore = "runs the pinned Go binaries; just compat"]
 fn go_and_lsr_list_the_same_databases_and_files() {
     let rig = rig();
-    let mut runner = TestRunner::new(Config {
-        cases: 512,
-        failure_persistence: None,
-        ..Config::default()
-    });
-    let tally = Tally::default();
-    if let Err(error) = runner.run(&case(), |case| compare(&rig, &case, &tally)) {
+    let run = Differential::new("read-only commands");
+    let mut parts = vec![run.free(512, &case(), |case| compare(&rig, &case))];
+    for (ending, tokens) in AIMED {
+        let cases = aimed(tokens);
+        parts.push(run.aimed(ending, AIMED_CASES, &cases, |case| compare(&rig, &case)));
+    }
+    if let Some(Err(error)) = parts.into_iter().find(Result::is_err) {
         panic!("{error}");
     }
-    let tally = tally.into_inner().unwrap();
-    eprintln!("Go ended as: {tally:?}");
-    for ending in [
-        "databases-ok",
-        "databases-with-dir-ok",
-        "ltx-ok",
-        "ltx-with-dir-ok",
-        "wal-ok",
-        "Usage",
-        "NoConfig",
-        "NotInConfig",
-    ] {
-        let seen = tally.get(ending).copied().unwrap_or(0);
-        assert!(seen >= 3, "{ending} ended only {seen} cases: {tally:?}");
+    let endings: Vec<&str> = AIMED.iter().map(|(ending, _)| *ending).collect();
+    match run.require(&endings, 3) {
+        Ok(tally) => eprintln!("Go ended as: {tally:?}"),
+        Err(error) => panic!("{error}"),
     }
 }

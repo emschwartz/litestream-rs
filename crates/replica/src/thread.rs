@@ -696,6 +696,7 @@ impl Worker {
         let snapshots = self.actor.snapshots();
         let work = self.actor.work();
         let wal_synced_offset = self.actor.synced_wal_offset();
+        let read_lock_violations = self.actor.read_lock_violations();
         let ran = self.app_ran_total();
         let app = self.app_total();
         let verification = self
@@ -728,6 +729,7 @@ impl Worker {
             health.counters = Counters {
                 snapshots,
                 work,
+                read_lock_violations,
                 ..seen.counters
             };
             health.verification = verification;
