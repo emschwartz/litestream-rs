@@ -1,8 +1,8 @@
 diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
-index f5ef1d58..f3081bc2 100644
+index e58a7fea..5e8c5a19 100644
 --- a/crates/cli/src/run.rs
 +++ b/crates/cli/src/run.rs
-@@ -833,6 +833,13 @@ async fn restore_on<S: ObjectStore>(
+@@ -864,6 +864,13 @@ async fn restore_on<S: ObjectStore>(
          Vec::new()
      };
      let created = create_parents(output).map_err(CliError::Parent)?;
@@ -14,5 +14,5 @@ index f5ef1d58..f3081bc2 100644
 +        }
 +    }
      let attempt = async {
-         let sink = FileSink::create_over(output, existing)?.with_integrity_check(integrity_check);
-         if txid_and_timestamp {
+         // A replicator started on the restored database builds on the replica it came from,
+         // through the takeover record: an output with no meta directory is refused before
