@@ -340,11 +340,6 @@ mod fake {
             lock(&self.time.state).free = true;
             self.time.signal.notify_all();
         }
-
-        /// From now on the clock moves only by [`FakeClockHandle::advance`].
-        pub fn hold(&self) {
-            lock(&self.time.state).free = false;
-        }
     }
 }
 

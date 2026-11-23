@@ -217,7 +217,6 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     faulty.panic_always.store(true, Ordering::SeqCst);
     clock.release();
     let rebuilt = wait(&replicator, |h| h.counters.panics >= 1);
-    clock.hold();
     assert_eq!(
         rebuilt.task(Task::Upload),
         degraded.task(Task::Upload),

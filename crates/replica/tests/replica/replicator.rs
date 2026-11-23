@@ -876,3 +876,24 @@ fn a_retry_s_backoff_is_waited_out_by_moving_the_clock() {
     );
     assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
 }
+
+/// A replicator prints its database and state, and a runtime its clock: what a panic message
+/// or a log of either shows.
+#[test]
+fn a_replicator_and_its_runtime_print_what_they_hold() {
+    let site = Site::new();
+    let (runtime, _clock) = fake();
+    let printed_runtime = format!("{runtime:?}");
+    assert!(
+        printed_runtime.starts_with("Runtime { now: "),
+        "{printed_runtime}"
+    );
+    let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let printed = format!("{replicator:?}");
+    assert!(
+        printed.starts_with("Replicator { shared: Shared { database: "),
+        "{printed}"
+    );
+    assert!(printed.contains("state: "), "{printed}");
+    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+}
