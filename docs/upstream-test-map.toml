@@ -1687,8 +1687,8 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestParsePos/OK" = { reason = "@go-ltx-pos" }
 "TestParseTXID" = { counterpart = "lsr-ltx::ids::tests::parse_round_trips_the_bounds" }
 "TestParseTXID/ErrInvalidFormat" = { counterpart = "lsr-ltx::ids::tests::parse_rejects_everything_go_never_writes" }
-"TestParseTXID/ErrTooLong" = { counterpart = "lsr-ltx::time::tests::every_parse_error_is_produced" }
-"TestParseTXID/ErrTooShort" = { counterpart = "lsr-ltx::time::tests::every_parse_error_is_produced" }
+"TestParseTXID/ErrTooLong" = { counterpart = "lsr-ltx::time::tests::only_go_s_shape_is_read" }
+"TestParseTXID/ErrTooShort" = { counterpart = "lsr-ltx::time::tests::only_go_s_shape_is_read" }
 "TestParseTXID/OK" = { counterpart = "lsr-ltx::ids::tests::parse_round_trips_the_bounds" }
 "TestParseTimestamp" = { counterpart = ["lsr-ltx::time::tests::offsets_fractions_and_truncation", "lsr-ltx::time::tests::known_instants_parse_and_print"] }
 "TestPeekHeader" = { counterpart = "lsr-ltx::ltx::pins::decoder_header_appears_with_the_header_event_and_stays" }
