@@ -105,6 +105,7 @@ use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
     Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
 };
+use crate::counts::{Counted, WorkCounts};
 use crate::created_at::{ResolvedCreatedAt, resolve};
 use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
@@ -513,6 +514,25 @@ impl Actor {
         self.kept.wanted_takeover
     }
 
+    /// A takeover record this engine spent: it published a transaction the
+    /// record covers, so the record no longer describes the replica (a
+    /// rollback may have taken the files it was written for) and must not
+    /// vouch for a file another writer puts at one of its ids. The driver
+    /// deletes the durable record, then hands it back with
+    /// [`Actor::forget_takeover`]; until then it asks again every tick.
+    #[must_use]
+    pub const fn takeover_spent(&self) -> Option<TakeoverRecord> {
+        self.kept.spent_takeover
+    }
+
+    /// The driver deleted the durable copy of `record`, a spent takeover
+    /// ([`Actor::takeover_spent`]).
+    pub fn forget_takeover(&mut self, record: TakeoverRecord) {
+        if self.kept.spent_takeover == Some(record) {
+            self.kept.spent_takeover = None;
+        }
+    }
+
     /// The replica's newest transaction when the last boot refused to build
     /// on replica files nothing vouched for (`crate::takeover`): what the
     /// stop's message names. `None` otherwise.
@@ -600,6 +620,19 @@ impl Actor {
     #[must_use]
     pub const fn snapshots(&self) -> SnapshotCounts {
         self.kept.snapshots
+    }
+
+    /// What the engine's sync steps and checkpoints did since the actor began.
+    #[must_use]
+    pub const fn work(&self) -> WorkCounts {
+        self.kept.work
+    }
+
+    /// Where in the WAL the newest staged file ends (Go's `litestream_wal_size`, the offset
+    /// its last sync read to); 0 before the first sync.
+    #[must_use]
+    pub fn synced_wal_offset(&self) -> u64 {
+        self.position().map_or(0, |p| p.synced().offset().get())
     }
 
     /// Why the next sync is a snapshot, when it is one.
@@ -751,16 +784,22 @@ impl Actor {
         // From here on each store is reached as its role: an error from it is
         // classified as that store's, never the other's (`fault::role`).
         let (staging, remote) = (Staging(env.staging), Replica(env.remote));
+        // Each checkpoint asked of SQLite is counted (`crate::counts`).
+        let mut ck = Counted::new(&mut *env.ck, env.clock);
         let mut roles = Env {
             wal: &mut *env.wal,
             db: &mut *env.db,
-            ck: &mut *env.ck,
+            ck: &mut ck,
             staging: &staging,
             remote: &remote,
             clock: env.clock,
             journal: env.journal.as_deref_mut(),
         };
-        let tick = self.tick_at(&mut roles, now).await;
+        // Boxed: the tick's state machine is the largest future the replicator thread polls,
+        // and on the heap it is not part of every poll frame below `block_on`, which in a
+        // debug build is what the half-stack headroom gate measures (`lsr_replica::stack`).
+        let tick = Box::pin(self.tick_at(&mut roles, now)).await;
+        self.kept.work.add_checkpoints(ck.totals());
         let tick = self.reconcile_journal(env.journal.as_deref_mut(), tick, now);
         self.observe_lag(env.wal, now);
         let tick = self.wake_for_probe(tick);
@@ -1078,18 +1117,79 @@ impl Actor {
         }
     }
 
+    /// This engine published `txid`: a held takeover that covers it is spent, once the
+    /// engine has seen the replica hold less than the record covers (`takeover_armed`).
+    /// The spend rests on the engine's own commit; a listing only arms it, and a listing
+    /// that lags arms it early at worst, which costs no more than spending on every
+    /// covered publish.
+    fn spend_takeover(&mut self, txid: Txid) {
+        if !self.kept.takeover_armed {
+            return;
+        }
+        if let Some(held) = self.kept.takeover.filter(|held| held.covers(txid)) {
+            self.kept.takeover = None;
+            self.kept.spent_takeover = Some(held);
+            self.kept.takeover_armed = false;
+        }
+    }
+
+    /// A listing showed the replica ending at `newest`: below the held takeover's
+    /// transaction, the replica lost files the record was written for, and the next
+    /// covered publish spends it.
+    fn arm_takeover_below(&mut self, newest: Option<Txid>) {
+        if self
+            .kept
+            .takeover
+            .is_some_and(|held| newest < Some(held.txid()))
+        {
+            self.kept.takeover_armed = true;
+        }
+    }
+
+    /// What one upload step that succeeded leaves behind; false when the uploader has
+    /// nothing more to do this tick.
+    fn after_upload_step(&mut self, did: &Did, now: Timestamp) -> bool {
+        match *did {
+            Did::Nothing | Did::Diverged { .. } => return false,
+            Did::Listed { newest } => {
+                self.engine.maintain.stale = true;
+                self.arm_takeover_below(newest);
+            }
+            Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
+                let at = listing_after_upload(now, &self.kept.cfg.maintenance);
+                self.engine.maintain.list_by(at);
+                let watch = self.engine.maintain.watch;
+                self.engine.maintain.watch = RegressionWatch::put(watch, key);
+                self.spend_takeover(key.range().max());
+            }
+        }
+        true
+    }
+
+    /// Notes the put `plan` is about to send: its id may reach the replica though its answer
+    /// is lost, so a takeover record before a running drop may vouch for it.
+    fn note_attempt(&mut self, plan: UploadPlan) {
+        if let UploadPlan::Upload(key) = plan {
+            self.engine.attempted = self.engine.attempted.max(Some(key.range().max()));
+        }
+    }
+
     /// The takeover a running task needs before it deletes staged files the
     /// replica may hold: through the staged position, or `cap` if that is
     /// lower, unless one held already covers it or the configuration checks
-    /// nothing at boot. A running engine's staged files are its own, and any
-    /// of them may be on the replica unconfirmed (an upload whose answer was
-    /// lost), so only a key the replica is known to end at caps it.
+    /// nothing at boot. A staged file this engine sent a put for may be on the
+    /// replica unconfirmed (an upload whose answer was lost), so the record
+    /// reaches the newest one it sent, and no further: an id past every put it
+    /// sent and every confirmed one is not its own on the replica, and a record
+    /// that vouched for it would let another writer's file there pass the next
+    /// boot. With nothing confirmed and nothing sent, no record is needed.
     fn vouch_before_drop(&mut self, task: Task, cap: Option<Txid>, now: Timestamp) -> Option<Tick> {
         if self.kept.cfg.responses.other_writer == OtherWriter::ContinueAndInterleaveHistories {
             return None;
         }
         let staged = self.staged()?;
-        let through = cap.map_or(staged, |cap| staged.min(cap));
+        let reach = self.engine.upload.confirmed().max(self.engine.attempted)?;
+        let through = cap.map_or(staged, |cap| staged.min(cap)).min(reach);
         if self.kept.takeover.is_some_and(|held| held.covers(through)) {
             return None;
         }
@@ -1155,6 +1255,7 @@ impl Actor {
             Ok(listed) => listed,
             Err(step) => return self.boot_step(step, now),
         };
+        self.arm_takeover_below(upload.confirmed());
         let Judged {
             pending: Pending { tokens, refused },
             upload,
@@ -1448,7 +1549,9 @@ impl Actor {
         if self.owes_truncate() && !may_checkpoint {
             return Some(self.owed_in_drain(now));
         }
+        let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
+        self.step_ended(env.clock, began, &stepped);
         let (files, proof) = match self.stepped(stepped, now) {
             Ok(synced) => synced,
             Err(tick) => return Some(tick),
@@ -1513,6 +1616,28 @@ impl Actor {
             Ok(Stepped::Stop(cause)) => Err(self.verdict(Task::Sync, cause, now)),
             Err(fault) => Err(self.fault(Task::Sync, fault, now)),
         }
+    }
+
+    /// What a sync step is counted from (`crate::counts`): when it began and where the
+    /// position stood. Plain calls around the step, not a wrapper future, so counting adds no
+    /// frame to the replicator thread's stack.
+    fn step_began(&self, clock: &dyn Clock) -> (Timestamp, Option<Position>) {
+        (clock.now(), self.position())
+    }
+
+    /// Counts the sync step that began at `began` from `from` and ended as `stepped`.
+    fn step_ended(
+        &mut self,
+        clock: &dyn Clock,
+        (began, from): (Timestamp, Option<Position>),
+        stepped: &Result<Stepped, Fault>,
+    ) {
+        let took = clock.now().saturating_duration_since(began);
+        let fault = stepped.as_ref().err().copied();
+        let to = self.position();
+        self.kept
+            .work
+            .sync_step(fault, took, from.as_ref(), to.as_ref());
     }
 
     /// One sync step from what recovery says about the WAL now.
@@ -1862,6 +1987,7 @@ impl Actor {
         for _ in 0..limit {
             self.pass_dropped_acknowledged();
             let plan = plan_upload(&self.engine.upload, self.staged());
+            self.note_attempt(plan);
             let bound = self.upload_bound(plan);
             let witnesses = &self.engine.witnesses;
             let uploaded = upload_next_in(
@@ -1885,15 +2011,8 @@ impl Actor {
             if matches!(last, Did::Put(_) | Did::AlreadyPut(_)) {
                 self.kept.suspect_staged = None;
             }
-            match last {
-                Did::Nothing | Did::Diverged { .. } => break,
-                Did::Listed { .. } => self.engine.maintain.stale = true,
-                Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
-                    let at = listing_after_upload(now, &self.kept.cfg.maintenance);
-                    self.engine.maintain.list_by(at);
-                    let watch = self.engine.maintain.watch;
-                    self.engine.maintain.watch = RegressionWatch::put(watch, key);
-                }
+            if !self.after_upload_step(&last, now) {
+                break;
             }
             if self.uploads_idle() {
                 break;
@@ -2444,7 +2563,9 @@ impl Actor {
                 now,
             );
         }
+        let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
+        self.step_ended(env.clock, began, &stepped);
         let proof = match self.stepped(stepped, now) {
             Ok((0, Some(proof))) => proof,
             // A reset wal-index gives no proof until the next commit, and

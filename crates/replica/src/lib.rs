@@ -84,12 +84,12 @@ pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};
 pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
-    AppCheckpoint, AppCheckpoints, AsOfInside, CheckpointConfig, Clock, Degraded, Denied, Depth,
-    Entropy, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate, IfReplicationStops,
-    JournalSignal, L0Retention, Maintenance, MaxUnreplicatedAge, OtherWriter,
+    AppCheckpoint, AppCheckpoints, AsOfInside, CallTotals, CheckpointConfig, CheckpointMode, Clock,
+    Degraded, Denied, Depth, Entropy, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
+    IfReplicationStops, JournalSignal, L0Retention, Maintenance, MaxUnreplicatedAge, OtherWriter,
     PersistentCause as DegradedCause, ReplicaId, Report, Response, Responses, RestoreOptions,
     RestoreTarget, Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
-    StopCause, TakeoverRecord, Task, Trip,
+    StopCause, TakeoverRecord, Task, Trip, WorkCounts,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, app_connection_raw, ffi};

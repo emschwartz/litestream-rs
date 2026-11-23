@@ -1,0 +1,4 @@
+name = "checkpoint-failures-not-counted"
+fix = "plant"
+package = "lsr-core"
+tests = ["actor::tests::work::checkpoints_are_counted_per_mode"]

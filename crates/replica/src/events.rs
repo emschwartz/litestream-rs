@@ -54,6 +54,14 @@ pub enum Event {
         /// What the file system said.
         kind: std::io::ErrorKind,
     },
+    /// The engine spent its takeover record by publishing a transaction it covers
+    /// (`lsr_core::Actor::takeover_spent`), and the record could not be deleted from the meta
+    /// directory. Deleting it is retried every turn; a restart before it succeeds reads the
+    /// stale record back.
+    TakeoverNotRemoved {
+        /// What the file system said.
+        kind: std::io::ErrorKind,
+    },
     /// A scheduled verify ended: the restore of `txid` compared with the live database at
     /// `txid`. A failure is a degraded state (`Health::verification`) that names what differed.
     Verified {

@@ -1,0 +1,4 @@
+name = "wal-size-is-the-file-size"
+fix = "plant"
+package = "lsr-sidecar"
+tests = ["health::tests::the_wal_size_is_the_synced_offset_and_not_the_file"]

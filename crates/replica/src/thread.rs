@@ -53,7 +53,7 @@ use crate::config::Config;
 use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
 use crate::health::{AheadOfWal, AheadOfWalUnchecked, Counters, FailStop, Gone, Phase, Stopped};
-use crate::meta::{MetaLock, write_takeover};
+use crate::meta::{MetaLock, remove_takeover, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
 use crate::runtime::{Runtime, later};
@@ -279,8 +279,15 @@ impl Worker {
 
     /// Writes the takeover the engine asked for before it deletes staged files, and hands
     /// it back, so its next tick may delete them. A write that fails hands nothing back: the
-    /// engine's next tick fails `LocalIo` and waits, and deletes nothing unrecorded.
+    /// engine's next tick fails `LocalIo` and waits, and deletes nothing unrecorded. A record
+    /// the engine spent is deleted first, so a restart cannot hand it back.
     fn keep_takeover(&mut self) {
+        if let Some(spent) = self.actor.takeover_spent() {
+            match remove_takeover(&self.meta) {
+                Ok(()) => self.actor.forget_takeover(spent),
+                Err(err) => self.emit(&Event::TakeoverNotRemoved { kind: err.kind() }),
+            }
+        }
         let Some(record) = self.actor.takeover_wanted() else {
             return;
         };
@@ -707,6 +714,8 @@ impl Worker {
             .map(AheadOfWalUnchecked::of);
         let snapshots = self.actor.snapshots();
         let final_retention = self.actor.final_retention();
+        let work = self.actor.work();
+        let wal_synced_offset = self.actor.synced_wal_offset();
         let final_snapshot = self.actor.final_snapshot();
         let read_lock_violations = self.actor.read_lock_violations();
         let ran = self.app_ran_total();
@@ -737,8 +746,10 @@ impl Worker {
             health.resnapshot = resnapshot;
             health.app_checkpoints_ran = ran;
             health.app_checkpoints = app;
+            health.wal_synced_offset = wal_synced_offset;
             health.counters = Counters {
                 snapshots,
+                work,
                 read_lock_violations,
                 ..seen.counters
             };

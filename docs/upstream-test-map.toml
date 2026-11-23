@@ -581,8 +581,8 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestDB_SyncReturnsDiskFullErrorForLTXStaging" = { counterpart = ["lsr-core::fault::tests::from_remote_scratch_exhausted_is_local_disk_full", "lsr-core::fault::tests::local_disk_full_retries"] }
 "TestDB_SyncTruncateCheckpointFiresDuringChunkedCatchUp" = { counterpart = "lsr-core::checkpoint::tests::a_capped_step_only_triggers_the_truncate_threshold" }
 "TestDB_Sync_CompactionValidAfterGrowthAndCheckpoint" = { counterpart = ["lsr-core::compact::tests::a_growth_that_skips_a_page_is_refused_and_never_published", "lsr-compat::compat::live_matches_sim::commits_overwrites_and_growth"] }
-"TestDB_Sync_ErrorMetrics" = { reason = "The library reports through EventSink events and the health() handle; the sidecar's /metrics renders that handle on each scrape, so there is no collector to keep, reset or delete, and litestream_sync_error_count is not emitted: failures show as lsr_retries_total and, when they persist, lsr_degraded (the lsr-sidecar metrics module doc lists every Go series and why)." }
-"TestDB_Sync_InitErrorMetrics" = { reason = "The library reports through EventSink events and the health() handle; the sidecar's /metrics renders that handle on each scrape, so there is no collector to keep, reset or delete, and litestream_sync_error_count is not emitted: failures show as lsr_retries_total and, when they persist, lsr_degraded (the lsr-sidecar metrics module doc lists every Go series and why)." }
+"TestDB_Sync_ErrorMetrics" = { counterpart = "lsr-core::actor::tests::work::a_full_disk_is_reported_until_a_step_stages" }
+"TestDB_Sync_InitErrorMetrics" = { counterpart = "lsr-core::actor::tests::work::a_full_disk_is_reported_until_a_step_stages" }
 "TestDB_Sync_UpdatesMetrics" = { counterpart = "lsr-cli::cli::sidecar::metrics_and_health_are_served_on_exactly_the_given_address" }
 "TestDB_Verify_WALOffsetAtHeader" = { counterpart = "lsr-core::recover::tests::go_parity_an_end_at_offset_32_continues" }
 "TestDB_Verify_WALOffsetAtHeader_SaltMismatch" = { counterpart = "lsr-core::recover::tests::go_parity_an_unknown_salt_snapshots" }

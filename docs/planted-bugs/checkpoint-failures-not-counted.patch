@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/counts.rs b/crates/core/src/counts.rs
+--- a/crates/core/src/counts.rs
++++ b/crates/core/src/counts.rs
+@@ -129,7 +129,7 @@
+         let began = self.clock.now();
+         let run = self.inner.checkpoint(mode);
+         let took = self.clock.now().saturating_duration_since(began);
+-        self.totals.record(mode, run.is_err(), took);
++        self.totals.record(mode, false, took);
+         run
+     }
+ 

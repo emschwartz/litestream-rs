@@ -95,10 +95,19 @@ impl KnownWrong {
     #[must_use]
     pub fn matches(self, violation: &Violation) -> bool {
         match self {
-            Self::DatabaseAheadOfWal => matches!(
-                violation,
-                Violation::BugFault { context } if context == MODEL_DIVERGED_AFTER_LOST_WRITEBACK
-            ),
+            // Before the boot check the model diverged; with it the engine raises its own
+            // verdict for the same file, which the simulator does not yet adopt.
+            Self::DatabaseAheadOfWal => {
+                matches!(
+                    violation,
+                    Violation::BugFault { context } if context == MODEL_DIVERGED_AFTER_LOST_WRITEBACK
+                ) || matches!(
+                    violation,
+                    Violation::UnexpectedDegraded {
+                        cause: lsr_core::PersistentCause::DatabaseAheadOfWal { .. }
+                    }
+                )
+            }
             Self::HaltForgottenAtRestart => {
                 matches!(violation, Violation::HealthBlind { restarts, .. } if *restarts > 0)
             }

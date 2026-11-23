@@ -344,11 +344,11 @@ notes = "Boot reads and reports, and nothing decides on it yet. The signal stand
 table = "Boot"
 id = "BOOT-30"
 circumstance = "The engine is about to delete staged files the replica may hold: a staged copy that turned unreadable (BOOT-5), a divergence (BOOT-13), a pending file the WAL no longer vouches for (BOOT-11), at boot or while running"
-response = "It asks the driver for a takeover record through what staging vouched for (`Actor::takeover_wanted`, `Event::TakeoverWanted`) and deletes nothing until the driver hands it back. At boot: the newest staged transaction, capped at the replica's newest level-0 key, listed or found by a read past a listing that lags (a key judged torn counts). While running: the newest staged transaction, capped only by a key the replica is known to end at. A record already held that covers it is enough. The replicator writes `<meta>/lsr-takeover` by scratch, fsync, rename and directory fsync, then hands it back"
+response = "It asks the driver for a takeover record through what staging vouched for (`Actor::takeover_wanted`, `Event::TakeoverWanted`) and deletes nothing until the driver hands it back. At boot: the newest staged transaction, capped at the replica's newest level-0 key, listed or found by a read past a listing that lags (a key judged torn counts). While running: the newest staged transaction, capped by a key the replica is known to end at and by the newest of the confirmed transaction and the newest level-0 put this engine sent (`Engine::attempted`): past both, nothing of this engine's can be on the replica, since a boot's listing showed what earlier processes put, so a record that reached further would let another writer's file at such an id pass the next boot. A record is spent when the engine publishes a transaction it covers after its own evidence that the replica held less than the record covers (a listing below it, including the relist after `RemoteRegressed`; D172): the engine stops holding it and the replicator deletes `<meta>/lsr-takeover` (CFG-46), so after a rollback it cannot vouch for another writer's file at its ids. A record already held that covers it is enough. The replicator writes `<meta>/lsr-takeover` by scratch, fsync, rename and directory fsync, then hands it back"
 signal = "`TakeoverWanted`; `TakeoverNotRecorded` when the write fails"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`, sim::`survival::a_running_drop_records_past_an_unconfirmed_upload_seed_0x348`, sim::`survival::a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7`, core::`the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides`; plant::`takeover-before-drop-skipped`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-listed`, plant::`takeover-ask-spins`"
+detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::publishing_a_covered_transaction_spends_the_takeover_record`, core::`vouch::a_rollback_seen_while_running_arms_the_takeover_for_the_next_publish`, core::`vouch::a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`, sim::`survival::a_running_drop_records_past_an_unconfirmed_upload_seed_0x348`, sim::`survival::a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7`, core::`the_takeover_before_a_witness_drop_covers_a_tail_the_listing_hides`; plant::`takeover-before-drop-skipped`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-listed`, plant::`takeover-ask-spins`"
 recovered_by = "sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`"
 notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and waits its backoff, and nothing is deleted unrecorded. Pending files above every replica key vouch for nothing there, so one put back from a backup never raises the record"
 
@@ -373,7 +373,7 @@ signal = "`database_ahead_of_wal` in `Health.degraded` while degraded, then `Hea
 at_risk = "The commits the WAL lost, which no restore brings back. The latest state is the damaged file; the state before it is restorable for seven days"
 recovery = "Automatic. The notice and the kept restore point end seven days after the verdict, across restarts"
 detected_by = "core::`a_boot_with_a_debt_reports_pages_from_commits_the_wal_lost`, core::`a_boot_with_a_debt_whose_file_kept_its_pages_comes_up_clean`, core::`a_recorded_verdict_stops_once_under_strict_responses`, core::`the_restore_point_is_kept_for_the_window_across_a_restart`, sidecar::`a_database_ahead_of_its_wal_is_a_notice_in_both_outputs`; plant::`debt-boot-skips-page-check`, plant::`ahead-verdict-not-journaled`, plant::`ahead-truncate-before-check`, plant::`ahead-check-counts-covered-pages`, plant::`ahead-restore-point-released-early`, plant::`ahead-window-restarts-at-boot`, plant::`ahead-notice-never-ends`"
-notes = "The simulator reaches it (seed 0x585, known-wrong cell `DatabaseAheadOfWal`); its world does not yet adopt the mixed state as damage, so it is caught by the simulator's model check, and the cell flips once the judge allows a restore at the kept restore point. A page above the newest staged size that no frame covers is not checked. Holding the read mark at the proven frame cannot prevent the mix (D104)"
+notes = "The simulator reaches it (first seed 0x585, now pinned by a hand-written history with no bucket rollback, known-wrong cell `DatabaseAheadOfWal`); its world does not yet adopt the mixed state as damage, so the run fails on the verdict it does not expect, and the cell flips once the judge allows a restore at the kept restore point. A page above the newest staged size that no frame covers is not checked. Holding the read mark at the proven frame cannot prevent the mix (D104)"
 
 [[row]]
 table = "Boot"
@@ -1864,7 +1864,7 @@ detected_by = "sidecar::`help_succeeds_only_when_asked_for_literally`, compat::`
 [[row]]
 table = "Config and startup"
 id = "CFG-33"
-circumstance = "A Go command `lsr` does not have: `reset`, and the commands that talk to a running daemon over its control socket, `status`, `sync`, `list`, `info`, `start`, `stop`, `register`, `unregister`. (`restore` takes Go's arguments: REST-13; `databases`, `ltx` and `wal` are built: CFG-44; `-once -force-snapshot`: CFG-45; `-once -enforce-retention`: CFG-46)"
+circumstance = "A Go command `lsr` does not have: `reset`, and the commands that talk to a running daemon over its control socket, `status`, `sync`, `list`, `info`, `start`, `stop`, `register`, `unregister`. (`restore` takes Go's arguments: REST-13; `databases`, `ltx` and `wal` are built: CFG-44; `-once -force-snapshot`: CFG-45; `-once -enforce-retention`: CFG-47)"
 response = "refuse, naming the command or flag. A gap to build, tracked in #177 (D48)"
 signal = "exit 64"
 at_risk = "Nothing runs"
@@ -1886,14 +1886,13 @@ notes = "Before, `replicate` exited 2, 3 or 64 where Go exits 1 (D47). The compa
 [[row]]
 table = "Config and startup"
 id = "CFG-35"
-circumstance = "What `addr` serves. Go: Prometheus `/metrics` with its `litestream_*` series, and `/debug/pprof` on the same mux. `lsr`: `/metrics` with the `litestream_*` series it has values for (`db_size`, `txid`, `sync_count`, the `replica_operation` series), its own `lsr_*` series, and `/healthz`"
-response = "continue. A departure from Go for the series and routes it lacks (D48). Every `/debug/pprof` path is a 404 whose body names D161"
+circumstance = "What `addr` serves. Go: Prometheus `/metrics` with its `litestream_*` series, and `/debug/pprof` on the same mux. `lsr`: `/metrics` with Go's series under Go's names, types, help text and labels where the engine counts them (`db_size`, `wal_size`, `total_wal_bytes`, `txid`, the `sync_*` and `checkpoint_*` series, `disk_full`, the `replica_operation` series), its own `lsr_*` series, and `/healthz`"
+response = "continue. A departure from Go for the families not built and for pprof (D48, D163). Every `/debug/pprof` path is a 404 whose body names D161"
 signal = "none"
-at_risk = "None. A dashboard or alert on a missing series sees no data"
+at_risk = "None. A dashboard or alert on a family not built sees no data"
 recovery = "Operator: alert on `lsr_unreplicated_age_seconds` and `/healthz`"
-detected_by = "compat::`go_config_and_meta_start_the_rust_sidecar_with_no_snapshot`; cli::`metrics_and_health_are_served_on_exactly_the_given_address`"
-no_test = "the series list against Go's: code only"
-notes = "Not emitted: `litestream_wal_size`, `_total_wal_bytes`, `_sync_error_count`, `_sync_seconds`, `_checkpoint_count`, `_checkpoint_error_count`, `_checkpoint_seconds`, `_disk_full`, `_replica_operation_errors_total`, `_l0_retention_files_total`, `_compaction_verify_error_count`, the validation series, and pprof (`docs/plans/phase-4-sidecar.md`)"
+detected_by = "compat::`go_and_lsr_serve_the_same_metric_families`; cli::`metrics_and_health_are_served_on_exactly_the_given_address`"
+notes = "Not built: `litestream_replica_operation_errors_total`, `_l0_retention_files_total`, `_compaction_verify_error_count`, the three `_validation_*` series, and pprof. `sync_count` counts sync steps, not every one-second poll, and checkpoint series are served for every mode from the start (D163)"
 
 [[row]]
 table = "Config and startup"
@@ -2002,11 +2001,22 @@ signal = "exit 0; a database whose snapshot was not written logs `database drain
 at_risk = "None: a snapshot not written leaves the replica as the drain left it, and one published with a lost response is a whole file"
 recovery = "Operator: run it again"
 detected_by = "compat::`go_and_lsr_end_once_with_one_level_nine_snapshot`, compat::`a_second_run_at_the_same_position_writes_the_same_snapshot_on_both`, compat::`once_alone_writes_no_snapshot_on_either_side`, core::`the_snapshot_follows_the_last_upload_and_ends_the_drain`, core::`a_reset_wal_index_fails_the_snapshot_by_name`, core::`a_failed_write_ends_the_drain_without_a_snapshot`, core::`a_passed_deadline_does_not_cut_the_snapshot`, sim::`a_snapshot_published_with_a_lost_response_then_a_power_loss_restores`, cli::`once_replicates_everything_committed_and_exits`"
-notes = "Go runs database by database and stops at the first error; every database runs here and each outcome is reported (D167). With `-enforce-retention` too, the snapshot comes first, and a snapshot that was not written skips that database's retention, as Go returns before it (CFG-46)"
+notes = "Go runs database by database and stops at the first error; every database runs here and each outcome is reported (D167). With `-enforce-retention` too, the snapshot comes first, and a snapshot that was not written skips that database's retention, as Go returns before it (CFG-47)"
 
 [[row]]
 table = "Config and startup"
 id = "CFG-46"
+circumstance = "The engine spent its takeover record (it published a transaction the record covers after seeing the replica hold less, BOOT-30), and the record cannot be deleted from the meta directory"
+response = "The engine holds the record no longer; the replicator retries the delete every turn"
+signal = "`TakeoverNotRemoved` (sidecar: an error line)"
+at_risk = "A restart before the delete succeeds reads the stale record back, and it may vouch for another writer's file at its ids"
+recovery = "Automatic once the meta directory takes writes"
+detected_by = "replica::`meta::tests::a_spent_takeover_record_is_removed_and_a_missing_one_is_no_error`"
+notes = "The replicator thread's delete failure is **code only**"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-47"
 circumstance = "`replicate -once -enforce-retention`: every database drains, then ends with a retention pass, as Go's `runOnce` runs `EnforceSnapshotRetention`"
 response = "the daemon's retention rules with level-0 deletion off, one delete job at a time until nothing more is to be deleted: snapshots created before the anchor less `snapshot-retention`, the last kept, then level 1 to 8 files below their floor, each level's last kept. Departures (D167): ages run from the replica's newest created-at time when that is behind the clock, so an idle replica keeps snapshots Go deletes, with exit 0; a listing the trust gates refuse deletes nothing; the pass is not cut by `shutdown-sync-timeout` once everything is uploaded. With retention off nothing is deleted, as Go"
 signal = "exit 0; a pass held, failed, or stopped because the listing kept showing a deleted key logs `database drained, retention not enforced` with the reason and the run exits 1"
@@ -2665,7 +2675,7 @@ response = "The simulator's error domain (`sim/src/domain.rs`) lists every SQLit
 signal = "None (a checker)"
 at_risk = "None (a checker)"
 recovery = "None"
-detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`, sim::`known_wrong::a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0x21`, sim::`known_wrong::a_power_loss_after_a_failed_wal_sync_leaves_a_database_ahead_of_its_wal_seed_0x585`, sim::`known_wrong::compaction_takes_a_staging_denial_as_staging_seed_0x68f`"
+detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`, sim::`known_wrong::a_restart_after_a_failed_wal_sync_owes_the_truncate_seed_0x21`, sim::`known_wrong::a_checkpoint_of_unproven_frames_then_a_power_loss_leaves_a_database_ahead_of_its_wal`, sim::`known_wrong::compaction_takes_a_staging_denial_as_staging_seed_0x68f`"
 notes = "Before, histories drew two store errors and two SQLite errors on nine of twelve operations. The whole domain (22 source cells, 40 store cells, drawn last in the swarm mix) found D2 unaided in 85 of 3000 mixed seeds (first at seed 18) and a new defect, compaction classifying staging errors as the replica's (1 seed). D2 was a known-wrong cell until the engine journal fixed it (seed 0xf now must pass). The same cell stays known-wrong for what a failed sync still costs: a checkpoint copies unproven frames into the database file and a power loss leaves a file no commit made (detection at boot is the journal's next step), 1 of 3000 mixed seeds once D2 was fixed (seed 0x585), left out of the per-push seeds and counted as known in the nightly; the compaction cell was too until #145 fixed it, and its seed now must pass. Three cells are unmodelled, gaps in the simulator listed in section 6 (C9): an unlinked WAL. A checkpoint whose read-transaction retake is lost is drawn: the simulated checkpointer ends and retakes the read transaction around a failed checkpoint as lsr-sqlite does. WAL damage while a failed sync's writeback is lost is skipped and counted (`wal.damage_skipped.writeback_lost`)"
 
 [[row]]
