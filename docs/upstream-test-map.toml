@@ -196,7 +196,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestLTXCommand_UsageOmitsReplicaFlag" = { counterpart = "lsr-cli::bin/lsr::args::tests::help_documents_every_flag_command_and_exit_code" }
 "TestLevelVarParsing" = { counterpart = "lsr-cli::bin/lsr::args::tests::files_takes_replica_and_json" }
 "TestLevelVarString" = { reason = "Go-only: the String method of the -level flag type in Go's CLI." }
-"TestTXIDVarParsing" = { counterpart = "lsr-cli::bin/lsr::args::tests::bad_txid" }
+"TestTXIDVarParsing" = { counterpart = "lsr-cli::bin/lsr::args::tests::txid_as_go_reads_it" }
 "TestTXIDVarString" = { counterpart = "lsr-ltx::ids::tests::display_is_the_object_key_form" }
 
 ["litestream/cmd/litestream/main_cli_test.go"]
