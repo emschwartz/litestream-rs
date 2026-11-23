@@ -1,5 +1,8 @@
 //! Seed 0x753's history of 42 operations, as the live generator under the seed's swarm mix with the block crash law drew it.
 //!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
+//!
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
@@ -17,7 +20,7 @@ pub const OPS: &[Op] = &[
     Op::EnvFault(EnvFault::Source(SourceOp::PageCount, SourceError::Busy)),
     Op::Shutdown,
     Op::Tick,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Heal,
     Op::Restore,
     Op::Hold {

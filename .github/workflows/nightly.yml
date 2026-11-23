@@ -136,6 +136,19 @@ jobs:
           tool: just
       - run: just shuttle 500000
 
+  # Every planted-bug patch still applies (`just planted-bugs-apply`): seconds, and a stale patch is
+  # named here even when the full run below times out. Not in the land gate, so a moved line near a
+  # planted site does not block every land; re-express the patch (docs/planted-bugs.md).
+  planted-bugs-apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just planted-bugs-apply
+
   # Every defect fixed on main is planted again in a scratch tree and the tests that caught it must
   # fail (docs/planted-bugs.md). A survivor means a test no longer guards its fix; a patch that stops
   # applying means the entry needs re-expressing against the current tree. About 25 minutes cold on

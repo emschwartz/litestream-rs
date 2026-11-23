@@ -1,5 +1,8 @@
 //! Seed 0x31c's history of 300 operations, as the live generator under the seed's own mix drew it before the lagging-listings law, the directory staging store and the error domain.
 //!
+//! Its forged staged files (`MetaOp::ForgeNewest`) became flipped bytes when forgery left the
+//! fault model (`docs/decisions.md` D131).
+//!
 //! Recorded with `lsr_sim::record`, so no change to the generator gives the regression
 //! another history. Edit by hand only to shrink it, and run its planted bug after.
 
@@ -40,7 +43,7 @@ pub const OPS: &[Op] = &[
     Op::Spill,
     Op::OtherProcessReader { begin: false },
     Op::Remote(RemoteOp::RollBack),
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Remote(RemoteOp::RollBack),
     Op::Heal,
     Op::WalDamage {
@@ -147,7 +150,7 @@ pub const OPS: &[Op] = &[
         pages: 1,
         grow: true,
     },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::WalDamage {
         op: WalOp::RegrowWithoutCommitMarks(16692877257233574259),
         ticks: 5,
@@ -172,7 +175,7 @@ pub const OPS: &[Op] = &[
     Op::Restore,
     Op::Shutdown,
     Op::CommitInTick { pages: 4 },
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Tick,
     Op::Spill,
     Op::WalDamage {
@@ -408,7 +411,7 @@ pub const OPS: &[Op] = &[
         op: WalOp::RegrowSameSalts(14788462511781325668),
         ticks: 0,
     },
-    Op::StagingDamage(MetaOp::ForgeNewest),
+    Op::StagingDamage(MetaOp::FlipNewestByte),
     Op::WalDamage {
         op: WalOp::FlipLastFrameBit,
         ticks: 6,
@@ -428,9 +431,9 @@ pub const OPS: &[Op] = &[
     Op::CommitInTick { pages: 4 },
     Op::Restore,
     Op::Remote(RemoteOp::RollBack),
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::RequestSnapshot,
-    Op::Meta(MetaOp::ForgeNewest),
+    Op::Meta(MetaOp::FlipNewestByte),
     Op::Meta(MetaOp::Restore),
     Op::ClockJump(86053),
     Op::CommitInTick { pages: 3 },

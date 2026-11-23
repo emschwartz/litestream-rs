@@ -35,6 +35,18 @@
 //!
 //! The hard link needs a filesystem that supports them (every Unix one a
 //! database lives on does).
+//!
+//! Replacing ([FileSink::create_over], Go's `restore` over an empty output file, or any
+//! file with `-force`): the restore still builds the scratch and the existing target is
+//! untouched until publish, so a restore that fails leaves it as it was (Go deletes it
+//! before restoring). Publish then runs the check, fsyncs the scratch, checks the target
+//! is still replaceable, removes the target's journal files ([Existing::Any] only) and
+//! fsyncs the directory, then renames the scratch over the target and fsyncs the
+//! directory. The journal files go, durably, before the rename: otherwise power loss
+//! could keep the rename and lose the unlinks, and SQLite would replay the old database's
+//! WAL into the new one. A crash after the unlinks and before the rename leaves the old
+//! database without its journals, which the caller asked to overwrite; restoring again
+//! completes it.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -52,6 +64,18 @@ pub use integrity::{IntegrityCheck, IntegrityFailure};
 
 /// The files SQLite keeps beside a database that must not outlive it.
 const JOURNAL_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+/// What a restore may do with a file already at its target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Existing {
+    /// Refuse it: the default, and the only mode that never removes a file it did not create.
+    Refuse,
+    /// Replace it if it is an empty regular file (Go's `restore` without `-force`); journal
+    /// files beside it are still refused.
+    Empty,
+    /// Replace any regular file, and remove its journal files at publish (Go's `-force`).
+    Any,
+}
 
 /// Why a [FileSink] could not be created.
 #[derive(Debug, Error)]
@@ -119,6 +143,15 @@ pub enum PublishStep {
     SyncName,
     /// The unlink of the scratch's name.
     RemoveScratch,
+    /// Replacing: the check that the target may still be replaced.
+    CheckReplaceable,
+    /// Replacing: the removal of the target's journal files.
+    RemoveJournals,
+    /// Replacing: the fsync of the directory that makes the removals durable before the
+    /// rename.
+    SyncJournals,
+    /// Replacing: the rename of the scratch over the target.
+    Rename,
     /// The fsync of the directory that makes the unlink durable.
     SyncRemoval,
 }
@@ -128,7 +161,14 @@ impl PublishStep {
     #[must_use]
     pub const fn after_link(self) -> bool {
         match self {
-            Self::Check | Self::SyncScratch | Self::CheckAbsent | Self::Link => false,
+            Self::Check
+            | Self::SyncScratch
+            | Self::CheckAbsent
+            | Self::Link
+            | Self::CheckReplaceable
+            | Self::RemoveJournals
+            | Self::SyncJournals
+            | Self::Rename => false,
             Self::SyncName | Self::RemoveScratch | Self::SyncRemoval => true,
         }
     }
@@ -144,6 +184,10 @@ impl std::fmt::Display for PublishStep {
             Self::SyncName => "syncing the directory after the link",
             Self::RemoveScratch => "removing the scratch file",
             Self::SyncRemoval => "syncing the directory after removing the scratch",
+            Self::CheckReplaceable => "checking the target may still be replaced",
+            Self::RemoveJournals => "removing the replaced database's journal files",
+            Self::SyncJournals => "syncing the directory after removing the journal files",
+            Self::Rename => "renaming the restored file over the target",
         })
     }
 }
@@ -234,6 +278,59 @@ fn publish_steps(fs: &mut impl PublishFs, target: &Path) -> Result<(), PublishEr
     fs.sync_dir().map_err(at(PublishStep::SyncRemoval))
 }
 
+/// The file system steps of a replacing publish.
+trait ReplaceFs {
+    fn sync_scratch(&mut self) -> io::Result<()>;
+    fn not_replaceable(&self) -> io::Result<Option<PathBuf>>;
+    fn remove_journals(&self) -> io::Result<()>;
+    fn sync_dir(&self) -> io::Result<()>;
+    fn rename(&self) -> io::Result<()>;
+}
+
+/// A replacing publish after the SQLite check, in order (see the module doc).
+fn replace_steps(fs: &mut impl ReplaceFs, target: &Path) -> Result<(), PublishError> {
+    let at = |step| move |source| PublishError::at(target, step, source);
+    fs.sync_scratch().map_err(at(PublishStep::SyncScratch))?;
+    let check = PublishStep::CheckReplaceable;
+    if let Some(path) = fs.not_replaceable().map_err(at(check))? {
+        let source = io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} changed during the restore", path.display()),
+        );
+        return Err(at(check)(source));
+    }
+    fs.remove_journals()
+        .map_err(at(PublishStep::RemoveJournals))?;
+    fs.sync_dir().map_err(at(PublishStep::SyncJournals))?;
+    fs.rename().map_err(at(PublishStep::Rename))?;
+    fs.sync_dir().map_err(at(PublishStep::SyncName))
+}
+
+/// The first path that stops a replace of `target` under `existing`: a target that is not
+/// a regular file (or, for [Existing::Empty], not empty), or for [Existing::Empty] a
+/// journal file. `None` when the replace may go ahead.
+fn blocking(target: &Path, existing: Existing) -> io::Result<Option<PathBuf>> {
+    match target.symlink_metadata() {
+        Ok(meta) => {
+            let empty_enough = existing == Existing::Any || meta.len() == 0;
+            if !meta.file_type().is_file() || !empty_enough {
+                return Ok(Some(target.to_path_buf()));
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    if existing == Existing::Any {
+        return Ok(None);
+    }
+    for path in journal_files(target) {
+        if exists(&path)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 /// A database being restored into a scratch file beside its target.
 #[derive(Debug)]
 pub struct FileSink {
@@ -241,6 +338,7 @@ pub struct FileSink {
     scratch: PathBuf,
     target: PathBuf,
     integrity: IntegrityCheck,
+    existing: Existing,
     published: bool,
 }
 
@@ -297,12 +395,38 @@ pub fn clear_journal_files(target: &Path) -> Result<Vec<PathBuf>, ClearError> {
 /// [CreateError::TargetExists] when the target exists, or
 /// [CreateError::Inspect] when a path cannot be inspected.
 pub fn preflight(target: &Path) -> Result<Vec<PathBuf>, CreateError> {
+    preflight_over(target, Existing::Refuse)
+}
+
+/// [preflight] under a replace mode: a target the mode may replace passes, and under
+/// [Existing::Any] journal files are not returned, since publish removes them.
+///
+/// # Errors
+/// As [preflight].
+pub fn preflight_over(target: &Path, existing: Existing) -> Result<Vec<PathBuf>, CreateError> {
     let inspect = |path: &Path| {
         let path = path.to_path_buf();
         move |source| CreateError::Inspect { path, source }
     };
-    if exists(target).map_err(inspect(target))? {
-        return Err(CreateError::TargetExists(target.to_path_buf()));
+    match existing {
+        Existing::Refuse => {
+            if exists(target).map_err(inspect(target))? {
+                return Err(CreateError::TargetExists(target.to_path_buf()));
+            }
+        }
+        Existing::Empty | Existing::Any => {
+            if blocking(target, Existing::Any)
+                .map_err(inspect(target))?
+                .is_some()
+                || (existing == Existing::Empty
+                    && target.symlink_metadata().is_ok_and(|m| m.len() > 0))
+            {
+                return Err(CreateError::TargetExists(target.to_path_buf()));
+            }
+            if existing == Existing::Any {
+                return Ok(Vec::new());
+            }
+        }
     }
     let mut present = Vec::new();
     for path in journal_files(target) {
@@ -331,18 +455,21 @@ impl FileSink {
     /// [CreateError::TargetExists], [CreateError::Journal file],
     /// [CreateError::RestoreInProgress], or the I/O failure.
     pub fn create(target: &Path) -> Result<Self, CreateError> {
-        let inspect = |path: &Path| {
-            let path = path.to_path_buf();
-            move |source| CreateError::Inspect { path, source }
-        };
-        if exists(target).map_err(inspect(target))? {
-            return Err(CreateError::TargetExists(target.to_path_buf()));
-        }
-        for path in journal_files(target) {
-            if exists(&path).map_err(inspect(&path))? {
-                return Err(CreateError::JournalFile { path });
-            }
-        }
+        Self::create_over(target, Existing::Refuse)
+    }
+
+    /// [FileSink::create], with what may be done with a file already at [target]: under
+    /// [Existing::Empty] or [Existing::Any] it is left in place now and replaced at publish.
+    ///
+    /// # Errors
+    /// As [FileSink::create]; [CreateError::TargetExists] when the target is not a file the
+    /// mode may replace.
+    pub fn create_over(target: &Path, existing: Existing) -> Result<Self, CreateError> {
+        preflight_over(target, existing)?
+            .first()
+            .map_or(Ok(()), |path| {
+                Err(CreateError::JournalFile { path: path.clone() })
+            })?;
         let scratch = suffixed(target, ".restore");
         let scratch_fault = |source| CreateError::Scratch {
             path: scratch.clone(),
@@ -375,6 +502,7 @@ impl FileSink {
             scratch,
             target: target.to_path_buf(),
             integrity: IntegrityCheck::Off,
+            existing,
             published: false,
         })
     }
@@ -391,6 +519,38 @@ impl FileSink {
     #[must_use]
     pub fn scratch_path(&self) -> &Path {
         &self.scratch
+    }
+}
+
+impl ReplaceFs for FileSink {
+    fn sync_scratch(&mut self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+
+    fn not_replaceable(&self) -> io::Result<Option<PathBuf>> {
+        blocking(&self.target, self.existing)
+    }
+
+    fn remove_journals(&self) -> io::Result<()> {
+        if self.existing != Existing::Any {
+            return Ok(());
+        }
+        for path in journal_files(&self.target) {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    fn sync_dir(&self) -> io::Result<()> {
+        sync_dir(&self.target)
+    }
+
+    fn rename(&self) -> io::Result<()> {
+        fs::rename(&self.scratch, &self.target)
     }
 }
 
@@ -466,7 +626,10 @@ impl DatabaseSink for FileSink {
                 PublishError::at(&target, PublishStep::Check, source)
             }
         })?;
-        publish_steps(&mut self, &target)?;
+        match self.existing {
+            Existing::Refuse => publish_steps(&mut self, &target)?,
+            Existing::Empty | Existing::Any => replace_steps(&mut self, &target)?,
+        }
         self.published = true;
         Ok(())
     }
@@ -482,6 +645,9 @@ impl Drop for FileSink {
 
 #[cfg(test)]
 mod publish_tests;
+
+#[cfg(test)]
+mod replace_tests;
 
 #[cfg(test)]
 mod tests;

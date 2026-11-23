@@ -7,6 +7,7 @@
 //! with its patch applied and fails when the test survives), or says why it has none.
 //! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
 
+pub mod seed_0x116;
 pub mod seed_0x126d68ed250e;
 pub mod seed_0x126d68ef1c07;
 pub mod seed_0x126d68ef545f;
@@ -25,10 +26,12 @@ pub mod seed_0x330;
 pub mod seed_0x46;
 pub mod seed_0x4c;
 pub mod seed_0x585;
+pub mod seed_0x734;
 pub mod seed_0x753;
 pub mod seed_0x80e;
 pub mod seed_0x82;
 pub mod seed_0x8ef;
+pub mod seed_0x92d;
 pub mod seed_0x95a;
 pub mod seed_0x9f9;
 pub mod seed_0xa4d;
@@ -36,6 +39,7 @@ pub mod seed_0xb6b;
 pub mod seed_0xb9e;
 pub mod seed_0xe9;
 pub mod seed_0xf;
+pub mod seed_0xf45b5;
 pub mod seed_0xf4721;
 pub mod seed_0xf488c;
 
@@ -198,6 +202,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         ),
     ),
     (
+        "seed_0x116",
+        "a_kill_right_after_a_failed_wal_sync_still_owes_the_truncate_seed_0x116",
+        Guard::Own("journal-debt-not-recorded-sim"),
+    ),
+    (
         "seed_0xf488c",
         "swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage",
         Guard::Own("boundary-snapshot-keeps-page-table-sim"),
@@ -206,6 +215,22 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0xb9e",
         "compaction_takes_a_staging_denial_as_staging_seed_0xb9e",
         Guard::Own("compact-local-read-as-remote-sim"),
+    ),
+    (
+        "seed_0x734",
+        "seed_0x734_trips_on_a_snapshot_it_cannot_vouch_for_and_is_excused",
+        Guard::Unguarded(
+            "the history checks a judge exemption, not an engine fix: no engine plant can make \
+             the judge excuse a trip it would otherwise call false",
+        ),
+    ),
+    (
+        "seed_0x92d",
+        "seed_0x92d_trips_on_frames_it_never_read_and_is_excused",
+        Guard::Unguarded(
+            "the history checks a judge exemption, not an engine fix: no engine plant can make \
+             the judge excuse a trip it would otherwise call false",
+        ),
     ),
     (
         "seed_0x9f9",
@@ -230,6 +255,11 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
         "seed_0xa4d",
         "seed_0xa4d_does_not_trip",
         Guard::Own("failstop-trip-held-to-zero-age-sim"),
+    ),
+    (
+        "seed_0xf45b5",
+        "a_running_drop_records_past_an_unconfirmed_upload_seed_0xf45b5",
+        Guard::Own("running-drop-record-capped-at-confirmed"),
     ),
 ];
 
