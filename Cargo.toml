@@ -56,7 +56,8 @@ saphyr-parser = { version = "0.3.4", default-features = false }
 # `--cfg shuttle` (`just shuttle`), so no other build compiles it.
 shuttle = { version = "0.9.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
-serde_json = { version = "1", default-features = false, features = ["std"] }
+# `preserve_order`: the daemon's and `lsr`'s JSON keeps the order its code writes the keys in.
+serde_json = { version = "1", default-features = false, features = ["std", "preserve_order"] }
 sha2 = { version = "0.11.1", default-features = false }
 # The CLI's `replicate` waits for SIGINT, SIGTERM and SIGHUP without unsafe code of its own.
 signal-hook = { version = "0.4.6", default-features = false, features = ["iterator"] }

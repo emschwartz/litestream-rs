@@ -19,6 +19,7 @@ lsr-replica.workspace = true
 lsr-sidecar.workspace = true
 lsr-store-fs.workspace = true
 lsr-store-s3.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -33,7 +34,6 @@ lsr-core = { workspace = true, features = ["testing"] }
 lsr-store-s3 = { workspace = true, features = ["testing"] }
 # The Tigris run (tests/cli/tigris.rs) checkpoints the live database Go replicated.
 rusqlite.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -58,7 +58,6 @@ pub use error::SidecarError;
 pub use exec::{ChildEnd, During, ExecCommand, ExecError};
 pub use flags::{Parsed, UsageError};
 pub use http::{AddrError, MAX_CONNECTIONS, MAX_REQUEST};
-pub use json::string as json_string;
 
 use crate::daemon::Daemon;
 use crate::exec::Wake;
