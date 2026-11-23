@@ -54,12 +54,12 @@ recovered_by = "sim::`a_staging_backup_put_back_while_down_is_refused_at_boot`"
 [[row]]
 table = "Boot"
 id = "BOOT-5"
-circumstance = "A staged file the replica may still need fails verification. First failed read: nothing is deleted, the boot fails with `StagedLost` and runs again. Same file fails on the next try: it and every staged file after it are deleted (`upload.rs`, `actor.rs`)"
+circumstance = "A staged file the replica may still need fails verification. First failed read: nothing is deleted, the boot fails with `StagedLost` and runs again. Same file fails on the next try: it and every staged file after it are deleted (`upload.rs`, `actor.rs`). Recovery's own read of the newest staged file is held to the same rule: one that makes it look unreadable fails the boot with `StagedLost` first (D168)"
 response = "retry once, then: if recovery continues from the newest file left, continue, and the WAL stages the deleted range again; otherwise snapshot, `NewestStagedFileUnreadable` Before deleting, the engine has the driver keep a takeover record through what the deleted files vouched for (`Event::TakeoverWanted`, BOOT-30), so a crash before the snapshot does not make the next boot refuse them. While running, the same drop leaves its record's ids to the uploader's next listing, never to another-writer judgement (UP-10)."
 signal = "\"retrying\", then none or `newest_staged_file_unreadable`"
 at_risk = "When a snapshot follows: the restore points of the deleted, unpublished files. Their end state is in the snapshot. No committed data is lost"
 recovery = "Automatic"
-detected_by = "core::`one_bad_read_of_a_staged_file_at_boot_drops_nothing`, core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`, core::`a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot`, core::`a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next`, sim::`a_torn_staged_file_is_dropped_seed_0x25`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`; plant::`delete-on-one-failed-read-boot`, plant::`boot-snapshot-after-unreadable`"
+detected_by = "core::`one_bad_read_of_a_staged_file_at_boot_drops_nothing`, core::`witness::one_lying_read_of_the_newest_staged_header_retries_the_boot`, core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`, core::`a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot`, core::`a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next`, sim::`a_torn_staged_file_is_dropped_seed_0x25`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`; plant::`delete-on-one-failed-read-boot`, plant::`boot-snapshot-after-unreadable`"
 recovered_by = "sim::`a_torn_staged_file_is_dropped_seed_0x25`"
 notes = "A deleted file the replica already holds leaves staging behind the replica, which recovery answers with `BehindRemote`, so continuing never stages new content under a transaction the replica shows. Before, the snapshot was taken even when the WAL could regenerate the files (D14)"
 
@@ -113,11 +113,11 @@ in_review = "#89 keeps the staged snapshot if the process dies before uploading 
 table = "Boot"
 id = "BOOT-10"
 circumstance = "Same salts and length, but the frame before the staged end is not a commit frame, or its page differs from the staged file's"
-response = "snapshot, `PrevFrameMismatch` or `LastPageMismatch`"
+response = "snapshot, `PrevFrameMismatch` or `LastPageMismatch`. A `LastPageMismatch` that nothing the sweep or the witness passes proved explains rests on one read of the newest staged file: the first boot fails with `StagedLost` and only the next boot that reads the same snapshots (D168)"
 signal = "`prev_frame_mismatch`, `last_page_mismatch`"
 at_risk = "As BOOT-7"
 recovery = "Automatic"
-detected_by = "core::`rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch`, core::`rule_9_a_last_page_that_differs_snapshots`, sim::`wal_rewritten_same_length`, sim::`wal_regrown_same_salts_diff_bytes`"
+detected_by = "core::`rule_8_a_frame_before_the_end_that_does_not_verify_is_prev_frame_mismatch`, core::`rule_9_a_last_page_that_differs_snapshots`, core::`witness::one_lying_read_of_the_newest_staged_pages_retries_the_boot`, sim::`wal_rewritten_same_length`, sim::`wal_regrown_same_salts_diff_bytes`"
 recovered_by = "sim::`wal_rewritten_same_length`, sim::`wal_regrown_same_salts_diff_bytes`"
 
 [[row]]
