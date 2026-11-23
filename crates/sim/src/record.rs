@@ -259,6 +259,7 @@ fn store_error(err: &StoreError) -> Result<String, Unprintable> {
         StoreError::NotFound { .. }
         | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
+        | StoreError::CreateOnlyUnsupported { .. }
         | StoreError::Corrupt { .. } => Err(Unprintable(format!("{err:?}"))),
     }
 }
@@ -403,6 +404,7 @@ const fn remote(remote: RemoteOp) -> &'static str {
         RemoteOp::RemoveUnrecognized => "RemoteOp::RemoveUnrecognized",
         RemoteOp::RollBack => "RemoteOp::RollBack",
         RemoteOp::DropCreatedAt => "RemoteOp::DropCreatedAt",
+        RemoteOp::RefuseCreateOnly => "RemoteOp::RefuseCreateOnly",
     }
 }
 

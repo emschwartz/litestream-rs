@@ -90,6 +90,8 @@ pub enum FaultKind {
     WalSyncFailed,
     /// [`Fault::DatabasePageMismatch`].
     DatabasePageMismatch,
+    /// [`Fault::CreateOnlyUnsupported`].
+    CreateOnlyUnsupported,
     /// [`Fault::ShutdownDeadline`].
     ShutdownDeadline,
     /// [`Fault::Bug`].
@@ -98,7 +100,7 @@ pub enum FaultKind {
 
 impl FaultKind {
     /// Every fault, in the order of [`Fault`].
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 34] = [
         Self::StoreTransient,
         Self::StoreThrottled,
         Self::StoreCredentials,
@@ -130,6 +132,7 @@ impl FaultKind {
         Self::WalUnlinked,
         Self::WalSyncFailed,
         Self::DatabasePageMismatch,
+        Self::CreateOnlyUnsupported,
         Self::ShutdownDeadline,
         Self::Bug,
     ];
@@ -179,6 +182,7 @@ impl From<&Fault> for FaultKind {
             Fault::WalUnlinked => Self::WalUnlinked,
             Fault::WalSyncFailed => Self::WalSyncFailed,
             Fault::DatabasePageMismatch { .. } => Self::DatabasePageMismatch,
+            Fault::CreateOnlyUnsupported => Self::CreateOnlyUnsupported,
             Fault::ShutdownDeadline => Self::ShutdownDeadline,
             Fault::Bug(_) => Self::Bug,
         }
@@ -216,6 +220,7 @@ pub fn stop_of(kind: FaultKind) -> Option<StopCause> {
         FaultKind::DatabasePageMismatch => {
             lsr_ltx::PageNo::new(1, page).map(|pgno| StopCause::DatabasePageMismatch { pgno })
         }
+        FaultKind::CreateOnlyUnsupported => Some(StopCause::ConditionalWritesUnsupported),
         FaultKind::ShutdownDeadline => Some(StopCause::Shutdown),
         FaultKind::Bug => Some(StopCause::Bug),
         FaultKind::StoreTransient
@@ -301,6 +306,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::WalUnlinked => &[wal_unlinked_mid_run],
         FaultKind::WalSyncFailed => &[wal_fsync_fails, wal_fsync_fails_then_restart],
         FaultKind::DatabasePageMismatch => &[db_page_flipped_under_sync],
+        FaultKind::CreateOnlyUnsupported => &[create_only_refused_mid_run],
         FaultKind::ShutdownDeadline => &[sigterm_during_upload],
         FaultKind::Bug => &[],
     }
@@ -1497,6 +1503,29 @@ pub fn db_page_flipped_under_sync() -> Scenario {
             Op::RequestSnapshot,
         ],
         vec![Expect::Stopped(flipped)],
+    )
+}
+
+/// The replica's store turns out to have no conditional writes: the next level-0 upload is
+/// refused with nothing published, and under responses that stop the engine stops on it; under
+/// keep-trying responses uploads replace from then on, with the upload task degraded (D79).
+#[must_use]
+pub fn create_only_refused_mid_run() -> Scenario {
+    build(
+        "create_only_refused_mid_run",
+        vec![
+            live(),
+            vec![
+                Op::Remote(RemoteOp::RefuseCreateOnly),
+                commit(2, false),
+                Op::Tick,
+            ],
+            ticks(SETTLE),
+        ],
+        vec![
+            Expect::Stopped(StopCause::ConditionalWritesUnsupported),
+            Expect::Oracle,
+        ],
     )
 }
 

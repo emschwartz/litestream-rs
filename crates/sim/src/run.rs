@@ -238,6 +238,9 @@ pub struct Opts {
     /// The replica is the S3 store over its in-memory bucket ([`Weights::remote_s3`]).
     /// [`run_with`] sets it.
     pub remote_s3: bool,
+    /// The replica's store has no conditional writes ([`Weights::no_create_only`]).
+    /// [`run_with`] sets it.
+    pub no_create_only: bool,
     /// Which judges run: the oracle, the history judge, or both (the default).
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
@@ -342,6 +345,8 @@ struct Runner {
     quiet: bool,
     record: bool,
     allow_stop: bool,
+    /// The replica recorder's length at the last unguarded-replace judgment (`run::create_only`).
+    unguarded_seen: usize,
     responses: Responses,
     /// Whether retention deletes, for the running engine and the next boot.
     retention: RetentionMode,
@@ -479,6 +484,9 @@ impl Runner {
         runner.error_domain = opts.error_domain;
         runner.truncate_pages = opts.truncate_pages;
         runner.known_wrong = opts.known_wrong;
+        if opts.no_create_only {
+            runner.refuse_create_only();
+        }
         runner.reboot();
         runner
     }
@@ -513,6 +521,7 @@ impl Runner {
             quiet: false,
             record: false,
             allow_stop: false,
+            unguarded_seen: 0,
             responses: Responses::GO_LIKE,
             retention: RetentionMode::Enforce,
             degraded: [false; 5],
@@ -824,6 +833,7 @@ impl Runner {
         self.watch_staging()?;
         self.note_boot(booting, remote0.lists, salts, commits);
         self.judge_stores()?;
+        self.judge_unguarded()?;
         let crashed = matches!(ended, TickEnd::Crashed { .. });
         self.forcings_mid_tick(hits0, crashed)?;
         self.report.ticks = self.report.ticks.saturating_add(1);
@@ -1919,6 +1929,10 @@ impl Runner {
                 from.is_some()
             }),
             RemoteOp::DropCreatedAt => self.w.remote_drop_created_at(),
+            RemoteOp::RefuseCreateOnly => {
+                self.refuse_create_only();
+                Ok(true)
+            }
         };
         if matches!(op, RemoteOp::RollBack | RemoteOp::RemoveUnrecognized) {
             self.w.history.excuse_regression();
@@ -2519,6 +2533,7 @@ impl Runner {
             | PersistentCause::DatabaseAheadOfWal { .. }
             | PersistentCause::WalLostCommits { .. }
             | PersistentCause::DatabaseAheadOfWalUnchecked
+            | PersistentCause::ConditionalWritesUnsupported
             | PersistentCause::Bug => true,
         }
     }
@@ -2791,6 +2806,7 @@ pub fn run_with(
         truncate_pages: weights.truncate_pages,
         kill_after_fault: weights.kill_after_fault,
         remote_s3: weights.remote_s3,
+        no_create_only: weights.no_create_only,
         ..opts.clone()
     };
     run_ops(seed, &history(seed, steps, weights), &opts)
@@ -2890,6 +2906,7 @@ pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<
 }
 
 mod after_restart;
+mod create_only;
 mod fail_stop;
 mod hold;
 mod in_tick;
@@ -2940,6 +2957,7 @@ const fn persistent_reports_loss(cause: PersistentCause) -> bool {
         | PersistentCause::RemoteCorrupt
         | PersistentCause::PageSizeChanged { .. }
         | PersistentCause::DatabasePageMismatch { .. }
+        | PersistentCause::ConditionalWritesUnsupported
         | PersistentCause::Bug
         | PersistentCause::Stalled(_) => false,
     }
@@ -2963,6 +2981,7 @@ const fn stop_reports_loss(cause: StopCause) -> bool {
         | StopCause::RemoteCorrupt
         | StopCause::PageSizeChanged { .. }
         | StopCause::DatabasePageMismatch { .. }
+        | StopCause::ConditionalWritesUnsupported
         | StopCause::Shutdown
         | StopCause::Bug => false,
     }

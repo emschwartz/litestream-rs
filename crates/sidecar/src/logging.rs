@@ -463,6 +463,7 @@ fn degraded_line(task: Task, cause: DegradedCause, until: Timestamp) -> Line {
         | DegradedCause::WalSyncFailed
         | DegradedCause::PageSizeChanged { .. }
         | DegradedCause::DatabasePageMismatch { .. }
+        | DegradedCause::ConditionalWritesUnsupported
         | DegradedCause::Bug
         | DegradedCause::Stalled(_) => (
             LogLevel::Warn,

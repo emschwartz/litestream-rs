@@ -792,13 +792,7 @@ mod cases {
         let err = write_new(&h.store, &k, b"second", 64).unwrap_err();
         assert_eq!(err, StoreError::AlreadyExists { key: k });
         assert_eq!(read_back(&h.store, &k, 5), b"first");
-        assert_eq!(
-            h.store.write_stats(),
-            WriteStats {
-                refused_taken: 1,
-                ..WriteStats::default()
-            }
-        );
+        assert_eq!(h.store.write_stats(), WriteStats { refused_taken: 1 });
     }
 
     #[test]
@@ -828,50 +822,45 @@ mod cases {
     }
 
     /// A provider without conditional writes answers the header with 501. The
-    /// PUT fails retryably, nothing is published, and from then on create-only
-    /// writes go out without the condition, counted, as Go's do.
+    /// PUT fails with `CreateOnlyUnsupported`, nothing is published, and every
+    /// later create-only write fails the same way: the store never drops the
+    /// condition itself, so an object already there is never replaced by a
+    /// create-only write (`docs/decisions.md` D79). A replace still goes.
     #[test]
-    fn a_provider_without_conditional_writes_falls_back_and_says_so() {
+    fn a_provider_without_conditional_writes_fails_every_create_only_write() {
         let h = FakeHarness::new();
         h.wire.inner().refuse_conditional_writes();
         let k = key(0, 1, 1);
-        let err = write_new(&h.store, &k, b"first", 64).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                StoreError::Transient {
-                    op: StoreOp::Upload,
-                    kind: io::ErrorKind::Unsupported
-                }
-            ),
-            "{err:?}"
-        );
+        let refused = StoreError::CreateOnlyUnsupported {
+            op: StoreOp::Upload,
+            key: k,
+        };
+        assert_eq!(write_new(&h.store, &k, b"first", 64), Err(refused.clone()));
         assert!(list_all(&h.store).unwrap().files.is_empty());
-        write_new(&h.store, &k, b"first", 64).unwrap();
-        write_new(&h.store, &k, b"other", 64).unwrap();
-        assert_eq!(read_back(&h.store, &k, 5), b"other", "it replaces now");
-        assert_eq!(
-            h.store.write_stats(),
-            WriteStats {
-                conditional_unsupported: true,
-                unconditional_new: 2,
-                refused_taken: 0,
-            }
-        );
+        write_all(&h.store, &k, b"first", 64).unwrap();
+        assert_eq!(write_new(&h.store, &k, b"other", 64), Err(refused));
+        assert_eq!(read_back(&h.store, &k, 5), b"first", "never replaced");
+        assert_eq!(h.store.write_stats(), WriteStats { refused_taken: 0 });
     }
 
-    /// The same at a complete: the parts are still there, so the complete
-    /// goes again at once without the condition.
+    /// The same at a complete: nothing is published, the open upload goes on
+    /// the orphan list, and no complete goes out without the condition.
     #[test]
-    fn a_complete_refused_as_not_implemented_is_sent_again_without_the_condition() {
+    fn a_complete_refused_as_not_implemented_publishes_nothing() {
         let h = FakeHarness::new();
         h.wire.inner().refuse_conditional_writes();
         let k = key(0, 1, 1);
         let bytes = body(PART * 2);
-        write_new(&h.store, &k, &bytes, PART).unwrap();
-        assert!(read_back(&h.store, &k, PART * 2) == bytes);
-        assert_eq!(count(&h.wire, Shape::Complete), 2);
-        assert!(h.store.write_stats().conditional_unsupported);
+        assert_eq!(
+            write_new(&h.store, &k, &bytes, PART),
+            Err(StoreError::CreateOnlyUnsupported {
+                op: StoreOp::Upload,
+                key: k,
+            })
+        );
+        assert!(list_all(&h.store).unwrap().files.is_empty());
+        assert_eq!(count(&h.wire, Shape::Complete), 1);
+        assert_eq!(h.store.abort_orphans().unwrap(), 1);
         assert_eq!(h.wire.inner().open_uploads(), 0);
     }
 

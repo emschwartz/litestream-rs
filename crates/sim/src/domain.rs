@@ -479,6 +479,8 @@ pub enum StoreClass {
     ScratchExhausted,
     /// [`StoreError::Corrupt`].
     Corrupt,
+    /// [`StoreError::CreateOnlyUnsupported`].
+    CreateOnlyUnsupported,
     /// [`StoreError::Refused`].
     Refused,
 }
@@ -492,7 +494,7 @@ pub const STORE_OPS: [StoreOp; 4] = [
 ];
 
 /// Every store error class, every denial kind among them ([`store_class`] checks it).
-pub const STORE_CLASSES: [StoreClass; 12] = [
+pub const STORE_CLASSES: [StoreClass; 13] = [
     StoreClass::Transient,
     StoreClass::Throttled,
     StoreClass::Denied(Denied::Credentials),
@@ -504,6 +506,7 @@ pub const STORE_CLASSES: [StoreClass; 12] = [
     StoreClass::AlreadyExists,
     StoreClass::ScratchExhausted,
     StoreClass::Corrupt,
+    StoreClass::CreateOnlyUnsupported,
     StoreClass::Refused,
 ];
 
@@ -538,6 +541,7 @@ pub const fn store_class(err: &StoreError) -> StoreClass {
         StoreError::AlreadyExists { .. } => StoreClass::AlreadyExists,
         StoreError::ScratchExhausted { .. } => StoreClass::ScratchExhausted,
         StoreError::Corrupt { .. } => StoreClass::Corrupt,
+        StoreError::CreateOnlyUnsupported { .. } => StoreClass::CreateOnlyUnsupported,
         StoreError::Refused { .. } => StoreClass::Refused,
     }
 }
@@ -551,6 +555,9 @@ const NOT_FOUND_IS_STALE: &str = "a NotFound for an object the store holds is a 
 const TAKEN_IS_WORLD: &str = "a taken key is a fact about the store: a create-only upload is \
                               answered from what the key holds, an earlier ambiguous commit or \
                               another writer, each drawn elsewhere";
+const NO_CREATE_ONLY_IS_WORLD: &str = "a store without create-only writes is a fact about the \
+                                       store for the whole run: drawn as the world's \
+                                       Weights::no_create_only, every create-only commit refused";
 const NOT_FOUND_NEVER: &str = "neither store reports NotFound here: a listing of nothing is empty, a delete of nothing succeeds";
 
 /// The cell of `op` and `class` on `target`: the staging store against `store-fs`, the replica
@@ -584,6 +591,15 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
             }
         },
         StoreClass::Corrupt => Cell::Impossible(CORRUPT_IS_WORLD),
+        StoreClass::CreateOnlyUnsupported => match (target, op) {
+            (Target::Remote, StoreOp::Upload) => Cell::Impossible(NO_CREATE_ONLY_IS_WORLD),
+            (Target::Staging, StoreOp::Upload) => Cell::Impossible(
+                "the engine's staging writes replace; it never asks for create-only",
+            ),
+            (_, StoreOp::List | StoreOp::Read | StoreOp::Delete) => {
+                Cell::Impossible("only a create-only upload can be refused for lack of the check")
+            }
+        },
         StoreClass::Refused => match target {
             Target::Remote => Cell::Drawn,
             Target::Staging => Cell::Impossible("store-fs has no status codes and refuses nothing"),
@@ -646,7 +662,8 @@ fn store_error(
         StoreClass::NotFound
         | StoreClass::AlreadyExists
         | StoreClass::ScratchExhausted
-        | StoreClass::Corrupt => {
+        | StoreClass::Corrupt
+        | StoreClass::CreateOnlyUnsupported => {
             // NotFound, AlreadyExists and Corrupt are never drawn. A scratch exhaustion names a key the
             // engine only reports, never acts on.
             placeholder_error(op, class)
@@ -673,6 +690,7 @@ fn placeholder_error(op: StoreOp, class: StoreClass) -> StoreError {
         | StoreClass::Denied(_)
         | StoreClass::NotFound
         | StoreClass::AlreadyExists
+        | StoreClass::CreateOnlyUnsupported
         | StoreClass::Refused => transient,
     }
 }
@@ -743,7 +761,10 @@ pub fn known_in(ops: &[crate::generate::Op], weights: &crate::Weights) -> Vec<Kn
 #[must_use]
 pub const fn refused_before_acting(err: &StoreError) -> bool {
     match store_class(err) {
-        StoreClass::Denied(_) | StoreClass::Refused | StoreClass::ScratchExhausted => true,
+        StoreClass::Denied(_)
+        | StoreClass::Refused
+        | StoreClass::ScratchExhausted
+        | StoreClass::CreateOnlyUnsupported => true,
         StoreClass::Transient
         | StoreClass::Throttled
         | StoreClass::NotFound
@@ -760,6 +781,9 @@ pub const fn store_stop(target: Target, err: &StoreError) -> Option<StopCause> {
         (Target::Remote, StoreClass::Denied(why)) => Some(StopCause::StoreDenied(why)),
         (Target::Remote, StoreClass::Refused) => Some(StopCause::StoreRefused),
         (Target::Remote, StoreClass::Corrupt) => Some(StopCause::RemoteCorrupt),
+        (Target::Remote, StoreClass::CreateOnlyUnsupported) => {
+            Some(StopCause::ConditionalWritesUnsupported)
+        }
         (
             Target::Remote,
             StoreClass::Transient

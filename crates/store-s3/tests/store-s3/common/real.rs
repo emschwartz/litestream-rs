@@ -676,7 +676,6 @@ pub fn create_only_multipart_into_a_taken_key_is_refused(h: &RealHarness) {
     assert_eq!(err, StoreError::AlreadyExists { key });
     assert_eq!(h.read_back(&key, 5), b"first");
     assert_eq!(h.store.write_stats().refused_taken, 1);
-    assert!(!h.store.write_stats().conditional_unsupported);
     assert_eq!(h.store.abort_orphans().unwrap(), 1);
     assert_eq!(h.open_uploads(), 0);
 }

@@ -365,6 +365,16 @@ impl Bucket {
         }
     }
 
+    /// From now on the bucket has no conditional writes, as a provider that answers
+    /// `If-None-Match` with `NotImplemented` (`docs/decisions/D079.md`): `MemStore` refuses every
+    /// create-only commit, and the S3 bucket answers every conditional write with 501.
+    pub fn refuse_create_only(&self) {
+        match self {
+            Self::Mem(store) => store.refuse_create_only(),
+            Self::S3(wire) => wire.inner().refuse_conditional_writes(),
+        }
+    }
+
     /// What the bucket holds at a key, for the recorder (`crate::store::Landed`): the content
     /// digest of the object there, read from the bucket's own store.
     #[must_use]

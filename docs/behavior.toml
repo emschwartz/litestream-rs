@@ -1050,6 +1050,17 @@ detected_by = "core::`a_running_engine_stops_when_another_writer_took_its_next_i
 notes = "Before, the divergence snapshotted above the other writer's file, which interleaves the two histories. A boot's divergence stays recovery's (BOOT-13): it cannot tell an earlier run's upload from another writer's"
 
 [[row]]
+table = "Upload"
+id = "UP-18"
+circumstance = "The replica's store cannot make create-only writes: an S3 provider answers `If-None-Match: *` with `NotImplemented` (`docs/decisions.md` D79)"
+response = "The store fails the write with `CreateOnlyUnsupported` and publishes nothing; it never drops the condition itself. Default: the upload task is degraded at `ConditionalWritesUnsupported` and level-0 uploads replace from then on, as Go's do; the cause stands after every later success until the process restarts, and comes back at the task's next success after any other fault held it. Under `litestream-rs.responses.conditional-writes-unsupported: stop` (and `STRICT`): stop. Each process asks the store again at its first level-0 upload"
+signal = "`conditional_writes_unsupported` in `Health.degraded`; `/healthz` stays 200, a stop is 503"
+at_risk = "Nothing is lost by the refusal. While uploads replace, another writer's file under the same key is not refused by the bucket (UP-14), only reported here"
+recovery = "Automatic, as Go; a provider with conditional writes, or the stop response, ends it"
+detected_by = "core::`a_store_without_create_only_writes_degrades_and_uploads_by_replacing`, core::`the_refused_create_only_write_publishes_nothing`, core::`a_store_without_create_only_writes_stops_under_strict_responses`, core::`a_restart_asks_for_create_only_writes_again`, core::`the_cause_comes_back_after_another_fault_on_the_upload_task`, store-s3::`a_provider_without_conditional_writes_fails_every_create_only_write`, store-s3::`a_complete_refused_as_not_implemented_publishes_nothing`, sim::`create_only::every_replace_on_a_store_without_create_only_writes_is_reported`, sim::`faults::create_only_refused_mid_run`"
+notes = "Before, the S3 store dropped the condition on its own after the first refusal and counted it in `WriteStats`, which nothing read: the engine went on claiming create-only writes it was not making. The simulator draws a store without create-only writes in a quarter of its swarm mixes, and its judge fails a run that takes a level-0 replace on such a store while the upload task is not degraded. A task holds one degraded cause, so while another fault holds it health names that one. store-fs's hard-link create-only on a filesystem without links is an open question (D79)"
+
+[[row]]
 table = "Maintenance and retention"
 id = "MAINT-1"
 circumstance = "A level's window opened (30 s, 5 min, 1 h by default): merge at most 32 contiguous files from the level below (`compact.rs`). Inputs are never deleted by the merge. A hole in the source ends the run; the next job starts after it"
