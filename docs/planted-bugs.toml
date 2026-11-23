@@ -1777,3 +1777,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["verify_reports_a_live_transaction_a_rollback_took_seed_0xd"]
+
