@@ -142,13 +142,23 @@ impl Runner {
         if let TickEnd::Done(Tick::Stopped(cause)) = ended {
             reported.extend(PersistentCause::of(*cause));
         }
-        let failed = !reported.is_empty()
+        // A task standing degraded on the WAL or the database says nothing of a request the
+        // store refused in this tick: a read-ahead HEAD (maintenance's created-at reads) the
+        // engine drops by design is not a failure the engine owed a report of.
+        let failed = reported.iter().any(|cause| !local_cause(*cause))
             || matches!(
                 ended,
                 TickEnd::Done(Tick::Ran {
-                    event: Event::Retrying { .. } | Event::Degraded { .. },
+                    event: Event::Retrying { .. },
                     ..
                 })
+            )
+            || matches!(
+                ended,
+                TickEnd::Done(Tick::Ran {
+                    event: Event::Degraded { cause, .. },
+                    ..
+                }) if !local_cause(*cause)
             );
         if owed.may_drop && !failed {
             self.report.reach.bump("http_fault.denial_read_ahead");
@@ -213,6 +223,27 @@ impl Runner {
     /// The provider faults pushed and not yet met by a request, at the end of a run.
     pub(super) fn http_faults_pending(&self) -> usize {
         self.w.remote_raw.wire().map_or(0, |wire| wire.pending())
+    }
+}
+
+/// Whether a degraded cause is about the local WAL or database, so that a task standing on it
+/// is no failure of a store request.
+const fn local_cause(cause: PersistentCause) -> bool {
+    match cause {
+        PersistentCause::WalCorrupt
+        | PersistentCause::WalTruncated
+        | PersistentCause::WalUnlinked
+        | PersistentCause::WalSyncFailed
+        | PersistentCause::PageSizeChanged { .. }
+        | PersistentCause::DatabasePageMismatch { .. } => true,
+        PersistentCause::StoreDenied(_)
+        | PersistentCause::StoreRefused
+        | PersistentCause::RemoteCorrupt
+        | PersistentCause::OtherWriter
+        | PersistentCause::RemoteRegressed
+        | PersistentCause::ConditionalWritesUnsupported
+        | PersistentCause::Bug
+        | PersistentCause::Stalled(_) => false,
     }
 }
 
