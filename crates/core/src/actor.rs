@@ -2590,8 +2590,8 @@ impl BootGate {
         let listed = newest_replica_level_zero(remote)
             .await?
             .map(|info| info.key.range().max());
-        // Early returns, not `Option::map` with `min` and a guarded match: rustc 1.99.1 to at
-        // least 1.102 (1.85 was sound) miscompiles that form with optimization in some
+        // Early returns, not `Option::map` with `min` and a guarded match: rustc 1.95 to at
+        // least 1.102 (1.94 was sound) miscompiles that form with optimization in some
         // instantiations, so an empty replica read as transaction zero and a boot that dropped
         // staged files asked for a takeover through zero forever. LLVM's SimplifyCFG hoists the
         // `umin` out of `map` keeping its nonzero range attributes, InstCombine folds the

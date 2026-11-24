@@ -371,7 +371,7 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
 /// A staged file damaged before the first upload ever landed (a power loss can tear one): the
 /// next start reads it twice, drops it with every file after it, and boots from the database
 /// with a snapshot. The replica is empty, so staging vouched for nothing on it and no takeover
-/// record is needed. Built with optimization, rustc 1.99.1 to at least 1.102 compiled the boot's
+/// record is needed. Built with optimization, rustc 1.95 to at least 1.102 compiled the boot's
 /// gate so that the empty replica read as transaction zero: the engine asked for a takeover
 /// through zero on every attempt and never booted. `just test-opt` runs this test optimized.
 #[test]
