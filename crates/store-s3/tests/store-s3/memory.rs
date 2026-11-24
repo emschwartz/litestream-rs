@@ -32,11 +32,15 @@ use std::thread;
 
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
-use lsr_core::{DatabaseSink, FakeClock, FileKey, ObjectStore, RestoreTarget, Upload, restore};
+use lsr_core::{
+    CompactionInputs, DatabaseSink, FakeClock, FileKey, Level, MAX_INPUTS, ObjectStore, PageLimit,
+    RestoreTarget, Upload, compact_staged, restore,
+};
 use lsr_ltx::{
     DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
     TxidRange,
 };
+use lsr_store_fs::FsStore;
 use lsr_store_s3::{
     BucketName, Endpoint, FakeS3, HttpRequest, Method, PartSize, Prefix, READ_CONCURRENCY,
     S3Config, S3Store, Transport, object_key,
@@ -291,14 +295,15 @@ impl DatabaseSink for Discard {
     }
 }
 
-/// A snapshot of `pages` incompressible 4 KiB pages as the encoder writes it.
-fn snapshot_bytes(pages: u32) -> Vec<u8> {
+/// A file of transaction `n` as the encoder writes it: a database of `commit` 4 KiB pages
+/// of which it holds `pages`, all incompressible.
+fn ltx_bytes(n: u64, commit: u32, pages: std::ops::RangeInclusive<u32>) -> Vec<u8> {
     let size = PageSize::new(4096).unwrap();
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size: size,
-        commit: pages,
-        txids: TxidRange::new(txid(1), txid(1)).unwrap(),
+        commit,
+        txids: TxidRange::new(txid(n), txid(n)).unwrap(),
         timestamp: Timestamp::from_unix_millis(1_700_000_000_000),
         pre_apply: None,
         wal: None,
@@ -308,7 +313,7 @@ fn snapshot_bytes(pages: u32) -> Vec<u8> {
     let mut encoder = Encoder::new(Vec::new(), header).unwrap();
     let mut page = vec![0_u8; size.bytes()];
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-    for pgno in 1..=pages {
+    for pgno in pages {
         for word in page.chunks_mut(8) {
             state ^= state << 13;
             state ^= state >> 7;
@@ -325,7 +330,8 @@ fn snapshot_bytes(pages: u32) -> Vec<u8> {
 /// Restores a snapshot of `mib` MiB through the real client and returns the heap peak.
 fn restore_peak(mib: usize) -> usize {
     let fake = fake();
-    let bytes = snapshot_bytes(u32::try_from(mib * 256).unwrap());
+    let pages = u32::try_from(mib * 256).unwrap();
+    let bytes = ltx_bytes(1, pages, 1..=pages);
     let key = FileKey::snapshot(txid(1));
     fake.put_raw(
         &object_key(config().prefix(), &key),
@@ -380,5 +386,73 @@ fn a_restore_through_the_real_client_holds_one_read_window() {
     assert!(
         few >= window - RESTORE_CHUNK,
         "the gate saw {few} bytes: it cannot see the window"
+    );
+}
+
+/// Pages each staged input holds, all of them distinct: 32 inputs make a 62.5 MiB output,
+/// twelve parts, so the compaction uploads in batches as a busy database's does.
+const INPUT_PAGES: u32 = 500;
+
+/// What the engine's compaction reads a staged input in (restated: a change shows here), a
+/// page, and the output buffer it flushes at.
+const STAGED_WINDOW: usize = 128 * KIB;
+const PAGE: usize = 4 * KIB;
+const FLUSH: usize = MIB;
+
+/// The memory of a replicating database's busiest moment: a level-1 compaction merging
+/// `MAX_INPUTS` staged files while its output goes up as a multipart upload through the
+/// real client. The two bounds add: the inputs' windows and one batch of parts.
+#[test]
+fn a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts() {
+    let from = tempfile::tempdir().unwrap();
+    let staging = FsStore::new(from.path());
+    let commit = INPUT_PAGES * u32::try_from(MAX_INPUTS).unwrap();
+    // From transaction 2: a file that starts at transaction 1 is a snapshot, and must hold
+    // every page.
+    for n in 2..=u64::try_from(MAX_INPUTS).unwrap() + 1 {
+        let first = INPUT_PAGES * u32::try_from(n - 2).unwrap() + 1;
+        let bytes = ltx_bytes(n, commit, first..=first + INPUT_PAGES - 1);
+        let key = FileKey::new(Level::ZERO, TxidRange::new(txid(n), txid(n)).unwrap());
+        block_on(async {
+            let stamp = Timestamp::from_unix_millis(1_700_000_000_000);
+            let mut upload = staging
+                .begin_upload(&key, stamp, WriteMode::New)
+                .await
+                .unwrap();
+            upload.write(&bytes).await.unwrap();
+            upload.commit().await.unwrap();
+        });
+    }
+    let files = block_on(staging.list(Level::ZERO, None, PageLimit::MAX))
+        .unwrap()
+        .files;
+    let inputs = CompactionInputs::new(files).unwrap();
+    let part = usize::try_from(PartSize::MIN.get()).unwrap();
+    let concurrency = 5;
+    let fake = fake();
+    let dest = store_on(serve(&fake), part, concurrency);
+
+    let (done, peak) = process_peak_of(|| {
+        block_on(compact_staged(
+            &staging,
+            &dest,
+            &inputs,
+            Level::new(1).unwrap(),
+        ))
+    });
+
+    let done = done.unwrap();
+    assert_eq!(done.pages(), commit);
+    assert!(done.info().size > u64::try_from(2 * concurrency * part).unwrap());
+    let bound = MAX_INPUTS * (STAGED_WINDOW + PAGE) + FLUSH + concurrency * part + MARGIN;
+    eprintln!(
+        "compaction into s3: {} KiB (bound {} KiB)",
+        peak.extra >> 10,
+        bound >> 10
+    );
+    assert!(
+        peak.extra <= bound,
+        "compaction held {} bytes, over {bound} ({MAX_INPUTS} inputs x ({STAGED_WINDOW} + {PAGE}) + {FLUSH} + {concurrency} parts x {part} + {MARGIN})",
+        peak.extra
     );
 }
