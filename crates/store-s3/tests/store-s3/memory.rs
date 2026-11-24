@@ -347,10 +347,14 @@ fn restore_peak(mib: usize) -> usize {
     peak.extra
 }
 
+/// What a restore holds beyond its window: the client's buffers, the decoder's page and the
+/// result. Tighter than `MARGIN` so that one more chunk, a copy of a body, is over the bound.
+const RESTORE_MARGIN: usize = 3 * MIB;
+
 /// The most a restore may hold: `READ_CONCURRENCY` responses of the chunk it asks for in
-/// flight, the one more the store copies a body into, and the margin.
+/// flight, and the margin.
 fn restore_bound() -> usize {
-    (READ_CONCURRENCY.get() + 1) * RESTORE_CHUNK + MARGIN
+    READ_CONCURRENCY.get() * RESTORE_CHUNK + RESTORE_MARGIN
 }
 
 /// A restore through the real client holds its read window, and no more as the database
