@@ -179,6 +179,18 @@ impl Managed {
         dir: &Path,
         tag: &str,
     ) -> Result<Self, CompatError> {
+        Self::start_with_env(exe, program, args, dir, tag, &[])
+    }
+
+    /// As [`Managed::start`], with these variables added to the program's environment.
+    pub(super) fn start_with_env(
+        exe: &Path,
+        program: &Path,
+        args: &[&OsStr],
+        dir: &Path,
+        tag: &str,
+        env: &[(&str, String)],
+    ) -> Result<Self, CompatError> {
         let stats = dir.join(format!("{tag}.usage"));
         let pidfile = dir.join(format!("{tag}.pid"));
         let log = dir.join(format!("{tag}.log"));
@@ -193,6 +205,7 @@ impl Managed {
             .arg(&pidfile)
             .arg(program)
             .args(args)
+            .envs(env.iter().map(|(k, v)| (*k, v)))
             .stdout(Stdio::from(out))
             .stderr(Stdio::from(err))
             .spawn()
@@ -217,6 +230,11 @@ impl Managed {
         )?;
         me.pid = pid.unwrap_or(0);
         Ok(me)
+    }
+
+    /// The program's own process id (the wrapper's child), for `/proc/<pid>`.
+    pub(super) const fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// The last lines of the program's output.
