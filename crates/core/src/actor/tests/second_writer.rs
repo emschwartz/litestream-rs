@@ -301,11 +301,10 @@ fn puts(seen: &[Tick]) -> Vec<FileKey> {
 /// other's file. No id is published by both hosts, and one host stops for
 /// another writer.
 ///
-/// The bucket's refusal (`If-None-Match` on level-0 keys) is PR #96, not yet
-/// on main: here both hosts publish the same id, the second replacing the
-/// first, which is the interleaving this test exists to forbid.
+/// The bucket's refusal (`If-None-Match` on level-0 keys) is modelled by the
+/// fake remote; a host that published an id the other already holds is the
+/// interleaving this test exists to forbid.
 #[test]
-#[ignore = "needs the conditional level-0 writes of PR #96 (branch claude/listing-trust)"]
 fn failover_with_the_old_host_alive_never_publishes_one_id_twice() {
     let mut a = Rig::new();
     let mut host_a = go_like_actor();
