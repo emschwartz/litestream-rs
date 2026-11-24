@@ -194,7 +194,7 @@ pub struct Health {
     pub final_snapshot: FinalSnapshot,
 }
 
-/// Fail-stop's state (`lsr_core::failstop`, `docs/proposals/fail-stop.md`).
+/// Fail-stop's state (`lsr_core::failstop`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FailStop {
     /// Why replication tripped, if it has: an unsafe stop, a commit off the replica past

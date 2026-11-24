@@ -1,7 +1,6 @@
 //! What an application at SQLite's defaults does to a read lock held in another process, with the actor
 //! replicating and the oracle judging: the cases an application beside a sidecar has that an application set
-//! up by `lsr_sqlite::app_connection` never does (docs/plans/phase-4-sidecar.md, "The application's
-//! connection settings").
+//! up by `lsr_sqlite::app_connection` never does.
 //!
 //! The application runs in a child process (`Placement::SeparateProcess`): automatic checkpoints
 //! every 1000 frames, busy timeout zero. The read lock, the actor, the stores and

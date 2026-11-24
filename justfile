@@ -61,7 +61,7 @@ commit-check base="":
         exit 1
     fi
 
-# The S3 store's HTTP clients (docs/plans/phase-1-reading.md, ruling F2 as amended): each builds
+# The S3 store's HTTP clients: each builds
 # alone, which `clippy` over all features cannot show. Their tests run in `test`, which has ureq,
 # reqwest and native-tls on at once.
 features:
@@ -189,7 +189,7 @@ mutants crate *args:
 spawn name:
     git -C "{{justfile_directory()}}" worktree add ".worktrees/{{name}}" -b "{{name}}" main
 
-# The large real-SQLite cases (docs/plans/phase-3-syncing.md, the fault suite): a 16 KiB-page
+# The large real-SQLite cases: a 16 KiB-page
 # database past 1 GiB, one past 4 GiB (skipped below 20 GB free disk), a WAL past the sync cap.
 # Minutes and several gigabytes of temporary files; not part of check.
 sqlite-big:
@@ -348,7 +348,7 @@ tigris-restore:
     ./scripts/build-go-litestream.sh v0.5.18
     env -u AWS_CA_BUNDLE ./scripts/tigris.sh cargo nextest run --release -p lsr-cli --test cli -E 'test(/^tigris::/)' --run-ignored only --no-capture --locked
 
-# The long soak of `lsr replicate` against the Tigris bucket (docs/plans/phase-3-syncing.md, the soak section):
+# The long soak of `lsr replicate` against the Tigris bucket:
 # a synthetic writer for the given hours, a restore at Latest and at a random sampled transaction
 # compared with recorded page hashes every hour (LSR_SOAK_CHECK_SECS), resources and log warnings
 # printed as HOUR lines. Never part of check or CI. Afterwards, check that the run prefix lists

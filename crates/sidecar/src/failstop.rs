@@ -1,4 +1,4 @@
-//! Fail-stop in the daemon (`if-replication-stops`, `docs/proposals/fail-stop.md` section 3):
+//! Fail-stop in the daemon (`if-replication-stops`):
 //! what `/healthz`, `/metrics` and the log say of a trip, in one place.
 //!
 //! Every name and line here was approved by the owner (`docs/decisions.md` D84); they are kept

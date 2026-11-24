@@ -609,8 +609,8 @@ fn outside_passive_restart_and_truncate_while_pinned_and_on_read_mark_zero() {
 /// once an application writer that began on a mark above zero appends frames after a read-mark-0 read lock, no
 /// checkpoint can backfill them and no writer can restart the log over them while the read lock
 /// holds: the frames the continuity proof cannot see are never abandoned, and the engine
-/// continues. (The plan, docs/plans/phase-3-syncing.md, worried that read mark 0 does
-/// not block a restart; it blocks every restart but the one at the very next commit, which the
+/// continues. (One might expect read mark 0 not to
+/// block a restart; it blocks every restart but the one at the very next commit, which the
 /// proof follows.) A read lock on a mark above zero blocks the same way.
 #[test]
 fn the_read_lock_on_read_mark_zero_blocks_every_backfill_past_it() {

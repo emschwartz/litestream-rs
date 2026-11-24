@@ -1,4 +1,4 @@
-//! Fail-stop in named runs (`docs/proposals/fail-stop.md` section 2): the trips that must come
+//! Fail-stop in named runs: the trips that must come
 //! (P2, a missed trip; P3, clearing; P5, a crash loop) where each run's truth is exact, and one
 //! run for each class of fault that must never trip. The judge of every run
 //! (`lsr_sim::failstop`, P1) watches all of them too.

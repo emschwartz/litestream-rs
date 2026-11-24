@@ -6,8 +6,7 @@
 //! does not hold) and for the pages the database grew by that no scanned WAL frame
 //! holds (the "grown pages" below; `plan_pages` in `sync.rs`). [`PageChecksumTable`] is checked
 //! before every such page is used, so a page that changed since the engine last
-//! knew it is caught instead of shipped silently (`docs/plans/phase-3-syncing.md`,
-//! the page-table section).
+//! knew it is caught instead of shipped silently.
 //!
 //! What feeds it:
 //! - Every WAL page a sync step staged is recorded with the digest the scan

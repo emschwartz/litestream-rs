@@ -1,6 +1,5 @@
 //! `lsr replicate` as Go's daemon: Go's `replicate` command line and
-//! `litestream.yml`, many databases in one process, one replicator thread each
-//! (docs/plans/phase-4-sidecar.md).
+//! `litestream.yml`, many databases in one process, one replicator thread each.
 //!
 //! [`run`] reads the arguments after `replicate` ([`flags`]), installs the signal
 //! handlers ([`signals`]), loads the config (`-config`, `LITESTREAM_CONFIG`, else

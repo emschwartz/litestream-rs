@@ -1,5 +1,5 @@
 # Clippy reads the nearest clippy.toml only, so this repeats the root file in full
-# and adds the descriptor rule of docs/plans/phase-3-syncing.md ("Global constraints").
+# and adds the descriptor rule: a closed descriptor on the database drops SQLite's locks.
 allow-indexing-slicing-in-tests = true
 allow-panic-in-tests = true
 allow-unwrap-in-tests = true

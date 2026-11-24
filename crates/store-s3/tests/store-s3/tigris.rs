@@ -596,7 +596,7 @@ fn raw_complete(
     )
 }
 
-// What a conditional write does on Tigris (docs/proposals/beyond-go.md, conditional writes).
+// What a conditional write does on Tigris.
 // Measured only; the store sends no conditional header, since Go sends none and the
 // replica format adds nothing Go does not write.
 

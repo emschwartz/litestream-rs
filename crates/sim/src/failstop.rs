@@ -1,5 +1,4 @@
-//! The fail-stop judge: no false trip, over every run (`docs/proposals/fail-stop.md` section 2,
-//! property P1).
+//! The fail-stop judge: no false trip, over every run.
 //!
 //! It shares nothing with the engine's clock (`lsr_core::Lag`). Its truth is the simulator's:
 //! when the app committed, and whether a restore of the raw replica's `Latest` is the model's

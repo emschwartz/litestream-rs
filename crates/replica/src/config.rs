@@ -44,8 +44,7 @@ impl NonZeroDuration {
     }
 }
 
-/// Whether the application says when it holds a long read (TRUNCATE needs the application's word;
-/// see `docs/plans/phase-3-syncing.md`, the reader-tracking section).
+/// Whether the application says when it holds a long read (TRUNCATE needs the application's word).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderTracking {
     /// The application gives no signal, so a reader may always be running: the replicator never

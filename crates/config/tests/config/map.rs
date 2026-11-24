@@ -362,7 +362,7 @@ fn app_autocheckpoint_defaults_to_sqlite_s_and_can_be_off() {
     );
 }
 
-/// The fail-stop setting (`docs/proposals/fail-stop.md`): `hold-start` and 10 minutes unless
+/// The fail-stop setting: `hold-start` and 10 minutes unless
 /// stated; an unknown value, or a bound below five minutes, is refused.
 #[test]
 fn if_replication_stops_defaults_to_hold_start_and_the_bound_to_ten_minutes() {

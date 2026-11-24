@@ -1,8 +1,7 @@
 //! Go's sidecar to Rust's sidecar and back: the same `litestream.yml`, the same meta
 //! directories and the same replicas, each daemon started the way an operator starts it
 //! (`replicate -config <file>`) and stopped with SIGINT, while the application keeps its own
-//! connection open in this process (docs/plans/phase-4-sidecar.md, "Go sidecar to Rust
-//! sidecar").
+//! connection open in this process.
 //!
 //! - `go_config_and_meta_start_the_rust_sidecar_with_no_snapshot`: Go runs three databases from
 //!   one file, stops; `lsr replicate -config` starts on the file unchanged and each database's

@@ -1,4 +1,4 @@
-//! Fail-stop for the library (`docs/proposals/fail-stop.md` section 3, property P4): while the
+//! Fail-stop for the library: while the
 //! gate is held, the commit hook `Replicator::app_connection` installs refuses every commit
 //! with `SQLITE_CONSTRAINT_COMMITHOOK`, reads go on, and a trip that clears by itself
 //! releases the application without anyone acting.
