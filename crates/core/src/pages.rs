@@ -225,7 +225,7 @@ pub(crate) async fn seeded<L: Role>(
         table: PageChecksumTable::new(),
         quiet: BTreeSet::new(),
     };
-    let mut prev_commit = None;
+    let mut prev: Option<SeedRead> = None;
     let mut at = ListAt::first(Level::ZERO);
     loop {
         let page = staging
@@ -238,11 +238,17 @@ pub(crate) async fn seeded<L: Role>(
             .filter(|info| from.is_none_or(|from| info.key.range().max() >= from));
         for info in vouched {
             let pending = from.is_none_or(|from| info.key.range().min() > from);
-            let read = seed_file(staging, &info.key, &mut seeded.table, prev_commit).await?;
-            if pending && read.is_some_and(|read| !read.changes) {
+            let read = seed_file(staging, &info.key, &mut seeded.table, prev).await?;
+            // A file whose WAL span ends where the one before it ended holds no frame the
+            // replica's newest does not (a snapshot taken for a doubt on a quiet WAL), though
+            // it rewrites pages the table never saw.
+            let nothing_new = |read: SeedRead| {
+                read.wal_end.is_some() && prev.is_some_and(|prev| prev.wal_end == read.wal_end)
+            };
+            if pending && read.is_some_and(|read| !read.changes || nothing_new(read)) {
                 seeded.quiet.insert(info.key.range().max());
             }
-            prev_commit = read.map(|read| read.commit);
+            prev = read;
         }
         match at
             .following(page.next)
@@ -272,6 +278,8 @@ pub(crate) struct Seeded {
 struct SeedRead {
     commit: u32,
     changes: bool,
+    /// Where in the WAL the file's frames end: the salts and the byte offset.
+    wal_end: Option<((u32, u32), u64)>,
 }
 
 /// Records every page of one staged file. A file that does not decode and
@@ -280,7 +288,7 @@ async fn seed_file<L: Role>(
     staging: &L,
     key: &FileKey,
     table: &mut PageChecksumTable,
-    prev_commit: Option<u32>,
+    prev: Option<SeedRead>,
 ) -> Result<Option<SeedRead>, Fault> {
     let chunk = SEED_READ;
     let mut pages = Vec::new();
@@ -297,14 +305,22 @@ async fn seed_file<L: Role>(
         Ok(verified) => {
             table.fit(verified.header().page_size());
             let commit = verified.header().fields().commit;
-            let changes = prev_commit != Some(commit)
+            let wal_end = verified.header().fields().wal.and_then(|wal| {
+                let end = wal.offset().checked_add(wal.size())?;
+                Some((wal.salts(), end))
+            });
+            let changes = prev.map(|prev| prev.commit) != Some(commit)
                 || pages
                     .iter()
                     .any(|(pgno, digest)| table.get(*pgno) != Some(*digest));
             for (pgno, digest) in pages {
                 table.record(pgno, digest);
             }
-            Ok(Some(SeedRead { commit, changes }))
+            Ok(Some(SeedRead {
+                commit,
+                changes,
+                wal_end,
+            }))
         }
         Err(ReadFault::Store(err)) => Err(L::fault(&err)),
         Err(ReadFault::Decode(_)) => {
