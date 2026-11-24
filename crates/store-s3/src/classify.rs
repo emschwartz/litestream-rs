@@ -62,6 +62,9 @@ pub enum S3Code {
     AllAccessDisabled,
     /// `RequestTimeTooSkewed`.
     RequestTimeTooSkewed,
+    /// `ExpiredRequest`: R2's answer to a signed URL past its expiry, which for this
+    /// store's five-minute signatures means the host clock is behind.
+    ExpiredRequest,
     /// The KMS key the request needs cannot be used: `KMS.DisabledException`,
     /// `KMS.InvalidKeyUsageException`, `KMS.KMSInvalidStateException` or
     /// `KMS.NotFoundException`, each 400 in S3's published error list.
@@ -105,6 +108,7 @@ impl S3Code {
             "TokenRefreshRequired" => Self::TokenRefreshRequired,
             "AllAccessDisabled" => Self::AllAccessDisabled,
             "RequestTimeTooSkewed" => Self::RequestTimeTooSkewed,
+            "ExpiredRequest" => Self::ExpiredRequest,
             "KMS.DisabledException"
             | "KMS.InvalidKeyUsageException"
             | "KMS.KMSInvalidStateException"
@@ -142,7 +146,7 @@ impl S3Code {
             Self::AccessDenied | Self::AllAccessDisabled | Self::KmsKeyUnusable => {
                 Some(Denied::Permission)
             }
-            Self::RequestTimeTooSkewed => Some(Denied::ClockSkew),
+            Self::RequestTimeTooSkewed | Self::ExpiredRequest => Some(Denied::ClockSkew),
             Self::NoSuchBucket => Some(Denied::BucketMissing),
             Self::NoSuchKey
             | Self::NoSuchUpload
@@ -163,6 +167,20 @@ impl S3Code {
 fn retry_after(r: &HttpResponse) -> Option<Duration> {
     let seconds: u64 = r.header("retry-after")?.trim().parse().ok()?;
     Some(Duration::from_secs(seconds))
+}
+
+/// Whether an `AccessDenied` body says the signature's time is outside its window: AWS and
+/// Tigris answer a signed URL that is past its expiry or dated ahead with `AccessDenied` and one
+/// of these messages, and nothing in the code says it is the clock.
+fn signing_time_outside_window(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body);
+    [
+        "<Message>Request has expired</Message>",
+        "<Message>Request is not yet valid</Message>",
+        "<Message>Request is not valid yet</Message>",
+    ]
+    .iter()
+    .any(|message| text.contains(message))
 }
 
 /// Whether a response is S3 saying the range starts at or past the end
@@ -195,6 +213,12 @@ pub fn classify(
         };
     }
     let code = S3Code::from_body(r.body());
+    if code == Some(S3Code::AccessDenied) && signing_time_outside_window(r.body()) {
+        return Err(StoreError::Denied {
+            op,
+            why: Denied::ClockSkew,
+        });
+    }
     if status == 429 || code == Some(S3Code::SlowDown) {
         return Err(StoreError::Throttled {
             op,
@@ -286,6 +310,7 @@ pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<
         | S3Code::TokenRefreshRequired
         | S3Code::AllAccessDisabled
         | S3Code::RequestTimeTooSkewed
+        | S3Code::ExpiredRequest
         | S3Code::InvalidObjectState
         | S3Code::KmsKeyUnusable
         | S3Code::BadDigest
@@ -614,6 +639,41 @@ mod tests {
                 }),
             ),
         ]);
+    }
+
+    /// The answers a real provider gave to a read signed an hour in the past and an hour ahead
+    /// (docs/spikes.md, the provider checks): the code alone says AccessDenied on AWS and Tigris,
+    /// so the message is what names the clock.
+    #[test]
+    fn a_signature_outside_its_time_window_is_the_clock() {
+        let answer = |code: &str, message: &str| {
+            let body = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>{code}</Code>\
+                 <Message>{message}</Message></Error>"
+            );
+            HttpResponse::new(403, Vec::new(), body.into_bytes(), true)
+        };
+        for (code, message) in [
+            ("AccessDenied", "Request has expired"),
+            ("AccessDenied", "Request is not yet valid"),
+            ("AccessDenied", "Request is not valid yet"),
+            ("ExpiredRequest", "Request has expired"),
+            (
+                "RequestTimeTooSkewed",
+                "The difference between the request time and the server's time is too large.",
+            ),
+        ] {
+            assert_eq!(
+                classify(OP, None, None, &answer(code, message)),
+                denied(Denied::ClockSkew),
+                "{code}: {message}"
+            );
+        }
+        // An AccessDenied for any other reason stays a permission.
+        assert_eq!(
+            classify(OP, None, None, &answer("AccessDenied", "Access Denied")),
+            denied(Denied::Permission)
+        );
     }
 
     #[test]

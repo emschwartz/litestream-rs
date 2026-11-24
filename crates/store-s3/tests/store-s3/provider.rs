@@ -797,7 +797,7 @@ fn a_signature_made_an_hour_ago_or_an_hour_ahead_is_denied_and_never_retried() {
     for signed_at in [now.saturating_sub(3_600_000), now.saturating_add(3_600_000)] {
         let err = read_signed_at(&h, signed_at);
         eprintln!("OBS classified: {err:?}");
-        assert!(matches!(err, StoreError::Denied { .. }), "{err:?}");
+        assert!(denied(Denied::ClockSkew)(&err), "{err:?}");
         assert_eq!(class_of(&err), Class::Permanent);
     }
 }
