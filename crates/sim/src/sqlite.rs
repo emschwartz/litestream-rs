@@ -831,19 +831,41 @@ impl State {
             .take(byte_pos(u64::from(frames.min(self.index.mx_frame))))
             .rposition(|frame| *frame == pgno)
             .and_then(|at| u32::try_from(at).ok());
-        newest.map_or_else(
-            || {
-                let at = self.page_at(pgno);
-                let mut data = self
-                    .db
-                    .get(at..at.saturating_add(self.page_size.bytes()))
-                    .unwrap_or_default()
-                    .to_vec();
-                data.resize(self.page_size.bytes(), 0);
-                data
-            },
-            |index| self.frame_page(index),
-        )
+        let mut data = Vec::with_capacity(self.page_size.bytes());
+        self.push_page(&mut data, pgno, newest);
+        data
+    }
+
+    /// The database, `db_size` pages, as a reader whose snapshot ends after `frames` frames
+    /// sees it. One pass over the WAL's page numbers for the whole image: asking for each page
+    /// separately would scan the frames once per page.
+    fn image_through(&self, frames: u32) -> Vec<u8> {
+        let newest = self.newest(0, frames.min(self.index.mx_frame));
+        let mut image = Vec::with_capacity(
+            self.page_size
+                .bytes()
+                .saturating_mul(byte_pos(u64::from(self.index.db_size))),
+        );
+        for pgno in 1..=self.index.db_size {
+            self.push_page(&mut image, pgno, newest.get(&pgno).copied());
+        }
+        image
+    }
+
+    /// Appends page `pgno`, a page size long: from the WAL frame `newest` when there is one,
+    /// else from the database file.
+    fn push_page(&self, out: &mut Vec<u8>, pgno: u32, newest: Option<u32>) {
+        let start = out.len();
+        let size = self.page_size.bytes();
+        let (bytes, at) = match newest {
+            Some(index) => (
+                &self.wal,
+                self.frame_at(index).saturating_add(FRAME_HEADER_LEN),
+            ),
+            None => (&self.db, self.page_at(pgno)),
+        };
+        out.extend_from_slice(bytes.get(at..at.saturating_add(size)).unwrap_or_default());
+        out.resize(start.saturating_add(size), 0);
     }
 
     /// The automatic checkpoint, right after an app commit.
@@ -1767,11 +1789,7 @@ impl SimSqlite {
     /// The database as a new reader sees it, `db_size` pages.
     #[must_use]
     pub fn image(&self) -> Vec<u8> {
-        self.with(|state| {
-            (1..=state.index.db_size)
-                .flat_map(|pgno| state.image_page(pgno))
-                .collect()
-        })
+        self.with(|state| state.image_through(state.index.mx_frame))
     }
 
     /// The database at each commit mark of the WAL's generation, ascending: the frame count
@@ -1784,12 +1802,7 @@ impl SimSqlite {
                 .tx_ends
                 .iter()
                 .filter(|end| **end <= state.index.mx_frame)
-                .map(|end| {
-                    let image = (1..=state.index.db_size)
-                        .flat_map(|pgno| state.image_page_through(pgno, *end))
-                        .collect();
-                    (*end, image)
-                })
+                .map(|end| (*end, state.image_through(*end)))
                 .collect()
         })
     }

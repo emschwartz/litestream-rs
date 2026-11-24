@@ -225,14 +225,8 @@ impl MemStore {
             .ok_or(StoreError::NotFound { key: *key })?;
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         let want = usize::try_from(len.get()).unwrap_or(usize::MAX);
-        Ok(object
-            .bytes
-            .get(start..)
-            .unwrap_or_default()
-            .iter()
-            .take(want)
-            .copied()
-            .collect())
+        let tail = object.bytes.get(start..).unwrap_or_default();
+        Ok(tail.get(..want).unwrap_or(tail).to_vec())
     }
 }
 
