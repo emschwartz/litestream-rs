@@ -39,6 +39,7 @@
 //! `AWS_*` and `LITESTREAM_*` variables ([`scrub_env`]), and the S3 checks refuse any endpoint
 //! but loopback `http` ([`loopback_endpoint`]): they never reach a real object store.
 
+mod bench;
 mod binaries;
 mod chain;
 mod checks;
@@ -60,6 +61,7 @@ mod scenario;
 mod vfs;
 mod workload;
 
+pub use bench::run as bench_vs_go;
 pub use binaries::{
     FIRST_WAL_INDEX_END_PATCH, GoBuild, GoVersion, KNOWN_RELEASES, LIVE_MODULE, PageEncoding,
     QUIRKS, Quirk, QuirkEntry, S3_MODULE, VERSIONS_ENV, WAL_INDEX_END_COMMIT, builds_in,
