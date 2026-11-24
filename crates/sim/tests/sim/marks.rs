@@ -35,3 +35,22 @@ fn a_weight_set_to_zero_fails_the_gate() {
         assert!(judged.zeros.iter().any(|zero| zero == CANARY));
     }
 }
+
+/// Each coverage scenario reaches the marks it names, every one of them is a mark the gate
+/// requires (a scenario for an exempt mark would hide that the exemption went stale), and no two
+/// name the same mark.
+#[test]
+fn the_coverage_scenarios_reach_their_required_marks() {
+    let required = lsr_sim::marks::required_keys();
+    let mut named = Vec::new();
+    for scenario in lsr_sim::scenario::coverage() {
+        let reached = scenario.run().unwrap_or_else(|why| panic!("{why}"));
+        assert!(!scenario.keys().is_empty(), "{}", scenario.name());
+        for key in scenario.keys() {
+            assert!(required.contains(key), "{key} is not a required mark");
+            assert!(reached.get(key) > 0, "{key}");
+            assert!(!named.contains(key), "{key} is named twice");
+            named.push(key.clone());
+        }
+    }
+}
