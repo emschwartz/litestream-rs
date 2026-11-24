@@ -15,17 +15,28 @@
 //! `LastModified`; a replica is restored and compared to the source (page hashes, never
 //! bytes) before a run's numbers count where the run can check it.
 //!
+//! A fourth set, [`impact`] (`just bench-snapshot-impact`, issue 315), is not a comparison with
+//! Go: it measures what a full copy of a database larger than memory does to an application
+//! reading a hot set beside it, and which remedy (patches kept in `crates/compat/bench-patches`)
+//! brings it back. It has its own frame in [`plan`] and needs no Go build.
+//!
 //! The binary `bench-vs-go` is a thin shell around [`run`]. It needs MinIO through
 //! `lsr_core::needs` and is never part of `just check`.
 
 mod app;
 mod clock;
+mod hot;
+mod impact;
 mod latency;
 mod observe;
 mod overhead;
 mod plan;
 mod proc;
 mod restore;
+mod runs;
+mod summary;
+mod sys;
+mod tally;
 
 use std::ffi::OsString;
 use std::fs;
@@ -321,6 +332,9 @@ fn machine() {
     println!("tier: exploratory, candidate and unconfirmed (a laptop, no isolation)");
 }
 
+/// The set that measures a copy's effect on an application; not part of `all` (it takes hours).
+const IMPACT: &str = "snapshot-impact";
+
 /// Everything one invocation runs, by name.
 const SETS: [&str; 7] = [
     "aa-restore",
@@ -336,6 +350,7 @@ struct Args {
     out: PathBuf,
     pairs: Option<usize>,
     sets: Vec<String>,
+    impact: impact::Options,
 }
 
 fn parse(args: &[OsString]) -> Result<Args, CompatError> {
@@ -343,6 +358,7 @@ fn parse(args: &[OsString]) -> Result<Args, CompatError> {
     let mut out = None;
     let mut pairs = None;
     let mut sets = Vec::new();
+    let mut impact = impact::Options::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let text = arg.to_string_lossy().into_owned();
@@ -354,8 +370,31 @@ fn parse(args: &[OsString]) -> Result<Args, CompatError> {
                     return Err(bad("--pairs needs a number".to_owned()));
                 }
             }
+            "--force" => impact.force = true,
+            "--patched" => impact.patched = it.next().map(PathBuf::from),
+            "--arms" => {
+                impact.only = it
+                    .next()
+                    .map(|v| v.to_string_lossy().split(',').map(str::to_owned).collect())
+                    .unwrap_or_default();
+            }
+            "--db-mib" | "--hot-mib" | "--pre-secs" | "--post-secs" | "--rounds"
+            | "--gate-pairs" => {
+                let value: Option<u64> = it.next().and_then(|v| v.to_string_lossy().parse().ok());
+                let Some(value) = value else {
+                    return Err(bad(format!("{text} needs a number")));
+                };
+                match text.as_str() {
+                    "--db-mib" => impact.db_mib = Some(value),
+                    "--hot-mib" => impact.hot_mib = Some(value),
+                    "--pre-secs" => impact.pre_secs = Some(value),
+                    "--post-secs" => impact.post_secs = Some(value),
+                    "--rounds" => impact.rounds = usize::try_from(value).ok(),
+                    _ => impact.gate_pairs = usize::try_from(value).ok(),
+                }
+            }
             "all" => sets.extend(SETS.iter().map(|s| (*s).to_owned())),
-            name if SETS.contains(&name) => sets.push(name.to_owned()),
+            name if SETS.contains(&name) || name == IMPACT => sets.push(name.to_owned()),
             other => {
                 return Err(bad(format!(
                     "unknown argument {other:?}; sets: all {SETS:?}"
@@ -367,7 +406,12 @@ fn parse(args: &[OsString]) -> Result<Args, CompatError> {
     if sets.is_empty() {
         return Err(bad(format!("name a set: all {SETS:?}")));
     }
-    Ok(Args { out, pairs, sets })
+    Ok(Args {
+        out,
+        pairs,
+        sets,
+        impact,
+    })
 }
 
 /// The entry of the `bench-vs-go` binary.
@@ -378,7 +422,10 @@ pub fn run(args: &[OsString]) -> Result<(), CompatError> {
     if args.first().is_some_and(|a| a == EXEC) {
         return exec_wrapper(args.get(1..).unwrap_or_default());
     }
-    let args = parse(args)?;
+    if args.first().is_some_and(|a| a == hot::HOT) {
+        return hot::run_child(args.get(1..).unwrap_or_default());
+    }
+    let mut args = parse(args)?;
     let Some(env) = need(Resource::Minio, || {
         let env = MinioEnv::from_env().map_err(|e| e.to_string())?;
         reachable(env.endpoint())?;
@@ -392,6 +439,14 @@ pub fn run(args: &[OsString]) -> Result<(), CompatError> {
         exe: std::env::current_exe().map_err(CompatError::io("current_exe"))?,
         out: args.out.clone(),
     };
+    if args.sets.iter().any(|s| s == IMPACT) {
+        println!("minio: {}, {}-byte pages", rig.env.endpoint(), PAGE_SIZE);
+        impact::run(&rig, &args.impact)?;
+    }
+    args.sets.retain(|s| s != IMPACT);
+    if args.sets.is_empty() {
+        return Ok(());
+    }
     machine();
     println!("minio: {}, {}-byte pages", rig.env.endpoint(), PAGE_SIZE);
     println!("{}", plan::NAPKIN);
