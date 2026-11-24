@@ -2596,8 +2596,9 @@ impl BootGate {
         // staged files asked for a takeover through zero forever. LLVM's SimplifyCFG hoists the
         // `umin` out of `map` keeping its nonzero range attributes, InstCombine folds the
         // `None` arm into it, and EarlyCSE then proves the result nonzero
-        // (https://github.com/llvm/llvm-project/issues/245656). `just test-opt` runs the
-        // scenarios that catch it.
+        // (https://github.com/llvm/llvm-project/issues/245656, tracked for rustc at
+        // https://github.com/rust-lang/rust/issues/166505). `just test-opt` runs the scenarios
+        // that catch it.
         let Some(replica) = tip.max(listed) else {
             return Ok(());
         };
