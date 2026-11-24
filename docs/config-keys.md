@@ -168,7 +168,7 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 
 | Key | What it does |
 | --- | --- |
-| `app-readers` | `Config.readers`: `none` is `ReaderTracking::Tracked`, which lets TRUNCATE run. |
+| `app-readers` | `Config.readers`: `none` is `ReaderTracking::Tracked`, which lets TRUNCATE run. Its cost: each TRUNCATE that empties the WAL is followed by a copy of the whole database, read from disk and uploaded as a snapshot. The application keeps writing during the copy; writes wait only while SQLite's TRUNCATE copies the WAL into the database file. |
 | `app-autocheckpoint` | `Config.app_autocheckpoint`. |
 | `responses` | A section; its keys are below. |
 | `if-replication-stops` | `Config.if_replication_stops`. |

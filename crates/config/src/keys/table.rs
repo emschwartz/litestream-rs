@@ -197,7 +197,10 @@ const SETS: &[(&str, &str)] = &[
     ),
     (
         "rust.app-readers",
-        "`Config.readers`: `none` is `ReaderTracking::Tracked`, which lets TRUNCATE run.",
+        "`Config.readers`: `none` is `ReaderTracking::Tracked`, which lets TRUNCATE run. Its cost: each \
+         TRUNCATE that empties the WAL is followed by a copy of the whole database, read from disk \
+         and uploaded as a snapshot. The application keeps writing during the copy; writes wait \
+         only while SQLite's TRUNCATE copies the WAL into the database file.",
     ),
     ("rust.app-autocheckpoint", "`Config.app_autocheckpoint`."),
     ("rust.responses", CONTAINER),

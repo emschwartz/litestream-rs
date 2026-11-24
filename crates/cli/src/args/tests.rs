@@ -166,6 +166,41 @@ fn unknown_command() {
     );
 }
 
+/// A flag before the command is the Go habit `lsr -config c.yml replicate`; the message says where
+/// flags go and names every command, and no other first word gets it.
+#[test]
+fn a_flag_before_the_command_says_flags_follow_it() {
+    for line in ["-config c.yml replicate", "--config=c.yml replicate", "-x"] {
+        let error = usage(line);
+        let first = line.split_whitespace().next().unwrap().to_owned();
+        assert_eq!(
+            error,
+            UsageError::FlagBeforeCommand { flag: first },
+            "{line}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.starts_with("flags go after the command"),
+            "{message}"
+        );
+        for word in ["replicate", "config"] {
+            assert!(message.contains(word), "{message}");
+        }
+        for command in CommandName::ALL {
+            assert!(message.contains(command.word()), "{message}");
+        }
+    }
+    // The help and version flags still answer, and a word that is not a command is still unknown.
+    assert_eq!(parsed("-h"), Ok(Command::Help));
+    assert_eq!(parsed("--version"), Ok(Command::Version));
+    assert_eq!(
+        usage("frobnicate -config c.yml"),
+        UsageError::UnknownCommand {
+            name: "frobnicate".into()
+        }
+    );
+}
+
 #[test]
 fn unknown_flag_including_one_another_command_takes() {
     assert_eq!(
