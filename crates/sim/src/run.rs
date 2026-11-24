@@ -417,6 +417,9 @@ struct Runner {
     /// Boots that listed the replica and failed (each is tried again, and
     /// costs the replica a boot's reads).
     failed_boots: u32,
+    /// The replica files a restore could read, summed over the ticks that began unbooted with
+    /// nothing staged ([`budget::Spent::restores`]).
+    restore_files: u64,
     /// Bucket rollbacks and removals of the newest file: each may cost the
     /// engine a relist once it learns of the loss.
     regressions: u32,
@@ -544,6 +547,7 @@ impl Runner {
             put_back: 0,
             rate_active: false,
             failed_boots: 0,
+            restore_files: 0,
             regressions: 0,
             settling: false,
             forcings: crate::forcing::Forcings::new(),
@@ -803,6 +807,9 @@ impl Runner {
         let began = self.now();
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
+        if booting && self.w.staged_level_zero().is_empty() {
+            self.restore_files = self.restore_files.saturating_add(self.w.remote_file_count());
+        }
         self.forcings_before_tick();
         self.staging_moved()?;
         let fired0 = (self.remote_fired(), fired(&self.w.staging_faults));
@@ -2570,6 +2577,7 @@ impl Runner {
                 .saturating_add(u64::from(self.regressions)),
             fault_hits: hits(&self.w.remote_faults),
             degraded_retries: self.report.reach.get("event.Degraded"),
+            restores: self.restore_files,
         };
         crate::budget::check(
             &self.w.remote_recorder.events(),
