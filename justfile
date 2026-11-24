@@ -29,6 +29,12 @@ test:
 test-opt:
     cargo nextest run --cargo-profile sim -p lsr-core -p lsr-sim -p lsr-replica --all-features --locked
 
+# The same three crates built with the release profile's code generation (the `release-asserts`
+# profile: release plus debug assertions and overflow checks), the way the binary ships.
+# Nightly only (docs/decisions/D187.md).
+test-release-opt:
+    cargo nextest run --cargo-profile release-asserts -p lsr-core -p lsr-sim -p lsr-replica --all-features --locked
+
 # Commit subjects on this branch since `base` follow Conventional Commits (AGENTS.md).
 # The default base is local `main`, which `just spawn` branches from; without one, `origin/main`.
 commit-check base="":
