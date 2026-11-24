@@ -1,4 +1,4 @@
-//! `lsr`: restore, verify and list a Litestream file replica.
+//! `lsr`: replicate SQLite databases to a Litestream replica, and restore, verify and list one.
 //!
 //! A thin root: collect arguments, parse, run, print, exit. Stdout carries only
 //! the result; every failure is one line on stderr. The stores are async over

@@ -224,10 +224,10 @@ pub enum Op {
     /// The process dies between ticks and a new one starts. Scenarios only: a
     /// history never draws this.
     Restart,
-    /// The operator runs `lsr take-over`: a takeover record through the
+    /// The operator runs `lsr trust-local`: a takeover record through the
     /// replica's newest transaction, read by the next process. Scenarios
     /// only.
-    TakeOver,
+    TrustLocal,
     /// The machine loses power between ticks. Scenarios only.
     PowerLoss,
     /// From now on the disk lies about the engine's own fsync of the WAL: it

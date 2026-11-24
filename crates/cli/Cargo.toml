@@ -1,7 +1,7 @@
 [package]
 name = "lsr-cli"
 version = "0.0.0"
-description = "The `lsr` command: restore, verify and list a Litestream file replica."
+description = "The `lsr` command: replicate SQLite databases to a Litestream replica, and restore, verify and list one."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

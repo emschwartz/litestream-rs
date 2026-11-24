@@ -12,7 +12,11 @@
 //! `OtherWriter`, and only a takeover record covering the replica's newest
 //! transaction lets it go on as it used to: a snapshot above those files.
 //!
-//! `lsr take-over <db>` writes one through the replica's newest transaction,
+//! Two words name two things: "takeover record" is the engine's word for this record, which
+//! the engine and every restore also write with no operator involved, and `lsr trust-local` is
+//! the operator's command that writes one.
+//!
+//! `lsr trust-local <db>` writes one through the replica's newest transaction,
 //! and a restore writes one through the transaction it restored, so a
 //! container that restores at start never stops. A record covers only what
 //! the replica held when it was written: another writer's file above it

@@ -74,7 +74,7 @@ pub fn done(done: &Done) -> String {
             created_at_fallbacks,
             json: true,
         } => files_json(inventory, *created_at_fallbacks),
-        Done::TakenOver { through, meta } => taken_over_text(*through, meta),
+        Done::TrustedLocal { through, meta } => trusted_local_text(*through, meta),
         Done::Daemon(_) => String::new(),
         Done::DaemonHelp(text) => (*text).to_owned(),
         Done::ConfigChecked(checked) => checked.to_string(),
@@ -83,11 +83,14 @@ pub fn done(done: &Done) -> String {
     }
 }
 
-/// `lsr take-over`'s line.
-fn taken_over_text(through: Option<Txid>, meta: &Path) -> String {
+/// `lsr trust-local`'s line.
+fn trusted_local_text(through: Option<Txid>, meta: &Path) -> String {
     match through {
-        Some(txid) => format!("takeover recorded through {txid} in {}\n", meta.display()),
-        None => "the replica is empty: there is nothing to take over and nothing was recorded\n"
+        Some(txid) => format!(
+            "trusting this database over the replica: takeover recorded through {txid} in {}\n",
+            meta.display()
+        ),
+        None => "the replica is empty: there is nothing to trust this database over, and nothing was recorded\n"
             .to_owned(),
     }
 }
@@ -103,7 +106,9 @@ pub fn error_line(error: &CliError) -> String {
 
 /// The help text, generated from the flag table and the exit codes.
 pub fn help() -> String {
-    let mut out = String::from("lsr: restore, verify and list a Litestream file replica\n");
+    let mut out = String::from(
+        "lsr: replicate SQLite databases to a Litestream replica, and restore, verify and list one\n",
+    );
     for command in CommandName::ALL {
         let mut usage = format!("\nlsr {}", command.word());
         if let Some(positional) = command.positional() {

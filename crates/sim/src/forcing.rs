@@ -171,7 +171,7 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::Verify
         // The operator's word lets a boot build above the replica; the
         // snapshot that follows is forced by what disturbed staging.
-        | Op::TakeOver => &[],
+        | Op::TrustLocal => &[],
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! `restore` reads Go's flag grammar (`restore.rs`, `lsr-sidecar`'s `goflag`), and its
 //! flags are listed for the help text in [`RESTORE_FLAGS`]. `lsr`'s own commands
-//! (`verify`, `files`, `take-over`, `config check`) are read by clap, built from
+//! (`verify`, `files`, `trust-local`, `config check`) are read by clap, built from
 //! the [`Command`](clap::Command)s below; the help text lists their flags from the
 //! same definitions, so it cannot document a flag the parser does not know. A
 //! flag takes its value as the next argument (`--replica dir`); a value that
@@ -45,13 +45,13 @@ pub enum CommandName {
     Verify,
     /// `lsr files`.
     Files,
-    /// `lsr take-over <db>`.
-    TakeOver,
+    /// `lsr trust-local <db>`.
+    TrustLocal,
 }
 
 impl CommandName {
     /// Every subcommand, in help order.
-    pub const ALL: [Self; 4] = [Self::Restore, Self::Verify, Self::Files, Self::TakeOver];
+    pub const ALL: [Self; 4] = [Self::Restore, Self::Verify, Self::Files, Self::TrustLocal];
 
     /// The word typed after `lsr`.
     pub const fn word(self) -> &'static str {
@@ -59,7 +59,7 @@ impl CommandName {
             Self::Restore => "restore",
             Self::Verify => "verify",
             Self::Files => "files",
-            Self::TakeOver => "take-over",
+            Self::TrustLocal => "trust-local",
         }
     }
 
@@ -67,7 +67,7 @@ impl CommandName {
     pub const fn positional(self) -> Option<&'static str> {
         match self {
             Self::Restore | Self::Verify | Self::Files => None,
-            Self::TakeOver => Some("<db>"),
+            Self::TrustLocal => Some("<db>"),
         }
     }
 
@@ -77,8 +77,8 @@ impl CommandName {
             Self::Restore => "rebuild a database from a replica; never touches an existing file",
             Self::Verify => "check a replica for damage and gaps without restoring",
             Self::Files => "list every file of a replica with its size and stored time",
-            Self::TakeOver => {
-                "let <db> replicate over what the replica holds now, after a replicator refused files it has no record of writing: records a takeover through the replica's newest transaction in <db>'s meta directory"
+            Self::TrustLocal => {
+                "trust the local database <db> over what the replica holds now, after a replicator refused replica files this database has no record of writing: records a takeover through the replica's newest transaction in <db>'s meta directory, so the next start replicates above them. If the replica is the right one, run lsr restore instead"
             }
         }
     }
@@ -252,8 +252,8 @@ pub enum Command {
     Verify(VerifyArgs),
     /// List a replica's files.
     Files(FilesArgs),
-    /// Record a takeover.
-    TakeOver(TakeOverArgs),
+    /// Trust the local database over the replica: record a takeover.
+    TrustLocal(TrustLocalArgs),
     /// Go's `replicate` daemon: the arguments after `replicate`, read by `lsr-sidecar`.
     Daemon(Vec<String>),
     /// `lsr config check <file>`.
@@ -277,9 +277,9 @@ pub const CONFIG_CHECK_USAGE: &str = "lsr config check <file>";
 /// One line for the help text.
 pub const CONFIG_CHECK_SUMMARY: &str = "read a Go litestream.yml as the daemon would and print every refusal and warning a start would; writes nothing and touches no bucket, but scans a dir entry as a start does";
 
-/// `lsr take-over`.
+/// `lsr trust-local`.
 #[derive(Debug, PartialEq, Eq)]
-pub struct TakeOverArgs {
+pub struct TrustLocalArgs {
     /// The database that may replicate over the replica.
     pub database: PathBuf,
     /// The replica.
@@ -316,8 +316,8 @@ pub enum UsageError {
     /// Nothing after `lsr`.
     #[error("no command given")]
     NoCommand,
-    /// `lsr take-over` with no database path before its flags.
-    #[error("take-over needs the database path first: lsr take-over <db> --replica <dir>")]
+    /// `lsr trust-local` with no database path before its flags.
+    #[error("trust-local needs the database path first: lsr trust-local <db> --replica <dir>")]
     MissingDatabase,
     /// The first argument is not a subcommand.
     #[error("unknown command {name:?}")]
@@ -533,7 +533,7 @@ fn own_command(command: CommandName) -> Option<clap::Command> {
                 ))
                 .arg(switch("json", "print one JSON object instead of text")),
         ),
-        CommandName::TakeOver => Some(replica_flags(base).arg(value_flag(
+        CommandName::TrustLocal => Some(replica_flags(base).arg(value_flag(
             "meta-dir",
             "<dir>",
             "the database's meta directory when its config sets one (default .<name>-litestream beside it)",
@@ -748,7 +748,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         },
         "verify" => parse_own(CommandName::Verify, rest),
         "files" => parse_own(CommandName::Files, rest),
-        "take-over" => parse_own(CommandName::TakeOver, rest),
+        "trust-local" => parse_own(CommandName::TrustLocal, rest),
         "replicate" => Ok(Command::Daemon(rest.to_vec())),
         "config" => parse_config(rest),
         other => Err(UsageError::UnknownCommand {
@@ -757,15 +757,15 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     }
 }
 
-/// `verify`, `files` and `take-over <db>`: read by clap. `take-over` takes the database path
+/// `verify`, `files` and `trust-local <db>`: read by clap. `trust-local` takes the database path
 /// first, then its flags.
 fn parse_own(command: CommandName, rest: &[String]) -> Result<Command, UsageError> {
     let (database, flags) = match (command, rest.split_first()) {
-        (CommandName::TakeOver, Some((first, _))) if is_help(first) => return Ok(Command::Help),
-        (CommandName::TakeOver, Some((first, flags))) if !first.starts_with('-') => {
+        (CommandName::TrustLocal, Some((first, _))) if is_help(first) => return Ok(Command::Help),
+        (CommandName::TrustLocal, Some((first, flags))) if !first.starts_with('-') => {
             (PathBuf::from(first), flags)
         }
-        (CommandName::TakeOver, _) => return Err(UsageError::MissingDatabase),
+        (CommandName::TrustLocal, _) => return Err(UsageError::MissingDatabase),
         (_, _) => (PathBuf::new(), rest),
     };
     let Some(cli) = own_command(command) else {
@@ -786,7 +786,7 @@ fn parse_own(command: CommandName, rest: &[String]) -> Result<Command, UsageErro
             json,
             resolved: matches.get_flag("created-at"),
         }),
-        CommandName::TakeOver => Command::TakeOver(TakeOverArgs {
+        CommandName::TrustLocal => Command::TrustLocal(TrustLocalArgs {
             database,
             replica: replica_of_matches(&matches)?,
             meta_dir: matches.get_one::<String>("meta-dir").map(PathBuf::from),

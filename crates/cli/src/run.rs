@@ -45,7 +45,7 @@ use thiserror::Error;
 
 use crate::args::{
     Command, DatabasesArgs, FilesArgs, LtxArgs, LtxFrom, Replica, RestoreArgs, RestoreFrom,
-    TakeOverArgs, UsageError, VerifyArgs,
+    TrustLocalArgs, UsageError, VerifyArgs,
 };
 use crate::render;
 use crate::replica::{self, Remote};
@@ -277,9 +277,9 @@ pub enum Done {
         /// Whether to print JSON.
         json: bool,
     },
-    /// A takeover was recorded, through this transaction (`None`: the replica is empty and
-    /// nothing was recorded), in this meta directory.
-    TakenOver {
+    /// `lsr trust-local` recorded a takeover, through this transaction (`None`: the replica is
+    /// empty and nothing was recorded), in this meta directory.
+    TrustedLocal {
         /// The replica's newest transaction.
         through: Option<lsr_ltx::Txid>,
         /// Where the record went.
@@ -343,8 +343,8 @@ pub enum CliError {
     /// The verify walk stopped.
     #[error("{0}")]
     Verify(#[from] VerifyError),
-    /// The takeover record could not be written: by `lsr take-over`, or after a restore that
-    /// was published (a replicator started on it then refuses until `lsr take-over` runs).
+    /// The takeover record could not be written: by `lsr trust-local`, or after a restore that
+    /// was published (a replicator started on it then refuses until `lsr trust-local` runs).
     #[error("the takeover record cannot be written in {}: {kind:?}", .meta.display())]
     Takeover {
         /// The meta directory.
@@ -353,7 +353,7 @@ pub enum CliError {
         kind: std::io::ErrorKind,
     },
     /// The database path names no file, so it has no meta directory.
-    #[error("{} names no file, so it has no meta directory for the takeover record (lsr take-over accepts --meta-dir)", .path.display())]
+    #[error("{} names no file, so it has no meta directory for the takeover record (lsr trust-local accepts --meta-dir)", .path.display())]
     NoMetaDir {
         /// The path given.
         path: PathBuf,
@@ -465,7 +465,7 @@ pub fn exit_for_done(done: &Done) -> Exit {
         Done::Restore(_)
         | Done::Databases { .. }
         | Done::Ltx { .. }
-        | Done::TakenOver { .. }
+        | Done::TrustedLocal { .. }
         | Done::Files { .. }
         | Done::DaemonHelp(_)
         | Done::Help
@@ -565,7 +565,7 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
         Command::Ltx(args) => ltx_command(args).await,
         Command::Verify(args) => verify_command(args).await,
         Command::Files(args) => files_command(args).await,
-        Command::TakeOver(args) => take_over_command(args).await,
+        Command::TrustLocal(args) => trust_local_command(args).await,
         Command::Daemon(args) => match lsr_sidecar::run(&args)? {
             lsr_sidecar::Outcome::Help(text) => Ok(Done::DaemonHelp(text)),
             lsr_sidecar::Outcome::Ran(finished) => Ok(Done::Daemon(finished)),
@@ -1154,9 +1154,10 @@ async fn verify_command(args: VerifyArgs) -> Result<Done, CliError> {
     })
 }
 
-/// `lsr take-over`: a takeover record through the replica's newest transaction in the
-/// database's meta directory (`lsr_core::TakeoverRecord`).
-async fn take_over_command(args: TakeOverArgs) -> Result<Done, CliError> {
+/// `lsr trust-local`: the operator trusts the local database over what the replica holds. It
+/// writes a takeover record through the replica's newest transaction in the database's meta
+/// directory (`lsr_core::TakeoverRecord`).
+async fn trust_local_command(args: TrustLocalArgs) -> Result<Done, CliError> {
     let meta = match args.meta_dir {
         Some(meta) => meta,
         None => meta_dir_of(&args.database)?,
@@ -1171,7 +1172,7 @@ async fn take_over_command(args: TakeOverArgs) -> Result<Done, CliError> {
             kind: err.kind(),
         })?;
     }
-    Ok(Done::TakenOver {
+    Ok(Done::TrustedLocal {
         through: newest,
         meta,
     })

@@ -43,8 +43,10 @@
 //! replica shows files above everything this engine staged, which stops the replicator by
 //! default (`Responses::GO_LIKE`, `other_writer: Stop`). A restart stops again while the
 //! other writer's files are on the replica, since the boot refuses replica files nothing local
-//! vouches for, and replicates once an operator has removed them or run `lsr take-over`
-//! ([`lsr_core::TakeoverRecord`]).
+//! vouches for. It replicates once an operator has removed them, has run `lsr trust-local`
+//! because this database is the right one ([`trust_local`], which writes a
+//! [`lsr_core::TakeoverRecord`]), or has restored from the replica because the replica is
+//! ([`restore`], `lsr restore`).
 
 #![forbid(unsafe_code)]
 
@@ -67,7 +69,7 @@ mod thread;
 pub mod waiting;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
-pub use error::{RestoreError, StartError, TakeOverError};
+pub use error::{RestoreError, StartError, TrustLocalError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink, TakeoverUnusable};
 pub use exec::block_on;
 pub use health::{
@@ -76,7 +78,9 @@ pub use health::{
 };
 pub use readers::ReaderGuard;
 pub use replicator::{FinalSync, Replicator};
-pub use restore::{record_takeover, restore, restore_if_missing, restore_with, take_over, verify};
+pub use restore::{
+    record_takeover, restore, restore_if_missing, restore_with, trust_local, verify,
+};
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
 pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};

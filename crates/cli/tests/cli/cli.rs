@@ -1227,10 +1227,10 @@ fn a_url_restore_with_a_timestamp_refuses_an_empty_replica() {
     assert!(!output.exists());
 }
 
-/// `lsr take-over <db>` records a takeover through the replica's newest transaction in the
+/// `lsr trust-local <db>` records a takeover through the replica's newest transaction in the
 /// database's meta directory.
 #[test]
-fn take_over_records_the_replicas_newest_transaction() {
+fn trust_local_records_the_replicas_newest_transaction() {
     let db = sqlite_pages();
     let work = tempfile::tempdir().expect("tempdir");
     let replica = work.path().join("replica");
@@ -1238,14 +1238,15 @@ fn take_over_records_the_replicas_newest_transaction() {
     let database = work.path().join("app.db");
     let meta = work.path().join(".app.db-litestream");
     let run = lsr(&[
-        "take-over",
+        "trust-local",
         path_str(&database),
         "--replica",
         path_str(&replica),
     ]);
     assert_eq!((run.code, run.stderr.as_str()), (0, ""), "{}", run.stdout);
     assert!(
-        run.stdout.starts_with("takeover recorded through "),
+        run.stdout
+            .starts_with("trusting this database over the replica: takeover recorded through "),
         "{}",
         run.stdout
     );
