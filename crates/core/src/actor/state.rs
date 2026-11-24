@@ -13,7 +13,7 @@ use lsr_ltx::{Timestamp, Txid};
 use super::Actor;
 use crate::fault::{Next, PersistentCause, StopCause};
 use crate::layout::FileKey;
-use crate::maintain::{MaintainState, RetentionMode};
+use crate::maintain::{MaintainState, Remembered, RetentionMode};
 use crate::verify::LivePages;
 
 /// What the actor is doing.
@@ -392,6 +392,9 @@ pub(super) struct Maintain {
     /// The last listing planned a snapshot while uploads were busy: the next listing waits
     /// for them to go idle, so the snapshot's last transaction is at most what was published.
     pub(super) snapshot_waits: bool,
+    /// The newest file known at each level, so a pass can list the tail of a level instead
+    /// of all of it. In memory only; every fault drops it.
+    pub(super) remembered: Remembered,
 }
 
 /// How many uploads in a row run before prune or maintenance, when either has work, takes
@@ -411,6 +414,7 @@ impl Default for Maintain {
             suspect: None,
             passed_over: 0,
             snapshot_waits: false,
+            remembered: Remembered::default(),
         }
     }
 }

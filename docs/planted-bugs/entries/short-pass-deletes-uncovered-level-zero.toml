@@ -1,0 +1,8 @@
+# The short level-0 pass deletes every file older than the anchor, without asking whether a
+# listed level 1-8 file covers it.
+name = "short-pass-deletes-uncovered-level-zero"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "maintain::retain::tests::short_view::the_short_views_deletes_are_a_subset_of_the_whole_rules",
+]

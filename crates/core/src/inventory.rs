@@ -81,13 +81,29 @@ impl Inventory {
     /// The first failed page in level order, or a cursor that does not
     /// advance. Never a partial inventory.
     pub async fn load<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
-        let mut files = Vec::new();
-        let mut skipped = BTreeMap::new();
-        let width = store.batch_width(BatchKind::Lists).get();
-        let mut going: Vec<ListAt> = Level::ALL
+        let all: Vec<ListAt> = Level::ALL
             .iter()
             .map(|&level| ListAt::first(level))
             .collect();
+        Self::load_from(store, &all).await
+    }
+
+    /// Lists each of `starts` to the end and returns what was listed: an inventory of those
+    /// listings only, which is **not** a picture of the replica unless `starts` holds every
+    /// level from its first page. Only the maintenance tail view
+    /// ([`crate::maintain`]'s `Tail`) builds one on purpose, and says what it may decide
+    /// from it.
+    ///
+    /// # Errors
+    /// As [`Self::load`].
+    pub(crate) async fn load_from<S: ObjectStore>(
+        store: &S,
+        starts: &[ListAt],
+    ) -> Result<Self, InventoryError> {
+        let mut files = Vec::new();
+        let mut skipped = BTreeMap::new();
+        let width = store.batch_width(BatchKind::Lists).get();
+        let mut going: Vec<ListAt> = starts.to_vec();
         while !going.is_empty() {
             let round: Vec<ListAt> = going.iter().take(width).copied().collect();
             let pages = store.list_many(&round, SCAN_PAGE).await;

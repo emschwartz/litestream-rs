@@ -1,0 +1,8 @@
+# A fault leaves the engine's remembered newest files in place, so the pass after it lists a
+# tail of the replica instead of every level and misses what the fault was about.
+name = "fault-keeps-remembered-files"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::listing::a_fault_drops_the_remembered_files_and_the_next_pass_lists_the_whole_replica",
+]
