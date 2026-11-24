@@ -6,7 +6,7 @@ Version 3. What changed from version 2 is listed at the end of section 7.
 
 **Scope, stated plainly.** Sections 3 to 5 account for every circumstance the code distinguishes: every variant of its closed enums has a row. That is not every circumstance the world produces. Circumstances the code does not distinguish (a paused process, two processes on one staging directory, a volume snapshot put back) are in section 2 and in the `WORLD` rows of section 3, most of them marked untested or unknown. The list of circumstances is open and will stay open; section 7 says what would shrink it.
 
-**Read at** `origin/main` 50fb763; the rows #104 changed were read again at dd1d89b. Paths are under `crates/` unless they start with `docs/` or `scripts/`. Nothing was built or run to write it: every statement is a reading of the code, of a named test, or of a named report. Code is cited by file and symbol, never by line. Everything cited is a path in the repository, a test name, a commit, or a pull request or issue number on emschwartz/litestream-rs. Two measurements from earlier drafts were cut because their reports are not in the repository.
+**Read at** `origin/main` 50fb763; the rows #104 changed were read again at dd1d89b, and UP-14, WORLD-5, WORLD-32 and GO-9 at fdf1920db. Paths are under `crates/` unless they start with `docs/` or `scripts/`. Nothing was built or run to write it: every statement is a reading of the code, of a named test, or of a named report. Code is cited by file and symbol, never by line. Everything cited is a path in the repository, a test name, a commit, or a pull request or issue number on emschwartz/litestream-rs. Two measurements from earlier drafts were cut because their reports are not in the repository.
 
 **Evidence marks.** A row's Mark column says what a test has shown, not what the row claims. Three marks can be earned, and they are separate:
 
@@ -36,25 +36,17 @@ Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "cor
 | Mark | Rows |
 |---|---|
 | D R | 56 |
-| D | 68 |
+| D | 71 |
 | D S | 6 |
 | D S R | 5 |
 | S | 1 |
 | untested | 14 |
 | code only | 8 |
 | unknown | 9 |
-| known wrong | 7 |
+| known wrong | 4 |
 | accepted, undetected | 2 |
 
-**Changes in review.** Main is described as it is. Where an open branch changes a row, the last column names it:
-
-| Tag | Branch | What it changes |
-|---|---|---|
-| #96 | `claude/listing-trust` | Level-0 uploads become conditional (`If-None-Match: *`); after every listing the engine reads past the listed end before trusting it; a listed tail is read twice before it is judged torn; a retried multipart Complete is settled by a HEAD; the simulator's listings can lag |
-| #86 | `claude/checker-hygiene` | A per-cause snapshot counter in health and `/metrics`; a simulator oracle that fails a snapshot no injected fault justifies; canaries for the planted-bug runner |
-| #89 | `claude/rewound-snapshot` | A staged snapshot of a rewound database survives a restart; a pinned position follows a new WAL header over a generation with no frames |
-| #97 | `claude/crash-loop-cost` | Boot removes a killed process's scratch files and aborts its multipart uploads; prune and maintenance get a share of ticks while uploads are backlogged |
-
+**Changes in review.** None. Main is described as it is. Four pull requests were once listed here: #96 (`claude/listing-trust`) and #89 (`claude/rewound-snapshot`) were closed unmerged, and #86 and #97 merged. A row whose In review cell still names one of them has a stale tag and is read again when it is next touched.
 
 ---
 
@@ -97,7 +89,7 @@ Version 0.0.0: these are what the code is built to deliver.
 **Counted against G1.**
 - BOOT-19: across a restart after a bucket rollback, one transaction id is put twice with different bytes. Not defended: Go does not notice a rollback either, and the next snapshot makes the replica whole (`docs/decisions/D173.md`). No restore has been shown wrong from it.
 - RUN-12: under the default response a page no commit wrote is shipped. Deliberate, reported while it lasts, and still a restore that is not a committed state.
-- WORLD-1 and WORLD-5 are suspected, not shown.
+- WORLD-1 is suspected, not shown.
 
 **Qualifiers.**
 - A database-file page is trusted on its first read after the page table was emptied (`core/src/pages.rs`, "What it cannot check").
@@ -112,8 +104,8 @@ Version 0.0.0: these are what the code is built to deliver.
 | Simulator rotating seeds: sim `soak` | Default and swarm mixes for a time budget (`just sim-nightly`, 900 s) | Nightly. `#[ignore]` in the gate |
 | Real engine, directory store: history `every_restore_of_a_file_replica_is_a_node_of_the_history` | **One seed (7), 60 steps, no faults, clean drained stops only** | The gate |
 | Real engine, MinIO: history `every_restore_of_a_minio_replica_is_a_node_of_the_history` | The same driver against MinIO | **`#[ignore]`**. Run by `just test-s3`, which CI runs on pull requests |
-| Real SQLite under the block crash law: history `every_real_restore_through_power_losses_is_a_node_of_the_history` | **One seed, 4 cycles** | The gate. The 50-seed version, `real_power_loss_trials`, is **`#[ignore]`** and run by hand |
-| Real SQLite crash cycles: sqlite `crash_cycles_under_the_block_law_restore_committed_states` | **3 frozen seeds** | The gate. `crash_cycle_campaign` is **`#[ignore]`**, run by hand |
+| Real SQLite under the block crash law: history `every_real_restore_through_power_losses_is_a_node_of_the_history` | **One seed, 4 cycles** | The gate. The 50-seed version, `real_power_loss_trials`, is **`#[ignore]`** and runs nightly (`just power-loss-trials`, `.github/workflows/nightly.yml`) |
+| Real SQLite crash cycles: sqlite `crash_cycles_under_the_block_law_restore_committed_states` | **3 frozen seeds** | The gate. `crash_cycle_campaign` is **`#[ignore]`** and runs nightly in the same recipe |
 | Real binary on LazyFS: `scripts/lazyfs.py` | 300 cycles nightly; latest state only. The README on `claude/readme` reports 1000 cycles with 0 anomalies (at most about 0.3% per cycle at 95%, that fault mix only). Not re-run here | Nightly |
 
 **Blind spots in that evidence.** Oracle `TxidReused` and the increasing-cover check used to be switched off for a whole run once any rewind, bucket rollback or lost file had occurred. They are now scoped (CHK-1): an id may cover a second commit only if the replica lost the first from outside, or a power loss cut the first before the second was put. Section 6, C1.
@@ -261,7 +253,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 |---|---|---|---|
 | Process paused (SIGSTOP, cgroup freezer, VM live migration, laptop sleep), also while holding the write barrier or the read transaction | **Gap** | WORLD-2 | None. **unknown** |
 | Two processes on one database and one staging directory | **Gap** | WORLD-1. No lock exists | None. **unknown** |
-| Failover with the old host still alive | **Gap** | WORLD-5 | None. **untested** |
+| Failover with the old host still alive | In: the second put of an id is refused and that host stops | WORLD-5, UP-14, UP-17 | core `failover_with_the_old_host_alive_never_publishes_one_id_twice` |
 | VM or volume snapshot put back | In, detected at boot | WORLD-3, BOOT-22 | sim `vm_restore_stops_until_trust_local` |
 | Filesystem remounted read-only; EROFS, EMFILE, EDQUOT | **Gap** | WORLD-16 | None. **untested** |
 | The host application exits before a drain returns, or starves the replicator thread | **Gap** | WORLD-30 | None |
@@ -472,7 +464,7 @@ Every `SnapshotCause` variant (`core/src/fault.rs`). A snapshot reads every page
 | `PrevFrameMismatch` | The frame before the position is not a commit frame, or the position is mid-transaction | The WAL is not the one the staged file came from | Yes | Page-digest compare | BOOT-10 |
 | `LastPageMismatch` | The last page the staged file covers differs from the WAL | Same | Yes | Page-digest compare | BOOT-10 |
 | `LocalRewound` | Same generation; the committed end or the file is shorter than the staged end, or the range was rewritten | The replica is ahead of the database, or holds other content. The snapshot puts the replica's latest state back in step | Yes | Page-digest compare ships only the reverted pages | BOOT-9, GO-4 |
-| `CheckpointBoundary` | The engine's own TRUNCATE changed the WAL | A commit may have slipped between the last sync and the checkpoint | Usually not: nothing slipped in | Seal first, checkpoint with RESTART, and read SQLite's reported frame count to prove nothing was committed in between. Needs a spike on real SQLite | CKPT-4 |
+| `CheckpointBoundary` | The engine's own TRUNCATE changed the WAL | A commit may have slipped between the last sync and the checkpoint | Usually not: nothing slipped in | A TRUNCATE that cannot swallow a commit (the engine's read on mark 0 blocks every backfill, and a TRUNCATE run from the writer connection after the seal fails busy if anything was committed since), so no snapshot is needed: issue #334 | CKPT-4 |
 | `OperatorRequested` | An operator asked | By definition | Yes | None | RUN-23 |
 | `WalSyncFailed` | The TRUNCATE that follows a failed WAL fsync completed (RUN-3) | Commits the failed sync covered were never staged; the TRUNCATE wrote them into the database file, which the snapshot reads | Yes: those commits are in no WAL any more | None while the WAL is the only other copy | RUN-3 |
 | `StagedUnverified` | At boot, pending staged files that do not read whole or do not chain, and recovery cannot continue | The files cannot be uploaded, so they are not published; the snapshot holds their end state | Only for torn or misplaced files: a plain crash, a WAL restart or a staging copy put back leaves files that read whole and chain, which are uploaded as staged (D175) | None needed | BOOT-11, GO-3 |
@@ -526,7 +518,7 @@ Three other ways replication ends that are not a `StopCause`:
 | D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Accepted as a documented limit (`docs/decisions/D173.md`) | BOOT-19, G1 | None open. Issue #99 |
 | D4 | **Closed by #98.** A restore as of an instant could return a state committed up to one tick's read after the instant | G3 | Merged |
 | D5 | **Closed by scope.** A boot or relist listing that lags the bucket is trusted; a store that lags is unsupported (D173) | BOOT-18, MAINT-12 | `docs/decisions/D173.md` |
-| D6 | No conditional writes: a second writer or a reused id replaces an object instead of being refused. Two writers in step replace each other indefinitely and neither stops (expected-fail test core::`failover_with_the_old_host_alive_never_publishes_one_id_twice` (`#[ignore]` until #96)) | UP-14, GO-9, WORLD-5 | #96, with UP-17 on `claude/second-writer` |
+| D6 | **Closed.** Level-0 writes are create-only, so a second writer or a reused id is refused, and UP-17 stops the refused writer (core `failover_with_the_old_host_alive_never_publishes_one_id_twice`, run in the gate). Open: a Go process's puts are unconditional (GO-9) | UP-14, GO-9, WORLD-5 | Merged |
 | D7 | A retried multipart Complete that already succeeded is reported as `store_refused` | UP-13 | #96 |
 | D9 | **Accepted limit** (`docs/decisions/D174.md`). Retry counts, waits and degraded states reset on restart, as Go's do. The one stop the engine makes by default, `OtherWriter`, holds across a restart because every boot refuses the other writer's files again (BOOT-13, BOOT-22), whether it saw them before or was down when they appeared | BOOT-21, BOOT-22; a halt across restarts goes unreported, reached by the simulator's overlapping holds (CHK-9), which count it and do not judge it | `claude/second-writer` for the stop; `docs/decisions/D174.md` for the rest, left out of v1 |
 | D10 | A commit is dated by when it was staged. After an outage, a restore as of an instant inside the outage leaves out commits made before that instant. The contract "what the replica held at t" is not stated anywhere a user reads | G3 | None. None |

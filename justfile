@@ -331,6 +331,29 @@ bench-vs-go out *sets="all": minio-up
     export LSR_PERFSTATS="${LSR_PERFSTATS:-$HOME/.claude/skills/perf-experiment/perfstats.py}"
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" "${CARGO_TARGET_DIR:-$PWD/target}/release/bench-vs-go" --out "{{out}}" {{sets}}
 
+# What a full copy of a database larger than memory does to an application reading a hot set
+# beside it, and which remedy brings it back (issue 315). Linux with 8 GiB of memory and about
+# 80 GB of free disk under <out>; needs Docker, Rust, uv and root (to drop the page cache between
+# runs). Builds lsr and one binary per patch in crates/compat/bench-patches (about 20 minutes), builds
+# the 16 GiB database (about 15 minutes), then the calibration round, the A/A gate and the rounds:
+# about 5 hours on local NVMe and 10 to 11 on a 125 MB/s network disk (the throttled copies
+# run 2, 4 and 8 times as long as the plain one; --rounds N shortens it). The frame and the arms are
+# in crates/compat/src/bench/plan.rs; extra arguments (--rounds N, --arms A,B,..) go to the harness
+# and make the run a check of it. Never part of check.
+bench-snapshot-impact out *args: minio-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for var in $(compgen -e); do
+        case "$var" in AWS_* | LITESTREAM_*) unset "$var" ;; esac
+    done
+    ./scripts/build-bench-arms.sh "{{out}}/arms"
+    cargo build --release --locked -p lsr-cli --bin lsr
+    cargo build --release --locked -p lsr-compat --bin bench-vs-go
+    eval "$(./scripts/minio.sh env)"
+    perfstats="${LSR_PERFSTATS:-$HOME/.claude/skills/perf-experiment/perfstats.py}"
+    if [ -f "$perfstats" ]; then export LSR_PERFSTATS="$perfstats"; fi
+    "${CARGO_TARGET_DIR:-$PWD/target}/release/bench-vs-go" --out "{{out}}" snapshot-impact --patched "{{out}}/arms" {{args}}
+
 # The two alternation runs (Go and Rust taking turns on one prefix, each turn killed at a
 # seeded point) over the pinned builds; compat-releases.yml prints the seed of a nightly run.
 # Both alternation runs with one seed: just compat-alternation <seed> replays a nightly failure.

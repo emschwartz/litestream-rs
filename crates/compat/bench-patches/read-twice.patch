@@ -1,0 +1,37 @@
+diff --git a/crates/sqlite/src/pages.rs b/crates/sqlite/src/pages.rs
+index 0c1c914bb..6068874ce 100644
+--- a/crates/sqlite/src/pages.rs
++++ b/crates/sqlite/src/pages.rs
+@@ -226,6 +226,9 @@ fn page_offset(pgno: PageNo, page_size: u32) -> Option<u64> {
+         .checked_mul(u64::from(page_size))
+ }
+ 
++/// The page number of the previous `read_page`, for the read-twice control.
++static LAST_PAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
++
+ impl PageSource for Sqlite {
+     fn page_count(&mut self) -> Result<DbPages, SourceError> {
+         let mut inner = self.lock();
+@@ -246,6 +249,22 @@ impl PageSource for Sqlite {
+         if u32::try_from(buf.len()) != Ok(size) {
+             return Err(SourceError::Io(io::ErrorKind::InvalidInput));
+         }
++        // BENCH PROTOTYPE (crates/compat/bench-patches/read-twice.patch, never in the engine): a
++        // known-bad control. A pass over the file (its first read, or a read of a lower page than
++        // the last) first reads every page once and throws it away, so the pass reads each page
++        // twice, a whole file apart: the second read is a cache miss whenever the file is larger
++        // than the cache. It must lose to the plain copy, or the harness cannot see this axis.
++        let last = LAST_PAGE.swap(pgno.get(), std::sync::atomic::Ordering::Relaxed);
++        if pgno.get() <= last {
++            let len = inner.file().size().map_err(rc_error)?;
++            let mut scratch = vec![0_u8; buf.len()];
++            let mut at = 0_u64;
++            while at < len {
++                // A failed read here is no one's business: the real read below reports its own.
++                let _ = inner.file().read_at(&mut scratch, at);
++                at = at.saturating_add(u64::from(size));
++            }
++        }
+         let offset = page_offset(pgno, size).ok_or(SourceError::Io(io::ErrorKind::InvalidInput))?;
+         inner.file().read_at(buf, offset).map_err(|rc| {
+             if rc == ffi::SQLITE_IOERR_SHORT_READ {

@@ -308,7 +308,7 @@ fn wait_for_scratch(dir: &Path) {
 /// replica must hold at least the first boot's writes; today it holds only what the very
 /// first, unkilled boot uploaded.
 #[test]
-#[ignore = "livelock: a boot snapshot cut short by a kill keeps no progress; resuming it needs durable engine state"]
+#[ignore = "open defect, no issue yet, fails when run: a boot snapshot cut short by a kill keeps no progress, and resuming it needs durable engine state"]
 fn a_boot_snapshot_cut_short_every_boot_still_moves_the_replica() {
     let world = World::new();
     // The first boot replicates the database as it is.
