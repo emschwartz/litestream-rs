@@ -30,16 +30,26 @@ pub fn write_config_snapshotting(
     write_config_with(path, db, replica, snapshot_interval, "1h")
 }
 
-/// [`write_config`] whose snapshot window is a day, as Rust's default, so neither Go nor Rust
-/// takes a scheduled snapshot while a test runs once one exists (both snapshot at once when
-/// the replica has none). A new snapshot during such a run is then a forced one, never the
-/// schedule's, unless the run crosses midnight UTC, where both windows start.
-pub fn write_config_daily_snapshots(
+/// An interval no run crosses, in Go's duration syntax: a hundred years. Go and Rust both start
+/// a window at each multiple of its interval, so a day-long window starts at midnight UTC, and
+/// a run that ended at 00:00:00.1 on 2026-11-24 found the scheduled snapshot a test said could
+/// not be there. The next multiple of this one is decades away on either implementation's
+/// reckoning.
+pub const BEYOND_A_RUN: &str = "876000h";
+
+/// Half of [`BEYOND_A_RUN`], for a level that must stay below the snapshot interval.
+const HALF_BEYOND_A_RUN: &str = "438000h";
+
+/// [`write_config`] whose snapshot window no run crosses ([`BEYOND_A_RUN`]), so neither Go nor
+/// Rust takes a scheduled snapshot while a test runs once one exists (both snapshot at once
+/// when the replica has none). A new snapshot during such a run is then a forced one, never
+/// the schedule's.
+pub fn write_config_no_scheduled_snapshot(
     path: &Path,
     db: &Path,
     replica: &Path,
 ) -> Result<(), CompatError> {
-    write_config_with(path, db, replica, "24h", "24h")
+    write_config_with(path, db, replica, BEYOND_A_RUN, BEYOND_A_RUN)
 }
 
 fn write_config_with(
@@ -78,12 +88,12 @@ impl Schedule<'static> {
         snapshot_retention: "1h",
     };
 
-    /// [`Schedule::FAST`]'s levels with a day-long snapshot window
-    /// ([`write_config_daily_snapshots`]).
-    pub const DAILY_SNAPSHOTS: Self = Self {
+    /// [`Schedule::FAST`]'s levels with a snapshot window no run crosses
+    /// ([`write_config_no_scheduled_snapshot`]).
+    pub const NO_SCHEDULED_SNAPSHOT: Self = Self {
         levels: &["1s", "2s", "4s"],
-        snapshot_interval: "24h",
-        snapshot_retention: "24h",
+        snapshot_interval: BEYOND_A_RUN,
+        snapshot_retention: BEYOND_A_RUN,
     };
 
     /// No compaction and no scheduled snapshot within a run: the replica holds the boot's
@@ -91,9 +101,9 @@ impl Schedule<'static> {
     /// at an instant between two syncs has exactly one right answer, whichever created-at time a reader
     /// takes (Go before v0.5.16 reads only the object's `LastModified`).
     pub const LEVEL_ZERO_ONLY: Self = Self {
-        levels: &["1h"],
-        snapshot_interval: "24h",
-        snapshot_retention: "24h",
+        levels: &[HALF_BEYOND_A_RUN],
+        snapshot_interval: BEYOND_A_RUN,
+        snapshot_retention: BEYOND_A_RUN,
     };
 }
 

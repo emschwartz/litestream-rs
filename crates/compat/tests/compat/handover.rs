@@ -473,7 +473,7 @@ mod live {
             AppFixture, Chain, GoBuild, GoRestore, PageEncoding, Replicator, Shape, Target,
             Written, builds_in, builds_under_test, clock_ending_now, list, newest_l0, pages_of,
             position, real_now_ms, restore_replica, restore_with_go, wait_staged_past, wait_until,
-            write_config, write_config_snapshotting,
+            write_config, write_config_no_scheduled_snapshot,
         };
         use lsr_core::{Event, Level, RestoreTarget};
         use lsr_ltx::{Header, Txid};
@@ -591,8 +591,12 @@ mod live {
             let position_salts = position_head.fields().wal.expect("origin").salts();
             let snapshots = l9(&written.fixture.replica);
             let config = written.fixture.dir().join("go.yml");
-            write_config_snapshotting(&config, &written.fixture.db, &written.fixture.replica, "1h")
-                .expect("config");
+            write_config_no_scheduled_snapshot(
+                &config,
+                &written.fixture.db,
+                &written.fixture.replica,
+            )
+            .expect("config");
             let mut go = Replicator::start(&bin, &config, &written.fixture.dir().join("go.log"))
                 .expect("start");
             for _ in 0..3 {
@@ -870,7 +874,7 @@ mod live {
             AppFixture, GoBuild, Kind, PageEncoding, Replicator, Shape, Summary, Target,
             builds_under_test, go_restore, lsr_binary, position, rust_restore, snapshots,
             wait_boot_file, wait_staged_past, wait_until, wait_uploaded, write_config,
-            write_config_daily_snapshots,
+            write_config_no_scheduled_snapshot,
         };
         use lsr_core::RestoreTarget;
         use lsr_ltx::Txid;
@@ -955,9 +959,10 @@ mod live {
             let mut fixture = AppFixture::create(4096, 51).expect("fixture");
             fixture.prepare_for_processes(200).expect("prepare");
             let config = fixture.dir().join("go.yml");
-            write_config_daily_snapshots(&config, &fixture.db, &fixture.replica).expect("config");
+            write_config_no_scheduled_snapshot(&config, &fixture.db, &fixture.replica)
+                .expect("config");
             let log = |fixture: &AppFixture, n: &str| fixture.dir().join(n);
-            // Every Go version snapshots within seconds on this one; the daily window of `config`
+            // Every Go version snapshots within seconds on this one; the long window of `config`
             // keeps the later turns from taking a scheduled snapshot once one exists.
             let first = fixture.dir().join("go-first.yml");
             write_config(&first, &fixture.db, &fixture.replica).expect("config");

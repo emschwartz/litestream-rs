@@ -341,17 +341,17 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
     let bin = build.binary().expect("the build under test is present");
     let mut fixture = fixture(env, "handover", 63);
     fixture.prepare_for_processes(200).expect("prepare");
-    // Go snapshots within seconds on the first config; the daily window of the second
+    // Go snapshots within seconds on the first config; the long window of the second
     // keeps the later turns from taking a scheduled snapshot once one exists.
     let first = config(&fixture, "go-first.yml", Schedule::FAST);
-    let daily = config(&fixture, "daily.yml", Schedule::DAILY_SNAPSHOTS);
+    let steady = config(&fixture, "steady.yml", Schedule::NO_SCHEDULED_SNAPSHOT);
     let go = start(Kind::Go, &bin, &first, &fixture.dir().join("go-1.log"));
     assert!(turn(go, &mut fixture, None).is_none());
     let go_newest = position(&fixture).expect("position").expect("Go staged");
     let at_go_stop = fixture.hash_now().expect("hash");
     let l9 = snapshots(&fixture);
 
-    let rs = start(Kind::Rust, lsr, &daily, &fixture.dir().join("lsr.log"));
+    let rs = start(Kind::Rust, lsr, &steady, &fixture.dir().join("lsr.log"));
     let boot = turn(rs, &mut fixture, Some(go_newest));
     assert_continued(name, Kind::Rust, boot.as_ref(), go_newest);
     assert_eq!(snapshots(&fixture), l9, "{name}: Rust took a snapshot");
@@ -376,16 +376,16 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
         s3_of(&fixture).delete_all().expect("clean up");
         return;
     }
-    let latest = go_restore(&bin, &daily, &fixture, Target::Latest, "go-1.db");
+    let latest = go_restore(&bin, &steady, &fixture, Target::Latest, "go-1.db");
     assert_eq!(latest, at_rust_stop, "{name}: Go on the Go-then-Rust chain");
 
-    let go = start(Kind::Go, &bin, &daily, &fixture.dir().join("go-2.log"));
+    let go = start(Kind::Go, &bin, &steady, &fixture.dir().join("go-2.log"));
     let boot = turn(go, &mut fixture, Some(rust_newest));
     assert_continued(name, Kind::Go, boot.as_ref(), rust_newest);
     assert_eq!(snapshots(&fixture), l9, "{name}: Go took a snapshot");
     let at_end = fixture.hash_now().expect("hash");
     assert_eq!(
-        go_restore(&bin, &daily, &fixture, Target::Latest, "go-2.db"),
+        go_restore(&bin, &steady, &fixture, Target::Latest, "go-2.db"),
         at_end,
         "{name}"
     );
@@ -398,7 +398,7 @@ fn hand_over(env: &MinioEnv, build: &GoBuild, lsr: &Path) {
         txid: rust_newest.get(),
     };
     assert_eq!(
-        go_restore(&bin, &daily, &fixture, at_rust, "go-rs-position.db"),
+        go_restore(&bin, &steady, &fixture, at_rust, "go-rs-position.db"),
         at_rust_stop,
         "{name}: Go at the txid where lsr stopped"
     );
