@@ -457,6 +457,18 @@ mod tests {
         assert_eq!(response.status(), 307);
     }
 
+    /// A bare bucket's empty path segment survives the `url` type and reqwest, in both URL
+    /// styles and every request form.
+    #[test]
+    fn a_bare_buckets_leading_slash_reaches_the_socket() {
+        use crate::config::UrlStyle;
+        use crate::transport::wire_proof::{assert_bare_bucket_arrived, sent_by};
+        let transport = own();
+        for style in [UrlStyle::Path, UrlStyle::VirtualHost] {
+            assert_bare_bucket_arrived(&sent_by(&transport, style), style);
+        }
+    }
+
     #[test]
     fn a_head_is_complete_without_a_body() {
         let url =

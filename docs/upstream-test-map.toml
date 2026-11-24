@@ -978,7 +978,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestBoolQueryValue/Multiple keys" = { reason = "@go-url-helper" }
 "TestBoolQueryValue/Nil query" = { reason = "@go-url-helper" }
 "TestBoolQueryValue/True values" = { reason = "@go-url-helper" }
-"TestCleanReplicaURLPath" = { counterpart = "lsr-store-s3::config::tests::prefix_refuses_empty_and_slashes" }
+"TestCleanReplicaURLPath" = { counterpart = "lsr-store-s3::config::tests::prefix_accepts_empty_and_refuses_unclean_paths" }
 "TestEnsureEndpointScheme" = { counterpart = ["lsr-config::config::map::query_settings_apply_and_the_file_s_keys_win", "lsr-config::config::map::bucket_path_and_endpoint_keys_without_a_url"] }
 "TestIntQueryValue" = { reason = "@go-url-helper" }
 "TestIntQueryValue/Alias order" = { reason = "@go-url-helper" }

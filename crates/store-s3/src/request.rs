@@ -108,6 +108,13 @@ impl HttpRequest {
         }
     }
 
+    /// The same request to another URL, for tests that point it at a local socket.
+    #[cfg(test)]
+    pub(crate) fn with_url(mut self, url: Url) -> Self {
+        self.url = url;
+        self
+    }
+
     /// The method.
     #[must_use]
     pub fn method(&self) -> Method {
@@ -746,6 +753,7 @@ impl RequestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::UrlStyle;
     use crate::credentials::SecretString;
     use lsr_core::parse_file_name;
     use lsr_ltx::Txid;
@@ -852,6 +860,153 @@ mod tests {
             start_after(&prefix, Level::ZERO, range(3, 7)),
             "db/one/0000/0000000000000003-0000000000000007.ltx"
         );
+    }
+
+    /// With no path Go's expression is `"" + "/" + "0000/<file>"`: the key starts with a slash,
+    /// and so does the listing prefix (rc.go:702, 1326, 1575).
+    #[test]
+    fn object_key_matches_go_with_no_path() {
+        let bare = Prefix::new("").unwrap();
+        assert_eq!(
+            object_key(&bare, &key(0, 1, 1)),
+            "/0000/0000000000000001-0000000000000001.ltx"
+        );
+        assert_eq!(
+            object_key(&bare, &key(9, 0xff, u64::MAX)),
+            "/0009/00000000000000ff-ffffffffffffffff.ltx"
+        );
+        assert_eq!(level_prefix(&bare, Level::new(9).unwrap()), "/0009/");
+        assert_eq!(
+            start_after(&bare, Level::ZERO, range(3, 7)),
+            "/0000/0000000000000003-0000000000000007.ltx"
+        );
+    }
+
+    /// A bare bucket, addressed in either style.
+    fn bare(style: UrlStyle) -> RequestBuilder {
+        let config = S3Config::new(
+            crate::config::Endpoint::new("http://localhost:9000").unwrap(),
+            crate::config::BucketName::new("examplebucket").unwrap(),
+            Prefix::new("").unwrap(),
+        )
+        .with_style(style)
+        // Minio is asked for every upload and the caller filters; this one sends the prefix.
+        .with_provider(Provider::Other);
+        let credentials = S3Credentials::new(
+            "AKIAIOSFODNN7EXAMPLE".to_owned(),
+            SecretString::new("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_owned()),
+        );
+        RequestBuilder::new(&config, &credentials).unwrap()
+    }
+
+    /// With no path the object URL has an empty first segment, `/examplebucket//0000/<file>` in
+    /// path style and `//0000/<file>` in virtual-host style, and the listing and the upload
+    /// listing ask for `/0000/` and `/`. Go's keys are the same.
+    #[test]
+    fn a_bare_bucket_keeps_the_leading_slash_in_every_request() {
+        let file = "0000000000000001-0000000000000001.ltx";
+        let k = key(0, 1, 1);
+        for (style, path) in [
+            (UrlStyle::Path, format!("/examplebucket//0000/{file}")),
+            (UrlStyle::VirtualHost, format!("//0000/{file}")),
+        ] {
+            let b = bare(style);
+            let list = b
+                .list_page(now(), Level::ZERO, Some(range(1, 1)), PageLimit::MAX)
+                .unwrap();
+            assert_eq!(
+                query(&list, "prefix").as_deref(),
+                Some("/0000/"),
+                "{style:?}"
+            );
+            assert_eq!(
+                query(&list, "start-after"),
+                Some(format!("/0000/{file}")),
+                "{style:?}"
+            );
+            let more = b
+                .list_continue(now(), Level::ZERO, "t", PageLimit::MAX)
+                .unwrap();
+            assert_eq!(
+                query(&more, "prefix").as_deref(),
+                Some("/0000/"),
+                "{style:?}"
+            );
+            let uploads = b.list_uploads(now(), None).unwrap();
+            assert_eq!(query(&uploads, "prefix").as_deref(), Some("/"), "{style:?}");
+
+            let etags = vec!["\"d41d8cd98f00b204e9800998ecf8427e\"".to_owned()];
+            let objects = [
+                b.head(now(), &k).unwrap(),
+                b.get_range(now(), &k, 0, ReadLen::new(1).unwrap()).unwrap(),
+                b.put_object(now(), &k, b"x".to_vec(), now())
+                    .unwrap()
+                    .into(),
+                b.create_multipart(now(), &k, now()).unwrap(),
+                b.upload_part(now(), &k, &upload(), PartNumber::new(1).unwrap(), vec![1])
+                    .unwrap()
+                    .into(),
+                b.complete_multipart(now(), &k, &upload(), &etags).unwrap(),
+                b.abort_multipart(now(), &k, &upload()).unwrap(),
+            ];
+            for request in &objects {
+                assert_eq!(request.url().path(), path, "{style:?} {request:?}");
+            }
+            let delete = b.delete_objects(now(), &[k, key(1, 2, 3)]).unwrap();
+            let body = String::from_utf8(delete.body().to_vec()).unwrap();
+            assert!(
+                body.contains(&format!("<Key>/0000/{file}</Key>"))
+                    && body.contains("<Key>/0001/0000000000000002-0000000000000003.ltx</Key>"),
+                "{style:?} {body}"
+            );
+        }
+    }
+
+    /// SigV4 signs the path as sent, and S3 does not normalise it, so the empty segment must be
+    /// in the canonical URI. The signature of the URL with the slash collapsed is another one.
+    #[test]
+    fn the_signature_covers_the_empty_segment() {
+        let b = bare(UrlStyle::Path);
+        let sign = |url: &Url, headers: &Headers| {
+            let at = jiff::Timestamp::from_millisecond(now().unix_millis()).unwrap();
+            let signed = rusty_s3::signing::sign(
+                &at,
+                rusty_s3::Method::Get,
+                url.clone(),
+                "AKIAIOSFODNN7EXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                None,
+                "us-east-1",
+                EXPIRES_IN.as_secs(),
+                std::iter::empty(),
+                headers.iter().map(|(name, value)| (*name, value.as_str())),
+            );
+            query_value(&signed, "X-Amz-Signature")
+        };
+        let sent = b
+            .sign_raw(
+                now(),
+                Method::Get,
+                Some("/0000/f.ltx"),
+                &[],
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(sent.url().path(), "/examplebucket//0000/f.ltx");
+        let headers = b.base_headers();
+        let signature = query_value(sent.url(), "X-Amz-Signature");
+        assert_eq!(sign(sent.url(), &headers), signature, "signed as sent");
+        let mut collapsed = sent.url().clone();
+        collapsed.set_path("/examplebucket/0000/f.ltx");
+        assert_ne!(sign(&collapsed, &headers), signature, "the path is signed");
+    }
+
+    fn query_value(url: &Url, name: &str) -> String {
+        url.query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+            .unwrap()
     }
 
     #[test]
@@ -1118,11 +1273,15 @@ mod tests {
         #[test]
         fn object_key_round_trips(level in 0u8..=9, min in 1u64.., len in 0u64..1000) {
             let max = min.saturating_add(len);
-            let prefix = Prefix::new("p/q").unwrap();
-            let k = key(level, min, max);
-            let full = object_key(&prefix, &k);
-            let name = full.strip_prefix(level_prefix(&prefix, k.level()).as_str()).unwrap();
-            prop_assert_eq!(parse_file_name(name).unwrap(), k.range());
+            for text in ["p/q", ""] {
+                let prefix = Prefix::new(text).unwrap();
+                let k = key(level, min, max);
+                let full = object_key(&prefix, &k);
+                let name = full.strip_prefix(level_prefix(&prefix, k.level()).as_str()).unwrap();
+                prop_assert_eq!(parse_file_name(name).unwrap(), k.range());
+                // The empty prefix is the same key under a leading slash, not a different shape.
+                prop_assert_eq!(full, format!("{text}/{level:04x}/{}", k.file_name()));
+            }
         }
 
         #[test]

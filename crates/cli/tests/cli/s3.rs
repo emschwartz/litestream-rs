@@ -156,6 +156,24 @@ fn a_bad_replica_url_is_a_usage_error_before_credentials_are_read() {
     assert_eq!(run.code, 64);
 }
 
+/// A bucket with no path is a usable replica, as under Go: the command gets past the URL and
+/// the credentials and fails at the unreachable endpoint like any other S3 replica.
+#[test]
+fn a_bare_bucket_replica_reaches_the_endpoint() {
+    let run = lsr_with(
+        &[
+            "files",
+            "--replica",
+            "s3://bucket/",
+            "--endpoint",
+            "http://127.0.0.1:1",
+        ],
+        &canary_env(),
+    );
+    assert_eq!((run.code, run.stdout.as_str()), (3, ""), "{}", run.stderr);
+    assert_no_canary(&run);
+}
+
 #[test]
 fn secret_never_on_stderr_against_an_unreachable_endpoint() {
     // Port 1 on loopback refuses the connection at once.

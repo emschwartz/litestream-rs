@@ -30,6 +30,15 @@ pub fn config() -> S3Config {
     )
 }
 
+/// The replica Go calls `s3://bucket`: no path inside the bucket.
+pub fn bare_config() -> S3Config {
+    S3Config::new(
+        Endpoint::new("http://localhost:9000").unwrap(),
+        BucketName::new("bucket").unwrap(),
+        Prefix::new("").unwrap(),
+    )
+}
+
 pub fn fake() -> FakeS3 {
     FakeS3::new(&config(), FakeClock::new(now()))
 }

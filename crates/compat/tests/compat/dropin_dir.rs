@@ -103,6 +103,13 @@ enum Replica {
     FilePath,
     S3Url,
     S3Bucket,
+    /// A bucket and no path inside it: `url: s3://bucket/`, keys that start with a slash.
+    /// (`s3://bucket` without the slash is Go's prefix `.`, which litestream-rs refuses.)
+    S3BareUrl,
+    /// `type: s3` with a bucket and no `path`.
+    S3BareBucket,
+    /// `type: s3` with a bucket and `path: ""`.
+    S3EmptyPath,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +169,9 @@ fn case() -> impl Strategy<Value = Case> {
             Just(Replica::FilePath),
             Just(Replica::S3Url),
             Just(Replica::S3Bucket),
+            Just(Replica::S3BareUrl),
+            Just(Replica::S3BareBucket),
+            Just(Replica::S3EmptyPath),
         ],
         prop_oneof![Just(Meta::Beside), Just(Meta::Dir), Just(Meta::Path)],
     )
@@ -288,10 +298,17 @@ fn config_text(base: &Path, root: &Path, case: &Case) -> String {
             writeln!(text, "      type: file\n      path: {}", quoted(&replica)).unwrap()
         }
         Replica::S3Url => text.push_str("      url: s3://bucket/some/prefix\n"),
-        // Always with a prefix: an empty one is refused on purpose, `dir` or not, where Go
-        // writes keys with a leading slash (CFG-18, D40).
         Replica::S3Bucket => text.push_str(
             "      type: s3\n      bucket: bucket\n      path: pre\n      region: us-east-1\n",
+        ),
+        // No path inside the bucket works as under Go (CFG-18, D181), so a `dir` that names a
+        // database file gives it the bare bucket and a directory gives each database its own.
+        Replica::S3BareUrl => text.push_str("      url: s3://bucket/\n"),
+        Replica::S3BareBucket => {
+            text.push_str("      type: s3\n      bucket: bucket\n      region: us-east-1\n")
+        }
+        Replica::S3EmptyPath => text.push_str(
+            "      type: s3\n      bucket: bucket\n      path: \"\"\n      region: us-east-1\n",
         ),
     }
     text
@@ -364,7 +381,7 @@ fn pinned_cases() -> Vec<Case> {
         replica: Replica::FileUrl,
         meta: Meta::Beside,
     };
-    vec![
+    let mut cases = vec![
         one(vec![(vec![0], Kind::Db)], DirSpelling::Link, "*.db", false),
         one(vec![(vec![0], Kind::Db)], DirSpelling::File, "*.db", false),
         one(
@@ -391,7 +408,25 @@ fn pinned_cases() -> Vec<Case> {
             "*",
             true,
         ),
-    ]
+    ];
+    // A bucket with no path: a `dir` that names a database file leaves the replica bare, a
+    // directory gives each database its own path.
+    for replica in [
+        Replica::S3BareUrl,
+        Replica::S3BareBucket,
+        Replica::S3EmptyPath,
+    ] {
+        for dir in [DirSpelling::File, DirSpelling::Absolute] {
+            let base = one(
+                vec![(vec![0], Kind::Db), (vec![11, 1], Kind::Db)],
+                dir,
+                "*.db",
+                true,
+            );
+            cases.push(Case { replica, ..base });
+        }
+    }
+    cases
 }
 
 /// The differential itself. 512 generated cases plus the pinned ones; a disagreement prints
