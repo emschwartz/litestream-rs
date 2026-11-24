@@ -2590,13 +2590,21 @@ impl BootGate {
         let listed = newest_replica_level_zero(remote)
             .await?
             .map(|info| info.key.range().max());
-        let replica = tip.max(listed);
-        match replica.map(|replica| replica.min(local)) {
-            Some(through) if !covers(through) => {
-                Err(BootStep::Vouch(TakeoverRecord::through(through)))
-            }
-            Some(_) | None => Ok(()),
+        // Early returns, not `Option::map` with `min` and a guarded match: rustc 1.99.1 to at
+        // least 1.102 (1.85 was sound) miscompiles that form with optimization in some
+        // instantiations, so an empty replica read as transaction zero and a boot that dropped
+        // staged files asked for a takeover through zero forever. LLVM's SimplifyCFG hoists the
+        // `umin` out of `map` keeping its nonzero range attributes, InstCombine folds the
+        // `None` arm into it, and EarlyCSE then proves the result nonzero. `just test-opt` runs
+        // the scenarios that catch it.
+        let Some(replica) = tip.max(listed) else {
+            return Ok(());
+        };
+        let through = replica.min(local);
+        if covers(through) {
+            return Ok(());
         }
+        Err(BootStep::Vouch(TakeoverRecord::through(through)))
     }
 
     /// Whether the meta directory is brand new: nothing staged when the boot began and no

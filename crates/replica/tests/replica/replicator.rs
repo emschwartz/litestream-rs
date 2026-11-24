@@ -368,6 +368,68 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
     site.assert_restores(&*site.store());
 }
 
+/// A staged file damaged before the first upload ever landed (a power loss can tear one): the
+/// next start reads it twice, drops it with every file after it, and boots from the database
+/// with a snapshot. The replica is empty, so staging vouched for nothing on it and no takeover
+/// record is needed. Built with optimization, rustc 1.99.1 to at least 1.102 compiled the boot's
+/// gate so that the empty replica read as transaction zero: the engine asked for a takeover
+/// through zero on every attempt and never booted. `just test-opt` runs this test optimized.
+#[test]
+fn a_staged_file_damaged_before_the_first_upload_is_dropped_and_the_next_start_boots() {
+    let site = Site::new();
+    let faulty = site.faulty();
+    faulty.fail_uploads.store(true, Ordering::SeqCst);
+    let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
+    let (runtime, _clock) = fake();
+    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    wait(&replicator, |h| {
+        h.synced.is_some() && h.counters.retries > 0
+    });
+    let cut_off = replicator.stop(Duration::ZERO).wait();
+    assert!(
+        matches!(cut_off, Stopped::DeadlineReached { staged_not_uploaded, .. } if staged_not_uploaded > 0),
+        "{cut_off:?}"
+    );
+    drop(replicator);
+    let meta = config().meta_dir_for(&site.db).unwrap();
+    let newest = newest_staged(&meta);
+    let mut bytes = std::fs::read(&newest).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xff;
+    std::fs::write(&newest, bytes).unwrap();
+    site.commit(1);
+    let (runtime, clock) = fake();
+    let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    // The first read of the damaged file only retries the boot (one read never condemns a
+    // file); the clock moves through that wait, and through the doubling waits a boot that asks
+    // for a takeover it never gets would take.
+    moved_until(&next, &clock, (POLL, 120), |h| h.phase != Phase::Booting);
+    assert_eq!(next.wait_booted(PATIENCE), Booted::Booted);
+    assert!(matches!(
+        stopped_moving(&next, &clock, POLL),
+        Stopped::Drained { .. }
+    ));
+    site.assert_restores(&*site.store());
+}
+
+/// The staged LTX file with the highest name under `meta`: names sort by transaction.
+fn newest_staged(meta: &std::path::Path) -> std::path::PathBuf {
+    let mut found = Vec::new();
+    let mut dirs = vec![meta.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "ltx") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    found.pop().expect("a staged file")
+}
+
 /// A second stop shortens the first: a drain that waits on a failing upload ends at the
 /// earlier deadline, and both stops report the same end.
 #[test]

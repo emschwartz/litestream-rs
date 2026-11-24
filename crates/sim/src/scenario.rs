@@ -1262,5 +1262,7 @@ pub fn power_loss_wal_rewind() -> Scenario {
     )
 }
 
+mod coverage;
 mod faults;
+pub use coverage::*;
 pub use faults::*;
