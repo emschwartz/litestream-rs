@@ -455,3 +455,74 @@ fn two_no_commit_snapshots_and_a_second_writer_never_trip_the_age_bound() {
     ];
     run_with(&ops, &no_conditional_writes());
 }
+
+/// A power loss inside a tick drops a staged file whose upload had landed. The staging check
+/// looks between ticks and never saw the file, so the boot's refusal of the replica's files
+/// is not a refusal without cause: the operator trusts the local database and starts again.
+#[test]
+fn a_power_loss_inside_a_tick_that_drops_an_uploaded_staged_file_is_a_cause_for_a_refusal() {
+    use lsr_core::{SourceOp, StoreError, StoreOp};
+    use lsr_sim::generate::{AppAt, AppOp, WalOp};
+    use lsr_sim::{CrashKind, OtherProcessMode};
+    let ops = [
+        Op::Crash(CrashKind::Process),
+        Op::CommitInTick { pages: 2 },
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::List,
+            ahead: 0,
+            shape: FaultShape::Error(StoreError::Transient {
+                op: StoreOp::List,
+                kind: ErrorKind::Other,
+            }),
+        },
+        Op::Crash(CrashKind::Power),
+        Op::Tick,
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::Upload,
+            ahead: 1,
+            shape: FaultShape::ErrorAfterPublish(StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: ErrorKind::ConnectionReset,
+            }),
+        },
+        Op::AppInTick {
+            at: AppAt::Call(20),
+            op: AppOp::Commit {
+                pages: 3,
+                grow: false,
+            },
+        },
+        Op::Crash(CrashKind::Process),
+        Op::AppInTick {
+            at: AppAt::Call(2),
+            op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+        },
+        Op::AppInTick {
+            at: AppAt::Before(SourceOp::PageCount),
+            op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+        },
+        Op::WalDamage {
+            op: WalOp::TearHeader,
+            ticks: 7,
+        },
+        Op::Crash(CrashKind::Process),
+        Op::Crash(CrashKind::Power),
+    ];
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        after_restart: lsr_sim::AfterRestart::Nothing,
+        overlap: true,
+        kill_after_fault: true,
+        remote_s3: true,
+        no_create_only: true,
+        truncate_pages: std::num::NonZeroU32::new(3),
+        ..Opts::default()
+    };
+    match run_ops(Seed::new(0x6b06_248f), &ops, &opts) {
+        Ok(_) => {}
+        Err(failure) => panic!("{}\n{}", failure.violation, failure.message(failure.steps)),
+    }
+}

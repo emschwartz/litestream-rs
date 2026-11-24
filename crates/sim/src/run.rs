@@ -1247,6 +1247,10 @@ impl Runner {
     fn note_lost(&mut self, lost: &[(lsr_core::FileKey, crate::store::Lost)]) {
         if !lost.is_empty() {
             self.forcings.note(Forcing::StagedLost);
+            // A power loss inside a tick took a staged file the staging check, which looks
+            // between ticks, never saw: a boot that refuses the replica's files afterwards
+            // has a cause.
+            self.staging_disturbed = true;
         }
         for (_, how) in lost {
             self.report.reach.bump(format!("staged.{}", variant(how)));
