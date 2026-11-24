@@ -267,8 +267,6 @@ macro_rules! side {
 side! {
     /// What the driver does at process start.
     fn start_driver(&self);
-    /// The engine's own commits (its sequence bumps) since the last call, oldest first; a backend that reports what it wrote has none.
-    fn take_engine_commits(&self) -> Vec<AppCommit>;
     /// Our read transaction begins, outside a tick.
     fn our_reader_begin(&self) -> bool;
     /// Our read transaction ends, outside a tick.

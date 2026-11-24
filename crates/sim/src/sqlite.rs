@@ -341,10 +341,6 @@ struct State {
     // The app's commit armed for the next barrier, and the one it made there.
     in_tick: Option<InTick>,
     in_tick_done: Option<InTickCommit>,
-    // The engine's own commits (its sequence bumps) since the world last took them up, each
-    // with the generation and end it made: a tick can make two with a WAL restart between, and
-    // the model sees only the WAL as the tick left it.
-    engine_commits: Vec<AppCommit>,
     // With a seed, a power loss keeps a drawn prefix of the unsynced WAL
     // writes instead of none.
     torn: Option<u64>,
@@ -681,12 +677,6 @@ impl State {
             self.index.tx_ends.push(self.index.mx_frame);
             self.writer = None;
             self.readers.remove(&by);
-            if by == Conn::Writer {
-                self.engine_commits.push(AppCommit {
-                    salts: self.index.salts,
-                    end: WalOffset::from_frame_index(self.index.mx_frame, self.page_size),
-                });
-            }
         }
         true
     }
@@ -1281,7 +1271,6 @@ impl SimSqlite {
             app_auto: AutoTally::default(),
             in_tick: None,
             in_tick_done: None,
-            engine_commits: Vec::new(),
             torn: None,
             torn_kept: (0, 0),
             blocks: None,
@@ -1397,11 +1386,6 @@ impl SimSqlite {
                 created_at,
             });
         });
-    }
-
-    /// The engine's own commits since the last call, oldest first.
-    pub fn take_engine_commits(&self) -> Vec<AppCommit> {
-        self.with(|state| mem::take(&mut state.engine_commits))
     }
 
     /// The armed commit if a barrier made it (`None` when no barrier came or

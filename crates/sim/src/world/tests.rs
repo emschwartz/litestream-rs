@@ -61,32 +61,6 @@ fn the_engines_own_bump_commit_joins_the_model() {
     assert!(w.model_matches_sqlite());
 }
 
-/// A tick can make two commits of the engine's own with a WAL restart between them, and a snapshot
-/// the engine takes in between ends on the first. The model keeps both ends, not only the one the
-/// WAL was left at.
-#[test]
-fn two_bump_commits_across_a_wal_restart_both_join_the_model() {
-    let mut w = world();
-    commit(&mut w, 1);
-    let mut ck = w.sqlite.checkpointer();
-    lsr_core::Checkpointer::bump_seq(&mut ck).unwrap();
-    let first = (w.sqlite.salts(), w.sqlite.mx_frame());
-    assert!(w.other_process_checkpoint(OtherProcessMode::Restart));
-    lsr_core::Checkpointer::bump_seq(&mut ck).unwrap();
-    assert_ne!(
-        w.sqlite.salts(),
-        first.0,
-        "the second bump restarted the WAL"
-    );
-    w.sync_model_at(0);
-    let end = WalOffset::from_frame_index(first.1, w.sqlite.page_size()).get();
-    assert!(
-        w.model.find(first.0, end, 0).is_some(),
-        "the first bump is a commit"
-    );
-    assert!(w.model_matches_sqlite());
-}
-
 #[test]
 fn a_vacuum_to_a_new_page_size_restarts_the_model_on_the_new_image() {
     let mut w = world();
