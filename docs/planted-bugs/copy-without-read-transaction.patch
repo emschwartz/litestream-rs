@@ -1,0 +1,20 @@
+diff --git a/crates/sqlite/src/pages.rs b/crates/sqlite/src/pages.rs
+index 0c1c914bb..eb36a636a 100644
+--- a/crates/sqlite/src/pages.rs
++++ b/crates/sqlite/src/pages.rs
+@@ -241,7 +241,7 @@ impl PageSource for Sqlite {
+ 
+     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
+         let mut inner = self.lock();
+-        inner.ensure_read_lock_held()?;
++        inner.end_read()?;
+         let size = inner.page_size().get();
+         if u32::try_from(buf.len()) != Ok(size) {
+             return Err(SourceError::Io(io::ErrorKind::InvalidInput));
+@@ -318,4 +318,4 @@ mod tests {
+             Some(u64::from(u32::MAX - 1) * 65536)
+         );
+     }
+-}
++}
+\ No newline at end of file

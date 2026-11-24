@@ -3,9 +3,9 @@
 //! The soak gate ([`crate::marks::gate`]) requires every drawn app action point
 //! ([`crate::domain::points`]) and every drawn error cell to be reached. A random history
 //! reaches a point only when it arms the app's action in the one tick that makes the engine's
-//! call, and several calls are rare: the engine takes the write lock only at the end of a
-//! TRUNCATE, reads the page count only for a snapshot that finds nothing in the WAL, and reads
-//! pages only for a snapshot. Measured over 6,000 seeds, the rarest of these points ran
+//! call, and several calls are rare: the engine copies the database after a TRUNCATE only
+//! when the TRUNCATE moved the WAL, reads the page count only for a snapshot that finds nothing
+//! in the WAL, and reads pages only for a snapshot. Measured over 6,000 seeds, the rarest of these points ran
 //! 0 to 3 times per 1,000 seeds, so a soak of 1,600 seeds left each at zero about as often as
 //! it reached it.
 //!
@@ -18,10 +18,10 @@
 
 use std::num::NonZeroU32;
 
-use lsr_core::{SourceError, SourceOp};
+use lsr_core::SourceOp;
 
 use crate::domain::points::{Action, point_key};
-use crate::generate::{AppAt, AppOp, EnvFault, MetaOp, Op, WalOp};
+use crate::generate::{AppAt, AppOp, MetaOp, Op, WalOp};
 use crate::reach::Reach;
 use crate::run::{Opts, run_ops};
 use crate::seed::Seed;
@@ -40,8 +40,8 @@ enum Situation {
     /// As [`Self::PassiveDue`], with an app reader open that the armed action can end.
     PassiveDueWithReader,
     /// The TRUNCATE threshold is low, a reader held off the PASSIVE checkpoint that tried first,
-    /// and the reader is gone: the next tick truncates the WAL and snapshots it under the write
-    /// lock.
+    /// and the reader is gone: the next tick truncates the WAL and snapshots the database, with
+    /// no lock that keeps the application's commits out.
     TruncateDue,
     /// The engine is down, its newest staged file is gone and the WAL's header is torn: the
     /// next tick boots, finds nothing readable in the WAL and snapshots from the database file,
@@ -193,7 +193,7 @@ fn point(name: &'static str, situation: Situation, call: SourceOp, op: AppOp) ->
 pub fn coverage() -> Vec<Coverage> {
     let passive = AppOp::Checkpoint(OtherProcessMode::Passive);
     let restart = AppOp::Checkpoint(OtherProcessMode::Restart);
-    let mut all = vec![
+    vec![
         point(
             "reader_begins_before_a_snapshot_reads_a_page",
             Situation::SnapshotRequested,
@@ -243,9 +243,9 @@ pub fn coverage() -> Vec<Coverage> {
             AppOp::ReaderEnd,
         ),
         point(
-            "commit_before_the_write_lock",
+            "commit_while_the_boundary_snapshot_reads_a_page",
             Situation::TruncateDue,
-            SourceOp::BeginWriteLock,
+            SourceOp::ReadPage,
             AppOp::Commit {
                 pages: 1,
                 grow: false,
@@ -257,26 +257,5 @@ pub fn coverage() -> Vec<Coverage> {
             SourceOp::PageCount,
             AppOp::DeleteWal,
         ),
-    ];
-    all.push(disk_full_at_the_write_lock());
-    all
-}
-
-/// The write lock fails for lack of disk, in the tick that takes it.
-fn disk_full_at_the_write_lock() -> Coverage {
-    let situation = Situation::TruncateDue;
-    let mut ops = situation.setup();
-    ops.push(Op::EnvFault(EnvFault::Source(
-        SourceOp::BeginWriteLock,
-        SourceError::DiskFull,
-    )));
-    ops.push(Op::Tick);
-    ops.extend(situation.after());
-    ops.extend(vec![Op::Tick; 6]);
-    Coverage {
-        name: "disk_full_at_the_write_lock",
-        truncate_pages: situation.truncate_pages(),
-        ops,
-        keys: vec!["cell.source.BeginWriteLock.DiskFull.hit".to_owned()],
-    }
+    ]
 }

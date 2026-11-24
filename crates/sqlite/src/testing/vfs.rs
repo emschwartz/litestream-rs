@@ -221,6 +221,24 @@ struct State {
     /// Per open database file (its `sqlite3_file` address), its path and where the unix VFS
     /// mapped region 0 of its wal-index: live from `xShmMap` until that file's `xShmUnmap`.
     shm: BTreeMap<usize, (Option<usize>, usize)>,
+    /// What [`FaultVfs::after_next_wal_truncate`] armed.
+    after_truncate: Option<AfterTruncate>,
+}
+
+/// A closure armed to run once, in the first wal-index lock request after the next truncate of a
+/// WAL to nothing.
+struct AfterTruncate {
+    run: Box<dyn FnOnce() + Send>,
+    /// Whether that truncate has happened.
+    truncated: bool,
+}
+
+impl std::fmt::Debug for AfterTruncate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AfterTruncate")
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -605,6 +623,7 @@ impl FaultVfs {
                 lying_sync: false,
                 lost: BTreeMap::new(),
                 shm: BTreeMap::new(),
+                after_truncate: None,
             }),
         }));
         let vfs = Self { shared };
@@ -658,6 +677,19 @@ impl FaultVfs {
     /// Schedules `fault`; its count starts now.
     pub fn arm(&self, fault: Fault) {
         self.shared.lock().pending.push(Pending { fault, seen: 0 });
+    }
+
+    /// Runs `run` once, at the start of the first wal-index lock request (by any connection)
+    /// after a WAL is next truncated to nothing. After a TRUNCATE checkpoint that is the moment
+    /// its connection has released every lock and not yet begun its next read: a commit made
+    /// there lands between a checkpoint and the read transaction retaken after it, inside one
+    /// call into SQLite. Nothing is held while `run` runs, so it may use other connections
+    /// through this VFS; their own lock requests do not run it again.
+    pub fn after_next_wal_truncate(&self, run: impl FnOnce() + Send + 'static) {
+        self.shared.lock().after_truncate = Some(AfterTruncate {
+            run: Box::new(run),
+            truncated: false,
+        });
     }
 
     /// Drops every fault not fired yet.
@@ -1202,7 +1234,15 @@ extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: i64) -> c_int {
     }
     remember(file, u64::try_from(size).unwrap_or(0), u64::MAX);
     // SAFETY: SQLite's own argument, passed on to the unix file under the header.
-    unsafe { truncate(real_of(file), size) }
+    let rc = unsafe { truncate(real_of(file), size) };
+    if rc == ffi::SQLITE_OK
+        && size == 0
+        && kind == FileKind::Wal
+        && let Some(armed) = shared.lock().after_truncate.as_mut()
+    {
+        armed.truncated = true;
+    }
+    rc
 }
 
 #[expect(unsafe_code, reason = "the io method xSync")]
@@ -1341,6 +1381,19 @@ extern "C" fn x_shm_lock(
     flags: c_int,
 ) -> c_int {
     let (shared, kind, path) = header(file);
+    if flags & ffi::SQLITE_SHM_UNLOCK == 0 {
+        let armed = {
+            let mut state = shared.lock();
+            if state.after_truncate.as_ref().is_some_and(|a| a.truncated) {
+                state.after_truncate.take()
+            } else {
+                None
+            }
+        };
+        if let Some(armed) = armed {
+            (armed.run)();
+        }
+    }
     // Only a request can fail: SQLite ignores what an unlock returns, so a failed unlock would
     // leave a lock held that no connection knows it holds.
     if flags & ffi::SQLITE_SHM_UNLOCK == 0

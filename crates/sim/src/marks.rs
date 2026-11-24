@@ -237,10 +237,6 @@ classes! {
     HoldSecondWriter = "Hold.SecondWriter", Lasting;
 }
 
-const WRITE_LOCK_RARE: &str = "the engine takes the write lock only after a TRUNCATE that moved the WAL, and an app \
-     step arms for one tick: ran 0 to 2 times in 6000 seeds (the one required, \
-     BeginWriteLock.Commit, has a coverage scenario); a finding";
-
 const PAGE_COUNT_RARE: &str = "the engine reads the page count only for a snapshot that finds nothing in the WAL (a \
      torn header at boot; the repair D173 removed read it too), and an app step arms for one \
      tick: ran 0 or 1 times in 6000 seeds (the one required, PageCount.DeleteWal, has a \
@@ -275,36 +271,8 @@ pub const EXEMPT: &[(&str, &str)] = &[
         "drawn WAL damage is not judged while in place; Hold.Wal judges this shape",
     ),
     // Error-domain cells and app action points the soak rarely or never reaches (measured over
-    // 6000 seeds with the nightly's TRUNCATE law, docs/decisions.md D112). The engine takes the
-    // write lock only for the snapshot after a TRUNCATE that moved the WAL; an injection queued
-    // for the lock waits for one, an app step arms for one tick. Marks that rare and required
-    // anyway are reached by `lsr_sim::scenario::coverage`.
-    ("cell.source.EndWriteLock.Io.hit", WRITE_LOCK_RARE),
-    ("point.BeginWriteLock.ReaderBegin.ran", WRITE_LOCK_RARE),
-    ("point.BeginWriteLock.ReaderEnd.ran", WRITE_LOCK_RARE),
-    (
-        "point.BeginWriteLock.Checkpoint.Passive.ran",
-        WRITE_LOCK_RARE,
-    ),
-    (
-        "point.BeginWriteLock.Checkpoint.Restart.ran",
-        WRITE_LOCK_RARE,
-    ),
-    (
-        "point.BeginWriteLock.Checkpoint.Truncate.ran",
-        WRITE_LOCK_RARE,
-    ),
-    ("point.BeginWriteLock.DeleteWal.ran", WRITE_LOCK_RARE),
-    ("point.EndWriteLock.Commit.ran", WRITE_LOCK_RARE),
-    ("point.EndWriteLock.ReaderBegin.ran", WRITE_LOCK_RARE),
-    ("point.EndWriteLock.ReaderEnd.ran", WRITE_LOCK_RARE),
-    ("point.EndWriteLock.Checkpoint.Passive.ran", WRITE_LOCK_RARE),
-    ("point.EndWriteLock.Checkpoint.Restart.ran", WRITE_LOCK_RARE),
-    (
-        "point.EndWriteLock.Checkpoint.Truncate.ran",
-        WRITE_LOCK_RARE,
-    ),
-    ("point.EndWriteLock.DeleteWal.ran", WRITE_LOCK_RARE),
+    // 6000 seeds with the nightly's TRUNCATE law, docs/decisions.md D112). Marks that rare and
+    // required anyway are reached by `lsr_sim::scenario::coverage`.
     // The engine reads the page count only for a snapshot that scans nothing, and an app step
     // arms for one tick: Commit ran once in 6000 seeds and the others in none.
     ("point.PageCount.Commit.ran", PAGE_COUNT_RARE),

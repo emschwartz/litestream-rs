@@ -96,13 +96,16 @@ pub fn point_of(at: AppAt, op: AppOp) -> Option<String> {
     }
 }
 
-/// The cell of `call` and `action`. Every pair is drawn: the app can act right before any of
-/// the engine's calls, and an action SQLite refuses there (a commit while the engine holds the
-/// barrier or the write lock, a checkpoint while the app is in a transaction) is the point
-/// exercised, not a reason to leave it out. A new call or action breaks the build here until
-/// someone decides its cells.
+/// The cell of `call` and `action`. Every pair of a call the engine makes is drawn: the app
+/// can act right before any of them, and an action SQLite refuses there (a commit while the
+/// engine holds the barrier, a checkpoint while the app is in a transaction) is the point
+/// exercised, not a reason to leave it out. The write lock's calls are never made. A new call or
+/// action breaks the build here until someone decides its cells.
 #[must_use]
 pub const fn point_cell(call: SourceOp, action: Action) -> Cell {
+    if let SourceOp::BeginWriteLock | SourceOp::EndWriteLock = call {
+        return Cell::Impossible(super::NOT_CALLED);
+    }
     match (call, action) {
         (
             SourceOp::Open
