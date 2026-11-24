@@ -2250,12 +2250,14 @@ mod once;
 mod once_retention;
 mod pages;
 mod rejected_snapshot;
+mod requested_snapshot_after_restart;
 mod rewound;
 mod second_writer;
 mod stamp;
 mod tasks;
 mod vouch;
 mod wal_barrier;
+mod wal_truncated_mid_step;
 mod witness;
 mod work;
 
