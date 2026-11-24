@@ -611,6 +611,18 @@ impl World {
     /// taken to cover it.
     pub fn sync_model_at(&mut self, at: usize) {
         let written = self.sqlite.take_written();
+        // Each commit of the engine's own, not only the one the tick left the WAL at: a tick can
+        // make one, take a snapshot that ends on it, restart the WAL and make another. A file
+        // that ends on the first is a commit's end too.
+        // A bump rewrites page 1 as it is, so each leaves the newest commit's image.
+        for commit in self.sqlite.take_engine_commits() {
+            self.retire_generation(commit.salts);
+            if !self.newest_ends_at(commit) {
+                let size = self.model.newest_image().db_size();
+                self.model.commit(&[], size, commit, at);
+                self.log_history();
+            }
+        }
         let frames = self.sqlite.mx_frame();
         let salts = self.sqlite.salts();
         self.retire_generation(salts);
@@ -618,12 +630,7 @@ impl World {
             return;
         }
         let end = WalOffset::from_frame_index(frames, self.sqlite.page_size());
-        let known = self
-            .model
-            .newest_commit()
-            .and_then(|id| self.model.rec(id))
-            .is_some_and(|rec| rec.salts == salts && rec.end.get() == end.get());
-        if !known {
+        if !self.newest_ends_at(AppCommit { salts, end }) {
             let (pages, size) = written.map_or_else(
                 || (Vec::new(), self.sqlite.db_size()),
                 |real| (real.pages, real.db_size),
@@ -632,6 +639,14 @@ impl World {
                 .commit(&pages, size, AppCommit { salts, end }, at);
             self.log_history();
         }
+    }
+
+    /// Whether the model's newest commit is the one `commit` names.
+    fn newest_ends_at(&self, commit: AppCommit) -> bool {
+        self.model
+            .newest_commit()
+            .and_then(|id| self.model.rec(id))
+            .is_some_and(|rec| rec.salts == commit.salts && rec.end.get() == commit.end.get())
     }
 
     /// The driver starts: see `SimSqlite::start_driver`. The bump frame it may
