@@ -30,7 +30,7 @@ fn trips() -> [Trip; 3] {
     ]
 }
 
-/// The design's table (`docs/proposals/fail-stop.md`, "Decision"), every cell.
+/// The design's table, every cell.
 #[test]
 fn the_gate_follows_the_table() {
     let stop = Trip::Stopped(StopCause::OtherWriter);

@@ -1,6 +1,5 @@
 //! Fail-stop: whether replication's state holds or stops the application (`if-replication-stops`,
-//! issue #115; the design is `docs/proposals/fail-stop.md`, the trade-offs `docs/decisions.md`
-//! D14 to D22).
+//! issue #115; the trade-offs are in `docs/decisions.md` D14 to D22).
 //!
 //! Three things trip it, and nothing else ([`Trip`]):
 //!

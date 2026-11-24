@@ -26,7 +26,7 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     # webpki-roots (Mozilla's roots: the S3 store's fallback when the system holds none,
-    # as Go's x509roots/fallback; docs/plans/phase-1-reading.md, ruling F4 as amended) and
+    # as Go's x509roots/fallback) and
     # webpki-root-certs (rustls-platform-verifier's roots on wasm only, in the lock).
     "CDLA-Permissive-2.0",
     "ISC",

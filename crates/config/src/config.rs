@@ -482,8 +482,7 @@ impl S3Settings {
 }
 
 /// What the operator states about the application's readers: TRUNCATE waits for every reader, so it
-/// runs only when the operator says the application holds no long readers
-/// (docs/plans/phase-4-sidecar.md, the TRUNCATE section).
+/// runs only when the operator says the application holds no long readers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppReaders {
     /// Nothing stated (the default): litestream-rs never checkpoints with TRUNCATE.

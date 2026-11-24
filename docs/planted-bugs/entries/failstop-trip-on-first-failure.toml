@@ -1,4 +1,4 @@
-# Fail-stop (if-replication-stops, docs/proposals/fail-stop.md section 2): each entry is one of the
+# Fail-stop (if-replication-stops): each entry is one of the
 # design's planted bugs, re-planted against the feature as it landed.
 name = "failstop-trip-on-first-failure"
 fix = "d14e6e4"

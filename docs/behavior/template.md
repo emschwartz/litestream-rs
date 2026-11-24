@@ -433,7 +433,7 @@ The compat tests are `#[ignore]` in the gate and run by `just compat`, which CI 
 
 ### Fail-stop
 
-`if-replication-stops` (`report`, `hold-start` by default, `stop-app`) and `max-unreplicated-age` (`docs/proposals/fail-stop.md`, decisions D14 to D22 and D80 to D83). Three things trip it and nothing else; what a trip does depends on the mode and on whether the application was released yet. The library refuses commits through a commit hook; `-exec` holds or stops the child; plain sidecar answers 503.
+`if-replication-stops` (`report`, `hold-start` by default, `stop-app`) and `max-unreplicated-age`. Three things trip it and nothing else; what a trip does depends on the mode and on whether the application was released yet. The library refuses commits through a commit hook; `-exec` holds or stops the child; plain sidecar answers 503.
 
 <!-- rows: Fail-stop -->
 

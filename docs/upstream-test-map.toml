@@ -20,7 +20,7 @@ v03-layout = "The v0.3 generations/ layout (snapshots and WAL segments under gen
 control-socket-cli = "A CLI command that talks to the running daemon over the control socket; the control socket is not in v1 (docs/PLAN.md section 1)."
 control-socket-server = "The control socket and its HTTP server (register, unregister, start, stop, sync, info, list, status over the socket) are not in v1 (docs/PLAN.md section 1, 'Not in v1')."
 restore-follow = "Restore -follow (a continuously updated local read replica and its TXID file) is a read replica, which is not in v1 (docs/PLAN.md section 1: the Go VFS stays in use for reading)."
-watch-dir = "Watching a directory for databases added or removed at run time (`watch: true`) is not in v1: a `dir` entry is scanned once at start and `watch: true` is refused at load (docs/plans/phase-4-sidecar.md, the directory ruling; lsr-config::config::map::watching_a_dir_is_refused_at_load)."
+watch-dir = "Watching a directory for databases added or removed at run time (`watch: true`) is not in v1: a `dir` entry is scanned once at start and `watch: true` is refused at load."
 backend-oss = "Alibaba OSS backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)."
 go-ltx-spill = "Go-only: ltx's spill-to-disk buffering for large encodes and compactions. Rust bounds memory instead: the encoder keeps only the varint index (at most 30 bytes a page, crates/ltx/src/encoder.rs module doc) and compaction streams with a stated bound (lsr-core compact::tests::thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound)."
 s3-sse = "S3 server-side encryption (SSE-C, SSE-KMS) is a Go store option v1 does not offer: lsr-store-s3's configuration is endpoint, region, path style and part size (crates/store-s3/src/config.rs module doc), and D6 (docs/PLAN.md section 8) adds nothing beyond what the contract needs."
@@ -39,12 +39,12 @@ provider-hosts = "Rust tells apart only Tigris, AWS, R2 and MinIO-like hosts (cr
 backend-gcs = "Google Cloud Storage backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)."
 go-ltx-error = "Go-only: the LTXError type and its operator hints, which point at `litestream reset` and auto-recover. Auto-recover is not in v1 (docs/PLAN.md section 1); Rust errors are typed enums per crate (lsr-core fault::tests::from_staging_names_the_local_fault_for_every_store_error)."
 go-aws-sdk = "Go-only: configuration of the AWS SDK for Go (its retryer, uploader manager, checksum middleware or HTTP client). lsr-store-s3 signs its own requests with rusty-s3 over ureq or reqwest and has no SDK to configure."
-go-soak = "A long-running soak of the Go binary (minutes to hours, Docker or cloud credentials). Rust's counterpart is the simulator's nightly rotating seeds (just sim-nightly) and the 72-hour Tigris soak run by hand (docs/plans/phase-3-syncing.md, the Tigris soak); neither is a test in this listing."
+go-soak = "A long-running soak of the Go binary (minutes to hours, Docker or cloud credentials). Rust's counterpart is the simulator's nightly rotating seeds (just sim-nightly) and the 72-hour Tigris soak run by hand; neither is a test in this listing."
 go-test-helper = "Go-only: a test of upstream's own integration-test helper code, with no product behaviour behind it."
 go-replica-helper = "Go-only helper: Replica.TimeBounds computes a replica's oldest and newest created-at times for restore -timestamp. Rust's as-of planner answers the restore question directly (lsr-core::plan_lazy plan_as_of_equals_the_exact_planner)."
 go-file-resolver = "Go-only: resolving a file:// replica path written with the pre-0.5 percent-escaping. The Rust CLI takes a directory path as given."
 backend-azure = "Azure Blob Storage backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)."
-go-reset = "`litestream reset` is one of Go's subcommands v1 does not have (docs/plans/phase-4-sidecar.md, out of scope: only `replicate` is the daemon's; `lsr restore` and `lsr verify` keep their own flags). The replicator recovers from a missing staging directory by itself (lsr-sim::faults meta_dir_deleted_mid_run)."
+go-reset = "`litestream reset` is one of Go's subcommands v1 does not have. The replicator recovers from a missing staging directory by itself (lsr-sim::faults meta_dir_deleted_mid_run)."
 go-library-api = "Go library API (DB.EnsureExists) with no caller in cmd/ at 041a8c3. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice."
 go-ltx-encode = "Go-only: the `ltx encode-db` debugging command (a database file to a snapshot LTX file, written over a chosen output). Rust snapshots only from a live WAL source (lsr-core snapshot::tests::snapshot_equals_model) and has no such command."
 go-encoder = "Go-only: the encoder's runtime state machine. Rust's Encoder takes the header in Encoder::new and finish(self) consumes it (crates/ltx/src/encoder.rs), so a page before the header or a call after close does not compile."
@@ -591,7 +591,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestDB_WriteLTXFromWALHonorsCanceledContext" = { reason = "@go-context" }
 "TestDB_WriteLTXFromWAL_FillsMissingGrowthPagesFromDB" = { counterpart = "lsr-core::sync::tests::grown_pages_come_from_the_database_file" }
 "TestDB_WriteLTXFromWAL_PageGrowthCoverage" = { counterpart = ["lsr-core::sync::tests::grown_pages_come_from_the_database_file", "lsr-compat::compat::live_matches_sim::commits_overwrites_and_growth"] }
-"TestDB_releaseReadLock_DoubleRollback" = { reason = "Go-only: database/sql reports an error when a transaction it already rolled back is rolled back again. The Rust SQLite backend will hold the read transaction on a connection it owns (docs/plans/phase-3-syncing.md, the rusqlite backend), with one owner for ending it." }
+"TestDB_releaseReadLock_DoubleRollback" = { reason = "Go-only: database/sql reports an error when a transaction it already rolled back is rolled back again. The Rust SQLite backend will hold the read transaction on a connection it owns, with one owner for ending it." }
 "TestIsDiskFullError" = { counterpart = ["lsr-core::fault::tests::from_staging_names_the_local_fault_for_every_store_error", "lsr-core::store::tests::io_errors_classify_without_inventing_not_found"] }
 "TestIsSQLiteBusyError" = { counterpart = ["lsr-core::checkpoint::tests::a_busy_passive_reports_busy", "lsr-core::fault::tests::sqlite_busy_retries"] }
 "TestReplicaMonitor_DrainsLimitedBacklogWithoutWaitingForInterval" = { counterpart = "lsr-core::upload::tests::files_per_tick_is_honoured_and_asks_to_step_again" }
@@ -750,7 +750,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestFsyncDir_NotExist" = { counterpart = "lsr-store-fs::tests::a_failed_directory_sync_fails_the_upload_before_it_can_commit" }
 
 ["litestream/internal/internal_windows_test.go"]
-"TestFsyncDir_Windows" = { reason = "Go-only: Windows directory fsync. The Rust port targets Unix only (the SQLite backend reads through the unix VFS, docs/plans/phase-3-syncing.md)." }
+"TestFsyncDir_Windows" = { reason = "Go-only: Windows directory fsync. The Rust port targets Unix only (the SQLite backend reads through the unix VFS)." }
 
 ["litestream/internal/log_test.go"]
 "TestCleanSourcePath" = { reason = "@go-slog" }
@@ -1219,7 +1219,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestStore_SyncDB_ConcurrentCapture" = { reason = "Go-only: fairness and context handling of Go mutexes shared between goroutines (the exec, sync and checkpoint locks). The Rust engine is one actor driven tick by tick with no shared locks (docs/PLAN.md section 3)." }
 
 ["litestream/store_test.go"]
-"TestStore_Close_StopsMonitorsBeforeClosingDBs" = { reason = "v1's shutdown drains what is in flight up to `shutdown-sync-timeout` instead of cancelling it (docs/plans/phase-4-sidecar.md, the daemon): a drain past its deadline stops (lsr-core::actor::tests::drain_deadline_stops) and a second signal cuts it at once (lsr-cli::cli::daemon::a_second_signal_cuts_the_drain)." }
+"TestStore_Close_StopsMonitorsBeforeClosingDBs" = { reason = "v1's shutdown drains what is in flight up to `shutdown-sync-timeout` instead of cancelling it: a drain past its deadline stops (lsr-core::actor::tests::drain_deadline_stops) and a second signal cuts it at once (lsr-cli::cli::daemon::a_second_signal_cuts_the_drain)." }
 "TestStore_CompactDB" = { counterpart = "lsr-core::maintain::tests::level_one_goes_before_level_two_and_both_before_the_snapshot" }
 "TestStore_CompactDB/DBNotReady" = { counterpart = "lsr-core::maintain::tests::an_empty_replica_with_nothing_published_has_nothing_to_do" }
 "TestStore_CompactDB/L1" = { counterpart = "lsr-core::maintain::tests::level_one_compacts_the_whole_source_when_the_destination_is_empty" }
@@ -1227,8 +1227,8 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestStore_CompactDB/Snapshot" = { counterpart = "lsr-core::maintain::tests::a_first_snapshot_is_due_at_once" }
 "TestStore_CompactDB/SnapshotNoProgress" = { counterpart = "lsr-core::maintain::tests::an_idle_database_writes_no_snapshot_however_old_the_last_one" }
 "TestStore_Integration" = { counterpart = ["lsr-sim::sim::fixed_seeds::fixed::seeds_1_to_8", "lsr-compat::compat::live_source::live_sync_chain_restores"] }
-"TestStore_Open_InitError" = { reason = "A deliberate departure (docs/plans/phase-4-sidecar.md, ruling R7): a database whose replica fails to open or start leaves the others replicating, where Go's Store refuses to open at all, and the exit code says so at shutdown (lsr-cli::cli::daemon::one_database_failing_to_start_leaves_the_other_replicating)." }
-"TestStore_Open_InitErrorDoesNotOpenDBs" = { reason = "A deliberate departure (docs/plans/phase-4-sidecar.md, ruling R7): a database whose replica fails to open or start leaves the others replicating, where Go's Store refuses to open at all, and the exit code says so at shutdown (lsr-cli::cli::daemon::one_database_failing_to_start_leaves_the_other_replicating)." }
+"TestStore_Open_InitError" = { reason = "A deliberate departure: a database whose replica fails to open or start leaves the others replicating, where Go's Store refuses to open at all, and the exit code says so at shutdown (lsr-cli::cli::daemon::one_database_failing_to_start_leaves_the_other_replicating)." }
+"TestStore_Open_InitErrorDoesNotOpenDBs" = { reason = "A deliberate departure: a database whose replica fails to open or start leaves the others replicating, where Go's Store refuses to open at all, and the exit code says so at shutdown (lsr-cli::cli::daemon::one_database_failing_to_start_leaves_the_other_replicating)." }
 "TestStore_SetRetentionEnabled" = { counterpart = ["lsr-core::maintain::retain::tests::switch::retention_is_enforced_by_default_as_in_go", "lsr-core::maintain::retain::tests::switch::switching_retention_back_on_resumes_deletes_under_the_usual_rules", "lsr-sim::sim::retention::switching_retention_on_in_a_running_engine_resumes_deletes"] }
 "TestStore_SnapshotInterval_Default" = { counterpart = "lsr-core::maintain::tests::go_defaults_run_through_new_and_match_go" }
 "TestStore_Validate" = { counterpart = "lsr-core::verify::tests::a_clean_replica_has_no_findings_at_either_depth" }

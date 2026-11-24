@@ -1,6 +1,6 @@
 //! Every key Go's `Config` defines at 041a8c3 (`cmd/litestream/main.go`,
 //! `server.go`, `internal/log.go`), section by section, with what Go reads it
-//! as and how litestream-rs treats it (docs/plans/phase-4-sidecar.md, the config section):
+//! as and how litestream-rs treats it:
 //! implemented, off-only unless asked for, or a knob with no effect. One table
 //! per Go struct; `ReplicaSettings` is inlined both at the top level and in
 //! each replica, as Go inlines it.
@@ -315,7 +315,7 @@ const AGE: &[Key] = &[
 ];
 
 /// The one key Go does not define, which holds every Rust-only setting: Go ignores it, so the
-/// same file still starts Go and rolling back is a binary swap (docs/plans/phase-4-sidecar.md).
+/// same file still starts Go and rolling back is a binary swap.
 const RUST: &[Key] = &[
     key("app-readers", Str, Implemented),
     key("app-autocheckpoint", Str, Implemented),

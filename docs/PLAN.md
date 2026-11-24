@@ -19,7 +19,7 @@ Build an in-process Rust library that replicates a WAL-mode SQLite database to S
 - Tolerant reader: both page encodings (LZ4 frame, written by v0.5.0 to v0.5.15; LZ4 block, written from v0.5.16), files with and without tracked checksums, non-zero reserved bytes, unknown sibling objects such as `lock.json`.
 - Strict writer: LZ4 block with the size-prefix flag, pages strictly ascending and never above commit, lock page never encoded, snapshots contiguous from page 1, reserved bytes zero. v1 writes the `NoChecksum` flag exactly as Go does (decision D2).
 - Reader floor for Rust-written files: Go v0.5.16 (older builds reject block-encoded pages; measured).
-- Known Go bug for handover to Go: releases through v0.5.18 can replicate WAL frames past the wal-index's committed end that a writer stopped mid-commit left (#38, fixed upstream in bcd69ae, in no release yet; `docs/plans/phase-3-syncing.md`).
+- Known Go bug for handover to Go: releases through v0.5.18 can replicate WAL frames past the wal-index's committed end that a writer stopped mid-commit left (#38, fixed upstream in bcd69ae, in no release yet).
 - Equality is defined on restored database pages (page hashes plus rolling checksum), never on LTX bytes: `lz4_flex` matched Go's compressor on 14 of 40 frames.
 
 **Not in v1:** the v0.3 `generations/` layout, backends other than S3 and a local directory, a VFS read replica (the Go VFS stays in use), control socket, heartbeat, runtime auto-recover (suspected lineage-fork bug upstream; do not copy), multi-writer leases. A separate-process mode (a sidecar, as Go runs) is phase 4, after the library.
@@ -95,7 +95,7 @@ enum SnapshotCause {
 }
 ```
 
-Exact signatures live in `docs/plans/phase-2-writing.md`, task 4.
+Exact signatures live in the code.
 
 `SnapshotCause` is also the event field that replaces today's log grep for forced re-snapshots.
 
@@ -160,13 +160,13 @@ Workspace, lint set, CI, pinned Go binaries. Settle what the research left unver
 - A WAL checksum or salt mismatch below the committed end is `Fault::WalCorruptBelowCommitted` with policy Stop, never end-of-WAL (Go returns EOF there, wal_reader.go:188). LTX pages are taken from the verified read; there is no second, unchecked read of a page.
 - Page checksum table: page number to CRC, fed by verified WAL frames and seeded by the first snapshot. A database-file page that does not match is never uploaded. The policy for a mismatch and for an unexplained WAL rewind is fixed in the phase 3 task plan (P1, P2).
 - Real-SQLite fault suite and all four compat directions, including Go, Rust, Go handover on one prefix with no forced snapshot.
-**Exit:** the fault suite and the upstream test map are green; handover in both directions happens without a snapshot when the WAL is intact; an alternation test switches Go and Rust on one prefix repeatedly, with a SIGKILL at a random point in each handover (mid-upload, mid-compaction, with local files not yet uploaded), and every switch is a plain restart with no forced snapshot and no restore mismatch (one exception, for Go builds without upstream bcd69ae, every release through v0.5.18: Go's boot transaction may hold a WAL tail SQLite never committed, left by a Rust process stopped mid-commit, and the test accepts that one restore when it equals exactly the tail's state; known Go bug #38, `docs/plans/phase-3-syncing.md`. A minimum Go version for handover will be named once upstream tags a release containing bcd69ae); a 72-hour soak against real Tigris with a synthetic writer shows zero oracle failures and the resource properties holding.
+**Exit:** the fault suite and the upstream test map are green; handover in both directions happens without a snapshot when the WAL is intact; an alternation test switches Go and Rust on one prefix repeatedly, with a SIGKILL at a random point in each handover (mid-upload, mid-compaction, with local files not yet uploaded), and every switch is a plain restart with no forced snapshot and no restore mismatch (one exception, for Go builds without upstream bcd69ae, every release through v0.5.18: Go's boot transaction may hold a WAL tail SQLite never committed, left by a Rust process stopped mid-commit, and the test accepts that one restore when it equals exactly the tail's state; known Go bug #38. A minimum Go version for handover will be named once upstream tags a release containing bcd69ae); a 72-hour soak against real Tigris with a synthetic writer shows zero oracle failures and the resource properties holding.
 
 ### Phase 4: the sidecar (a separate process, as Go runs)
 Added 2026-11-20 at the owner's request. A `litestream`-style daemon over the same library, so an application that cannot embed Rust (or runs Go's sidecar today) can switch by replacing a binary.
 - `lsr replicate` grown into a daemon: one process, many databases, each its own actor thread; signals for reload and shutdown (`final_sync` on SIGTERM within a deadline); `health()` exposed for the application (a status file or a local HTTP endpoint, decided in the phase 4 task plan).
 - Configuration: whether to read Go's `litestream.yml` as is (drop-in) or a stricter subset that refuses unknown keys (design goal: "disabled" is not zero), decided in the phase 4 task plan.
-- The read lock across processes: a SQLite read transaction in the sidecar works as in phase 3 (ruling P0); POSIX locks conflict across processes, so the in-process descriptor hazard of section 6 is gone, and the pure-Rust read lock of #9 is simpler here (`docs/notes/pure-rust-read-lock.md`, deployment B).
+- The read lock across processes: a SQLite read transaction in the sidecar works as in phase 3 (ruling P0); POSIX locks conflict across processes, so the in-process descriptor hazard of section 6 is gone, and the pure-Rust read lock of #9 is simpler here.
 - Checkpoints from outside the application: the application must still run with `wal_autocheckpoint = 0`, which a sidecar cannot set for it (`PERSIST_WAL` is no longer asked of an application, decisions D123); the phase 4 plan says how that is checked and what happens when the application checkpoints anyway (phase 3's outside-checkpoint cases already cover the replication side).
 - Compatibility: the phase 3 alternation test, run as Go sidecar to Rust sidecar and back on one prefix.
 **Exit:** the alternation test and the phase 3 fault suite pass with the library in a separate process; a Go user's config and meta directory start the Rust sidecar with no snapshot when the WAL is intact.

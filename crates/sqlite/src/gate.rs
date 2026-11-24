@@ -1,5 +1,5 @@
 //! The fail-stop commit gate: a commit hook that refuses an application connection's commits
-//! while a flag is set (`lsr_core::failstop`; `docs/proposals/fail-stop.md` section 3).
+//! while a flag is set (`lsr_core::failstop`).
 //!
 //! SQLite calls the hook (`sqlite3_commit_hook`) before every commit on the connection; a
 //! non-zero return turns the COMMIT into a ROLLBACK, and the application's COMMIT fails with

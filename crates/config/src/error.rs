@@ -77,7 +77,7 @@ impl fmt::Display for KeyPath {
 }
 
 /// How litestream-rs treats a key Go defines: implemented, accepted only at its off value, a knob with no
-/// effect, or refused (docs/plans/phase-4-sidecar.md, the config section).
+/// effect, or refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyClass {
     /// Go knows it and litestream-rs does what it says.
