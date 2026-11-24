@@ -423,7 +423,7 @@ fn parse_s3_forms() {
     assert_eq!(
         usage("files --replica s3://bucket"),
         UsageError::BadReplicaUrl {
-            reason: ReplicaProblem::S3(ConfigError::BadPrefix)
+            reason: ReplicaProblem::NoSlashAfterBucket
         }
     );
     assert!(matches!(

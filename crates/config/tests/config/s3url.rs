@@ -72,8 +72,11 @@ fn each_bad_shape_is_refused() {
     let cases = [
         ("not a url", ReplicaProblem::BadUrl),
         ("s3:///p", ReplicaProblem::BucketRequired),
-        ("s3://b", s3(ConfigError::BadPrefix)),
-        ("s3://b?region=eu-west-1", s3(ConfigError::BadPrefix)),
+        ("s3://b", ReplicaProblem::NoSlashAfterBucket),
+        (
+            "s3://b?region=eu-west-1",
+            ReplicaProblem::NoSlashAfterBucket,
+        ),
         ("s3://b/a%0Ab", s3(ConfigError::BadPrefix)),
         ("s3://b%20c/p", s3(ConfigError::BadBucket)),
         (

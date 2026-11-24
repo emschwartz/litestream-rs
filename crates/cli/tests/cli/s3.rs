@@ -151,7 +151,8 @@ fn credentials_come_from_a_shared_credentials_file() {
 fn a_bad_replica_url_is_a_usage_error_before_credentials_are_read() {
     let run = lsr_with(&["files", "--replica", "s3://bucket"], &[]);
     assert_eq!((run.code, run.stdout.as_str()), (64, ""));
-    assert!(run.stderr.contains("prefix"), "{}", run.stderr);
+    // The message says what to write, since Go accepts this URL.
+    assert!(run.stderr.contains("`s3://bucket/`"), "{}", run.stderr);
     let run = lsr_with(&["files", "--replica", "dir", "--region", "eu-west-1"], &[]);
     assert_eq!(run.code, 64);
 }
