@@ -407,3 +407,19 @@ fn an_age_trip_while_every_read_of_the_replica_lies_is_excused() {
         "no age trip was judged under the lie"
     );
 }
+
+
+/// A trip the judge accepted holds until the commits it tripped on reach the replica, not until
+/// the age falls under the bound (`lsr_core::failstop`, Clearing). A clock stepped back after
+/// the trip makes the age on the clock the engine reads shorter than the bound, and the engine's
+/// trip stands all the same: that is the module's rule, not a trip that came early.
+#[test]
+fn a_trip_stands_when_the_clock_steps_back_under_the_bound() {
+    let mut ops = vec![down(StoreOp::Upload, timeout(StoreOp::Upload)), commit(), Op::Tick];
+    ops.push(Op::ClockJump(BOUND + 10_000));
+    ops.extend(ticks(3));
+    ops.push(Op::ClockJump(-100_000));
+    ops.extend(ticks(3));
+    let report = run(&ops);
+    assert!(age_trips(&report) > 0, "{:?}", report.trips);
+}
