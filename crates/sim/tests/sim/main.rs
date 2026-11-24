@@ -17,6 +17,8 @@ mod differential;
 #[cfg(test)]
 mod dropped_created_at;
 #[cfg(test)]
+mod empty_replica_boot;
+#[cfg(test)]
 #[cfg(test)]
 #[cfg(test)]
 mod failstop;

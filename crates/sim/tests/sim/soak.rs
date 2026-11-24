@@ -14,10 +14,13 @@
 //! reach is summed, written as JSON to `LSR_SIM_REACH_OUT` when it is set
 //! (the nightly workflow uploads it), and judged by [`lsr_sim::marks::gate`].
 //! A fault class's required count that no seed reached fails the soak as a
-//! failing seed does.
+//! failing seed does. The marks too rare for a soak of a thousand seeds to reach reliably
+//! come from `lsr_sim::scenario::coverage`, run once ahead of the seeds; a scenario that stops
+//! reaching its mark fails the soak too.
 
 use std::time::{Duration, Instant};
 
+use lsr_sim::scenario::coverage;
 use lsr_sim::{Reach, Seed, Weights, nightly_base, replay_line, run};
 
 const STEPS: u32 = 300;
@@ -55,6 +58,17 @@ fn rotating_seeds() {
     let mut failed = Vec::new();
     let mut ran = 0_u64;
     let mut reach = Reach::default();
+    // The marks a thousand random seeds do not reliably reach, from short explicit histories.
+    let mut unreached = Vec::new();
+    for scenario in coverage() {
+        match scenario.run() {
+            Ok(reached) => reach.merge(&reached),
+            Err(why) => {
+                println!("{why}");
+                unreached.push(why);
+            }
+        }
+    }
     for n in base.. {
         if Instant::now() >= until {
             break;
@@ -84,6 +98,11 @@ fn rotating_seeds() {
     let gate = lsr_sim::marks::gate(&reach);
     write_reach(base, ran, &reach, &gate);
     assert!(failed.is_empty(), "failing seeds:\n{}", lines.join("\n"));
+    assert!(
+        unreached.is_empty(),
+        "coverage scenarios that no longer reach their marks:\n{}",
+        unreached.join("\n")
+    );
     assert!(
         gate.passed(),
         "the soak left required marks unreached: {gate:?}"

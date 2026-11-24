@@ -21,11 +21,17 @@ fn tally() {
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or(1);
+    // The sums below are of the seeds alone; the gate's verdict adds the coverage scenarios the
+    // soak adds, so its zeros are the soak's.
     let mut sum = Reach::default();
     let mut failed = Vec::new();
     for n in base..base.saturating_add(seeds) {
         let seed = Seed::new(n);
-        match run(seed, STEPS, &Weights::mixed(seed)) {
+        let mut weights = Weights::mixed(seed);
+        if std::env::var("LSR_SIM_NIGHTLY_LAWS").is_ok() {
+            weights = weights.with_nightly_laws(seed);
+        }
+        match run(seed, STEPS, &weights) {
             Ok(report) => sum.merge(&report.reach),
             Err(failure) => {
                 println!("FAILED {failure}");
@@ -38,6 +44,12 @@ fn tally() {
     }
     println!("{seeds} seeds from {base}, {} failed", failed.len());
     println!("required states at zero: {:?}", sum.missing());
+    for scenario in lsr_sim::scenario::coverage() {
+        match scenario.run() {
+            Ok(reached) => sum.merge(&reached),
+            Err(why) => println!("FAILED coverage scenario {why}"),
+        }
+    }
     let gate = lsr_sim::marks::gate(&sum);
     println!("gate zeros: {:?}", gate.zeros);
     println!("gate stale exemptions: {:?}", gate.stale);
