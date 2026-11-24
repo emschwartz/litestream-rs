@@ -20,6 +20,8 @@ mod limits;
 #[cfg(test)]
 mod minio;
 #[cfg(test)]
+mod provider;
+#[cfg(test)]
 #[path = "common/real.rs"]
 mod real;
 #[cfg(test)]
