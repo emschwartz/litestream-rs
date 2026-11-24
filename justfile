@@ -449,6 +449,56 @@ lazyfs cycles="50" *args:
     test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
     uv run scripts/lazyfs.py run --cycles {{cycles}} {{args}}
 
+# The real `lsr replicate` beside a real SQLite writer, its replica on MinIO behind Toxiproxy, under a
+# seeded menu of faults (kill -9, partitions, slow and cut transfers, the pinned Go beside it; LazyFS
+# power loss on Linux), judged by point-in-time restores (scripts/fault_rig.py). Needs Docker, Go
+# (Toxiproxy and Go Litestream are built once). MinIO on another port and name keeps a run off a
+# shared one: LSR_MINIO_PORT=9101 LSR_MINIO_NAME=lsr-minio-fault just fault-rig 50. Exit 1 on any
+# anomaly, 2 when the rig failed or a required situation was never reached.
+fault-rig cycles="50" *args: minio-up toxiproxy-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --locked -p lsr-cli
+    cargo build --release --locked -p lsr-history --features sqlite
+    ./scripts/build-go-litestream.sh 041a8c3
+    if [ "$(uname)" = Linux ]; then
+        test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
+    fi
+    eval "$(./scripts/minio.sh env)"
+    eval "$(./scripts/toxiproxy.sh env)"
+    uv run scripts/fault_rig.py run --cycles {{cycles}} {{args}}
+
+# The rig's own canary: damage planted in the replica (a dropped, swapped or flipped level-0 file)
+# must be reported. A rig that reports 0 anomalies here is blind.
+fault-rig-canary *args: minio-up toxiproxy-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --locked -p lsr-cli
+    cargo build --release --locked -p lsr-history --features sqlite
+    ./scripts/build-go-litestream.sh 041a8c3
+    eval "$(./scripts/minio.sh env)"
+    eval "$(./scripts/toxiproxy.sh env)"
+    uv run scripts/fault_rig.py canary {{args}}
+
+# The fault rig against a planted engine defect (docs/planted-bugs/<name>.patch), until its first
+# anomaly: just fault-rig-plant restart-abandoned-at-synced-end 200
+fault-rig-plant name cycles="200" *args: minio-up toxiproxy-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    patch="docs/planted-bugs/{{name}}.patch"
+    [ -f "$patch" ] || { echo "fault-rig-plant: no plant named {{name}}" >&2; exit 2; }
+    tree=".worktrees/fault-rig-plant-{{name}}"
+    git worktree add --detach "$tree" HEAD >/dev/null
+    trap 'git worktree remove --force "$tree"' EXIT
+    git -C "$tree" apply "$PWD/$patch"
+    # The judge comes from this tree, never the planted one.
+    cargo build --release --locked -p lsr-history --features sqlite
+    CARGO_TARGET_DIR="$PWD/target/fault-rig-plants/{{name}}" cargo build --release --locked -p lsr-cli --manifest-path "$tree/Cargo.toml"
+    ./scripts/build-go-litestream.sh 041a8c3
+    eval "$(./scripts/minio.sh env)"
+    eval "$(./scripts/toxiproxy.sh env)"
+    uv run scripts/fault_rig.py run --cycles {{cycles}} --stop-on-anomaly --lsr "target/fault-rig-plants/{{name}}/release/lsr" --work "target/fault-rig-plant-{{name}}" {{args}}
+
 # A plant is scripts/lazyfs-plants/<name>.patch or docs/planted-bugs/<name>.patch, applied to a
 # scratch worktree of HEAD and built into target/lazyfs-plants/<name>.
 # The LazyFS rig against a planted defect, until its first anomaly: just lazyfs-plant wal-barrier 200

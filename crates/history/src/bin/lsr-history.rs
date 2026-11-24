@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! lsr-history digest RESTORED_DB     print the chain tip's hex digest, or exit 3 if the file is broken
-//! lsr-history judge LOG [--ahead-counts]
+//! lsr-history judge LOG [--ahead-counts] [--signals-required]
 //! ```
 //!
 //! The log is text, one event per line, appended by the application and the driver on storage
@@ -17,6 +17,16 @@
 //! - `L <at> <hex>` or `L <at> broken <why>`: a restore of the newest state, judged against the
 //!   tree as the log stands at that line.
 //! - `F <at> <hex>`: the same, after a clean stop and drain; it must also be the head.
+//! - `P <at> <txid-hex> <hex>` (or `... broken <why>`): a restore of one of the replica's restore
+//!   points, named by the replica's own transaction id. The points since the last `W` are judged
+//!   together, in the order given (the replica's order): each is a node of the tree and each
+//!   extends the one before it unless a recorded rewind explains the move.
+//! - `W <at>`: ends a run of `P` lines and judges it.
+//! - `T <at> <instant> <hex>` (or `... broken <why>`): a restore as of `<instant>` (milliseconds,
+//!   the driver's clock): a node whose commit began before the instant.
+//! - `S <at>`: the engine itself reported a loss of history (the driver reads this from the
+//!   engine's own log). With `--signals-required` a rewind explains a step back only when an `S`
+//!   line followed it; without one the step is an `unsignaled` anomaly.
 //! - Any other line (and a last line with no newline, cut by a kill) is skipped.
 //!
 //! An intended commit that a later `E` follows without an `A` is a commit whose outcome is
@@ -31,22 +41,34 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use lsr_history::{AheadMode, Anomaly, Digest, Judge, Log, Target, chain};
+use lsr_history::{AheadMode, Anomaly, Digest, Judge, Log, Signals, Target, chain};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     match refs.as_slice() {
         ["digest", db] => digest(Path::new(db)),
-        ["judge", log] => judge(Path::new(log), AheadMode::Fatal),
-        ["judge", log, "--ahead-counts"] => judge(Path::new(log), AheadMode::Count),
-        _ => {
-            eprintln!(
-                "usage: lsr-history digest RESTORED_DB | lsr-history judge LOG [--ahead-counts]"
-            );
-            ExitCode::from(2)
+        ["judge", log, flags @ ..] => {
+            let mut mode = AheadMode::Fatal;
+            let mut signals = Signals::Ignored;
+            for flag in flags {
+                match *flag {
+                    "--ahead-counts" => mode = AheadMode::Count,
+                    "--signals-required" => signals = Signals::Required,
+                    _ => return usage(),
+                }
+            }
+            judge(Path::new(log), mode, signals)
         }
+        _ => usage(),
     }
+}
+
+fn usage() -> ExitCode {
+    eprintln!(
+        "usage: lsr-history digest RESTORED_DB | lsr-history judge LOG [--ahead-counts] [--signals-required]"
+    );
+    ExitCode::from(2)
 }
 
 fn digest(db: &Path) -> ExitCode {
@@ -87,6 +109,8 @@ struct Replay {
     log: Option<Log>,
     judge: Judge,
     sent: Option<(Digest, i64)>,
+    /// Restore points read since the last `W`: transaction id, content, and not foreign.
+    points: Vec<(u64, Digest, bool)>,
     anomalies: u32,
 }
 
@@ -122,9 +146,9 @@ impl Replay {
 
     fn restored(&mut self, line: usize, d: Digest, at: i64, last: bool) {
         // A restore can show the commit in flight before its acknowledgement is logged.
-        if self.sent.is_some_and(|(s, _)| s == d) {
+        if let Some((s, begun)) = self.sent.filter(|(s, _)| *s == d) {
             self.sent = None;
-            self.log(at).commit(d, at);
+            self.log(at).commit_between(s, begun, at);
         }
         self.log(at);
         let Some(log) = self.log.as_ref() else { return };
@@ -137,8 +161,59 @@ impl Replay {
         }
     }
 
+    /// A restore as of `instant`, judged like a `Latest` one, with the same allowance for the
+    /// commit in flight.
+    fn restored_as_of(&mut self, line: usize, d: Digest, at: i64, instant: i64) {
+        if let Some((s, begun)) = self.sent.filter(|(s, _)| *s == d) {
+            self.sent = None;
+            self.log(at).commit_between(s, begun, at);
+        }
+        self.log(at);
+        let Some(log) = self.log.as_ref() else { return };
+        if let Err(anomaly) = self.judge.as_of(log, instant, d, None) {
+            self.report(line, &anomaly.to_string());
+        }
+    }
+
+    /// The `P` lines since the last `W`, judged in the order they came.
+    fn sweep(&mut self, line: usize, at: i64) {
+        let points = std::mem::take(&mut self.points);
+        self.log(at);
+        let Some(log) = self.log.as_ref() else { return };
+        if let Err(anomaly) = self.judge.sweep(log, &points) {
+            self.report(line, &anomaly.to_string());
+        }
+    }
+
     fn event(&mut self, line: usize, fields: &[&str]) {
         let at = fields.get(1).and_then(|t| t.parse::<i64>().ok());
+        if let (Some("P"), Some(at), Some(txid)) = (
+            fields.first().copied(),
+            at,
+            fields.get(2).and_then(|t| u64::from_str_radix(t, 16).ok()),
+        ) {
+            self.restore_point(line, at, txid, fields.get(3..).unwrap_or_default());
+            return;
+        }
+        if let (Some("T"), Some(at), Some(instant)) = (
+            fields.first().copied(),
+            at,
+            fields.get(2).and_then(|t| t.parse::<i64>().ok()),
+        ) {
+            self.as_of_line(line, at, instant, fields.get(3..).unwrap_or_default());
+            return;
+        }
+        if let (Some("W"), Some(at)) = (fields.first().copied(), at) {
+            self.sweep(line, at);
+            return;
+        }
+        if let (Some("S"), Some(at)) = (fields.first().copied(), at) {
+            self.log(at);
+            if let Some(log) = self.log.as_ref() {
+                self.judge.signal(log);
+            }
+            return;
+        }
         let d = fields.get(2).and_then(|h| parse_digest(h));
         match (fields.first().copied(), at, d) {
             (Some("E"), Some(at), Some(d)) => self.recovered(line, d, at),
@@ -147,8 +222,8 @@ impl Replay {
                 self.sent = Some((d, at));
             }
             (Some("A"), Some(at), _) => {
-                if let Some((d, _)) = self.sent.take() {
-                    self.log(at).commit(d, at);
+                if let Some((d, begun)) = self.sent.take() {
+                    self.log(at).commit_between(d, begun, at);
                 }
             }
             (Some(tag @ ("L" | "F")), Some(at), Some(d)) => self.restored(line, d, at, tag == "F"),
@@ -165,7 +240,50 @@ impl Replay {
     }
 }
 
-fn judge(path: &Path, mode: AheadMode) -> ExitCode {
+impl Replay {
+    fn restore_point(&mut self, line: usize, at: i64, txid: u64, rest: &[&str]) {
+        match rest {
+            ["broken", why @ ..] => {
+                let broken = Anomaly::Broken {
+                    target: Target::Point(txid),
+                    why: why.join(" "),
+                };
+                self.report(line, &broken.to_string());
+            }
+            [hex, ..] => {
+                if let Some(d) = parse_digest(hex) {
+                    // A restore point can show the commit in flight too.
+                    if let Some((s, begun)) = self.sent.filter(|(s, _)| *s == d) {
+                        self.sent = None;
+                        self.log(at).commit_between(s, begun, at);
+                    }
+                    self.points.push((txid, d, false));
+                }
+            }
+            [] => {}
+        }
+    }
+
+    fn as_of_line(&mut self, line: usize, at: i64, instant: i64, rest: &[&str]) {
+        match rest {
+            ["broken", why @ ..] => {
+                let broken = Anomaly::Broken {
+                    target: Target::AsOf(instant),
+                    why: why.join(" "),
+                };
+                self.report(line, &broken.to_string());
+            }
+            [hex, ..] => {
+                if let Some(d) = parse_digest(hex) {
+                    self.restored_as_of(line, d, at, instant);
+                }
+            }
+            [] => {}
+        }
+    }
+}
+
+fn judge(path: &Path, mode: AheadMode, signals: Signals) -> ExitCode {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(err) => {
@@ -175,8 +293,9 @@ fn judge(path: &Path, mode: AheadMode) -> ExitCode {
     };
     let mut replay = Replay {
         log: None,
-        judge: Judge::new(mode),
+        judge: Judge::new(mode).with_signals(signals),
         sent: None,
+        points: Vec::new(),
         anomalies: 0,
     };
     for (n, line) in text.split_inclusive('\n').enumerate() {
