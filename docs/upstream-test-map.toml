@@ -540,10 +540,10 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestApplySyncResult/Pos" = { reason = "Go-only: see TestApplySyncResult." }
 "TestApplySyncResult/WALState" = { reason = "Go-only: see TestApplySyncResult." }
 "TestCalcWALSize" = { counterpart = ["lsr-wal::frame::tests::offsets_are_the_header_plus_whole_frames", "lsr-wal::frame::tests::offsets_past_the_frame_counter_are_refused"] }
-"TestDB_CheckpointCreatesSnapshotL0" = { counterpart = ["lsr-core::checkpoint::tests::a_truncate_snapshots_the_new_generation_once_under_the_write_lock", "lsr-core::checkpoint::tests::a_commit_before_the_truncate_is_in_the_snapshot"] }
+"TestDB_CheckpointCreatesSnapshotL0" = { counterpart = ["lsr-core::checkpoint::tests::a_truncate_snapshots_the_new_generation_once_without_the_write_lock", "lsr-core::checkpoint::tests::a_commit_before_the_truncate_is_in_the_snapshot"] }
 "TestDB_CheckpointDoesNotTriggerSnapshot" = { counterpart = "lsr-compat::compat::live_matches_sim::outside_checkpoints_and_restarts" }
 "TestDB_CheckpointDoesNotTriggerSnapshot/PassiveMode" = { counterpart = "lsr-core::checkpoint::tests::a_passive_that_restarts_the_wal_starts_a_new_generation_file" }
-"TestDB_CheckpointDoesNotTriggerSnapshot/TruncateMode" = { counterpart = "lsr-core::checkpoint::tests::a_truncate_snapshots_the_new_generation_once_under_the_write_lock" }
+"TestDB_CheckpointDoesNotTriggerSnapshot/TruncateMode" = { counterpart = "lsr-core::checkpoint::tests::a_truncate_snapshots_the_new_generation_once_without_the_write_lock" }
 "TestDB_CheckpointPageGapWithConcurrentWrites" = { counterpart = ["lsr-core::checkpoint::tests::a_commit_before_the_truncate_is_in_the_snapshot", "lsr-core::sync::tests::staged_chain_equals_sqlites_checkpoint_at_any_cap"] }
 "TestDB_CheckpointPassiveRestartSkipsTruncate" = { counterpart = ["lsr-core::checkpoint::tests::a_passive_with_nothing_in_the_way_seals_then_follows_the_writer_restart", "lsr-core::checkpoint::tests::decide_follows_the_ladder"] }
 "TestDB_CheckpointPassive_CachesLastLTXPage" = { reason = "Go-only: an in-memory cache of a file or page Go read before. Rust caches nothing without a measurement (AGENTS.md design rules) and reads what each decision needs." }

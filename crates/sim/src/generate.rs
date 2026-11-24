@@ -547,8 +547,8 @@ pub struct Weights {
     /// [`Op::Verify`].
     pub verify: u32,
     /// The engine checkpoints TRUNCATE at this many synced frames instead of the simulator's
-    /// usual 32, so its TRUNCATE and the snapshot it takes under the write lock (CKPT-4) are
-    /// reached in short runs. Never drawn by a mix: the nightly sets it.
+    /// usual 32, so its TRUNCATE and the snapshot it takes after one (CKPT-4) are reached in
+    /// short runs. Never drawn by a mix: the nightly sets it.
     pub truncate_pages: Option<std::num::NonZeroU32>,
     /// [`Op::HttpFault`]: a step that does anything only with the replica on S3.
     pub http_fault: u32,
@@ -1116,7 +1116,6 @@ fn env_fault(entropy: &SeededEntropy, weights: &Weights) -> Op {
                     SourceOp::BeginBarrier,
                     SourceOp::Checkpoint,
                     SourceOp::BumpSeq,
-                    SourceOp::BeginWriteLock,
                 ],
             )
             .unwrap_or(SourceOp::Len);
@@ -1242,7 +1241,7 @@ fn app_in_tick(entropy: &SeededEntropy) -> Op {
 }
 
 /// Every call the engine makes into SQLite, by kind.
-const SOURCE_OPS: [SourceOp; 12] = [
+const SOURCE_OPS: [SourceOp; 10] = [
     SourceOp::Open,
     SourceOp::Len,
     SourceOp::Committed,
@@ -1253,8 +1252,6 @@ const SOURCE_OPS: [SourceOp; 12] = [
     SourceOp::EndBarrier,
     SourceOp::Checkpoint,
     SourceOp::BumpSeq,
-    SourceOp::BeginWriteLock,
-    SourceOp::EndWriteLock,
 ];
 
 /// The history of `steps` operations that `seed` names.

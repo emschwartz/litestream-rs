@@ -145,7 +145,9 @@ impl Runner {
         // A task standing degraded on the WAL or the database says nothing of a request the
         // store refused in this tick: a read-ahead HEAD (maintenance's created-at reads) the
         // engine drops by design is not a failure the engine owed a report of.
-        let failed = reported.iter().any(|cause| !local_cause(*cause))
+        let failed = reported
+            .iter()
+            .any(|cause| !says_nothing_of_requests(*cause))
             || matches!(
                 ended,
                 TickEnd::Done(Tick::Ran {
@@ -158,7 +160,7 @@ impl Runner {
                 TickEnd::Done(Tick::Ran {
                     event: Event::Degraded { cause, .. },
                     ..
-                }) if !local_cause(*cause)
+                }) if !says_nothing_of_requests(*cause)
             );
         if owed.may_drop && !failed {
             self.report.reach.bump("http_fault.denial_read_ahead");
@@ -226,22 +228,24 @@ impl Runner {
     }
 }
 
-/// Whether a degraded cause is about the local WAL or database, so that a task standing on it
-/// is no failure of a store request.
-const fn local_cause(cause: PersistentCause) -> bool {
+/// Whether a degraded cause cannot come from a refused request, so that a task standing on it is
+/// no failure of one: the local WAL or database, and a store with no conditional writes (a 501 on
+/// a create-only write, which stands for the rest of the process whatever else the store later
+/// refuses).
+const fn says_nothing_of_requests(cause: PersistentCause) -> bool {
     match cause {
         PersistentCause::WalCorrupt
         | PersistentCause::WalTruncated
         | PersistentCause::WalUnlinked
         | PersistentCause::WalSyncFailed
         | PersistentCause::PageSizeChanged { .. }
-        | PersistentCause::DatabasePageMismatch { .. } => true,
+        | PersistentCause::DatabasePageMismatch { .. }
+        | PersistentCause::ConditionalWritesUnsupported => true,
         PersistentCause::StoreDenied(_)
         | PersistentCause::StoreRefused
         | PersistentCause::RemoteCorrupt
         | PersistentCause::OtherWriter
         | PersistentCause::RemoteRegressed
-        | PersistentCause::ConditionalWritesUnsupported
         | PersistentCause::Bug
         | PersistentCause::Stalled(_) => false,
     }
@@ -253,4 +257,22 @@ struct Owed {
     kinds: Vec<Denied>,
     may_drop: bool,
     masked: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store without conditional writes stands degraded for the whole process; a refused
+    /// read-ahead HEAD in a later tick must not be judged against that standing cause.
+    #[test]
+    fn a_standing_unsupported_create_only_is_no_failure_of_a_refused_request() {
+        assert!(says_nothing_of_requests(
+            PersistentCause::ConditionalWritesUnsupported
+        ));
+        assert!(!says_nothing_of_requests(PersistentCause::StoreDenied(
+            Denied::Permission
+        )));
+        assert!(!says_nothing_of_requests(PersistentCause::StoreRefused));
+    }
 }

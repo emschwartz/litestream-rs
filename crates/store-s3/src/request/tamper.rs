@@ -14,10 +14,22 @@ impl HttpRequest {
         self
     }
 
-    /// Appends a query parameter, leaving the signature as it was.
+    /// Sets a query parameter, replacing any of that name, leaving the signature as it was.
+    /// Giving `X-Amz-Signature` makes a damaged signature.
     #[must_use]
     pub fn tamper_query(mut self, name: &str, value: &str) -> Self {
-        self.url.query_pairs_mut().append_pair(name, value);
+        let kept: Vec<(String, String)> = self
+            .url
+            .query_pairs()
+            .filter(|(have, _)| have != name)
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        {
+            let mut pairs = self.url.query_pairs_mut();
+            pairs.clear();
+            pairs.extend_pairs(kept);
+            pairs.append_pair(name, value);
+        }
         self
     }
 

@@ -21,6 +21,8 @@ pub(super) const PAGE_SIZE: u32 = 4096;
 const PAYLOAD: usize = 1000;
 /// Rows a preload commits at once.
 const PRELOAD_CHUNK: u32 = 5000;
+/// Commits of a large preload between two WAL truncations (about 200 MiB of WAL).
+const CHECKPOINT_EVERY_CHUNKS: u32 = 40;
 
 /// The writer's connection and what it has written.
 #[derive(Debug)]
@@ -37,6 +39,25 @@ impl App {
     /// checkpoints) and `synchronous=NORMAL` (the usual setting for WAL), preloads
     /// `preload_rows` rows, then truncates the WAL so replication starts from a settled file.
     pub(super) fn create(path: &Path, seed: u64, preload_rows: u32) -> Result<Self, CompatError> {
+        Self::create_with(path, seed, preload_rows, None)
+    }
+
+    /// As [`App::create`], for a database too large to leave its WAL until the end: the WAL
+    /// is truncated every `CHECKPOINT_EVERY_CHUNKS` commits, so the file is the only large thing on disk.
+    pub(super) fn create_large(
+        path: &Path,
+        seed: u64,
+        preload_rows: u32,
+    ) -> Result<Self, CompatError> {
+        Self::create_with(path, seed, preload_rows, Some(CHECKPOINT_EVERY_CHUNKS))
+    }
+
+    fn create_with(
+        path: &Path,
+        seed: u64,
+        preload_rows: u32,
+        checkpoint_every: Option<u32>,
+    ) -> Result<Self, CompatError> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "page_size", PAGE_SIZE)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -60,10 +81,15 @@ impl App {
             marker_page,
         };
         let mut left = preload_rows;
+        let mut chunks = 0_u32;
         while left > 0 {
             let n = left.min(PRELOAD_CHUNK);
             app.insert_in_tx(n, false)?;
             left = left.saturating_sub(n);
+            chunks = chunks.saturating_add(1);
+            if checkpoint_every.is_some_and(|every| chunks.is_multiple_of(every)) {
+                app.checkpoint()?;
+            }
         }
         app.checkpoint()?;
         Ok(app)

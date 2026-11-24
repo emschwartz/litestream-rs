@@ -2,7 +2,6 @@
 //! is uploaded and a drain waits for it.
 
 use super::*;
-use crate::source::{CheckpointEffect, CheckpointScript};
 
 /// The newest transaction in staging and on the replica.
 fn newest(rig: &Rig) -> (Option<u64>, Option<u64>) {
@@ -46,30 +45,6 @@ fn passive_failed_after_the_seal(op: SourceOp, err: SourceError) -> (Rig, Actor)
     (rig, actor)
 }
 
-/// A TRUNCATE whose boundary snapshot is staged and whose write lock then
-/// fails to release.
-fn truncate_failed_after_the_snapshot() -> (Rig, Actor) {
-    let mut config = cfg();
-    config.checkpoint.truncate_pages = Some(nz(1));
-    let mut rig = Rig::new();
-    // The PASSIVE tried first at the threshold is held back, so a TRUNCATE follows.
-    rig.ck.script(CheckpointScript {
-        busy: true,
-        effect: CheckpointEffect::Nothing,
-    });
-    rig.ck
-        .inject(SourceOp::EndWriteLock, SourceError::Io(ErrorKind::Other));
-    let mut actor = Actor::new(config);
-    let seen = rig.settle(&mut actor, T0);
-    assert!(
-        seen.iter()
-            .any(|t| matches!(event(t), Some(Event::Retrying { .. }))),
-        "the write lock's release should fail: {seen:?}"
-    );
-    assert!(rig.ck.calls().contains(&CheckpointCall::EndWriteLock));
-    (rig, actor)
-}
-
 /// A named way to reach a failed checkpoint that staged a file.
 type Case = (&'static str, Box<dyn Fn() -> (Rig, Actor)>);
 
@@ -94,10 +69,6 @@ fn cases() -> Vec<Case> {
         (
             "bump io",
             passive(SourceOp::BumpSeq, SourceError::Io(ErrorKind::Other)),
-        ),
-        (
-            "end write lock",
-            Box::new(truncate_failed_after_the_snapshot),
         ),
     ]
 }

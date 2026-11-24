@@ -139,7 +139,8 @@ shuttle iterations="200":
     SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
         cargo test --locked -p lsr-replica --test replica shuttle::
 
-# Every planted-bug patch still applies to the tree. Seconds; nightly in CI, not in check, so a
+# Every planted-bug patch, and every benchmark arm's patch (crates/compat/bench-patches), still
+# applies to the tree. Seconds; nightly in CI, not in check, so a
 # moved line near a planted site does not block a land. Whether the planted defect is caught is
 # `planted-bugs`'s question.
 planted-bugs-apply:
@@ -147,7 +148,7 @@ planted-bugs-apply:
     set -euo pipefail
     stale=()
     found=0
-    for patch in docs/planted-bugs/*.patch; do
+    for patch in docs/planted-bugs/*.patch crates/compat/bench-patches/*.patch; do
         found=$((found + 1))
         git apply --check "$patch" 2>/dev/null || stale+=("$patch")
     done
@@ -331,6 +332,29 @@ bench-vs-go out *sets="all": minio-up
     export LSR_PERFSTATS="${LSR_PERFSTATS:-$HOME/.claude/skills/perf-experiment/perfstats.py}"
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" "${CARGO_TARGET_DIR:-$PWD/target}/release/bench-vs-go" --out "{{out}}" {{sets}}
 
+# What a full copy of a database larger than memory does to an application reading a hot set
+# beside it, and which remedy brings it back (issue 315). Linux with 8 GiB of memory and about
+# 80 GB of free disk under <out>; needs Docker, Rust, uv and root (to drop the page cache between
+# runs). Builds lsr and one binary per patch in crates/compat/bench-patches (about 20 minutes), builds
+# the 16 GiB database (about 15 minutes), then the calibration round, the A/A gate and the rounds:
+# about 5 hours on local NVMe and 10 to 11 on a 125 MB/s network disk (the throttled copies
+# run 2, 4 and 8 times as long as the plain one; --rounds N shortens it). The frame and the arms are
+# in crates/compat/src/bench/plan.rs; extra arguments (--rounds N, --arms A,B,..) go to the harness
+# and make the run a check of it. Never part of check.
+bench-snapshot-impact out *args: minio-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for var in $(compgen -e); do
+        case "$var" in AWS_* | LITESTREAM_*) unset "$var" ;; esac
+    done
+    ./scripts/build-bench-arms.sh "{{out}}/arms"
+    cargo build --release --locked -p lsr-cli --bin lsr
+    cargo build --release --locked -p lsr-compat --bin bench-vs-go
+    eval "$(./scripts/minio.sh env)"
+    perfstats="${LSR_PERFSTATS:-$HOME/.claude/skills/perf-experiment/perfstats.py}"
+    if [ -f "$perfstats" ]; then export LSR_PERFSTATS="$perfstats"; fi
+    "${CARGO_TARGET_DIR:-$PWD/target}/release/bench-vs-go" --out "{{out}}" snapshot-impact --patched "{{out}}/arms" {{args}}
+
 # The two alternation runs (Go and Rust taking turns on one prefix, each turn killed at a
 # seeded point) over the pinned builds; compat-releases.yml prints the seed of a nightly run.
 # Both alternation runs with one seed: just compat-alternation <seed> replays a nightly failure.
@@ -338,20 +362,40 @@ compat-alternation $LSR_ALTERNATION_SEED:
     ./scripts/build-go-litestream.sh
     cargo nextest run -p lsr-compat --test compat --run-ignored all --locked --no-fail-fast --no-capture -E 'test(go_and_rust_alternate_on_one_prefix) | test(go_and_rust_sidecars_alternate_on_one_config_file)'
 
-# The store and the conformance suite against the real Tigris bucket.
-# Never part of check or CI: it needs credentials (a file outside the repo, or
-# AWS_* variables) and spends real requests (docs/spikes.md).
-# Everything it writes sits under one run prefix, deleted afterwards with the aws CLI.
-test-tigris:
+# The store, the conformance suite and the provider checks (create-only writes and their races,
+# listing and read consistency, error classification, abandoned uploads, and one `lsr replicate`
+# and restore) against one real provider's bucket: tigris, aws or r2. For Tigris it also runs the
+# Tigris-only probes. Never part of check or CI: it needs credentials (a file outside the repo,
+# see scripts/provider.sh) and spends real requests (docs/spikes.md, docs/release-bar.md R9).
+# Everything it writes sits under one run prefix, deleted afterwards with the aws CLI, and the
+# script fails if the prefix does not list empty (objects and multipart uploads).
+test-provider provider:
+    ./scripts/provider.sh {{provider}} just _provider-tests
+
+[private]
+_provider-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    store_filter='test(/^provider::/)'
+    [ "$LSR_PROVIDER" = tigris ] && store_filter="$store_filter | test(/^tigris::/)"
     # LSR_S3_TRANSPORT=reqwest runs the same tests over the reqwest client.
-    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^tigris::/)' --run-ignored only --no-capture --locked --no-fail-fast
+    status=0
+    # The tests run in parallel (a serial run of the long ones takes an hour on R2); each prints
+    # its output when it ends.
+    output='--success-output immediate --failure-output immediate'
+    cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E "$store_filter" --run-ignored only $output --locked --no-fail-fast || status=$?
+    cargo nextest run -p lsr-cli --test cli -E 'test(/^provider::/)' --run-ignored only $output --locked --no-fail-fast || status=$?
+    exit $status
+
+# The same as `just test-provider tigris`.
+test-tigris: (test-provider "tigris")
 
 # The consistency probe against the Tigris bucket (crates/store-s3/tests/store-s3/common/real.rs):
 # one client writes and deletes keys, a second lists and reads right after, and every stale answer
 # is counted in an `OBS consistency` table. About six requests a round. Never part of check or CI,
 # which hold no store credentials; `just test-s3` runs the same probe against MinIO at 20 rounds.
 consistency-probe-tigris $LSR_PROBE_ROUNDS="10000":
-    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^tigris::shared_cases::consistency_probe$/)' --run-ignored only --no-capture --locked
+    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^provider::shared_cases::consistency_probe$/)' --run-ignored only --no-capture --locked
 
 # A production-shaped restore: Go v0.5.18 replicates the compat workload straight to Tigris
 # (a few hundred files, levels 0 to 3 and 9), then `lsr verify`, and `lsr restore`

@@ -86,11 +86,20 @@ fn store_cells() -> impl Iterator<Item = (String, Cell)> {
 fn every_cell_is_drawn_or_says_why_not() {
     // Drawn, unmodelled. A move in these numbers is a change to the domain: say
     // it in the pull request.
-    assert_eq!(tally(source_cells()), [22, 4], "source cells");
+    assert_eq!(tally(source_cells()), [18, 4], "source cells");
     assert_eq!(tally(store_cells()), [41, 0], "store cells");
     // Each SQLite call fails at least one way, but the sync of
-    // the WAL: a failed sync is modelled by its scenarios, not drawn (`docs/decisions/D173.md`).
-    for op in SOURCE_OPS.into_iter().filter(|op| *op != SourceOp::Sync) {
+    // the WAL: a failed sync is modelled by its scenarios, not drawn (`docs/decisions/D173.md`);
+    // and the write lock's calls, which the engine never makes.
+    let never_called = [
+        SourceOp::Sync,
+        SourceOp::BeginWriteLock,
+        SourceOp::EndWriteLock,
+    ];
+    for op in SOURCE_OPS
+        .into_iter()
+        .filter(|op| !never_called.contains(op))
+    {
         assert!(
             SOURCE_CLASSES
                 .iter()

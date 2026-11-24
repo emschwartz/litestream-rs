@@ -550,7 +550,7 @@ fn a_passive_that_restarts_the_wal_starts_a_new_generation_file() {
 }
 
 #[test]
-fn a_truncate_snapshots_the_new_generation_once_under_the_write_lock() {
+fn a_truncate_snapshots_the_new_generation_once_without_the_write_lock() {
     let mut rig = Rig::new();
     let proof = rig.proof();
     let done = rig.run(proof, CheckpointMode::Truncate).unwrap();
@@ -564,8 +564,6 @@ fn a_truncate_snapshots_the_new_generation_once_under_the_write_lock() {
         [
             CheckpointCall::Checkpoint(CheckpointMode::Truncate),
             CheckpointCall::BumpSeq,
-            CheckpointCall::BeginWriteLock,
-            CheckpointCall::EndWriteLock,
         ]
     );
     let barrier = rig.ck.begin_barrier().unwrap();
@@ -706,26 +704,23 @@ fn a_failed_release_never_replaces_the_first_fault() {
 }
 
 #[test]
-fn every_truncate_step_failure_releases_the_write_lock() {
+fn every_truncate_step_failure_reports_the_fault_and_holds_no_lock() {
     for op in [
         SourceOp::Open,
         SourceOp::Checkpoint,
         SourceOp::BumpSeq,
         SourceOp::Len,
-        SourceOp::BeginWriteLock,
-        SourceOp::EndWriteLock,
+        SourceOp::Committed,
     ] {
         let (mut rig, result) = fail_at(op, CheckpointMode::Truncate);
         let failed = result.unwrap_err();
         assert_eq!(failed.fault, Fault::LocalIo, "{op:?}");
-        if op == SourceOp::EndWriteLock {
-            assert!(rig.ck.calls().contains(&CheckpointCall::EndWriteLock));
-        } else if op != SourceOp::BeginWriteLock {
-            assert!(
-                rig.ck.begin_write_lock().is_ok(),
-                "{op:?} left the lock held"
-            );
-        }
+        assert!(
+            !rig.ck.calls().contains(&CheckpointCall::BeginWriteLock),
+            "{op:?}: the TRUNCATE took the write lock"
+        );
+        let barrier = rig.ck.begin_barrier();
+        assert!(barrier.is_ok(), "{op:?} left the writer held");
     }
 }
 
@@ -737,7 +732,6 @@ fn a_failure_after_a_staging_step_hands_back_the_file_it_staged() {
         (SourceOp::Checkpoint, CheckpointMode::Passive),
         (SourceOp::EndBarrier, CheckpointMode::Passive),
         (SourceOp::BumpSeq, CheckpointMode::Passive),
-        (SourceOp::EndWriteLock, CheckpointMode::Truncate),
     ] {
         let (rig, result) = fail_at(op, mode);
         let failed = result.unwrap_err();

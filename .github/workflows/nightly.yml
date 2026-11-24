@@ -197,7 +197,7 @@ jobs:
   # NIGHTLY ONLY, never in the PR gate. The real `lsr replicate` beside a real SQLite writer with
   # its replica on MinIO behind Toxiproxy (`just fault-rig`): kill -9, partitions, slow and cut
   # transfers, LazyFS power loss, a clock step (libfaketime) and the pinned Go Litestream on the
-  # same prefix, judged by point-in-time restores (docs/decisions/D192.md). 1,000 cycles take
+  # same prefix, judged by point-in-time restores (docs/decisions/D195.md). 1,000 cycles take
   # about four hours on a hosted runner; --max-minutes stops starting cycles before the hard
   # timeout, and the summary line says how many ran. Exit 1 is an anomaly (a finding to file),
   # exit 2 a rig failure or a required situation never reached. Evidence is kept on failure.

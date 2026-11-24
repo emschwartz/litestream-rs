@@ -371,7 +371,7 @@ pub enum ProblemKind {
     ReplicaPathIsUrl,
     /// `truncate-page-n` without the operator's claim that the application holds no long readers.
     #[error(
-        "TRUNCATE checkpoints need `litestream-rs: {{app-readers: none}}`: without that claim litestream-rs never truncates (an application reader would make every attempt a wasted snapshot)"
+        "TRUNCATE checkpoints need `litestream-rs: {{app-readers: none}}`: without that claim litestream-rs never truncates"
     )]
     TruncateNeedsClaim,
     /// A path that cannot be made absolute.

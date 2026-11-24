@@ -25,8 +25,12 @@ pub enum Resource {
     Toxiproxy,
     /// The pinned Go builds (`scripts/build-go-litestream.sh`).
     GoBuilds,
-    /// The Tigris bucket and its credentials (`scripts/tigris.sh`).
+    /// The Tigris bucket and its credentials (`scripts/provider.sh tigris`).
     Tigris,
+    /// The AWS S3 bucket and its credentials (`scripts/provider.sh aws`).
+    Aws,
+    /// The Cloudflare R2 bucket and its credentials (`scripts/provider.sh r2`).
+    R2,
     /// A C compiler and the SQLite headers.
     CCompiler,
     /// Free disk space for the large cases.
@@ -35,11 +39,13 @@ pub enum Resource {
 
 impl Resource {
     /// Every resource, for the parser of [`SKIP_VAR`].
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Minio,
         Self::Toxiproxy,
         Self::GoBuilds,
         Self::Tigris,
+        Self::Aws,
+        Self::R2,
         Self::CCompiler,
         Self::Disk,
     ];
@@ -52,6 +58,8 @@ impl Resource {
             Self::Toxiproxy => "toxiproxy",
             Self::GoBuilds => "go",
             Self::Tigris => "tigris",
+            Self::Aws => "aws",
+            Self::R2 => "r2",
             Self::CCompiler => "cc",
             Self::Disk => "disk",
         }
@@ -66,6 +74,7 @@ impl Resource {
             Self::Tigris => {
                 "run through `just test-tigris` or `just tigris-restore` with credentials"
             }
+            Self::Aws | Self::R2 => "run through `just test-provider <aws|r2>` with credentials",
             Self::CCompiler => "install a C compiler and the SQLite headers (see `just compat`)",
             Self::Disk => "free the disk space the case needs",
         }
@@ -182,6 +191,67 @@ pub fn minio() -> Option<Minio> {
             access: env_text("LSR_MINIO_ACCESS_KEY").unwrap_or_else(|| "lsrtestroot".into()),
             secret: env_text("LSR_MINIO_SECRET_KEY")
                 .unwrap_or_else(|| "lsrtest-throwaway-0000".into()),
+        })
+    })
+}
+
+/// A real provider's bucket for one run, as `scripts/provider.sh` names it. Its `Debug` leaves out
+/// the endpoint, the region and both keys.
+#[derive(Clone)]
+pub struct RealBucket {
+    /// `tigris`, `aws` or `r2`.
+    pub provider: &'static str,
+    /// The S3 endpoint URL.
+    pub endpoint: String,
+    /// The bucket.
+    pub bucket: String,
+    /// The signing region.
+    pub region: String,
+    /// The run prefix: everything the run writes sits under it, and the script lists it empty
+    /// afterwards.
+    pub prefix: String,
+    /// The access key id.
+    pub access: String,
+    /// The secret access key.
+    pub secret: String,
+}
+
+impl std::fmt::Debug for RealBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealBucket")
+            .field("provider", &self.provider)
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The bucket `scripts/provider.sh` set up for this run, from `LSR_PROVIDER`
+/// (`tigris`, `aws` or `r2`) and the `LSR_PROVIDER_*` and `AWS_*` variables it exports. A
+/// test that calls this is `#[ignore]`d, so there is no opt-out (see [`must`]).
+#[must_use]
+pub fn real_bucket() -> RealBucket {
+    let name = env_text("LSR_PROVIDER").unwrap_or_default();
+    let (provider, resource) = match name.as_str() {
+        "tigris" => ("tigris", Resource::Tigris),
+        "aws" => ("aws", Resource::Aws),
+        "r2" => ("r2", Resource::R2),
+        _ => missing(
+            Resource::Tigris,
+            "LSR_PROVIDER is not one of tigris, aws, r2",
+            false,
+        ),
+    };
+    must(resource, || {
+        let var = |name: &str| env_text(name).ok_or_else(|| format!("{name} is not set"));
+        Ok(RealBucket {
+            provider,
+            endpoint: var("LSR_PROVIDER_ENDPOINT")?,
+            bucket: var("LSR_PROVIDER_BUCKET")?,
+            region: var("AWS_REGION")?,
+            prefix: var("LSR_PROVIDER_PREFIX")?,
+            access: var("AWS_ACCESS_KEY_ID")?,
+            secret: var("AWS_SECRET_ACCESS_KEY")?,
         })
     })
 }
