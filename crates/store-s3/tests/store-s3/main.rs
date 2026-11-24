@@ -18,6 +18,8 @@ mod latency;
 #[cfg(test)]
 mod limits;
 #[cfg(test)]
+mod memory;
+#[cfg(test)]
 mod minio;
 #[cfg(test)]
 mod provider;

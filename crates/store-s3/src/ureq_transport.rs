@@ -69,7 +69,9 @@ impl UreqTransport {
         }
     }
 
-    fn build(request: &HttpRequest) -> Result<http::Request<Vec<u8>>, TransportError> {
+    /// The request as ureq takes it. The body is borrowed from `request`, not copied: a
+    /// multipart part is megabytes, and an upload sends a batch of them at once.
+    fn build(request: &HttpRequest) -> Result<http::Request<&[u8]>, TransportError> {
         let mut builder = http::Request::builder()
             .method(method_name(request.method()))
             .uri(request.url().as_str());
@@ -80,7 +82,7 @@ impl UreqTransport {
             }
         }
         builder
-            .body(request.body().to_vec())
+            .body(request.body())
             .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))
     }
 }
