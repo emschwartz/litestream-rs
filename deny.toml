@@ -6,12 +6,6 @@ version = 2
 yanked = "warn"
 unmaintained = "workspace"
 ignore = [
-    # url 2.5.8: stack overflow in `Url::origin()` on nested `blob:` URLs. No
-    # workspace code calls `Url::origin`, and the only URLs parsed are replica
-    # URLs (`s3://`, `file://`) from the operator's own config. The fix, 2.5.9,
-    # is inside the 3-day publish cooldown (.cargo/config.toml) until
-    # 2026-11-24; bump with `cargo update -p url` then and delete this entry.
-    { id = "RUSTSEC-2026-0592", reason = "Url::origin unused; fix inside publish cooldown until 2026-11-24" },
 ]
 
 [bans]
