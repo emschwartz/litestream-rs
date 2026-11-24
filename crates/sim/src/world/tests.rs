@@ -87,6 +87,37 @@ fn two_bump_commits_across_a_wal_restart_both_join_the_model() {
     assert!(w.model_matches_sqlite());
 }
 
+/// The app's commit inside a tick that follows the engine's own bump: the model learns the bump
+/// from the in-tick operation's record of where the WAL stood before it, and must not take it up
+/// again from the engine's list, where it would be a second commit at the same end that carries
+/// the app's newer pages.
+#[test]
+fn a_bump_before_the_apps_in_tick_commit_is_one_commit() {
+    use crate::sqlite::{InTickAt, InTickOp};
+    let mut w = world();
+    commit(&mut w, 1);
+    let before = w.model.commits().len();
+    let pages: Vec<(PageNo, Vec<u8>)> = vec![(pgno(1), page(7)), (pgno(2), page(7))];
+    w.arm_app_commit_in_tick(pages, 4);
+    w.sqlite
+        .arm_app_in_tick(InTickAt::Call(1), InTickOp::Commit);
+    let mut ck = w.sqlite.checkpointer();
+    let mut wal = w.sqlite.source();
+    let end = w.run_tick(
+        async {
+            lsr_core::Checkpointer::bump_seq(&mut ck).unwrap();
+            lsr_core::WalSource::committed(&mut wal).unwrap();
+        },
+        None,
+    );
+    assert!(matches!(end, TickEnd::Done(())));
+    let made = &w.model.commits()[before..];
+    assert_eq!(made.len(), 2, "the bump and the app's commit");
+    let ends: std::collections::BTreeSet<u64> = made.iter().map(|rec| rec.end.get()).collect();
+    assert_eq!(ends.len(), 2, "no end is recorded twice");
+    assert!(w.model_matches_sqlite());
+}
+
 #[test]
 fn a_vacuum_to_a_new_page_size_restarts_the_model_on_the_new_image() {
     let mut w = world();

@@ -610,6 +610,13 @@ impl World {
     /// replica recorder's length when the tick started, so no earlier put can be
     /// taken to cover it.
     pub fn sync_model_at(&mut self, at: usize) {
+        self.sync_model_from(at, self.model.commits().len());
+    }
+
+    /// [`World::sync_model_at`] for a tick whose model commits from index `from` on were already
+    /// taken up (the app's, and the engine's bump the app's in-tick operation saw): an engine
+    /// commit that one of them already names is not recorded again.
+    fn sync_model_from(&mut self, at: usize, from: usize) {
         let written = self.sqlite.take_written();
         // Each commit of the engine's own, not only the one the tick left the WAL at: a tick can
         // make one, take a snapshot that ends on it, restart the WAL and make another. A file
@@ -617,7 +624,12 @@ impl World {
         // A bump rewrites page 1 as it is, so each leaves the newest commit's image.
         for commit in self.sqlite.take_engine_commits() {
             self.retire_generation(commit.salts);
-            if !self.newest_ends_at(commit) {
+            let seen = self.model.commits().get(from..).is_some_and(|taken| {
+                taken
+                    .iter()
+                    .any(|rec| rec.salts == commit.salts && rec.end.get() == commit.end.get())
+            });
+            if !seen && !self.newest_ends_at(commit) {
                 let size = self.model.newest_image().db_size();
                 self.model.commit(&[], size, commit, at);
                 self.log_history();
@@ -684,11 +696,12 @@ impl World {
         let ran = run_until(fut, budget);
         // The app's commit inside the tick came before the engine's own frames
         // that followed it, so the model takes it up first.
+        let from = self.model.commits().len();
         self.record_app_in_tick();
         self.in_tick = self.record_commit_in_tick();
         // Before the crash takes anything: a power loss decides which of the
         // engine's own commits survive, so the model must know them first.
-        self.sync_model_at(at);
+        self.sync_model_from(at, from);
         match ran {
             RunEnd::Done(out) => TickEnd::Done(out),
             RunEnd::Crashed { polls } => {
