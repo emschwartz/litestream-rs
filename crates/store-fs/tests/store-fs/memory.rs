@@ -8,7 +8,9 @@
 //! files are written by the real encoder through the store before a measurement starts,
 //! and the output goes to a second directory, so only the compaction is counted.
 //!
-//! The inputs are read as a replica's, a mebibyte at a time (the public `compact`).
+//! Both roles are measured: a replica's inputs are read a mebibyte at a time (the public
+//! `compact`, what a file replica's levels above 1 get), and the engine's level-1
+//! compaction reads the staged level-0 files in a 128 KiB window (`compact_staged`).
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -21,6 +23,7 @@ use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     CompactionInputs, FileKey, Level, MAX_INPUTS, ObjectStore, PageLimit, Upload, compact,
+    compact_staged,
 };
 use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
 use lsr_store_fs::FsStore;
@@ -43,8 +46,10 @@ const MIB: usize = 1024 * KIB;
 /// Pages every input holds: a little over one mebibyte of incompressible 4 KiB pages.
 const PAGES: u32 = 300;
 
-/// What one read of an input asks for, restated so a change to it shows here.
+/// What one read of a replica's input asks for, and of a staged one, restated so a change
+/// to either shows here.
 const CHUNK: usize = MIB;
+const STAGED_WINDOW: usize = 128 * KIB;
 
 /// A page's size, and the encoder's output buffer that compaction flushes at.
 const PAGE: usize = 4 * KIB;
@@ -143,4 +148,24 @@ fn a_compaction_holds_a_chunk_per_replica_input() {
 
     assert_eq!(done.unwrap().pages(), PAGES);
     assert_holds_a_window_per_input(peak.extra, CHUNK);
+}
+
+/// The engine's level-1 compaction reads the staged files in the staging window.
+#[test]
+fn a_level_one_compaction_holds_a_staging_window_per_input() {
+    let (_from, source, inputs) = staged_inputs();
+    let to = tempfile::tempdir().unwrap();
+    let dest = FsStore::new(to.path());
+
+    let (done, peak) = peak_of(|| {
+        block_on(compact_staged(
+            &source,
+            &dest,
+            &inputs,
+            Level::new(1).unwrap(),
+        ))
+    });
+
+    assert_eq!(done.unwrap().pages(), PAGES);
+    assert_holds_a_window_per_input(peak.extra, STAGED_WINDOW);
 }
