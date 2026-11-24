@@ -416,7 +416,7 @@ fn parse_s3_forms() {
         "a/b/c"
     );
     // A bucket with no path is the whole bucket, as under Go: keys start with a slash. Without
-    // the slash Go's prefix is `.` (keys `./0000/...`), which no URL can name: refused.
+    // the slash Go's prefix is `.` (keys `./0000/...`), which the `url` type cannot carry: refused.
     let bare = s3("files --replica s3://bucket/");
     assert_eq!(bare.bucket().as_str(), "bucket");
     assert_eq!(bare.prefix().as_str(), "");

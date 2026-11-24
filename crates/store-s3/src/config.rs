@@ -27,7 +27,7 @@ pub enum ConfigError {
     #[error("unsupported url scheme")]
     UnsupportedScheme,
     /// The prefix has a leading or trailing slash, an empty segment, a `.` or `..` segment or a
-    /// control character. A URL cannot carry a dot segment: the `url` type and every HTTP client
+    /// control character. The `url` type cannot carry a dot segment: it and the HTTP clients built on it
     /// drop it, so the request would name another object than the key says.
     #[error("the replica prefix is not a clean path")]
     BadPrefix,

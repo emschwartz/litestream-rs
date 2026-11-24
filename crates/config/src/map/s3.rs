@@ -71,7 +71,7 @@ impl S3Url {
             .map_err(|_bytes| ReplicaProblem::BadUrl)?;
         let path = path.trim_start_matches('/');
         // Go's `path.Clean("")` is `.`, so `s3://bucket` has the path `.`, and its keys are
-        // `./0000/<file>`: a name no URL carries, since every client drops a `.` segment. The store
+        // `./0000/<file>`: a name the `url` type cannot carry, since it drops a `.` segment. The store
         // refuses that prefix rather than write somewhere else. `s3://bucket/` cleans to `/` and is the
         // bare bucket.
         out.path = (!path.is_empty()).then(|| path.to_owned());

@@ -41,7 +41,7 @@ fn a_bare_url_is_aws_in_virtual_host_style() {
 
 /// Go cleans the URL's path (`path.Clean`) and trims one leading slash, so `s3://b/` has an empty
 /// path and its keys start with a slash. `s3://b` cleans to `.`, which is a different prefix (its
-/// keys are `./0000/<file>`) that no URL can name, so it is refused, not read as the bare bucket.
+/// keys are `./0000/<file>`) that the `url` type cannot carry, so it is refused, not read as the bare bucket.
 #[test]
 fn a_bucket_with_no_path_is_a_replica_at_the_root_of_the_bucket() {
     for text in ["s3://b/", "s3://b/.", "s3://b//", "s3://b/a/.."] {
