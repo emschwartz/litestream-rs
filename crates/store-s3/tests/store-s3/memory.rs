@@ -1,5 +1,5 @@
 //! Memory gates for the S3 store through the real HTTP client: the live heap of a multipart
-//! upload, measured while the transport that ships does the work.
+//! upload and of a restore, measured while the transport that ships does the work.
 //!
 //! A test server on a loopback socket stands in for S3 (the in-memory `FakeS3` behind a
 //! real listener, one thread per connection), so the client's own buffers, the request body
@@ -12,6 +12,9 @@
 //!
 //! - An upload holds at most `concurrency` parts (the batch being sent), whatever its size:
 //!   the part buffers are the request bodies, so nothing copies them.
+//! - A restore holds one read window: `READ_CONCURRENCY` responses of the 4 MiB the engine
+//!   asks for, whatever the database's size, so each response holds its length and not the
+//!   capacity a read grown from empty ends with.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -19,19 +22,24 @@
 )]
 
 use std::collections::BTreeSet;
+use std::convert::Infallible;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
-use lsr_core::{FakeClock, FileKey, ObjectStore, Upload};
-use lsr_ltx::{Timestamp, Txid};
+use lsr_core::{DatabaseSink, FakeClock, FileKey, ObjectStore, RestoreTarget, Upload, restore};
+use lsr_ltx::{
+    DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
+    TxidRange,
+};
 use lsr_store_s3::{
-    BucketName, Endpoint, FakeS3, HttpRequest, Method, PartSize, Prefix, S3Config, S3Store,
-    Transport, object_key,
+    BucketName, Endpoint, FakeS3, HttpRequest, Method, PartSize, Prefix, READ_CONCURRENCY,
+    S3Config, S3Store, Transport, object_key,
 };
 use url::Url;
 
@@ -51,6 +59,10 @@ static HEAP: Counting = Counting;
 
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
+
+/// Bytes one restore read asks of the store: core's `restore::CHUNK_BYTES`, restated so a
+/// change there shows here.
+const RESTORE_CHUNK: usize = 4 * MIB;
 
 /// What a store may hold beyond the buffers the laws name: the client's per-request
 /// buffers and the decoder's page, the multipart bookkeeping and the result.
@@ -245,4 +257,124 @@ fn an_upload_through_the_real_client_holds_five_parts() {
 #[test]
 fn the_bound_follows_part_size_and_concurrency() {
     assert_upload_holds_one_batch(8 * MIB, 3, 56 * MIB);
+}
+
+/// A destination that keeps a page count and nothing else.
+struct Discard {
+    pages: Arc<AtomicU64>,
+}
+
+impl DatabaseSink for Discard {
+    fn write_page(&mut self, _page: PageRef<'_>) -> io::Result<()> {
+        self.pages.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn truncate(&mut self, _pages: DbPages, _page_size: PageSize) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn reset(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn checksum(&mut self, _pages: DbPages, _page_size: PageSize) -> io::Result<DbChecksum> {
+        Err(io::Error::other(
+            "untracked files never ask for the end state",
+        ))
+    }
+
+    type PublishError = Infallible;
+
+    fn publish(self) -> Result<(), Infallible> {
+        Ok(())
+    }
+}
+
+/// A snapshot of `pages` incompressible 4 KiB pages as the encoder writes it.
+fn snapshot_bytes(pages: u32) -> Vec<u8> {
+    let size = PageSize::new(4096).unwrap();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: size,
+        commit: pages,
+        txids: TxidRange::new(txid(1), txid(1)).unwrap(),
+        timestamp: Timestamp::from_unix_millis(1_700_000_000_000),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    let mut page = vec![0_u8; size.bytes()];
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    for pgno in 1..=pages {
+        for word in page.chunks_mut(8) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            word.copy_from_slice(&state.to_le_bytes()[..word.len()]);
+        }
+        encoder
+            .write_page(PageNo::new(pgno, size).unwrap(), &page)
+            .unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
+/// Restores a snapshot of `mib` MiB through the real client and returns the heap peak.
+fn restore_peak(mib: usize) -> usize {
+    let fake = fake();
+    let bytes = snapshot_bytes(u32::try_from(mib * 256).unwrap());
+    let key = FileKey::snapshot(txid(1));
+    fake.put_raw(
+        &object_key(config().prefix(), &key),
+        bytes,
+        &[("x-amz-meta-litestream-timestamp", &now().to_string())],
+    );
+    let store = store_on(serve(&fake), PartSize::MIN.get().try_into().unwrap(), 5);
+    let pages = Arc::new(AtomicU64::new(0));
+    let sink = Discard {
+        pages: Arc::clone(&pages),
+    };
+    let (restored, peak) =
+        process_peak_of(|| block_on(restore(&store, RestoreTarget::Latest, sink)));
+    restored.unwrap();
+    assert_eq!(
+        pages.load(Ordering::Relaxed),
+        u64::try_from(mib * 256).unwrap()
+    );
+    peak.extra
+}
+
+/// The most a restore may hold: `READ_CONCURRENCY` responses of the chunk it asks for in
+/// flight, the one more the store copies a body into, and the margin.
+fn restore_bound() -> usize {
+    (READ_CONCURRENCY.get() + 1) * RESTORE_CHUNK + MARGIN
+}
+
+/// A restore through the real client holds its read window, and no more as the database
+/// grows from 72 MiB to 144 MiB.
+#[test]
+fn a_restore_through_the_real_client_holds_one_read_window() {
+    let window = READ_CONCURRENCY.get() * RESTORE_CHUNK;
+    assert!(
+        72 * MIB > window,
+        "the database must be larger than the window"
+    );
+    let few = restore_peak(72);
+    eprintln!(
+        "restore 72 MiB: {} KiB (bound {} KiB)",
+        few >> 10,
+        restore_bound() >> 10
+    );
+    assert!(
+        few <= restore_bound(),
+        "restore held {few} bytes, over {}",
+        restore_bound()
+    );
+    assert!(
+        few >= window - RESTORE_CHUNK,
+        "the gate saw {few} bytes: it cannot see the window"
+    );
 }
