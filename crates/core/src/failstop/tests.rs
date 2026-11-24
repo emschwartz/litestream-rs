@@ -69,6 +69,28 @@ fn the_gate_follows_the_table() {
     }
 }
 
+/// Writes are held while the gate is held, and while the boot is still being judged under
+/// `hold-start` and `stop-app`; `report` never holds them, and an open gate never does.
+#[test]
+fn writes_are_blocked_by_a_held_gate_and_by_a_pending_boot_except_under_report() {
+    let stop = Trip::Stopped(StopCause::OtherWriter);
+    for mode in MODES {
+        assert_eq!(blocks_writes(mode, Gate::Allowed), None, "{mode:?}");
+        assert_eq!(
+            blocks_writes(mode, Gate::Held(stop)),
+            Some(WhyBlocked::Tripped(stop)),
+            "{mode:?}"
+        );
+        let pending = match mode {
+            IfReplicationStops::Report => None,
+            IfReplicationStops::HoldStart | IfReplicationStops::StopApp => {
+                Some(WhyBlocked::Booting)
+            }
+        };
+        assert_eq!(blocks_writes(mode, Gate::Pending), pending, "{mode:?}");
+    }
+}
+
 #[test]
 fn the_default_mode_is_hold_start() {
     assert_eq!(IfReplicationStops::default(), IfReplicationStops::HoldStart);

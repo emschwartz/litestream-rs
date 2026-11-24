@@ -41,7 +41,7 @@
 //!
 //! The connections are lsr-sqlite's: the app (commits, spills, another process's
 //! checkpoints), our read connection (which also runs our checkpoints, between ending and
-//! retaking its read transaction), our writer connection (the barrier, the write lock and
+//! retaking its read transaction), our writer connection (the barrier and
 //! `bump_seq`, one at a time), and other-process readers. The app, our reader and our writer
 //! each carry a checkpoint count, so the first frame after our own TRUNCATE, written by our
 //! writer whose count is 0, gets random salts, as in SQLite.
@@ -74,7 +74,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
-    SourceError, SourceOp, WalFileLen, WalSource, WriteLock,
+    SourceError, SourceOp, WalFileLen, WalSource,
 };
 use lsr_ltx::{DbPages, PageNo, PageSize, Timestamp};
 use lsr_wal::testing::{WalBuilder, page};
@@ -166,8 +166,8 @@ pub struct AppCommit {
 /// Which crash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrashKind {
-    /// Our process dies: our read transaction, barrier, write lock and writer
-    /// connection vanish; the files, the wal-index and the app stay.
+    /// Our process dies: our read transaction, barrier, gate and writer
+    /// connections vanish; the files, the wal-index and the app stay.
     Process,
     /// The machine loses power: every connection vanishes, the WAL is what was
     /// last fsynced, and the app's next open runs SQLite's recovery.
@@ -188,6 +188,9 @@ enum Conn {
     /// it keeps a checkpoint count of its own, so after a restart whose writer rolled back it
     /// writes the header again with the same salts and another seed.
     OtherWriter,
+    /// The replicator's write gate (`lsr_sqlite::WriteGate`): a connection of our process
+    /// that holds a write transaction and never writes, so no other connection can.
+    Gate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,7 +337,6 @@ struct State {
     next_reader: u32,
     next_token: u64,
     barrier: Option<u64>,
-    write_lock: Option<u64>,
     faults: Faults,
     app_autocheckpoint: Option<u32>,
     app_auto: AutoTally,
@@ -560,7 +562,7 @@ impl State {
             Conn::OtherWriter => Some(&mut self.other_writer_checkpoints),
             Conn::Ours => Some(&mut self.ours_checkpoints),
             Conn::Writer => Some(&mut self.writer_checkpoints),
-            Conn::OtherProcess(_) | Conn::Cli => None,
+            Conn::OtherProcess(_) | Conn::Cli | Conn::Gate => None,
         }
     }
 
@@ -1044,10 +1046,19 @@ impl State {
         self.next_token
     }
 
+    /// `WritesHeld` while the gate holds: `lsr-replica`'s checkpointer refuses every write and
+    /// checkpoint then, before SQLite is asked.
+    fn writes_allowed(&self) -> Result<(), SourceError> {
+        if self.writer == Some(Conn::Gate) {
+            return Err(SourceError::WritesHeld);
+        }
+        Ok(())
+    }
+
     fn take_writer(&mut self, conn: Conn) -> Result<u64, SourceError> {
-        // One lock at a time on the one writer connection, as the real checkpointer refuses
+        // One barrier at a time on the one writer connection, as the real checkpointer refuses
         // a second while a token is outstanding.
-        if self.barrier.is_some() || self.write_lock.is_some() {
+        if self.barrier.is_some() {
             return Err(SourceError::Io(io::ErrorKind::InvalidInput));
         }
         if self.writer.is_some() || self.readers.contains_key(&conn) {
@@ -1068,8 +1079,9 @@ impl State {
     fn process_crash(&mut self) {
         self.end(Conn::Ours);
         self.drop_writer(Conn::Writer);
+        // The gate's connection is our process's too.
+        self.drop_writer(Conn::Gate);
         self.barrier = None;
-        self.write_lock = None;
         self.ours_checkpoints = 0;
         self.writer_checkpoints = 0;
     }
@@ -1271,7 +1283,6 @@ impl SimSqlite {
             next_reader: 0,
             next_token: 0,
             barrier: None,
-            write_lock: None,
             faults: Faults::default(),
             app_autocheckpoint: None,
             our_sync_lies: false,
@@ -1723,6 +1734,39 @@ impl SimSqlite {
         self.with(|state| state.faults.injections.clear());
     }
 
+    /// The replicator's write gate takes the write lock (`BEGIN IMMEDIATE` on a connection of
+    /// its own): from here no other connection commits, and our checkpointer refuses every
+    /// write as `WritesHeld`, as `lsr-replica`'s does. False, changing nothing, while another
+    /// connection is in a write transaction; true if the gate already holds.
+    pub fn hold_writes(&self) -> bool {
+        self.with(|state| {
+            if state.writer == Some(Conn::Gate) {
+                return true;
+            }
+            if state.writer.is_some() {
+                return false;
+            }
+            state.begin(Conn::Gate);
+            state.writer = Some(Conn::Gate);
+            true
+        })
+    }
+
+    /// The gate rolls back: writes go through again.
+    pub fn release_writes(&self) {
+        self.with(|state| state.drop_writer(Conn::Gate));
+    }
+
+    /// Whether the gate holds the write lock now.
+    pub fn writes_held(&self) -> bool {
+        self.with(|state| state.writer == Some(Conn::Gate))
+    }
+
+    /// Whether a connection other than the gate is in a write transaction now.
+    pub fn writer_busy(&self) -> bool {
+        self.with(|state| state.writer.is_some_and(|holder| holder != Conn::Gate))
+    }
+
     /// The next TRUNCATE checkpoint that finishes, ours or another process's, resets
     /// the wal-index and then fails to truncate the file (`ftruncate` failing):
     /// the file keeps the old header and frames until the next commit writes a
@@ -2162,7 +2206,7 @@ impl PageSource for SimPages {
 }
 
 /// Our checkpoint connections: [`Checkpointer`] over the shared state. Checkpoints run on our
-/// read connection; the barrier, the write lock and `bump_seq` on our writer connection.
+/// read connection; the barrier and `bump_seq` on our writer connection.
 #[derive(Clone, Debug)]
 pub struct SimCheckpointer {
     state: Arc<Mutex<State>>,
@@ -2175,6 +2219,7 @@ impl Checkpointer for SimCheckpointer {
         // The application commits after the tick's sync read the committed end and before the
         // barrier keeps writers out: the commit the checkpoint's seal must stage.
         state.commit_in_tick(InTickSite::BeforeBarrier);
+        state.writes_allowed()?;
         state.faults.take(SourceOp::BeginBarrier)?;
         let id = state.take_writer(Conn::Writer)?;
         state.barrier = Some(id);
@@ -2198,6 +2243,7 @@ impl Checkpointer for SimCheckpointer {
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         let mut state = lock(&self.state);
         state.app_call(Some(SourceOp::Checkpoint));
+        state.writes_allowed()?;
         // lsr-sqlite releases the read transaction before it asks SQLite and takes it again
         // after, whatever SQLite answered: a failed checkpoint still starts a new hold. A lost
         // retake ran the checkpoint and leaves the read transaction lapsed, for the next read
@@ -2232,12 +2278,13 @@ impl Checkpointer for SimCheckpointer {
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         let mut state = lock(&self.state);
         state.app_call(Some(SourceOp::BumpSeq));
+        state.writes_allowed()?;
         state.faults.take(SourceOp::BumpSeq)?;
         let first = PageNo::new(1, state.page_size).ok_or(SourceError::Busy)?;
         let data = state.image_page(1);
         let size = state.index.db_size.max(1);
-        // The writer connection is in the lock's transaction: the real checkpointer refuses.
-        if state.barrier.is_some() || state.write_lock.is_some() {
+        // The writer connection is in the barrier's transaction: the real checkpointer refuses.
+        if state.barrier.is_some() {
             return Err(SourceError::Io(io::ErrorKind::InvalidInput));
         }
         if state.write(Conn::Writer, &[(first, data)], Some(size)) {
@@ -2245,26 +2292,5 @@ impl Checkpointer for SimCheckpointer {
         } else {
             Err(SourceError::Busy)
         }
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        let mut state = lock(&self.state);
-        state.app_call(Some(SourceOp::BeginWriteLock));
-        state.faults.take(SourceOp::BeginWriteLock)?;
-        let id = state.take_writer(Conn::Writer)?;
-        state.write_lock = Some(id);
-        Ok(WriteLock::new(id))
-    }
-
-    fn end_write_lock(&mut self, lock_held: WriteLock) -> Result<(), SourceError> {
-        let mut state = lock(&self.state);
-        state.app_call(Some(SourceOp::EndWriteLock));
-        // As `end_barrier`: the lock is released and the token spent, whatever the error.
-        let released = state.faults.take(SourceOp::EndWriteLock);
-        if state.write_lock == Some(lock_held.id()) {
-            state.write_lock = None;
-            state.drop_writer(Conn::Writer);
-        }
-        released
     }
 }

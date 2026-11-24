@@ -28,6 +28,15 @@
 //! Every wait this thread returns is capped at a stop's deadline (`park_until`), and a turn
 //! that finds the deadline passed while the engine waits to be rebuilt ends there.
 //!
+//! Fail-stop's write gate is this thread's too: a third connection ([`WriteGate`]), apart
+//! from the engine's two, that holds a write transaction while [`lsr_core::blocks_writes`]
+//! says the application's writes are held. After every tick, and at the start of every turn,
+//! the gate is made to match the latest judgement; a hold that meets an open application write
+//! transaction is tried again on the next turn, at most one poll interval later. The gate is
+//! never dropped with the engine: it holds through a panic, a rebuild and a stop for a bug,
+//! and goes only when the thread ends. Each change is an event (`WritesBlocked`,
+//! `WritesAllowed`) sent after the health snapshot that shows it.
+//!
 //! The connections reopen by path, but the replicator was registered by device and inode.
 //! A reopen that finds another file at the path (or none) does not open it, and one whose
 //! opened descriptor names another file does not keep it: the database the replicator
@@ -38,21 +47,20 @@ use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use lsr_core::{
-    Actor, AppCheckpoints, AppGate, Degraded, Did, Env, Event as EngineEvent, Gate, Level,
-    ObjectStore, PageLimit, PersistentCause, Phase as EnginePhase, Response, StopCause,
-    TakeoverRecord, Task, Tick, Unfinished, WalSource, retry_wait,
+    Actor, AppCheckpoints, AppGate, Degraded, Did, Env, Event as EngineEvent, Level, ObjectStore,
+    PageLimit, PersistentCause, Phase as EnginePhase, Response, StopCause, TakeoverRecord, Task,
+    Tick, Unfinished, WalSource, WhyBlocked, blocks_writes, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
-use lsr_sqlite::{DatabaseFile, Sqlite};
+use lsr_sqlite::{DatabaseFile, Sqlite, WriteGate};
 use lsr_store_fs::FsStore;
 
 use crate::config::Config;
 use crate::events::{Event, EventSink, TakeoverUnusable};
 use crate::exec::block_on;
-use crate::health::{Counters, FailStop, Gone, Phase, Stopped};
+use crate::health::{Counters, FailStop, Gone, Phase, Stopped, Writes};
 use crate::meta::{MetaLock, remove_takeover, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
@@ -187,6 +195,20 @@ pub(crate) struct Worker {
     _meta_lock: Option<MetaLock>,
     /// Whether fail-stop has let the application run yet (`lsr_core::AppGate`).
     app_gate: AppGate,
+    /// The connection that holds the application's writes.
+    gate: WriteGate,
+    /// Why the application's writes are to be held, as last judged; `None` lets them through.
+    blocked: Option<WhyBlocked>,
+    /// The last reason writes were held for, which a gate whose release failed still shows.
+    why: WhyBlocked,
+    /// What the last `WritesBlocked` or `WritesAllowed` event said.
+    reported: Writes,
+    /// The pending boot waited on held writes (a sequence bump for a missing WAL): the gate
+    /// lets writes through until the boot is judged, so it is judged on what it finds and not
+    /// on the hold, which would never end.
+    boot_write: bool,
+    /// When a hold or release that failed is tried again at the latest.
+    gate_retry: Option<Timestamp>,
     /// The clock's last reading, to notice it stepping back.
     last_reading: Option<Timestamp>,
 }
@@ -208,9 +230,14 @@ impl Drop for ExitGuard {
 }
 
 impl Worker {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "what one thread owns, each from its own open in the launch"
+    )]
     pub(crate) fn new(
         shared: Arc<Shared>,
         sqlite: Sqlite,
+        gate: WriteGate,
         database: &Path,
         meta: &Path,
         store: Arc<dyn DynStore>,
@@ -233,6 +260,8 @@ impl Worker {
             Arc::clone(&shared.meters),
             Arc::clone(&runtime.clock),
         );
+        // Until the first judgement the boot is pending, which holds writes but under `report`.
+        let blocked = blocks_writes(config.if_replication_stops, lsr_core::Gate::Pending);
         Self {
             shared,
             sqlite: Some(sqlite),
@@ -254,6 +283,12 @@ impl Worker {
             _meta_lock: None,
             last_reading: None,
             app_gate: AppGate::default(),
+            blocked,
+            gate,
+            why: WhyBlocked::Booting,
+            reported: Writes::Allowed,
+            boot_write: false,
+            gate_retry: None,
         }
     }
 
@@ -354,8 +389,13 @@ impl Worker {
         }
     }
 
-    /// A wait until `at`, never past a stop's deadline.
+    /// A wait until `at`, never past a stop's deadline, nor past the retry of a gate that does
+    /// not yet hold as judged.
     fn park_until(&self, at: Option<Timestamp>) -> Turn {
+        let at = match (at, self.gate_retry) {
+            (Some(at), Some(retry)) => Some(at.min(retry)),
+            (at, retry) => at.or(retry),
+        };
         Turn::Wait(match (at, self.stop) {
             (Some(at), Some(deadline)) => Some(at.min(deadline)),
             (at, deadline) => at.or(deadline),
@@ -386,6 +426,7 @@ impl Worker {
 
     fn turn(&mut self, now: Timestamp) -> Turn {
         self.follow_clock(now);
+        self.sync_gate(now);
         if let Some(cause) = self.stopped {
             return self.stopped(cause);
         }
@@ -446,6 +487,7 @@ impl Worker {
             sqlite,
             self.config.readers,
             Arc::clone(&self.shared.readers),
+            self.shared.writes_held.clone(),
         );
         let env = Env {
             wal: &mut wal,
@@ -499,6 +541,11 @@ impl Worker {
 
     fn ran(&mut self, event: EngineEvent, next: lsr_core::Next, now: Timestamp) -> Turn {
         let idle = event == EngineEvent::Idle;
+        if matches!(event, EngineEvent::WritesHeld { .. })
+            && self.blocked == Some(WhyBlocked::Booting)
+        {
+            self.boot_write = true;
+        }
         // A drain that made progress ticks again at once: the engine reports `Drained` only on
         // the tick after its last upload, and would otherwise name the drain's deadline (or the
         // next poll) as its wake. A retry is not progress: it waits its backoff.
@@ -513,6 +560,7 @@ impl Worker {
             | EngineEvent::Idle
             | EngineEvent::Degraded { .. }
             | EngineEvent::Retrying { .. }
+            | EngineEvent::WritesHeld { .. }
             | EngineEvent::Clamped(_) => false,
         };
         if !idle {
@@ -542,7 +590,7 @@ impl Worker {
         if self.stop.is_some() {
             Turn::Done(Stopped::Stopped(cause))
         } else {
-            Turn::Wait(None)
+            self.park_until(None)
         }
     }
 
@@ -568,6 +616,8 @@ impl Worker {
             | EngineEvent::Idle
             | EngineEvent::Resnapshot(_)
             | EngineEvent::Clamped(_)
+            // A wait on held writes is not a failure: nothing is counted.
+            | EngineEvent::WritesHeld { .. }
             | EngineEvent::TakeoverWanted(_) => {}
         }
     }
@@ -686,16 +736,19 @@ impl Worker {
             }
         };
         let (wal_bytes, db_bytes) = self.sizes();
+        let fail_stop = self.fail_stop();
+        self.keep_gate(now);
         let snapshot = SnapshotParts {
             now,
             phase: self.phase(),
-            fail_stop: self.fail_stop(),
+            fail_stop,
             degraded: self.degraded(),
             wal_bytes,
             db_bytes,
             left,
         };
         self.publish(&snapshot);
+        self.report_writes();
     }
 
     fn publish(&self, parts: &SnapshotParts) {
@@ -715,6 +768,7 @@ impl Worker {
             .unwrap_or_default();
         let (seen, progress) = (&self.seen, &self.progress);
         let unreplicated = self.actor.unreplicated_since();
+        let writes = self.writes();
         self.shared.update(|state| {
             let health = &mut state.health;
             health.reported_at = parts.now;
@@ -729,6 +783,7 @@ impl Worker {
                 (seen, engine) => seen.or(engine),
             };
             health.held_by = parts.fail_stop;
+            health.writes = writes;
             health.wal_bytes = parts.wal_bytes;
             health.db_bytes = parts.db_bytes;
             health.resnapshot = resnapshot;
@@ -748,9 +803,9 @@ impl Worker {
         });
     }
 
-    /// Fail-stop's trip and gate now (`lsr_core::failstop`), and the flag the commit hook reads.
-    /// A stop this thread made itself (a panic or a replaced database under a stop response)
-    /// trips as an engine stop does.
+    /// Fail-stop's trip and gate now (`lsr_core::failstop`), and whether the application's
+    /// writes are to be held. A stop this thread made itself (a panic or a replaced database
+    /// under a stop response) trips as an engine stop does.
     fn fail_stop(&mut self) -> FailStop {
         let trip = match self.stopped {
             Some(cause) => lsr_core::trip(Some(cause), None, None),
@@ -760,12 +815,71 @@ impl Worker {
         let gate = self
             .app_gate
             .judge(self.config.if_replication_stops, trip, judged);
-        let held = match gate {
-            Gate::Held(_) => true,
-            Gate::Pending | Gate::Allowed => false,
-        };
-        self.shared.writes_refused.store(held, Ordering::Release);
+        self.blocked = blocks_writes(self.config.if_replication_stops, gate);
+        if self.blocked != Some(WhyBlocked::Booting) {
+            self.boot_write = false;
+        }
         FailStop { trip, gate }
+    }
+
+    /// Takes or lets go of the write lock as last judged. One that fails (an application write
+    /// transaction is open, or SQLite failed) is tried again at the next turn, which comes
+    /// within one poll interval.
+    fn keep_gate(&mut self, now: Timestamp) {
+        if let Some(why) = self.blocked {
+            self.why = why;
+        }
+        let hold = match self.blocked {
+            Some(WhyBlocked::Booting) => !self.boot_write,
+            Some(WhyBlocked::Tripped(_)) => true,
+            None => false,
+        };
+        let kept = if hold {
+            self.gate.hold()
+        } else {
+            self.gate.release()
+        };
+        self.gate_retry = kept
+            .is_err()
+            .then(|| later(now, self.config.poll_interval.get()));
+    }
+
+    /// Whether writes are held now: the lock's own state, with the reason judged.
+    fn writes(&self) -> Writes {
+        match (self.gate.is_held(), self.blocked) {
+            (true, blocked) => Writes::Blocked(blocked.unwrap_or(self.why)),
+            (false, Some(why)) => Writes::Blocking(why),
+            (false, None) => Writes::Allowed,
+        }
+    }
+
+    /// The gate made to match the last judgement between ticks: a hold an application
+    /// transaction kept out is retried here, and a change shows in health and as an event.
+    fn sync_gate(&mut self, now: Timestamp) {
+        self.keep_gate(now);
+        let writes = self.writes();
+        if writes != self.reported {
+            self.shared.update(|state| state.health.writes = writes);
+            self.report_writes();
+        }
+    }
+
+    /// Emits `WritesBlocked` or `WritesAllowed` when the lock was taken, its reason changed,
+    /// or it was let go since the last one.
+    fn report_writes(&mut self) {
+        let writes = self.writes();
+        let was = std::mem::replace(&mut self.reported, writes);
+        let event = match (was, writes) {
+            (Writes::Blocked(old), Writes::Blocked(why)) if old == why => None,
+            (_, Writes::Blocked(why)) => Some(Event::WritesBlocked { why }),
+            (Writes::Blocked(_), Writes::Allowed | Writes::Blocking(_)) => {
+                Some(Event::WritesAllowed)
+            }
+            (Writes::Allowed | Writes::Blocking(_), Writes::Allowed | Writes::Blocking(_)) => None,
+        };
+        if let Some(event) = event {
+            self.emit(&event);
+        }
     }
 
     /// What is not on the replica now, as the engine measures it; `None` when it cannot: no

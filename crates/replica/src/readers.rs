@@ -11,12 +11,19 @@
 //! backoff and asks again. A FULL checkpoint (the cure after a failed WAL sync runs one) is
 //! blocked by readers on older snapshots the same way, also reports busy without waiting, and
 //! is guarded alike. PASSIVE checkpoints never wait on readers and are unaffected.
+//!
+//! The same checkpointer stands down while fail-stop holds the application's writes
+//! ([`WritesHeld`]): every step that writes or checkpoints (the barrier, a checkpoint of any
+//! mode, the sequence bump) is refused before SQLite is asked, as `SourceError::WritesHeld`,
+//! which the engine waits out without counting a failure. No application commit can grow the
+//! WAL meanwhile, so nothing is lost by not checkpointing, and the engine's own write would
+//! only meet the gate's lock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError, WriteLock};
-use lsr_sqlite::Sqlite;
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
+use lsr_sqlite::{Sqlite, WritesHeld};
 
 use crate::config::ReaderTracking;
 
@@ -43,12 +50,14 @@ impl Drop for ReaderGuard {
     }
 }
 
-/// The backend's checkpointer, refusing TRUNCATE unless the application said no reader runs.
+/// The backend's checkpointer, refusing TRUNCATE unless the application said no reader runs,
+/// and every write while the application's writes are held.
 #[derive(Clone, Debug)]
 pub(crate) struct Guarded {
     sqlite: Sqlite,
     tracking: ReaderTracking,
     readers: Arc<AtomicUsize>,
+    held: WritesHeld,
 }
 
 impl Guarded {
@@ -56,12 +65,22 @@ impl Guarded {
         sqlite: Sqlite,
         tracking: ReaderTracking,
         readers: Arc<AtomicUsize>,
+        held: WritesHeld,
     ) -> Self {
         Self {
             sqlite,
             tracking,
             readers,
+            held,
         }
+    }
+
+    /// `WritesHeld` while the gate holds the application's writes.
+    fn writes_allowed(&self) -> Result<(), SourceError> {
+        if self.held.is_held() {
+            return Err(SourceError::WritesHeld);
+        }
+        Ok(())
     }
 
     fn may_wait(&self) -> bool {
@@ -74,6 +93,7 @@ impl Guarded {
 
 impl Checkpointer for Guarded {
     fn begin_barrier(&mut self) -> Result<Barrier, SourceError> {
+        self.writes_allowed()?;
         self.sqlite.begin_barrier()
     }
 
@@ -82,6 +102,7 @@ impl Checkpointer for Guarded {
     }
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
+        self.writes_allowed()?;
         match mode {
             CheckpointMode::Truncate | CheckpointMode::Full if !self.may_wait() => {
                 Err(SourceError::ReadersHeld)
@@ -93,15 +114,8 @@ impl Checkpointer for Guarded {
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
+        self.writes_allowed()?;
         self.sqlite.bump_seq()
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.sqlite.begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.sqlite.end_write_lock(lock)
     }
 }
 

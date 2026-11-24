@@ -24,7 +24,8 @@ impl Runner {
         let (remote, staging) = (self.remote_fired(), fired(&self.w.staging_faults));
         let reported_failure = match ended {
             TickEnd::Done(Tick::Ran { event, .. }) => match event {
-                Event::Retrying { .. } => true,
+                // A step that waited on held writes did not move its commits either.
+                Event::Retrying { .. } | Event::WritesHeld { .. } => true,
                 Event::Degraded { task, .. } => data_path(*task),
                 Event::Booted { .. }
                 | Event::Synced { .. }

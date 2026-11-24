@@ -65,7 +65,10 @@ impl Actor {
             return;
         }
         self.kept.lag.failed(now);
-        if task != Task::Sync {
+        // Held writes judge no boot: the host lets a pending boot's own write through instead
+        // (`docs/decisions/D192.md`), and a boot judged on the hold would release the start
+        // before the boot had found what it would find.
+        if task != Task::Sync || matches!(fault, Some(Fault::WritesHeld)) {
             return;
         }
         if self.kept.listed {

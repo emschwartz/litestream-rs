@@ -1,0 +1,15 @@
+diff --git a/crates/sim/src/sqlite.rs b/crates/sim/src/sqlite.rs
+--- a/crates/sim/src/sqlite.rs
++++ b/crates/sim/src/sqlite.rs
+@@ -1510,7 +1510,10 @@
+     /// to a busy PASSIVE, and its read mark holds the backfill back, as any connection's do.
+     /// Always `Some`.
+     pub fn other_process_checkpoint(&self, mode: OtherProcessMode) -> Option<CheckpointNumbers> {
+-        self.with(|state| Some(state.checkpoint(Conn::Cli, mode)))
++        self.with(|state| {
++            state.drop_writer(Conn::Gate);
++            Some(state.checkpoint(Conn::Cli, mode))
++        })
+     }
+ 
+     /// The last connection closes: a full checkpoint, then the WAL is deleted

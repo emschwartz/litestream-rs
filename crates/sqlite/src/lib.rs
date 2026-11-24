@@ -43,6 +43,11 @@
 //! out of every reader's reach), `FsyncFailed` when its sync of the WAL failed (the next sync
 //! is made again, with nothing remembered), and `Io` for the rest.
 //!
+//! [`WriteGate`] is fail-stop's write gate: a write transaction held on a third connection of the
+//! replicator's own, which stops every other writer while it holds (the `gate` module).
+//! [`fail_fast_while`] makes a blocked write on an application connection fail at once while
+//! the gate holds, instead of waiting out its busy timeout.
+//!
 //! [`app_connection`] and [`check_app_connection`] set up and check the application's own connections
 //! (`wal_autocheckpoint = 0`, PLAN section 6; never `SQLITE_FCNTL_PERSIST_WAL`, which only the
 //! replicator's own two connections set, see [`app_connection`]).
@@ -73,6 +78,6 @@ pub use conn::{
     app_connection_for, app_connection_raw, check_app_connection,
 };
 pub use error::{OpenError, Refusal, SetupError, SplitOpen};
-pub use gate::refuse_commits_while;
+pub use gate::{WriteGate, WritesHeld, fail_fast_while};
 /// SQLite's C interface, for the raw handle [`app_connection_raw`] takes.
 pub use rusqlite::ffi;

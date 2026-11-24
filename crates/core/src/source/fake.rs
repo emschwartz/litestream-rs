@@ -32,7 +32,7 @@ use lsr_wal::{
 
 use super::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, SourceError,
-    WalSource, WriteLock,
+    WalSource,
 };
 use crate::position::{ReadLockHold, WalFileLen};
 
@@ -61,9 +61,11 @@ pub enum SourceOp {
     Checkpoint,
     /// `Checkpointer::bump_seq`.
     BumpSeq,
-    /// `Checkpointer::begin_write_lock`.
+    /// The write lock Go takes for a TRUNCATE (`db.go:2759-2771`). Nothing calls it: the
+    /// engine's copy after a TRUNCATE takes no lock (docs/decisions/D190.md), and the
+    /// `Checkpointer` trait no longer has the method. Kept so recorded histories still read.
     BeginWriteLock,
-    /// `Checkpointer::end_write_lock`.
+    /// The release of that write lock (Go `db.go:2795`). Nothing calls it either.
     EndWriteLock,
     /// `WalSource::sync`.
     Sync,
@@ -647,10 +649,6 @@ pub enum CheckpointCall {
     Checkpoint(CheckpointMode),
     /// `bump_seq`.
     BumpSeq,
-    /// `begin_write_lock`.
-    BeginWriteLock,
-    /// `end_write_lock`.
-    EndWriteLock,
 }
 
 /// Records its calls and applies scripted checkpoint outcomes to a [`FakeWal`].
@@ -664,7 +662,6 @@ pub struct FakeCheckpointer {
     calls: Vec<CheckpointCall>,
     scripts: Vec<CheckpointScript>,
     barrier_held: bool,
-    lock_held: bool,
     next_id: u64,
 }
 
@@ -677,7 +674,6 @@ impl FakeCheckpointer {
             calls: Vec::new(),
             scripts: Vec::new(),
             barrier_held: false,
-            lock_held: false,
             next_id: 1,
         }
     }
@@ -739,21 +735,6 @@ impl Checkpointer for FakeCheckpointer {
         if let Some(pgno) = PageNo::new(1, state.page_size) {
             state.append(&[(pgno, Vec::new())], Some(size));
         }
-        Ok(())
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.enter(CheckpointCall::BeginWriteLock, SourceOp::BeginWriteLock)?;
-        if self.lock_held {
-            return Err(SourceError::Busy);
-        }
-        self.lock_held = true;
-        Ok(WriteLock::new(self.fresh_id()))
-    }
-
-    fn end_write_lock(&mut self, _lock: WriteLock) -> Result<(), SourceError> {
-        self.enter(CheckpointCall::EndWriteLock, SourceOp::EndWriteLock)?;
-        self.lock_held = false;
         Ok(())
     }
 }

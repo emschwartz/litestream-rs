@@ -114,9 +114,10 @@ pub struct Config {
     /// mismatch is a degraded state in [`crate::Health::verification`], never a stop.
     pub verify_interval: Option<NonZeroDuration>,
     /// What a fail-stop trip does to the application (`if-replication-stops`, decisions D13
-    /// and D14): `HoldStart` by default. For the library, a held gate refuses the application's
-    /// commits through the hook [`crate::Replicator::app_connection`] installs; see
-    /// [`crate::Health::held_by`].
+    /// and D14): `HoldStart` by default. For the library, a held gate, and a boot not yet
+    /// judged except under `Report`, hold the application's writes with the write lock the
+    /// replicator keeps (`docs/decisions/D192.md`); see [`crate::Health::held_by`] and
+    /// [`crate::Health::writes`].
     pub if_replication_stops: IfReplicationStops,
     /// How long a commit may stay off the replica before fail-stop trips for it (decision
     /// D22): 10 minutes by default, at least 5.

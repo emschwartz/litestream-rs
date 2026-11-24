@@ -263,6 +263,17 @@ impl SqliteSide for RealSide {
             real.engine();
         });
     }
+    // The real backend runs no write gate: a run with one is the model's alone.
+    fn hold_writes(&self) -> bool {
+        false
+    }
+    fn release_writes(&self) {}
+    fn writes_held(&self) -> bool {
+        false
+    }
+    fn writer_busy(&self) -> bool {
+        false
+    }
     fn our_reader_begin(&self) -> bool {
         false
     }

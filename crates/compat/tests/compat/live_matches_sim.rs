@@ -39,7 +39,7 @@ use lsr_core::conformance::block_on;
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, Level, MemStore,
     ObjectStore, PageLimit, PageSource, Position, PositionSource, Probes, ReadLen, SourceError,
-    StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalSource, WalView, WriteLock, checkpoint,
+    StepEnd, SyncConfig, Synced, SyncedThrough, Verdict, WalSource, WalView, checkpoint,
     recover_traced, sync_step,
 };
 use lsr_ltx::{PageNo, PageSize, Timestamp};
@@ -155,8 +155,6 @@ enum Call {
     Truncate,
     Full,
     BumpSeq,
-    WriteLock,
-    EndWriteLock,
 }
 
 /// One call on the real side and what it left behind.
@@ -232,18 +230,6 @@ impl Checkpointer for RealCk {
         self.record(Call::BumpSeq, None);
         Ok(())
     }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        let lock = self.live.begin_write_lock()?;
-        self.record(Call::WriteLock, None);
-        Ok(lock)
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.live.end_write_lock(lock)?;
-        self.record(Call::EndWriteLock, None);
-        Ok(())
-    }
 }
 
 /// A checkpoint's numbers and read-lock hold on both sides.
@@ -308,16 +294,6 @@ impl Checkpointer for ModelCk {
             }
         }
         Ok(())
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.next(Call::WriteLock);
-        self.ck.begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.next(Call::EndWriteLock);
-        self.ck.end_write_lock(lock)
     }
 }
 

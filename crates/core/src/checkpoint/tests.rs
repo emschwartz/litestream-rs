@@ -593,7 +593,6 @@ fn a_busy_truncate_that_changed_nothing_takes_no_snapshot() {
     let done = rig.run(proof, CheckpointMode::Truncate).unwrap();
     assert_eq!(done.outcome, CheckpointOutcome::Busy);
     assert!(done.staged.files().len() <= 1);
-    assert!(!rig.ck.calls().contains(&CheckpointCall::BeginWriteLock));
     assert_eq!(rig.files().len(), 1 + done.staged.files().len());
 }
 
@@ -715,10 +714,6 @@ fn every_truncate_step_failure_reports_the_fault_and_holds_no_lock() {
         let (mut rig, result) = fail_at(op, CheckpointMode::Truncate);
         let failed = result.unwrap_err();
         assert_eq!(failed.fault, Fault::LocalIo, "{op:?}");
-        assert!(
-            !rig.ck.calls().contains(&CheckpointCall::BeginWriteLock),
-            "{op:?}: the TRUNCATE took the write lock"
-        );
         let barrier = rig.ck.begin_barrier();
         assert!(barrier.is_ok(), "{op:?} left the writer held");
     }

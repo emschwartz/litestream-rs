@@ -1,8 +1,0 @@
-name = "failstop-no-commit-hook"
-fix = "c8b9c90"
-package = "lsr-replica"
-test_bin = "replica"
-tests = [
-    "failstop::a_refusal_at_boot_refuses_commits_until_the_first_listing",
-    "failstop::an_unsafe_stop_while_running_refuses_commits_only_under_stop_app",
-]

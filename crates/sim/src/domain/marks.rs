@@ -53,6 +53,7 @@ const fn source_class_name(class: SourceClass) -> &'static str {
         SourceClass::FsyncFailed => "FsyncFailed",
         SourceClass::Busy => "Busy",
         SourceClass::ReadersHeld => "ReadersHeld",
+        SourceClass::WritesHeld => "WritesHeld",
         SourceClass::Short => "Short",
         SourceClass::Unlinked => "Unlinked",
         SourceClass::ReadTxLost => "ReadTxLost",

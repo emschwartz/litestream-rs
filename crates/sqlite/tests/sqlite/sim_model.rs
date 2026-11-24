@@ -21,9 +21,7 @@ mod diff {
     use std::io::Read;
     use std::time::Duration;
 
-    use lsr_core::{
-        Barrier, CheckpointMode, Checkpointer, PageSource, ReadLockHold, WalSource, WriteLock,
-    };
+    use lsr_core::{Barrier, CheckpointMode, Checkpointer, PageSource, ReadLockHold, WalSource};
     use lsr_ltx::{PageNo, PageSize};
     use lsr_sim::{OtherProcessMode, ReaderId, SimCheckpointer, SimPages, SimSource, SimSqlite};
     use lsr_sqlite::Sqlite;
@@ -52,8 +50,6 @@ mod diff {
         BumpSeq,
         BeginBarrier,
         EndBarrier,
-        BeginWriteLock,
-        EndWriteLock,
     }
 
     /// How a salt moved since the side's previous committed read.
@@ -64,18 +60,12 @@ mod diff {
         Other,
     }
 
-    /// What one side holds of the engine's two writer locks.
-    enum Held {
-        Barrier(Barrier),
-        Lock(WriteLock),
-    }
-
     /// One side's memory between steps, to say how salts and the hold moved.
     #[derive(Default)]
     struct Last {
         salts: Option<(u32, u32)>,
         epoch: Option<ReadLockHold>,
-        held: Vec<Held>,
+        held: Vec<Barrier>,
     }
 
     impl Last {
@@ -178,35 +168,21 @@ mod diff {
             Op::BeginBarrier => {
                 let got = cp.begin_barrier();
                 let out = show(got.as_ref().map(drop));
-                last.held.extend(got.ok().map(Held::Barrier));
+                last.held.extend(got.ok());
                 out
             }
-            Op::BeginWriteLock => {
-                let got = cp.begin_write_lock();
-                let out = show(got.as_ref().map(drop));
-                last.held.extend(got.ok().map(Held::Lock));
-                out
-            }
-            Op::EndBarrier | Op::EndWriteLock => end_held(cp, last, op),
+            Op::EndBarrier => end_held(cp, last),
             Op::Commit(_) | Op::OtherBegin(_) | Op::OtherEnd(_) | Op::AppCheckpoint(_) => {
                 String::new()
             }
         }
     }
 
-    /// Ends the newest held lock of the kind `op` names, as the engine would; nothing held of
-    /// that kind is a no-op on both sides.
-    fn end_held<C: Checkpointer>(cp: &mut C, last: &mut Last, op: Op) -> String {
-        let at = last.held.iter().rposition(|held| {
-            matches!(
-                (held, op),
-                (Held::Barrier(_), Op::EndBarrier) | (Held::Lock(_), Op::EndWriteLock)
-            )
-        });
-        match at.map(|at| last.held.remove(at)) {
+    /// Ends the newest barrier held, as the engine would; nothing held is a no-op on both sides.
+    fn end_held<C: Checkpointer>(cp: &mut C, last: &mut Last) -> String {
+        match last.held.pop() {
             None => "nothing held".to_owned(),
-            Some(Held::Barrier(barrier)) => show(cp.end_barrier(barrier)),
-            Some(Held::Lock(lock)) => show(cp.end_write_lock(lock)),
+            Some(barrier) => show(cp.end_barrier(barrier)),
         }
     }
 
@@ -294,9 +270,7 @@ mod diff {
                 | Op::Checkpoint(_)
                 | Op::BumpSeq
                 | Op::BeginBarrier
-                | Op::EndBarrier
-                | Op::BeginWriteLock
-                | Op::EndWriteLock => {
+                | Op::EndBarrier => {
                     let (mut src, mut pages, mut cp) = (
                         self.sqlite.clone(),
                         self.sqlite.clone(),
@@ -383,9 +357,7 @@ mod diff {
                 | Op::Checkpoint(_)
                 | Op::BumpSeq
                 | Op::BeginBarrier
-                | Op::EndBarrier
-                | Op::BeginWriteLock
-                | Op::EndWriteLock => engine(
+                | Op::EndBarrier => engine(
                     &mut self.src,
                     &mut self.pages,
                     &mut self.cp,
@@ -428,8 +400,6 @@ mod diff {
             2 => Just(Op::BumpSeq),
             1 => Just(Op::BeginBarrier),
             1 => Just(Op::EndBarrier),
-            1 => Just(Op::BeginWriteLock),
-            1 => Just(Op::EndWriteLock),
         ]
     }
 

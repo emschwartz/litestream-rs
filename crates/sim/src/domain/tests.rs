@@ -20,6 +20,7 @@ fn the_operation_and_class_lists_hold_every_variant_once_in_order() {
         SourceError::FsyncFailed,
         SourceError::Busy,
         SourceError::ReadersHeld,
+        SourceError::WritesHeld,
         SourceError::Short {
             pgno: PageNo::new(1, PageSize::new(4096).unwrap()).unwrap(),
         },
