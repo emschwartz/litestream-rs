@@ -1,13 +1,16 @@
 //! The application's long readers, and the checkpointer that respects them.
 //!
-//! A TRUNCATE checkpoint waits for every reader to finish, and SQLite cannot tell the
-//! replicator whether one is coming. So TRUNCATE runs only on the application's word:
+//! A TRUNCATE checkpoint cannot finish while a reader holds an older snapshot of the database,
+//! and SQLite cannot tell the replicator whether one is coming. The engine's connections never
+//! wait on a lock (a busy timeout of zero), so a TRUNCATE a reader blocks does not wait for it:
+//! it copies what the reader allows into the database file, reports busy, leaves the WAL as it
+//! was and takes no snapshot. So TRUNCATE runs only on the application's word:
 //! under [`ReaderTracking::Untracked`] it never runs, and under [`ReaderTracking::Tracked`] it runs only while no [`ReaderGuard`]
 //! lives. A TRUNCATE asked for while one does is refused without calling SQLite, as
 //! `SourceError::ReadersHeld` and not as busy (SQLite was never asked), so the engine waits its
-//! backoff and asks again. A FULL checkpoint (the cure after a failed WAL sync runs one)
-//! waits for readers on older snapshots the same way and is guarded alike. PASSIVE checkpoints
-//! never wait on readers and are unaffected.
+//! backoff and asks again. A FULL checkpoint (the cure after a failed WAL sync runs one) is
+//! blocked by readers on older snapshots the same way, also reports busy without waiting, and
+//! is guarded alike. PASSIVE checkpoints never wait on readers and are unaffected.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

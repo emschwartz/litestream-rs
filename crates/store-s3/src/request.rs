@@ -439,6 +439,10 @@ impl RequestBuilder {
         };
         let mut all = self.base_headers();
         all.extend(headers);
+        // The signer writes the signed headers in the order given and a server rebuilds them
+        // sorted by name (AWS does; the store's own path sorts through the action's map), so an
+        // unsorted list signs a request AWS refuses with SignatureDoesNotMatch.
+        all.sort_by_key(|(name, _)| *name);
         // The signer merges the query with its own sorted `X-Amz-*` pairs and assumes both
         // are sorted; an unsorted one signs a canonical request the server does not rebuild.
         let mut query = query.to_vec();
@@ -1000,6 +1004,54 @@ mod tests {
         let mut collapsed = sent.url().clone();
         collapsed.set_path("/examplebucket/0000/f.ltx");
         assert_ne!(sign(&collapsed, &headers), signature, "the path is signed");
+    }
+
+    /// A server rebuilds the signed headers sorted by name and the signer writes them as given,
+    /// so the raw signer sorts first: an unsorted list made AWS answer SignatureDoesNotMatch.
+    #[test]
+    fn a_raw_request_signs_its_headers_in_name_order() {
+        let b = bare(UrlStyle::Path);
+        let sign = |url: &Url, headers: &[(&'static str, String)]| {
+            let at = jiff::Timestamp::from_millisecond(now().unix_millis()).unwrap();
+            let signed = rusty_s3::signing::sign(
+                &at,
+                rusty_s3::Method::Put,
+                url.clone(),
+                "AKIAIOSFODNN7EXAMPLE",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                None,
+                "us-east-1",
+                EXPIRES_IN.as_secs(),
+                std::iter::empty(),
+                headers.iter().map(|(name, value)| (*name, value.as_str())),
+            );
+            query_value(&signed, "X-Amz-Signature")
+        };
+        let given = vec![
+            ("x-amz-meta-a", "1".to_owned()),
+            ("if-none-match", "*".to_owned()),
+        ];
+        let sent = b
+            .sign_raw(
+                now(),
+                Method::Put,
+                Some("k"),
+                &[],
+                given.clone(),
+                Vec::new(),
+            )
+            .unwrap();
+        let names: Vec<&str> = sent.headers().iter().map(|(name, _)| *name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "sent in name order");
+        let mut all = b.base_headers();
+        all.extend(given);
+        let signature = query_value(sent.url(), "X-Amz-Signature");
+        all.sort_by_key(|(name, _)| *name);
+        assert_eq!(sign(sent.url(), &all), signature, "signed in name order");
+        all.reverse();
+        assert_ne!(sign(sent.url(), &all), signature, "the order is signed");
     }
 
     fn query_value(url: &Url, name: &str) -> String {

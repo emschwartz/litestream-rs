@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lsr_core::WriteMode;
 use lsr_core::conformance::{Failure, Harness, block_on};
 use lsr_core::{
-    Clock, CorruptCause, FileKey, Level, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp,
-    Upload,
+    Class, Clock, CorruptCause, FileKey, Level, ObjectStore, PageLimit, ReadLen, StoreError,
+    StoreOp, Upload, classify as classify_error,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 use lsr_store_s3::{
@@ -116,6 +116,8 @@ pub struct Counts {
     pub lists: AtomicU64,
     pub heads: AtomicU64,
     pub requests: AtomicU64,
+    /// Uploads started again after a retryable answer, as the engine would.
+    pub retried: AtomicU64,
     pub header_names: Mutex<BTreeSet<String>>,
     pub statuses: Mutex<BTreeSet<u16>>,
 }
@@ -216,11 +218,12 @@ impl Drop for RealHarness {
     fn drop(&mut self) {
         let statuses = self.counts.statuses.lock().unwrap().clone();
         eprintln!(
-            "{}-requests: total={} lists={} heads={} statuses={statuses:?}",
+            "{}-requests: total={} lists={} heads={} retried={} statuses={statuses:?}",
             self.server.name,
             self.counts.requests.load(Ordering::Relaxed),
             self.counts.lists.load(Ordering::Relaxed),
             self.counts.heads.load(Ordering::Relaxed),
+            self.counts.retried.load(Ordering::Relaxed),
         );
     }
 }
@@ -376,15 +379,33 @@ impl RealHarness {
         object_key(&self.prefix, key)
     }
 
+    /// Runs one whole upload, again from its start on a retryable answer (a 5xx or a throttle: R2
+    /// answers a plain 500 now and then), as the engine would. A provider check judges the
+    /// answers it is about, not whether one request in thousands failed; `retried` counts them.
+    fn upload_with_retry(&self, mut attempt: impl FnMut() -> Result<(), StoreError>) {
+        const ATTEMPTS: u8 = 5;
+        for _ in 0..ATTEMPTS {
+            match attempt() {
+                Ok(()) => return,
+                Err(err) if matches!(classify_error(&err), Class::Retry | Class::RetryAfter(_)) => {
+                    self.counts.retried.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(err) => panic!("upload: {err}"),
+            }
+        }
+        panic!("upload stayed retryable for {ATTEMPTS} attempts");
+    }
+
     pub fn put(&self, key: &FileKey, created_at: Timestamp, bytes: &[u8]) {
-        block_on(async {
-            let mut upload = self
-                .store
-                .begin_upload(key, created_at, WriteMode::Replace)
-                .await
-                .unwrap();
-            upload.write(bytes).await.unwrap();
-            upload.commit().await.unwrap();
+        self.upload_with_retry(|| {
+            block_on(async {
+                let mut upload = self
+                    .store
+                    .begin_upload(key, created_at, WriteMode::Replace)
+                    .await?;
+                upload.write(bytes).await?;
+                upload.commit().await.map(drop)
+            })
         });
     }
 
@@ -394,16 +415,17 @@ impl RealHarness {
     }
 
     pub fn write_all(&self, key: &FileKey, created_at: Timestamp, bytes: &[u8], chunk: usize) {
-        block_on(async {
-            let mut upload = self
-                .store
-                .begin_upload(key, created_at, WriteMode::Replace)
-                .await
-                .unwrap();
-            for piece in bytes.chunks(chunk) {
-                upload.write(piece).await.unwrap();
-            }
-            upload.commit().await.unwrap();
+        self.upload_with_retry(|| {
+            block_on(async {
+                let mut upload = self
+                    .store
+                    .begin_upload(key, created_at, WriteMode::Replace)
+                    .await?;
+                for piece in bytes.chunks(chunk) {
+                    upload.write(piece).await?;
+                }
+                upload.commit().await.map(drop)
+            })
         });
     }
 

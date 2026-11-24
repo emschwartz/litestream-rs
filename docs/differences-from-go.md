@@ -55,6 +55,7 @@ The replicator saves each batch of changes in its working folder (the folder whe
 | `restore` over an existing database | Deletes the old file first | Keeps the old file until the new one is complete and checked |
 | `restore` by URL to a time after the newest file | Refuses | Restores the newest state |
 | `replicate -once -enforce-retention` on an idle database | Keeps 1 snapshot | Keeps 2 |
+| A TRUNCATE checkpoint, once the WAL passes `truncate-page-n` | On by default. After it Go copies the whole database while it holds SQLite's write lock, so the application cannot write until the copy ends (minutes, for a large database) | Off unless the config says `litestream-rs: {app-readers: none}`. Then each TRUNCATE that empties the WAL is followed by a copy of the whole database, read from disk and uploaded as a snapshot: disk reads and bucket bytes in proportion to the database's size. The application keeps writing during the copy. Writes wait only while SQLite's own TRUNCATE copies the WAL into the database file, which depends on the WAL's size, not the database's ([decisions/D190.md](decisions/D190.md)) |
 
 ## Go has it, litestream-rs does not
 
