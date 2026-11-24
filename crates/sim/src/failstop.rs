@@ -21,7 +21,7 @@
 //!   degraded data-path task on that tick);
 //! - refused at boot: a store refusal fired in this life, and this life has not booted.
 //!
-//! Two exemptions, each excused and counted on its own ([`Excused`]), so a generator change that
+//! Three exemptions, each excused and counted on its own ([`Excused`]), so a generator change that
 //! makes either common shows.
 //!
 //! **Committed WAL frames the engine never read.** The engine is judged on
@@ -40,6 +40,13 @@
 //! own upload lands after that boot, that snapshot is lag it cannot rule out, and an age trip
 //! dated at or after the boot is correct even if the simulator knows the replica holds every
 //! commit. Only an age trip, only in the life that booted so, only before its first upload.
+
+//!
+//! **Reads of the replica that lie.** While `Hold::LyingReads` holds, every read the engine
+//! makes of the replica returns a flipped byte, so it cannot confirm that its newest upload
+//! landed: it dates that file from its stamp, and an age trip over a replica the simulator knows
+//! is whole is correct while the lie lasts. Only an age trip, only during the hold; the trip
+//! clears once reads are honest (a trip lingers for `CLEAR_TICKS` after the catch-up).
 
 use std::time::Duration;
 
@@ -104,6 +111,8 @@ pub struct TickSeen {
     pub read_wal: bool,
     /// The engine booted in it with a logged cause that broke continuity.
     pub unvouched_boot: bool,
+    /// Every read of the replica lied in it (`Hold::LyingReads`).
+    pub reads_lying: bool,
 }
 
 /// Age trips the judge excused, by exemption.
@@ -113,6 +122,8 @@ pub struct Excused {
     pub unread_wal: u64,
     /// While a snapshot taken at a boot that broke continuity was not uploaded.
     pub unvouched_snapshot: u64,
+    /// While every read of the replica lied.
+    pub lying_reads: u64,
 }
 
 impl FailStopJudge {
@@ -265,6 +276,10 @@ impl FailStopJudge {
                     self.excused.unread_wal = self.excused.unread_wal.saturating_add(1);
                     Ok(())
                 }
+                Err(_) if age_trip && tick.reads_lying => {
+                    self.excused.lying_reads = self.excused.lying_reads.saturating_add(1);
+                    Ok(())
+                }
                 Err(_) if self.unvouched_snapshot(trip) => {
                     self.excused.unvouched_snapshot =
                         self.excused.unvouched_snapshot.saturating_add(1);
@@ -395,6 +410,7 @@ mod tests {
             refusal_fired: false,
             read_wal,
             unvouched_boot: false,
+            reads_lying: false,
         }
     }
 
@@ -467,10 +483,31 @@ mod tests {
             .judge(age_trip(1_000), tick(700_000, false), BOUND, true, false)
             .unwrap();
         let want = Excused {
-            unread_wal: 0,
             unvouched_snapshot: 1,
+            ..Excused::default()
         };
         assert_eq!(judge.excused(), want);
+    }
+
+    /// An age trip while every read of the replica lies, over a replica the judge knows is
+    /// whole: excused and counted; the same trip with honest reads is a false trip.
+    #[test]
+    fn a_trip_while_reads_of_the_replica_lie_is_excused_and_counted() {
+        let mut judge = caught_up();
+        let lying = TickSeen {
+            reads_lying: true,
+            ..tick(700_000, false)
+        };
+        judge
+            .judge(age_trip(1_000), lying, BOUND, true, false)
+            .unwrap();
+        assert_eq!(judge.excused().lying_reads, 1);
+        let mut judge = caught_up();
+        assert!(
+            judge
+                .judge(age_trip(1_000), tick(700_000, false), BOUND, true, false)
+                .is_err()
+        );
     }
 
     /// A trip dated before that boot, after the engine's first upload since it, or in the next
