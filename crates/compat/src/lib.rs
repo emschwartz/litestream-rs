@@ -79,7 +79,7 @@ pub use fake_aws::{Answer, Answers, FakeAws, Roles, TokenAnswer};
 pub use generate::generate;
 pub use golive::{
     GoRestore, Schedule, build_verify_helper, go_verify, restore_with_go, rfc3339_millis,
-    write_config, write_config_daily_snapshots, write_config_for, write_config_snapshotting,
+    write_config, write_config_for, write_config_no_scheduled_snapshot, write_config_snapshotting,
 };
 pub use handover::{
     PROCESS_STEP, position, snapshots, uploaded, wait_boot_file, wait_staged_past, wait_uploaded,
