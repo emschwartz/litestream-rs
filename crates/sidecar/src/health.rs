@@ -246,6 +246,7 @@ pub(crate) const fn snapshot_kind_name(kind: SnapshotCauseKind) -> &'static str 
         SnapshotCauseKind::CheckpointBoundary => "checkpoint_boundary",
         SnapshotCauseKind::OperatorRequested => "operator_requested",
         SnapshotCauseKind::StagedUnverified => "staged_unverified",
+        SnapshotCauseKind::AheadOfReplica => "ahead_of_replica",
     }
 }
 
