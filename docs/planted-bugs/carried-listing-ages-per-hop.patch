@@ -1,0 +1,10 @@
+--- a/crates/core/src/maintain/short.rs	2026-11-24 18:57:04
++++ b/crates/core/src/maintain/short.rs	2026-11-24 18:57:04
+@@ -303,7 +303,7 @@
+             listed: tail.listed.clone(),
+             covers: tail.covers.clone(),
+             confirmed,
+-            at: tail.made_at,
++            at: now,
+         });
+     }

@@ -565,13 +565,18 @@ fn maintenance(config: &GoConfig, found: &mut Found) -> Option<Maintenance> {
     };
     let check = l0_check(config.l0_retention_check_interval(), found)?;
     match Maintenance::new(levels, interval, retention, l0) {
-        Ok(schedule) => Some(schedule.with_l0_check_interval(check).with_retention(
-            if config.retention_enabled() {
+        Ok(schedule) => {
+            let schedule = if config.l0_retention_check_interval_is_set() {
+                schedule.with_l0_check_interval(check)
+            } else {
+                schedule
+            };
+            Some(schedule.with_retention(if config.retention_enabled() {
                 RetentionMode::Enforce
             } else {
                 RetentionMode::Off
-            },
-        )),
+            }))
+        }
         Err(error) => {
             found.problem(&KeyPath::root(), MapProblemKind::Maintenance(error));
             None

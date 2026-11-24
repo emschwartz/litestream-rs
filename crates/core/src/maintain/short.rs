@@ -8,9 +8,9 @@
 //! whole listings a pass asks the store only for what its decision reads ([`Plan`], [`Tail`]): level 0,
 //! the tail of a compaction level whose window is open and the level below it, level 1 after the
 //! cover cursor and level 9 when level-0 retention is due. A pass with nothing due lists nothing, and the
-//! pass after this engine's own job reuses that pass's listing ([`Carry`], at most five seconds old).
+//! passes after this engine's own jobs reuse a listing at most five seconds old ([`Carry`], which keeps the time it was really made and is never used by a pass that may delete).
 //! A level whose own output closed its window is quiet until the next window; level-0 retention is
-//! checked every [`CHECK_STRETCH`] check intervals. Nothing is written to disk and nothing survives a fault,
+//! checked every [`Maintenance::retention_check_every`]. Nothing is written to disk and nothing survives a fault,
 //! a stop or a restart: [`Remembered::forget`] drops it all and the next pass is whole.
 //!
 //! # When a pass is whole
@@ -59,6 +59,9 @@
 //!   remembered newest file of its level (a foreign compaction of an older range), and a replica
 //!   that lost files below the tail. The longest that takes is [`FULL_LISTING_INTERVAL`] of
 //!   maintenance passes (a replica nothing is written to has no passes, as before).
+//! - With a record above the configured top, level-0 retention is decided on whole listings only
+//!   (see [`Remembered::plan`]): the record may name a file another process removed, which would
+//!   hold the anchor too high.
 //! - Never seen by a short pass: a foreign snapshot until the snapshot window or retention lists
 //!   level 9, and any file at a level above the configured top, which no short pass lists (the
 //!   anchor reads the remembered newest file of each such level, learned at the whole listing). The
@@ -88,11 +91,6 @@ use crate::store::{ListAt, ObjectStore};
 /// passes save (docs/decisions/D193.md).
 pub(crate) const FULL_LISTING_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// How many check intervals a short pass lets go by between two level-0 retention checks: the
-/// check is the one listing a quiet minute costs (level 0, the level-1 tail for covers and level 9
-/// for the floor), and a file waits at most this long past the interval for its delete.
-pub(crate) const CHECK_STRETCH: u32 = 8;
-
 /// How old a listing may be and still stand in for the one a pass directly after this engine's
 /// own job would make: the job changed nothing it listed but the output it noted.
 const CARRY_MAX_AGE_MILLIS: i64 = 5_000;
@@ -113,6 +111,9 @@ pub(crate) enum Gate {
 pub(crate) struct Remembered {
     newest: BTreeMap<Level, FileInfo>,
     cover: Option<TxidRange>,
+    /// The first level-0 transaction the last listing showed: while it stays the same (a file the
+    /// rules never delete), a whole listing keeps the cursor a short pass advanced past it.
+    zero_min: Option<Txid>,
     known: bool,
     full_by: Option<Timestamp>,
     retention_wake: Option<Timestamp>,
@@ -215,12 +216,24 @@ impl Remembered {
             .level(Level::ZERO)
             .first()
             .map(|info| info.key.range().min());
-        self.cover = advance_cover(
+        let cover = advance_cover(
             None,
             inventory.level(ONE),
             first_zero,
             self.newest.get(&ONE),
         );
+        // A level-0 file no rule deletes holds the first-listed position back at every whole
+        // listing, and the next retention check would list level 1 from far behind it: keep the
+        // further cursor a short pass reached while that file is still the first.
+        self.cover = match (self.cover, cover) {
+            (Some(kept), Some(new))
+                if self.zero_min == first_zero && cmp_range(new, kept).is_lt() =>
+            {
+                Some(kept)
+            }
+            (_, new) => new,
+        };
+        self.zero_min = first_zero;
         self.known = true;
         self.quiet.clear();
         self.snapshot_quiet = None;
@@ -275,6 +288,7 @@ impl Remembered {
             decided.settled_min.or(first_zero),
             self.newest.get(&ONE),
         );
+        self.zero_min = first_zero;
         for (level, until) in &decided.quiet {
             self.quiet.insert(*level, *until);
         }
@@ -289,7 +303,7 @@ impl Remembered {
             listed: tail.listed.clone(),
             covers: tail.covers.clone(),
             confirmed,
-            at: now,
+            at: tail.made_at,
         });
     }
 
@@ -344,6 +358,14 @@ impl Remembered {
         !matches!((frontier, dest), (Some(source), Some(dest)) if source <= dest)
     }
 
+    /// Whether the last whole listing found a file at a level above the configured top. A short
+    /// pass never lists those levels, so a record there may name a file another process has
+    /// since removed, which would hold the retention anchor too high: with one remembered, level-0
+    /// retention is decided on whole listings only.
+    fn above_top(&self, config: &Maintenance) -> bool {
+        self.newest.keys().any(|level| *level > config.top())
+    }
+
     /// What a pass at `now` has to decide.
     pub(crate) fn plan(
         &self,
@@ -351,35 +373,55 @@ impl Remembered {
         now: Timestamp,
         confirmed: Option<Txid>,
     ) -> Plan {
-        let stretch = i64::from(CHECK_STRETCH)
-            .saturating_mul(i64::try_from(config.l0_check_interval().millis()).unwrap_or(i64::MAX));
+        let active: Vec<Level> = compaction_levels(config)
+            .filter(|level| self.active(*level, now, confirmed))
+            .collect();
+        // A compaction that comes first leaves retention undecided and the next pass lists it
+        // all again: retention waits for a pass with no compaction to plan, unless it is a whole
+        // check interval overdue.
+        let due = |after: i64| {
+            self.checked_at.is_none_or(|at| {
+                now.unix_millis()
+                    >= at
+                        .unix_millis()
+                        .saturating_add(self.check_millis(config, after))
+            })
+        };
         Plan {
-            active: compaction_levels(config)
-                .filter(|level| self.active(*level, now, confirmed))
-                .collect(),
             snapshot: self.snapshot_quiet.is_none_or(|until| now >= until),
             retention: matches!(
                 (config.retention(), config.l0_retention()),
                 (RetentionMode::Enforce, super::L0Retention::After(_))
-            ) && self
-                .checked_at
-                .is_none_or(|at| now.unix_millis() >= at.unix_millis().saturating_add(stretch)),
+            ) && !self.above_top(config)
+                && if active.is_empty() { due(1) } else { due(2) },
+            active,
         }
+    }
+
+    /// `times` retention check intervals, in milliseconds.
+    fn check_millis(&self, config: &Maintenance, times: i64) -> i64 {
+        i64::try_from(config.retention_check_every().millis())
+            .unwrap_or(i64::MAX)
+            .saturating_mul(times)
     }
 
     /// The earliest time a quiet pass has something to look at: a window opening, the next
     /// retention check, a retention wake or the whole listing's backstop.
     pub(crate) fn next_wake(&self, config: &Maintenance, now: Timestamp) -> Option<Timestamp> {
-        let stretch = i64::from(CHECK_STRETCH)
-            .saturating_mul(i64::try_from(config.l0_check_interval().millis()).unwrap_or(i64::MAX));
-        let check = self
-            .checked_at
-            .map(|at| Timestamp::from_unix_millis(at.unix_millis().saturating_add(stretch)));
+        let check = |times: i64| {
+            self.checked_at.map(|at| {
+                Timestamp::from_unix_millis(
+                    at.unix_millis()
+                        .saturating_add(self.check_millis(config, times)),
+                )
+            })
+        };
         self.quiet
             .values()
             .copied()
             .chain(self.snapshot_quiet)
-            .chain(check)
+            .chain(check(1))
+            .chain(check(2))
             .chain(self.retention_wake)
             .chain(self.full_by)
             .filter(|at| *at > now)
@@ -503,6 +545,10 @@ pub(crate) struct Tail {
     /// What this engine had confirmed when level 0 in `listed` was listed: the replica may not
     /// be judged to have lost files below what was confirmed since.
     baseline: Option<Txid>,
+    /// Whether the listing stood in, in part, for what the last pass listed.
+    carried: bool,
+    /// When the oldest part of `listed` was really listed.
+    made_at: Timestamp,
 }
 
 /// Whether the pages listed from `have` include everything a listing from `want` returns.
@@ -534,24 +580,26 @@ impl Tail {
         confirmed: Option<Txid>,
     ) -> Result<Self, InventoryError> {
         let wanted = remembered.starts(config, &plan);
+        // Never for a pass that may delete: a delete is decided from a listing made in the same
+        // pass. A carried listing keeps the time it was really made (a pass that stands on it
+        // saves it again with that time), so a run of this engine's own jobs cannot stretch
+        // its age past [`CARRY_MAX_AGE_MILLIS`].
         let carried = remembered.carry.as_ref().filter(|carry| {
             !remembered.fresh.is_empty()
+                && !plan.retention
                 && now >= carry.at
                 && now.unix_millis().saturating_sub(carry.at.unix_millis()) <= CARRY_MAX_AGE_MILLIS
         });
         let mut baseline = confirmed;
+        let used_carry = carried.is_some();
+        let carried_at = carried.map(|carry| carry.at);
         let (listed, covers) = match carried {
             Some(carry) => {
                 let missing: Vec<ListAt> = wanted
                     .iter()
                     .filter(|want| {
                         !covered(&carry.covers, want)
-                            // Fresh sources only matter to a compaction; retention only deletes
-                            // files older than the listing's newest, so a few seconds' lag in
-                            // level 0 deletes less, never more.
-                            || (want.level == Level::ZERO
-                                && carry.confirmed != confirmed
-                                && !plan.active.is_empty())
+                            || (want.level == Level::ZERO && carry.confirmed != confirmed)
                     })
                     .copied()
                     .collect();
@@ -585,6 +633,8 @@ impl Tail {
             plan,
             covers,
             baseline,
+            carried: used_carry,
+            made_at: carried_at.unwrap_or(now),
         })
     }
 
@@ -702,8 +752,7 @@ fn decide(
         &tail.newest_known(),
         now,
         config,
-        // Level 0 may be a few seconds old: judged against what was confirmed when it was listed.
-        tail.baseline().min(published),
+        published,
         state,
         resolved,
     ) {

@@ -1,0 +1,8 @@
+# A pass that may delete level 0 stands on a carried listing, so the delete is decided from
+# covers and a gate that may be seconds old.
+name = "carried-listing-decides-a-delete"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "maintain::short::tests::a_carried_listing_keeps_its_real_age_and_never_decides_a_delete",
+]

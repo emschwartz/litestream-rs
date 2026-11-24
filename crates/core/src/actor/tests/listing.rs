@@ -28,10 +28,23 @@ struct Seen {
 /// a daemon does: again at once on `Next::Now`, at the asked time when that
 /// comes before the next commit, else at the next commit (the WAL poll).
 fn write_every_second(rig: &mut Rig, actor: &mut Actor, start: i64, seconds: i64) -> Vec<Seen> {
+    write_when(rig, actor, start, seconds, |_| true)
+}
+
+/// As [`write_every_second`], committing only in the seconds `writes` allows.
+fn write_when(
+    rig: &mut Rig,
+    actor: &mut Actor,
+    start: i64,
+    seconds: i64,
+    writes: impl Fn(i64) -> bool,
+) -> Vec<Seen> {
     let mut seen = Vec::new();
     for s in 0..seconds {
         let second = start + s * 1000;
-        rig.commit(u8::try_from(s % 250 + 1).unwrap());
+        if writes(s) {
+            rig.commit(u8::try_from(s % 250 + 1).unwrap());
+        }
         let mut now = second;
         for _ in 0..100 {
             let (lists, deleted) = (rig.remote.lists(), rig.remote.deleted().len());
@@ -225,27 +238,68 @@ fn long_history(files: u64, maintenance: Maintenance) -> (Rig, Actor, i64) {
 /// LIST requests and listed entries an hour of a steady writer may cost over a long history.
 /// Before maintenance listed only what a check reads, this hour cost 10,773 requests and
 /// 2.95 million entries at 2,900 level-1 files, and 25,410 requests and 17.9 million at
-/// 20,000 (issue 324). After: about 3,200 requests and 230,000 to 300,000 entries at either
-/// size. A pass lists level 0 whole, level 9 whole and a tail of each compaction level (five
-/// requests with the default three levels); whole listings stay to boot, faults, retention
+/// 20,000 (issue 324). After: 610 requests and 161,000 entries at 2,900
+/// files, 679 and 230,000 at 20,000. A pass lists only what its decision reads; a retention
+/// check lists level 0, a level-1 tail and level 9 fresh (a delete is never decided from a
+/// carried listing, which costs about 95 requests an hour); whole listings stay to boot, faults
 /// and one every [`FULL_LISTING_INTERVAL`], about 30 requests each at 20,000 files.
-const REQUESTS_PER_HOUR: u32 = 600;
-const ENTRIES_PER_HOUR: u64 = 230_000;
+const REQUESTS_PER_HOUR: u32 = 700;
+const ENTRIES_PER_HOUR: u64 = 250_000;
+
+/// How a writer behaves over the measured hour, and the replica around it.
+struct Hour {
+    files: u64,
+    days: u64,
+    maintenance: fn(u64) -> Maintenance,
+    /// Whether the writer commits in second `s` of the hour.
+    writes: fn(i64) -> bool,
+    /// Commits made before the hour with no tick between: a backlog for a chain of compactions.
+    backlog: u8,
+    /// A level-0 file no rule deletes (its level-1 cover is gone), ahead of every other.
+    stuck_level_zero: bool,
+    requests: u32,
+    entries: u64,
+}
+
+const STEADY: Hour = Hour {
+    files: 2_900,
+    days: 1,
+    maintenance: retained,
+    writes: |_| true,
+    backlog: 0,
+    stuck_level_zero: false,
+    requests: REQUESTS_PER_HOUR,
+    entries: ENTRIES_PER_HOUR,
+};
 
 /// Runs the hour a minute at a time, stopping as soon as a bound is passed: a replica that
 /// lists everything at every pass would otherwise take minutes to prove it.
-fn an_hour_stays_within_the_bounds(files: u64, days: u64) {
-    let (mut rig, mut actor, mut now) = long_history(files, retained(days));
+fn an_hour_stays_within_the_bounds(hour: &Hour) {
+    let (mut rig, mut actor, mut now) = long_history(hour.files, (hour.maintenance)(hour.days));
+    if hour.stuck_level_zero {
+        let range = TxidRange::new(Txid::new(3).unwrap(), Txid::new(3).unwrap()).unwrap();
+        block_on(rig.remote.inner.delete(&[FileKey::new(level(1), range)])).unwrap();
+        let key = FileKey::new(level(0), range);
+        super::second_writer::put_whole(&rig.remote.inner, &key, &ltx_file(range, 3));
+    }
+    for n in 0..hour.backlog {
+        rig.commit(n % 250 + 1);
+    }
     let (lists, entries) = (rig.remote.lists(), rig.remote.listed());
+    let files = hour.files;
     for minute in 0..60 {
-        write_every_second(&mut rig, &mut actor, now + 1000, 60);
+        write_when(&mut rig, &mut actor, now + 1000, 60, |s| {
+            (hour.writes)(minute * 60 + s)
+        });
         now += 60_000;
         let (lists, entries) = (rig.remote.lists() - lists, rig.remote.listed() - entries);
         assert!(
-            lists <= REQUESTS_PER_HOUR && entries <= ENTRIES_PER_HOUR,
+            lists <= hour.requests && entries <= hour.entries,
             "{lists} LIST requests and {entries} entries after {} minutes at {files} level-1 files, \
-             bounds {REQUESTS_PER_HOUR} and {ENTRIES_PER_HOUR} an hour",
-            minute + 1
+             bounds {} and {} an hour",
+            minute + 1,
+            hour.requests,
+            hour.entries
         );
     }
 }
@@ -254,13 +308,109 @@ fn an_hour_stays_within_the_bounds(files: u64, days: u64) {
 /// all of them again, 21 requests a pass, 14 passes a minute.
 #[test]
 fn an_hour_of_uploads_over_20000_level_one_files_lists_a_bounded_number_of_requests() {
-    an_hour_stays_within_the_bounds(20_000, 7);
+    an_hour_stays_within_the_bounds(&Hour {
+        files: 20_000,
+        days: 7,
+        ..STEADY
+    });
 }
 
 /// The same with a day of retention, as an upstream user reported.
 #[test]
 fn an_hour_of_uploads_over_2900_level_one_files_lists_a_bounded_number_of_requests() {
-    an_hour_stays_within_the_bounds(2_900, 1);
+    an_hour_stays_within_the_bounds(&STEADY);
+}
+
+/// An idle writer after the history: passes with nothing due ask for nothing.
+#[test]
+fn an_idle_hour_lists_a_bounded_number_of_requests() {
+    an_hour_stays_within_the_bounds(&Hour {
+        writes: |_| false,
+        requests: 200,
+        entries: 100_000,
+        ..STEADY
+    });
+}
+
+/// Ten seconds of writes in every minute.
+#[test]
+fn a_bursty_hour_lists_a_bounded_number_of_requests() {
+    an_hour_stays_within_the_bounds(&Hour {
+        writes: |s| s % 60 < 10,
+        ..STEADY
+    });
+}
+
+/// With retention off nothing deletes level 0, so every pass lists the hour's growing level 0
+/// whole: more entries than the steady hour, as the whole listing it replaced had.
+#[test]
+fn an_hour_with_retention_off_lists_a_bounded_number_of_requests() {
+    an_hour_stays_within_the_bounds(&Hour {
+        maintenance: |days| retained(days).with_retention(RetentionMode::Off),
+        entries: 500_000,
+        ..STEADY
+    });
+}
+
+/// Levels 2 and 3 on a faster schedule (10 s, 30 s, 1 min): their windows open often, and their
+/// tails are populated by the history.
+#[test]
+fn an_hour_with_busy_upper_levels_lists_a_bounded_number_of_requests() {
+    an_hour_stays_within_the_bounds(&Hour {
+        maintenance: |days| {
+            Maintenance::new(
+                vec![
+                    Duration::from_secs(10),
+                    Duration::from_secs(30),
+                    Duration::from_secs(60),
+                ],
+                Duration::from_secs(86_400),
+                Duration::from_secs(days * 86_400),
+                L0Retention::After(Duration::from_secs(300)),
+            )
+            .unwrap()
+        },
+        requests: 1_350,
+        entries: 320_000,
+        ..STEADY
+    });
+}
+
+/// Three hundred transactions at once: a run of this engine's own compactions, one after the
+/// other, before a retention check falls due.
+#[test]
+fn an_hour_that_starts_with_a_chain_of_compactions_lists_a_bounded_number_of_requests() {
+    an_hour_stays_within_the_bounds(&Hour {
+        backlog: 250,
+        ..STEADY
+    });
+}
+
+/// A level-0 file no rule deletes is the first level-0 file at every whole listing; level 1 is
+/// not listed again from behind it.
+#[test]
+fn an_hour_with_a_level_zero_file_that_stays_lists_a_bounded_number_of_requests() {
+    an_hour_stays_within_the_bounds(&Hour {
+        stuck_level_zero: true,
+        requests: 640,
+        entries: 200_000,
+        ..STEADY
+    });
+}
+
+/// Changing the retention mode forces a whole listing: what was remembered was decided under
+/// the old setting.
+#[test]
+fn changing_the_retention_mode_forces_a_whole_listing() {
+    let (mut rig, mut actor) = caught_up();
+    let at = until_a_whole_listing(&mut rig, &mut actor, T0 + 1000);
+    one_second(&mut rig, &mut actor, at);
+    assert!(actor.short_pass_ok(ts(at + 1000)), "short passes are on");
+    actor.set_retention(RetentionMode::Off);
+    assert!(
+        !actor.short_pass_ok(ts(at + 1000)),
+        "the next pass is whole"
+    );
 }
 
 // What short listings still catch, and what waits for the whole one.

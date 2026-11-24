@@ -1,0 +1,10 @@
+--- a/crates/core/src/maintain/short.rs	2026-11-24 18:57:05
++++ b/crates/core/src/maintain/short.rs	2026-11-24 18:57:05
+@@ -586,7 +586,6 @@
+         // its age past [`CARRY_MAX_AGE_MILLIS`].
+         let carried = remembered.carry.as_ref().filter(|carry| {
+             !remembered.fresh.is_empty()
+-                && !plan.retention
+                 && now >= carry.at
+                 && now.unix_millis().saturating_sub(carry.at.unix_millis()) <= CARRY_MAX_AGE_MILLIS
+         });

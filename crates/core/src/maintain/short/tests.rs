@@ -333,3 +333,169 @@ fn a_compaction_first_does_not_lose_the_retention_wake() {
         "the wake was lost: a short pass runs past the time retention is due"
     );
 }
+fn nothing_decided() -> ShortDecided {
+    ShortDecided {
+        due: Due::Wait {
+            until: None,
+            held: None,
+        },
+        settled_min: None,
+        until: None,
+        quiet: Vec::new(),
+        snapshot_quiet: None,
+        retention_decided: false,
+    }
+}
+
+fn some_level_zero_and_one() -> Vec<FileInfo> {
+    vec![
+        file(0, 1, 1, T0),
+        file(0, 2, 2, T0 + 1_000),
+        file(1, 1, 1, T0),
+        file(1, 2, 2, T0 + 1_000),
+    ]
+}
+
+/// A listing carried over to the passes after this engine's own jobs keeps the time it was really
+/// made, and is never what a delete is decided from: a run of own compactions cannot keep a
+/// listing alive past [`CARRY_MAX_AGE_MILLIS`] (it held a level-1 file deleted 24 s earlier, and
+/// never showed a foreign level-0 file).
+#[test]
+fn a_carried_listing_keeps_its_real_age_and_never_decides_a_delete() {
+    let cfg = defaults();
+    let files = some_level_zero_and_one();
+    let store = store_of(&files);
+    let mut known = Remembered::default();
+    let browse = Plan {
+        active: vec![level(1)],
+        snapshot: false,
+        retention: false,
+    };
+    let output = file(1, 3, 3, T0 + 2_000);
+    let pass = |known: &Remembered, plan: &Plan, secs: i64| {
+        block_on(Tail::load(
+            &store,
+            known,
+            &cfg,
+            plan.clone(),
+            at(T0 + secs * 1_000),
+            None,
+        ))
+        .unwrap()
+    };
+    // A real listing, then another process deletes a level-1 file behind it.
+    let first = pass(&known, &browse, 1);
+    assert!(!first.carried);
+    known.learn_short(&first, &cfg, &nothing_decided(), at(T0 + 1_000), None);
+    block_on(store.delete(&[files[3].key])).unwrap();
+    // Our own jobs' outputs: the next passes stand on the carried listing, while it is young.
+    known.note_output(output, &cfg, at(T0 + 2_000));
+    let second = pass(&known, &browse, 2);
+    assert!(second.carried);
+    assert!(
+        second
+            .listed
+            .level(level(1))
+            .iter()
+            .any(|f| f.key == files[3].key)
+    );
+    known.learn_short(&second, &cfg, &nothing_decided(), at(T0 + 2_000), None);
+    known.note_output(file(1, 4, 4, T0 + 4_000), &cfg, at(T0 + 4_000));
+    let third = pass(&known, &browse, 4);
+    assert!(third.carried);
+    known.learn_short(&third, &cfg, &nothing_decided(), at(T0 + 4_000), None);
+    // Each hop was under 5 s after the last, but the listing is 6 s old: a real one, which shows
+    // the deletion.
+    known.note_output(file(1, 5, 5, T0 + 7_000), &cfg, at(T0 + 7_000));
+    let fourth = pass(&known, &browse, 7);
+    assert!(!fourth.carried);
+    assert!(
+        !fourth
+            .listed
+            .level(level(1))
+            .iter()
+            .any(|f| f.key == files[3].key)
+    );
+    // A pass that may delete is never carried.
+    known.learn_short(&fourth, &cfg, &nothing_decided(), at(T0 + 7_000), None);
+    known.note_output(file(1, 6, 6, T0 + 8_000), &cfg, at(T0 + 8_000));
+    let deleting = Plan {
+        retention: true,
+        ..browse
+    };
+    assert!(!pass(&known, &deleting, 8).carried);
+}
+
+/// A level-0 file no rule deletes is the first level-0 file at every whole listing; the cover
+/// cursor a short pass advanced past it stays, or the next retention check would list level 1
+/// from far behind it every 15 minutes.
+#[test]
+fn a_whole_listing_keeps_the_cover_cursor_past_a_level_zero_file_that_stays() {
+    let mut known = Remembered::default();
+    let inventory = Inventory::from_files([
+        file(0, 5, 5, T0),
+        file(1, 1, 2, T0),
+        file(1, 3, 4, T0),
+        file(1, 8, 9, T0),
+    ])
+    .unwrap();
+    known.learn_full(&inventory, at(T0), &defaults(), &waiting());
+    let behind = known.cover;
+    // A short pass settles past the stuck file: its cursor moves to the level-1 file after it.
+    known.cover = Some(range(8, 9));
+    known.learn_full(&inventory, at(T0 + 1_000), &defaults(), &waiting());
+    assert_eq!(known.cover, Some(range(8, 9)));
+    assert_eq!(behind, Some(range(3, 4)));
+    // A different first level-0 file is a new position: the cursor is computed again.
+    let moved = Inventory::from_files([
+        file(0, 6, 6, T0),
+        file(1, 1, 2, T0),
+        file(1, 3, 4, T0),
+        file(1, 8, 9, T0),
+    ])
+    .unwrap();
+    known.learn_full(&moved, at(T0 + 2_000), &defaults(), &waiting());
+    assert_eq!(known.cover, Some(range(3, 4)));
+}
+
+/// With a record above the configured top (a short pass never re-lists those levels, so it may
+/// name a file another process removed and hold the retention anchor too high) level-0 retention
+/// is decided on whole listings only.
+#[test]
+fn a_remembered_file_above_the_top_leaves_level_zero_retention_to_whole_listings() {
+    let cfg = defaults();
+    let mut known = Remembered::default();
+    let plain = Inventory::from_files([file(0, 1, 1, T0), file(1, 1, 1, T0)]).unwrap();
+    known.learn_full(&plain, at(T0), &cfg, &waiting());
+    // Only the check interval has to pass: no compaction level has anything to plan.
+    for l in compaction_levels(&cfg) {
+        known.quiet.insert(l, at(T0 + 10_000_000));
+    }
+    let later = at(T0 + 2 * 60_000);
+    assert!(known.plan(&cfg, later, None).retention);
+    let above = Inventory::from_files([file(0, 1, 1, T0), file(5, 1, 1, T0)]).unwrap();
+    known.learn_full(&above, at(T0), &cfg, &waiting());
+    assert!(!known.plan(&cfg, later, None).retention);
+}
+
+/// `l0-retention-check-interval` as set is the interval the check runs at; only the default is
+/// stretched (D193).
+#[test]
+fn a_configured_retention_check_interval_is_the_interval_the_check_runs_at() {
+    let one_minute = std::time::Duration::from_secs(60);
+    let set =
+        defaults().with_l0_check_interval(crate::maintain::Interval::new(one_minute).unwrap());
+    assert_eq!(set.retention_check_every().millis(), 60_000);
+    assert_eq!(defaults().retention_check_every().millis(), 120_000);
+    for (cfg, every) in [(set, 60_000), (defaults(), 120_000)] {
+        let mut known = Remembered::default();
+        let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+        known.learn_full(&inventory, at(T0), &cfg, &waiting());
+        for l in compaction_levels(&cfg) {
+            known.quiet.insert(l, at(T0 + 10_000_000));
+        }
+        assert!(!known.plan(&cfg, at(T0 + every - 1), None).retention);
+        assert!(known.plan(&cfg, at(T0 + every), None).retention);
+        assert_eq!(known.next_wake(&cfg, at(T0 + 1)), Some(at(T0 + every)));
+    }
+}
