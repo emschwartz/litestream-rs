@@ -313,6 +313,9 @@ impl SqliteSide for RealSide {
             }
         });
     }
+    fn take_engine_commits(&self) -> Vec<AppCommit> {
+        Vec::new()
+    }
     fn app_autocheckpoints(&self) -> AutoTally {
         AutoTally::default()
     }
