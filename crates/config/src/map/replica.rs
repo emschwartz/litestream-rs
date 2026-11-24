@@ -64,6 +64,12 @@ pub enum ReplicaProblem {
     /// The URL does not parse.
     #[error("the replica url does not parse")]
     BadUrl,
+    /// An `s3://` URL that ends at the bucket, with no slash: Go's path `.`, which litestream-rs
+    /// cannot address.
+    #[error(
+        "the s3 url ends at the bucket name; add a trailing slash (`s3://bucket/`) to replicate to the top of the bucket. Go Litestream reads a url without the slash as a folder named `.` in the bucket, which litestream-rs does not support"
+    )]
+    NoSlashAfterBucket,
     /// The URL carries a user or password; credentials never come from a URL.
     #[error(
         "the replica url carries credentials; give them as access-key-id and secret-access-key, or in the environment"

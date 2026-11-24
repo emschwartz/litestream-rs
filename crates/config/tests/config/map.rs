@@ -494,7 +494,7 @@ fn a_bucket_with_no_path_is_the_whole_bucket() {
     // Go's prefix for `s3://my-bucket` is `.`, which no URL can address: refused, never the bare bucket.
     assert!(matches!(
         s3_refusal("      url: s3://my-bucket\n"),
-        ReplicaProblem::S3(lsr_store_s3::ConfigError::BadPrefix)
+        ReplicaProblem::NoSlashAfterBucket
     ));
 }
 
