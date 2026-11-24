@@ -46,6 +46,7 @@ pub const REQUIRED: &[&str] = &[
     "snapshot.GenerationChanged",
     "snapshot.PrevFrameMismatch",
     "snapshot.LastPageMismatch",
+    "snapshot.AheadOfReplica",
     // An operator's snapshot is judged when staged, and every staged file given up is judged
     // by the lost-restore-point check.
     "snapshot.staged.OperatorRequested",

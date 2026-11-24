@@ -39,7 +39,8 @@
 use std::io;
 
 use lsr_ltx::{
-    DbChecksum, DbPages, DecodeError, Event, Header, PageRef, PageSize, Txid, TxidRange, Verified,
+    DbChecksum, DbPages, DecodeError, Event, Header, PageRef, PageSize, Timestamp, Txid, TxidRange,
+    Verified,
 };
 use thiserror::Error;
 
@@ -329,6 +330,7 @@ pub struct Restored {
     created_at_read: u64,
     post_apply: Option<DbChecksum>,
     inside_file: Option<FileKey>,
+    written: Timestamp,
 }
 
 impl Restored {
@@ -342,6 +344,13 @@ impl Restored {
     #[must_use]
     pub const fn page_size(&self) -> PageSize {
         self.page_size
+    }
+
+    /// When the last file applied was written, by its header: the newest transaction's time.
+    /// A compacted file carries the time of the newest file it merged.
+    #[must_use]
+    pub const fn written(&self) -> Timestamp {
+        self.written
     }
 
     /// The database's length in pages.
@@ -512,6 +521,7 @@ async fn restore_within<S: ObjectStore, K: DatabaseSink>(
                     created_at_read,
                     post_apply: last.trailer().post_apply(),
                     inside_file,
+                    written: last.header().fields().timestamp,
                 });
             }
             Err(Abort::Fatal(err)) => return Err(err),

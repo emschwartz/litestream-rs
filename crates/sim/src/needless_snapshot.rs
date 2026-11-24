@@ -122,6 +122,11 @@ pub const fn forced_by(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
         // that sync, damage, or a staging backup put back can.
         SnapshotCauseKind::LocalRewound => &[LyingDisk, WalDamaged, StagingEdited],
         SnapshotCauseKind::StagedUnverified => FORCES_STAGED_UNVERIFIED,
+        // A boot over a brand-new meta directory found the database ahead of the replica: only a
+        // staging directory emptied outside the engine (wiped, lost to a power loss, or given
+        // up) leaves a boot with nothing staged and no takeover record over a replica that
+        // holds files.
+        SnapshotCauseKind::AheadOfReplica => &[StagingEdited, StagedLost, StagedGivenUp],
         SnapshotCauseKind::CheckpointBoundary => return None,
         SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
     })

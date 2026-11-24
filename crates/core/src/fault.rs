@@ -306,6 +306,15 @@ pub enum SnapshotCause {
         /// The first transaction deleted.
         from: Txid,
     },
+    /// At boot, with a brand-new meta directory, the database is not the replica's state at its
+    /// newest transaction `tip` but reads as that state plus commits the replica never got: it
+    /// was written after the replica's newest file and holds at least half of that state's
+    /// pages (`crate::identity`). Nothing local vouches for the replica's files, so the
+    /// snapshot goes above them.
+    AheadOfReplica {
+        /// The replica's newest transaction.
+        tip: Txid,
+    },
 }
 
 /// A [`SnapshotCause`] without its payload: what a counter or a label names.
@@ -333,11 +342,13 @@ pub enum SnapshotCauseKind {
     OperatorRequested,
     /// [`SnapshotCause::StagedUnverified`].
     StagedUnverified,
+    /// [`SnapshotCause::AheadOfReplica`].
+    AheadOfReplica,
 }
 
 impl SnapshotCauseKind {
     /// Every kind, in declaration order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::FirstSync,
         Self::BehindRemote,
         Self::NewestStagedFileUnreadable,
@@ -349,6 +360,7 @@ impl SnapshotCauseKind {
         Self::CheckpointBoundary,
         Self::OperatorRequested,
         Self::StagedUnverified,
+        Self::AheadOfReplica,
     ];
 }
 
@@ -366,6 +378,7 @@ impl From<&SnapshotCause> for SnapshotCauseKind {
             SnapshotCause::CheckpointBoundary => Self::CheckpointBoundary,
             SnapshotCause::OperatorRequested => Self::OperatorRequested,
             SnapshotCause::StagedUnverified { .. } => Self::StagedUnverified,
+            SnapshotCause::AheadOfReplica { .. } => Self::AheadOfReplica,
         }
     }
 }

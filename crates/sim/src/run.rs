@@ -598,7 +598,7 @@ impl Runner {
     }
 
     fn run_one(&mut self, plan: Option<CrashPlan>) -> TickEnd<Tick> {
-        let mut wal = self.w.sqlite.source();
+        let mut wal = self.w.sqlite.source().with_modified(self.w.modified());
         let mut db = self.w.sqlite.pages();
         let mut ck = CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone());
         let staging = self.w.staging.clone();
@@ -1981,6 +1981,7 @@ impl Runner {
         self.op_began_at = self.w.sqlite.mx_frame();
         self.op_began = self.now();
         self.apply(op)?;
+        self.w.note_writes(self.op_began);
         self.fail_stop_commits();
         self.after_restart();
         self.recovery_agrees()?;
@@ -2848,7 +2849,10 @@ const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause, over_files: bool
         | C::PrevFrameMismatch
         | C::LastPageMismatch
         | C::LocalRewound { .. }
-        | C::StagedUnverified { .. } => true,
+        | C::StagedUnverified { .. }
+        // Taken for the replica's own database plus more on evidence, not proof: a database a
+        // lying disk rewound reads the same way.
+        | C::AheadOfReplica { .. } => true,
         C::CheckpointBoundary | C::OperatorRequested => false,
     }
 }
