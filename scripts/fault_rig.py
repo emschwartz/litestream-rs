@@ -139,6 +139,13 @@ REQUIRED_REACH = {
     "nemesis.cut-uploads": 1, "nemesis.slow-uploads": 1, "judged.during_outage": 1,
 }
 
+# The Go nemesis (Go Litestream and lsr on one prefix) is a known defect, filed as issue #346:
+# restores of past points and instants can be unsound databases, and the engine does not always
+# log OtherWriter. Anomalies inside a segment that nemesis touched are counted and printed under
+# "known" and do not fail the run; an anomaly in any other segment does. REMOVE this exemption
+# (KNOWN_GO_ISSUE and every use of known_issue) when issue #346 closes. See docs/decisions/D195.md.
+KNOWN_GO_ISSUE = "#346"
+
 MS = 1000
 LOOPBACK = ("127.0.0.1", "localhost", "[::1]")
 # restore's documented refusals of a target inside a compacted file whose finer files are gone
@@ -377,6 +384,9 @@ class Rig:
         self.nemesis_now = "none"
         self.recent: list[str] = []
         self.seen_anomalies: set[tuple] = set()
+        self.known: list[dict] = []  # anomalies of segments the Go nemesis touched (KNOWN_GO_ISSUE)
+        self.go_cycles: list[dict] = []
+        self.other_writer_seen = False
         self.skipped_points: set[int] = set()
         self.restores = 0
         self.judge_counts: list[str] = []
@@ -580,6 +590,8 @@ class Rig:
                 self.anomaly("ENGINE_BUG", line[:500])
             for m in re.finditer(r"\bcause=(\w+)", line):
                 cause = m.group(1)
+                if cause == "OtherWriter":
+                    self.other_writer_seen = True
                 self.bump(self.causes.setdefault(self.nemesis_now, {}), cause)
                 is_loss = cause in LOSS_CAUSES or (cause == "FirstSync" and self.epoch > 1)
                 if is_loss and "cause=FirstSync" in line and "snapshot required" not in line:
@@ -612,12 +624,18 @@ class Rig:
         self.seen_anomalies.add(key)
         a = {"kind": kind, "detail": detail, "cycle": self.cycle_no, "segment": self.seg,
              "nemesis": self.nemesis_now, "seed": self.args.seed}
-        self.anomalies.append(a)
+        # A rig failure is never the known issue's.
+        known = self.tainted == "go-concurrent" and kind != "RIG"
+        if known:
+            a["known_issue"] = KNOWN_GO_ISSUE
+            self.known.append(a)
+        else:
+            self.anomalies.append(a)
         a["evidence"] = str(self.keep_evidence(kind, detail))
-        print(json.dumps({"anomaly": a}), flush=True)
+        print(json.dumps({"known" if known else "anomaly": a}), flush=True)
 
     def keep_evidence(self, kind: str, detail: str) -> Path:
-        out = self.evidence / f"{len(self.anomalies):03d}-{kind.lower()}"
+        out = self.evidence / f"{len(self.anomalies) + len(self.known):03d}-{kind.lower()}"
         out.mkdir(parents=True, exist_ok=True)
 
         def copy(src: Path, name: str) -> None:
@@ -637,7 +655,7 @@ class Rig:
             (out / "listing.txt").write_text("\n".join(f"{k} {s}" for k, s in objs) + "\n")
             # The objects themselves for the first anomalies only: a cycle that goes wrong makes
             # dozens of the same anomaly, and each full copy is megabytes.
-            budget = 400 if len(self.anomalies) <= EVIDENCE_REPLICAS else 0
+            budget = 400 if len(self.anomalies) + len(self.known) <= EVIDENCE_REPLICAS else 0
             for key, size in objs[:budget]:
                 dest = out / "replica" / key[len(self.prefix) + 1:]
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -960,6 +978,8 @@ class Rig:
                               stdout=open(self.work / "go.log", "a"), stderr=subprocess.STDOUT,
                               env=self.env())
         self.tainted = "go-concurrent"
+        self.other_writer_seen = False
+        self.go_cycles.append({"segment": self.seg, "cycle": self.cycle_no, "known_before": len(self.known)})
         self.watch(GO_SECONDS)
         go.send_signal(signal.SIGTERM)
         try:
@@ -1033,6 +1053,7 @@ class Rig:
                         break
                     self.check_damage_hook(n)
                 self.finish()
+                self.close_go_cycle()
                 self.last_prefix_done()
         finally:
             self.kill_all()
@@ -1050,6 +1071,20 @@ class Rig:
         self.toxi.listen = listen
         self.fresh()
         self.damage_done = False
+
+    def close_go_cycle(self) -> None:
+        """At a segment's end: did lsr log OtherWriter during the Go cycle, and how many known
+        anomalies did the segment collect? A silent Go cycle (no OtherWriter) is the part of the
+        known issue that matters most, so it gets a line of its own."""
+        if not self.go_cycles or "segment_known" in self.go_cycles[-1] or self.go_cycles[-1]["segment"] != self.seg:
+            return
+        g = self.go_cycles[-1]
+        g["other_writer_logged"] = self.other_writer_seen
+        g["segment_known"] = len(self.known) - g.pop("known_before")
+        silent = "" if self.other_writer_seen else " SILENT: lsr logged no OtherWriter"
+        print(f"go-cycle: segment {g['segment']} cycle {g['cycle']}: OtherWriter logged: "
+              f"{'yes' if self.other_writer_seen else 'NO'}; known anomalies in the segment: "
+              f"{g['segment_known']} (known: issue {KNOWN_GO_ISSUE}){silent}", flush=True)
 
     def last_prefix_done(self) -> None:
         self.end_segment_cleanup()
@@ -1098,7 +1133,15 @@ class Rig:
             "menu_restricted": self.args.menu or None,
             "lazyfs": self.use_lazyfs, "libfaketime": bool(self.libfaketime),
             "nemeses_drawn": self.nemeses,
-            "nemeses_unavailable_here": {k: f"{v}x: {self.unavailable[k]}" for k, v in self.skipped.items()},
+            "nemeses_ran": {k: v - self.skipped.get(k, 0) for k, v in self.nemeses.items()
+                            if v - self.skipped.get(k, 0) > 0},
+            "nemeses_NOT_RUN": {k: f"{v}x drawn, not run: {self.unavailable[k]}" for k, v in self.skipped.items()},
+            "known_issue": {
+                "issue": KNOWN_GO_ISSUE, "anomalies": len(self.known),
+                "kinds": sorted({a["kind"] for a in self.known}),
+                "go_cycles": self.go_cycles,
+                "silent_go_cycles": [g for g in self.go_cycles if g.get("other_writer_logged") is False],
+            },
             "restores": self.restores, "judged": self.judged, "refusals": self.refusals,
             "engine_causes_by_nemesis": self.causes,
             **self.totals,
@@ -1107,6 +1150,11 @@ class Rig:
             "first_anomaly_cycle": self.anomalies[0]["cycle"] if self.anomalies else None,
             "reach_failures": reach_fail, "work": str(self.root),
         }
+        for k, v in self.skipped.items():
+            print(f"NOT RUN: nemesis {k} was drawn {v}x and did not run: {self.unavailable[k]}", flush=True)
+        print(f"known: issue {KNOWN_GO_ISSUE}: {len(self.known)} anomalies in segments the Go nemesis touched "
+              f"({len([g for g in self.go_cycles if g.get('other_writer_logged') is False])} Go cycles with no "
+              f"OtherWriter logged); they do not fail the run. Failing anomalies: {len(self.anomalies)}", flush=True)
         print(json.dumps({"summary": summary}), flush=True)
         if any(a["kind"] == "RIG" for a in self.anomalies) or reach_fail:
             return 2
@@ -1114,6 +1162,29 @@ class Rig:
 
 
 # ---------------------------------------------------------------- canaries
+
+
+def exemption_canary(args: argparse.Namespace) -> str:
+    """With the known-issue exemption on, an anomaly in a segment the Go nemesis touched must be
+    counted as known and not fail the run, and the same anomaly in an untainted segment must
+    still fail it (exit 1)."""
+    ns = argparse.Namespace(**{**vars(args), "menu": "", "work": str(Path(args.work) / "canary-exemption"),
+                               "damage": "", "stop_on_anomaly": False})
+    rig = Rig(ns)
+    rig.root.mkdir(parents=True, exist_ok=True)
+    rig.evidence.mkdir(exist_ok=True)
+    rig.prefix = f"{rig.run_id}/canary-exemption"
+    rig.seg = 1
+    rig.tainted = "go-concurrent"
+    rig.anomaly("JUDGE", "canary: a restore in a tainted segment")
+    code_tainted = rig.report(1)
+    rig.tainted = None
+    rig.cycle_no = 1
+    rig.anomaly("JUDGE", "canary: a restore in an untainted segment")
+    code_untainted = rig.report(1)
+    ok = code_tainted == 0 and len(rig.known) == 1 and code_untainted == 1 and len(rig.anomalies) == 1
+    return "caught (tainted: known and exit 0, untainted: exit 1)" if ok else (
+        f"WRONG (tainted exit {code_tainted}, untainted exit {code_untainted})")
 
 
 def canary(args: argparse.Namespace) -> int:
@@ -1133,6 +1204,7 @@ def canary(args: argparse.Namespace) -> int:
         before = [a for a in rig.anomalies if a["cycle"] < 3]
         verdicts[kind] = (f"caught ({after[0]['kind']} at cycle {after[0]['cycle']})" if after
                           else f"MISSED (exit {code}, {len(before)} anomalies before the damage)")
+    verdicts["known-exemption"] = exemption_canary(args)
     print(json.dumps({"canary": verdicts}), flush=True)
     return 0 if all(v.startswith("caught") for v in verdicts.values()) else 1
 
