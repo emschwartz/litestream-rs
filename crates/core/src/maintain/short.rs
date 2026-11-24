@@ -74,7 +74,7 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 use super::retain::short_level_zero;
 use super::{
     Decided, DeleteJob, Due, Job, MaintainState, Maintenance, RetentionMode, Step, absorb,
-    delete_first, next_window, plan_level, plan_snapshot, soonest,
+    delete_first, plan_level, plan_snapshot, soonest, window_closed_by,
 };
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
 use crate::inventory::{Inventory, InventoryError};
@@ -306,11 +306,11 @@ impl Remembered {
         self.note(info);
         self.own.insert(level);
         self.fresh.insert(level);
-        if let (Some(interval), Some(created)) = (config.interval(level), info.created_at()) {
-            let (start, next) = next_window(now, interval);
-            if created.at() > start {
-                self.quiet.insert(level, next);
-            }
+        if let Some(next) = config
+            .interval(level)
+            .and_then(|interval| window_closed_by(&info, now, interval))
+        {
+            self.quiet.insert(level, next);
         }
     }
 

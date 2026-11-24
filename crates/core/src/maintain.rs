@@ -407,6 +407,17 @@ fn next_window(now: Timestamp, interval: Interval) -> (Timestamp, Timestamp) {
     (start, next)
 }
 
+/// When the window of a level that compacts every `interval` next opens, if `output` (a file
+/// this engine just wrote there) was created inside the current one: the planner then waits for
+/// the next window ([`created_after`]). `None` when the window stays open.
+fn window_closed_by(output: &FileInfo, now: Timestamp, interval: Interval) -> Option<Timestamp> {
+    let (start, next) = next_window(now, interval);
+    output
+        .created_at()
+        .filter(|created| created.at() > start)
+        .map(|_| next)
+}
+
 /// When maintenance next lists the replica after an upload at `now`: the
 /// earliest of the next window of every compaction level and of the snapshot,
 /// and, while retention deletes level 0, `now` plus the level-0 retention

@@ -4,6 +4,13 @@
 use super::*;
 use crate::maintain::{ShortDecided, Tail, due_short};
 
+/// What a short pass decided: the job or wait, and what to do after a level-0 delete.
+pub(super) struct ShortPass {
+    pub(super) due: Due,
+    pub(super) after_delete: Option<Option<Timestamp>>,
+    pub(super) created_at_read: u64,
+}
+
 impl Actor {
     /// Whether the next maintenance pass may list a tail instead of the whole replica: the
     /// remembered newest files are valid and recent enough, and nothing needs a whole view
@@ -16,9 +23,12 @@ impl Actor {
             && self.kept.kept_restore_point().is_none()
     }
 
-    /// One maintenance pass over a short listing. The checks the whole pass makes on its
-    /// listing (a file past this engine's position, a replica below what it confirmed) are made
-    /// on the listed files only.
+    /// One maintenance pass's decision over a short listing, or the tick of the fault it found.
+    /// The checks the whole pass makes on its listing (a file past this engine's position, a
+    /// replica below what it confirmed) are made on the listed files only.
+    ///
+    /// The caller acts on the decision: this future's frames are gone before a job runs, which
+    /// keeps the replicator thread's stack under the headroom gate (crates/replica/src/stack.rs).
     pub(super) async fn maintain_short<
         W: WalSource,
         P: PageSource,
@@ -29,7 +39,7 @@ impl Actor {
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
-    ) -> Tick {
+    ) -> Result<ShortPass, Box<Tick>> {
         let confirmed = self.engine.upload.confirmed();
         let (plan, wake) = {
             let (remembered, cfg) = (&self.engine.maintain.remembered, &self.kept.cfg.maintenance);
@@ -43,18 +53,14 @@ impl Actor {
             let maintain = &mut self.engine.maintain;
             maintain.remembered.settle();
             maintain.stale = false;
-            return self
-                .act_on(
-                    env,
-                    Due::Wait {
-                        until: wake,
-                        held: None,
-                    },
-                    Some(wake),
-                    0,
-                    now,
-                )
-                .await;
+            return Ok(ShortPass {
+                due: Due::Wait {
+                    until: wake,
+                    held: None,
+                },
+                after_delete: Some(wake),
+                created_at_read: 0,
+            });
         }
         let loaded = Tail::load(
             env.remote,
@@ -67,14 +73,22 @@ impl Actor {
         .await;
         let tail = match loaded.map_err(|err| inventory_fault::<R>(&err)) {
             Ok(tail) => tail,
-            Err(fault) => return self.fault(Task::Maintenance, fault, now),
+            Err(fault) => return Err(Box::new(self.fault(Task::Maintenance, fault, now))),
         };
         let listed = tail.newest_listed();
         if listed > self.staged().max(confirmed) {
-            return self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now);
+            return Err(Box::new(self.fault(
+                Task::Maintenance,
+                Fault::RemoteAheadOfLocal,
+                now,
+            )));
         }
         if listed < tail.baseline() {
-            return self.fault(Task::Upload, Fault::RemoteRegressed, now);
+            return Err(Box::new(self.fault(
+                Task::Upload,
+                Fault::RemoteRegressed,
+                now,
+            )));
         }
         let decided = {
             let (cfg, state) = (&self.kept.cfg.maintenance, &self.engine.maintain.state);
@@ -86,7 +100,11 @@ impl Actor {
         let decided = match decided {
             Ok(decided) => decided,
             Err(err) => {
-                return self.fault(Task::Maintenance, Fault::from_created_at(&err), now);
+                return Err(Box::new(self.fault(
+                    Task::Maintenance,
+                    Fault::from_created_at(&err),
+                    now,
+                )));
             }
         };
         let maintain = &mut self.engine.maintain;
@@ -113,8 +131,11 @@ impl Actor {
         maintain.passed_over = 0;
         maintain.snapshot_waits = false;
         maintain.level_one = maintain.remembered.newest_txid(1);
-        self.act_on(env, due, Some(until), decided.created_at_read, now)
-            .await
+        Ok(ShortPass {
+            due,
+            after_delete: Some(until),
+            created_at_read: decided.created_at_read,
+        })
     }
 
     /// What a pass does with its decision. `after_delete` is `Some` for a short pass: the

@@ -2101,7 +2101,13 @@ impl Actor {
             return None;
         }
         if self.short_pass_ok(now) {
-            return Some(self.maintain_short(env, now).await);
+            return Some(match self.maintain_short(env, now).await {
+                Ok(pass) => {
+                    self.act_on(env, pass.due, pass.after_delete, pass.created_at_read, now)
+                        .await
+                }
+                Err(tick) => *tick,
+            });
         }
         let loaded = Inventory::load(env.remote).await;
         let inventory = match loaded.map_err(|err| inventory_fault::<R>(&err)) {
