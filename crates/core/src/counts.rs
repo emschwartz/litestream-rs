@@ -16,7 +16,7 @@ use lsr_wal::HEADER_LEN;
 use crate::env::Clock;
 use crate::fault::Fault;
 use crate::position::Position;
-use crate::source::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError, WriteLock};
+use crate::source::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
 
 /// One kind of call's totals.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -138,14 +138,6 @@ impl<C: Checkpointer> Checkpointer for Counted<'_, C> {
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.inner.bump_seq()
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.inner.begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.inner.end_write_lock(lock)
     }
 }
 

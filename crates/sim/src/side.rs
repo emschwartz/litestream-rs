@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
-    SourceError, SourceOp, WalFileLen, WalSource, WriteLock,
+    SourceError, SourceOp, WalFileLen, WalSource,
 };
 use lsr_ltx::{DbPages, PageNo, PageSize, Timestamp};
 use lsr_wal::Salts;
@@ -195,14 +195,6 @@ impl Checkpointer for SideCheckpointer {
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.0.bump_seq()
     }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.0.begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.0.end_write_lock(lock)
-    }
 }
 
 /// Builds a run's SQLite from the run's seed, its page size and its database's first size.
@@ -288,6 +280,14 @@ macro_rules! side {
 side! {
     /// What the driver does at process start.
     fn start_driver(&self);
+    /// The replicator's write gate takes the write lock; false while another connection writes, or from a backend that cannot hold one.
+    fn hold_writes(&self) -> bool;
+    /// The write gate lets writes through again.
+    fn release_writes(&self);
+    /// Whether the write gate holds the write lock now.
+    fn writes_held(&self) -> bool;
+    /// Whether a connection other than the write gate is in a write transaction now.
+    fn writer_busy(&self) -> bool;
     /// The engine's own commits (its sequence bumps) since the last call, oldest first; a backend that reports what it wrote has none.
     fn take_engine_commits(&self) -> Vec<AppCommit>;
     /// Our read transaction begins, outside a tick.

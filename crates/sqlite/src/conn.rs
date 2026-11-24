@@ -140,7 +140,7 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn connect(path: &Path, config: &SqliteConfig) -> Result<Connection, rusqlite::Error> {
+pub(crate) fn connect(path: &Path, config: &SqliteConfig) -> Result<Connection, rusqlite::Error> {
     // No CREATE: a path that names no database is an error, never a new empty one.
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = match &config.vfs {
@@ -161,7 +161,7 @@ pub(crate) fn page_size(bytes: u32) -> Result<PageSize, OpenError> {
 }
 
 /// `SQLITE_FCNTL_PERSIST_WAL` on: the connection's close, when it is the last, keeps the WAL file.
-fn persist_wal(conn: &Connection) -> Result<(), rusqlite::Error> {
+pub(crate) fn persist_wal(conn: &Connection) -> Result<(), rusqlite::Error> {
     let mut on: c_int = 1;
     conn.file_control(Some(rusqlite::MAIN_DB), FileControl::PersistWal(&mut on))
 }
@@ -611,8 +611,9 @@ pub fn app_connection_for(conn: &Connection, database: &DatabaseFile) -> Result<
     app_connection(conn)
 }
 
-/// [`app_connection_for`] on a raw SQLite handle, for an application on sqlx, diesel or its own FFI.
-/// The handle stays the application's: nothing here closes it.
+/// [`app_connection_for`] on a raw SQLite handle, for an application on sqlx, diesel or its own FFI,
+/// then [`fail_fast_while`](crate::fail_fast_while) with `held`. The handle stays the
+/// application's: nothing here closes it.
 ///
 /// # Safety
 /// `db` is an open connection, used by no other thread during the call, and opened by the
@@ -621,7 +622,8 @@ pub fn app_connection_for(conn: &Connection, database: &DatabaseFile) -> Result<
 /// `sqlite3_wal_hook` the application set on the connection.
 ///
 /// # Errors
-/// As [`app_connection_for`]; [`SetupError::Sqlite`] when the handle cannot be wrapped.
+/// As [`app_connection_for`] and `fail_fast_while`; [`SetupError::Sqlite`] when the handle
+/// cannot be wrapped.
 #[expect(
     unsafe_code,
     reason = "an application's raw handle can only be borrowed through rusqlite's unsafe from_handle"
@@ -629,11 +631,13 @@ pub fn app_connection_for(conn: &Connection, database: &DatabaseFile) -> Result<
 pub unsafe fn app_connection_raw(
     db: *mut rusqlite::ffi::sqlite3,
     database: &DatabaseFile,
+    held: &crate::WritesHeld,
 ) -> Result<(), SetupError> {
     // SAFETY: the caller promises an open handle of this library's SQLite that no other thread
     // uses during the call; `from_handle` borrows it and its drop does not close it.
     let conn = unsafe { Connection::from_handle(db) }.map_err(SetupError::Sqlite)?;
-    app_connection_for(&conn, database)
+    app_connection_for(&conn, database)?;
+    crate::fail_fast_while(&conn, held)
 }
 
 /// Reads back what [`app_connection`] sets, and that the connection syncs at all: its

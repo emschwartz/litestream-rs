@@ -781,7 +781,9 @@ impl<B: Backend> Rig<B> {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Resnapshot(_)
-            | Event::Clamped(_) => {}
+            | Event::Clamped(_)
+            // The rig runs no write gate.
+            | Event::WritesHeld { .. } => {}
         }
         match next {
             Next::Now if matches!(event, Event::Idle) => self.clock.advance(SPIN_STEP),

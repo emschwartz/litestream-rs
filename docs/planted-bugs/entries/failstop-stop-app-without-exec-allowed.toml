@@ -1,5 +1,0 @@
-name = "failstop-stop-app-without-exec-allowed"
-fix = "c5881f5"
-package = "lsr-cli"
-test_bin = "cli"
-tests = ["sidecar::stop_app_without_exec_is_refused"]

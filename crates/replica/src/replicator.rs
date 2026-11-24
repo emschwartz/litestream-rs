@@ -20,21 +20,21 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::{fmt, io};
 
-use lsr_core::{Clock, StopCause, Task, Unfinished};
+use lsr_core::{Clock, Gate, StopCause, Task, Unfinished, blocks_writes};
 use lsr_ltx::Timestamp;
-use lsr_sqlite::{DatabaseFile, Sqlite};
+use lsr_sqlite::{DatabaseFile, Sqlite, SqliteConfig, WriteGate, WritesHeld};
 
 use crate::config::Config;
 use crate::error::StartError;
 use crate::events::EventSink;
-use crate::health::{Booted, Gone, Health, Phase, Stopped};
+use crate::health::{Booted, Gone, Health, Phase, Stopped, Writes};
 use crate::meta::{MetaLock, read_takeover};
 use crate::readers::ReaderGuard;
 use crate::runtime::{CALLER_SLICE, Park, Runtime, later};
@@ -81,9 +81,9 @@ pub(crate) struct Shared {
     pub(crate) grace: Duration,
     pub(crate) readers: Arc<AtomicUsize>,
     pub(crate) meters: Arc<Meters>,
-    /// Fail-stop's gate is held: the commit hook `app_connection` installs refuses the
-    /// application's commits while this is set.
-    pub(crate) writes_refused: Arc<AtomicBool>,
+    /// Whether the write gate holds the application's writes now: the busy handler
+    /// `app_connection` installs and the engine's checkpointer read it.
+    pub(crate) writes_held: WritesHeld,
     pid: u32,
     state: Mutex<State>,
     changed: Condvar,
@@ -113,7 +113,7 @@ impl Shared {
             grace: config.shutdown_grace,
             readers: Arc::new(AtomicUsize::new(0)),
             meters: Arc::new(Meters::default()),
-            writes_refused: Arc::new(AtomicBool::new(false)),
+            writes_held: WritesHeld::new(),
             pid: std::process::id(),
             state: Mutex::new(State {
                 health: Health::new(now),
@@ -389,9 +389,34 @@ impl Replicator {
         let meta_lock = MetaLock::take(meta)?;
         let takeover = read_takeover(meta);
         let sqlite = Sqlite::open(database)?;
+        let mut gate = WriteGate::open(
+            database,
+            &SqliteConfig::default(),
+            shared.writes_held.clone(),
+        )?;
+        // Every connection must hold the file `start` registered, by its own descriptor: a file
+        // swapped in at the path between the opens would be gated or replicated in its place.
+        let registered =
+            |opened: Option<DatabaseFile>| opened.is_none_or(|file| file == shared.database);
+        let replaced = || StartError::Open {
+            kind: io::ErrorKind::NotFound,
+        };
+        let engine = sqlite.database_file().map_err(|_split| replaced())?;
+        if !registered(engine) || !registered(gate.database_file()) {
+            return Err(replaced());
+        }
+        if let Some(why) = blocks_writes(config.if_replication_stops, Gate::Pending) {
+            // Taken before `start` returns, so nothing the application writes lands before the
+            // boot is judged. An application write transaction already open keeps it out; the
+            // thread tries again on every turn.
+            if gate.hold().is_ok() {
+                shared.update(|state| state.health.writes = Writes::Blocked(why));
+            }
+        }
         let worker = Worker::new(
             Arc::clone(shared),
             sqlite,
+            gate,
             database,
             meta,
             store,
@@ -408,17 +433,29 @@ impl Replicator {
         Ok(())
     }
 
-    /// Blocks until the first boot has finished, keeps failing (degraded), or the replicator
-    /// stopped, or until `within` passes on the replicator's clock.
+    /// Blocks until the replicator is ready, or cannot be, or until `within` passes on the
+    /// replicator's clock: [`Replicator::ready`] for a caller without async.
     #[must_use]
     pub fn wait_booted(&self, within: Duration) -> Booted {
         if self.shared.forked() {
             return Booted::Gone(Gone::Forked);
         }
+        settle_boot(&self.shared, later(self.shared.clock.now(), within))
+    }
+
+    /// Resolves once the replicator is ready: the first boot finished and was judged, so the
+    /// write hold that covers it is over (`Booted::Booted`). Or once it cannot be: the boot
+    /// keeps failing (`Degraded`), the replicator stopped, its thread is gone, or `within`
+    /// passed on the replicator's clock (`TimedOut`). It answers as
+    /// [`Replicator::wait_booted`] does. The future needs no runtime: `.await` it or call
+    /// [`Ready::wait`]; a poll that finds no answer starts a thread that waits for it.
+    pub fn ready(&self, within: Duration) -> Ready {
         let deadline = later(self.shared.clock.now(), within);
-        self.shared
-            .wait_for(Some(deadline), boot_answer)
-            .unwrap_or(Booted::TimedOut)
+        let watched = Watched::new(&self.shared, deadline, settle_boot, "lsr-ready");
+        if self.shared.forked() {
+            return Ready(watched.answered(Booted::Gone(Gone::Forked)));
+        }
+        Ready(watched)
     }
 
     /// Blocks until `done` holds for the health snapshot, or `within` passes on the
@@ -513,40 +550,39 @@ impl Replicator {
         &self.shared.database
     }
 
-    /// Sets `wal_autocheckpoint = 0` on one of the application's
-    /// connections, after checking that it opens this replicator's database (device and
-    /// inode). Call it on every connection the application opens, pooled ones included.
+    /// Whether the replicator holds the application's writes now, as a handle that follows
+    /// it: what [`crate::app_connection_raw`] gives an application connection's busy handler.
+    /// [`Health::writes`] says the same, with the reason.
+    #[must_use]
+    pub fn writes_held(&self) -> WritesHeld {
+        self.shared.writes_held.clone()
+    }
+
+    /// Optional setup for one of the application's connections: checks that it opens this
+    /// replicator's database (device and inode), sets `wal_autocheckpoint = 0`, and installs a
+    /// busy handler that makes a write fail at once while the replicator holds the
+    /// application's writes, instead of after the connection's busy timeout. Otherwise the
+    /// handler waits as SQLite's default one does, for the busy timeout the connection had
+    /// when this was called.
+    ///
+    /// Skipping it is safe. Fail-stop holds writes with a write transaction of its own
+    /// ([`Health::writes`]), which stops every writer whether or not it was set up, in this
+    /// process or another: a connection not set up here meets "database is locked" after its
+    /// busy timeout, and runs automatic checkpoints, which cost the replica nothing
+    /// ([`crate::Health::app_notice`]). Setting `PRAGMA busy_timeout` afterwards replaces the
+    /// handler and loses only the fast failure. SQLite's own error is not changed: an
+    /// application that wants to say more listens for `Event::WritesBlocked`.
     ///
     /// # Errors
     /// [`lsr_sqlite::SetupError`]: the connection has no file or opens another one, or a
-    /// setting failed; `CommitHookReplaced` when the connection already had a commit hook,
-    /// which SQLite cannot keep beside the gate's.
-    ///
-    /// It also installs a commit hook (`sqlite3_commit_hook`) that refuses every commit while
-    /// fail-stop holds the application ([`crate::Health::held_by`],
-    /// `Config::if_replication_stops`): SQLite rolls the transaction back and the
-    /// application's COMMIT fails with `SQLITE_CONSTRAINT_COMMITHOOK`. Reads go on.
-    ///
-    /// Known limits: the gate holds only on connections this call set up and whose hook is
-    /// still the gate's. These writers commit whatever fail-stop says, and nothing reports it:
-    /// - a connection not set up here, pooled ones the application forgot included;
-    /// - a connection whose commit hook the application set after this call, which silently
-    ///   removes the gate (SQLite allows one commit hook per connection and offers no way to
-    ///   read it back, so nothing can notice; a hook set before this call makes it fail with
-    ///   `CommitHookReplaced` instead);
-    /// - another SQLite library linked into the process, which never sees this hook;
-    /// - another process writing the database: a second program, the `sqlite3` shell, an
-    ///   application on another binding (it can read the gate from [`Self::health`]).
-    ///
-    /// The sidecar's `stop-app` stops its `-exec` child, every connection of it included, but
-    /// not a process it did not start.
+    /// setting failed.
     #[cfg(feature = "rusqlite")]
     pub fn app_connection(
         &self,
         conn: &rusqlite::Connection,
     ) -> Result<(), lsr_sqlite::SetupError> {
         lsr_sqlite::app_connection_for(conn, &self.shared.database)?;
-        lsr_sqlite::refuse_commits_while(conn, &self.shared.writes_refused)
+        lsr_sqlite::fail_fast_while(conn, &self.shared.writes_held)
     }
 }
 
@@ -570,7 +606,9 @@ fn boot_answer(state: &State, died: bool) -> Option<Booted> {
         // outcome set to `Stopped(Shutdown)` under the same lock.
         Some(Stopped::Drained { .. } | Stopped::DeadlineReached { .. }) | None => {}
     }
-    if state.booted {
+    // Ready once the boot is judged too: until then writes are held (`Gate::Pending`), so an
+    // application told it may go would meet "database is locked".
+    if state.booted && state.health.held_by.gate != Gate::Pending {
         return Some(Booted::Booted);
     }
     if let Phase::Stopped(cause) = state.health.phase {
@@ -580,6 +618,13 @@ fn boot_answer(state: &State, died: bool) -> Option<Booted> {
         .health
         .task(Task::Sync)
         .map(|degraded| Booted::Degraded(degraded.cause))
+}
+
+/// [`boot_answer`] by `deadline`, blocking the calling thread.
+fn settle_boot(shared: &Shared, deadline: Timestamp) -> Booted {
+    shared
+        .wait_for(Some(deadline), boot_answer)
+        .unwrap_or(Booted::TimedOut)
 }
 
 /// The end of a stop, as the thread reports it or, at the deadline, as the caller sees it.
@@ -599,49 +644,8 @@ fn stop_answer(state: &State, died: bool, now: Timestamp, deadline: Timestamp) -
     })
 }
 
-#[derive(Debug, Default)]
-struct Watch {
-    result: Option<Stopped>,
-    waker: Option<Waker>,
-    watching: bool,
-}
-
-/// The outcome of [`Replicator::stop`]: a future that needs no runtime, or [`FinalSync::wait`]
-/// to block for it.
-#[derive(Debug)]
-#[must_use = "a stop's outcome says whether everything committed reached the replica"]
-pub struct FinalSync {
-    shared: Arc<Shared>,
-    deadline: Timestamp,
-    watch: Arc<Mutex<Watch>>,
-}
-
-impl FinalSync {
-    fn new(shared: &Arc<Shared>, deadline: Timestamp) -> Self {
-        Self {
-            shared: Arc::clone(shared),
-            deadline,
-            watch: Arc::new(Mutex::new(Watch::default())),
-        }
-    }
-
-    fn ready(shared: &Arc<Shared>, outcome: Stopped) -> Self {
-        let sync = Self::new(shared, shared.clock.now());
-        lock(&sync.watch).result = Some(outcome);
-        sync
-    }
-
-    /// Blocks until the stop ends, or until its deadline passes with the thread still inside
-    /// a request.
-    pub fn wait(self) -> Stopped {
-        if let Some(result) = lock(&self.watch).result {
-            return result;
-        }
-        settle(&self.shared, self.deadline)
-    }
-}
-
-fn settle(shared: &Shared, deadline: Timestamp) -> Stopped {
+/// [`stop_answer`], blocking the calling thread.
+fn settle_stop(shared: &Shared, deadline: Timestamp) -> Stopped {
     let clock = Arc::clone(&shared.clock);
     shared
         .wait_for(None, |state, died| {
@@ -650,13 +654,62 @@ fn settle(shared: &Shared, deadline: Timestamp) -> Stopped {
         .unwrap_or(Stopped::Gone(Gone::ThreadDied))
 }
 
-impl Future for FinalSync {
-    type Output = Stopped;
+#[derive(Debug)]
+struct Watch<T> {
+    result: Option<T>,
+    waker: Option<Waker>,
+    watching: bool,
+}
+
+/// One answer from the thread's state, as a future that needs no runtime or by blocking:
+/// what [`FinalSync`] and [`Ready`] share. `settle` blocks until the answer, by `deadline`.
+#[derive(Debug)]
+struct Watched<T> {
+    shared: Arc<Shared>,
+    deadline: Timestamp,
+    settle: fn(&Shared, Timestamp) -> T,
+    /// The watcher thread's name.
+    name: &'static str,
+    watch: Arc<Mutex<Watch<T>>>,
+}
+
+impl<T: Copy + Send + 'static> Watched<T> {
+    fn new(
+        shared: &Arc<Shared>,
+        deadline: Timestamp,
+        settle: fn(&Shared, Timestamp) -> T,
+        name: &'static str,
+    ) -> Self {
+        Self {
+            shared: Arc::clone(shared),
+            deadline,
+            settle,
+            name,
+            watch: Arc::new(Mutex::new(Watch {
+                result: None,
+                waker: None,
+                watching: false,
+            })),
+        }
+    }
+
+    /// Already answered.
+    fn answered(self, result: T) -> Self {
+        lock(&self.watch).result = Some(result);
+        self
+    }
+
+    fn wait(self) -> T {
+        if let Some(result) = lock(&self.watch).result {
+            return result;
+        }
+        (self.settle)(&self.shared, self.deadline)
+    }
 
     /// The first poll that has no answer starts a watcher thread that blocks on the answer
     /// and wakes this future; without one, nothing would wake it at the deadline while the
     /// replicator's thread is stuck in a request.
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Stopped> {
+    fn poll(&self, cx: &Context<'_>) -> Poll<T> {
         let mut watch = lock(&self.watch);
         if let Some(result) = watch.result {
             return Poll::Ready(result);
@@ -664,27 +717,85 @@ impl Future for FinalSync {
         watch.waker = Some(cx.waker().clone());
         if !watch.watching {
             watch.watching = true;
-            let (shared, deadline) = (Arc::clone(&self.shared), self.deadline);
+            let (shared, deadline, settle) = (Arc::clone(&self.shared), self.deadline, self.settle);
             let slot = Arc::clone(&self.watch);
-            let spawned =
-                crate::stack::spawn("lsr-final-sync", crate::stack::WAIT_STACK, move || {
-                    let result = settle(&shared, deadline);
-                    let waker = {
-                        let mut watch = lock(&slot);
-                        watch.result = Some(result);
-                        watch.waker.take()
-                    };
-                    if let Some(waker) = waker {
-                        waker.wake();
-                    }
-                });
+            let spawned = crate::stack::spawn(self.name, crate::stack::WAIT_STACK, move || {
+                let result = settle(&shared, deadline);
+                let waker = {
+                    let mut watch = lock(&slot);
+                    watch.result = Some(result);
+                    watch.waker.take()
+                };
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            });
             if spawned.is_err() {
                 // No thread to wait on: wait here, on the poller's thread.
                 drop(watch);
-                return Poll::Ready(settle(&self.shared, self.deadline));
+                return Poll::Ready((self.settle)(&self.shared, self.deadline));
             }
         }
         Poll::Pending
+    }
+}
+
+/// The outcome of [`Replicator::stop`]: a future that needs no runtime, or [`FinalSync::wait`]
+/// to block for it.
+#[derive(Debug)]
+#[must_use = "a stop's outcome says whether everything committed reached the replica"]
+pub struct FinalSync(Watched<Stopped>);
+
+impl FinalSync {
+    fn new(shared: &Arc<Shared>, deadline: Timestamp) -> Self {
+        Self(Watched::new(
+            shared,
+            deadline,
+            settle_stop,
+            "lsr-final-sync",
+        ))
+    }
+
+    fn ready(shared: &Arc<Shared>, outcome: Stopped) -> Self {
+        Self(
+            Watched::new(shared, shared.clock.now(), settle_stop, "lsr-final-sync")
+                .answered(outcome),
+        )
+    }
+
+    /// Blocks until the stop ends, or until its deadline passes with the thread still inside
+    /// a request.
+    pub fn wait(self) -> Stopped {
+        self.0.wait()
+    }
+}
+
+impl Future for FinalSync {
+    type Output = Stopped;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Stopped> {
+        self.0.poll(cx)
+    }
+}
+
+/// The outcome of [`Replicator::ready`]: a future that needs no runtime, or [`Ready::wait`] to
+/// block for it, which is [`Replicator::wait_booted`].
+#[derive(Debug)]
+#[must_use = "the outcome says whether the replicator is ready, and why not"]
+pub struct Ready(Watched<Booted>);
+
+impl Ready {
+    /// Blocks until the replicator is ready or cannot be, or the wait runs out.
+    pub fn wait(self) -> Booted {
+        self.0.wait()
+    }
+}
+
+impl Future for Ready {
+    type Output = Booted;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Booted> {
+        self.0.poll(cx)
     }
 }
 

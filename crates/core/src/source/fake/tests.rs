@@ -194,8 +194,6 @@ fn the_checkpointer_records_calls_and_refuses_a_second_barrier() {
     let barrier = checkpointer.begin_barrier().unwrap();
     assert_eq!(checkpointer.begin_barrier().unwrap_err(), SourceError::Busy);
     checkpointer.end_barrier(barrier).unwrap();
-    let write = checkpointer.begin_write_lock().unwrap();
-    checkpointer.end_write_lock(write).unwrap();
     checkpointer.bump_seq().unwrap();
     assert_eq!(
         checkpointer.calls(),
@@ -203,8 +201,6 @@ fn the_checkpointer_records_calls_and_refuses_a_second_barrier() {
             CheckpointCall::BeginBarrier,
             CheckpointCall::BeginBarrier,
             CheckpointCall::EndBarrier,
-            CheckpointCall::BeginWriteLock,
-            CheckpointCall::EndWriteLock,
             CheckpointCall::BumpSeq,
         ]
     );

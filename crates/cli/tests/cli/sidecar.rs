@@ -820,35 +820,43 @@ fn an_oversized_request_and_too_many_connections_are_refused() {
 
 // fail-stop ----------------------------------------------------------------------------
 
-/// `stop-app` with no `-exec` and no `exec` key could not stop anything: `config check`
-/// refuses it, and so does the daemon, before any database is touched (decision D20).
+/// `stop-app` with no `-exec` is accepted: the daemon holds the database's write lock
+/// while writes are held, which stops every writer (`docs/decisions/D192.md`).
 #[test]
-fn stop_app_without_exec_is_refused() {
+fn stop_app_without_exec_is_accepted() {
     let alone = setup("litestream-rs:\n  if-replication-stops: stop-app\n", "");
     let out = lsr()
         .args(["config", "check"])
         .arg(&alone.config)
         .output()
         .unwrap();
-    let text =
-        String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
-    assert_eq!(out.status.code(), Some(2), "{text}");
-    assert!(
-        text.contains(
-            "if-replication-stops: stop-app refused: stopping the application needs -exec (or the exec key); use hold-start or report"
-        ),
-        "{text}"
-    );
-    let with_exec = setup(
-        "litestream-rs:\n  if-replication-stops: stop-app\nexec: /bin/true\n",
-        "",
-    );
-    let out = lsr()
-        .args(["config", "check"])
-        .arg(&with_exec.config)
-        .output()
-        .unwrap();
     assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+/// A plain sidecar under `stop-app` whose boot stops for an unsafe cause blocks every
+/// writer: the log says `writes blocked` and why, and a write that waits for no lock gets
+/// "database is locked".
+#[test]
+fn a_plain_sidecar_blocks_writes_under_stop_app() {
+    let extra = "addr: 127.0.0.1:0\nshutdown-sync-timeout: 100ms\n\
+                 litestream-rs:\n  if-replication-stops: stop-app\n  responses:\n    \
+                 page-size-changed: stop\n";
+    let setup = setup(extra, "    monitor-interval: 20ms\n");
+    change_the_page_size(&setup);
+    let mut command = lsr();
+    command.args(["replicate", "-config"]).arg(&setup.config);
+    let mut daemon = Daemon::spawn(command);
+    daemon.wait_for(&["msg=\"writes blocked\"", "held_by=page_size_changed"]);
+    let writer = rusqlite::Connection::open(&setup.db).unwrap();
+    writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let err = writer.execute_batch("CREATE TABLE blocked(x)").unwrap_err();
+    assert_eq!(
+        err.sqlite_error().map(|e| e.code),
+        Some(rusqlite::ErrorCode::DatabaseBusy),
+        "{err}"
+    );
+    daemon.signal("TERM");
+    daemon.finish();
 }
 
 /// Replicates `setup`'s database at 4096-byte pages, then rewrites the database at 8192: the

@@ -17,7 +17,6 @@ use lsr_core::conformance::block_on;
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointOutcome, CheckpointRun, Checkpointer, CommittedRead,
     MemSink, PageSource, ReadLockHold, RestoreTarget, SourceError, SourceOp, WalFileLen, WalSource,
-    WriteLock,
 };
 use lsr_ltx::{DbPages, PageNo};
 use lsr_sqlite::testing::{Backend, Stepper};
@@ -108,16 +107,6 @@ impl Checkpointer for Hooked {
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         hook(SourceOp::BumpSeq);
         self.0.bump_seq()
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        hook(SourceOp::BeginWriteLock);
-        self.0.begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        hook(SourceOp::EndWriteLock);
-        self.0.end_write_lock(lock)
     }
 }
 

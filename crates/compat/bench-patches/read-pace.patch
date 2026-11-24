@@ -1,25 +1,22 @@
 diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
-index 51f7ea0b1..b6f1624f2 100644
 --- a/crates/replica/src/readers.rs
 +++ b/crates/replica/src/readers.rs
-@@ -13,12 +13,90 @@
- //! is guarded alike. PASSIVE checkpoints never wait on readers and are unaffected.
+@@ -20,13 +20,89 @@
+ //! only meet the gate's lock.
  
  use std::sync::Arc;
 -use std::sync::atomic::{AtomicUsize, Ordering};
 +use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 +use std::time::Duration;
  
--use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError, WriteLock};
-+use lsr_core::{
-+    Barrier, CheckpointMode, CheckpointRun, Checkpointer, PageSource, SourceError, WriteLock,
-+};
+-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
++use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, PageSource, SourceError};
 +use lsr_ltx::{DbPages, PageNo, Timestamp};
- use lsr_sqlite::Sqlite;
+ use lsr_sqlite::{Sqlite, WritesHeld};
  
  use crate::config::ReaderTracking;
 +use crate::runtime::{Runtime, later};
-+
+ 
 +/// BENCH PROTOTYPE (crates/compat/bench-patches/read-pace.patch, never in the engine): a page
 +/// source that spends a byte budget as it reads, so a copy proceeds at `bytes_per_s` and no
 +/// faster. It waits on the runtime's clock and park, between pages and never while the write
@@ -92,58 +89,21 @@ index 51f7ea0b1..b6f1624f2 100644
 +        read
 +    }
 +}
- 
++
  /// Held for the length of one long read. While any guard lives, the replicator runs no
  /// TRUNCATE checkpoint. Counted, so overlapping readers are safe; dropping it ends the read.
-@@ -49,6 +127,7 @@ pub(crate) struct Guarded {
-     sqlite: Sqlite,
-     tracking: ReaderTracking,
-     readers: Arc<AtomicUsize>,
-+    write_locked: Option<Arc<AtomicBool>>,
- }
- 
- impl Guarded {
-@@ -61,9 +140,16 @@ impl Guarded {
-             sqlite,
-             tracking,
-             readers,
-+            write_locked: None,
-         }
+ #[derive(Debug)]
+@@ -134,4 +210,4 @@
+         drop(second);
+         assert_eq!(count.load(Ordering::SeqCst), 0);
      }
- 
-+    /// Sets `flag` while the write lock is held, for the pacing page source (bench prototype).
-+    pub(crate) fn flagging(mut self, flag: Arc<AtomicBool>) -> Self {
-+        self.write_locked = Some(flag);
-+        self
-+    }
-+
-     fn may_wait(&self) -> bool {
-         match self.tracking {
-             ReaderTracking::Untracked => false,
-@@ -97,10 +183,17 @@ impl Checkpointer for Guarded {
-     }
- 
-     fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
--        self.sqlite.begin_write_lock()
-+        let lock = self.sqlite.begin_write_lock()?;
-+        if let Some(flag) = &self.write_locked {
-+            flag.store(true, Ordering::SeqCst);
-+        }
-+        Ok(lock)
-     }
- 
-     fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-+        if let Some(flag) = &self.write_locked {
-+            flag.store(false, Ordering::SeqCst);
-+        }
-         self.sqlite.end_write_lock(lock)
-     }
- }
+-}
++}
+\ No newline at end of file
 diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
-index e638a104b..5b37b72f4 100644
 --- a/crates/replica/src/thread.rs
 +++ b/crates/replica/src/thread.rs
-@@ -441,12 +441,19 @@ impl Worker {
+@@ -482,7 +482,13 @@
      /// One engine tick, or why the closed connections could not be reopened.
      fn tick(&mut self, now: Timestamp) -> Result<Tick, Reopen> {
          let sqlite = self.connection()?;
@@ -158,10 +118,3 @@ index e638a104b..5b37b72f4 100644
          let mut ck = Guarded::new(
              sqlite,
              self.config.readers,
-             Arc::clone(&self.shared.readers),
--        );
-+        )
-+        .flagging(write_locked);
-         let env = Env {
-             wal: &mut wal,
-             db: &mut db,

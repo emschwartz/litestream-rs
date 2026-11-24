@@ -1,13 +1,12 @@
 diff --git a/crates/sqlite/src/gate.rs b/crates/sqlite/src/gate.rs
-index eef3d0c..3ac1038 100644
 --- a/crates/sqlite/src/gate.rs
 +++ b/crates/sqlite/src/gate.rs
-@@ -87,7 +87,7 @@ pub fn refuse_commits_while(
-     // failure at once, with the hook untouched; on success when the connection closes or the
-     // data is replaced. The earlier gate's count it releases now is named only by the hook,
-     // which the next call replaces before any commit can run.
--    let stored = unsafe { ffi::sqlite3_set_clientdata(db, KEY.as_ptr(), arg, Some(release)) };
-+    let stored = ffi::SQLITE_OK;
-     if stored != ffi::SQLITE_OK {
-         return Err(SetupError::Sqlite(rusqlite::Error::SqliteFailure(
-             ffi::Error::new(stored),
+@@ -217,7 +217,7 @@
+ extern "C" fn release(arg: *mut c_void) {
+     // SAFETY: `arg` came from `Box::into_raw` in `fail_fast_while`, and SQLite calls the
+     // destructor once per pointer it was given.
+-    drop(unsafe { Box::from_raw(arg.cast::<Busy>()) });
++    std::mem::forget(unsafe { Box::from_raw(arg.cast::<Busy>()) });
+ }
+ 
+ /// Gives `conn` the busy handler that fails a blocked write at once while `held` says the gate

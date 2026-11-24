@@ -218,6 +218,9 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         // A store without conditional writes refuses the first create-only upload of each
         // process, which publishes nothing and is retried as a replace: no snapshot follows.
         no_create_only: _,
+        // The write gate refuses the application's commits, which never reach the engine, and
+        // keeps the engine's checkpoints waiting: neither is a fault that forces a snapshot.
+        write_gate: _,
         lying_wal_sync,
     } = opts;
     if *lying_wal_sync {

@@ -68,6 +68,8 @@ pub enum FaultKind {
     SqliteBusy,
     /// [`Fault::ReadersHeld`].
     ReadersHeld,
+    /// [`Fault::WritesHeld`].
+    WritesHeld,
     /// [`Fault::WalMoved`].
     WalMoved,
     /// [`Fault::WalIndexInconsistent`].
@@ -100,7 +102,7 @@ pub enum FaultKind {
 
 impl FaultKind {
     /// Every fault, in the order of [`Fault`].
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::StoreTransient,
         Self::StoreThrottled,
         Self::StoreCredentials,
@@ -121,6 +123,7 @@ impl FaultKind {
         Self::LocalFsyncFailed,
         Self::SqliteBusy,
         Self::ReadersHeld,
+        Self::WritesHeld,
         Self::WalMoved,
         Self::WalIndexInconsistent,
         Self::WalChangedUnderRead,
@@ -171,6 +174,7 @@ impl From<&Fault> for FaultKind {
             Fault::LocalFsyncFailed => Self::LocalFsyncFailed,
             Fault::SqliteBusy => Self::SqliteBusy,
             Fault::ReadersHeld => Self::ReadersHeld,
+            Fault::WritesHeld => Self::WritesHeld,
             Fault::WalMoved => Self::WalMoved,
             Fault::WalIndexInconsistent => Self::WalIndexInconsistent,
             Fault::WalChangedUnderRead => Self::WalChangedUnderRead,
@@ -234,6 +238,7 @@ pub fn stop_of(kind: FaultKind) -> Option<StopCause> {
         | FaultKind::LocalFsyncFailed
         | FaultKind::SqliteBusy
         | FaultKind::ReadersHeld
+        | FaultKind::WritesHeld
         | FaultKind::WalMoved
         | FaultKind::WalIndexInconsistent
         | FaultKind::WalChangedUnderRead
@@ -251,6 +256,7 @@ pub fn names_fault(scenario: &Scenario, kind: FaultKind) -> bool {
         .iter()
         .any(|want| match (want, stop_of(kind)) {
             (Expect::Event(EventMatch::Retrying(got)), _) => *got == kind,
+            (Expect::Event(EventMatch::WritesHeld), _) => kind == FaultKind::WritesHeld,
             // The lost file's policy is a snapshot at the first transaction the
             // replica lacks, announced as this resnapshot.
             (Expect::Event(EventMatch::Resnapshot(CauseKind::NewestStagedFileUnreadable)), _) => {
@@ -292,6 +298,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::LocalFsyncFailed => &[fsync_fails_once],
         FaultKind::SqliteBusy => &[busy_on_barrier, shm_header_mid_update],
         FaultKind::ReadersHeld => &[readers_hold_the_wal],
+        FaultKind::WritesHeld => &[writes_held_through_a_checkpoint],
         FaultKind::WalMoved => &[wal_header_torn_while_running],
         FaultKind::WalIndexInconsistent => &[shm_end_inside_tx],
         FaultKind::WalChangedUnderRead => &[frame_overwritten_between_scan_and_read],
@@ -1162,6 +1169,23 @@ pub fn readers_hold_the_wal() -> Scenario {
             commit(9, true),
         ],
         vec![retries(FaultKind::ReadersHeld)],
+    )
+}
+
+/// The replicator holds the application's writes when a checkpoint comes due: the checkpoint
+/// waits, uncounted and never degraded, and runs once writes go through again.
+#[must_use]
+pub fn writes_held_through_a_checkpoint() -> Scenario {
+    injected(
+        "writes_held_through_a_checkpoint",
+        vec![
+            Op::EnvFault(EnvFault::Source(
+                SourceOp::Checkpoint,
+                SourceError::WritesHeld,
+            )),
+            commit(9, true),
+        ],
+        vec![Expect::Event(EventMatch::WritesHeld)],
     )
 }
 
