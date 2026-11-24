@@ -75,6 +75,10 @@ impl WalSource for BeforeCommittedRead {
     fn sync(&mut self) -> Result<(), SourceError> {
         self.0.wal.sync()
     }
+
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        self.0.wal.modified()
+    }
 }
 
 /// A checkpointer the application commits through right before the write barrier keeps it out:

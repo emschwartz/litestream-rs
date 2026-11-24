@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/identity.rs b/crates/core/src/identity.rs
+index 0000000..0000000 100644
+--- a/crates/core/src/identity.rs
++++ b/crates/core/src/identity.rs
+@@ -163,9 +163,6 @@ pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
+     if compared.same() {
+         return Ok(Identity::Same);
+     }
+-    if !compared.ahead_bar() {
+-        return Ok(Identity::Other);
+-    }
+     // The replica's newest file's own header time, against the database's modified time: no
+     // slack, and a time that cannot be read is no evidence.
+     let written = wal.modified().map_err(Fault::from_source)?;

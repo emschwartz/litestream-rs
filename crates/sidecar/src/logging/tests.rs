@@ -111,3 +111,34 @@ fn a_refusal_logs_the_approved_text() {
         )
     );
 }
+
+/// A boot that found the database ahead of the replica warns, naming the replica's newest
+/// transaction in the text and in a field of its own.
+#[test]
+fn a_boot_ahead_of_the_replica_warns_and_names_its_newest_transaction() {
+    let out = Captured::default();
+    let log = Arc::new(Logger::to(
+        LogLevel::Info,
+        LogFormat::Text,
+        Arc::new(At),
+        Box::new(out.clone()),
+    ));
+    let mut events = DbEvents::new(Arc::clone(&log), Path::new("/data/app.db"));
+    let tip = Txid::new(0x2a).unwrap();
+    events.event(&Event::Engine(EngineEvent::Booted {
+        cause: Some(SnapshotCause::AheadOfReplica { tip }),
+    }));
+    let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+    let msg = ahead_message(tip);
+    assert_eq!(
+        msg,
+        format!(
+            "the meta directory has no record of the replica's newest transaction {tip}, but this database was written after it and holds most of its pages: replicating it as the same database with commits that never reached the replica, starting with a snapshot above {tip}. If another replicator writes to this prefix, stop it."
+        )
+    );
+    assert!(
+        text.starts_with("time=1970-01-01T00:00:00.000Z level=WARN msg="),
+        "{text}"
+    );
+    assert!(text.ends_with(" db=app.db tip=42\n"), "{text}");
+}

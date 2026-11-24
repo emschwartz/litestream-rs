@@ -109,7 +109,7 @@ use crate::fault::{
     Action, Backoff, Clamped, Fault, Next, OtherWriter, PersistentCause, Policy, Responses,
     STALLED_AFTER, SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
 };
-use crate::identity;
+use crate::identity::{self, Identity};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
@@ -2945,20 +2945,31 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let now = view.header.map(|header| header.page_size());
     let refused = unvouched.filter(|tip| gate.refuses(*tip));
     let resized = page_size.zip(now).filter(|(was, now)| was != now);
-    let refused_through = match refused {
+    let (refused_through, ahead) = match refused {
         Some(tip) if resized.is_none() && gate.fresh() => {
-            let same =
-                identity::local_is_replica(env.wal, reader, committed, env.db, remote, tip).await?;
-            (!same).then_some(tip)
+            let local =
+                identity::local_against_replica(env.wal, reader, committed, env.db, remote, tip)
+                    .await?;
+            match local {
+                Identity::Same => (None, None),
+                Identity::Ahead => (None, Some(tip)),
+                Identity::Other => (Some(tip), None),
+            }
         }
-        Some(_) | None => refused,
+        Some(_) | None => (refused, None),
     };
-    let recovered = match (resized, refused_through) {
-        (Some((was, now)), _) => Recovered::Stop(StopCause::PageSizeChanged { was, now }),
-        (None, Some(_)) => Recovered::Stop(StopCause::OtherWriter),
+    let recovered = match (resized, refused_through, ahead) {
+        (Some((was, now)), _, _) => Recovered::Stop(StopCause::PageSizeChanged { was, now }),
+        (None, Some(_), _) => Recovered::Stop(StopCause::OtherWriter),
+        // The database reads as the replica's state plus commits it never got: the snapshot
+        // goes above the replica's newest transaction whatever the WAL says.
+        (None, None, Some(tip)) => Recovered::Snapshot {
+            after: Some(tip),
+            cause: SnapshotCause::AheadOfReplica { tip },
+        },
         // A boot position holds no read lock, so no verdict here names a broken one; a
         // rewound WAL's event repeats what its snapshot cause carries.
-        (None, None) => {
+        (None, None, None) => {
             recover_traced(
                 newest_staged.as_ref().map(PositionSource::Boot),
                 &view,

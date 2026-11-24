@@ -36,6 +36,10 @@ impl WalSource for TruncatedAfterOpen {
     fn sync(&mut self) -> Result<(), SourceError> {
         self.0.sync()
     }
+
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        self.0.modified()
+    }
 }
 
 /// The frames a boot cannot read from a file that shrank under it are no sign of a power

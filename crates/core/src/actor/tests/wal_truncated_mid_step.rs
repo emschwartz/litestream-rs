@@ -38,6 +38,10 @@ impl WalSource for TruncatedAtLen {
     fn sync(&mut self) -> Result<(), SourceError> {
         self.inner.sync()
     }
+
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        self.inner.modified()
+    }
 }
 
 /// The frames a running step cannot find in a file that shrank under it were checkpointed

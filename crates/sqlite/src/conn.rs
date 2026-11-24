@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use lsr_core::{CommittedRead, ReadLockHold, SourceError, WalFileLen, WalSource};
-use lsr_ltx::PageSize;
+use lsr_ltx::{PageSize, Timestamp};
 use lsr_wal::{CommittedEnd, Salts};
 use rusqlite::{Connection, FileControl, OpenFlags};
 
@@ -91,6 +91,8 @@ pub(crate) struct Inner {
     pub(crate) reader: Connection,
     pub(crate) writer: Connection,
     wal_path: PathBuf,
+    /// The database file's path, for its modified time (`WalSource::modified`).
+    db_path: PathBuf,
     /// The file the WAL path named once the first read transaction was held. SQLite keeps that
     /// file open for the reader's whole life, so any other file at the path, or none, means it
     /// was deleted under the read lock; `None` when it could not be told.
@@ -252,6 +254,7 @@ impl Sqlite {
             reader,
             writer,
             wal_path,
+            db_path: path.to_owned(),
             wal_id,
             page_size,
             epoch: ReadLockHold::first(),
@@ -502,6 +505,31 @@ impl WalSource for Sqlite {
             Err(WalSync::NoWal) => Err(SourceError::Io(io::ErrorKind::NotFound)),
             Err(WalSync::Failed(_rc)) => Err(SourceError::FsyncFailed),
         }
+    }
+
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        let inner = self.lock();
+        let db = std::fs::metadata(&inner.db_path).map_err(|err| io_error(&err))?;
+        let wal = match std::fs::metadata(&inner.wal_path) {
+            Ok(meta) => Some(meta),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(io_error(&err)),
+        };
+        // A WAL of its header alone (or none) holds no write: SQLite creates it, header-less,
+        // when a connection opens the database, and the last close may cut it to nothing.
+        let header = u64::try_from(lsr_wal::HEADER_LEN).unwrap_or(u64::MAX);
+        let wal = wal.filter(|meta| meta.len() > header);
+        let stamp = |meta: &Metadata| {
+            let since = meta
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            i64::try_from(since.as_millis())
+                .ok()
+                .map(Timestamp::from_unix_millis)
+        };
+        Ok(stamp(&db).max(wal.as_ref().and_then(stamp)))
     }
 }
 

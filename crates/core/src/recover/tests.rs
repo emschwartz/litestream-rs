@@ -1000,6 +1000,7 @@ fn shape(recovered: &Recovered) -> String {
             SnapshotCause::BehindRemote { .. } => "BehindRemote".into(),
             SnapshotCause::LocalRewound { .. } => "LocalRewound".into(),
             SnapshotCause::StagedUnverified { .. } => "StagedUnverified".into(),
+            SnapshotCause::AheadOfReplica { .. } => "AheadOfReplica".into(),
             SnapshotCause::FirstSync
             | SnapshotCause::NewestStagedFileUnreadable
             | SnapshotCause::WalMissing

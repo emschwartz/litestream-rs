@@ -12,7 +12,7 @@
 
 use std::io::{self, Read, Seek};
 
-use lsr_ltx::{DbPages, PageNo};
+use lsr_ltx::{DbPages, PageNo, Timestamp};
 use lsr_wal::{CommittedEnd, Salts};
 use thiserror::Error;
 
@@ -183,6 +183,16 @@ pub trait WalSource {
     /// emptied the WAL. The engine does not rely on it: after one failure it
     /// stages nothing from the WAL until that checkpoint (`actor::unproven`).
     fn sync(&mut self) -> Result<(), SourceError>;
+
+    /// When the database was last written: the later of the database file's and the WAL
+    /// file's modified times, the WAL's counted only while it holds a frame (SQLite creates an
+    /// empty WAL when a connection opens it, which writes nothing). `None` when the platform
+    /// gives no modified time. A boot with a brand-new meta directory compares it with the
+    /// replica's newest file (`crate::identity`).
+    ///
+    /// # Errors
+    /// [`SourceError`] when a stat fails.
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError>;
 }
 
 /// The database file, read for snapshots.

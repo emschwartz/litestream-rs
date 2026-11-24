@@ -1,0 +1,11 @@
+# The similarity bar dropped: a database written after the replica's newest file carries on
+# with a snapshot whatever it holds, so an empty or unrelated database becomes the replica's
+# newest state.
+name = "identity-ahead-bar-dropped"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "ahead::a_new_meta_directory_over_an_unrelated_database_still_stops",
+    "ahead::a_four_page_unrelated_database_stops",
+    "ahead::a_two_page_database_never_carries_on",
+]

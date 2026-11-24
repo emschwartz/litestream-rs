@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
 use lsr_core::Task;
-use lsr_core::{Clock, Event as EngineEvent};
+use lsr_core::{Clock, Event as EngineEvent, SnapshotCause};
 use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
 use crate::failstop;
@@ -283,6 +283,14 @@ impl EventSink for DbEvents {
     fn event(&mut self, event: &Event) {
         let db = ("db", Value::Text(self.db.clone()));
         let (level, msg, fields): (LogLevel, &str, Vec<(&str, Value)>) = match event {
+            Event::Engine(EngineEvent::Booted {
+                cause: Some(SnapshotCause::AheadOfReplica { tip }),
+            }) => {
+                let msg = ahead_message(*tip);
+                let tip = ("tip", Value::from(tip.get()));
+                self.log.log(LogLevel::Warn, &msg, &[db, tip]);
+                return;
+            }
             Event::Engine(engine) => match engine_line(engine) {
                 Some(line) => line,
                 None => return,
@@ -335,6 +343,15 @@ impl EventSink for DbEvents {
         all.extend(fields);
         self.log.log(level, msg, &all);
     }
+}
+
+/// The text for a boot with a brand-new meta directory that found the database ahead of the
+/// replica: not its newest state, but written after it and holding most of its pages
+/// (`lsr_core::SnapshotCause::AheadOfReplica`). A warning, not an error: the engine goes on.
+fn ahead_message(tip: Txid) -> String {
+    format!(
+        "the meta directory has no record of the replica's newest transaction {tip}, but this database was written after it and holds most of its pages: replicating it as the same database with commits that never reached the replica, starting with a snapshot above {tip}. If another replicator writes to this prefix, stop it."
+    )
 }
 
 /// The approved text for a boot that refused the replica's newest transactions: nothing

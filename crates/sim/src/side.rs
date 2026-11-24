@@ -19,13 +19,13 @@
 
 use std::fmt::Debug;
 use std::io::{Read, Seek};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
     SourceError, SourceOp, WalFileLen, WalSource,
 };
-use lsr_ltx::{DbPages, PageNo, PageSize};
+use lsr_ltx::{DbPages, PageNo, PageSize, Timestamp};
 use lsr_wal::Salts;
 
 use crate::Seed;
@@ -41,7 +41,10 @@ pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
 
 /// The engine's WAL source over any backend's.
-pub struct SideSource(Box<dyn WalSource<Wal = Box<dyn ReadSeek>>>);
+pub struct SideSource(
+    Box<dyn WalSource<Wal = Box<dyn ReadSeek>>>,
+    Option<Arc<Mutex<Option<Timestamp>>>>,
+);
 
 impl Debug for SideSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -80,6 +83,10 @@ where
     fn sync(&mut self) -> Result<(), SourceError> {
         self.0.sync()
     }
+
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        self.0.modified()
+    }
 }
 
 impl SideSource {
@@ -88,7 +95,14 @@ impl SideSource {
     where
         S::Wal: 'static,
     {
-        Self(Box::new(BoxedWal(source)))
+        Self(Box::new(BoxedWal(source)), None)
+    }
+
+    /// Answers [`WalSource::modified`] from `times`, the world's stamps on the run's clock,
+    /// instead of the backend (a real backend's files carry the wall clock's times).
+    #[must_use]
+    pub fn with_modified(self, times: Arc<Mutex<Option<Timestamp>>>) -> Self {
+        Self(self.0, Some(times))
     }
 }
 
@@ -113,6 +127,13 @@ impl WalSource for SideSource {
 
     fn sync(&mut self) -> Result<(), SourceError> {
         self.0.sync()
+    }
+
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        match &self.1 {
+            Some(times) => Ok(*times.lock().unwrap_or_else(PoisonError::into_inner)),
+            None => self.0.modified(),
+        }
     }
 }
 

@@ -25,7 +25,7 @@ use std::io::Cursor;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use lsr_ltx::{DbPages, PageNo, PageSize};
+use lsr_ltx::{DbPages, PageNo, PageSize, Timestamp};
 use lsr_wal::{
     ByteOrder, CommittedEnd, FRAME_HEADER_LEN, HEADER_LEN, Salts, WalChecksum, WalOffset,
 };
@@ -129,6 +129,8 @@ struct WalState {
     /// commit gave it. A [`FakeDb`] linked to this WAL reads them.
     copied: BTreeMap<u32, Vec<u8>>,
     copied_size: u32,
+    /// What [`WalSource::modified`] answers: set by the test, `None` until it is.
+    modified: Option<Timestamp>,
 }
 
 /// A transaction armed to commit at a later read.
@@ -318,11 +320,17 @@ impl FakeWal {
             injections: Injections::default(),
             copied: BTreeMap::new(),
             copied_size: 0,
+            modified: None,
         };
         state.write_header();
         Self {
             state: Arc::new(Mutex::new(state)),
         }
+    }
+
+    /// Sets when the database was last written, as [`WalSource::modified`] answers it.
+    pub fn set_modified(&self, at: Option<Timestamp>) {
+        lock(&self.state).modified = at;
     }
 
     /// Writes one committed transaction (each page zero-padded or cut to the page
@@ -600,6 +608,10 @@ impl WalSource for FakeWal {
 
     fn sync(&mut self) -> Result<(), SourceError> {
         lock(&self.state).injections.take(SourceOp::Sync)
+    }
+
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        Ok(lock(&self.state).modified)
     }
 }
 

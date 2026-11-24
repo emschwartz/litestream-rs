@@ -11,7 +11,7 @@ use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
     SourceError, SourceOp, WalFileLen, WalSource,
 };
-use lsr_ltx::{DbPages, PageNo};
+use lsr_ltx::{DbPages, PageNo, Timestamp};
 
 use super::state::{Real, lock};
 use crate::Sqlite;
@@ -96,6 +96,10 @@ impl WalSource for RealSource {
         let synced = engine.sync();
         vfs.lie_on_syncs(false);
         synced
+    }
+
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        self.0.before(None)?.modified()
     }
 }
 
