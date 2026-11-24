@@ -33,9 +33,9 @@ use std::time::Duration;
 
 use alternate::{Launch, alternate, seed};
 use lsr_compat::{
-    AppFixture, GoBuild, Kind, PageEncoding, Replicator, Shape, Summary, Target, builds_in,
-    builds_under_test, go_restore, lsr_binary, position, rust_restore, snapshots, wait_boot_file,
-    wait_staged_past, wait_until, wait_uploaded,
+    AppFixture, BEYOND_A_RUN, GoBuild, Kind, PageEncoding, Replicator, Shape, Summary, Target,
+    builds_in, builds_under_test, go_restore, lsr_binary, position, rust_restore, snapshots,
+    wait_boot_file, wait_staged_past, wait_until, wait_uploaded,
 };
 use lsr_core::RestoreTarget;
 use lsr_ltx::Txid;
@@ -50,14 +50,16 @@ const UP: Duration = Duration::from_secs(30);
 /// `busy-timeout`), and the Rust-only section, which Go ignores. The application keeps
 /// `wal_autocheckpoint = 0` (`AppFixture`), which the section says.
 fn write_sidecar_config(path: &Path, fixtures: &[AppFixture]) {
-    let mut text = String::from(
+    // The snapshot window is one no run crosses: a day-long one starts at midnight UTC, where
+    // a run found a scheduled snapshot and failed the no-new-snapshot check.
+    let mut text = format!(
         "levels:
   - interval: 1s
   - interval: 2s
   - interval: 4s
 snapshot:
-  interval: 24h
-  retention: 24h
+  interval: {window}
+  retention: {window}
 socket:
   enabled: false
 mcp-addr: \"\"
@@ -69,6 +71,7 @@ litestream-rs:
     wal-unlinked: stop
 dbs:
 ",
+        window = BEYOND_A_RUN,
     );
     for fixture in fixtures {
         text.push_str(&format!(
