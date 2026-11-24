@@ -28,8 +28,4 @@ Each crate is `crates/<name>`, package `lsr-<name>`. The crate map, with what ea
 
 The gate is dominated by compiling, so a compiler cache helps on a machine that builds many worktrees: `cargo install sccache --locked`, then `export RUSTC_WRAPPER=sccache SCCACHE_DIR=~/.cache/sccache` (one directory shared by every checkout) before `just check`. It is optional; nothing in the repo requires it.
 
-<<<<<<< HEAD
-A test that needs something outside the process (MinIO, the Go builds, Tigris credentials, a C compiler, free disk) fails when it is missing; it never passes by skipping. The one opt-out is the runner naming it: `LSR_SKIP=minio` (comma separated: `minio`, `toxiproxy`, `go`, `tigris`, `cc`, `disk`). CI never sets it, and under CI (the `CI` variable) setting it is itself a failure. The rule lives in `lsr_core::needs`. A test that hangs is killed by nextest (`.config/nextest.toml`) and CI jobs carry `timeout-minutes`, so a hang is a failure, not a six-hour job.
-=======
 A test that needs something outside the process (MinIO, the Go builds, Tigris credentials, a C compiler, free disk) fails when it is missing; it never passes by skipping. The one opt-out is the runner naming it: `LSR_SKIP=minio` (comma separated: `minio`, `toxiproxy`, `go`, `tigris`, `aws`, `r2`, `cc`, `disk`). CI never sets it, and under CI (the `CI` variable) setting it is itself a failure. The rule lives in `lsr_core::needs`. A test that hangs is killed by nextest (`.config/nextest.toml`) and CI jobs carry `timeout-minutes`, so a hang is a failure, not a six-hour job.
->>>>>>> main
