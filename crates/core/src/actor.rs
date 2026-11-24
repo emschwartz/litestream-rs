@@ -2595,8 +2595,9 @@ impl BootGate {
         // instantiations, so an empty replica read as transaction zero and a boot that dropped
         // staged files asked for a takeover through zero forever. LLVM's SimplifyCFG hoists the
         // `umin` out of `map` keeping its nonzero range attributes, InstCombine folds the
-        // `None` arm into it, and EarlyCSE then proves the result nonzero. `just test-opt` runs
-        // the scenarios that catch it.
+        // `None` arm into it, and EarlyCSE then proves the result nonzero
+        // (https://github.com/llvm/llvm-project/issues/245656). `just test-opt` runs the
+        // scenarios that catch it.
         let Some(replica) = tip.max(listed) else {
             return Ok(());
         };
