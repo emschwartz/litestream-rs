@@ -25,7 +25,7 @@ test:
 # The engine and both of its drivers again, built optimized (the `sim` profile: opt-level 1, every
 # assertion kept). The engine ships optimized and the simulator soaks optimized, while `test`
 # builds unoptimized; an optimizer that changes what the engine does fails here
-# (docs/decisions/D182.md).
+# (docs/decisions/D185.md).
 test-opt:
     cargo nextest run --cargo-profile sim -p lsr-core -p lsr-sim -p lsr-replica --all-features --locked
 
