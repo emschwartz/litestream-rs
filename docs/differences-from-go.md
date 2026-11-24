@@ -66,4 +66,9 @@ The replicator saves each batch of changes in its working folder (the folder whe
 
 ## litestream-rs has it, Go does not
 
-- Holding the application when replication stops (`if-replication-stops`, [decisions/D177.md](decisions/D177.md)). The default, `hold-start`, does not start the application when the replicator stops or S3 refuses it at start. `report` never holds the application, as under Go. `stop-app` also holds a running application's writes when replication stops or changes have waited too long for S3.
+- Holding the application back when replication cannot continue ([decisions/D177.md](decisions/D177.md)). Under Go the application always runs. Here the `if-replication-stops` setting decides, with three values:
+  - `report`: the application is never held back. Health and metrics report the problem. This is what Go does.
+  - `hold-start`, the default: the application is not started if the replicator stops at startup or S3 refuses it there, for example over wrong credentials. Once the application is running, a problem is only reported.
+  - `stop-app`: as `hold-start` at startup. A running application is also held back when replication stops, or when changes have waited longer than `max-unreplicated-age` (10 minutes by default) to reach S3.
+
+  What "held back" means depends on how litestream-rs runs. Under `-exec` the application is not started, or is stopped. Inside the library its commits are refused. A sidecar without `-exec` can only answer 503 on `/healthz`.
