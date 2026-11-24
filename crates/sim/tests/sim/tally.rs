@@ -25,7 +25,11 @@ fn tally() {
     let mut failed = Vec::new();
     for n in base..base.saturating_add(seeds) {
         let seed = Seed::new(n);
-        match run(seed, STEPS, &Weights::mixed(seed)) {
+        let mut weights = Weights::mixed(seed);
+        if std::env::var("LSR_SIM_NIGHTLY_LAWS").is_ok() {
+            weights = weights.with_nightly_laws(seed);
+        }
+        match run(seed, STEPS, &weights) {
             Ok(report) => sum.merge(&report.reach),
             Err(failure) => {
                 println!("FAILED {failure}");
