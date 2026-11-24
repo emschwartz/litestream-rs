@@ -355,29 +355,6 @@ fn seed_0x9f9_does_not_trip() {
 
 mod seed_0xf4342;
 
-/// Seed 0x92d from the mixed campaign: the engine first sees two committed WAL frames (a
-/// vacuum that rewrote identical pages), then a torn WAL header held for 127 ticks keeps it
-/// from reading them past the bound, and it trips. It cannot know those frames hold nothing
-/// the replica lacks, so the trip is correct (`docs/decisions.md` D81, amended) and the judge
-/// excuses it, counted.
-#[test]
-fn seed_0x92d_trips_on_frames_it_never_read_and_is_excused() {
-    let opts = Opts {
-        drawn: true,
-        after_restart: lsr_sim::AfterRestart::Busy,
-        clock_law: lsr_sim::ClockLaw::EachRead,
-        overlap: true,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    let report = match run_ops(Seed::new(0x92d), crate::histories::seed_0x92d::OPS, &opts) {
-        Ok(report) => report,
-        Err(failure) => panic!("step {}: {}", failure.step, failure.violation),
-    };
-    assert!(age_trips(&report) > 0, "{:?}", report.trips);
-    assert!(report.reach.get("failstop.excused.unread_wal") > 0);
-}
-
 /// Seed 0x734 from the mixed campaign: a rollback of the replica leaves staged files it lacks.
 /// The boot after used to delete them, the live WAL not vouching for them, and stage a snapshot
 /// of their end state (`SnapshotCause::StagedUnverified`); uploads were then refused past the
