@@ -11,7 +11,10 @@
 //!
 //! **Waiting.** A database whose file does not exist yet is checked again every
 //! `monitor-interval` by one waiter thread, which starts it once the file appears
-//! (Go `db.go:611-614`). It looks with `metadata`, which opens no descriptor.
+//! (Go `db.go:611-614`). It looks with `metadata`, which opens no descriptor. A start that
+//! meets the application writing, or another replicator holding the meta directory's lock
+//! (an overlapping deploy, docs/decisions/D178.md), leaves the database waiting the same way
+//! when a waiter runs; under `-once` it is a failed start.
 //!
 //! **Stop.** The first SIGINT, SIGTERM or SIGHUP, the `-exec` child's exit (see
 //! [`crate::supervise`]), or with `-once` the start finishing, ends the waiter and
@@ -194,6 +197,10 @@ impl Started {
 
 /// The daemon over a plan.
 pub(crate) struct Daemon {
+    /// Whether a waiter will run: a start that fails for a cause that passes by itself is left
+    /// waiting only then, since under `-once` nothing would retry it and the run would end
+    /// clean without replicating it.
+    waiter: bool,
     log: Arc<Logger>,
     clock: Arc<dyn Clock>,
     started: Started,
@@ -222,8 +229,10 @@ impl Daemon {
         log: Arc<Logger>,
         started: Started,
         board: Board,
+        waiter: bool,
     ) -> Self {
         let daemon = Self {
+            waiter,
             log,
             clock: Runtime::system().clock,
             started,
@@ -276,6 +285,10 @@ impl Daemon {
                 Err(failure) => {
                     // The waiter retries a slot that is waiting, as it does a file that
                     // appears mid-creation.
+                    let failure = Failure {
+                        transient: failure.transient && self.waiter,
+                        ..failure
+                    };
                     if failure.transient {
                         slot.state = State::Waiting;
                     }
@@ -319,7 +332,7 @@ impl Daemon {
             Err(error) => Err(Failure {
                 msg: "cannot start database",
                 error: error.to_string(),
-                transient: is_busy(&error),
+                transient: passes_by_itself(&error),
             }),
         }
     }
@@ -665,14 +678,28 @@ enum OpenStoreError {
     Store(#[from] lsr_store_s3::ConfigError),
 }
 
-/// The store for a replica; S3 credentials are resolved now, from the file or the
-/// environment and shared files (Go copies `LITESTREAM_*` to `AWS_*`; the chain reads both).
-/// Whether the start failed because another connection held a lock SQLite would not wait for
-/// (the application writing while the database opens), which passes by itself.
-fn is_busy(error: &StartError) -> bool {
-    matches!(error, StartError::Sqlite { code } if matches!(code & 0xff, 5 | 6))
+/// Whether a start failed for a cause that passes by itself: another connection held a lock
+/// SQLite would not wait for (the application writing while the database opens), or another
+/// replicator holds the meta directory's lock and will release it when it exits (an
+/// overlapping deploy, docs/decisions/D178.md).
+fn passes_by_itself(error: &StartError) -> bool {
+    match error {
+        StartError::Sqlite { code } => matches!(code & 0xff, 5 | 6),
+        StartError::MetaLocked => true,
+        StartError::Open { .. }
+        | StartError::NotWal { .. }
+        | StartError::AlreadyReplicated
+        | StartError::MetaDir { .. }
+        | StartError::MetaLock { .. }
+        | StartError::Refused(_)
+        | StartError::PageSize { .. }
+        | StartError::SqliteBuild { .. }
+        | StartError::Thread { .. } => false,
+    }
 }
 
+/// The store for a replica; S3 credentials are resolved now, from the file or the
+/// environment and shared files (Go copies `LITESTREAM_*` to `AWS_*`; the chain reads both).
 fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreError> {
     match replica {
         ReplicaPlan::File(dir) => Ok(Arc::new(FsStore::new(dir))),
@@ -772,7 +799,7 @@ mod tests {
             Runtime::system().clock,
             Box::new(io::sink()),
         ));
-        Daemon::start(&plan, false, log, started.clone(), Board::default())
+        Daemon::start(&plan, false, log, started.clone(), Board::default(), true)
     }
 
     /// An application holding the write lock while the database opens makes the start busy.
@@ -802,7 +829,7 @@ mod tests {
         ));
         let board = Board::default();
         let started = Started::default();
-        let daemon = Daemon::start(&plan, false, log, started, board.clone());
+        let daemon = Daemon::start(&plan, false, log, started, board.clone(), true);
         let state = |board: &Board| board.views().remove(0).state;
         assert!(matches!(state(&board), DbState::Waiting));
         assert!(daemon.retry_waiting(), "still locked: still waiting");
@@ -810,6 +837,100 @@ mod tests {
         assert!(!daemon.retry_waiting());
         assert!(matches!(state(&board), DbState::Running(_)));
         drop(daemon.stop(None, daemon.now(), false, false));
+    }
+
+    /// A second daemon on a meta directory another one holds waits for the lock instead of
+    /// failing, and runs once the holder has stopped (an overlapping deploy on one volume).
+    #[test]
+    fn a_start_on_a_locked_meta_directory_waits_for_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = dir.path().join("meta");
+        let make = |name: &str| {
+            let db = dir.path().join(name);
+            let app = rusqlite::Connection::open(&db).unwrap();
+            app.pragma_update(None, "journal_mode", "wal").unwrap();
+            app.execute_batch("CREATE TABLE t (x);").unwrap();
+            let text = format!(
+                "dbs:\n  - path: {}\n    meta-path: {}\n    replica:\n      url: file://{}\n",
+                db.display(),
+                meta.display(),
+                dir.path().join("replica").join(name).display(),
+            );
+            let loaded = GoConfig::parse(&text, Expand::Off, &ProcessEnv).unwrap();
+            let plan = lsr_config::plan(&loaded.config, &ProcessEnv).unwrap();
+            let log = Arc::new(Logger::to(
+                lsr_config::LogLevel::Error,
+                lsr_config::LogFormat::Text,
+                Runtime::system().clock,
+                Box::new(io::sink()),
+            ));
+            let board = Board::default();
+            let daemon = Daemon::start(&plan, false, log, Started::default(), board.clone(), true);
+            (app, daemon, board)
+        };
+        let state = |board: &Board| board.views().remove(0).state;
+        let (_old_app, old, old_board) = make("old.db");
+        assert!(matches!(state(&old_board), DbState::Running(_)));
+        let (_new_app, new, new_board) = make("new.db");
+        assert!(matches!(state(&new_board), DbState::Waiting));
+        assert!(new.retry_waiting(), "the lock is held: still waiting");
+        drop(old.stop(None, old.now(), false, false));
+        assert!(!new.retry_waiting());
+        assert!(matches!(state(&new_board), DbState::Running(_)));
+        drop(new.stop(None, new.now(), false, false));
+    }
+
+    fn start_from(text: &str, waiter: bool) -> (Daemon, Board) {
+        let loaded = GoConfig::parse(text, Expand::Off, &ProcessEnv).unwrap();
+        let plan = lsr_config::plan(&loaded.config, &ProcessEnv).unwrap();
+        let log = Arc::new(Logger::to(
+            lsr_config::LogLevel::Error,
+            lsr_config::LogFormat::Text,
+            Runtime::system().clock,
+            Box::new(io::sink()),
+        ));
+        let board = Board::default();
+        let daemon = Daemon::start(&plan, false, log, Started::default(), board.clone(), waiter);
+        (daemon, board)
+    }
+
+    fn wal_db(path: &Path) -> rusqlite::Connection {
+        let app = rusqlite::Connection::open(path).unwrap();
+        app.pragma_update(None, "journal_mode", "wal").unwrap();
+        app.execute_batch("CREATE TABLE t (x);").unwrap();
+        app
+    }
+
+    /// Under `-once` no waiter runs, so a start that meets the application writing, or a
+    /// locked meta directory, is a failed start: not clean, as before either was retried.
+    #[test]
+    fn without_a_waiter_a_transient_start_failure_is_a_failed_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = |name: &str, meta: &str| {
+            format!(
+                "dbs:\n  - path: {}\n    meta-path: {}\n    replica:\n      url: file://{}\n",
+                dir.path().join(name).display(),
+                dir.path().join(meta).display(),
+                dir.path().join("replica").join(name).display(),
+            )
+        };
+        // Busy: the application holds the write lock while the database opens.
+        let busy = wal_db(&dir.path().join("busy.db"));
+        busy.execute_batch("BEGIN IMMEDIATE; INSERT INTO t VALUES (1);")
+            .unwrap();
+        let (daemon, board) = start_from(&text("busy.db", "busy-meta"), false);
+        assert!(matches!(board.views().remove(0).state, DbState::Failed));
+        let finished = daemon.stop(None, daemon.now(), false, false);
+        assert!(!finished.clean());
+        // Locked: another daemon holds the meta directory.
+        let _holder = wal_db(&dir.path().join("a.db"));
+        let _other = wal_db(&dir.path().join("b.db"));
+        let (first, _) = start_from(&text("a.db", "shared-meta"), false);
+        let (second, board) = start_from(&text("b.db", "shared-meta"), false);
+        assert!(matches!(board.views().remove(0).state, DbState::Failed));
+        let finished = second.stop(None, second.now(), false, false);
+        assert!(!finished.clean());
+        drop(first.stop(None, first.now(), false, false));
     }
 
     /// A cut is a state: after a second signal, every drain the stop asks for gets nothing,

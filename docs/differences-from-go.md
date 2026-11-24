@@ -41,7 +41,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | The WAL is damaged below the last commit | Reads it as the end of the WAL | Reports `wal_corrupt` and replicates nothing past the damage |
 | A writer stopped mid-commit left frames in the WAL | Releases through v0.5.18 can replicate them | Never reads past the last commit |
 | A failure that persists | A log line | A named degraded state in `health()`, `/healthz` and `/metrics` |
-| Two replicators start on one working folder (an overlapping deploy on one disk) † | Runs both, which can corrupt the local files | The second waits for the first to exit |
+| Two replicators start on one working folder (an overlapping deploy on one disk) | Runs both, which can corrupt the local files | The second waits for the first to exit |
 | The working folder is lost and the database is kept | Adopts the bucket's newest file and snapshots on top | Compares the database with the bucket and continues when they are equal. Otherwise it stops, as in the first row above |
 | The S3 provider has no conditional writes | Does not use them | Runs as Go does, and reports `conditional_writes_unsupported` |
 | `restore` over an existing database | Deletes the old file first | Keeps the old file until the new one is complete and checked |
@@ -63,4 +63,3 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 ## What `main` does today for the rows marked †
 
 - **S3 replica with no path:** refused at load.
-- **Two replicators on one working folder:** the second refuses to start.

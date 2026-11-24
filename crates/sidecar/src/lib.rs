@@ -124,6 +124,7 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
         Arc::clone(&log),
         control.started(),
         board,
+        !flags.once,
     ));
     let finished = if flags.once {
         daemon.stop(
