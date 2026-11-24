@@ -2236,6 +2236,7 @@ fn a_crash_between_the_drop_and_the_snapshot_boots_clean() {
     assert_eq!(restored(&rig), 2);
 }
 
+mod boot_truncated;
 mod checkpoint_failed;
 mod create_only;
 mod degraded;
