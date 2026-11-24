@@ -83,7 +83,15 @@ impl Rig {
     }
 
     fn size(&self) -> u32 {
-        self.txs.last().map_or(self.base, |tx| tx.size)
+        self.size_through(self.txs.len())
+    }
+
+    /// The database size after the first `count` transactions.
+    fn size_through(&self, count: usize) -> u32 {
+        count
+            .checked_sub(1)
+            .and_then(|last| self.txs.get(last))
+            .map_or(self.base, |tx| tx.size)
     }
 
     /// Commits a transaction that writes `pages` and every page the file grows by.
@@ -172,13 +180,18 @@ impl Rig {
 
     /// The image the file must hold: page number to fill byte.
     fn image(&self) -> BTreeMap<u32, u8> {
+        self.image_through(self.txs.len())
+    }
+
+    /// The image after the first `count` transactions: what a snapshot proved through them holds.
+    fn image_through(&self, count: usize) -> BTreeMap<u32, u8> {
         let mut image: BTreeMap<u32, u8> = (1..=self.base).map(|n| (n, db_fill(n))).collect();
-        for tx in &self.txs {
+        for tx in self.txs.iter().take(count) {
             for page in &tx.pages {
                 image.insert(*page, tx.fill);
             }
         }
-        image.retain(|n, _| *n <= self.size());
+        image.retain(|n, _| *n <= self.size_through(count));
         image
     }
 
@@ -327,6 +340,46 @@ proptest! {
         let (_, pages) = rig.read_back(&info);
         prop_assert_eq!(pages, rig.image());
     }
+}
+
+/// The history, then transactions committed after the last sync: the live case of a writer that
+/// commits between the sync and the snapshot. The snapshot is bounded by the proof's synced end,
+/// so it holds the history and none of the tail, whatever pages the tail writes or grows to.
+#[test]
+fn a_snapshot_never_holds_commits_past_the_synced_end() {
+    proptest!(|(history in histories(), tail in prop::collection::vec(prop::collection::vec(1_u32..=12, 1..4), 1..4))| {
+        let mut rig = build(&history);
+        let synced = rig.txs.len();
+        for pages in &tail {
+            rig.commit(pages);
+        }
+        let info = rig.snapshot(1_000_000).unwrap();
+        let (header, pages) = rig.read_back(&info);
+        prop_assert_eq!(pages, rig.image_through(synced));
+        prop_assert_eq!(header.fields().commit, rig.size_through(synced));
+        prop_assert_eq!(info.key.range().max(), rig.position.unwrap().txid());
+    });
+}
+
+/// Three transactions synced, two more of other page sets (the second larger, growing the
+/// file) not synced. Page 3 is last written by the unsynced tail and is read from the database
+/// file for the snapshot, which must hold the file's bytes and not the tail's frame.
+#[test]
+fn a_snapshot_taken_past_an_unsynced_tail_reads_the_synced_state() {
+    let mut rig = Rig::new(3);
+    rig.commit(&[1]);
+    rig.commit(&[2, 4]);
+    rig.commit(&[1, 4]);
+    rig.sync(1000);
+    rig.commit(&[3]);
+    rig.commit(&[2, 5, 6, 7]);
+    let info = rig.snapshot(5000).unwrap();
+    let (header, pages) = rig.read_back(&info);
+    assert_eq!(header.fields().commit, 4);
+    assert_eq!(pages.keys().copied().collect::<Vec<u32>>(), [1, 2, 3, 4]);
+    assert_eq!(pages[&3], db_fill(3), "page 3 comes from the database file");
+    assert_eq!(pages, rig.image_through(3));
+    assert_eq!(info.key.range().max(), rig.position.unwrap().txid());
 }
 
 fn two_commits() -> Rig {
