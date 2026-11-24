@@ -1,7 +1,7 @@
 //! A boot over a brand-new meta directory whose database is the replica's newest state plus
 //! commits the replica never got (issue 329): written after the replica's newest file and
 //! holding at least half of its pages, it snapshots above the replica instead of stopping
-//! (`crate::identity`, `docs/decisions/D192.md`). Everything that stopped for a real reason
+//! (`crate::identity`, `docs/decisions/D194.md`). Everything that stopped for a real reason
 //! still stops.
 
 use super::vouch::redeployed_with_a_new_meta_directory;

@@ -21,7 +21,7 @@
 //! never got: the lost meta directory held them staged, and the replica was unreachable or the
 //! process was killed before it uploaded them (issue 329). Ancestry cannot be proven from two
 //! images, so the check judges it from two pieces of evidence, both required
-//! (`docs/decisions/D192.md`): the database was written after the replica's newest file (its
+//! (`docs/decisions/D194.md`): the database was written after the replica's newest file (its
 //! modified time, `WalSource::modified`, against that file's own header timestamp, with no
 //! slack), and it holds at least half of the replica state's pages that are not zeros, with a
 //! database of one or two pages never passing. Then it is [`Identity::Ahead`] and the boot

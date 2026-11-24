@@ -381,7 +381,7 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
 /// the meta directory is brand new, so the boot asks whether the database is the replica's
 /// state: it is that state plus the commit, written after the replica's newest file, so the boot
 /// snapshots above it (`AheadOfReplica`). It used to stop here, until the operator trusted the
-/// local database (`docs/decisions/D192.md`).
+/// local database (`docs/decisions/D194.md`).
 #[must_use]
 pub fn meta_wiped_wal_restarted() -> Scenario {
     let restarted = vec![

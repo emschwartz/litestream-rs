@@ -2,7 +2,7 @@
 //! writes, the replicator is killed, the application's last close checkpoints the WAL, and the
 //! replicator starts again with a brand-new meta directory. The database is the replica's
 //! newest state plus the commits that never reached it, so the start carries on with a snapshot
-//! and a warning instead of refusing (`docs/decisions/D192.md`), and every transaction the
+//! and a warning instead of refusing (`docs/decisions/D194.md`), and every transaction the
 //! replica holds restores.
 
 use std::path::{Path, PathBuf};

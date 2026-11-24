@@ -71,6 +71,10 @@ impl WalSource for Hooked {
         hook(SourceOp::Sync);
         self.0.sync()
     }
+
+    fn modified(&mut self) -> Result<Option<lsr_ltx::Timestamp>, SourceError> {
+        self.0.modified()
+    }
 }
 
 impl PageSource for Hooked {
