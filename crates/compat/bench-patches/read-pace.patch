@@ -1,9 +1,9 @@
 diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
-index f5d5d32e4..bfef7fa4e 100644
+index 51f7ea0b1..b6f1624f2 100644
 --- a/crates/replica/src/readers.rs
 +++ b/crates/replica/src/readers.rs
-@@ -10,12 +10,90 @@
- //! never wait on readers and are unaffected.
+@@ -13,12 +13,90 @@
+ //! is guarded alike. PASSIVE checkpoints never wait on readers and are unaffected.
  
  use std::sync::Arc;
 -use std::sync::atomic::{AtomicUsize, Ordering};
@@ -95,7 +95,7 @@ index f5d5d32e4..bfef7fa4e 100644
  
  /// Held for the length of one long read. While any guard lives, the replicator runs no
  /// TRUNCATE checkpoint. Counted, so overlapping readers are safe; dropping it ends the read.
-@@ -46,6 +124,7 @@ pub(crate) struct Guarded {
+@@ -49,6 +127,7 @@ pub(crate) struct Guarded {
      sqlite: Sqlite,
      tracking: ReaderTracking,
      readers: Arc<AtomicUsize>,
@@ -103,7 +103,7 @@ index f5d5d32e4..bfef7fa4e 100644
  }
  
  impl Guarded {
-@@ -58,9 +137,16 @@ impl Guarded {
+@@ -61,9 +140,16 @@ impl Guarded {
              sqlite,
              tracking,
              readers,
@@ -120,7 +120,7 @@ index f5d5d32e4..bfef7fa4e 100644
      fn may_wait(&self) -> bool {
          match self.tracking {
              ReaderTracking::Untracked => false,
-@@ -94,10 +180,17 @@ impl Checkpointer for Guarded {
+@@ -97,10 +183,17 @@ impl Checkpointer for Guarded {
      }
  
      fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
