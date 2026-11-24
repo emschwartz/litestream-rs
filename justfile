@@ -314,6 +314,23 @@ compat-s3: minio-up
     eval "$(./scripts/minio.sh env)"
     cargo nextest run -p lsr-compat --test compat -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
 
+# Go Litestream against lsr on this machine and a local MinIO (issue 42): commit to durable, host
+# overhead, restore. Exploratory numbers on whatever machine runs it. Sets: all, or any of
+# aa-restore aa-latency aa-overhead latency-steady latency-bursty overhead restore. Needs Docker, the
+# Go builds and perfstats.py (LSR_PERFSTATS, default the perf-experiment skill's). Never part of check.
+bench-vs-go out *sets="all": minio-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for var in $(compgen -e); do
+        case "$var" in AWS_* | LITESTREAM_*) unset "$var" ;; esac
+    done
+    ./scripts/build-go-litestream.sh 041a8c3
+    cargo build --release --locked -p lsr-cli --bin lsr
+    cargo build --release --locked -p lsr-compat --bin bench-vs-go
+    eval "$(./scripts/minio.sh env)"
+    export LSR_PERFSTATS="${LSR_PERFSTATS:-$HOME/.claude/skills/perf-experiment/perfstats.py}"
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" "${CARGO_TARGET_DIR:-$PWD/target}/release/bench-vs-go" --out "{{out}}" {{sets}}
+
 # The two alternation runs (Go and Rust taking turns on one prefix, each turn killed at a
 # seeded point) over the pinned builds; compat-releases.yml prints the seed of a nightly run.
 # Both alternation runs with one seed: just compat-alternation <seed> replays a nightly failure.

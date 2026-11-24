@@ -172,6 +172,12 @@ impl S3Replica {
         })
     }
 
+    /// The store itself, for a harness that reads the bucket its own way (the benchmark's
+    /// observer lists level 0 as fast as the server answers).
+    pub(crate) fn store(&self) -> &S3Store {
+        &self.store
+    }
+
     /// The key prefix.
     pub fn prefix(&self) -> &str {
         &self.prefix
@@ -180,6 +186,12 @@ impl S3Replica {
     /// The `replica:` block both Go and `lsr replicate -config` read, indented for a `dbs`
     /// entry: the endpoint, path style, region and credentials all explicit.
     pub(crate) fn yaml(&self) -> String {
+        format!("{}      sync-interval: 100ms\n", self.yaml_defaults())
+    }
+
+    /// The same section without `sync-interval`, so the program under test keeps its own
+    /// default (the benchmark measures what a user gets, `crates/compat/src/bench`).
+    pub(crate) fn yaml_defaults(&self) -> String {
         format!(
             "    replica:
       type: s3
@@ -190,7 +202,6 @@ impl S3Replica {
       force-path-style: true
       access-key-id: {access:?}
       secret-access-key: {secret:?}
-      sync-interval: 100ms
 ",
             bucket = self.env.bucket,
             prefix = self.prefix,
@@ -205,7 +216,13 @@ impl S3Replica {
     /// # Errors
     /// [`CompatError::Fixture`] when a listing fails or its cursor does not advance.
     pub fn files(&self) -> Result<Vec<FileInfo>, CompatError> {
-        let page = PageLimit::new(LIST_PAGE)
+        self.files_paged(LIST_PAGE)
+    }
+
+    /// [`Self::files`] with a chosen page size (the benchmark lists a replica of thousands of
+    /// files a thousand at a time).
+    pub(crate) fn files_paged(&self, page: u16) -> Result<Vec<FileInfo>, CompatError> {
+        let page = PageLimit::new(page)
             .ok_or_else(|| CompatError::Fixture("listing page size".to_owned()))?;
         let mut out = Vec::new();
         for level in Level::ALL {
