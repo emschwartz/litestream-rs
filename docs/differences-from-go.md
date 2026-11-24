@@ -10,13 +10,21 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | Situation | What both do |
 |---|---|
 | The replicator crashes, is killed or restarts | Resume from the local files and the WAL. Take a snapshot only when the WAL no longer matches |
-| The replicator restarts with staged files that are not yet in S3 | Upload them as they are. litestream-rs first verifies each file's checksum, checks that it follows on from the file before it, and compares the files the WAL still holds with the WAL (Go checks only the newest). Not covered by either: a working folder put back alone from a copy of another history (its files are uploaded; a restore of the newest state is right, and a restore to a point inside that stretch returns the other history), a file forged to pass the checks, and a disk that loses written data at a power loss when the same part of the WAL is rewritten after the uploaded file's local copy is gone, about 30 seconds after its upload ([decisions/D175.md](decisions/D175.md)) |
+| The replicator restarts with files it had saved locally and not yet uploaded | Upload them as they are. litestream-rs checks every one first: its checksum, that it continues from the file before it, and that it matches the WAL where the WAL still holds those changes. Go checks only the newest. Three unlikely cases get past both, listed under [Files waiting to upload at a restart](#files-waiting-to-upload-at-a-restart) |
 | S3 errors, throttles or is down | Retry, waiting up to 5 minutes between tries, for as long as it takes |
 | SQLite changes the WAL: a checkpoint from outside, a WAL restart, `VACUUM`, a deleted WAL | Continue, or take a snapshot |
 | S3's list of files is out of date | Trust the list. Object storage that lists behind its writes is unsupported |
 | The replicator restarts while replication is failing | Not covered: the failure is forgotten. The count of failed tries and the degraded report start again from zero, so a replicator that keeps restarting can stay quiet. litestream-rs carries one number across the restart, the age of the oldest change that was staged and not yet in S3 (`lsr_unreplicated_age_seconds`) |
 | An S3 replica with no path inside the bucket, written `s3://bucket/` or as `bucket` with no `path` | Works, with keys that start with `/` ([decisions/D181.md](decisions/D181.md)) |
 | `replicate` and `restore` fail | Exit 1 |
+
+### Files waiting to upload at a restart
+
+The replicator saves each batch of changes in its working folder (the folder where it keeps its own files) before it uploads it. After a restart it uploads whatever is still waiting there. Neither implementation catches these three cases ([decisions/D175.md](decisions/D175.md)):
+
+- **The working folder is put back from a backup that does not match the database**, for example one taken before the database was rolled back or replaced. The files waiting in that folder are uploaded, although they belong to the other history. A restore of the newest state is still right. A restore to a point in time that those files cover returns the other history's data.
+- **A waiting file is altered on purpose so that it still passes the checks.** It is uploaded.
+- **The power fails on a disk that loses data it had reported as written.** The database can come back without its last changes while files that hold them are still waiting. Those files are uploaded, so the replica holds changes the database lost. If the application then writes different changes over the same part of the WAL, that is noticed only while the local copy of the uploaded file still exists, about 30 seconds after its upload. After that it is not noticed.
 
 ## Different: litestream-rs stops or refuses, Go carries on
 
