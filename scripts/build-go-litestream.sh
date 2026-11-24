@@ -72,11 +72,12 @@ build() {
 # and the compaction hook (lsrcompact.go): the same export plus those files in cmd/litestream,
 # which act only when LSR_DUMP or LSR_COMPACT is set.
 build_dump() {
-    v=$1 rev=$2 bin=$3
+    v=$1 rev=$2 bin=$3 stamp=$4
     export_rev "$v" "$rev"
     cp "$repo/crates/compat/go/dump/lsrdump.go" "$repo/crates/compat/go/dump/lsrcompact.go" \
         "$dir/cmd/litestream/"
     if (cd "$dir" && CGO_ENABLED=1 GOFLAGS=-mod=mod go build -trimpath -o "$bin" ./cmd/litestream) >"$scratch/$v.dump.log" 2>&1; then
+        echo "$stamp" >"$bin.src"
         echo "$v: dump built $(git -C "$src" rev-parse --short "$rev")"
     else
         echo "$v: dump FAILED $(grep -v '^$' "$scratch/$v.dump.log" | tail -n 1)"
@@ -128,11 +129,15 @@ for v in $versions; do
     # Only the pinned commit the port reads has a dumper: the config differential is against it.
     if [ "$v" = "$pinned_head" ]; then
         dump="$out/litestream-dump-$v"
-        if [ -x "$dump" ] && [ "$dump" -nt "$repo/crates/compat/go/dump/lsrdump.go" ] &&
-            [ "$dump" -nt "$repo/crates/compat/go/dump/lsrcompact.go" ]; then
+        # Fresh by content, not by file time: a CI checkout stamps every source file "now", so
+        # a binary restored from the cache always looked older than its sources, was rebuilt on
+        # every run, and each rebuild downloaded every Go module again.
+        stamp=$(git hash-object "$repo/crates/compat/go/dump/lsrdump.go" \
+            "$repo/crates/compat/go/dump/lsrcompact.go" | tr '\n' ' ')
+        if [ -x "$dump" ] && [ "$(cat "$dump.src" 2>/dev/null)" = "$stamp" ]; then
             echo "$v: dump present"
         else
-            build_dump "$v" "$rev" "$dump"
+            build_dump "$v" "$rev" "$dump" "$stamp"
         fi
     fi
     so="$out/litestream-vfs-$v.so"
