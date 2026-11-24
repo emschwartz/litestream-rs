@@ -4,4 +4,4 @@ name = "running-drop-record-capped-at-confirmed"
 fix = "88577ff"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["a_running_drop_records_past_an_unconfirmed_upload_seed_0x348"]
+tests = ["a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it"]

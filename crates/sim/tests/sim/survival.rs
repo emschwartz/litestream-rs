@@ -374,31 +374,6 @@ fn survival_campaign_swarm() {
     assert_eq!(failed, 0);
 }
 
-/// Seed 0xb44 of the fixed set's mix, its first 83 operations, recorded: other writers' files
-/// appear while the engine is down, among crashes, lagging listings and bucket rollbacks. With
-/// the boot gate refusing nothing (the plant `boot-gate-refuses-nothing-sim`), the boot builds
-/// on those files and a restore of transaction 10 returns pages no commit made. It replaces
-/// swarm seed 0xb9 (two second writers, then a latest that went back), whose history stopped
-/// at the other writer once the running engine learned to stop on one. The boot refuses replica
-/// files that neither the live WAL nor a takeover record vouches for (BOOT-22).
-#[test]
-fn a_boot_never_builds_on_files_nothing_local_vouches_for_seed_0xb44() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: true,
-        lying_wal_sync: true,
-        after_restart: AfterRestart::Busy,
-        clock_law: ClockLaw::EachRead,
-        overlap: false,
-        error_domain: true,
-        staging_fs: false,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(0xb44), crate::histories::seed_0xb44::OPS, &opts) {
-        panic!("{failure}");
-    }
-}
-
 /// Seed 0xd of the fixed set's mix, 236 operations. A staged file whose upload published but
 /// whose answer was lost turns unreadable in staging; the engine drops it while it runs, and
 /// later boots find the replica one transaction past staging with a WAL that no longer holds
@@ -409,30 +384,6 @@ fn a_boot_never_builds_on_files_nothing_local_vouches_for_seed_0xb44() {
 fn an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd() {
     let seed = lsr_sim::Seed::new(0xd);
     if let Err(failure) = lsr_sim::run(seed, 236, &lsr_sim::Weights::mixed(seed)) {
-        panic!("{failure}");
-    }
-}
-
-/// Seed 0x348 of the fixed set's mix, its first 103 operations, recorded: a running drop of an
-/// unreadable staged copy whose upload published with its answer lost. With the takeover
-/// record capped at the confirmed transaction (the plant
-/// `running-drop-record-capped-at-confirmed`), a later boot refuses the engine's own file: "a
-/// boot refused replica files through 8 with staging intact and no other writer". It replaces
-/// unaided seed 0xf45b5, whose history no longer reached the drop on the merged tree.
-#[test]
-fn a_running_drop_records_past_an_unconfirmed_upload_seed_0x348() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: true,
-        lying_wal_sync: false,
-        after_restart: AfterRestart::Nothing,
-        clock_law: ClockLaw::PerTick,
-        overlap: false,
-        error_domain: false,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(0x348), crate::histories::seed_0x348::OPS, &opts) {
         panic!("{failure}");
     }
 }

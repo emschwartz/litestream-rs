@@ -141,6 +141,42 @@ fn a_crash_loop_does_not_reset_the_clock() {
     assert!(at <= since.unix_millis() + BOUND + life, "{at}");
 }
 
+/// A snapshot the engine owes for a finding of commits the staged files lack keeps the clock
+/// when the replica has caught up with the staged files: the commit may be in the database
+/// file only. Here a commit is staged and refused by the replica, a power loss takes it from
+/// the database along with the whole WAL (the boot owes a `LocalRewound` snapshot), and staging
+/// refuses that snapshot while the replica takes the staged file. With no WAL frame past the
+/// synced position and no pending file, only the snapshot owed holds the clock.
+#[test]
+fn a_snapshot_owed_after_a_rewind_keeps_the_lag_once_the_replica_has_the_files() {
+    let (mut rig, _stopped) = lagging(1);
+    rig.wal.lose_frames_from(0);
+    for _ in 0..1_000 {
+        rig.staging.inner.inject_failure(
+            StoreOp::Upload,
+            StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: ErrorKind::StorageFull,
+            },
+        );
+    }
+    let mut actor = Actor::new(go_like());
+    let seen = drive(&mut rig, &mut actor, T0 + 20, T0 + 30_000);
+    let newest = Rig::files(&rig.remote, Level::ZERO)
+        .last()
+        .map(|file| file.key.range().max().get());
+    assert_eq!(newest, Some(2), "the replica has the staged file: {seen:?}");
+    assert!(
+        matches!(
+            actor.pending_snapshot(),
+            Some(SnapshotCause::LocalRewound { .. })
+        ),
+        "{:?}",
+        actor.pending_snapshot()
+    );
+    assert!(actor.unreplicated_since().is_some(), "{seen:?}");
+}
+
 /// A refusal before the first listing trips; a timeout does not; the first listing ends it.
 #[test]
 fn a_refusal_at_boot_trips_until_the_first_listing() {

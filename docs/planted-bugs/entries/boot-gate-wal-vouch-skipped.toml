@@ -4,6 +4,6 @@ name = "boot-gate-wal-vouch-skipped"
 fix = "aa1165d"
 package = "lsr-core"
 tests = [
-    "vouch::a_wiped_staging_in_the_same_wal_generation_continues",
+    "vouch::a_wiped_staging_with_commits_the_replica_lacks_continues_on_the_wals_word",
     "vouch::staging_behind_a_replica_the_wal_vouches_for_continues",
 ]

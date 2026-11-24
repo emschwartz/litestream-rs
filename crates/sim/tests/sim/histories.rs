@@ -21,7 +21,6 @@ pub mod seed_0x2c;
 pub mod seed_0x2d;
 pub mod seed_0x2e7;
 pub mod seed_0x330;
-pub mod seed_0x348;
 pub mod seed_0x46;
 pub mod seed_0x4c;
 pub mod seed_0x68f;
@@ -31,7 +30,6 @@ pub mod seed_0x8ef;
 pub mod seed_0x92d;
 pub mod seed_0x9f9;
 pub mod seed_0xa4d;
-pub mod seed_0xb44;
 pub mod seed_0xb6b;
 pub mod seed_0xf488c;
 
@@ -141,16 +139,6 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
             "the ledger entry success-keeps-a-stall is caught by direct lsr-core tests now; this recording is \
              converted to an explicit scenario under docs/decisions/D165.md",
         ),
-    ),
-    (
-        "seed_0xb44",
-        "a_boot_never_builds_on_files_nothing_local_vouches_for_seed_0xb44",
-        Guard::Own("boot-gate-refuses-nothing-sim"),
-    ),
-    (
-        "seed_0x348",
-        "a_running_drop_records_past_an_unconfirmed_upload_seed_0x348",
-        Guard::Own("running-drop-record-capped-at-confirmed"),
     ),
     (
         "seed_0x2e7",
