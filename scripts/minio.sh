@@ -15,7 +15,7 @@
 set -eu
 
 IMAGE=cgr.dev/chainguard/minio@sha256:e9cf6b99c226e9539ed0f14b6f00e37b07da153c7ba1f4f8709c807574b471ec
-NAME=lsr-minio-test
+NAME=${LSR_MINIO_NAME:-lsr-minio-test}
 PORT=${LSR_MINIO_PORT:-9000}
 ROOT_USER=lsrtestroot
 ROOT_PASSWORD=lsrtest-throwaway-0000

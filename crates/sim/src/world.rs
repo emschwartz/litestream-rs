@@ -286,6 +286,61 @@ pub struct World {
     in_tick: Option<CommittedInTick>,
     // When the app's armed in-tick commit landed, by the app's own clock read.
     in_tick_time: Arc<Mutex<Option<Timestamp>>>,
+    file_times: FileTimes,
+}
+
+/// When the database file and the WAL were last written, as their modified times would say:
+/// the driver notes the files after every operation (`World::note_writes`), stamping what
+/// changed with the time the operation began, never a later one. The engine reads it through
+/// `WalSource::modified` (`crate::side::SideSource::with_modified`), whatever the backend, so
+/// the stamps share the run's clock with the replica's file headers.
+#[derive(Debug)]
+struct FileTimes {
+    db: Vec<u8>,
+    wal: Option<Vec<u8>>,
+    db_at: Timestamp,
+    wal_at: Timestamp,
+    shared: Arc<Mutex<Option<Timestamp>>>,
+}
+
+impl FileTimes {
+    fn new(db: Vec<u8>, wal: Option<Vec<u8>>, at: Timestamp) -> Self {
+        let times = Self {
+            db,
+            wal,
+            db_at: at,
+            wal_at: at,
+            shared: Arc::default(),
+        };
+        times.publish();
+        times
+    }
+
+    fn note(&mut self, db: Vec<u8>, wal: Option<Vec<u8>>, at: Timestamp) {
+        if db != self.db {
+            self.db = db;
+            self.db_at = at;
+        }
+        if wal != self.wal {
+            self.wal = wal;
+            self.wal_at = at;
+        }
+        self.publish();
+    }
+
+    /// As the real source answers: the WAL counts only while it holds a frame.
+    fn publish(&self) {
+        let framed = self
+            .wal
+            .as_ref()
+            .is_some_and(|wal| wal.len() > lsr_wal::HEADER_LEN);
+        let at = if framed {
+            self.db_at.max(self.wal_at)
+        } else {
+            self.db_at
+        };
+        *self.shared.lock().unwrap_or_else(PoisonError::into_inner) = Some(at);
+    }
 }
 
 /// The replica stack over `backend`: the recorder on the world's clock, the yield on each call
@@ -357,6 +412,11 @@ impl World {
             ClockLaw::PerTick,
             seed.stream(16),
         ));
+        let file_times = FileTimes::new(
+            sqlite.db_file(),
+            sqlite.wal_file(),
+            Timestamp::from_unix_millis(EPOCH_MILLIS),
+        );
         Self {
             seed,
             sqlite,
@@ -388,7 +448,20 @@ impl World {
             crash_entropy: SeededEntropy::new(seed.stream(5)),
             in_tick: None,
             in_tick_time: Arc::default(),
+            file_times,
         }
+    }
+
+    /// Stamps the database file and the WAL with `at` where they changed since the last call.
+    pub fn note_writes(&mut self, at: Timestamp) {
+        let (db, wal) = (self.sqlite.db_file(), self.sqlite.wal_file());
+        self.file_times.note(db, wal, at);
+    }
+
+    /// The modified time the engine reads, shared with its WAL source.
+    #[must_use]
+    pub fn modified(&self) -> Arc<Mutex<Option<Timestamp>>> {
+        Arc::clone(&self.file_times.shared)
     }
 
     /// Puts the replica on the S3 store over a fresh in-memory bucket behind its fault layer

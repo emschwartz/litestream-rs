@@ -194,6 +194,61 @@ jobs:
           tool: cargo-nextest,just
       - run: just power-loss-trials
 
+  # NIGHTLY ONLY, never in the PR gate. The real `lsr replicate` beside a real SQLite writer with
+  # its replica on MinIO behind Toxiproxy (`just fault-rig`): kill -9, partitions, slow and cut
+  # transfers, LazyFS power loss, a clock step (libfaketime) and the pinned Go Litestream on the
+  # same prefix, judged by point-in-time restores (docs/decisions/D195.md). 1,000 cycles take
+  # about four hours on a hosted runner; --max-minutes stops starting cycles before the hard
+  # timeout, and the summary line says how many ran. Exit 1 is an anomaly (a finding to file),
+  # exit 2 a rig failure or a required situation never reached. Evidence is kept on failure.
+  fault-rig:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: ./.github/actions/go-compat
+      - run: sudo apt-get install -y cmake g++ libfuse3-dev fuse3 libfaketime
+      # The rig's own canary first: planted damage in the replica must be reported, and the
+      # known-issue exemption must not hide an anomaly in an untainted segment.
+      - run: just fault-rig-canary
+      # One plant the LazyFS path should reach (wal-barrier, the plant that just lazyfs-plant is
+      # run with), bounded, reported as found or not found and never failing the job. The Linux
+      # paths had not run anywhere when this was written; this says whether the rig reaches a defect there.
+      - name: plant wal-barrier under power loss, found or not found
+        run: |
+          set +e
+          just fault-rig-plant wal-barrier 60 --menu none,kill9,power-loss --max-minutes 30 2>&1 | tee plant.log
+          rc=${PIPESTATUS[0]}
+          case "$rc" in
+            1) line="PLANT wal-barrier: FOUND" ;;
+            0) line="PLANT wal-barrier: NOT FOUND in 60 cycles" ;;
+            *) line="PLANT wal-barrier: rig failed (exit $rc)" ;;
+          esac
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^NOT RUN' plant.log >> "$GITHUB_STEP_SUMMARY" || true
+          exit 0
+      # Anomalies in a segment the Go nemesis touched are known issue #346 and do not fail the
+      # run; any other anomaly does. The summary lists the nemeses that did not run.
+      - run: |
+          set -o pipefail
+          just fault-rig 1000 --max-minutes 280 2>&1 | tee fault-rig.log
+      - if: always()
+        run: grep -E '^(NOT RUN|known:|go-cycle:)' fault-rig.log >> "$GITHUB_STEP_SUMMARY" || true
+      - if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: fault-rig-${{ github.run_id }}
+          path: |
+            target/fault-rig/evidence
+            target/fault-rig/cycles.jsonl
+          if-no-files-found: ignore
+
   # NIGHTLY ONLY, never in the PR gate. The real `lsr replicate` on LazyFS (`just lazyfs`): power
   # loss by dropped unsynced data and torn WAL writes, judged by restores against the workload's
   # commit log. Hosted Ubuntu runners mount FUSE: LazyFS's own CI mounts it on ubuntu-latest at the
