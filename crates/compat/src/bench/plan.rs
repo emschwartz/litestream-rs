@@ -88,7 +88,7 @@ pub(super) const IMPACT_PRE: Duration = Duration::from_secs(20);
 /// The application after the snapshot has landed and the replica is current.
 pub(super) const IMPACT_POST: Duration = Duration::from_secs(10);
 /// A copy that has not landed after this long is cut off and counted as timed out.
-pub(super) const IMPACT_COPY_LIMIT: Duration = Duration::from_secs(45 * 60);
+pub(super) const IMPACT_COPY_LIMIT: Duration = Duration::from_secs(60 * 60);
 /// How long the replica may take to hold everything committed before the snapshot landed.
 pub(super) const IMPACT_CURRENT_LIMIT: Duration = Duration::from_secs(15 * 60);
 /// How long the application may take to warm its hot set.
@@ -106,11 +106,11 @@ pub(super) const IMPACT_BAR_P99_VS_A: f64 = 2.0;
 /// The success bar: a remedy's copy wall time, relative to the unthrottled copy's.
 pub(super) const IMPACT_BAR_COPY_VS_B: f64 = 4.0;
 /// A/A pairs run before the arms to find the noise floor.
-pub(super) const IMPACT_GATE_PAIRS: usize = 8;
+pub(super) const IMPACT_GATE_PAIRS: usize = 6;
 /// Fewest and most rounds (one run of every arm each) the A/A noise may ask for.
-pub(super) const IMPACT_MIN_ROUNDS: usize = 10;
+pub(super) const IMPACT_MIN_ROUNDS: usize = 4;
 /// See [`IMPACT_MIN_ROUNDS`].
-pub(super) const IMPACT_MAX_ROUNDS: usize = 16;
+pub(super) const IMPACT_MAX_ROUNDS: usize = 6;
 
 /// One arm: its label, the patch whose binary it runs ([`None`] is the tree's own [`lsr`]), and
 /// the divisor of the calibrated copy rate when it paces reads.
@@ -124,9 +124,10 @@ pub(super) struct ArmDef {
 }
 
 /// The arms, in the order of the table. A is the application alone, B the unthrottled copy;
-/// the paced arms take a half, a quarter and an eighth of the rate B's calibration copy read at;
+/// the paced arm takes half the rate B's calibration copy read at (a quarter and an eighth were
+/// dropped before any counted run: see the frame's last paragraph);
 /// [`read-twice`] is the known-bad control and must lose to B clearly.
-pub(super) const ARMS: [ArmDef; 7] = [
+pub(super) const ARMS: [ArmDef; 5] = [
     ArmDef {
         label: "A",
         patch: None,
@@ -143,18 +144,6 @@ pub(super) const ARMS: [ArmDef; 7] = [
         label: "pace-1/2",
         patch: Some("read-pace"),
         pace_divisor: Some(2),
-        idle: false,
-    },
-    ArmDef {
-        label: "pace-1/4",
-        patch: Some("read-pace"),
-        pace_divisor: Some(4),
-        idle: false,
-    },
-    ArmDef {
-        label: "pace-1/8",
-        patch: Some("read-pace"),
-        pace_divisor: Some(8),
         idle: false,
     },
     ArmDef {
@@ -187,11 +176,11 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
     free memory is 2.3 turnovers), so hot pages the kernel evicts come back by random 4 KiB reads that
     also queue behind the copy's sequential reads: application p99 read latency rises several times.
   mechanism of the remedies, stated before the numbers (predictions are guesses, not claims):
-    read pacing (read-pace, a half, a quarter and an eighth of B's calibrated page-read rate) lowers
+    read pacing (read-pace, at half of B's calibrated page-read rate) lowers
       the rate of eviction and of competing disk reads but not the volume read: the same 32 GiB (two
       passes) still pass through the cache. It helps if the kernel keeps twice-referenced pages (the hottest tenth
       is re-read every few seconds) and the disk queue was the cost; it does little if volume was.
-      It costs a copy 2, 4 and 8 times as long, so a read transaction held that much longer.
+      It costs a copy twice as long, so a read transaction held that much longer.
     fadvise(DONTNEED) on the pages the copy read (fadvise-dontneed, through SQLite's own descriptor,
       in runs of 1 MiB) attacks the volume: the copy leaves nothing behind. It also drops hot pages the
       copy happens to read (about one page in sixteen is hot), which the application must read again.
@@ -207,13 +196,13 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
   success bar for a remedy, pre-registered: p99 within 2 times arm A's AND copy wall time within 4
     times B's. A remedy below the bar on p99 but above it on copy time trades a longer read
     transaction for latency and is reported as that trade, with the WAL it grew.
-  arms: A (no copy), B (lsr takes the boot snapshot of an empty replica), pace-1/2, pace-1/4,
-    pace-1/8, fadvise, read-twice; A is also run against itself (the gate). Rounds: one run of every
+  arms: A (no copy), B (lsr takes the boot snapshot of an empty replica), pace-1/2,
+    fadvise, read-twice; A is also run against itself (the gate). Rounds: one run of every
     arm per round, the order rotated each round, cold page cache before every run (drop_caches), the
     hot set warmed and referenced twice, MinIO emptied after. A's window is as long as the copy of B's
     calibration run. The rates of the paced arms are fixed from that calibration run and recorded.
-  pairs: an A/A run of 8 pairs gives the sd of the per-pair log ratio of p99; rounds = pairs_needed
-    (80% power at SESOI), at least 10 and at most 16. The gate fails (the run stops) when the A/A
+  pairs: an A/A run of 6 pairs gives the sd of the per-pair log ratio of p99; rounds = pairs_needed
+    (80% power at SESOI), at least 4 and at most 6. The gate fails (the run stops) when the A/A
     interval excludes 0 (drift or an order effect) or when its half width exceeds SESOI.
   napkin (written before timing; 16 GiB = 17.2 GB database, 8 GiB box, hot set 1 GiB):
     copy read floor: the boot snapshot reads every page twice through the page source (observed, see
@@ -228,7 +217,7 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
       up to 400 misses a second at 100 us (NVMe) to 1 to 2 ms (network SSD, which also caps near 3,000
       IOPS), queued behind 1 MiB readahead. p99 is then a miss: 3 to 50 times A. The incident's two
       orders of magnitude is the top of that range.
-    paced copies: wall time is 34.4 GB / rate, so 2, 4 and 8 times B if reading is what B waited on. WAL growth is the application's
+    paced copy: wall time is 34.4 GB / rate, so 2 times B if reading is what B waited on. WAL growth is the application's
       0.1 MB/s times the copy: about 60 MB for a 10 minute copy, small beside the database; the cost of
       throttling at this write rate is time (the read transaction, a stale replica), not disk.
     fadvise: the copy's cache footprint of the database reads falls from 34.4 GB to about 1 MiB (the
@@ -236,6 +225,15 @@ pub(super) const IMPACT_FRAME: &str = "frame of snapshot-impact (written before 
       it drops cost a burst of misses at its start.
     read-twice: 3 times the bytes read of B (a full sweep first) and 1.5 to 2 times the copy time;
       p99 not better than B.
+  changed before any counted run (2026-11-24): the first calibration on the box (4 dedicated cores,
+    8 GiB, one virtual SSD shared with MinIO) copied in 1,257 s, four times the napkin's ceiling of
+    300 s, because the same disk also takes the staging file and MinIO's writes. At that length the
+    plan as first written (seven arms, 8 gate pairs, 10 to 16 rounds) is about 66 hours, and the
+    quarter-rate and eighth-rate arms would pass the 45 minute copy limit. So: the quarter and
+    eighth arms are dropped (the eighth fails the copy bar by construction, the quarter sits on it),
+    the gate is 6 pairs, rounds are 4 to 6, and the copy limit is 60 minutes. Fewer rounds mean wider
+    intervals; the gate still stops the run if the box cannot see the SESOI. Only calibration runs
+    (unmeasured) had happened; no arm's counted number was seen before this change.
   confounders accepted and named: MinIO runs on the same disk and in the same page cache (its writes
     of the replica are part of what a copy does here, in every arm that copies); one machine, one disk
     type; a hot set with a 90/10 skew, not the embedder's; uniform random reads within each tier.
