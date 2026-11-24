@@ -32,6 +32,8 @@ mod app_at_defaults;
 #[cfg(test)]
 mod big;
 #[cfg(test)]
+mod boundary_snapshot;
+#[cfg(test)]
 mod common;
 #[cfg(test)]
 mod crash_cycles;

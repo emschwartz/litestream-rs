@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::position::ReadLockHold;
-use crate::source::{Barrier, CheckpointRun, WriteLock};
+use crate::source::{Barrier, CheckpointRun};
 
 const LATE: Duration = Duration::from_millis(636);
 
@@ -100,14 +100,6 @@ impl Checkpointer for BeforeBarrier<'_> {
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.inner.bump_seq()
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.inner.begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.inner.end_write_lock(lock)
     }
 }
 

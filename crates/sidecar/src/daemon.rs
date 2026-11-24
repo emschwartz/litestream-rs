@@ -43,8 +43,6 @@ use lsr_replica::{
     IfReplicationStops, Replicator, RestoreError, Runtime, StartError, Stopped, Trip,
     record_takeover, restore_if_missing,
 };
-use lsr_store_fs::FsStore;
-use lsr_store_s3::{CredentialChain, CredentialError, S3Store};
 
 use crate::exec::ChildEnd;
 use crate::health::{Board, DbState, Entry};
@@ -261,7 +259,7 @@ impl Daemon {
 
     fn open(&self, plan: DbPlan, restore: bool) -> Slot {
         let path = plan.path().to_owned();
-        let store = match open_store(plan.replica()) {
+        let store = match lsr_config::open_store(plan.replica()) {
             Ok(store) => Some(store),
             Err(why) => {
                 let fields = [
@@ -666,18 +664,6 @@ fn exists(path: &Path) -> bool {
     !matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
 }
 
-/// Why a replica's store could not be opened. Each variant is the source's own message, so the
-/// log line a person reads is unchanged.
-#[derive(Debug, thiserror::Error)]
-enum OpenStoreError {
-    /// No usable S3 credentials.
-    #[error("{0}")]
-    Credentials(#[from] CredentialError),
-    /// The S3 config cannot address its bucket.
-    #[error("{0}")]
-    Store(#[from] lsr_store_s3::ConfigError),
-}
-
 /// Whether a start failed for a cause that passes by itself: another connection held a lock
 /// SQLite would not wait for (the application writing while the database opens), or another
 /// replicator holds the meta directory's lock and will release it when it exits (an
@@ -695,28 +681,6 @@ fn passes_by_itself(error: &StartError) -> bool {
         | StartError::PageSize { .. }
         | StartError::SqliteBuild { .. }
         | StartError::Thread { .. } => false,
-    }
-}
-
-/// The store for a replica; S3 credentials are resolved now, from the file or the
-/// environment and shared files (Go copies `LITESTREAM_*` to `AWS_*`; the chain reads both).
-fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreError> {
-    match replica {
-        ReplicaPlan::File(dir) => Ok(Arc::new(FsStore::new(dir))),
-        ReplicaPlan::S3 {
-            config,
-            credentials,
-        } => {
-            let chain = match credentials {
-                lsr_config::Credentials::FromConfig(given) => {
-                    CredentialChain::from_process().with_explicit(given.clone())
-                }
-                lsr_config::Credentials::FromEnvironment => CredentialChain::from_process(),
-            };
-            let resolved = chain.with_region(config.region().as_str()).resolve()?;
-            let store = S3Store::resolved((**config).clone(), &resolved)?;
-            Ok(Arc::new(store))
-        }
     }
 }
 
@@ -780,13 +744,46 @@ mod tests {
     use super::*;
     use crate::logging::Logger;
 
+    /// The daemon and an application that calls `lsr_config::load_plan` read one file to the
+    /// same databases, replicator settings and stores.
     #[test]
-    fn a_store_that_cannot_open_says_why_in_the_sources_words() {
-        let error = OpenStoreError::from(lsr_store_s3::ConfigError::BadUrl);
-        assert!(matches!(error, OpenStoreError::Store(_)));
-        assert_eq!(error.to_string(), "malformed replica url");
-        let dir = ReplicaPlan::File(std::path::PathBuf::from("/replica"));
-        open_store(&dir).unwrap();
+    fn the_daemon_and_load_plan_read_one_file_to_the_same_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("litestream.yml");
+        let text = format!(
+            "snapshot:\n  interval: 2h\n  retention: 48h\nl0-retention-check-interval: 30s\n\
+             shutdown-sync-timeout: 7s\n\
+             litestream-rs:\n  app-readers: none\n\
+             dbs:\n\
+             \x20 - path: {root}/a.db\n    truncate-page-n: 5000\n    busy-timeout: 3s\n    restore-if-db-not-exists: true\n\
+             \x20   replica:\n      type: s3\n      bucket: b\n      path: p\n      region: us-east-1\n\
+             \x20     access-key-id: AKID\n      secret-access-key: SECRET\n      part-size: 8MB\n      concurrency: 3\n\
+             \x20 - path: {root}/b.db\n    replica:\n      path: {root}/replica\n",
+            root = dir.path().display()
+        );
+        std::fs::write(&file, text).unwrap();
+        let loaded = crate::load_file(&file, lsr_config::Expand::Off).unwrap();
+        let daemon = crate::prepare(None, false, &loaded.config).unwrap().plan;
+        let library = lsr_config::load_plan(&file, lsr_config::Expand::Off, &ProcessEnv).unwrap();
+        assert_eq!(daemon.dbs().len(), 2);
+        assert_eq!(library.dbs().len(), daemon.dbs().len());
+        assert_eq!(
+            library.shutdown_sync_timeout(),
+            daemon.shutdown_sync_timeout()
+        );
+        for (from_daemon, from_library) in daemon.dbs().iter().zip(library.dbs()) {
+            assert_eq!(from_library.path(), from_daemon.path());
+            assert_eq!(from_library.config(), from_daemon.config());
+            assert_eq!(
+                from_library.restore_if_missing(),
+                from_daemon.restore_if_missing()
+            );
+            assert_eq!(
+                format!("{:?}", from_library.replica()),
+                format!("{:?}", from_daemon.replica())
+            );
+        }
+        assert!(daemon.dbs().first().unwrap().restore_if_missing());
     }
 
     fn daemon(started: &Started) -> Daemon {

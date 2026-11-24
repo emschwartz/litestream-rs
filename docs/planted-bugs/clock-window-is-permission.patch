@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/classify.rs b/crates/store-s3/src/classify.rs
+index e4dd8adc2..16bbca8bb 100644
+--- a/crates/store-s3/src/classify.rs
++++ b/crates/store-s3/src/classify.rs
+@@ -180,7 +180,7 @@ fn signing_time_outside_window(body: &[u8]) -> bool {
+         "<Message>Request is not valid yet</Message>",
+     ]
+     .iter()
+-    .any(|message| text.contains(message))
++    .any(|message| text.contains(message) && text.is_empty())
+ }
+ 
+ /// Whether a response is S3 saying the range starts at or past the end

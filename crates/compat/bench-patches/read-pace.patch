@@ -1,0 +1,120 @@
+diff --git a/crates/replica/src/readers.rs b/crates/replica/src/readers.rs
+--- a/crates/replica/src/readers.rs
++++ b/crates/replica/src/readers.rs
+@@ -20,13 +20,89 @@
+ //! only meet the gate's lock.
+ 
+ use std::sync::Arc;
+-use std::sync::atomic::{AtomicUsize, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
++use std::time::Duration;
+ 
+-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
++use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, PageSource, SourceError};
++use lsr_ltx::{DbPages, PageNo, Timestamp};
+ use lsr_sqlite::{Sqlite, WritesHeld};
+ 
+ use crate::config::ReaderTracking;
++use crate::runtime::{Runtime, later};
+ 
++/// BENCH PROTOTYPE (crates/compat/bench-patches/read-pace.patch, never in the engine): a page
++/// source that spends a byte budget as it reads, so a copy proceeds at `bytes_per_s` and no
++/// faster. It waits on the runtime's clock and park, between pages and never while the write
++/// lock is held (a pause there would be a pause of every application write). The rate comes
++/// from `LSRBENCH_PACE_MIB_S`; unset, it is a plain pass-through.
++pub(crate) struct Paced<S> {
++    inner: S,
++    runtime: Runtime,
++    write_locked: Arc<AtomicBool>,
++    bytes_per_s: Option<u64>,
++    /// When the current budget began, and the nanoseconds of reading it has been charged. The
++    /// due time is always computed from the first, so the clock's millisecond grain never adds
++    /// up across thousands of pages.
++    epoch: Option<Timestamp>,
++    spent_ns: u64,
++}
++
++impl<S> Paced<S> {
++    pub(crate) fn from_env(inner: S, runtime: Runtime, write_locked: Arc<AtomicBool>) -> Self {
++        let bytes_per_s = std::env::var("LSRBENCH_PACE_MIB_S")
++            .ok()
++            .and_then(|v| v.trim().parse::<u64>().ok())
++            .filter(|mib| *mib > 0)
++            .map(|mib| mib.saturating_mul(1 << 20));
++        Self {
++            inner,
++            runtime,
++            write_locked,
++            bytes_per_s,
++            epoch: None,
++            spent_ns: 0,
++        }
++    }
++
++    /// Charges `bytes` to the budget and waits out what is owed beyond a millisecond of slack,
++    /// so a page at a time costs no syscall and the long-run rate is exact. A reader that has
++    /// fallen a quarter second behind its budget starts a new one: credit is not banked.
++    fn spend(&mut self, bytes: usize) {
++        let Some(rate) = self.bytes_per_s else { return };
++        let now = self.runtime.clock.now();
++        let nanos = u64::try_from(bytes)
++            .unwrap_or(u64::MAX)
++            .saturating_mul(1_000_000_000)
++            .checked_div(rate)
++            .unwrap_or(0);
++        let epoch = *self.epoch.get_or_insert(now);
++        self.spent_ns = self.spent_ns.saturating_add(nanos);
++        let due = later(epoch, Duration::from_nanos(self.spent_ns));
++        if due > later(now, Duration::from_millis(1)) {
++            while self.runtime.clock.now() < due {
++                self.runtime.park.park(Some(due));
++            }
++        } else if later(due, Duration::from_millis(250)) < now {
++            self.epoch = Some(now);
++            self.spent_ns = 0;
++        }
++    }
++}
++
++impl<S: PageSource> PageSource for Paced<S> {
++    fn page_count(&mut self) -> Result<DbPages, SourceError> {
++        self.inner.page_count()
++    }
++
++    fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
++        let read = self.inner.read_page(pgno, buf);
++        if !self.write_locked.load(Ordering::SeqCst) {
++            self.spend(buf.len());
++        }
++        read
++    }
++}
++
+ /// Held for the length of one long read. While any guard lives, the replicator runs no
+ /// TRUNCATE checkpoint. Counted, so overlapping readers are safe; dropping it ends the read.
+ #[derive(Debug)]
+@@ -134,4 +210,4 @@
+         drop(second);
+         assert_eq!(count.load(Ordering::SeqCst), 0);
+     }
+-}
++}
+\ No newline at end of file
+diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
+--- a/crates/replica/src/thread.rs
++++ b/crates/replica/src/thread.rs
+@@ -482,7 +482,13 @@
+     /// One engine tick, or why the closed connections could not be reopened.
+     fn tick(&mut self, now: Timestamp) -> Result<Tick, Reopen> {
+         let sqlite = self.connection()?;
+-        let (mut wal, mut db) = (sqlite.clone(), sqlite.clone());
++        let write_locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
++        let mut wal = sqlite.clone();
++        let mut db = crate::readers::Paced::from_env(
++            sqlite.clone(),
++            self.runtime.clone(),
++            Arc::clone(&write_locked),
++        );
+         let mut ck = Guarded::new(
+             sqlite,
+             self.config.readers,

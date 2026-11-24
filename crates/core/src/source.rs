@@ -249,24 +249,6 @@ impl Barrier {
     }
 }
 
-/// The database write lock, held between `begin_write_lock` and `end_write_lock`.
-#[derive(Debug, PartialEq, Eq)]
-#[must_use = "a write lock must be ended with Checkpointer::end_write_lock"]
-pub struct WriteLock(u64);
-
-impl WriteLock {
-    /// A token with the implementation's own id.
-    pub const fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    /// The implementation's id.
-    #[must_use]
-    pub const fn id(&self) -> u64 {
-        self.0
-    }
-}
-
 /// Everything the checkpoint protocol does to SQLite besides reading.
 pub trait Checkpointer {
     /// `BEGIN; INSERT INTO _litestream_lock (id) VALUES (1)` (Go `db.go:2660-2674`).
@@ -296,17 +278,4 @@ pub trait Checkpointer {
     /// [`SourceError::WritesHeld`] while the replicator holds the application's writes;
     /// [`SourceError`] when the write fails.
     fn bump_seq(&mut self) -> Result<(), SourceError>;
-
-    /// Takes the write lock (Go `db.go:2759-2771`).
-    ///
-    /// # Errors
-    /// [`SourceError::Busy`] when another writer holds it; [`SourceError::WritesHeld`] while
-    /// the replicator holds the application's writes.
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError>;
-
-    /// Releases the write lock (Go `db.go:2795`).
-    ///
-    /// # Errors
-    /// [`SourceError`] when the release fails.
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError>;
 }

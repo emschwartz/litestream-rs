@@ -148,9 +148,17 @@ const RETAKE_ONLY: &str = "only a retake after a failed one reports it, and the 
                            draws the first failure; this call takes no read transaction of its own \
                            otherwise";
 
+/// The engine no longer calls these (docs/decisions/D190.md), and the `Checkpointer` trait no
+/// longer has them; the operations stay so recorded histories that name them still read.
+pub(crate) const NOT_CALLED: &str =
+    "the engine takes no write lock: its boundary snapshot copies the database without one";
+
 /// The cell of `op` and `class` against `lsr-sqlite`.
 #[must_use]
 pub const fn source_cell(op: SourceOp, class: SourceClass) -> Cell {
+    if let SourceOp::BeginWriteLock | SourceOp::EndWriteLock = op {
+        return Cell::Impossible(NOT_CALLED);
+    }
     match class {
         SourceClass::Io => io_cell(op),
         SourceClass::DiskFull => disk_full_cell(op),

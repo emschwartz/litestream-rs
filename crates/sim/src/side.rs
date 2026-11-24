@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
-    SourceError, SourceOp, WalFileLen, WalSource, WriteLock,
+    SourceError, SourceOp, WalFileLen, WalSource,
 };
 use lsr_ltx::{DbPages, PageNo, PageSize};
 use lsr_wal::Salts;
@@ -173,14 +173,6 @@ impl Checkpointer for SideCheckpointer {
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.0.bump_seq()
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.0.begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.0.end_write_lock(lock)
     }
 }
 

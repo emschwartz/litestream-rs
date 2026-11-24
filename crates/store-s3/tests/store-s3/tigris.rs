@@ -1,4 +1,5 @@
-//! The S3 store against the real Tigris bucket (`just test-tigris`).
+//! Probes only Tigris needs, against the real bucket (`just test-provider tigris`, which also runs
+//! `provider.rs`, the checks every provider passes).
 //!
 //! Every test is ignored: the recipe sources the credentials file, names a
 //! per-run prefix under the bucket and runs them with `--run-ignored only`.
@@ -10,41 +11,14 @@
 use std::time::Instant;
 
 use lsr_core::conformance::block_on;
-use lsr_core::needs::{Resource, must};
 use lsr_core::{Clock, PartNumber, ReadLen};
 use lsr_ltx::Timestamp;
 use lsr_store_s3::{
     EtagCheck, S3Code, UploadId, check_etag, parse_complete, parse_create, parse_head, quoted_md5,
 };
 
-use crate::real::{self, CREATED_AT_HEADER, RealHarness, Server, WallClock, at, body};
-
-fn server() -> Server {
-    let var = |name: &str| {
-        must(Resource::Tigris, || {
-            std::env::var(name).map_err(|_unset| format!("{name} is not set"))
-        })
-    };
-    Server {
-        name: "tigris",
-        endpoint: var("AWS_ENDPOINT_URL_S3"),
-        bucket: std::env::var("LSR_TIGRIS_BUCKET").unwrap_or_else(|_| "litestream-rs-test".into()),
-        region: var("AWS_REGION"),
-        access: var("AWS_ACCESS_KEY_ID"),
-        secret: var("AWS_SECRET_ACCESS_KEY"),
-        root: Some(var("LSR_TIGRIS_PREFIX")),
-    }
-}
-
-fn connect() -> Option<RealHarness> {
-    Some(RealHarness::connect(&server()))
-}
-
-crate::real::shared_cases!(connect, all());
-
-fn h() -> RealHarness {
-    RealHarness::connect(&server())
-}
+use crate::provider::{h, raw_body};
+use crate::real::{self, CREATED_AT_HEADER, RealHarness, WallClock, at, body};
 
 fn obs(h: &RealHarness, what: &str, raw: &real::Raw) {
     eprintln!("OBS {what}: {}", h.dump(raw));
@@ -565,148 +539,8 @@ fn item11_load_shedding_headers_seen_so_far() {
     eprintln!("OBS item11 statuses seen {statuses:?}; response header names {names:?}");
 }
 
-/// The object's bytes by a raw GET, `None` when it is absent.
-fn raw_body(h: &RealHarness, object: &str) -> Option<Vec<u8>> {
-    let got = h.raw("GET", Some(object), &[], &[], b"");
-    match got.status {
-        200 => Some(got.body),
-        404 => None,
-        other => panic!("GET {other}: {}", h.dump(&got)),
-    }
-}
-
-/// A raw CompleteMultipartUpload of one part, with `headers` signed.
-fn raw_complete(
-    h: &RealHarness,
-    object: &str,
-    upload: &UploadId,
-    etag: &str,
-    headers: &[(&'static str, &str)],
-) -> real::Raw {
-    let xml = format!(
-        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>\
-             <ETag>{etag}</ETag></Part></CompleteMultipartUpload>"
-    );
-    h.raw(
-        "POST",
-        Some(object),
-        &[("uploadId", upload.as_str())],
-        headers,
-        xml.as_bytes(),
-    )
-}
-
-// What a conditional write does on Tigris.
-// Measured only; the store sends no conditional header, since Go sends none and the
-// replica format adds nothing Go does not write.
-
-#[test]
-#[ignore = "needs a Tigris bucket (just test-tigris)"]
-fn if_none_match_on_put() {
-    let h = h();
-    let object = h.object(&h.key(0, 1, 1));
-    let star = [("if-none-match", "*")];
-    let first = h.raw("PUT", Some(&object), &[], &star, b"first");
-    obs(
-        &h,
-        "conditional write PUT If-None-Match:* to a new key",
-        &first,
-    );
-    let second = h.raw("PUT", Some(&object), &[], &star, b"second");
-    obs(
-        &h,
-        "conditional write PUT If-None-Match:* to an existing key",
-        &second,
-    );
-    let after = raw_body(&h, &object);
-    eprintln!(
-        "OBS conditional write object after both: {:?}",
-        after.as_deref().map(String::from_utf8_lossy)
-    );
-    assert_eq!(first.status, 200, "conditional write: a new key is written");
-    assert_eq!(
-        second.status, 412,
-        "conditional write: an existing key refuses"
-    );
-    assert_eq!(second.tag("Code").as_deref(), Some("PreconditionFailed"));
-    assert_eq!(
-        after.as_deref(),
-        Some(&b"first"[..]),
-        "conditional write: unchanged"
-    );
-}
-
-#[test]
-#[ignore = "needs a Tigris bucket (just test-tigris)"]
-fn if_none_match_on_complete_multipart() {
-    let h = h();
-    let key = h.key(0, 1, 1);
-    let object = h.object(&key);
-    let star = [("if-none-match", "*")];
-    let a = start_multipart(&h, &key, Timestamp::from_unix_millis(1));
-    let ea = put_part(&h, &key, &a, 1, b"AAAA".to_vec());
-    let b = start_multipart(&h, &key, Timestamp::from_unix_millis(2));
-    let eb = put_part(&h, &key, &b, 1, b"BBBB".to_vec());
-    let first = raw_complete(&h, &object, &a, &ea, &star);
-    obs(
-        &h,
-        "conditional write Complete If-None-Match:* to a new key",
-        &first,
-    );
-    let second = raw_complete(&h, &object, &b, &eb, &star);
-    obs(
-        &h,
-        "conditional write Complete If-None-Match:* to an existing key",
-        &second,
-    );
-    let after = raw_body(&h, &object);
-    eprintln!(
-        "OBS conditional write object after both: {:?}",
-        after.as_deref().map(String::from_utf8_lossy)
-    );
-    let open = h.open_uploads();
-    eprintln!("OBS conditional write open uploads after the refused complete: {open}");
-    let abort = h.send(
-        h.builder()
-            .abort_multipart(WallClock.now(), &key, &b)
-            .unwrap(),
-    );
-    obs_response("conditional write abort of the refused upload", &abort);
-    let put = h.raw("PUT", Some(&h.object(&h.key(0, 2, 2))), &[], &[], b"x");
-    let c = start_multipart(&h, &h.key(0, 2, 2), Timestamp::from_unix_millis(3));
-    let ec = put_part(&h, &h.key(0, 2, 2), &c, 1, b"CCCC".to_vec());
-    let over_put = raw_complete(&h, &h.object(&h.key(0, 2, 2)), &c, &ec, &star);
-    obs(
-        &h,
-        "conditional write Complete If-None-Match:* over a single PUT",
-        &over_put,
-    );
-    let _ = h.send(
-        h.builder()
-            .abort_multipart(WallClock.now(), &h.key(0, 2, 2), &c)
-            .unwrap(),
-    );
-    assert_eq!(put.status, 200);
-    assert_eq!(first.status, 200, "conditional write: a new key completes");
-    assert!(
-        first.tag("Code").is_none(),
-        "conditional write: no error document in the 200"
-    );
-    assert_eq!(
-        second.status, 412,
-        "conditional write: an existing key refuses the complete"
-    );
-    assert_eq!(second.tag("Code").as_deref(), Some("PreconditionFailed"));
-    assert_eq!(
-        after.as_deref(),
-        Some(&b"AAAA"[..]),
-        "conditional write: unchanged"
-    );
-    assert_eq!(
-        over_put.status, 412,
-        "conditional write: a PUT's object counts as existing"
-    );
-}
+// What an If-Match write does on Tigris. The create-only (`If-None-Match: *`) checks run on every
+// provider in provider.rs. Measured only: the store sends no If-Match.
 
 #[test]
 #[ignore = "needs a Tigris bucket (just test-tigris)"]

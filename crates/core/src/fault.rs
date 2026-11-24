@@ -126,7 +126,7 @@ pub enum Fault {
     /// said its readers hold the WAL (or tracks none). Not `SqliteBusy`:
     /// no lock was contended, and it lasts as long as the readers do.
     ReadersHeld,
-    /// A step that writes to the database (a checkpoint, the sequence bump, the write lock)
+    /// A step that writes to the database (a checkpoint, the write barrier, the sequence bump)
     /// was not attempted: the replicator holds the application's writes (`crate::failstop`).
     /// A wait, not a failure: no application commit can grow the WAL meanwhile, so nothing
     /// is lost by waiting, and it is never counted, never stalls and never degrades the task.

@@ -84,6 +84,10 @@ impl CommandName {
     }
 }
 
+/// Every word `lsr` takes first, for the error that names them; a test holds it to `parse`.
+const COMMAND_WORDS: &str =
+    "replicate, restore, databases, ltx, wal, config, verify, files, trust-local";
+
 /// One flag of a command's help text.
 #[derive(Debug)]
 pub struct HelpFlag {
@@ -324,6 +328,14 @@ pub enum UsageError {
     UnknownCommand {
         /// What was typed.
         name: String,
+    },
+    /// A flag before the command: `lsr -config c.yml replicate`.
+    #[error(
+        "flags go after the command, not before it: {flag:?} came first; write lsr <command> [flags], where <command> is one of {COMMAND_WORDS}"
+    )]
+    FlagBeforeCommand {
+        /// What was typed first.
+        flag: String,
     },
     /// A flag the command does not take.
     #[error("unknown flag {flag} for {command}")]
@@ -751,6 +763,9 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "trust-local" => parse_own(CommandName::TrustLocal, rest),
         "replicate" => Ok(Command::Daemon(rest.to_vec())),
         "config" => parse_config(rest),
+        flag if flag.starts_with('-') => Err(UsageError::FlagBeforeCommand {
+            flag: flag.to_owned(),
+        }),
         other => Err(UsageError::UnknownCommand {
             name: other.to_owned(),
         }),

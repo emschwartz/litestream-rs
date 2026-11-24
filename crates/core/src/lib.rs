@@ -130,7 +130,7 @@ pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classi
 pub use snapshot::SnapshotFailed;
 pub use source::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, SourceError,
-    WalSource, WriteLock,
+    WalSource,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use source::{

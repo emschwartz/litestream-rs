@@ -3,7 +3,8 @@
 //! It shares nothing with the engine's clock (`lsr_core::Lag`). Its truth is the simulator's:
 //! when the app committed, and whether a restore of the raw replica's `Latest` is the model's
 //! newest image. From those it keeps the time of the first commit since the replica last held
-//! everything, which is never later than the oldest commit truly off the replica: the age it
+//! everything (on the engine's clock the earliest stamp among them, since a step back can date a
+//! later commit earlier), which is never later than the oldest commit truly off the replica: the age it
 //! measures is an upper bound, so the judge can only be lenient, never raise a false alarm.
 //! That leniency is the price of judging every run; the named scenarios
 //! (`crates/sim/tests/sim/failstop.rs`) judge the other direction (P2, a missed trip; P3,
@@ -151,7 +152,12 @@ impl FailStopJudge {
             self.images.clear();
             self.images.push(before);
         }
-        self.since.get_or_insert((at, true_at));
+        // The engine dates each commit by its own clock's stamp and takes the oldest, so after a
+        // step back a later commit can date earlier than the first: the wall date is the least
+        // of them, which only lengthens the age the judge measures. The stepless date never goes
+        // back, so the first commit's stays.
+        let (wall, true_since) = self.since.unwrap_or((at, true_at));
+        self.since = Some((wall.min(at), true_since));
         self.images.push(after);
     }
 
@@ -411,6 +417,26 @@ mod tests {
             unvouched_boot: false,
             reads_lying: false,
         }
+    }
+
+    /// A commit made after the clock stepped back dates earlier than the first one, and the engine
+    /// dates its lag by the oldest stamp: a failure a bound after that stamp, with more clock
+    /// steps forward since, is a true trip on the engine's clock.
+    #[test]
+    fn a_commit_dated_earlier_by_a_clock_step_back_starts_the_engine_clock() {
+        let mut judge = caught_up();
+        let image = lsr_history::Digest::genesis();
+        judge.committed(ts(100_000), 100_000, image, image);
+        judge.committed(ts(40_000), 101_000, image, image);
+        let failing = TickSeen {
+            at: ts(640_000),
+            true_at: 300_000,
+            ..tick(640_000, true)
+        };
+        judge.saw(failing);
+        judge
+            .judge(age_trip(40_000), failing, BOUND, true, false)
+            .unwrap();
     }
 
     /// A judge that has seen the replica hold every commit: any age trip is false to it.
