@@ -408,18 +408,50 @@ fn an_age_trip_while_every_read_of_the_replica_lies_is_excused() {
     );
 }
 
-
 /// A trip the judge accepted holds until the commits it tripped on reach the replica, not until
 /// the age falls under the bound (`lsr_core::failstop`, Clearing). A clock stepped back after
 /// the trip makes the age on the clock the engine reads shorter than the bound, and the engine's
 /// trip stands all the same: that is the module's rule, not a trip that came early.
 #[test]
 fn a_trip_stands_when_the_clock_steps_back_under_the_bound() {
-    let mut ops = vec![down(StoreOp::Upload, timeout(StoreOp::Upload)), commit(), Op::Tick];
+    let mut ops = vec![
+        down(StoreOp::Upload, timeout(StoreOp::Upload)),
+        commit(),
+        Op::Tick,
+    ];
     ops.push(Op::ClockJump(BOUND + 10_000));
     ops.extend(ticks(3));
     ops.push(Op::ClockJump(-100_000));
     ops.extend(ticks(3));
     let report = run(&ops);
     assert!(age_trips(&report) > 0, "{:?}", report.trips);
+}
+
+/// The store refuses conditional writes, so nothing uploads, and the application writes
+/// nothing after its first transaction. A boot with its staging directory lost finds the
+/// database equal to the replica and stages a snapshot that holds no commit. A day-long clock
+/// step later, fail-stop must not trip: no commit of the application is off the replica (#345).
+fn no_conditional_writes() -> Opts {
+    Opts {
+        no_create_only: true,
+        allow_stop: true,
+        ..Opts::default()
+    }
+}
+
+/// The eight operations of #345: two snapshots with no commit in them, a second writer, and a
+/// restart before the day-long step.
+#[test]
+fn two_no_commit_snapshots_and_a_second_writer_never_trip_the_age_bound() {
+    let ops = [
+        Op::Shutdown,
+        Op::EnvFault(lsr_sim::EnvFault::WipeStaging),
+        Op::SecondWriter { ticks: 3 },
+        Op::Tick,
+        Op::RequestSnapshot,
+        Op::Tick,
+        Op::SecondWriter { ticks: 6 },
+        Op::ClockJump(93_600_000),
+    ];
+    run_with(&ops, &no_conditional_writes());
 }

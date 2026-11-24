@@ -1215,10 +1215,11 @@ impl Actor {
         let cause = boot_cause(dropped, refused, from.err());
         let staged = newest_staged.map(|newest_staged| newest_staged.txid());
         let course = boot_course(from, cause, self.kept.asked(), staged);
-        let (pages, quiet) = match boot_seed(env.staging, &course, upload.confirmed()).await {
-            Ok(seeded) => seeded,
-            Err(fault) => return self.boot_failed(fault, now),
-        };
+        let (pages, quiet) =
+            match boot_seed(env.staging, env.remote, &course, upload.confirmed()).await {
+                Ok(seeded) => seeded,
+                Err(fault) => return self.boot_failed(fault, now),
+            };
         self.quiet_at_boot(quiet);
         // Every step succeeded: the engine is assigned whole.
         self.engine = Engine {
@@ -2833,8 +2834,9 @@ struct Judged {
 /// reads. The quiet files are found for every course: a pending file that holds no commit
 /// stays no commit when this boot takes a snapshot of its own, and dated by its stamp it would
 /// trip the age bound after a long pause.
-async fn boot_seed<L: Role>(
+async fn boot_seed<L: Role, R: Role>(
     staging: &L,
+    remote: &R,
     course: &Course,
     confirmed: Option<Txid>,
 ) -> Result<(PageChecksumTable, BTreeSet<Txid>), Fault> {
@@ -2844,14 +2846,16 @@ async fn boot_seed<L: Role>(
             snapshot: None,
             ..
         } => {
-            let seeded = seeded(staging, confirmed, position.commit()).await?;
+            let mut seeded = seeded(staging, confirmed, position.commit()).await?;
+            seeded.place(remote, confirmed).await?;
             Ok((seeded.table, seeded.quiet))
         }
         Course::At {
             snapshot: Some(_), ..
         }
         | Course::Snapshot { .. } => {
-            let seeded = seeded(staging, confirmed, NonZeroU32::MIN).await?;
+            let mut seeded = seeded(staging, confirmed, NonZeroU32::MIN).await?;
+            seeded.place(remote, confirmed).await?;
             Ok((PageChecksumTable::new(), seeded.quiet))
         }
         Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),

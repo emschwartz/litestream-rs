@@ -819,7 +819,9 @@ impl Runner {
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
         if booting && self.w.staged_level_zero().is_empty() {
-            self.restore_files = self.restore_files.saturating_add(self.w.remote_file_count());
+            self.restore_files = self
+                .restore_files
+                .saturating_add(self.w.remote_file_count());
         }
         let held = self.holding_writes();
         self.forcings_before_tick();
