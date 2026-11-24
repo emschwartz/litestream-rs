@@ -390,18 +390,21 @@ fn open_reader<W: WalSource>(wal: &mut W) -> Result<Option<WalReader<W::Wal>>, F
     }
 }
 
-/// What `recover` reads of the WAL besides the reader.
-fn wal_view<W: WalSource, R: std::io::Read + std::io::Seek>(
-    wal: &mut W,
+/// What `recover` reads of the WAL besides the reader. `len` is the file's length read by the
+/// caller, before the reads it goes with: a boot awaits the store between its reads, and an
+/// application's TRUNCATE checkpoint that lands in between would otherwise show a file shorter
+/// than the header it names, which recovery takes for a power loss.
+fn wal_view<R: std::io::Read + std::io::Seek>(
+    len: Option<WalFileLen>,
     reader: Option<&WalReader<R>>,
     committed: CommittedRead,
-) -> Result<WalView, Fault> {
-    Ok(WalView {
+) -> WalView {
+    WalView {
         header: reader.map(|reader| *reader.header()),
-        len: wal.len().map_err(Fault::from_source)?,
+        len,
         committed: Some(committed),
         epoch: committed.epoch(),
-    })
+    }
 }
 
 impl Actor {
@@ -1588,7 +1591,8 @@ impl Actor {
         position: &Position,
     ) -> Result<Result<Step, Stepped>, Fault> {
         let probes = Probes::read_against(reader, position, &committed)?;
-        let view = wal_view(wal, Some(&*reader), committed)?;
+        let len = wal.len().map_err(Fault::from_source)?;
+        let view = wal_view(len, Some(&*reader), committed);
         let source = PositionSource::Running(position, probes);
         let verdict = recover_traced(Some(source), &view, self.engine.upload.confirmed());
         Ok(step_of(self.noted(verdict)))
@@ -1635,7 +1639,8 @@ impl Actor {
         let (None, Some(position)) = (self.pending(), self.position()) else {
             return Err(Fault::WalMoved);
         };
-        let view = wal_view::<W, W::Wal>(wal, None, committed)?;
+        let len = wal.len().map_err(Fault::from_source)?;
+        let view = wal_view::<W::Wal>(len, None, committed);
         // With no header, recovery decides before it looks at the probes.
         let probes = Probes {
             prev: FrameCheck::Miss(Miss::Truncated),
@@ -2809,10 +2814,20 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     upload: UploadState,
     gate: BootGate,
 ) -> Result<Judged, BootStep> {
+    // The length first: a file that shrinks after it shows in the header or the wal-index read
+    // after it (a missing WAL, a new generation), never as a short file.
+    let len = env.wal.len().map_err(Fault::from_source)?;
     let committed = env.wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(env.wal)?;
     let (pending, upload) = boot_witness(env.staging, env.remote, upload, gate).await?;
-    let booted = boot_recover(env, reader.as_mut(), committed, upload.confirmed(), gate).await?;
+    let booted = boot_recover(
+        env,
+        reader.as_mut(),
+        (len, committed),
+        upload.confirmed(),
+        gate,
+    )
+    .await?;
     Ok(Judged {
         pending,
         upload,
@@ -2837,7 +2852,7 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
 async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     mut reader: Option<&mut WalReader<W::Wal>>,
-    committed: CommittedRead,
+    (len, committed): (Option<WalFileLen>, CommittedRead),
     confirmed: Option<Txid>,
     gate: BootGate,
 ) -> Result<Booted, Fault> {
@@ -2861,7 +2876,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
         }
         None => None,
     };
-    let view = wal_view(env.wal, reader.as_deref(), committed)?;
+    let view = wal_view(len, reader.as_deref(), committed);
     let vouched = tip_file.as_ref().is_some_and(|file| {
         let verdict = recover_traced(Some(PositionSource::Boot(file)), &view, confirmed);
         matches!(
@@ -2901,6 +2916,26 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
             .recovered
         }
     };
+    // The reader reads the file as the boot goes, so a TRUNCATE checkpoint that lands during
+    // the boot shows as frames gone from a file that is now shorter than the one the boot
+    // statted first: what a power loss leaves, with no power loss. The boot judges the WAL
+    // again, and finds the file empty or in a new generation.
+    if matches!(
+        recovered,
+        Recovered::Snapshot {
+            cause: SnapshotCause::LocalRewound { .. },
+            ..
+        }
+    ) && let Some(was) = len
+        && env
+            .wal
+            .len()
+            .map_err(Fault::from_source)?
+            .map_or(0, WalFileLen::bytes)
+            < was.bytes()
+    {
+        return Err(Fault::WalMoved);
+    }
     Ok(Booted {
         newest_staged,
         recovered,
