@@ -316,6 +316,8 @@ struct Runner {
     // The S3 replica's refusals judged so far: provider faults fired, delete keys refused, and
     // every other store fault fired (one may mask a refusal in the same tick).
     denials_seen: (usize, u64, u64),
+    // Every read of the replica lies: a [`Hold::LyingReads`] is in place.
+    reads_lying: bool,
     rng: SeededEntropy,
     // Where an in-tick commit lands under the each-read clock law.
     sites: SeededEntropy,
@@ -494,6 +496,7 @@ impl Runner {
             actor: Actor::new(actor_config()),
             rng: SeededEntropy::new(seed.stream(11)),
             denials_seen: (0, 0, 0),
+            reads_lying: false,
             sites: SeededEntropy::new(seed.stream(19)),
             slew: None,
             overlap: None,

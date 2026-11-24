@@ -1521,7 +1521,7 @@ impl Actor {
             self.engine.course.set_tail(Tail::More);
             return Ok(Stepped::Held);
         }
-        let (mut reader, committed) = match self.open_wal(env)? {
+        let (mut reader, committed, len) = match self.open_wal(env)? {
             Ok(opened) => opened,
             Err(verdict) => return Ok(verdict),
         };
@@ -1532,7 +1532,7 @@ impl Actor {
             return Err(Fault::PageSizeChanged { was, now: size });
         }
         self.engine.page_size = Some(size);
-        let step = match self.plan_step(env.wal, &mut reader, committed)? {
+        let step = match self.plan_step(len, &mut reader, committed)? {
             Ok(step) => step,
             Err(verdict) => return Ok(verdict),
         };
@@ -1552,10 +1552,10 @@ impl Actor {
         Ok(self.absorb(synced, committed.end(), &*env.wal))
     }
 
-    fn plan_step<W: WalSource>(
+    fn plan_step<R: std::io::Read + std::io::Seek>(
         &mut self,
-        wal: &mut W,
-        reader: &mut WalReader<W::Wal>,
+        len: Option<WalFileLen>,
+        reader: &mut WalReader<R>,
         committed: CommittedRead,
     ) -> Result<Result<Step, Stepped>, Fault> {
         match (self.pending(), self.position()) {
@@ -1564,7 +1564,7 @@ impl Actor {
             // position: recovery first, and a verdict (a WAL that moved
             // under the position) replaces the cause with one that clears it.
             (Some(cause), Some(position)) if !snapshot_clears(&cause) => Ok(self
-                .recovered(wal, reader, committed, &position)?
+                .recovered(len, reader, committed, &position)?
                 .map(|_| Step::Snapshot {
                     after: self.snapshot_after(),
                     prev_timestamp: Some(position.timestamp()),
@@ -1575,7 +1575,7 @@ impl Actor {
                 prev_timestamp: position.map(|position| position.timestamp()),
                 cause,
             })),
-            (None, Some(position)) => self.recovered(wal, reader, committed, &position),
+            (None, Some(position)) => self.recovered(len, reader, committed, &position),
             // Unreachable by construction: no position means a `Course`
             // that names a snapshot's cause. Retried as the WAL having moved.
             (None, None) => Err(Fault::WalMoved),
@@ -1583,15 +1583,14 @@ impl Actor {
     }
 
     /// What recovery makes of the WAL past a running position.
-    fn recovered<W: WalSource>(
+    fn recovered<R: std::io::Read + std::io::Seek>(
         &mut self,
-        wal: &mut W,
-        reader: &mut WalReader<W::Wal>,
+        len: Option<WalFileLen>,
+        reader: &mut WalReader<R>,
         committed: CommittedRead,
         position: &Position,
     ) -> Result<Result<Step, Stepped>, Fault> {
         let probes = Probes::read_against(reader, position, &committed)?;
-        let len = wal.len().map_err(Fault::from_source)?;
         let view = wal_view(len, Some(&*reader), committed);
         let source = PositionSource::Running(position, probes);
         let verdict = recover_traced(Some(source), &view, self.engine.upload.confirmed());
@@ -1616,31 +1615,37 @@ impl Actor {
     fn open_wal<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
-    ) -> Result<Result<(WalReader<W::Wal>, CommittedRead), Stepped>, Fault> {
+    ) -> Result<Result<(WalReader<W::Wal>, CommittedRead, Option<WalFileLen>), Stepped>, Fault>
+    {
+        // The length first, as the boot reads it: a file an application's TRUNCATE checkpoint
+        // empties after it shows in the wal-index or header read below (a missing WAL, a new
+        // generation), never as a file shorter than the header, which recovery takes for a power
+        // loss.
+        let len = env.wal.len().map_err(Fault::from_source)?;
         let committed = env.wal.committed().map_err(Fault::from_source)?;
         if let Some(reader) = open_reader(env.wal)? {
-            return Ok(Ok((reader, committed)));
+            return Ok(Ok((reader, committed, len)));
         }
         if self.pending().is_none() {
-            return self.without_wal(env.wal, committed).map(Err);
+            return self.without_wal(len, committed).map(Err);
         }
         env.ck.bump_seq().map_err(Fault::from_source)?;
+        let len = env.wal.len().map_err(Fault::from_source)?;
         let committed = env.wal.committed().map_err(Fault::from_source)?;
         let reader = open_reader(env.wal)?.ok_or(Fault::WalMoved)?;
-        Ok(Ok((reader, committed)))
+        Ok(Ok((reader, committed, len)))
     }
 
     /// No readable WAL and no snapshot pending: recovery classifies the loss.
-    fn without_wal<W: WalSource>(
+    fn without_wal(
         &mut self,
-        wal: &mut W,
+        len: Option<WalFileLen>,
         committed: CommittedRead,
     ) -> Result<Stepped, Fault> {
         let (None, Some(position)) = (self.pending(), self.position()) else {
             return Err(Fault::WalMoved);
         };
-        let len = wal.len().map_err(Fault::from_source)?;
-        let view = wal_view::<W::Wal>(len, None, committed);
+        let view = wal_view::<std::io::Cursor<Vec<u8>>>(len, None, committed);
         // With no header, recovery decides before it looks at the probes.
         let probes = Probes {
             prev: FrameCheck::Miss(Miss::Truncated),
@@ -2792,7 +2797,9 @@ struct Judged {
 
 /// The page table and the quiet files a boot starts with. Only a boot that continues seeds
 /// the table, from the staged files boot already verified: a snapshot records every page it
-/// reads.
+/// reads. The quiet files are found for every course: a pending file that holds no commit
+/// stays no commit when this boot takes a snapshot of its own, and dated by its stamp it would
+/// trip the age bound after a long pause.
 async fn boot_seed<L: Role>(
     staging: &L,
     course: &Course,
@@ -2810,8 +2817,11 @@ async fn boot_seed<L: Role>(
         Course::At {
             snapshot: Some(_), ..
         }
-        | Course::Snapshot { .. }
-        | Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),
+        | Course::Snapshot { .. } => {
+            let seeded = seeded(staging, confirmed, NonZeroU32::MIN).await?;
+            Ok((PageChecksumTable::new(), seeded.quiet))
+        }
+        Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),
     }
 }
 
