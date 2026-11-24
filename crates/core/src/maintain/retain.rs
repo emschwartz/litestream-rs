@@ -662,8 +662,11 @@ pub(super) struct ShortZero {
 /// history. Its deletes are a subset of what [`retention`] on the whole listing would delete,
 /// when that listing's gate is clear. Every difference from the full rule only keeps more:
 ///
-/// - The anchor is the newest created-at time among the last level-0 file and the snapshot
-///   starts, files the full anchor also reads, so it is never above the full one.
+/// - The anchor is the newest created-at time among the last level-0 file, the snapshot
+///   starts and `known`, the newest file this engine knows at each level 1 to 8 (a listed
+///   one or a remembered one): the files the full anchor reads. A remembered file is read for
+///   its age only, never as a cover. Without it the anchor could sit below the full one, and
+///   the rules are not monotone in the anchor (see the module doc).
 /// - The floor comes from every snapshot, as in the full rule (level 9 is listed whole).
 /// - A level-0 file counts as covered only by a *listed* level 1 to 8 file that stays
 ///   (its last transaction is at or above the floor). The full rule's covers are all files
@@ -680,13 +683,14 @@ pub(super) struct ShortZero {
 /// `short` argues why that is enough.
 pub(super) fn short_level_zero(
     listed: &Inventory,
+    known: &[FileInfo],
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
     state: &MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<ShortZero> {
-    match short_decide(listed, now, config, published, state, resolved) {
+    match short_decide(listed, known, now, config, published, state, resolved) {
         Ok(zero) => Resolve::Done(zero),
         Err(file) => Resolve::Need(file),
     }
@@ -694,6 +698,7 @@ pub(super) fn short_level_zero(
 
 fn short_decide(
     listed: &Inventory,
+    known: &[FileInfo],
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
@@ -719,7 +724,9 @@ fn short_decide(
     let snaps = snapshots(listed);
     let mut anchors: Vec<FileInfo> = vec![*last_zero];
     anchors.extend(snaps.iter().map(|info| **info));
+    anchors.extend(known.iter().copied());
     anchors.sort_by_key(|info| info.key);
+    anchors.dedup_by_key(|info| info.key);
     let mut missing = anchors.iter().filter(|info| resolved.exact(info).is_none());
     if let Some(first) = missing.next() {
         return Err(Need::with_ahead(*first, missing.copied()));

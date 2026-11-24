@@ -794,6 +794,9 @@ impl Actor {
             .map_or((EngineClock::start(now), false), |clock| clock.read(now));
         self.kept.clock = Some(clock);
         if stepped {
+            // The 15-minute backstop for a whole listing runs on engine time, which holds and
+            // then slews after a step back: the next pass lists everything rather than wait.
+            self.engine.maintain.remembered.owe_full();
             return Err(Clamped {
                 prev: clock.now(),
                 now,

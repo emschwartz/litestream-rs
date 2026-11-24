@@ -9,6 +9,18 @@ use crate::maintain::tests::{T0, at, defaults, file, level, txid};
 use crate::mem::MemStore;
 use crate::store::{Upload, WriteMode};
 
+/// A plan that wants everything listed, as a pass right after a whole listing does.
+fn everything(config: &Maintenance) -> Plan {
+    Plan {
+        active: compaction_levels(config).collect(),
+        snapshot: true,
+        retention: matches!(
+            (config.retention(), config.l0_retention()),
+            (RetentionMode::Enforce, L0Retention::After(_))
+        ),
+    }
+}
+
 fn range(min: u64, max: u64) -> TxidRange {
     TxidRange::new(txid(min), txid(max)).unwrap()
 }
@@ -23,7 +35,7 @@ fn after(starts: &[ListAt], n: u8) -> Option<Option<TxidRange>> {
 
 #[test]
 fn a_replica_nothing_is_known_of_is_listed_from_the_first_file_at_every_level() {
-    let starts = Remembered::default().starts(&defaults());
+    let starts = Remembered::default().starts(&defaults(), &everything(&defaults()));
     let levels: Vec<u8> = starts.iter().map(|at| at.level.get()).collect();
     assert_eq!(levels, vec![0, 1, 2, 3, 9]);
     assert!(starts.iter().all(|at| at.after.is_none()));
@@ -38,7 +50,7 @@ fn each_level_is_listed_after_the_lowest_key_its_decisions_need() {
     known.note(file(2, 51, 80, T0));
     known.note(file(3, 1, 40, T0));
     known.cover = Some(range(61, 70));
-    let starts = known.starts(&defaults());
+    let starts = known.starts(&defaults(), &everything(&defaults()));
     // Level 1: its newest (91, 100), the cover (61, 70), and level 2's last transaction (80, 80).
     assert_eq!(after(&starts, 1), Some(Some(range(61, 70))));
     // Level 2: its newest (51, 80) and level 3's last transaction (40, 40).
@@ -62,7 +74,10 @@ fn the_cover_cursor_is_left_out_when_level_zero_is_kept() {
     let mut known = Remembered::default();
     known.note(file(1, 91, 100, T0));
     known.cover = Some(range(1, 10));
-    assert_eq!(after(&known.starts(&keep), 1), Some(Some(range(91, 100))));
+    assert_eq!(
+        after(&known.starts(&keep, &everything(&keep)), 1),
+        Some(Some(range(91, 100)))
+    );
 }
 
 /// The cursor is the key of the last file of the prefix that ends below `first_zero`.
@@ -155,7 +170,15 @@ fn decided(store: &MemStore, known: &Remembered, now: i64) -> ShortDecided {
         L0Retention::After(std::time::Duration::from_secs(300)),
     )
     .unwrap();
-    let tail = block_on(Tail::load(store, known, &cfg)).unwrap();
+    let tail = block_on(Tail::load(
+        store,
+        known,
+        &cfg,
+        everything(&cfg),
+        at(now),
+        None,
+    ))
+    .unwrap();
     let state = MaintainState::default();
     let got = block_on(crate::created_at::resolve(
         store,
@@ -238,4 +261,75 @@ fn forgetting_makes_the_next_pass_whole() {
     known.learn_full(&inventory, at(T0), &defaults(), &waking);
     assert!(known.short_ok(at(T0 + 4_999)));
     assert!(!known.short_ok(at(T0 + 5_000)));
+}
+
+fn waiting() -> Decided {
+    Decided {
+        due: Due::Wait {
+            until: None,
+            held: None,
+        },
+        gate: Gate::Clear,
+        retention_wake: None,
+    }
+}
+
+/// A whole listing replaces what was remembered: a level it finds empty (another process
+/// emptied it) has no record afterwards, so the next short pass lists it from its first page.
+#[test]
+fn a_whole_listing_that_finds_a_level_empty_forgets_its_record() {
+    let mut known = Remembered::default();
+    let before = Inventory::from_files([file(0, 1, 1, T0), file(1, 1, 5, T0)]).unwrap();
+    known.learn_full(&before, at(T0), &defaults(), &waiting());
+    assert_eq!(known.newest_txid(1), Some(txid(5)));
+    let after = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    known.learn_full(&after, at(T0 + 1), &defaults(), &waiting());
+    assert_eq!(known.newest_txid(1), None);
+    assert_eq!(
+        after_of(&known.starts(&defaults(), &everything(&defaults())), 1),
+        Some(None)
+    );
+}
+
+fn after_of(starts: &[ListAt], n: u8) -> Option<Option<TxidRange>> {
+    starts
+        .iter()
+        .find(|at| at.level == level(n))
+        .map(|at| at.after)
+}
+
+/// The levels above the configured top are remembered too: the retention anchor reads their
+/// newest file.
+#[test]
+fn the_newest_file_of_every_level_to_eight_is_remembered_for_the_anchor() {
+    let mut known = Remembered::default();
+    let inventory = Inventory::from_files([file(0, 1, 1, T0), file(7, 1, 1, T0)]).unwrap();
+    known.learn_full(&inventory, at(T0), &defaults(), &waiting());
+    assert_eq!(known.newest_txid(7), Some(txid(1)));
+}
+
+/// A whole listing whose job is a compaction says nothing about when retention is next due, so
+/// the wake an earlier one found stands: the short passes still end at it.
+#[test]
+fn a_compaction_first_does_not_lose_the_retention_wake() {
+    let mut known = Remembered::default();
+    let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let waking = Decided {
+        retention_wake: Some(at(T0 + 5_000)),
+        ..waiting()
+    };
+    known.learn_full(&inventory, at(T0), &defaults(), &waking);
+    let inputs = crate::compact::CompactionInputs::new(vec![file(0, 1, 1, T0)]).unwrap();
+    let job = crate::maintain::CompactJob::new(inputs, level(1)).unwrap();
+    let compacting = Decided {
+        due: Due::Run(Job::Compact(job)),
+        gate: Gate::Clear,
+        retention_wake: None,
+    };
+    known.learn_full(&inventory, at(T0 + 1_000), &defaults(), &compacting);
+    assert!(known.short_ok(at(T0 + 4_999)));
+    assert!(
+        !known.short_ok(at(T0 + 5_000)),
+        "the wake was lost: a short pass runs past the time retention is due"
+    );
 }

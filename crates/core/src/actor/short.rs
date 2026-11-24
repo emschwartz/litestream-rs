@@ -30,22 +30,50 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
+        let confirmed = self.engine.upload.confirmed();
+        let (plan, wake) = {
+            let (remembered, cfg) = (&self.engine.maintain.remembered, &self.kept.cfg.maintenance);
+            (
+                remembered.plan(cfg, now, confirmed),
+                remembered.next_wake(cfg, now),
+            )
+        };
+        if plan.is_empty() {
+            // Nothing is due, or nothing a listing could change: a pass that asks for no request.
+            let maintain = &mut self.engine.maintain;
+            maintain.remembered.settle();
+            maintain.stale = false;
+            return self
+                .act_on(
+                    env,
+                    Due::Wait {
+                        until: wake,
+                        held: None,
+                    },
+                    Some(wake),
+                    0,
+                    now,
+                )
+                .await;
+        }
         let loaded = Tail::load(
             env.remote,
             &self.engine.maintain.remembered,
             &self.kept.cfg.maintenance,
+            plan,
+            now,
+            confirmed,
         )
         .await;
         let tail = match loaded.map_err(|err| inventory_fault::<R>(&err)) {
             Ok(tail) => tail,
             Err(fault) => return self.fault(Task::Maintenance, fault, now),
         };
-        let confirmed = self.engine.upload.confirmed();
         let listed = tail.newest_listed();
         if listed > self.staged().max(confirmed) {
             return self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now);
         }
-        if listed < confirmed {
+        if listed < tail.baseline() {
             return self.fault(Task::Upload, Fault::RemoteRegressed, now);
         }
         let decided = {
@@ -61,15 +89,26 @@ impl Actor {
                 return self.fault(Task::Maintenance, Fault::from_created_at(&err), now);
             }
         };
-        let ShortDecided {
-            due,
-            settled_min,
-            until,
-        } = decided.value;
         let maintain = &mut self.engine.maintain;
-        maintain
+        maintain.remembered.learn_short(
+            &tail,
+            &self.kept.cfg.maintenance,
+            &decided.value,
+            now,
+            confirmed,
+        );
+        let wake = maintain
             .remembered
-            .learn_short(&tail, &self.kept.cfg.maintenance, settled_min);
+            .next_wake(&self.kept.cfg.maintenance, now);
+        let ShortDecided { due, until, .. } = decided.value;
+        let until = [until, wake].into_iter().flatten().min();
+        let due = match due {
+            Due::Wait { until: wait, held } => Due::Wait {
+                until: [wait, wake].into_iter().flatten().min(),
+                held,
+            },
+            run @ Due::Run(_) => run,
+        };
         maintain.stale = false;
         maintain.passed_over = 0;
         maintain.snapshot_waits = false;
@@ -118,7 +157,7 @@ impl Actor {
                     self.engine.maintain.remembered.owe_full();
                 }
                 let tick = self.run_job(env, &job, now, created_at_read).await;
-                self.after_job(&job, &tick, after_delete);
+                self.after_job(&job, &tick, after_delete, now);
                 tick
             }
         }
@@ -127,7 +166,13 @@ impl Actor {
     /// What a finished job teaches the remembered files: a compaction's output is the newest
     /// file of its level, and a short pass's level-0 delete, when it was not cut at the
     /// delete limit, leaves nothing more to plan until the next file ages.
-    fn after_job(&mut self, job: &Job, tick: &Tick, after_delete: Option<Option<Timestamp>>) {
+    pub(super) fn after_job(
+        &mut self,
+        job: &Job,
+        tick: &Tick,
+        after_delete: Option<Option<Timestamp>>,
+        now: Timestamp,
+    ) {
         let Tick::Ran {
             event: Event::Maintained { event, .. },
             ..
@@ -136,7 +181,13 @@ impl Actor {
             return;
         };
         match (event, job) {
-            (MaintainedEvent::Compacted(info), _) => self.engine.maintain.remembered.note(*info),
+            (MaintainedEvent::Compacted(info), _) => {
+                let cfg = &self.kept.cfg.maintenance;
+                self.engine.maintain.remembered.note_output(*info, cfg, now);
+            }
+            // An input is gone, or the output's key already holds an object the listing did not
+            // show: someone else is changing the replica, and the next listing is a whole one.
+            (MaintainedEvent::Replan, _) => self.engine.maintain.remembered.owe_full(),
             (MaintainedEvent::Deleted(count), Job::Delete(_)) if *count < MAX_DELETE => {
                 if let Some(until) = after_delete {
                     self.engine.maintain.stale = false;

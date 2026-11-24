@@ -132,6 +132,36 @@ impl Inventory {
         Self::from_parts(files.into_iter().collect(), BTreeMap::new())
     }
 
+    /// This inventory with the files and unrecognized-name counts of `levels` taken from
+    /// `fetched` instead: a kept listing refreshed where a newer one was made.
+    ///
+    /// # Errors
+    /// As [`Self::from_files`].
+    pub(crate) fn replacing_levels(
+        &self,
+        levels: &[Level],
+        fetched: &Self,
+    ) -> Result<Self, InventoryError> {
+        let kept = self
+            .files
+            .iter()
+            .filter(|info| !levels.contains(&info.key.level()))
+            .chain(fetched.files.iter())
+            .copied()
+            .collect();
+        let mut skipped: BTreeMap<Level, usize> = self
+            .skipped
+            .iter()
+            .filter(|(level, _)| !levels.contains(level))
+            .map(|(level, count)| (*level, *count))
+            .collect();
+        for (level, count) in &fetched.skipped {
+            let entry = skipped.entry(*level).or_default();
+            *entry = entry.saturating_add(*count);
+        }
+        Self::from_parts(kept, skipped)
+    }
+
     /// Records the unrecognized names a level held, as a store's listings counted them.
     #[must_use]
     pub fn with_skipped(mut self, level: Level, count: usize) -> Self {

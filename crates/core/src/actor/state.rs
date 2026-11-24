@@ -450,6 +450,8 @@ impl Actor {
     pub fn set_retention(&mut self, retention: RetentionMode) {
         self.kept.cfg.maintenance.set_retention(retention);
         self.engine.maintain.stale = true;
+        // What was remembered was decided under the old setting.
+        self.engine.maintain.remembered.owe_full();
     }
 
     /// Whether retention deletes anything right now.
