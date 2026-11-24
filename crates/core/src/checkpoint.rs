@@ -605,20 +605,23 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
     }
 
     /// Everything SQLite backfilled and truncated is in the database file or the new generation:
-    /// snapshot it under the write lock so no commit slips between the two. The database file
-    /// may hold a commit no step staged (one that landed between the proof and the TRUNCATE),
-    /// so the snapshot does not check its pages against the page table (`pages::snapshot_clears`).
+    /// snapshot both. The database file may hold a commit no step staged (one that landed
+    /// between the proof and the TRUNCATE), so the snapshot does not check its pages against the
+    /// page table (`pages::snapshot_clears`).
+    ///
+    /// No write lock is held, so the application keeps committing during the copy (see
+    /// docs/decisions/D190.md). The read transaction retaken inside the checkpoint is what keeps the copy
+    /// whole: on read mark 0 it makes every backfill busy, so the database file does not change;
+    /// on a mark above 0 a backfill reaches no further than that mark, at or below the
+    /// committed end the snapshot reads after it, so every page a backfill may write is taken
+    /// from its WAL frame and never from the file. Commits after that end are the next step's.
     async fn boundary_snapshot(&mut self) -> Result<(), Fault> {
-        let lock = self.ck.begin_write_lock().map_err(Fault::from_source)?;
         let snapshot = Step::Snapshot {
             after: Some(self.position().txid()),
             prev_timestamp: Some(self.position().timestamp()),
             cause: SnapshotCause::CheckpointBoundary,
         };
-        let stepped = self.step(snapshot).await;
-        let released = self.ck.end_write_lock(lock);
-        stepped?;
-        released.map_err(Fault::from_source)
+        self.step(snapshot).await
     }
 }
 
@@ -628,7 +631,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
 /// last step reached the committed end: it carries the position, so a stale
 /// one cannot be passed. A PASSIVE seals, checkpoints under a write barrier,
 /// and follows a restarted WAL; a TRUNCATE checkpoints and, when the WAL
-/// changed, snapshots under the write lock. Every barrier or lock taken is
+/// changed, snapshots the database without blocking writers. Every barrier taken is
 /// released first on a fault, and a failed release never replaces that fault.
 /// Each staged file's created-at time is read from `clock` after that step's
 /// committed read (`Env::clock`).
