@@ -4,8 +4,9 @@
 //! so the two runs draw the same operations). A seed that fails on both is an engine defect
 //! judged where `MemStore` runs, and is left out; most seeds must still run.
 
-use lsr_sim::generate::{DenialCode, HttpFault, HttpShape, Op};
+use lsr_sim::generate::{DenialCode, Hold, HttpFault, HttpShape, Op, WalOp};
 use lsr_sim::run::run_ops;
+use lsr_sim::{ClockLaw, CrashKind};
 use lsr_sim::{Opts, Seed, Weights, replay_line, run_with};
 
 const STEPS: u32 = 120;
@@ -70,4 +71,44 @@ fn a_refused_upload_is_reported_as_what_the_operator_must_fix() {
             "{code:?}: the refusal was met and judged"
         );
     }
+}
+
+/// A refused HEAD that only a batched created-at read-ahead met, which the engine drops by
+/// design, while a task stands degraded on a damaged WAL: the engine is loud about the WAL, and
+/// owes no report of a request nothing waited on. The judge must not take the standing
+/// degradation for the failure of that request.
+#[test]
+fn a_dropped_read_ahead_refusal_is_not_owed_a_report_beside_a_standing_wal_fault() {
+    let ops = [
+        // A long run of ticks over a growing replica, with the WAL regrown under the engine.
+        Op::Hold {
+            hold: Hold::Wal(WalOp::RegrowSameSalts(11_888_806_653_224_795_474)),
+            ticks: 102,
+        },
+        Op::Crash(CrashKind::Process),
+        Op::HttpFault(HttpFault::Denied(
+            HttpShape::Head,
+            DenialCode::AllAccessDisabled,
+        )),
+        Op::WalDamage {
+            op: WalOp::FlipLastFrameBit,
+            ticks: 3,
+        },
+    ];
+    let opts = Opts {
+        remote_s3: true,
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        clock_law: ClockLaw::EachRead,
+        overlap: true,
+        truncate_pages: std::num::NonZeroU32::new(2),
+        ..Opts::default()
+    };
+    let report = run_ops(Seed::new(2), &ops, &opts).unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        report.reach.get("http_fault.denial_read_ahead"),
+        1,
+        "the refused HEAD was met and judged as a dropped read-ahead"
+    );
 }

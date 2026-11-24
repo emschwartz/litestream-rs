@@ -2792,7 +2792,9 @@ struct Judged {
 
 /// The page table and the quiet files a boot starts with. Only a boot that continues seeds
 /// the table, from the staged files boot already verified: a snapshot records every page it
-/// reads.
+/// reads. The quiet files are found for every course: a pending file that holds no commit
+/// stays no commit when this boot takes a snapshot of its own, and dated by its stamp it would
+/// trip the age bound after a long pause.
 async fn boot_seed<L: Role>(
     staging: &L,
     course: &Course,
@@ -2810,8 +2812,11 @@ async fn boot_seed<L: Role>(
         Course::At {
             snapshot: Some(_), ..
         }
-        | Course::Snapshot { .. }
-        | Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),
+        | Course::Snapshot { .. } => {
+            let seeded = seeded(staging, confirmed, NonZeroU32::MIN).await?;
+            Ok((PageChecksumTable::new(), seeded.quiet))
+        }
+        Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),
     }
 }
 

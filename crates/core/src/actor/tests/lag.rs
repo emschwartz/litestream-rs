@@ -392,6 +392,35 @@ fn an_operator_snapshot_while_caught_up_is_not_lag() {
     assert_eq!(first_trip(&seen), None, "{seen:?}");
 }
 
+/// An operator's snapshot staged while caught up holds no commit. A restart whose boot takes a
+/// snapshot of its own (the WAL restarted while the engine was down) must still find the older
+/// one quiet: dated by its stamp it would, after a long pause, trip for age over a replica that
+/// holds every commit.
+#[test]
+fn a_quiet_snapshot_stays_quiet_across_a_restart_that_takes_a_snapshot() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    rig.settle(&mut actor, T0);
+    remote_down(&rig, 10_000);
+    actor.request_snapshot();
+    rig.tick(&mut actor, T0 + 10);
+    assert!(
+        actor.staged() > actor.replicated(),
+        "the snapshot is staged, not uploaded"
+    );
+    rig.wal.force_restart();
+    let mut actor = Actor::new(go_like());
+    let later = T0 + 2 * BOUND;
+    rig.tick(&mut actor, later);
+    assert!(actor.booted());
+    assert_eq!(
+        actor.unreplicated_since(),
+        None,
+        "the boot found the earlier snapshot quiet"
+    );
+    assert_eq!(actor.trip(), None);
+}
+
 /// A boot that asks for a snapshot is judged once that snapshot is staged or its step fails:
 /// a stop the snapshot finds is a stop at boot, and holds an application not yet started.
 #[test]

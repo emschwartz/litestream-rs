@@ -54,6 +54,7 @@ impl Runner {
                     ..
                 })
             ),
+            reads_lying: self.reads_lying,
             unvouched_boot: matches!(
                 ended,
                 TickEnd::Done(Tick::Ran {
@@ -95,6 +96,9 @@ impl Runner {
         let now = self.fail_stop.excused();
         if now.unread_wal > was.unread_wal {
             self.report.reach.bump("failstop.excused.unread_wal");
+        }
+        if now.lying_reads > was.lying_reads {
+            self.report.reach.bump("failstop.excused.lying_reads");
         }
         if now.unvouched_snapshot > was.unvouched_snapshot {
             self.report
