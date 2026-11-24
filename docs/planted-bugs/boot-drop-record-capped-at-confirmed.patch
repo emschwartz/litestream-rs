@@ -1,9 +1,9 @@
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2592,7 +2592,7 @@ impl BootGate {
-         // `umin` out of `map` keeping its nonzero range attributes, InstCombine folds the
-         // `None` arm into it, and EarlyCSE then proves the result nonzero. `just test-opt` runs
-         // the scenarios that catch it.
+@@ -2599,7 +2599,7 @@ impl BootGate {
+         // (https://github.com/llvm/llvm-project/issues/245656, tracked for rustc at
+         // https://github.com/rust-lang/rust/issues/166505). `just test-opt` runs the scenarios
+         // that catch it.
 -        let Some(replica) = tip.max(listed) else {
 +        let Some(replica) = tip.max(listed.filter(|_| false)) else {
              return Ok(());
