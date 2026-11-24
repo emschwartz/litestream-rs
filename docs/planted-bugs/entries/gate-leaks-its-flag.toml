@@ -1,6 +1,7 @@
-# The fail-stop commit gate leaked one count of its flag per connection, and replaced an
-# application's commit hook without a word.
+# The fail-fast busy handler's state is never freed: each connection set up keeps one count of
+# the replicator's writes-held flag after it closes. Re-expressed against the busy handler that
+# replaced the commit hook (docs/decisions/D192.md).
 name = "gate-leaks-its-flag"
 fix = "70f61c6"
 package = "lsr-sqlite"
-tests = ["gate::tests::the_gate_is_freed_with_its_connection"]
+tests = ["gate::tests::the_handler_is_set_up_once_and_freed_with_its_connection"]

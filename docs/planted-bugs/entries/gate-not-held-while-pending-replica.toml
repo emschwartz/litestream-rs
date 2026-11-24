@@ -1,0 +1,6 @@
+name = "gate-not-held-while-pending-replica"
+patch = "gate-not-held-while-pending"
+fix = "plant"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["failstop::writes_are_held_while_the_boot_is_pending"]

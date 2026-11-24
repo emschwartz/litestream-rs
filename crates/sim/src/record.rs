@@ -365,6 +365,7 @@ fn source_error(err: SourceError) -> Result<String, Unprintable> {
         SourceError::FsyncFailed => "SourceError::FsyncFailed".to_owned(),
         SourceError::Busy => "SourceError::Busy".to_owned(),
         SourceError::ReadersHeld => "SourceError::ReadersHeld".to_owned(),
+        SourceError::WritesHeld => "SourceError::WritesHeld".to_owned(),
         SourceError::Unlinked => "SourceError::Unlinked".to_owned(),
         SourceError::ReadTxLost => "SourceError::ReadTxLost".to_owned(),
         SourceError::Short { pgno } => short(pgno)?,

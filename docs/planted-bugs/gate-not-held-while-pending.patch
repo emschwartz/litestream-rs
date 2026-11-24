@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/failstop.rs b/crates/core/src/failstop.rs
+--- a/crates/core/src/failstop.rs
++++ b/crates/core/src/failstop.rs
+@@ -166,9 +166,7 @@
+ pub const fn blocks_writes(mode: IfReplicationStops, gate: Gate) -> Option<WhyBlocked> {
+     match (gate, mode) {
+         (Gate::Held(trip), _) => Some(WhyBlocked::Tripped(trip)),
+-        (Gate::Pending, IfReplicationStops::HoldStart | IfReplicationStops::StopApp) => {
+-            Some(WhyBlocked::Booting)
+-        }
++        (Gate::Pending, IfReplicationStops::HoldStart | IfReplicationStops::StopApp) => None,
+         (Gate::Pending, IfReplicationStops::Report) | (Gate::Allowed, _) => None,
+     }
+ }

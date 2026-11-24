@@ -267,6 +267,14 @@ macro_rules! side {
 side! {
     /// What the driver does at process start.
     fn start_driver(&self);
+    /// The replicator's write gate takes the write lock; false while another connection writes, or from a backend that cannot hold one.
+    fn hold_writes(&self) -> bool;
+    /// The write gate lets writes through again.
+    fn release_writes(&self);
+    /// Whether the write gate holds the write lock now.
+    fn writes_held(&self) -> bool;
+    /// Whether a connection other than the write gate is in a write transaction now.
+    fn writer_busy(&self) -> bool;
     /// The engine's own commits (its sequence bumps) since the last call, oldest first; a backend that reports what it wrote has none.
     fn take_engine_commits(&self) -> Vec<AppCommit>;
     /// Our read transaction begins, outside a tick.

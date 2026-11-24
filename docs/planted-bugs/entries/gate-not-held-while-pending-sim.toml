@@ -1,0 +1,6 @@
+name = "gate-not-held-while-pending-sim"
+patch = "gate-not-held-while-pending"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::writes_held_while_the_boot_is_pending"]

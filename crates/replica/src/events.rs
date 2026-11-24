@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-use lsr_core::{AppCheckpoint, StopCause};
+use lsr_core::{AppCheckpoint, StopCause, WhyBlocked};
 use lsr_ltx::Txid;
 
 use crate::health::VerifyOutcome;
@@ -45,6 +45,16 @@ pub enum Event {
     },
     /// The engine stopped by a cause and waits for a person.
     Stopped(StopCause),
+    /// The replicator now holds the database's write lock, so every write, from any connection
+    /// in any process, fails with SQLite's "database is locked" (`SQLITE_BUSY`); reads go on.
+    /// Emitted when the lock is taken, and again if the reason changes while it is held.
+    /// `Health::writes` says the same at any time.
+    WritesBlocked {
+        /// Why writes are held.
+        why: WhyBlocked,
+    },
+    /// The replicator let go of the write lock it held: writes go through again.
+    WritesAllowed,
     /// The takeover record in the meta directory (`lsr-takeover`) could not be read or did not
     /// decode at start. It is ignored, as if there were none: the boot builds only on what the
     /// live WAL vouches for, and refuses the rest until `lsr trust-local` writes a sound record.

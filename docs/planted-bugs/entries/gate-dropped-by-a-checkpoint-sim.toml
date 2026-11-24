@@ -1,0 +1,8 @@
+# The simulator's SQLite model lets another process's checkpoint take the write lock away from
+# the replicator's gate. Proves the run's write-gate judge (crates/sim/src/run/write_gate.rs)
+# sees a hold that went away without a crash or a release.
+name = "gate-dropped-by-a-checkpoint-sim"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::writes_held_after_a_stop"]

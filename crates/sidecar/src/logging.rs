@@ -24,6 +24,7 @@ use lsr_core::Task;
 use lsr_core::{Clock, Event as EngineEvent};
 use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
+use crate::failstop;
 use crate::json::string as json_string;
 
 /// One field's value.
@@ -323,6 +324,12 @@ impl EventSink for DbEvents {
                 vec![("kind", debug(kind))],
             ),
             Event::Verified { txid, outcome } => verified_line(*txid, *outcome),
+            Event::WritesBlocked { why } => (
+                LogLevel::Warn,
+                failstop::WRITES_BLOCKED,
+                vec![("held_by", failstop::why_name(*why).into())],
+            ),
+            Event::WritesAllowed => (LogLevel::Info, failstop::WRITES_ALLOWED, vec![]),
         };
         let mut all = vec![db];
         all.extend(fields);
@@ -429,6 +436,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
                 ("error", debug(fault)),
                 ("retry_at", until.to_string().into()),
             ],
+        ),
+        EngineEvent::WritesHeld { until } => (
+            LogLevel::Debug,
+            "checkpoint waits while writes are blocked",
+            vec![("retry_at", until.to_string().into())],
         ),
         EngineEvent::Resnapshot(cause) => (
             LogLevel::Info,

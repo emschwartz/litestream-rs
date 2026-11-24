@@ -1,0 +1,12 @@
+diff --git a/crates/sqlite/src/gate.rs b/crates/sqlite/src/gate.rs
+--- a/crates/sqlite/src/gate.rs
++++ b/crates/sqlite/src/gate.rs
+@@ -108,7 +108,7 @@
+             Ok(())
+         } else {
+             self.conn
+-                .execute_batch("BEGIN IMMEDIATE")
++                .execute_batch("BEGIN")
+                 .map_err(|err| source_error(&err))
+         };
+         self.held.set(self.is_held());

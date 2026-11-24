@@ -47,6 +47,9 @@ pub enum EventMatch {
     Checkpointed(CheckpointMode),
     /// A step failed with a fault whose policy is to retry it.
     Retrying(FaultKind),
+    /// A step that writes to the database waited: the replicator held the application's
+    /// writes (`lsr_core::Fault::WritesHeld`).
+    WritesHeld,
     /// The clock read earlier than the last time used and was clamped.
     Clamped,
     /// The read-back after a boot deleted a file of this level that did not
@@ -100,7 +103,8 @@ impl Expect {
                 Self::Event(EventMatch::Retrying(want)),
                 Seen::Event(Event::Retrying { fault, .. }),
             ) => FaultKind::from(fault) == *want,
-            (Self::Event(EventMatch::Clamped), Seen::Event(Event::Clamped(_))) => true,
+            (Self::Event(EventMatch::Clamped), Seen::Event(Event::Clamped(_)))
+            | (Self::Event(EventMatch::WritesHeld), Seen::Event(Event::WritesHeld { .. })) => true,
             (
                 Self::Event(EventMatch::Repaired(want)),
                 Seen::Event(Event::Maintained {
@@ -134,6 +138,9 @@ pub struct Scenario {
     pub check: Option<Check>,
     /// What each persistent fault does in this run.
     pub responses: Responses,
+    /// The replicator holds the application's writes under this fail-stop setting
+    /// ([`crate::run::Opts::write_gate`]); `None` runs no write gate.
+    pub write_gate: Option<lsr_core::IfReplicationStops>,
 }
 
 impl Scenario {
@@ -167,6 +174,7 @@ pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
             .iter()
             .any(|e| matches!(e, Expect::Stopped(_))),
         responses: scenario.responses,
+        write_gate: scenario.write_gate,
         ..Opts::default()
     };
     // The failure's own replay line names the seed's random history, which
@@ -268,6 +276,7 @@ fn build(name: &'static str, ops: Vec<Vec<Op>>, expect: Vec<Expect>) -> Scenario
         expect,
         check: None,
         responses: Responses::GO_LIKE,
+        write_gate: None,
     }
 }
 
@@ -1264,5 +1273,7 @@ pub fn power_loss_wal_rewind() -> Scenario {
 
 mod coverage;
 mod faults;
+mod write_gate;
 pub use coverage::*;
 pub use faults::*;
+pub use write_gate::*;

@@ -206,6 +206,13 @@ pub enum Violation {
         /// What the simulator found instead.
         detail: String,
     },
+    /// Writes got through while the replicator held them (`docs/decisions/D192.md`): the
+    /// held write lock went away without a crash or a release, or a commit landed under it.
+    #[error("writes got through while the replicator held them: {detail}")]
+    WritesLeaked {
+        /// What got through.
+        detail: String,
+    },
     /// A restore the replica should answer was refused.
     #[error("restoring {target:?} was refused: {outcome:?}")]
     RestoreRefused {

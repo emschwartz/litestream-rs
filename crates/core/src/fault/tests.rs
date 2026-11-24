@@ -138,6 +138,7 @@ policy_is!(
 );
 policy_is!(sqlite_busy_retries, Fault::SqliteBusy, doubling());
 policy_is!(readers_held_retries, Fault::ReadersHeld, doubling());
+policy_is!(writes_held_waits, Fault::WritesHeld, Policy::Wait);
 policy_is!(wal_moved_retries, Fault::WalMoved, doubling());
 policy_is!(
     wal_index_inconsistent_retries,
@@ -227,6 +228,7 @@ fn every_fault_has_a_named_policy_test() {
         | Fault::LocalFsyncFailed
         | Fault::SqliteBusy
         | Fault::ReadersHeld
+        | Fault::WritesHeld
         | Fault::WalMoved
         | Fault::WalIndexInconsistent
         | Fault::WalChangedUnderRead
@@ -401,7 +403,7 @@ fn a_persistent_cause_and_its_stop_cause_round_trip() {
 
 /// Every fault, pinned by the match in [`every_fault_has_a_named_policy_test`]'s spirit: the
 /// array's length breaks when a variant is added.
-pub(crate) fn every_fault() -> [Fault; 33] {
+pub(crate) fn every_fault() -> [Fault; 34] {
     [
         Fault::StoreTransient,
         Fault::StoreThrottled { retry_after: None },
@@ -424,6 +426,7 @@ pub(crate) fn every_fault() -> [Fault; 33] {
         Fault::WalSyncFailed,
         Fault::SqliteBusy,
         Fault::ReadersHeld,
+        Fault::WritesHeld,
         Fault::WalMoved,
         Fault::WalIndexInconsistent,
         Fault::WalChangedUnderRead,
@@ -453,6 +456,9 @@ fn every_retried_fault_stalls_and_no_stall_stops() {
             Policy::Retry(_) => Stall::of(&fault).is_some(),
             Policy::Persistent(_) => Stall::of(&fault).is_none(),
             Policy::Shutdown => fault == Fault::ShutdownDeadline,
+            // The one wait that is not a failure: it lasts exactly as long as the replicator
+            // holds the application's writes, which health reports as its own state.
+            Policy::Wait => fault == Fault::WritesHeld && Stall::of(&fault).is_none(),
         };
         assert!(ends_degraded, "{fault:?}");
         if let Some(stall) = Stall::of(&fault) {
@@ -900,6 +906,7 @@ fn from_source_maps_every_variant() {
         (SourceError::FsyncFailed, Fault::WalSyncFailed),
         (SourceError::Busy, Fault::SqliteBusy),
         (SourceError::ReadersHeld, Fault::ReadersHeld),
+        (SourceError::WritesHeld, Fault::WritesHeld),
         (SourceError::Short { pgno: page() }, Fault::LocalIo),
         (SourceError::Unlinked, Fault::WalUnlinked),
         (SourceError::ReadTxLost, Fault::ReadTxLost),

@@ -1,0 +1,9 @@
+# The replicator's write gate opens a deferred transaction instead of taking the write lock:
+# it believes it holds the application's writes, and every writer goes on (docs/decisions/D192.md).
+name = "gate-never-taken"
+fix = "plant"
+package = "lsr-sqlite"
+tests = [
+    "gate::tests::a_held_gate_blocks_a_writer_nothing_set_up_and_no_reader",
+    "gate::tests::a_set_up_connection_fails_at_once_while_the_gate_holds",
+]

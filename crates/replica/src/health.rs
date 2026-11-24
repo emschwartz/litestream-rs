@@ -11,7 +11,7 @@ use std::fmt;
 
 use lsr_core::{
     AppCheckpoint, AppCheckpoints, Degraded, FinalRetention, FinalSnapshot, Gate, PersistentCause,
-    Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, WorkCounts,
+    Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, WhyBlocked, WorkCounts,
 };
 use lsr_ltx::{Timestamp, Txid};
 
@@ -186,6 +186,8 @@ pub struct Health {
     /// Fail-stop (`Config::if_replication_stops`): whether replication has tripped, and what
     /// that does to the application.
     pub held_by: FailStop,
+    /// Whether the replicator holds the application's writes now, and why.
+    pub writes: Writes,
     /// The retention pass a stop was asked to end with
     /// ([`crate::Replicator::request_final_retention`]): not asked, running, or how it ended.
     pub final_retention: FinalRetention,
@@ -201,8 +203,24 @@ pub struct FailStop {
     /// `Config::max_unreplicated_age`, or a refusal by the store before the first listing.
     pub trip: Option<Trip>,
     /// What the trip does to the application under `Config::if_replication_stops`. While it is
-    /// [`Gate::Held`], the commit hook refuses the application's commits.
+    /// [`Gate::Held`], and while it is [`Gate::Pending`] under `hold-start` and `stop-app`,
+    /// the replicator holds the application's writes ([`Health::writes`]).
     pub gate: Gate,
+}
+
+/// Whether the replicator holds the application's writes: a write transaction of its own on
+/// the database, which every other writer, in any process, meets as SQLite's "database is
+/// locked" (`SQLITE_BUSY`). Reads are never held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Writes {
+    /// Writes go through.
+    Allowed,
+    /// Writes are to be held, and the replicator is waiting for a write transaction of the
+    /// application's to end before it can take the lock: that one transaction may still
+    /// commit. It tries again on every turn, at least once per `Config::poll_interval`.
+    Blocking(WhyBlocked),
+    /// The replicator holds the write lock: every write fails.
+    Blocked(WhyBlocked),
 }
 
 /// What the scheduled verify found: the replica's listing checked, and a restore of the
@@ -331,6 +349,7 @@ impl Health {
                 trip: None,
                 gate: Gate::Pending,
             },
+            writes: Writes::Allowed,
             verification: Verification {
                 last_run: None,
                 last_good: None,
