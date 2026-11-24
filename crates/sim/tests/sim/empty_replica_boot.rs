@@ -9,7 +9,7 @@ use lsr_sim::{Op, Opts, Seed};
 /// The engine stages transaction 1 and has not uploaded it when the staged file is damaged and
 /// the process dies. The next boot reads the file twice, drops it, and needs no takeover record:
 /// the replica is empty, so it holds nothing staging could have vouched for. It boots with a
-/// snapshot and drains. Built with optimization, rustc 1.99.1 to at least 1.102 compiled the
+/// snapshot and drains. Built with optimization, rustc 1.95 to at least 1.102 compiled the
 /// gate's old form so that the empty replica read as transaction zero: the boot asked for a
 /// takeover through zero on every tick, failed `LocalIo`, and never drained. `just test-opt`
 /// runs this scenario optimized; the unoptimized build never showed the fault.
