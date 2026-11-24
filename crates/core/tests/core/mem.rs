@@ -596,7 +596,8 @@ pub const SNAPSHOT_WRITE_CEILING: u64 = 2 * 1024 * 1024;
 pub const SNAPSHOT_INDEX_BYTES_PER_PAGE: u64 = 16;
 
 /// What a snapshot holds that does not grow with the pages: its buffers and
-/// bookkeeping, and the parts an upload buffers, which are the store's to bound.
+/// bookkeeping, and the parts an upload buffers, which are the store's to bound (and which
+/// `lsr-store-s3`'s memory gates hold to `concurrency x part size` through the real client).
 pub const SNAPSHOT_FIXED: usize = 2 * MIB;
 
 /// The snapshot law: peak = fixed + bytes-per-page times pages, checked on N and 4N.

@@ -356,7 +356,9 @@ const _: () = assert!(R2_CONCURRENCY.get() <= DEFAULT_CONCURRENCY.get());
 const _: () = assert!(CREATION_TIME_CONCURRENCY.get() <= lsr_core::MAX_AHEAD);
 // Memory in the worst case with the defaults: an upload buffers at most `concurrency`
 // parts (5 x 16 MiB on Tigris, 80 MiB), and a restore holds at most `READ_CONCURRENCY`
-// reads of the largest length (8 x 16 MiB, 128 MiB). Both stay under 128 MiB.
+// reads of the largest length (8 x 16 MiB, 128 MiB). Both stay under 128 MiB. What each
+// really holds, parts and bodies copied nowhere, is pinned through the real client by
+// `tests/store-s3/memory.rs`.
 const _: () = assert!(widen(DEFAULT_CONCURRENCY.get()) * PartSize::TIGRIS.get() <= 128 << 20);
 const _: () =
     assert!(widen(READ_CONCURRENCY.get()) * widen_len(lsr_core::ReadLen::MAX_RAW) <= 128 << 20);
