@@ -220,7 +220,6 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         ],
         SnapshotCause::GenerationChanged => &[
             app_checkpoint_while_down,
-            meta_wiped_wal_restarted,
             restart_during_read_lock_lapse,
             pinned_on_zero_single_restart,
             truncate_failed_after_the_index_reset,
@@ -233,6 +232,10 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::CheckpointBoundary => &[truncate_threshold_crossed],
         SnapshotCause::OperatorRequested => &[cli_snapshot],
         SnapshotCause::StagedUnverified { .. } => &[pending_file_that_does_not_chain],
+        SnapshotCause::AheadOfReplica { .. } => &[
+            meta_lost_with_commits_not_uploaded,
+            meta_wiped_wal_restarted,
+        ],
     }
 }
 
@@ -374,8 +377,11 @@ fn last_boot_continues(report: &RunReport) -> Result<(), String> {
 }
 
 /// The staging directory is wiped and, while the engine is down, an outside
-/// TRUNCATE and a commit restart the WAL: the replica's newest staged file gives the same
-/// snapshot a staged newest file would.
+/// TRUNCATE and a commit restart the WAL. The WAL cannot vouch for the replica's newest file and
+/// the meta directory is brand new, so the boot asks whether the database is the replica's
+/// state: it is that state plus the commit, written after the replica's newest file, so the boot
+/// snapshots above it (`AheadOfReplica`). It used to stop here, until the operator trusted the
+/// local database (`docs/decisions/D192.md`).
 #[must_use]
 pub fn meta_wiped_wal_restarted() -> Scenario {
     let restarted = vec![
@@ -387,7 +393,7 @@ pub fn meta_wiped_wal_restarted() -> Scenario {
     after_restart(
         "meta_wiped_wal_restarted",
         restarted,
-        CauseKind::GenerationChanged,
+        CauseKind::AheadOfReplica,
     )
 }
 
@@ -404,6 +410,44 @@ pub fn meta_wiped_wal_regrown() -> Scenario {
         "meta_wiped_wal_regrown",
         regrown,
         CauseKind::LastPageMismatch,
+    )
+}
+
+/// Issue 329: the replica refuses an upload, so a commit is staged and not uploaded; the process
+/// dies with its meta directory (`WipeStaging`); the application's last close checkpoints
+/// and empties the WAL; the replicator starts with a brand-new meta directory. Nothing local
+/// vouches for the replica's newest file, and the database is not the replica's state, but it
+/// was written after that file and holds most of its pages: the boot snapshots above it
+/// (`AheadOfReplica`) instead of stopping, and every state restores.
+#[must_use]
+pub fn meta_lost_with_commits_not_uploaded() -> Scenario {
+    let refused = Op::StoreFault {
+        target: crate::generate::Target::Remote,
+        op: lsr_core::StoreOp::Upload,
+        ahead: 0,
+        shape: crate::store::FaultShape::Error(lsr_core::StoreError::Transient {
+            op: lsr_core::StoreOp::Upload,
+            kind: std::io::ErrorKind::ConnectionReset,
+        }),
+    };
+    build(
+        "meta_lost_with_commits_not_uploaded",
+        vec![
+            synced(),
+            vec![
+                Op::Tick,
+                refused,
+                commit(2, false),
+                Op::Tick,
+                Op::EnvFault(EnvFault::WipeStaging),
+                Op::OurReader { begin: false },
+                Op::OtherProcessCheckpoint(OtherProcessMode::Truncate),
+                Op::Tick,
+            ],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        snapshot_after_boot(CauseKind::AheadOfReplica),
     )
 }
 

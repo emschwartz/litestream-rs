@@ -76,7 +76,7 @@ use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
     SourceError, SourceOp, WalFileLen, WalSource, WriteLock,
 };
-use lsr_ltx::{DbPages, PageNo, PageSize};
+use lsr_ltx::{DbPages, PageNo, PageSize, Timestamp};
 use lsr_wal::testing::{WalBuilder, page};
 
 use crate::crash_law::{self, BlockSize, CrashLaw, Rng};
@@ -2073,6 +2073,12 @@ impl WalSource for SimSource {
             state.sync_wal();
         }
         Ok(())
+    }
+
+    /// The rule model keeps no file times: the world stamps them on the run's clock
+    /// (`crate::world::World::note_writes`) and the engine's source answers from there.
+    fn modified(&mut self) -> Result<Option<Timestamp>, SourceError> {
+        Ok(None)
     }
 }
 

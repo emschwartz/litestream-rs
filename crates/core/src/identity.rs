@@ -15,7 +15,20 @@
 //! with the WAL frames up to the committed end the boot read, the page count that end's last
 //! commit, or the file's length with no frame. A boot holds no read lock, so the wal-index is
 //! read again after the pages: a WAL that moved under them is `WalMoved`, and the boot runs
-//! again. The first page that differs ends the check.
+//! again.
+//!
+//! A database that is not equal may still be this replica's database with commits the replica
+//! never got: the lost meta directory held them staged, and the replica was unreachable or the
+//! process was killed before it uploaded them (issue 329). Ancestry cannot be proven from two
+//! images, so the check judges it from two pieces of evidence, both required
+//! (`docs/decisions/D192.md`): the database was written after the replica's newest file (its
+//! modified time, `WalSource::modified`, against that file's own header timestamp, with no
+//! slack), and it holds at least half of the replica state's pages that are not zeros, with a
+//! database of one or two pages never passing. Then it is [`Identity::Ahead`] and the boot
+//! snapshots above the replica's newest transaction. An empty database, an unrelated one, an
+//! image put back with its old modified time, and a live second writer whose files keep landing
+//! after this database's last write all fail one of the two and still stop. So the pass over the
+//! local pages runs to the end instead of stopping at the first page that differs.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
@@ -71,21 +84,37 @@ pub(crate) fn restore_fault<R: Role>(err: &RestoreError) -> CheckError {
     }
 }
 
-/// Whether the local committed state, read under `committed` (the boot's wal-index read) with
-/// `reader` on the live WAL, equals the replica's state at `tip`: the same page size, page count
-/// and pages.
+/// What the check found the local database to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Identity {
+    /// The replica's state at the tip: the same page size, page count and pages.
+    Same,
+    /// Not that state, but plainly that state plus commits the replica never got: written after
+    /// the tip's file, and holding at least half of that state's pages.
+    Ahead,
+    /// Neither: another database, an older one, or one nothing tells apart from them.
+    Other,
+}
+
+/// The fewest pages the local database and the replica's state each hold for the database to
+/// read as [`Identity::Ahead`]: a database of one or two pages shares half its pages with
+/// nearly anything of the same schema.
+const AHEAD_MIN_PAGES: u32 = 3;
+
+/// What the local committed state, read under `committed` (the boot's wal-index read) with
+/// `reader` on the live WAL, is against the replica's state at `tip`.
 ///
 /// # Errors
-/// The [`Fault`] a read met: the replica could not give its state at `tip`, a local page could
-/// not be read, or the WAL moved under the reads.
-pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
+/// The [`Fault`] a read met: the replica could not give its state at `tip`, a local page or
+/// the files' modified time could not be read, or the WAL moved under the reads.
+pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
     wal: &mut W,
     reader: Option<&mut WalReader<W::Wal>>,
     committed: CommittedRead,
     db: &mut P,
     remote: &R,
     tip: Txid,
-) -> Result<bool, Fault> {
+) -> Result<Identity, Fault> {
     let mut image = BTreeMap::new();
     let sink = DigestSink { pages: &mut image };
     let restored = restore_once(
@@ -99,12 +128,13 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
     // refusal stands. A store that failed is the store's fault, and the boot runs again.
     let restored = match restored.map_err(|err| restore_fault::<R>(&err)) {
         Ok(restored) => restored,
-        Err(CheckError::Unrestorable) => return Ok(false),
+        Err(CheckError::Unrestorable) => return Ok(Identity::Other),
         Err(CheckError::Fault(fault)) => return Err(fault),
     };
     let page_size = restored.page_size();
-    let same = match reader {
-        Some(reader) if reader.header().page_size() != page_size => false,
+    let replica = restored.commit().get();
+    let compared = match reader {
+        Some(reader) if reader.header().page_size() != page_size => None,
         Some(reader) if committed.end().offset().frame_index() > 0 => {
             let covered = scan_whole(reader, committed)?;
             let size = match covered.commit() {
@@ -115,19 +145,64 @@ pub(crate) async fn local_is_replica<W: WalSource, P: PageSource, R: Role>(
                 reader: Some((reader, &covered)),
                 db,
             };
-            size == restored.commit().get() && local.matches(&image, size, page_size)?
+            Some(local.compare(&image, size, replica, page_size)?)
         }
         Some(_) | None => {
             let size = db.page_count().map_err(Fault::from_source)?.get();
             let local: Local<'_, '_, W::Wal, P> = Local { reader: None, db };
-            size == restored.commit().get() && local.matches(&image, size, page_size)?
+            Some(local.compare(&image, size, replica, page_size)?)
         }
     };
     let after = wal.committed().map_err(Fault::from_source)?;
     if after.epoch() != committed.epoch() || after.end() != committed.end() {
         return Err(Fault::WalMoved);
     }
-    Ok(same)
+    let Some(compared) = compared else {
+        return Ok(Identity::Other);
+    };
+    if compared.same() {
+        return Ok(Identity::Same);
+    }
+    if !compared.ahead_bar() {
+        return Ok(Identity::Other);
+    }
+    // The replica's newest file's own header time, against the database's modified time: no
+    // slack, and a time that cannot be read is no evidence.
+    let written = wal.modified().map_err(Fault::from_source)?;
+    Ok(match written {
+        Some(written) if written > restored.written() => Identity::Ahead,
+        Some(_) | None => Identity::Other,
+    })
+}
+
+/// What one pass over the local pages found against the replica's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Compared {
+    /// Every page up to the shorter of the two equal, the page counts equal too.
+    equal: bool,
+    /// The local database's page count.
+    local: u32,
+    /// The replica state's page count.
+    replica: u32,
+    /// The replica state's pages that are not all zeros.
+    nonzero: u32,
+    /// Of those, the ones the local database holds unchanged.
+    shared: u32,
+}
+
+impl Compared {
+    const fn same(&self) -> bool {
+        self.equal
+    }
+
+    /// Whether the database shares enough of the replica's state to be taken for it plus more:
+    /// at least half of its pages that are not zeros, both sides holding [`AHEAD_MIN_PAGES`].
+    fn ahead_bar(&self) -> bool {
+        self.local >= AHEAD_MIN_PAGES
+            && self.replica >= AHEAD_MIN_PAGES
+            && self.nonzero > 0
+            && u64::from(self.shared).saturating_mul(2) >= u64::from(self.nonzero)
+    }
 }
 
 /// The local committed state's pages: a WAL frame up to the committed end where one holds the
@@ -138,30 +213,48 @@ struct Local<'a, 'm, F, P> {
 }
 
 impl<F: Read + Seek, P: PageSource> Local<'_, '_, F, P> {
-    /// Whether pages 1 to `size` equal `image`, a page it lacks reading as zeros.
-    fn matches(
+    /// Pages 1 to the shorter of `local` and `replica` against `image`, a page it lacks reading
+    /// as zeros.
+    fn compare(
         mut self,
         image: &BTreeMap<u32, PageChecksum>,
-        size: u32,
+        local: u32,
+        replica: u32,
         page_size: lsr_ltx::PageSize,
-    ) -> Result<bool, Fault> {
+    ) -> Result<Compared, Fault> {
         let zero = vec![0_u8; page_size.bytes()];
         let mut buf = vec![0_u8; page_size.bytes()];
-        for n in 1..=size {
+        let mut equal = local == replica;
+        let mut shared = 0_u32;
+        for n in 1..=local.min(replica) {
             // The lock page is the one number PageNo refuses; neither side holds it.
             let Some(pgno) = PageNo::new(n, page_size) else {
                 continue;
             };
             self.read(pgno, &mut buf)?;
-            let want = image
-                .get(&n)
-                .copied()
-                .unwrap_or_else(|| PageChecksum::of(pgno, &zero));
-            if PageChecksum::of(pgno, &buf) != want {
-                return Ok(false);
+            let blank = PageChecksum::of(pgno, &zero);
+            let want = image.get(&n).copied().unwrap_or(blank);
+            let same = PageChecksum::of(pgno, &buf) == want;
+            equal &= same;
+            if same && want != blank {
+                shared = shared.saturating_add(1);
             }
         }
-        Ok(true)
+        let nonzero = image
+            .iter()
+            .filter(|(n, sum)| {
+                **n <= replica
+                    && PageNo::new(**n, page_size)
+                        .is_some_and(|pgno| **sum != PageChecksum::of(pgno, &zero))
+            })
+            .count();
+        Ok(Compared {
+            equal,
+            local,
+            replica,
+            nonzero: u32::try_from(nonzero).unwrap_or(u32::MAX),
+            shared,
+        })
     }
 
     fn read(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), Fault> {

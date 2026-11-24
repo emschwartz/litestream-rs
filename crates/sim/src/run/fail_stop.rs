@@ -179,7 +179,11 @@ impl Runner {
 /// commits that were never staged and the engine has nothing to compare it with.
 const fn breaks_continuity(cause: SnapshotCause) -> bool {
     match cause {
-        SnapshotCause::StagedUnverified { .. } | SnapshotCause::LocalRewound { .. } => true,
+        // The database ahead of the replica holds commits the lost meta directory had staged
+        // and this engine never saw.
+        SnapshotCause::StagedUnverified { .. }
+        | SnapshotCause::LocalRewound { .. }
+        | SnapshotCause::AheadOfReplica { .. } => true,
         // No replica yet, or one ahead of us (D81 keeps it out); a checkpoint is a mid-run
         // cause; the rest the engine never counts as lag.
         SnapshotCause::FirstSync
