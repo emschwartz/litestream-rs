@@ -6,7 +6,9 @@ use std::io;
 use std::path::PathBuf;
 
 use lsr_core::SourceError;
-use rusqlite::ffi;
+
+pub use crate::capi::SqliteError;
+use crate::ffi;
 
 /// Why [`crate::Sqlite::open`] gave no handle. Nothing is pinned when it returns one of these.
 #[derive(Debug, thiserror::Error)]
@@ -18,7 +20,7 @@ pub enum OpenError {
         /// The database path as given.
         path: PathBuf,
         /// What SQLite said.
-        source: rusqlite::Error,
+        source: SqliteError,
     },
     /// The SQLite answering at run time is not the build this crate's reads of SQLite's private
     /// layouts were written for, so those reads cannot be trusted. The process links another
@@ -136,7 +138,7 @@ pub enum Refusal {
 pub enum SetupError {
     /// A pragma failed.
     #[error("SQLite refused a setup pragma: {0}")]
-    Sqlite(rusqlite::Error),
+    Sqlite(SqliteError),
     /// The connection would checkpoint on its own, behind the replicator's back.
     #[error("wal_autocheckpoint is {pages}, not 0")]
     AutocheckpointOn {
@@ -168,20 +170,21 @@ pub(crate) const fn rc_error(rc: c_int) -> SourceError {
     }
 }
 
-/// [`rc_error`] for a rusqlite error; one that is not SQLite's own is an I/O error.
-pub(crate) fn source_error(err: &rusqlite::Error) -> SourceError {
-    err.sqlite_error()
-        .map_or(SourceError::Io(io::ErrorKind::Other), |e| {
-            rc_error(e.extended_code)
-        })
+/// [`rc_error`] for a failed call; one that is not SQLite's own is an I/O error.
+pub(crate) fn source_error(err: &SqliteError) -> SourceError {
+    err.code()
+        .map_or(SourceError::Io(io::ErrorKind::Other), rc_error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn failure(rc: c_int) -> rusqlite::Error {
-        rusqlite::Error::SqliteFailure(ffi::Error::new(rc), None)
+    fn failure(code: c_int) -> SqliteError {
+        SqliteError::Code {
+            code,
+            message: String::new(),
+        }
     }
 
     #[test]
@@ -204,7 +207,7 @@ mod tests {
             SourceError::Io(io::ErrorKind::Other)
         );
         assert_eq!(
-            source_error(&rusqlite::Error::QueryReturnedNoRows),
+            source_error(&SqliteError::NoRow),
             SourceError::Io(io::ErrorKind::Other)
         );
     }

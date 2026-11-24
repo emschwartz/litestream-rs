@@ -1,7 +1,8 @@
 //! The sync engine's doors on a live SQLite database in the application's process.
 //!
 //! [`Sqlite`] implements `lsr_core`'s `WalSource`, `PageSource` and `Checkpointer` over two
-//! rusqlite connections, the way Go's `db.go` uses its pool. The reader holds one long read
+//! connections opened on SQLite's C API (`libsqlite3-sys`, through the `capi` module), the way
+//! Go's `db.go` uses its pool. The reader holds one long read
 //! transaction (`BEGIN; SELECT COUNT(1) FROM _litestream_seq`, `db.go:1288`), so SQLite cannot
 //! checkpoint past what has been replicated; it ends only inside `Checkpointer::checkpoint`,
 //! which is what moves the `ReadLockHold`. The writer takes the write barrier, the write lock and
@@ -60,8 +61,12 @@
 //! The `testing` feature adds [`testing`]: the fault-injecting VFS and the harness of the
 //! real-SQLite fault suite in `tests/`.
 //!
-//! `unsafe` is allowed in this crate only, one reasoned `#[expect(unsafe_code)]` per site.
+//! `unsafe` is allowed in this crate only, one reasoned `#[expect(unsafe_code)]` per site. Every
+//! call into SQLite's C API is in the `capi` module; the calls through a VFS's methods and the
+//! reads of SQLite's private layouts are in `pages`, `shm` and `identity`, beside the
+//! explanation of each.
 
+mod capi;
 mod checkpoint;
 mod conn;
 mod error;
@@ -75,9 +80,9 @@ mod version;
 
 pub use conn::{
     DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig, app_connection,
-    app_connection_for, app_connection_raw, check_app_connection,
+    app_connection_for, app_connection_raw, check_app_connection, read_only_rows,
 };
-pub use error::{OpenError, Refusal, SetupError, SplitOpen};
+pub use error::{OpenError, Refusal, SetupError, SplitOpen, SqliteError};
 pub use gate::{WriteGate, WritesHeld, fail_fast_while};
-/// SQLite's C interface, for the raw handle [`app_connection_raw`] takes.
-pub use rusqlite::ffi;
+/// SQLite's C interface (`libsqlite3-sys`), for the raw handle [`app_connection_raw`] takes.
+pub use libsqlite3_sys as ffi;

@@ -10,7 +10,7 @@ publish.workspace = true
 [features]
 # `Replicator::app_connection` on a rusqlite connection. A feature because the type pins the
 # application to this crate's rusqlite version.
-rusqlite = []
+rusqlite = ["dep:rusqlite"]
 # `Runtime::fake`: a clock that moves when a test says so, and a park that waits on it.
 testing = ["lsr-core/testing"]
 # Test builds only (`just check` turns it on through --all-features): every thread `stack::spawn`
@@ -23,8 +23,7 @@ lsr-core.workspace = true
 lsr-ltx.workspace = true
 lsr-sqlite.workspace = true
 lsr-store-fs.workspace = true
-# The restore sink's SQLite integrity check (the `local` module).
-rusqlite.workspace = true
+rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]

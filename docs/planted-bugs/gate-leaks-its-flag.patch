@@ -1,12 +1,13 @@
-diff --git a/crates/sqlite/src/gate.rs b/crates/sqlite/src/gate.rs
---- a/crates/sqlite/src/gate.rs
-+++ b/crates/sqlite/src/gate.rs
-@@ -217,7 +217,7 @@
- extern "C" fn release(arg: *mut c_void) {
-     // SAFETY: `arg` came from `Box::into_raw` in `fail_fast_while`, and SQLite calls the
-     // destructor once per pointer it was given.
--    drop(unsafe { Box::from_raw(arg.cast::<Busy>()) });
-+    std::mem::forget(unsafe { Box::from_raw(arg.cast::<Busy>()) });
+diff --git a/crates/sqlite/src/capi.rs b/crates/sqlite/src/capi.rs
+index 367db4d48..a7732a3b1 100644
+--- a/crates/sqlite/src/capi.rs
++++ b/crates/sqlite/src/capi.rs
+@@ -619,7 +619,7 @@ extern "C" fn on_busy<T: BusyState>(arg: *mut c_void, count: c_int) -> c_int {
+ extern "C" fn free<T: BusyState>(arg: *mut c_void) {
+     // SAFETY: `arg` came from `Box::into_raw` of a `Box<T>` in [`Handle::install_busy`], and
+     // SQLite calls the destructor once per pointer it was given.
+-    drop(unsafe { Box::from_raw(arg.cast::<T>()) });
++    std::mem::forget(unsafe { Box::from_raw(arg.cast::<T>()) });
  }
  
- /// Gives `conn` the busy handler that fails a blocked write at once while `held` says the gate
+ #[expect(

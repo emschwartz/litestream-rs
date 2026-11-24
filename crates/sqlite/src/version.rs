@@ -13,9 +13,7 @@
 //! application for its own connections breaks the one-SQLite rule (see the crate doc) without
 //! changing what this crate's calls answer.
 
-use std::ffi::{CStr, c_int};
-
-use rusqlite::ffi;
+use std::ffi::c_int;
 
 use crate::error::OpenError;
 
@@ -31,7 +29,7 @@ const WRITTEN_FOR_SOURCE_ID: &str =
 /// # Errors
 /// [`OpenError::SqliteBuild`] when it is not the build the layout reads were written for.
 pub(crate) fn check_linked() -> Result<(), OpenError> {
-    check(rusqlite::version_number(), source_id())
+    check(crate::capi::version_number(), &crate::capi::source_id())
 }
 
 fn check(found: c_int, source_id: &str) -> Result<(), OpenError> {
@@ -43,19 +41,6 @@ fn check(found: c_int, source_id: &str) -> Result<(), OpenError> {
         source_id: source_id.to_owned(),
         expected: WRITTEN_FOR_NUMBER,
     })
-}
-
-#[expect(
-    unsafe_code,
-    reason = "sqlite3_sourceid returns a pointer to a static NUL-terminated string that lives as long as the library"
-)]
-fn source_id() -> &'static str {
-    // SAFETY: `sqlite3_sourceid` takes no arguments and only returns a pointer.
-    let pointer = unsafe { ffi::sqlite3_sourceid() };
-    // SAFETY: that pointer is to a constant, NUL-terminated string in the library's static
-    // data, never null and never freed.
-    let raw = unsafe { CStr::from_ptr(pointer) };
-    raw.to_str().unwrap_or_default()
 }
 
 #[cfg(test)]

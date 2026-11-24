@@ -1058,6 +1058,7 @@ version = "0.0.0"
 name = "lsr-sqlite"
 version = "0.0.0"
 dependencies = [
+ "libsqlite3-sys",
  "lsr-core",
  "lsr-history",
  "lsr-ltx",

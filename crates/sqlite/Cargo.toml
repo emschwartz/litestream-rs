@@ -22,6 +22,7 @@ lsr-ltx.workspace = true
 lsr-sim = { workspace = true, optional = true }
 lsr-store-fs = { workspace = true, optional = true }
 lsr-wal.workspace = true
+libsqlite3-sys.workspace = true
 rustix = { workspace = true, features = ["fs"], optional = true }
 rusqlite.workspace = true
 thiserror.workspace = true

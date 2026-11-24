@@ -91,7 +91,7 @@ impl From<lsr_sqlite::OpenError> for StartError {
     fn from(err: lsr_sqlite::OpenError) -> Self {
         match err {
             lsr_sqlite::OpenError::Sqlite { source, .. } => Self::Sqlite {
-                code: source.sqlite_error().map_or(-1, |e| e.extended_code),
+                code: source.code().unwrap_or(-1),
             },
             lsr_sqlite::OpenError::NotWal { mode } => Self::NotWal { journal_mode: mode },
             lsr_sqlite::OpenError::PageSize { bytes } => Self::PageSize { bytes },
@@ -161,7 +161,7 @@ mod tests {
     fn an_open_failure_outside_sqlite_has_code_minus_one() {
         let outside = lsr_sqlite::OpenError::Sqlite {
             path: "db".into(),
-            source: rusqlite::Error::InvalidQuery,
+            source: lsr_sqlite::SqliteError::NoRow,
         };
         assert!(matches!(
             StartError::from(outside),
@@ -169,7 +169,10 @@ mod tests {
         ));
         let busy = lsr_sqlite::OpenError::Sqlite {
             path: "db".into(),
-            source: rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), None),
+            source: lsr_sqlite::SqliteError::Code {
+                code: 5,
+                message: "database is locked".to_owned(),
+            },
         };
         assert!(matches!(
             StartError::from(busy),

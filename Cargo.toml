@@ -50,6 +50,9 @@ rustls-platform-verifier = { version = "0.7", default-features = false }
 # store's own clients; `webpki-roots` below is the fallback when the system holds none.
 rustls-native-certs = { version = "0.8", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+# SQLite's C API for the engine's own connections (MIT). Bundled: the one SQLite build the
+# `lsr-sqlite` version check accepts.
+libsqlite3-sys = { version = "0.40", default-features = false, features = ["bundled"] }
 rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
 # The sidecar forwards signals to its -exec child and waits for it without reaping
 # (`kill`, `waitid`), which needs unsafe code otherwise. Already in the lock through tempfile.

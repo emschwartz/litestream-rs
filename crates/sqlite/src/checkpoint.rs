@@ -11,37 +11,19 @@
 use std::ffi::c_int;
 use std::io;
 
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
-use rusqlite::{Connection, ffi};
-
-use crate::Sqlite;
+use crate::capi::Handle;
 use crate::error::{rc_error, source_error};
-use crate::pages::handle;
+use crate::{Sqlite, ffi};
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
 
 /// SQLite's result code and its two frame counts.
-#[expect(
-    unsafe_code,
-    reason = "sqlite3_wal_checkpoint_v2's frame counts on SQLITE_BUSY are lost by rusqlite's wrapper"
-)]
-fn wal_checkpoint(conn: &Connection, mode: CheckpointMode) -> (c_int, c_int, c_int) {
+fn wal_checkpoint(conn: Handle<'_>, mode: CheckpointMode) -> (c_int, c_int, c_int) {
     let mode = match mode {
         CheckpointMode::Passive => ffi::SQLITE_CHECKPOINT_PASSIVE,
         CheckpointMode::Truncate => ffi::SQLITE_CHECKPOINT_TRUNCATE,
         CheckpointMode::Full => ffi::SQLITE_CHECKPOINT_FULL,
     };
-    let (mut log, mut checkpointed) = (-1, -1);
-    let db = handle(conn);
-    // SAFETY: a live handle, a NUL-terminated schema name, and two `int`s it writes.
-    let rc = unsafe {
-        ffi::sqlite3_wal_checkpoint_v2(
-            db,
-            rusqlite::MAIN_DB.as_ptr(),
-            mode,
-            &raw mut log,
-            &raw mut checkpointed,
-        )
-    };
-    (rc, log, checkpointed)
+    conn.wal_checkpoint(mode)
 }
 
 /// Whether readers blocked the checkpoint, and its two frame counts; an error when it did not run.
@@ -78,7 +60,7 @@ impl Checkpointer for Sqlite {
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         let mut inner = self.lock();
         inner.end_read()?;
-        let (rc, log, checkpointed) = wal_checkpoint(&inner.reader, mode);
+        let (rc, log, checkpointed) = wal_checkpoint(inner.reader.handle(), mode);
         // The read transaction comes back whether or not the checkpoint ran, as Go defers it.
         let retaken = inner.begin_read();
         let (busy, log, checkpointed) = sort_run(rc, log, checkpointed)?;
@@ -94,20 +76,30 @@ impl Checkpointer for Sqlite {
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.lock()
             .free_writer()?
-            .execute(
+            .exec(
                 "INSERT INTO _litestream_seq (id, seq) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET seq = seq + 1",
-                [],
             )
-            .map(drop)
             .map_err(|e| source_error(&e))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
     use super::*;
+
+    /// A rusqlite view of the engine's writer, for its authorizer.
+    fn writer_view(sqlite: &Sqlite) -> Connection {
+        #[expect(
+            unsafe_code,
+            reason = "the test borrows the engine's handle into rusqlite for its authorizer"
+        )]
+        // SAFETY: the writer stays open for the test, which uses it from this thread alone, and
+        // a connection from `from_handle` does not close the handle when dropped.
+        unsafe { Connection::from_handle(sqlite.lock().writer.handle().as_ptr()) }.unwrap()
+    }
 
     /// A database in WAL mode under a temporary directory, and our handle on it.
     fn open() -> (tempfile::TempDir, std::path::PathBuf, Sqlite) {
@@ -147,20 +139,15 @@ mod tests {
     fn a_bump_after_a_release_that_failed_is_committed() {
         let (_dir, path, mut sqlite) = open();
         let barrier = sqlite.begin_barrier().unwrap();
-        sqlite
-            .lock()
-            .writer
-            .authorizer(Some(deny_rollback))
-            .unwrap();
+        let mut view = writer_view(&sqlite);
+        view.authorizer(Some(deny_rollback)).unwrap();
         assert!(
             sqlite.end_barrier(barrier).is_err(),
             "the ROLLBACK was refused"
         );
-        sqlite
-            .lock()
-            .writer
-            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        view.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
             .unwrap();
+        drop(view);
         sqlite.bump_seq().unwrap();
         assert_eq!(seq(&path), Some(1), "another connection sees the bump");
         let barrier = sqlite.begin_barrier().unwrap();

@@ -1,5 +1,5 @@
 diff --git a/crates/sqlite/Cargo.toml b/crates/sqlite/Cargo.toml
-index c933bf62d..499188531 100644
+index a5adaa990..aba63851f 100644
 --- a/crates/sqlite/Cargo.toml
 +++ b/crates/sqlite/Cargo.toml
 @@ -14,7 +14,7 @@ workspace = true
@@ -11,10 +11,10 @@ index c933bf62d..499188531 100644
  
  [dependencies]
  lsr-core.workspace = true
-@@ -22,10 +22,13 @@ lsr-ltx.workspace = true
- lsr-sim = { workspace = true, optional = true }
+@@ -23,10 +23,13 @@ lsr-sim = { workspace = true, optional = true }
  lsr-store-fs = { workspace = true, optional = true }
  lsr-wal.workspace = true
+ libsqlite3-sys.workspace = true
 -rustix = { workspace = true, features = ["fs"], optional = true }
  rusqlite.workspace = true
  thiserror.workspace = true
@@ -27,10 +27,10 @@ index c933bf62d..499188531 100644
  # The descriptor test drives a full sync and checkpoint cycle through core's in-memory store.
  lsr-core = { workspace = true, features = ["testing"] }
 diff --git a/crates/sqlite/src/conn.rs b/crates/sqlite/src/conn.rs
-index 162085096..670f3ceba 100644
+index 9869c45c8..ac4de10da 100644
 --- a/crates/sqlite/src/conn.rs
 +++ b/crates/sqlite/src/conn.rs
-@@ -106,6 +106,8 @@ pub(crate) struct Inner {
+@@ -107,6 +107,8 @@ pub(crate) struct Inner {
      /// transaction SQLite ended itself on an error, cannot leave a flag saying otherwise.
      issued: u64,
      returned: u64,
@@ -39,7 +39,7 @@ index 162085096..670f3ceba 100644
  }
  
  /// Which file a path named: device and inode.
-@@ -257,6 +259,7 @@ impl Sqlite {
+@@ -259,6 +261,7 @@ impl Sqlite {
              epoch: ReadLockHold::first(),
              issued: 0,
              returned: 0,
@@ -48,10 +48,10 @@ index 162085096..670f3ceba 100644
          Ok(Self {
              inner: Arc::new(Mutex::new(inner)),
 diff --git a/crates/sqlite/src/identity.rs b/crates/sqlite/src/identity.rs
-index 2262b2c75..ddb4ce6c3 100644
+index 9841cc9dc..67e3a8f40 100644
 --- a/crates/sqlite/src/identity.rs
 +++ b/crates/sqlite/src/identity.rs
-@@ -97,6 +97,43 @@ mod unix {
+@@ -66,6 +66,43 @@ mod unix {
              .map(|meta| DatabaseFile::of_metadata(&meta))
      }
  
@@ -59,12 +59,12 @@ index 2262b2c75..ddb4ce6c3 100644
 +    /// tells the kernel it may drop the cached pages of `offset..offset + len` of the database,
 +    /// through the descriptor SQLite holds (never closed, never duplicated). Linux only; elsewhere
 +    /// a no-op.
-+    pub(super) fn advise_dontneed(conn: &Connection, offset: u64, len: u64) {
-+        let Some(name) = vfs_name(conn) else { return };
++    pub(super) fn advise_dontneed(conn: Handle<'_>, offset: u64, len: u64) {
++        let Some(name) = conn.vfs_name() else { return };
 +        if !is_unix_family(&name) {
 +            return;
 +        }
-+        let Ok(file) = file_pointer(conn, rusqlite::MAIN_DB) else {
++        let Ok(file) = file_pointer(conn, MAIN) else {
 +            return;
 +        };
 +        let Some(fd) = descriptor(file) else { return };
@@ -92,30 +92,30 @@ index 2262b2c75..ddb4ce6c3 100644
 +        let _ = (fd, offset, len);
 +    }
 +
-     pub(super) fn opened(conn: &Connection) -> Option<DatabaseFile> {
-         if !is_unix_family(&vfs_name(conn)?) {
+     pub(super) fn opened(conn: Handle<'_>) -> Option<DatabaseFile> {
+         if !is_unix_family(&conn.vfs_name()?) {
              return None;
-@@ -106,6 +143,15 @@ mod unix {
+@@ -75,6 +112,15 @@ mod unix {
      }
  }
  
 +/// See `unix::advise_dontneed`.
 +#[cfg(unix)]
-+pub(crate) fn advise_dontneed(conn: &rusqlite::Connection, offset: u64, len: u64) {
++pub(crate) fn advise_dontneed(conn: crate::capi::Handle<'_>, offset: u64, len: u64) {
 +    unix::advise_dontneed(conn, offset, len);
 +}
 +
 +#[cfg(not(unix))]
-+pub(crate) fn advise_dontneed(_conn: &rusqlite::Connection, _offset: u64, _len: u64) {}
++pub(crate) fn advise_dontneed(_conn: crate::capi::Handle<'_>, _offset: u64, _len: u64) {}
 +
  /// The file `conn` holds open as its main database; `None` when the VFS is not SQLite's unix
  /// VFS or the platform is not Unix, where it cannot be told.
  #[cfg(unix)]
 diff --git a/crates/sqlite/src/pages.rs b/crates/sqlite/src/pages.rs
-index 0c1c914bb..360540916 100644
+index 5059f9406..93d72447d 100644
 --- a/crates/sqlite/src/pages.rs
 +++ b/crates/sqlite/src/pages.rs
-@@ -247,13 +247,32 @@ impl PageSource for Sqlite {
+@@ -210,13 +210,32 @@ impl PageSource for Sqlite {
              return Err(SourceError::Io(io::ErrorKind::InvalidInput));
          }
          let offset = page_offset(pgno, size).ok_or(SourceError::Io(io::ErrorKind::InvalidInput))?;
@@ -144,7 +144,7 @@ index 0c1c914bb..360540916 100644
 +            inner.advise = None;
 +        }
 +        for (from, n) in [early, full].into_iter().flatten() {
-+            crate::identity::advise_dontneed(&inner.reader, from, n);
++            crate::identity::advise_dontneed(inner.reader.handle(), from, n);
 +        }
 +        read
      }
