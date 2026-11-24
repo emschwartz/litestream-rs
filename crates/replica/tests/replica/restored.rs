@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{Site, assert_same, config, fake, stopped, wait};
+use common::{Site, assert_same, config, fake, stopped_on_system_clock, wait};
 use lsr_replica::{Replicator, RestoreTarget, Stopped, restore};
 use rusqlite::Connection;
 
@@ -31,7 +31,7 @@ fn restored(site: &Site) -> PathBuf {
     let store = site.store();
     let replicator = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
     site.commit(3);
-    let stopped = stopped(&replicator);
+    let stopped = stopped_on_system_clock(&replicator);
     assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
     drop(replicator);
     let snapshots = site.replica.join("ltx").join("9");

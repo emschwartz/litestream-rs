@@ -19,7 +19,7 @@ use std::process::{ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{assert_same, booted, config, fake, stopped_moving};
+use common::{assert_same, booted, config, fake, stopped};
 use lsr_replica::{Event, EventSink, Replicator, RestoreTarget, restore};
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
@@ -244,7 +244,7 @@ fn deploy_child() {
     // A boot that owes a snapshot can find the database busy with the application's inserts and
     // retry after a wait (`SqliteBusy`), and the drain waits with it: the clock moves meanwhile.
     let stop = || {
-        stopped_moving(&replicator, &clock, Duration::from_secs(1));
+        stopped(&replicator, &clock);
     };
     if line.trim() == "term-app-last" {
         stop();

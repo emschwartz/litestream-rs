@@ -50,7 +50,7 @@ fn a_second_engine_on_one_meta_directory_is_refused() {
         meta_dir: Some(site.dir.path().join("shared-meta")),
         ..config()
     };
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), shared.clone(), runtime).unwrap();
     let other = other_db(site.dir.path());
     let (runtime, _clock) = fake();
@@ -58,10 +58,10 @@ fn a_second_engine_on_one_meta_directory_is_refused() {
         Replicator::start_with(&other, site.store(), shared.clone(), runtime),
         Err(StartError::MetaLocked)
     ));
-    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
-    let (runtime, _clock) = fake();
+    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
+    let (runtime, clock) = fake();
     let second = Replicator::start_with(&other, site.store(), shared, runtime).unwrap();
-    assert!(matches!(stopped(&second), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&second, &clock), Stopped::Drained { .. }));
 }
 
 /// The same across processes: a child holds a replicator on the meta directory, and a start
@@ -104,9 +104,12 @@ fn a_second_process_on_one_meta_directory_is_refused() {
     );
     child.0.stdin.take().unwrap().write_all(b"stop\n").unwrap();
     assert!(child.0.wait().unwrap().success());
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), shared, runtime).unwrap();
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// A child process killed if the test fails before it exits, so a failure never hangs.
@@ -134,13 +137,16 @@ fn child_holds_the_meta_directory() {
         meta_dir: Some(PathBuf::from(meta)),
         ..config()
     };
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&db, store, shared, runtime).unwrap();
     println!("lsr-child: started");
     std::io::stdout().flush().unwrap();
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).unwrap();
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// A valid level-0 file for `txid` that the site's engine never staged, put on its replica.
@@ -215,7 +221,10 @@ fn a_stop_for_another_writer_survives_a_restart() {
     });
     clock.advance(Duration::from_secs(600));
     wait(&first, stopped_for_other_writer);
-    assert_eq!(stopped(&first), Stopped::Stopped(StopCause::OtherWriter));
+    assert_eq!(
+        stopped(&first, &clock),
+        Stopped::Stopped(StopCause::OtherWriter)
+    );
 
     site.commit(2);
     let (runtime, clock) = fake();
@@ -227,14 +236,17 @@ fn a_stop_for_another_writer_survives_a_restart() {
         Some(foreign.range().max()),
         "nothing went above it"
     );
-    assert_eq!(stopped(&second), Stopped::Stopped(StopCause::OtherWriter));
+    assert_eq!(
+        stopped(&second, &clock),
+        Stopped::Stopped(StopCause::OtherWriter)
+    );
 
     block_on(FsStore::new(&site.replica).delete(&[foreign])).unwrap();
     let (runtime, clock) = fake();
     let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     clock.advance(Duration::from_secs(1));
     wait(&third, caught_up);
-    assert!(matches!(stopped(&third), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&third, &clock), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
 
@@ -245,10 +257,10 @@ fn a_stop_for_another_writer_survives_a_restart() {
 fn a_restored_database_replicates_without_a_refusal() {
     let site = Site::new();
     site.commit(3);
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     wait(&first, caught_up);
-    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
     let restored = site.path("restored");
     let reached = lsr_replica::restore(
         &*site.store(),
@@ -279,7 +291,7 @@ fn a_restored_database_replicates_without_a_refusal() {
         caught_up(h) || matches!(h.phase, Phase::Stopped(_))
     });
     assert_eq!(health.phase, Phase::Running, "{health:?}");
-    assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
 }
 
 /// Another writer's file appeared while the replicator was down: the boot refuses it,
@@ -289,22 +301,25 @@ fn a_restored_database_replicates_without_a_refusal() {
 fn a_refused_boot_names_the_tip_and_a_take_over_clears_it() {
     let site = Site::new();
     site.commit(2);
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     wait(&first, caught_up);
     // The drain's txid, not the health's: `caught_up` can hold while a commit is unsynced.
-    let Stopped::Drained { txid: Some(ours) } = stopped(&first) else {
+    let Stopped::Drained { txid: Some(ours) } = stopped(&first, &clock) else {
         panic!("the first replicator drains");
     };
     let foreign = put_foreign(&site, ours.next().unwrap());
 
     let (sink, events) = lsr_replica::ChannelSink::new(std::num::NonZeroUsize::new(64).unwrap());
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let second =
         Replicator::start_with_events(&site.db, site.store(), config(), runtime, Box::new(sink))
             .unwrap();
     wait(&second, stopped_for_other_writer);
-    assert_eq!(stopped(&second), Stopped::Stopped(StopCause::OtherWriter));
+    assert_eq!(
+        stopped(&second, &clock),
+        Stopped::Stopped(StopCause::OtherWriter)
+    );
     let mut refused = None;
     while let Some(event) = events.try_recv() {
         if let lsr_replica::Event::Refused { through } = event {
@@ -329,7 +344,7 @@ fn a_refused_boot_names_the_tip_and_a_take_over_clears_it() {
     });
     assert_eq!(health.phase, Phase::Running, "{health:?}");
     assert!(newest_l0(&site) > Some(foreign.range().max()));
-    assert!(matches!(stopped(&third), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&third, &clock), Stopped::Drained { .. }));
 }
 
 /// A takeover record that does not decode is reported and ignored, as if there were none: a
@@ -338,10 +353,10 @@ fn a_refused_boot_names_the_tip_and_a_take_over_clears_it() {
 fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
     let site = Site::new();
     site.commit(2);
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     wait(&first, caught_up);
-    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
     std::fs::write(
         meta_of(&site).join("lsr-takeover"),
         b"lsr-takeover 1 garbage\n",
@@ -366,17 +381,20 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
         );
     }
     assert!(warned, "the unusable record is reported");
-    let Stopped::Drained { txid: Some(ours) } = stopped(&second) else {
+    let Stopped::Drained { txid: Some(ours) } = stopped(&second, &clock) else {
         panic!("the second replicator drains");
     };
     // Never taken as given either: another writer's file above everything is refused, as with
     // no record at all.
     let foreign = put_foreign(&site, ours.next().unwrap());
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     wait(&third, stopped_for_other_writer);
     assert_eq!(newest_l0(&site), Some(foreign.range().max()));
-    assert_eq!(stopped(&third), Stopped::Stopped(StopCause::OtherWriter));
+    assert_eq!(
+        stopped(&third, &clock),
+        Stopped::Stopped(StopCause::OtherWriter)
+    );
 }
 
 /// A staged file lost before its upload is dropped only after the takeover record through
@@ -424,6 +442,9 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
         caught_up(h) && h.synced > synced && !path.exists()
     });
     assert!(!path.exists());
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
