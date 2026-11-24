@@ -10,6 +10,11 @@
 //!
 //! The inputs are read as a replica's, a mebibyte at a time (the public `compact`).
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "bounds arithmetic on small counts in test code"
+)]
+
 use std::cell::Cell;
 
 use lsr_core::WriteMode;
@@ -95,7 +100,10 @@ fn staged_inputs() -> (tempfile::TempDir, FsStore, CompactionInputs) {
     for n in 1..=u64::try_from(MAX_INPUTS).unwrap() {
         let key = FileKey::new(Level::ZERO, TxidRange::new(txid(n), txid(n)).unwrap());
         let bytes = level_zero_file(n, &rng);
-        assert!(bytes.len() > CHUNK, "an input holds more than one read chunk");
+        assert!(
+            bytes.len() > CHUNK,
+            "an input holds more than one read chunk"
+        );
         block_on(async {
             let mut upload = source
                 .begin_upload(&key, stamp, WriteMode::New)
