@@ -332,13 +332,8 @@ fn read_bucket(
         .ok_or(StoreError::NotFound { key: *key })?;
     let start = usize::try_from(offset).unwrap_or(usize::MAX);
     let want = usize::try_from(len.get()).unwrap_or(usize::MAX);
-    Ok(body
-        .get(start..)
-        .unwrap_or_default()
-        .iter()
-        .take(want)
-        .copied()
-        .collect())
+    let tail = body.get(start..).unwrap_or_default();
+    Ok(tail.get(..want).unwrap_or(tail).to_vec())
 }
 
 /// The created-at time of `file`, as `MemStore` answers: gone is not found, another length is
