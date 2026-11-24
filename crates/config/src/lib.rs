@@ -18,6 +18,30 @@
 //! Every problem is collected, not just the first, and names its key path and
 //! line. Rust-only settings live under the one top-level key `litestream-rs`,
 //! which Go ignores, so the same file still starts Go.
+//!
+//! # Starting the library from the same file
+//!
+//! An application that replicates in its own process reads the file the daemon would read:
+//! [`load_plan`] gives one [`DbPlan`] per database, [`open_store`] opens its replica, and
+//! `lsr_replica::Replicator::start` takes the path and the [`DbPlan::config`]. `docs/config-keys.md`
+//! lists what every key sets (or that it is not supported or has no effect). The daemon-only keys
+//! (`addr`, `exec`, `logging`) are loaded and ignored here.
+//!
+//! ```no_run
+//! use lsr_config::{Expand, ProcessEnv, load_plan, open_store};
+//! use lsr_replica::Replicator;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let plan = load_plan("litestream.yml".as_ref(), Expand::Env, &ProcessEnv)?;
+//! let mut replicators = Vec::new();
+//! for db in plan.dbs() {
+//!     let store = open_store(db.replica())?;
+//!     // With `db.restore_if_missing()`, call `lsr_replica::restore_if_missing` first.
+//!     replicators.push(Replicator::start(db.path(), store, db.config().clone())?);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 mod build;
 mod config;
@@ -25,8 +49,10 @@ mod duration;
 mod error;
 mod expand;
 mod keys;
+mod load;
 mod map;
 mod size;
+mod store;
 mod value;
 mod walk;
 mod yaml;
@@ -45,11 +71,13 @@ pub use error::{
     WarningKind,
 };
 pub use expand::{Env, Expand, PathError, ProcessEnv, clean, expand_path, strip_sqlite_prefix};
+pub use load::{LoadPlanError, load_plan};
 pub use map::{
     Credentials, DbPlan, DirProblem, MapError, MapProblem, MapProblemKind, Note, Plan, ReplicaPlan,
     ReplicaProblem, S3Overrides, S3Url, default_meta, plan, s3_config,
 };
 pub use size::{SizeError, parse_byte_size};
+pub use store::{OpenStoreError, open_store};
 
 use error::Problem as P;
 use walk::Walk;
