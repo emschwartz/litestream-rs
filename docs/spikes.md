@@ -282,9 +282,9 @@ Recommendation: land the CRC fix, re-run the Tigris restore, and do option 2 onl
 
 `just test-provider <tigris|aws|r2>` at the provider-checks branch, from a laptop (macOS), one region each, unversioned buckets, no lifecycle rule. Each run wrote under its own prefix and the script deleted it and listed it empty (objects and multipart uploads) afterwards, all three runs.
 
-Requests per provider (counted at the test transports, plus about 320 uncounted from the racing writers and a few dozen from the `lsr` process): AWS 5,506, Tigris 6,710 (it also runs its own 13 probes), R2 5,497.
+Requests per provider (counted at the test transports, plus about 320 uncounted from the racing writers and a few dozen from the `lsr` process): AWS 5,507, Tigris 6,724 (it also runs its own 13 probes), R2 5,497.
 
-Results of the final runs: AWS S3 51 of 51 tests and the `lsr` end-to-end test; Tigris 64 of 64 and the end-to-end test; R2 49 of 51 and the end-to-end test. The two R2 failures: `shared_cases::unrecognized_names_are_skipped_and_counted` (a listing order difference, below) and `an_unknown_access_key_id_is_denied_as_credentials` in that run, which asked with an id R2 answers 400 to (shape check); the test now changes only the last digit of the real id and passes on all three.
+Results of the final runs (the tip commit): AWS S3 51 of 51 tests and the `lsr` end-to-end test; Tigris 64 of 64 and the end-to-end test; R2 50 of 51 and the end-to-end test. The R2 failure is `shared_cases::unrecognized_names_are_skipped_and_counted`, a listing order difference (below). Earlier runs of the same checks showed two test mistakes, fixed before the final runs: raw requests with an extra header unsorted in the signature (below), and a test that asked R2 with an access key id of the wrong shape (400); the test now changes only the last digit of the real id.
 
 | Check | Tigris | AWS S3 | R2 |
 |---|---|---|---|
