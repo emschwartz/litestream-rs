@@ -890,3 +890,48 @@ fn a_new_meta_directory_under_an_empty_wal_index_reads_the_database_file() {
         "{seen:?}"
     );
 }
+
+/// The gate's own arithmetic, case by case: the takeover it asks for is the lower of where
+/// staging stood and the replica's newest transaction, unless the held record covers it, and an
+/// empty replica needs none. The empty-replica case is the one an optimized build once got wrong
+/// (see `BootGate::vouch`); whether a miscompile shows depends on how the store's calls inline,
+/// so the end-to-end tests in lsr-sim (`empty_replica_boot`) and lsr-replica, run optimized by
+/// `just test-opt`, are what catch it. This one pins the rule itself.
+#[test]
+fn the_gate_vouches_for_the_lower_of_staging_and_the_replica() {
+    let empty = MemStore::default();
+    let held = |n| Takeover::Vouch(Some(TakeoverRecord::through(tx(n))));
+    let cases = [
+        (Takeover::Vouch(None), Some(2), None, Ok(())),
+        (
+            Takeover::Vouch(None),
+            Some(2),
+            Some(5),
+            Err(BootStep::Vouch(TakeoverRecord::through(tx(2)))),
+        ),
+        (
+            Takeover::Vouch(None),
+            Some(5),
+            Some(2),
+            Err(BootStep::Vouch(TakeoverRecord::through(tx(2)))),
+        ),
+        (held(2), Some(2), Some(5), Ok(())),
+        (held(3), Some(5), Some(3), Ok(())),
+        (
+            held(1),
+            Some(5),
+            Some(3),
+            Err(BootStep::Vouch(TakeoverRecord::through(tx(3)))),
+        ),
+        (Takeover::Vouch(None), None, Some(5), Ok(())),
+        (Takeover::Off, Some(2), Some(5), Ok(())),
+    ];
+    for (takeover, local, tip, want) in cases {
+        let gate = BootGate {
+            takeover,
+            local: local.map(tx),
+        };
+        let got = block_on(gate.vouch(&Replica(&empty), tip.map(tx)));
+        assert_eq!(got, want, "{gate:?} over tip {tip:?}");
+    }
+}
