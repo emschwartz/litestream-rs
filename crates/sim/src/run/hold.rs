@@ -267,6 +267,7 @@ impl Runner {
         let flipped = self.w.remote_faults.flipped().len();
         let before = Progress::of(self);
         let placed = self.place(hold);
+        self.reads_lying = hold == Hold::LyingReads;
         let middle = ticks / 2;
         for at in 0..ticks {
             if self.overlap.is_some() {
@@ -289,6 +290,7 @@ impl Runner {
         self.judge_held(hold, view.as_ref())?;
         self.health_tells(hold, &before)?;
         self.lift(placed);
+        self.reads_lying = false;
         let lied = self.w.remote_faults.flipped().len().saturating_sub(flipped);
         self.report.reach.add(
             format!("hold.{}.engine_reads_flipped", name(hold)),

@@ -400,3 +400,33 @@ fn seed_0x734_uploads_the_files_a_rollback_left_and_never_trips() {
     };
     assert_eq!(age_trips(&report), 0, "{:?}", report.trips);
 }
+
+/// Every read of the replica lies, long after the engine's last upload and a day's clock step:
+/// the engine cannot confirm that upload landed and dates it by its stamp, so an age trip is
+/// right while the lie lasts, and the judge excuses it (and counts it) though the replica is whole.
+#[test]
+fn an_age_trip_while_every_read_of_the_replica_lies_is_excused() {
+    let ops = [
+        Op::CommitInTick { pages: 3 },
+        Op::CommitInTick { pages: 3 },
+        Op::ClockJump(93_600_000),
+        Op::Hold {
+            hold: lsr_sim::Hold::LyingReads,
+            ticks: 37,
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        overlap: true,
+        error_domain: true,
+        staging_fs: true,
+        kill_after_fault: true,
+        ..Opts::default()
+    };
+    let report = run_ops(Seed::new(5), &ops, &opts)
+        .unwrap_or_else(|failure| panic!("step {}: {}", failure.step, failure.violation));
+    assert!(
+        report.reach.get("failstop.excused.lying_reads") > 0,
+        "no age trip was judged under the lie"
+    );
+}
