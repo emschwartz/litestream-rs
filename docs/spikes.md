@@ -277,3 +277,47 @@ Options for the network part, none done here:
 3. **Parallel files within a memory bound** (Go opens up to 32 files at once). Files must apply oldest first, so later files' bytes wait in memory, bounded by files in flight times chunk size, or the restore must merge streams the way Go's compactor does. Helps chains of many small files (round-trip bound), where option 2 already overlaps most of it; the largest change and the most memory.
 
 Recommendation: land the CRC fix, re-run the Tigris restore, and do option 2 only if Rust is still behind Go there.
+
+## Provider checks on Tigris, AWS S3 and R2, 2026-11-24
+
+`just test-provider <tigris|aws|r2>` at the provider-checks branch, from a laptop (macOS), one region each, unversioned buckets, no lifecycle rule. Each run wrote under its own prefix and the script deleted it and listed it empty (objects and multipart uploads) afterwards, all three runs.
+
+Requests per provider (counted at the test transports, plus about 320 uncounted from the racing writers and a few dozen from the `lsr` process): AWS 5,506, Tigris 6,710 (it also runs its own 13 probes), R2 5,497.
+
+Results of the final runs: AWS S3 51 of 51 tests and the `lsr` end-to-end test; Tigris 64 of 64 and the end-to-end test; R2 49 of 51 and the end-to-end test. The two R2 failures: `shared_cases::unrecognized_names_are_skipped_and_counted` (a listing order difference, below) and `an_unknown_access_key_id_is_denied_as_credentials` in that run, which asked with an id R2 answers 400 to (shape check); the test now changes only the last digit of the real id and passes on all three.
+
+| Check | Tigris | AWS S3 | R2 |
+|---|---|---|---|
+| Create-only PUT, new key | 200 | 200 | 200 |
+| Create-only PUT, existing key | 412 `PreconditionFailed`, object unchanged, store: AlreadyExists | same | same |
+| Create-only Complete, new key / existing key / over a plain PUT | 200 no error document / 412 `PreconditionFailed` / 412 | same | same |
+| 2 writers racing a create-only PUT, 100 rounds; 4 writers, 25 rounds | one winner every round; losers all 412; 0 retryable answers | same | same |
+| 2 writers racing a create-only Complete, 50 rounds | one 200 and one 412 every round; no 409 | same | same |
+| 1000 writes, each then listed and read from a second connection | 0 not listed, 0 not read | 0, 0 | 0, 0 |
+| 2500 keys, store paging at 1000 and 333, provider tokens at 1000; delete then list | no repeat, no gap; 0 after delete | same | same |
+| Wrong secret key | 403 `SignatureDoesNotMatch` = Credentials | same | same |
+| Unknown access key id | 403 `InvalidAccessKeyId` = Credentials | same | 401 `Unauthorized` = Credentials |
+| Missing bucket, GET and LIST | 404 `NoSuchBucket` = BucketMissing | same | same |
+| Missing bucket, HEAD (no body) | 403, read as Permission | 404, read as NotFound for the key | 404, read as NotFound for the key |
+| Missing object | GET 404 `NoSuchKey`, HEAD 404: NotFound; delete: ok | same | same |
+| Signed an hour ago | 403 `AccessDenied` "Request has expired" | 403 `AccessDenied` "Request has expired" | 403 `ExpiredRequest` "Request has expired" |
+| Signed an hour ahead | 403 `AccessDenied` "Request is not valid yet" | 403 `AccessDenied` "Request is not yet valid" | 403 `RequestTimeTooSkewed` |
+| Wrong signature (64 zeros) | 403 `SignatureDoesNotMatch` | same | same |
+| Malformed signature | 403 `SignatureDoesNotMatch` = Credentials | same | 400 `InvalidArgument` "Signature length inconsistent" = Refused 400 (permanent) |
+| Abandoned multipart uploads | 3 listed by prefix, invisible to an object listing; one aborted by hand, the next boot swept 2 | same | same |
+| `lsr replicate -once`, `verify`, `restore`, pages compared | pass | pass | pass |
+| Names that extend one another listed in bytewise order | yes | yes | **no** |
+| A request cut mid-body | not done: needs a TCP fault proxy (R9(c)) | | |
+
+## Differences that matter
+
+1. **Clock errors were reported as permission errors** on all three (fixed in this branch, store-s3 `classify`). A signature outside its five-minute window is `AccessDenied` with a message (AWS, Tigris) or `ExpiredRequest` (R2, signed in the past); only R2's future case has a code of its own (`RequestTimeTooSkewed`). The engine classed the first three as `permission_denied`, which sends an operator to the bucket policy when the host clock is wrong. They are now `clock_skew`.
+2. **R2 lists names that extend one another out of bytewise order.** Where one name extends another, R2 lists the longer one first (seen: `X.ltx.tmp`, `X.ltx`, `X`; and `000`, `00`, `0`), where bytewise order puts the shorter first. The store refuses a page whose keys are out of order (never a shorter listing), so a level that holds such a name fails every listing with a retryable `InvalidData`: a stray `X.ltx.tmp` beside `X.ltx`, or a stray `0`. The engine's own names (fixed width) list in order on R2 (the 2500-key check passes). Conformance case `unrecognized_names_are_skipped_and_counted` fails on R2. Not fixed: the engine decides whether to tolerate it.
+3. **HEAD answers carry no code**, so a HEAD in a missing bucket is a bare 404 on AWS and R2 (read as a missing object) and a 403 on Tigris (read as Permission). The next LIST names the bucket, so the effect is one wrong hint.
+4. **R2 answered one plain 500 to a PUT** in one of four runs (about 5,500 requests each). The store reads it as retryable, and the checks' setup writes retry as the engine does.
+5. No provider answered 409 `ConditionalRequestConflict` in 150 racing rounds of create-only PUTs and 50 of Completes, so that path is still exercised only by the fake.
+6. The `unknown access key id` answer differs in status (R2 401, the others 403), and a malformed signature in kind (R2 400). All end permanent, never retried.
+
+## Found while building the checks (fixed)
+
+The test-support raw signer wrote headers in the order given, and AWS rebuilds them sorted, so every raw request with an extra header (`If-None-Match`, a metadata header) answered 403 `SignatureDoesNotMatch` on AWS and on Tigris at this commit. The store's own requests were unaffected (they sort through the action's map). The signer now sorts; `a_raw_request_signs_its_headers_in_name_order` fails without it.
