@@ -1,13 +1,13 @@
 diff --git a/crates/replica/src/meta.rs b/crates/replica/src/meta.rs
-index c3dde08..8f8d792 100644
+index 543ff568..39727103 100644
 --- a/crates/replica/src/meta.rs
 +++ b/crates/replica/src/meta.rs
-@@ -71,7 +71,7 @@ impl MetaLock {
+@@ -91,7 +91,7 @@ impl MetaLock {
              .truncate(false)
              .open(meta.join(LOCK_FILE))
              .map_err(|err| StartError::MetaLock { kind: err.kind() })?;
 -        match file.try_lock() {
 +        match Ok::<(), TryLockError>(()) {
-             Ok(()) => Ok(Self { _file: file }),
+             Ok(()) => Ok(Self { file }),
              Err(TryLockError::WouldBlock) => Err(StartError::MetaLocked),
              Err(TryLockError::Error(err)) => Err(StartError::MetaLock { kind: err.kind() }),
