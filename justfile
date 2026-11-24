@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test doctest features upstream-test-map-fresh evidence-fresh
+check: fmt-check clippy test test-opt doctest features upstream-test-map-fresh evidence-fresh
 
 fmt-check:
     cargo fmt --all -- --check
@@ -21,6 +21,13 @@ clippy:
 # and the native-tls classification tests among them.
 test:
     cargo nextest run --workspace --all-features --locked --no-tests=warn
+
+# The engine and both of its drivers again, built optimized (the `sim` profile: opt-level 1, every
+# assertion kept). The engine ships optimized and the simulator soaks optimized, while `test`
+# builds unoptimized; an optimizer that changes what the engine does fails here
+# (docs/decisions/D185.md).
+test-opt:
+    cargo nextest run --cargo-profile sim -p lsr-core -p lsr-sim -p lsr-replica --all-features --locked
 
 # Commit subjects on this branch since `base` follow Conventional Commits (AGENTS.md).
 # The default base is local `main`, which `just spawn` branches from; without one, `origin/main`.
@@ -57,9 +64,10 @@ features:
 doctest:
     cargo test --doc --workspace --all-features --locked
 
-# Replays one simulator run, printing every operation: just sim-replay 0x2a [steps].
+# Replays one simulator run, printing every operation: just sim-replay 0x2a [steps]. Built with the
+# soaks' `sim` profile, so a seed replays the history the nightly ran.
 sim-replay seed steps="300":
-    LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run -p lsr-sim --test sim -E 'test(/^replay::/)' --no-capture --locked
+    LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^replay::/)' --no-capture --locked
 
 # Sums what random simulator histories reach over `seeds` seeds from `base`: one count per state.
 sim-tally seeds="200" base="1":
@@ -67,7 +75,7 @@ sim-tally seeds="200" base="1":
 
 # Runs rotating simulator seeds for the given seconds from a base seed (default: now).
 sim-soak seconds base=`date +%s`:
-    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+    LSR_SIM_BASE_SEED={{base}} LSR_SIM_SECONDS={{seconds}} cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
 
 # The nightly rotating seed set: seeds follow from the UTC date (YYYYMMDD), a million per night,
 # so no two nights share one and a night is rerun with `just sim-nightly <seconds> <YYYYMMDD>`.
@@ -75,7 +83,7 @@ sim-soak seconds base=`date +%s`:
 # variables only, never as shell text. The summed reach goes to target/sim-reach.json, and a
 # row or fault class no seed reached fails the run (crates/sim/src/marks.rs).
 sim-nightly $LSR_SIM_SECONDS="900" $LSR_SIM_DAY=`date -u +%Y%m%d`:
-    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach.json}" cargo nextest run -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
+    env -u LSR_SIM_BASE_SEED LSR_SIM_COMMIT="$(git rev-parse HEAD)" LSR_SIM_REACH_OUT="${LSR_SIM_REACH_OUT:-$PWD/target/sim-reach.json}" cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^soak::/)' --run-ignored only --no-capture --locked
 
 # The nightly toolchain for the sanitizer, Miri and fuzz recipes; override with LSR_NIGHTLY=nightly-YYYY-MM-DD.
 nightly := env("LSR_NIGHTLY", "nightly")
