@@ -1,0 +1,14 @@
+diff --git a/crates/store-s3/src/ureq_transport.rs b/crates/store-s3/src/ureq_transport.rs
+index 064e09b57..90e5fe55d 100644
+--- a/crates/store-s3/src/ureq_transport.rs
++++ b/crates/store-s3/src/ureq_transport.rs
+@@ -120,7 +120,8 @@ fn read_body(
+     response: &mut http::Response<ureq::Body>,
+     expected: u64,
+ ) -> Result<Vec<u8>, TransportError> {
+-    let mut body = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
++    let _ = expected;
++    let mut body = Vec::new();
+     response
+         .body_mut()
+         .with_config()
