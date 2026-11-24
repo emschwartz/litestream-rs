@@ -120,7 +120,7 @@ pub enum RestoreError {
     /// The database was restored and published, and the takeover record that lets
     /// replication build on the replica it came from (`lsr-takeover`) could not be written
     /// in its meta directory. Replication will refuse to start over that replica until
-    /// `lsr take-over` writes one.
+    /// `lsr trust-local` writes one.
     #[error("the database was restored but its takeover record could not be written: {kind:?}")]
     TakeoverRecord {
         /// What the file system said.
@@ -135,12 +135,9 @@ pub enum RestoreError {
     },
 }
 
-/// Why [`crate::take_over`] recorded nothing.
+/// Why [`crate::trust_local`] recorded nothing.
 #[derive(Debug, thiserror::Error)]
-pub enum TakeOverError {
-    /// The path names no file, so it has no meta directory.
-    #[error("the database path names no file")]
-    NoMetaDir,
+pub enum TrustLocalError {
     /// The replica could not be listed.
     #[error("the replica cannot be listed: {0}")]
     List(#[from] lsr_core::InventoryError),

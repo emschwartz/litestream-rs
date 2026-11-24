@@ -36,7 +36,9 @@ pub enum Event {
     /// The boot refused to replicate: the replica holds transactions through `through` that
     /// this database has no record of writing, which neither the live WAL nor a takeover
     /// record vouches for (`lsr_core::TakeoverRecord`). `Stopped(OtherWriter)` follows.
-    /// `lsr take-over` writes a takeover record; `lsr restore` gets those transactions.
+    /// If this database is the right one, `lsr trust-local` writes a takeover record and the
+    /// next start replicates above them; if the replica is, `lsr restore` gets those
+    /// transactions.
     Refused {
         /// The replica's newest transaction.
         through: Txid,
@@ -45,7 +47,7 @@ pub enum Event {
     Stopped(StopCause),
     /// The takeover record in the meta directory (`lsr-takeover`) could not be read or did not
     /// decode at start. It is ignored, as if there were none: the boot builds only on what the
-    /// live WAL vouches for, and refuses the rest until `lsr take-over` writes a sound record.
+    /// live WAL vouches for, and refuses the rest until `lsr trust-local` writes a sound record.
     TakeoverRecordUnusable(TakeoverUnusable),
     /// The engine asked for a takeover record before deleting staged files the replica holds
     /// (`lsr_core::Event::TakeoverWanted`), and it could not be written in the meta directory.

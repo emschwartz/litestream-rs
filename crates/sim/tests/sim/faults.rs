@@ -315,8 +315,8 @@ fn staging_put_back_with_other_bytes_is_not_written_over_the_replica() {
 }
 
 #[test]
-fn vm_restore_stops_until_a_take_over() {
-    run(scenario::vm_restore_stops_until_a_take_over);
+fn vm_restore_stops_until_trust_local() {
+    run(scenario::vm_restore_stops_until_trust_local);
 }
 
 #[test]

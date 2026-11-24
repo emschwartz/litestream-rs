@@ -359,7 +359,7 @@ struct Runner {
     // begins past the latest time seen before the step.
     slew: Option<(Timestamp, u64)>,
     saved: Option<StagedCopy>,
-    /// The takeover record an operator's take-over left in the meta
+    /// The takeover record an operator's `lsr trust-local` left in the meta
     /// directory ([`lsr_core::TakeoverRecord`]), handed to every new actor.
     takeover: Option<lsr_core::TakeoverRecord>,
     /// The takeover record saved with [`Runner::saved`].
@@ -926,7 +926,7 @@ impl Runner {
     /// ([`lsr_core::TakeoverRecord`]). With another writer's file still
     /// standing that is the stop the run expects. Otherwise the files are this
     /// database's own, which staging no longer showed and the WAL could not
-    /// vouch for: the operator takes over, as `lsr take-over` does, and starts
+    /// vouch for: the operator trusts the local database, as `lsr trust-local` does, and starts
     /// the engine again.
     fn after_refusal(&mut self, step: Step) -> Result<Step, Violation> {
         let refused = self.actor.refused_through();
@@ -951,7 +951,7 @@ impl Runner {
                 "a boot refused replica files through {tip} with staging intact and no other writer"
             )));
         }
-        self.report.reach.bump("refusal.take_over");
+        self.report.reach.bump("refusal.trust_local");
         self.takeover = Some(lsr_core::TakeoverRecord::through(tip));
         self.restart(CrashKind::Process);
         Ok(Step::Crashed)
@@ -970,16 +970,16 @@ impl Runner {
         }))
     }
 
-    /// The operator runs `lsr take-over`: a takeover record through the
+    /// The operator runs `lsr trust-local`: a takeover record through the
     /// replica's newest transaction, for the next process.
-    fn take_over(&mut self) -> Result<(), Violation> {
+    fn trust_local(&mut self) -> Result<(), Violation> {
         let held = lsr_core::conformance::block_on(lsr_core::Inventory::load(&self.w.remote_raw))
             .map_err(|err| bug_fault(format!("listing the replica failed: {err}")))?
             .newest();
         let done = held.map(|tip| {
             self.takeover = Some(lsr_core::TakeoverRecord::through(tip));
         });
-        self.scenario_bool("TakeOver", done.is_some())
+        self.scenario_bool("TrustLocal", done.is_some())
     }
 
     /// Notes a stop the engine chose: a stop that reports a loss is the engine's signal the
@@ -1337,7 +1337,7 @@ impl Runner {
                         "the engine stopped in a drain: {cause:?}"
                     )));
                 }
-                // A restart (an operator's take-over after a refusal) brings
+                // A restart (an operator's `lsr trust-local` after a refusal) brings
                 // up an engine that was never asked to drain.
                 Step::Crashed => {
                     self.actor
@@ -2345,7 +2345,7 @@ impl Runner {
             Op::RequestSnapshot => self.actor.request_snapshot(),
             Op::Restore => self.restore_all()?,
             Op::Restart => self.restart(CrashKind::Process),
-            Op::TakeOver => self.take_over()?,
+            Op::TrustLocal => self.trust_local()?,
             Op::PowerLoss => self.restart(CrashKind::Power),
             Op::LyingWalSync => self.w.sqlite.lie_on_our_sync(),
             Op::Meta(op) => self.meta(*op)?,

@@ -334,7 +334,7 @@ impl EventSink for DbEvents {
 /// local vouched for them (`lsr_replica::Event::Refused`).
 fn refused_message(through: Txid) -> String {
     format!(
-        "replicate refused: the replica holds transactions up to {through} that this database has no record of writing. Another replicator may be using this prefix. To replicate this database over them: `lsr take-over <db>`. To get them instead: `lsr restore`."
+        "replicate refused: the replica holds transactions up to {through} that this database has no record of writing. Another replicator may be using this prefix. If this database is the right one, run `lsr trust-local <db> --replica <url>` and start again. If the replica is the right one, restore from it with `lsr restore`."
     )
 }
 

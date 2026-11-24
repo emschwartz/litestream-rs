@@ -30,7 +30,7 @@ lsr-wal = { path = "crates/wal" }
 # from libFuzzer's bytes. No derive feature, so no proc-macro build.
 arbitrary = { version = "1.4", default-features = false }
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
-# Argument parsing for `lsr`'s own commands, `verify`, `files`, `take-over` and `config check` (MIT OR Apache-2.0). Go-compatible commands keep the hand-written Go flag parser.
+# Argument parsing for `lsr`'s own commands, `verify`, `files`, `trust-local` and `config check` (MIT OR Apache-2.0). Go-compatible commands keep the hand-written Go flag parser.
 clap = { version = "4", default-features = false, features = ["std", "error-context"] }
 crc = "3.4.0"
 jiff = { version = "1.0", default-features = false, features = ["std"] }

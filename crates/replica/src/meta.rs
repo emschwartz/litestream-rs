@@ -11,7 +11,7 @@
 //! - `lsr-takeover`: an operator's word that this database may replicate over
 //!   what the replica holds, through one transaction
 //!   ([`lsr_core::TakeoverRecord`]). Read at start; written by
-//!   [`crate::take_over`] (`lsr take-over`) and by every restore, through the
+//!   [`crate::trust_local`] (`lsr trust-local`) and by every restore, through the
 //!   restored transaction, and by the replicator thread when the engine asks
 //!   for one before deleting staged files the replica holds, through what
 //!   they vouched for; `lsr-takeover.new` is its scratch name.
@@ -99,7 +99,7 @@ impl MetaLock {
     }
 }
 
-/// The takeover record a take-over, a restore or the engine left, if any.
+/// The takeover record `lsr trust-local`, a restore or the engine left, if any.
 ///
 /// # Errors
 /// [`TakeoverUnusable`] when the file exists and cannot be read or does not
@@ -119,7 +119,7 @@ pub(crate) fn read_takeover(meta: &Path) -> Result<Option<TakeoverRecord>, Takeo
 
 /// Records a takeover through `record`'s transaction in `meta` (created if
 /// missing): written through the scratch name, synced, renamed, and the
-/// directory synced. `lsr take-over`, every restore and the engine's own
+/// directory synced. `lsr trust-local`, every restore and the engine's own
 /// request before deleting staged files (`lsr_core::Actor::takeover_wanted`)
 /// all write it here.
 ///

@@ -5,5 +5,5 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = [
     "foreign_file_while_down_stops",
-    "vm_restore_stops_until_a_take_over",
+    "vm_restore_stops_until_trust_local",
 ]

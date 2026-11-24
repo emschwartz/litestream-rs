@@ -258,7 +258,7 @@ impl Worker {
     }
 
     /// The meta directory's lock to hold, and the takeover record an earlier run, a
-    /// take-over or a restore left there, which the engine judges at its boot. One that
+    /// `lsr trust-local` or a restore left there, which the engine judges at its boot. One that
     /// cannot be used is reported and ignored, as if there were none.
     pub(crate) fn with_meta(
         mut self,

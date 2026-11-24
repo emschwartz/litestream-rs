@@ -206,7 +206,7 @@ pub fn run_scenario(scenario: &Scenario) -> Result<RunReport, String> {
 pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
     match cause {
         SnapshotCause::FirstSync => &[empty_meta_boot],
-        SnapshotCause::BehindRemote { .. } => &[vm_restore_stops_until_a_take_over],
+        SnapshotCause::BehindRemote { .. } => &[vm_restore_stops_until_trust_local],
         SnapshotCause::NewestStagedFileUnreadable => &[
             newest_staged_file_byte_flip,
             newest_staged_file_truncated,
@@ -596,11 +596,11 @@ fn no_refusal(report: &RunReport) -> Result<(), String> {
 /// A VM restored to an older image while down: staging put back from a copy
 /// taken before the replica moved on, and the WAL no longer holding the
 /// replica's newest files. Nothing local tells them from another writer's:
-/// the boot stops, and once the operator takes over it snapshots above them.
+/// the boot stops, and once the operator runs `lsr trust-local` it snapshots above them.
 #[must_use]
-pub fn vm_restore_stops_until_a_take_over() -> Scenario {
+pub fn vm_restore_stops_until_trust_local() -> Scenario {
     let mut s = build(
-        "vm_restore_stops_until_a_take_over",
+        "vm_restore_stops_until_trust_local",
         vec![
             vec![commit(3, false), Op::Shutdown, Op::Meta(MetaOp::Save)],
             vec![commit(2, false), commit(2, false), Op::Shutdown],
@@ -620,12 +620,12 @@ pub fn vm_restore_stops_until_a_take_over() -> Scenario {
             Expect::Oracle,
         ],
     );
-    s.check = Some(stops_then_takes_over);
+    s.check = Some(stops_then_trusts_local);
     s
 }
 
-/// A stop for another writer, then a `BehindRemote` boot after the take-over.
-fn stops_then_takes_over(report: &RunReport) -> Result<(), String> {
+/// A stop for another writer, then a `BehindRemote` boot after `lsr trust-local`.
+fn stops_then_trusts_local(report: &RunReport) -> Result<(), String> {
     let stop = report
         .seen
         .iter()
@@ -642,7 +642,7 @@ fn stops_then_takes_over(report: &RunReport) -> Result<(), String> {
     if snapshot {
         Ok(())
     } else {
-        Err("no snapshot above the replica's files after the take-over".to_owned())
+        Err("no snapshot above the replica's files after trust-local".to_owned())
     }
 }
 
@@ -912,7 +912,7 @@ pub fn restored_with_no_wal() -> Scenario {
                 Op::EnvFault(EnvFault::DriverWritesNothing),
                 // A restore leaves a takeover record through what it restored,
                 // before the process that replicates starts.
-                Op::TakeOver,
+                Op::TrustLocal,
                 Op::EnvFault(EnvFault::WipeStaging),
             ],
             ticks(SETTLE),

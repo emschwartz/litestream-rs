@@ -296,9 +296,9 @@ fn a_restored_database_replicates_without_a_refusal() {
 
 /// Another writer's file appeared while the replicator was down: the boot refuses it,
 /// naming the replica's newest transaction in `Event::Refused`, and writes nothing. A
-/// take-over through that transaction lets the next start snapshot above it.
+/// `trust_local` through that transaction lets the next start snapshot above it.
 #[test]
-fn a_refused_boot_names_the_tip_and_a_take_over_clears_it() {
+fn a_refused_boot_names_the_tip_and_trust_local_clears_it() {
     let site = Site::new();
     site.commit(2);
     let (runtime, clock) = fake();
@@ -333,7 +333,7 @@ fn a_refused_boot_names_the_tip_and_a_take_over_clears_it() {
         "nothing was written"
     );
 
-    let taken = lsr_replica::take_over(&*site.store(), &meta_of(&site)).unwrap();
+    let taken = lsr_replica::trust_local(&*site.store(), &meta_of(&site)).unwrap();
     assert_eq!(taken, Some(foreign.range().max()));
     let (runtime, clock) = fake();
     let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();

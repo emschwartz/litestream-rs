@@ -1,4 +1,4 @@
-# A takeover record that covers nothing: a take-over never clears a refusal or a stop record.
+# A takeover record that covers nothing: `lsr trust-local` never clears a refusal or a stop record.
 name = "boot-gate-takeover-ignored"
 fix = "aa1165d"
 package = "lsr-core"

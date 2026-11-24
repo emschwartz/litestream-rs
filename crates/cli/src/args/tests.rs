@@ -220,7 +220,7 @@ fn missing_required_flag() {
     for (line, command) in [
         ("verify", "verify"),
         ("files --json", "files"),
-        ("take-over app.db", "take-over"),
+        ("trust-local app.db", "trust-local"),
     ] {
         assert_eq!(
             usage(line),
@@ -636,18 +636,18 @@ fn follow_mode_is_refused_as_not_built() {
 }
 
 #[test]
-fn take_over_takes_the_database_first_then_its_flags() {
+fn trust_local_takes_the_database_first_then_its_flags() {
     assert_eq!(
-        parsed("take-over app.db --replica r --meta-dir m"),
-        Ok(Command::TakeOver(TakeOverArgs {
+        parsed("trust-local app.db --replica r --meta-dir m"),
+        Ok(Command::TrustLocal(TrustLocalArgs {
             database: PathBuf::from("app.db"),
             replica: Replica::Dir(PathBuf::from("r")),
             meta_dir: Some(PathBuf::from("m")),
         }))
     );
     assert_eq!(
-        parsed("take-over --replica r"),
+        parsed("trust-local --replica r"),
         Err(UsageError::MissingDatabase)
     );
-    assert_eq!(parsed("take-over"), Err(UsageError::MissingDatabase));
+    assert_eq!(parsed("trust-local"), Err(UsageError::MissingDatabase));
 }
