@@ -545,8 +545,6 @@ pub(crate) struct Tail {
     /// What this engine had confirmed when level 0 in `listed` was listed: the replica may not
     /// be judged to have lost files below what was confirmed since.
     baseline: Option<Txid>,
-    /// Whether the listing stood in, in part, for what the last pass listed.
-    carried: bool,
     /// When the oldest part of `listed` was really listed.
     made_at: Timestamp,
 }
@@ -591,7 +589,6 @@ impl Tail {
                 && now.unix_millis().saturating_sub(carry.at.unix_millis()) <= CARRY_MAX_AGE_MILLIS
         });
         let mut baseline = confirmed;
-        let used_carry = carried.is_some();
         let carried_at = carried.map(|carry| carry.at);
         let (listed, covers) = match carried {
             Some(carry) => {
@@ -633,7 +630,6 @@ impl Tail {
             plan,
             covers,
             baseline,
-            carried: used_carry,
             made_at: carried_at.unwrap_or(now),
         })
     }

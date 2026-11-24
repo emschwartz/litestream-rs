@@ -385,13 +385,16 @@ fn a_carried_listing_keeps_its_real_age_and_never_decides_a_delete() {
     };
     // A real listing, then another process deletes a level-1 file behind it.
     let first = pass(&known, &browse, 1);
-    assert!(!first.carried);
+    assert!(first.made_at == at(T0 + 1_000));
     known.learn_short(&first, &cfg, &nothing_decided(), at(T0 + 1_000), None);
     block_on(store.delete(&[files[3].key])).unwrap();
     // Our own jobs' outputs: the next passes stand on the carried listing, while it is young.
     known.note_output(output, &cfg, at(T0 + 2_000));
     let second = pass(&known, &browse, 2);
-    assert!(second.carried);
+    assert!(
+        second.made_at == at(T0 + 1_000),
+        "carried, made at the first pass"
+    );
     assert!(
         second
             .listed
@@ -402,13 +405,13 @@ fn a_carried_listing_keeps_its_real_age_and_never_decides_a_delete() {
     known.learn_short(&second, &cfg, &nothing_decided(), at(T0 + 2_000), None);
     known.note_output(file(1, 4, 4, T0 + 4_000), &cfg, at(T0 + 4_000));
     let third = pass(&known, &browse, 4);
-    assert!(third.carried);
+    assert!(third.made_at == at(T0 + 1_000));
     known.learn_short(&third, &cfg, &nothing_decided(), at(T0 + 4_000), None);
     // Each hop was under 5 s after the last, but the listing is 6 s old: a real one, which shows
     // the deletion.
     known.note_output(file(1, 5, 5, T0 + 7_000), &cfg, at(T0 + 7_000));
     let fourth = pass(&known, &browse, 7);
-    assert!(!fourth.carried);
+    assert!(fourth.made_at == at(T0 + 7_000), "a real listing");
     assert!(
         !fourth
             .listed
@@ -423,7 +426,7 @@ fn a_carried_listing_keeps_its_real_age_and_never_decides_a_delete() {
         retention: true,
         ..browse
     };
-    assert!(!pass(&known, &deleting, 8).carried);
+    assert!(pass(&known, &deleting, 8).made_at == at(T0 + 8_000));
 }
 
 /// A level-0 file no rule deletes is the first level-0 file at every whole listing; the cover
