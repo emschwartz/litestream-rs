@@ -1,7 +1,6 @@
 # How litestream-rs differs from Go Litestream
 
-Compared with Go Litestream 0.5.x at upstream 041a8c3. This page describes v1 as decided in [decisions/D173.md](decisions/D173.md). A row marked † is decided and not yet true on `main`; the last section says what `main` does today.
-
+Compared with Go Litestream 0.5.x at upstream 041a8c3. This page describes v1 as decided in [decisions/D173.md](decisions/D173.md).
 "S3" here means any S3-compatible object storage: AWS S3, Cloudflare R2, Tigris, MinIO and the like.
 
 The replica is the same: the bucket layout and the LTX files. Either implementation restores what the other wrote (Go from v0.5.16 for files written here), and either takes over the other's bucket and local files with a plain restart.
@@ -16,7 +15,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | SQLite changes the WAL: a checkpoint from outside, a WAL restart, `VACUUM`, a deleted WAL | Continue, or take a snapshot |
 | S3's list of files is out of date | Trust the list. Object storage that lists behind its writes is unsupported |
 | The replicator restarts while replication is failing | Not covered: the failure is forgotten. The count of failed tries and the degraded report start again from zero, so a replicator that keeps restarting can stay quiet. litestream-rs carries one number across the restart, the age of the oldest change that was staged and not yet in S3 (`lsr_unreplicated_age_seconds`) |
-| An S3 replica with no path inside the bucket † | Works, with keys that start with `/` |
+| An S3 replica with no path inside the bucket, written `s3://bucket/` or as `bucket` with no `path` | Works, with keys that start with `/` ([decisions/D181.md](decisions/D181.md)) |
 | `replicate` and `restore` fail | Exit 1 |
 
 ## Different: litestream-rs stops or refuses, Go carries on
@@ -29,6 +28,7 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | A restore the replica cannot give exactly, because files are missing | Can restore a shorter history. With `-if-replica-exists` it exits 0 and writes nothing | Fails with `Gap`. `-if-replica-exists` skips only a replica that holds nothing | A start script would otherwise run the application on an empty database beside its own history |
 | A config that cannot mean what it says: an unknown key, a key set twice, a value no request could use | Starts, and ignores or misreads it | Refuses at load, naming the key and line | A typo in `retention` silently changes what is kept |
 | Two databases share one working folder or one bucket path | Starts | Refuses at load | Each overwrites the other's files |
+| An S3 replica written `s3://bucket`, with no slash after the bucket | Reads the path as `.` and writes keys that start with `./` | Refuses at load; `s3://bucket/` is the bucket's root | No HTTP client sends a `.` segment, so the request would name another object than the key says ([decisions/D181.md](decisions/D181.md)) |
 | Used as a library: the application runs SQLite at `synchronous = OFF`, or links another SQLite build than the bundled one | Does not apply | Refuses the connection, or refuses to start | OFF syncs nothing; another build lays out the files the engine reads differently |
 
 ## Different: litestream-rs carries on as Go does, and checks or says more
@@ -60,6 +60,3 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 
 - Holding the application when replication stops (`if-replication-stops`, [decisions/D177.md](decisions/D177.md)). The default, `hold-start`, does not start the application when the replicator stops or S3 refuses it at start. `report` never holds the application, as under Go. `stop-app` also holds a running application's writes when replication stops or changes have waited too long for S3.
 
-## What `main` does today for the rows marked †
-
-- **S3 replica with no path:** refused at load.

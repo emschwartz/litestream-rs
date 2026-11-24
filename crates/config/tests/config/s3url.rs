@@ -39,14 +39,42 @@ fn a_bare_url_is_aws_in_virtual_host_style() {
     assert_eq!(tigris.part_size(), PartSize::TIGRIS);
 }
 
+/// Go cleans the URL's path (`path.Clean`) and trims one leading slash, so `s3://b/` has an empty
+/// path and its keys start with a slash. `s3://b` cleans to `.`, which is a different prefix (its
+/// keys are `./0000/<file>`) that no URL can name, so it is refused, not read as the bare bucket.
+#[test]
+fn a_bucket_with_no_path_is_a_replica_at_the_root_of_the_bucket() {
+    for text in ["s3://b/", "s3://b/.", "s3://b//", "s3://b/a/.."] {
+        let config = read(text).unwrap();
+        assert_eq!(config.bucket().as_str(), "b", "{text}");
+        assert_eq!(config.prefix().as_str(), "", "{text}");
+    }
+    let url = S3Url::parse("s3://b/p").unwrap();
+    let over = S3Overrides {
+        path: Some(""),
+        ..S3Overrides::default()
+    };
+    assert_eq!(
+        s3_config(Some(url), &over).unwrap().prefix().as_str(),
+        "p",
+        "an empty override counts as unset"
+    );
+    let bucket_only = S3Overrides {
+        bucket: Some("b"),
+        ..S3Overrides::default()
+    };
+    assert_eq!(s3_config(None, &bucket_only).unwrap().prefix().as_str(), "");
+}
+
 #[test]
 fn each_bad_shape_is_refused() {
     let s3 = ReplicaProblem::S3;
     let cases = [
         ("not a url", ReplicaProblem::BadUrl),
-        ("s3://b", s3(ConfigError::EmptyPrefix)),
-        ("s3://b/", s3(ConfigError::EmptyPrefix)),
         ("s3:///p", ReplicaProblem::BucketRequired),
+        ("s3://b", s3(ConfigError::BadPrefix)),
+        ("s3://b?region=eu-west-1", s3(ConfigError::BadPrefix)),
+        ("s3://b/a%0Ab", s3(ConfigError::BadPrefix)),
         ("s3://b%20c/p", s3(ConfigError::BadBucket)),
         (
             "s3://b/p?partSize=1024",

@@ -26,11 +26,9 @@ pub enum ConfigError {
     /// The endpoint's scheme is not `http` or `https`.
     #[error("unsupported url scheme")]
     UnsupportedScheme,
-    /// The prefix is empty. Go would build keys with a leading slash; a replica
-    /// at the root of a bucket is refused instead.
-    #[error("the replica prefix is empty")]
-    EmptyPrefix,
-    /// The prefix has a leading or trailing slash, an empty segment or a control character.
+    /// The prefix has a leading or trailing slash, an empty segment, a `.` or `..` segment or a
+    /// control character. A URL cannot carry a dot segment: the `url` type and every HTTP client
+    /// drop it, so the request would name another object than the key says.
     #[error("the replica prefix is not a clean path")]
     BadPrefix,
     /// The part size is below S3's 5 MiB minimum.
@@ -226,21 +224,27 @@ impl Region {
     }
 }
 
-/// The key prefix every object of the replica lives under: non-empty, no
-/// leading or trailing `/`, no empty segment, no control character.
+/// The key prefix every object of the replica lives under: empty (the replica is the whole
+/// bucket, `s3://bucket/`), or a path with no leading or trailing `/`, no empty segment, no
+/// `.` or `..` segment and no control character.
+///
+/// The empty prefix is Go's too: its keys are `c.Path + "/" + "0000/<file>"`, so with no
+/// path they start with a slash (`/0000/<file>.ltx`) and the object URL has an empty first
+/// segment (`/bucket//0000/<file>.ltx`). Nothing may normalise that slash away.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Prefix(String);
 
 impl Prefix {
     /// # Errors
-    /// [`ConfigError::EmptyPrefix`] for `""`, [`ConfigError::BadPrefix`] for the rest.
+    /// [`ConfigError::BadPrefix`] for a path that is not clean; `""` is the bare bucket.
     pub fn new(text: &str) -> Result<Self, ConfigError> {
         if text.is_empty() {
-            return Err(ConfigError::EmptyPrefix);
+            return Ok(Self(String::new()));
         }
         let clean = !text.starts_with('/')
             && !text.ends_with('/')
             && !text.contains("//")
+            && !text.split('/').any(|segment| matches!(segment, "." | ".."))
             && !text.chars().any(char::is_control);
         if clean {
             Ok(Self(text.to_owned()))
@@ -249,7 +253,7 @@ impl Prefix {
         }
     }
 
-    /// The prefix, without a trailing slash.
+    /// The prefix, without a trailing slash; empty for the bare bucket.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -516,13 +520,19 @@ mod tests {
     }
 
     #[test]
-    fn prefix_refuses_empty_and_slashes() {
-        assert_eq!(Prefix::new(""), Err(ConfigError::EmptyPrefix));
-        for bad in ["/", "a/", "/a", "a//b", "a\nb"] {
+    fn prefix_accepts_empty_and_refuses_unclean_paths() {
+        assert_eq!(Prefix::new("").map(|p| p.0), Ok(String::new()));
+        for bad in [
+            "/", "a/", "/a", "a//b", "a\nb", ".", "..", "a/./b", "a/..", "./a",
+        ] {
             assert_eq!(Prefix::new(bad), Err(ConfigError::BadPrefix), "{bad:?}");
         }
         assert_eq!(Prefix::new("a").map(|p| p.0), Ok("a".to_owned()));
         assert_eq!(Prefix::new("a/b").map(|p| p.0), Ok("a/b".to_owned()));
+        assert_eq!(
+            Prefix::new("a.b/..c/d.").map(|p| p.0),
+            Ok("a.b/..c/d.".to_owned())
+        );
     }
 
     #[test]

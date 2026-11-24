@@ -268,6 +268,9 @@ pub fn send_on_threads<T: Transport + ?Sized>(
         .collect()
 }
 
+#[cfg(test)]
+pub(crate) mod wire_proof;
+
 #[cfg(all(test, any(feature = "ureq", feature = "reqwest")))]
 mod tests {
     use lsr_core::ReadLen;

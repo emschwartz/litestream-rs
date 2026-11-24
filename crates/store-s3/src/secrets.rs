@@ -68,7 +68,6 @@ fn credentials_never_print() {
     let errors = [
         ConfigError::BadUrl,
         ConfigError::UnsupportedScheme,
-        ConfigError::EmptyPrefix,
         ConfigError::BadPrefix,
         ConfigError::MissingBucket,
         ConfigError::BadBucket,

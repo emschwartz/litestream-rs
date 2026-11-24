@@ -261,6 +261,18 @@ mod tests {
         let _released = release.send(());
     }
 
+    /// A bare bucket's empty path segment survives the `url` type, the `http` crate and ureq, in
+    /// both URL styles and every request form.
+    #[test]
+    fn a_bare_buckets_leading_slash_reaches_the_socket() {
+        use crate::config::UrlStyle;
+        use crate::transport::wire_proof::{assert_bare_bucket_arrived, sent_by};
+        let transport = UreqTransport::new(Duration::from_secs(5));
+        for style in [UrlStyle::Path, UrlStyle::VirtualHost] {
+            assert_bare_bucket_arrived(&sent_by(&transport, style), style);
+        }
+    }
+
     #[test]
     fn a_connection_closed_early_is_an_error() {
         assert_ne!(status_of(&serve_once(b"")), Ok(200));

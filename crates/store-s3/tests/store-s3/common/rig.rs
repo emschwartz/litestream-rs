@@ -8,7 +8,7 @@ use lsr_core::conformance::{Failure, Harness, block_on};
 use lsr_core::{FakeClock, FileKey, Level, ObjectStore, PageLimit, StoreError, Upload};
 use lsr_ltx::Timestamp;
 use lsr_store_s3::{
-    FakeS3, Fault, FaultTransport, HttpRequest, HttpResponse, S3Store, Shape, Transport,
+    FakeS3, Fault, FaultTransport, HttpRequest, HttpResponse, S3Config, S3Store, Shape, Transport,
     TransportError, level_prefix,
 };
 
@@ -25,19 +25,32 @@ impl Transport for Shared {
 pub struct FakeHarness {
     pub wire: Arc<FaultTransport<FakeS3>>,
     pub store: S3Store<Shared>,
+    config: S3Config,
 }
 
 impl FakeHarness {
     pub fn new() -> Self {
-        let wire = Arc::new(FaultTransport::new(fake()));
+        Self::with_config(config())
+    }
+
+    /// A store over a fresh fake addressed as `config` says.
+    pub fn with_config(config: S3Config) -> Self {
+        let wire = Arc::new(FaultTransport::new(FakeS3::new(
+            &config,
+            FakeClock::new(now()),
+        )));
         let store = S3Store::with_transport(
-            config(),
+            config.clone(),
             credentials(),
             Shared(Arc::clone(&wire)),
             FakeClock::new(now()),
         )
         .unwrap();
-        Self { wire, store }
+        Self {
+            wire,
+            store,
+            config,
+        }
     }
 }
 
@@ -49,7 +62,7 @@ impl Harness for FakeHarness {
     }
 
     fn plant_unrecognized(&self, level: Level, name: &str) -> Result<(), Failure> {
-        let object = format!("{}{name}", level_prefix(config().prefix(), level));
+        let object = format!("{}{name}", level_prefix(self.config.prefix(), level));
         self.wire.inner().put_raw(&object, b"stray".to_vec(), &[]);
         Ok(())
     }

@@ -477,6 +477,27 @@ fn an_s3_url_names_the_bucket_and_prefix() {
     ));
 }
 
+/// A bucket with no path inside it is a replica at the root of the bucket, as under Go, however
+/// it is written: a URL with or without the slash, or `type: s3` with a missing or empty `path`.
+#[test]
+fn a_bucket_with_no_path_is_the_whole_bucket() {
+    for replica in [
+        "      url: s3://my-bucket/\n",
+        "      type: s3\n      bucket: my-bucket\n",
+        "      type: s3\n      bucket: my-bucket\n      path: \"\"\n",
+    ] {
+        let db = s3_with(replica);
+        let config = s3_config(&db);
+        assert_eq!(config.bucket().as_str(), "my-bucket", "{replica}");
+        assert_eq!(config.prefix().as_str(), "", "{replica}");
+    }
+    // Go's prefix for `s3://my-bucket` is `.`, which no URL can address: refused, never the bare bucket.
+    assert!(matches!(
+        s3_refusal("      url: s3://my-bucket\n"),
+        ReplicaProblem::S3(lsr_store_s3::ConfigError::BadPrefix)
+    ));
+}
+
 /// Go's `URLWithEndpointQuery` and `ConfigOverridesQuery`: an endpoint turns path
 /// style on, the file's keys win over the query.
 #[test]

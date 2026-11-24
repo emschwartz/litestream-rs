@@ -4,6 +4,8 @@
 // `cfg(test)` is always set here; it marks the helpers as test code, so clippy.toml's
 // allow-*-in-tests cover them as they cover #[test] fns.
 #[cfg(test)]
+mod bare_bucket;
+#[cfg(test)]
 mod common;
 #[cfg(test)]
 mod fake;
