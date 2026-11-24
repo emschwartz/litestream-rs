@@ -933,6 +933,7 @@ version = "0.0.0"
 dependencies = [
  "lsr-core",
  "lsr-replica",
+ "lsr-store-fs",
  "lsr-store-s3",
  "percent-encoding",
  "proptest",
