@@ -216,9 +216,9 @@ fn a_database_removed_after_a_panic_still_stops_at_the_deadline() {
 #[test]
 fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     let site = Site::new();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    assert!(matches!(stopped(&first), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
     drop(first);
     let faulty = site.faulty();
     faulty.panics.store(2, Ordering::SeqCst);
@@ -242,7 +242,10 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     moved_until(&replicator, &clock, (POLL, 240), |h| {
         caught_up(h) && h.resnapshot.is_none()
     });
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -266,7 +269,10 @@ fn a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild() {
     moved_until(&replicator, &clock, (ten, 60), |h| {
         h.phase == Phase::Running
     });
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// A task the dropped engine reported degraded is still reported while the fresh engine waits
@@ -306,7 +312,10 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     moved_until(&replicator, &clock, (POLL, 240), |h| {
         caught_up(h) && !h.is_degraded()
     });
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// Moves another database over the replicated one's path, journal files and all, as a restore in
@@ -429,7 +438,7 @@ fn a_database_replaced_after_a_panic_stops_when_configured_to() {
     assert_eq!(health.phase, Phase::Stopped(StopCause::WalUnlinked));
     assert!(!has_replicator_tables(&replaced));
     assert_eq!(
-        stopped(&replicator),
+        stopped(&replicator, &clock),
         Stopped::Stopped(StopCause::WalUnlinked)
     );
 }

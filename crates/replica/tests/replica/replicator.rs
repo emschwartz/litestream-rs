@@ -15,8 +15,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::{
-    PATIENCE, Site, assert_same, booted, config, fake, moved_until, stopped, stopped_moving,
-    truncate_is_busy, wait,
+    PATIENCE, Site, assert_same, booted, config, fake, moved_until, stopped,
+    stopped_on_system_clock, truncate_is_busy, wait,
 };
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
@@ -44,7 +44,7 @@ fn start_returns_with_the_read_lock_held_and_stop_drains_every_commit() {
     let replicator = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
     assert!(truncate_is_busy(&site.db), "the read lock holds the WAL");
     site.commit(5);
-    let stopped = stopped(&replicator);
+    let stopped = stopped_on_system_clock(&replicator);
     let Stopped::Drained { txid: Some(txid) } = stopped else {
         panic!("{stopped:?}");
     };
@@ -80,9 +80,9 @@ fn a_stop_before_the_first_boot_drains_without_waiting_for_a_poll() {
         ));
         drop(first);
         site.commit(2);
-        let (runtime, _clock) = fake();
+        let (runtime, clock) = fake();
         let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-        let stopped = stopped(&replicator);
+        let stopped = stopped(&replicator, &clock);
         assert!(
             matches!(stopped, Stopped::Drained { txid: Some(_) }),
             "{stopped:?}"
@@ -165,14 +165,17 @@ fn a_stop_awaited_during_a_retry_wait_drains() {
 fn wait_booted_reports_the_first_boot() {
     let site = Site::new();
     let store = site.store();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator =
         Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
     assert_eq!(booted(&replicator), Booted::Booted);
     let health = wait(&replicator, caught_up);
     assert_eq!(health.phase, Phase::Running);
     assert!(!health.is_degraded());
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*store);
 }
 
@@ -188,23 +191,23 @@ fn a_sink_given_at_start_sees_the_first_boot() {
     let first = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
     site.commit(2);
     assert!(matches!(
-        stopped(&first),
+        stopped_on_system_clock(&first),
         Stopped::Drained { txid: Some(_) }
     ));
     drop(first);
     let recovered = Event::Engine(EngineEvent::Booted { cause: None });
 
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let late = Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
     assert_eq!(booted(&late), Booted::Booted);
     let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
     late.set_events(Box::new(sink));
-    assert!(matches!(stopped(&late), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&late, &clock), Stopped::Drained { .. }));
     drop(late);
     let seen = events.drain();
     assert!(!seen.contains(&recovered), "{seen:?}");
 
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
     let replicator = Replicator::start_with_events(
         &site.db,
@@ -215,7 +218,10 @@ fn a_sink_given_at_start_sees_the_first_boot() {
     )
     .unwrap();
     assert_eq!(booted(&replicator), Booted::Booted);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     let seen = events.drain();
     assert_eq!(seen.first(), Some(&recovered), "{seen:?}");
     assert_eq!(events.dropped(), 0);
@@ -247,7 +253,10 @@ fn a_refused_boot_is_degraded_and_recovers() {
     });
     assert_eq!(booted(&replicator), Booted::Booted);
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -268,7 +277,10 @@ fn the_lag_counts_from_the_start_while_the_first_boot_fails() {
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// Go's `SyncStatus`: what is staged locally and what the replica holds, before the replica
@@ -308,7 +320,10 @@ fn health_compares_the_local_and_replica_positions() {
     });
     assert!(after.counters.uploads > full.counters.uploads);
     assert!(after.counters.store.bytes_uploaded > full.counters.store.bytes_uploaded);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -361,10 +376,10 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
     );
     drop(panicked);
     faulty.panic_always.store(false, Ordering::SeqCst);
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert_eq!(booted(&next), Booted::Booted);
-    assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
 
@@ -405,10 +420,7 @@ fn a_staged_file_damaged_before_the_first_upload_is_dropped_and_the_next_start_b
     // for a takeover it never gets would take.
     moved_until(&next, &clock, (POLL, 120), |h| h.phase != Phase::Booting);
     assert_eq!(next.wait_booted(PATIENCE), Booted::Booted);
-    assert!(matches!(
-        stopped_moving(&next, &clock, POLL),
-        Stopped::Drained { .. }
-    ));
+    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
 
@@ -470,11 +482,11 @@ fn dropping_the_last_handle_drains_and_closes() {
     // fake clock; moving it until the commits are replicated leaves the drop nothing to retry.
     moved_until(&clone, &clock, (POLL, 240), |h| h.replicated != before);
     drop(clone);
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let health = wait(&next, caught_up);
     assert_eq!(health.resnapshot, None);
-    assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
 
@@ -486,7 +498,7 @@ fn a_stopped_replicator_reports_its_cause() {
     let faulty = site.faulty();
     faulty.refuse.store(true, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let strict = Config {
         responses: Responses::STRICT,
         ..config()
@@ -501,7 +513,7 @@ fn a_stopped_replicator_reports_its_cause() {
         Phase::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
-        stopped(&replicator),
+        stopped(&replicator, &clock),
         Stopped::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
 }
@@ -535,7 +547,7 @@ fn accepting_the_database_pages_ends_a_page_mismatch() {
     replicator.request_snapshot();
     wait(&replicator, |h| h.task(Task::Sync).is_none());
     assert!(matches!(
-        stopped_moving(&replicator, &clock, POLL),
+        stopped(&replicator, &clock),
         Stopped::Drained { .. }
     ));
 }
@@ -544,7 +556,7 @@ fn accepting_the_database_pages_ends_a_page_mismatch() {
 #[test]
 fn request_snapshot_stages_a_snapshot_and_events_report_it() {
     let site = Site::new();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
     replicator.set_events(Box::new(sink));
@@ -563,7 +575,10 @@ fn request_snapshot_stages_a_snapshot_and_events_report_it() {
     replicator.accept_database_pages();
     let health = wait(&replicator, caught_up);
     assert_eq!(health.task(Task::Sync), None);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -638,7 +653,7 @@ fn a_reader_guard_holds_off_truncate() {
     // The drain may have a retry's backoff to wait out (the TRUNCATE the guard held off), and
     // this clock moves only when the test moves it.
     assert!(matches!(
-        stopped_moving(&replicator, &clock, POLL),
+        stopped(&replicator, &clock),
         Stopped::Drained { .. }
     ));
     site.assert_restores(&*site.store());
@@ -665,7 +680,7 @@ fn app_connection_sets_up_only_this_database() {
         .execute("INSERT INTO t(v) VALUES (x'00')", [])
         .unwrap();
     // The insert may meet the replicator's read: the drain retries, so the clock must move.
-    let stopped = stopped_moving(&replicator, &clock, POLL);
+    let stopped = stopped(&replicator, &clock);
     assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
     site.assert_restores(&*site.store());
 }
@@ -681,7 +696,7 @@ fn verify_and_restore_if_missing_use_the_shared_store() {
     let replicator =
         Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
     site.commit(4);
-    let stopped = stopped_moving(&replicator, &clock, POLL);
+    let stopped = stopped(&replicator, &clock);
     assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
     let report = verify(&*store, Depth::Contents).unwrap();
     assert_eq!(report.worst(), None, "{report:?}");
@@ -727,7 +742,10 @@ fn a_panic_rebuilds_the_engine_and_replication_continues() {
     clock.advance(POLL);
     let health = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert!(!health.is_degraded(), "{health:?}");
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -737,14 +755,17 @@ fn a_panic_under_strict_responses_stops_with_bug() {
     let faulty = site.faulty();
     faulty.panics.store(1, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let strict = Config {
         responses: Responses::STRICT,
         ..config()
     };
     let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
     assert_eq!(booted(&replicator), Booted::Stopped(StopCause::Bug));
-    assert_eq!(stopped(&replicator), Stopped::Stopped(StopCause::Bug));
+    assert_eq!(
+        stopped(&replicator, &clock),
+        Stopped::Stopped(StopCause::Bug)
+    );
 }
 
 /// A checkpoint the application ran behind the replicator's back is counted and reported.
@@ -792,7 +813,10 @@ fn an_app_checkpoint_is_counted_and_reported() {
         ),
         "{reports:?}"
     );
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -826,7 +850,10 @@ fn grown_on_read_mark_zero(
             caught_up(h) && h.synced.map(|(txid, _)| txid) > before
         });
     }
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     (health, events.drain())
 }
 
@@ -890,7 +917,10 @@ fn an_idle_replicator_keeps_its_health_current() {
         assert_eq!(health.counters.syncs, settled.counters.syncs);
         assert_eq!(health.unreplicated_since, None);
     }
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// One replicator per file: a second start on the same file, even by another path, is
@@ -898,7 +928,7 @@ fn an_idle_replicator_keeps_its_health_current() {
 #[test]
 fn a_second_start_on_the_same_file_is_refused() {
     let site = Site::new();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let linked = site.dir.path().join("linked.db");
     std::fs::hard_link(&site.db, &linked).unwrap();
@@ -907,7 +937,10 @@ fn a_second_start_on_the_same_file_is_refused() {
         Replicator::start_with(&linked, site.store(), config(), runtime),
         Err(StartError::AlreadyReplicated)
     ));
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }
 
 #[test]
@@ -932,7 +965,10 @@ fn start_refuses_a_missing_database_and_an_unusable_meta_dir() {
     ));
     // Nothing was left registered: a good start goes through.
     let replicator = Replicator::start(&site.db, site.store(), config()).unwrap();
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped_on_system_clock(&replicator),
+        Stopped::Drained { .. }
+    ));
 }
 
 struct Panicking;
@@ -957,7 +993,10 @@ fn a_panicking_sink_is_counted_and_replication_goes_on() {
         caught_up(h) && h.counters.sink_panics > 0
     });
     assert_eq!(health.phase, Phase::Running);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -991,11 +1030,17 @@ fn a_thread_that_dies_is_reported_gone() {
     let health = wait(&replicator, |h| h.phase == Phase::Gone(Gone::ThreadDied));
     assert_eq!(health.phase, Phase::Gone(Gone::ThreadDied));
     // The file is free for the next replicator at once, without a stop of the dead one.
-    let (runtime, _clock) = fake();
+    let (runtime, next_clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    assert_eq!(stopped(&replicator), Stopped::Gone(Gone::ThreadDied));
+    assert_eq!(
+        stopped(&replicator, &clock),
+        Stopped::Gone(Gone::ThreadDied)
+    );
     assert_eq!(booted(&replicator), Booted::Gone(Gone::ThreadDied));
-    assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&next, &next_clock),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -1024,17 +1069,20 @@ fn a_thread_that_dies_without_an_outcome_is_reported_gone() {
     replicator.set_events(Box::new(ExplodesOnDrop));
     site.commit(1);
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
-    assert_eq!(stopped(&replicator), Stopped::Gone(Gone::ThreadDied));
+    assert_eq!(
+        stopped(&replicator, &clock),
+        Stopped::Gone(Gone::ThreadDied)
+    );
     assert_eq!(replicator.health().phase, Phase::Gone(Gone::ThreadDied));
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    assert!(matches!(stopped(&next), Stopped::Drained { .. }));
+    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
     site.assert_restores(&*site.store());
 }
 
 /// A drain that meets a retry waits out its backoff on the replicator's clock: on a fake
 /// clock it ends once the clock reaches the retry, not before. A test that stops a
-/// replicator whose drain may retry moves the clock while it waits ([`stopped_moving`]).
+/// replicator whose drain may retry moves the clock while it waits ([`stopped`]).
 #[test]
 fn a_drain_that_waits_out_a_retry_ends_once_the_clock_reaches_it() {
     let site = Site::new();
@@ -1051,7 +1099,7 @@ fn a_drain_that_waits_out_a_retry_ends_once_the_clock_reaches_it() {
         h.synced.is_some() && h.counters.store.begin_upload.errors > 0
     });
     faulty.fail_uploads.store(false, Ordering::SeqCst);
-    let stopped = stopped_moving(&replicator, &clock, POLL);
+    let stopped = stopped(&replicator, &clock);
     assert!(
         matches!(stopped, Stopped::Drained { txid: Some(_) }),
         "{stopped:?}"
@@ -1092,7 +1140,10 @@ fn a_retry_s_backoff_is_waited_out_by_moving_the_clock() {
         health.counters.uploads > start.counters.uploads,
         "{health:?}"
     );
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }
 
 /// A replicator prints its database and state, and a runtime its clock: what a panic message
@@ -1100,7 +1151,7 @@ fn a_retry_s_backoff_is_waited_out_by_moving_the_clock() {
 #[test]
 fn a_replicator_and_its_runtime_print_what_they_hold() {
     let site = Site::new();
-    let (runtime, _clock) = fake();
+    let (runtime, clock) = fake();
     let printed_runtime = format!("{runtime:?}");
     assert!(
         printed_runtime.starts_with("Runtime { now: "),
@@ -1113,5 +1164,8 @@ fn a_replicator_and_its_runtime_print_what_they_hold() {
         "{printed}"
     );
     assert!(printed.contains("state: "), "{printed}");
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        Stopped::Drained { .. }
+    ));
 }

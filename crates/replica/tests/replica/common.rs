@@ -154,31 +154,39 @@ pub fn booted(replicator: &Replicator) -> Booted {
     replicator.wait_booted(PATIENCE)
 }
 
-/// `stop(PATIENCE).wait()`, failing the test instead of hanging if the thread never stops
-/// (the deadline is on the replicator's clock).
-pub fn stopped(replicator: &Replicator) -> Stopped {
-    let stop = replicator.stop(PATIENCE);
-    wait(replicator, |health| {
-        matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_))
-    });
-    stop.wait()
-}
+/// How far [`stopped`] moves the fake clock at a time: past the longest retry wait a drain
+/// can have to sit out.
+const STOP_STEP: Duration = Duration::from_secs(1);
 
-/// [`stopped`] for a replicator on a fake clock: the clock moves `step` at a time while the
-/// stop is pending, so a drain that waits out a retry's backoff (a busy database or a failed
-/// call during the drain) ends instead of waiting on a clock nobody moves. Fails the test
-/// after [`LOOKS`] steps. Each move waits for the thread's park to have looked at the clock
-/// it set.
-pub fn stopped_moving(replicator: &Replicator, clock: &FakeClockHandle, step: Duration) -> Stopped {
+/// Stops a replicator on the fake `clock` it was started with, failing the test instead of
+/// hanging if the thread never stops. The clock moves a step at a time while the stop is
+/// pending, so a drain that waits out a retry's backoff (a busy database or a failed call
+/// during the drain) ends instead of waiting on a clock nobody moves. Each move waits for the
+/// thread's park to have looked at the clock it set, so a stop that needs no wait leaves the
+/// clock where it was. Fails the test after [`LOOKS`] steps. The clock must be the
+/// replicator's own: a park never reads another clock's reading.
+pub fn stopped(replicator: &Replicator, clock: &FakeClockHandle) -> Stopped {
     let stop = replicator.stop(PATIENCE);
     let gone = |health: &Health| matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_));
     for _ in 0..LOOKS {
         if seen_or(replicator, clock, &gone).is_some() {
             return stop.wait();
         }
-        clock.advance(step);
+        clock.advance(STOP_STEP);
     }
     panic_with(&replicator.health())
+}
+
+/// `stop(PATIENCE).wait()` for a replicator on the system clock (started with
+/// `Replicator::start`, never `fake()`), failing the test instead of hanging if the thread
+/// never stops. Its waits end on their own; a replicator on a fake clock goes through
+/// [`stopped`], which moves that clock.
+pub fn stopped_on_system_clock(replicator: &Replicator) -> Stopped {
+    let stop = replicator.stop(PATIENCE);
+    wait(replicator, |health| {
+        matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_))
+    });
+    stop.wait()
 }
 
 /// Moves the fake clock `step` at a time, at most `steps` times, until `done` holds; fails the
