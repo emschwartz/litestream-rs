@@ -24,6 +24,9 @@
 
 use crate::error::KeyClass;
 
+#[cfg(test)]
+mod table;
+
 /// A Go struct with keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Section {
