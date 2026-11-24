@@ -234,7 +234,7 @@ fn a_replica_newest_staged_file_over_one_read_is_checked_whole() {
 /// needs local state that ties the WAL's checksum chain to the newest staged file, which the
 /// replica format has no field for.
 #[test]
-#[ignore = "review: issue #12, a rewind of two or more transactions that regrows a byte-identical newest staged file passes the compare of the whole newest staged file"]
+#[ignore = "open defect, issue #12: a rewind of two or more transactions that regrows a byte-identical newest staged file passes the compare of the whole newest staged file, so this test fails"]
 fn review_a_rewind_of_two_transactions_regrowing_an_identical_newest_staged_file_is_caught() {
     let before = fresh();
     let after = FakeWal::new(PS, salts(10));
