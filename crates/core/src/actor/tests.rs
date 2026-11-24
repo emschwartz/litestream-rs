@@ -2256,6 +2256,7 @@ mod stamp;
 mod tasks;
 mod vouch;
 mod wal_barrier;
+mod wal_truncated_mid_step;
 mod witness;
 mod work;
 
