@@ -67,6 +67,6 @@ target's commit, run count and `stat::new_units_added` in the pull request that 
   inputs are whole WALs). Minimise `plan_contract` and `plan_lazy` by edges first, then add short
   inputs for their counters: `-merge=1 -use_counters=0 -use_cmp=0 -use_value_profile=0` into an
   empty directory, then `-merge=1 -max_len=128` into the same one (about 30 and 45 KiB). The
-  committed corpus is about 1.4 MiB today (0.5 MiB of it `wal`) and stays under 2 MiB in total
+  committed corpus is about 1.7 MiB today (0.7 MiB of it `wal`; the sum of the file sizes under `fuzz/corpus/`) and stays under 2 MiB in total
   (phase 1 task 7); drop the new inputs rather than go over.
 - Run `just check` afterwards: the corpus replay test reads every committed input.
