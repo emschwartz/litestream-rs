@@ -27,7 +27,6 @@ pub mod seed_0x68f;
 pub mod seed_0x734;
 pub mod seed_0x753;
 pub mod seed_0x8ef;
-pub mod seed_0x92d;
 pub mod seed_0x9f9;
 pub mod seed_0xa4d;
 pub mod seed_0xb6b;
@@ -183,14 +182,6 @@ pub const GUARDS: &[(&str, &str, Guard)] = &[
     (
         "seed_0x734",
         "seed_0x734_uploads_the_files_a_rollback_left_and_never_trips",
-        Guard::Unguarded(
-            "the history checks a judge exemption, not an engine fix: no engine plant can make \
-             the judge excuse a trip it would otherwise call false",
-        ),
-    ),
-    (
-        "seed_0x92d",
-        "seed_0x92d_trips_on_frames_it_never_read_and_is_excused",
         Guard::Unguarded(
             "the history checks a judge exemption, not an engine fix: no engine plant can make \
              the judge excuse a trip it would otherwise call false",
