@@ -139,7 +139,8 @@ shuttle iterations="200":
     SHUTTLE_ITERATIONS={{iterations}} RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
         cargo test --locked -p lsr-replica --test replica shuttle::
 
-# Every planted-bug patch still applies to the tree. Seconds; nightly in CI, not in check, so a
+# Every planted-bug patch, and every benchmark arm's patch (crates/compat/bench-patches), still
+# applies to the tree. Seconds; nightly in CI, not in check, so a
 # moved line near a planted site does not block a land. Whether the planted defect is caught is
 # `planted-bugs`'s question.
 planted-bugs-apply:
@@ -147,7 +148,7 @@ planted-bugs-apply:
     set -euo pipefail
     stale=()
     found=0
-    for patch in docs/planted-bugs/*.patch; do
+    for patch in docs/planted-bugs/*.patch crates/compat/bench-patches/*.patch; do
         found=$((found + 1))
         git apply --check "$patch" 2>/dev/null || stale+=("$patch")
     done
