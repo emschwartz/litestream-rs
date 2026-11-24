@@ -29,6 +29,14 @@ test:
 test-opt:
     cargo nextest run --cargo-profile sim -p lsr-core -p lsr-sim -p lsr-replica --all-features --locked
 
+# The same three crates built the way the binary ships, twice: under `release-asserts` (release
+# plus debug assertions and overflow checks) with every feature, then under `release` itself.
+# The second run names its features because a release build refuses `test-half-stack`.
+# Nightly only (docs/decisions/D187.md).
+test-release-opt:
+    cargo nextest run --cargo-profile release-asserts -p lsr-core -p lsr-sim -p lsr-replica --all-features --locked
+    cargo nextest run --release -p lsr-core -p lsr-sim -p lsr-replica --features lsr-core/testing,lsr-core/verify,lsr-replica/rusqlite,lsr-replica/testing --locked
+
 # Commit subjects on this branch since `base` follow Conventional Commits (AGENTS.md).
 # The default base is local `main`, which `just spawn` branches from; without one, `origin/main`.
 commit-check base="":

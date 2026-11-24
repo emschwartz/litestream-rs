@@ -161,3 +161,14 @@ strip = "none"
 [profile.sim]
 inherits = "dev"
 opt-level = 1
+
+# The engine's tests built the way the shipped binary is: every code generation setting of
+# `release` (opt-level, lto, codegen-units, panic strategy, incremental), inherited so a change
+# to the release profile reaches it. Only debug assertions and overflow checks are turned on, so
+# `invariant!` panics and the `debug_assert!` tier behave as the tests expect. Which level
+# miscompiles a function depends on its shape and on inlining, so `sim` (opt 1) says little
+# about opt 3. Run by `just test-release-opt` in the nightly workflow (docs/decisions/D187.md).
+[profile.release-asserts]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true

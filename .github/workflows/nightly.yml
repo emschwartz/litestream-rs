@@ -27,6 +27,20 @@ jobs:
           tool: cargo-nextest,just
       - run: just check
 
+  # The engine's tests built with the release profile's code generation (`just test-release-opt`):
+  # a miscompile that opt-level 1 in the land gate does not show can still change what the shipped
+  # binary does. A failure is a finding to file (docs/decisions/D187.md).
+  test-release-opt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just test-release-opt
+
   # From the committed corpus (docs/fuzzing.md): about ten minutes per LTX and WAL decoder
   # target, five per restore-planner target judged by the contract spec; the 24-hour run stays a
   # manual one. A crash, leak, timeout or out-of-memory input is uploaded; replay it with
