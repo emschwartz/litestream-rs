@@ -2250,6 +2250,7 @@ mod once;
 mod once_retention;
 mod pages;
 mod rejected_snapshot;
+mod requested_snapshot_after_restart;
 mod rewound;
 mod second_writer;
 mod stamp;
