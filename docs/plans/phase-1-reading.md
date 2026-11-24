@@ -211,7 +211,7 @@ A mismatch between Rust and Go on a valid replica is a defect in Rust until show
 - **A mismatch after the PUT:** when the returned ETag differs from the local MD5 the object is already visible, so the store deletes the key (best effort) before returning `ChecksumMismatch`, as the file store does for a size mismatch. The uploader writes the same key again without listing (`Fault::UploadChecksumMismatch`). Open hole: a crash between the bad PUT and the delete leaves a same-size wrong object that a boot listing confirms by size; `verify` finds it, and 8g's exact created-at times do not. A boot-time read-back of the newest L0 file would close it; 6g2 gets the scenario and decides.
 - **F8:** listing seeks with `start-after` (Go: filters client-side).
 - **F9:** a stored created-at time that does not parse is `Corrupt { BadCreatedAt }`; a missing one falls back to `LastModified` and is counted.
-- **F10:** an empty prefix is refused.
+- **F10 (superseded by D181):** an empty prefix was refused. It is accepted now, as under Go, and a prefix with a `.` or `..` segment is refused instead (`docs/decisions/D181.md`).
 
 **Order and parallelism**
 
@@ -295,7 +295,7 @@ Each block is one branch, green on `just check` alone. MinIO tests skip with a m
 - `pub(crate) fn classify(op: StoreOp, key: Option<&FileKey>, r: &HttpResponse) -> Result<(), StoreError>` and `classify_transport(op, &TransportError) -> StoreError`.
 
 **Semantics:**
-1. Key: `<prefix>/<FileKey Display>`, which is Go's `c.Path + "/" + fmt.Sprintf("%04x/%s", level, filename)` (rc.go:702, :738, :1253; list prefix :1575). Departure: an empty prefix is refused. Go builds a key with a leading "/" when Path is empty.
+1. Key: `<prefix>/<FileKey Display>`, which is Go's `c.Path + "/" + fmt.Sprintf("%04x/%s", level, filename)` (rc.go:702, :738, :1253; list prefix :1575). With an empty prefix the key starts with "/", as Go's does (superseded D40: `docs/decisions/D181.md`).
 2. Every request is presigned with an expiry of 300 s from `Clock::now` (rusty-s3 `sign_with_time`). Headers sent are exactly those inserted through `headers_mut`, so every `x-amz-*` header is signed (rusty-s3 src/actions/mod.rs:88-109 states AWS rejects unsigned ones).
 3. Every request carries `User-Agent: litestream-rs/<version>` (Go: "litestream", rc.go:956-976). On `Provider::Tigris`, every request carries `X-Tigris-Consistent: true` (rc.go:978-995, Go issue #905), signed.
 4. No `x-amz-checksum-*` and no aws-chunked encoding on any request (Go removes the trailer: rc.go:1039-1041, :470-481).

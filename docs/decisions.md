@@ -9,5 +9,5 @@ Each decision is a file under `docs/decisions/` named by its number (`D001.md`, 
 ## Unverified, not recorded
 
 - Who decided D1 to D5 and when: `docs/PLAN.md` says "Decided" with no name or date. Listed as owner, by 2026-11-20.
-- D8's exact wording: the owner approved adding the journal; the wording of the D6 amendment is Fable's.
+- D8's exact wording: the owner approved adding the journal (D8 is superseded by D173, which removes it); the wording of the D6 amendment is Fable's.
 - `snapshot-necessity` owner decisions D1 to D5 there (the price of an adopted journal, the catch-up file's failure class, download-and-diff, whether a handover heals, new cause names) and savings S2, S3, S5, S6, S7: no decision found.

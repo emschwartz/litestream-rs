@@ -415,12 +415,15 @@ fn parse_s3_forms() {
         s3("files --replica s3://bucket/a/b/c").prefix().as_str(),
         "a/b/c"
     );
-    // Departure: Go accepts a bucket with no path and builds keys with a leading
-    // slash; an empty prefix is refused.
+    // A bucket with no path is the whole bucket, as under Go: keys start with a slash. Without
+    // the slash Go's prefix is `.` (keys `./0000/...`), which the `url` type cannot carry: refused.
+    let bare = s3("files --replica s3://bucket/");
+    assert_eq!(bare.bucket().as_str(), "bucket");
+    assert_eq!(bare.prefix().as_str(), "");
     assert_eq!(
         usage("files --replica s3://bucket"),
         UsageError::BadReplicaUrl {
-            reason: ReplicaProblem::S3(ConfigError::EmptyPrefix)
+            reason: ReplicaProblem::S3(ConfigError::BadPrefix)
         }
     );
     assert!(matches!(
