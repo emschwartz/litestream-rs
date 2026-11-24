@@ -21,9 +21,16 @@
 //! Unlike a POSIX record lock (`fcntl`), closing some other descriptor of the
 //! same file in this process (SQLite opens and closes many) cannot drop it,
 //! and the file is never replaced, so the lock always names the inode a
-//! second engine opens. It is released when the thread's last handle goes,
-//! or when the process dies. Descriptors are opened close-on-exec, so an
+//! second engine opens. It is released when the replicator thread ends, or
+//! when the process dies. Descriptors are opened close-on-exec, so an
 //! `-exec` child does not inherit it.
+//!
+//! The release is an explicit unlock, not the close alone. A child process
+//! the host starts holds a copy of every descriptor from its fork until its
+//! exec, and a lock of this kind lasts until the last copy closes: left to
+//! the close, the lock outlived the replicator for that moment, and a
+//! replicator started again in the same process was refused as a second
+//! engine. An unlock through any copy releases it at once.
 //!
 //! Where it excludes: processes on one host whose meta directory is on a
 //! local filesystem (ext4, XFS, Btrfs, ZFS, tmpfs on Linux; APFS and HFS+ on
@@ -58,7 +65,15 @@ const TAKEOVER_SCRATCH: &str = "lsr-takeover.new";
 /// The exclusive lock on a meta directory, held while this value lives.
 #[derive(Debug)]
 pub(crate) struct MetaLock {
-    _file: File,
+    file: File,
+}
+
+impl Drop for MetaLock {
+    /// Unlocks before the close (the module doc says why). An unlock that fails leaves the
+    /// lock to the close, as before.
+    fn drop(&mut self) {
+        drop(self.file.unlock());
+    }
 }
 
 impl MetaLock {
@@ -77,7 +92,7 @@ impl MetaLock {
             .open(meta.join(LOCK_FILE))
             .map_err(|err| StartError::MetaLock { kind: err.kind() })?;
         match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self { file }),
             Err(TryLockError::WouldBlock) => Err(StartError::MetaLocked),
             Err(TryLockError::Error(err)) => Err(StartError::MetaLock { kind: err.kind() }),
         }
@@ -168,6 +183,19 @@ mod tests {
         ));
         drop(first);
         MetaLock::take(dir.path()).unwrap();
+    }
+
+    /// A child process the host is starting holds a copy of the lock's descriptor until it
+    /// execs. The lock goes with its holder, not with that last copy, or a replicator started
+    /// again in the same process is refused as a second engine.
+    #[test]
+    fn the_lock_goes_with_its_holder_not_with_the_last_copy_of_its_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = MetaLock::take(dir.path()).unwrap();
+        let copy = first.file.try_clone().unwrap();
+        drop(first);
+        MetaLock::take(dir.path()).unwrap();
+        drop(copy);
     }
 
     #[test]

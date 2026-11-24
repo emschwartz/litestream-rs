@@ -635,7 +635,12 @@ fn a_reader_guard_holds_off_truncate() {
     }
     assert!(truncates > 0, "no TRUNCATE once the guard was dropped");
     site.commit(1);
-    assert!(matches!(stopped(&replicator), Stopped::Drained { .. }));
+    // The drain may have a retry's backoff to wait out (the TRUNCATE the guard held off), and
+    // this clock moves only when the test moves it.
+    assert!(matches!(
+        stopped_moving(&replicator, &clock, POLL),
+        Stopped::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
