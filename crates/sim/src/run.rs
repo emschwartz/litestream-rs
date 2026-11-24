@@ -245,6 +245,9 @@ pub struct Opts {
     pub judges: Judges,
     /// Which SQLite the engine runs against: the rule model by default.
     pub sqlite: crate::side::SideMaker,
+    /// The replicator holds the application's writes under this fail-stop setting
+    /// (`run/write_gate.rs`); `None`, the default, runs no write gate.
+    pub write_gate: Option<lsr_core::IfReplicationStops>,
 }
 
 /// Which judges a run consults. Both by default; one alone measures what it catches unaided.
@@ -395,6 +398,10 @@ struct Runner {
     booted: bool,
     /// The fail-stop judge (`crate::failstop`).
     fail_stop: FailStopJudge,
+    /// The replicator's write gate, when the run has one.
+    write_gate: write_gate::WriteGate,
+    /// A commit the write gate's judge saw land under a hold, raised after the operation.
+    leaked: Option<Violation>,
     /// The sum of every clock step so far: the simulator's time with them taken out is the
     /// clock's reading less this.
     jumped: i64,
@@ -477,6 +484,7 @@ impl Runner {
         runner.overlap = opts.overlap.then(|| SeededEntropy::new(seed.stream(21)));
         runner.error_domain = opts.error_domain;
         runner.truncate_pages = opts.truncate_pages;
+        runner.write_gate = write_gate::WriteGate::new(opts.write_gate);
         if opts.no_create_only {
             runner.refuse_create_only();
         }
@@ -535,6 +543,8 @@ impl Runner {
             booted: false,
             // The database's first content is on no replica yet.
             fail_stop: FailStopJudge::starting(start, image),
+            write_gate: write_gate::WriteGate::default(),
+            leaked: None,
             fail_stop_image: image,
             fail_stop_commits: commits,
             op_began: start,
@@ -582,6 +592,7 @@ impl Runner {
         self.degraded = [false; 5];
         self.latest = None;
         self.forcings.rebooted();
+        self.gate_restarted();
     }
 
     fn app_seen(&self) -> AppCheckpoints {
@@ -803,6 +814,7 @@ impl Runner {
         let began = self.now();
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
+        let held = self.holding_writes();
         self.forcings_before_tick();
         self.staging_moved()?;
         let fired0 = (self.remote_fired(), fired(&self.w.staging_faults));
@@ -820,6 +832,17 @@ impl Runner {
         self.forcings_mid_tick(hits0, crashed)?;
         self.report.ticks = self.report.ticks.saturating_add(1);
         let in_tick = self.took_commit_in_tick();
+        if !crashed {
+            self.judge_gate_kept(held, in_tick.is_some())?;
+            if let TickEnd::Done(Tick::Ran {
+                event: Event::WritesHeld { .. },
+                ..
+            }) = &ended
+            {
+                self.note_wait();
+            }
+            self.keep_writes();
+        }
         self.note_snapshots(newest_commit, in_tick, at);
         self.judge_fail_stop(began, fired0, &ended)?;
         self.judge_denials(&ended)?;
@@ -1056,6 +1079,7 @@ impl Runner {
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Retrying { .. }
+            | Event::WritesHeld { .. }
             | Event::Resnapshot(_)
             | Event::Clamped(_)
             | Event::TakeoverWanted(_) => Ok(Step::Ran),
@@ -1092,6 +1116,7 @@ impl Runner {
             | Event::Uploaded(_)
             | Event::Maintained { .. }
             | Event::Idle
+            | Event::WritesHeld { .. }
             | Event::Clamped(_)
             | Event::TakeoverWanted(_) => return Ok(()),
         };
@@ -1136,6 +1161,7 @@ impl Runner {
             | Event::Uploaded(_)
             | Event::Maintained { .. }
             | Event::Idle
+            | Event::WritesHeld { .. }
             | Event::Clamped(_)
             | Event::TakeoverWanted(_) => {}
         }
@@ -1452,7 +1478,9 @@ impl Runner {
         let mut all = std::mem::take(&mut self.spilled);
         all.append(&mut pages);
         let before = self.w.sqlite.db_size();
-        if let Some(id) = self.w.app_commit(&all, db_size) {
+        let landed = self.w.app_commit(&all, db_size);
+        self.judge_commit_landed(landed.is_some());
+        if let Some(id) = landed {
             self.app
                 .logged(id, &all, db_size, self.w.sqlite.page_size());
             if db_size < before {
@@ -1796,7 +1824,9 @@ impl Runner {
     fn other_connection_commit(&mut self, count: u8) {
         let size = self.w.sqlite.db_size();
         let pages = self.pick_pages(u32::from(count), size);
-        if self.w.other_writer_commit(&pages, size).is_some() {
+        let landed = self.w.other_writer_commit(&pages, size).is_some();
+        self.judge_commit_landed(landed);
+        if landed {
             self.report.reach.bump("commit.other_connection");
         }
     }
@@ -1982,6 +2012,9 @@ impl Runner {
         self.op_began = self.now();
         self.apply(op)?;
         self.w.note_writes(self.op_began);
+        if let Some(leaked) = self.leaked.take() {
+            return Err(leaked);
+        }
         self.fail_stop_commits();
         self.after_restart();
         self.recovery_agrees()?;
@@ -2666,7 +2699,7 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
             until,
             fault: Fault::StoreThrottled { retry_after },
         } => (*until, *retry_after),
-        Event::Retrying { until, .. } => (*until, None),
+        Event::Retrying { until, .. } | Event::WritesHeld { until } => (*until, None),
         Event::Booted { .. }
         | Event::Synced { .. }
         | Event::Checkpointed { .. }
@@ -2831,6 +2864,7 @@ mod hold;
 mod in_tick;
 mod marks;
 mod verify;
+mod write_gate;
 
 /// Whether a snapshot with this cause is the engine saying the history it had replicated may
 /// not continue: the database, its WAL or the staging directory went back or cannot be

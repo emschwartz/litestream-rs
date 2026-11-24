@@ -73,4 +73,4 @@ The replicator saves each batch of changes in its working folder (the folder whe
   - `hold-start`, the default: the application is not started if the replicator stops at startup or S3 refuses it there, for example over wrong credentials. Once the application is running, a problem is only reported.
   - `stop-app`: as `hold-start` at startup. A running application is also held back when replication stops, or when changes have waited longer than `max-unreplicated-age` (10 minutes by default) to reach S3.
 
-  What "held back" means depends on how litestream-rs runs. Under `-exec` the application is not started, or is stopped. Inside the library its commits are refused. A sidecar without `-exec` can only answer 503 on `/healthz`.
+  What "held back" means: litestream-rs holds the database's write lock, so every write, from any process, fails with SQLite's "database is locked" (and the log says `writes blocked`). Under `-exec` the application is also not started, or is stopped. Writes are held the same way at startup until the replicator has checked the replica, except under `report` ([decisions/D192.md](decisions/D192.md)).

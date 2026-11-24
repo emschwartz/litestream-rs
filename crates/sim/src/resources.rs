@@ -8,9 +8,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use lsr_core::{
-    Barrier, CheckpointMode, CheckpointRun, Checkpointer, Event, SourceError, WriteLock,
-};
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, Event, SourceError};
 
 use crate::oracle::{Bound, Violation, within};
 use crate::store::RecorderCounts;
@@ -92,14 +90,6 @@ impl<C: Checkpointer> Checkpointer for CountingCheckpointer<C> {
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.inner.bump_seq()
     }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.inner.begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.inner.end_write_lock(lock)
-    }
 }
 
 /// What one tick did, counted from outside.
@@ -142,7 +132,10 @@ pub fn delta(before: RecorderCounts, after: RecorderCounts) -> RecorderCounts {
 
 const fn lists_allowed(event: &Event) -> bool {
     match event {
-        Event::Booted { .. } | Event::Retrying { .. } | Event::Degraded { .. } => true,
+        Event::Booted { .. }
+        | Event::Retrying { .. }
+        | Event::Degraded { .. }
+        | Event::WritesHeld { .. } => true,
         Event::Maintained { .. } | Event::Uploaded(_) => true,
         Event::Synced { .. }
         | Event::Checkpointed { .. }

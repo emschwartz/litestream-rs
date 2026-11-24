@@ -282,6 +282,13 @@ pub enum Event {
         /// level's backoff for a maintenance job, the task's for the rest.
         until: Timestamp,
     },
+    /// A step that writes to the database waited instead of running: the replicator holds the
+    /// application's writes ([`Fault::WritesHeld`]). Not a failure: nothing is counted, and
+    /// the task never stalls or degrades for it.
+    WritesHeld {
+        /// When the task tries again.
+        until: Timestamp,
+    },
     /// The next sync is a snapshot.
     Resnapshot(SnapshotCause),
     /// The clock read earlier than its last reading; nothing else ran.
@@ -860,6 +867,30 @@ impl Actor {
             }
             Policy::Persistent(cause) => self.persistent(waiter, cause, Backoff::Doubling, now),
             Policy::Shutdown => self.stop(StopCause::Shutdown),
+            Policy::Wait => {
+                // A boot not yet judged is held by its own start: the host lets its write through
+                // (`docs/decisions/D192.md`), so it tries again at once. A hold for a trip waits.
+                let at_once = !self.boot_judged() && self.trip().is_none();
+                let until = self.hold(waiter, now, at_once);
+                self.ran(Event::WritesHeld { until }, now)
+            }
+        }
+    }
+
+    /// Waits one retry interval, or not at all (`at_once`), without counting a failure
+    /// ([`Policy::Wait`]); returns when the wait ends.
+    fn hold(&mut self, waiter: Waiter, now: Timestamp, at_once: bool) -> Timestamp {
+        match waiter {
+            Waiter::Kept(until) => until,
+            Waiter::Task(task) => {
+                let until = if at_once {
+                    now
+                } else {
+                    now.saturating_add(self.kept.cfg.retry_interval)
+                };
+                self.kept.tasks.get_mut(task).hold(until);
+                until
+            }
         }
     }
 

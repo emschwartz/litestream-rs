@@ -186,15 +186,10 @@ fn injections_fire_once() {
 }
 
 #[test]
-fn barrier_and_write_lock_hold_the_writer() {
+fn the_barrier_holds_the_writer() {
     let db = sim();
     let mut ck = db.checkpointer();
     let barrier = ck.begin_barrier().unwrap();
-    assert_eq!(
-        ck.begin_write_lock(),
-        Err(SourceError::Io(std::io::ErrorKind::InvalidInput)),
-        "one lock at a time on the writer connection"
-    );
     assert_eq!(db.commit(&tx(&[2], 1), 4), None);
     assert_eq!(
         ck.bump_seq(),
@@ -207,9 +202,6 @@ fn barrier_and_write_lock_hold_the_writer() {
         "TRUNCATE degrades to PASSIVE under another writer"
     );
     ck.end_barrier(barrier).unwrap();
-    let held = ck.begin_write_lock().unwrap();
-    assert_eq!(db.commit(&tx(&[2], 1), 4), None);
-    ck.end_write_lock(held).unwrap();
     assert!(db.commit(&tx(&[2], 1), 4).is_some());
     ck.bump_seq().unwrap();
     assert_eq!(db.mx_frame(), 2);

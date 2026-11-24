@@ -1,4 +1,4 @@
-//! The checkpoint, the write barrier, the write lock and the sequence bump.
+//! The checkpoint, the write barrier and the sequence bump.
 //!
 //! The checkpoint runs on the reader through `sqlite3_wal_checkpoint_v2`, after its read
 //! transaction ends and before it is retaken, as Go defers the retake (`db.go:2805-2849`). Ending
@@ -11,7 +11,7 @@
 use std::ffi::c_int;
 use std::io;
 
-use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError, WriteLock};
+use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, SourceError};
 use rusqlite::{Connection, ffi};
 
 use crate::Sqlite;
@@ -101,14 +101,6 @@ impl Checkpointer for Sqlite {
             .map(drop)
             .map_err(|e| source_error(&e))
     }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.lock().begin_writer().map(WriteLock::new)
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.lock().end_writer(lock.id())
-    }
 }
 
 #[cfg(test)]
@@ -171,9 +163,9 @@ mod tests {
             .unwrap();
         sqlite.bump_seq().unwrap();
         assert_eq!(seq(&path), Some(1), "another connection sees the bump");
-        let lock = sqlite.begin_write_lock().unwrap();
-        sqlite.end_write_lock(lock).unwrap();
-        assert_eq!(seq(&path), Some(1), "the next lock's release kept it");
+        let barrier = sqlite.begin_barrier().unwrap();
+        sqlite.end_barrier(barrier).unwrap();
+        assert_eq!(seq(&path), Some(1), "the next barrier's release kept it");
     }
 
     /// A bump while a lock is outstanding would run inside the lock's transaction: refused.

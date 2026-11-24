@@ -395,6 +395,31 @@ fn readers_hold_the_wal() {
 }
 
 #[test]
+fn writes_held_through_a_checkpoint() {
+    run(scenario::writes_held_through_a_checkpoint);
+}
+
+#[test]
+fn writes_held_while_the_boot_is_pending() {
+    run(scenario::writes_held_while_the_boot_is_pending);
+}
+
+#[test]
+fn writes_allowed_after_the_boot() {
+    run(scenario::writes_allowed_after_the_boot);
+}
+
+#[test]
+fn writes_held_after_a_stop() {
+    run(scenario::writes_held_after_a_stop);
+}
+
+#[test]
+fn writes_never_held_under_report() {
+    run(scenario::writes_never_held_under_report);
+}
+
+#[test]
 fn shm_header_mid_update() {
     run(scenario::shm_header_mid_update);
 }

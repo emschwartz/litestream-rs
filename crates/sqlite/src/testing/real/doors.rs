@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use lsr_core::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, ReadLockHold,
-    SourceError, SourceOp, WalFileLen, WalSource, WriteLock,
+    SourceError, SourceOp, WalFileLen, WalSource,
 };
 use lsr_ltx::{DbPages, PageNo, Timestamp};
 
@@ -138,17 +138,5 @@ impl Checkpointer for RealCheckpointer {
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         self.0.before(Some(SourceOp::BumpSeq))?.bump_seq()
-    }
-
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError> {
-        self.0
-            .before(Some(SourceOp::BeginWriteLock))?
-            .begin_write_lock()
-    }
-
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError> {
-        self.0
-            .before(Some(SourceOp::EndWriteLock))?
-            .end_write_lock(lock)
     }
 }

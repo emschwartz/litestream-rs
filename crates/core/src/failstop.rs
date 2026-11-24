@@ -48,6 +48,11 @@
 //! **What the trip does** is [`gate`]'s answer, per [`IfReplicationStops`]: `report` never
 //! holds; `hold-start` holds an application that has not been released yet (an unsafe stop or
 //! a refusal at boot); `stop-app` holds on every trip. [`AppGate`] latches the release.
+//!
+//! **Holding the application's writes** is [`blocks_writes`]'s answer: a held gate, and under
+//! `hold-start` and `stop-app` also a boot not judged yet ([`Gate::Pending`]). The replicator
+//! holds them with a write transaction of its own, which stops every writer whatever its
+//! binding or process (`docs/decisions/D192.md`).
 
 use std::time::Duration;
 
@@ -136,13 +141,36 @@ impl Trip {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gate {
     /// The boot has not been judged yet (no listing, and no boot attempt that failed for
-    /// anything but a refusal): an application not yet started waits, writes are not refused,
-    /// and nothing is released.
+    /// anything but a refusal): an application not yet started waits, writes are held except
+    /// under `report` ([`blocks_writes`]), and nothing is released.
     Pending,
     /// It may: started, writes accepted.
     Allowed,
     /// It is held: not started, writes refused, or stopped.
     Held(Trip),
+}
+
+/// Why the application's writes are held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhyBlocked {
+    /// The boot is still being judged ([`Gate::Pending`]); bounded, since a boot attempt that
+    /// fails judges the boot.
+    Booting,
+    /// Fail-stop tripped and holds the application ([`Gate::Held`]).
+    Tripped(Trip),
+}
+
+/// Whether the application's writes are held under `mode` while the gate is `gate`, and why:
+/// a held gate always, and a boot still being judged under `hold-start` and `stop-app`.
+#[must_use]
+pub const fn blocks_writes(mode: IfReplicationStops, gate: Gate) -> Option<WhyBlocked> {
+    match (gate, mode) {
+        (Gate::Held(trip), _) => Some(WhyBlocked::Tripped(trip)),
+        (Gate::Pending, IfReplicationStops::HoldStart | IfReplicationStops::StopApp) => {
+            Some(WhyBlocked::Booting)
+        }
+        (Gate::Pending, IfReplicationStops::Report) | (Gate::Allowed, _) => None,
+    }
 }
 
 /// The engine's trip, from what it knows. A stop wins over the others: it is terminal.

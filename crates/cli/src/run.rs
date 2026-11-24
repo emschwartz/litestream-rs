@@ -505,7 +505,6 @@ fn daemon_exit(error: &lsr_sidecar::SidecarError) -> Exit {
         | SidecarError::Map(_)
         | SidecarError::NotBuilt { .. }
         | SidecarError::Exec(_)
-        | SidecarError::StopAppWithoutExec
         | SidecarError::Addr(_) => Exit::Refused,
         SidecarError::Stdin(_) | SidecarError::Signals(_) => Exit::Environment,
     }

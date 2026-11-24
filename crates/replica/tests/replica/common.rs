@@ -9,8 +9,8 @@
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lsr_core::WriteMode;
@@ -235,6 +235,8 @@ pub struct Faulty {
     pub panics: AtomicU32,
     /// Every call panics, before any other fault.
     pub panic_always: AtomicBool,
+    /// A listing waits while the test holds this.
+    pub stall_lists: Mutex<()>,
 }
 
 impl Faulty {
@@ -245,6 +247,7 @@ impl Faulty {
             refuse: AtomicBool::new(false),
             panics: AtomicU32::new(0),
             panic_always: AtomicBool::new(false),
+            stall_lists: Mutex::new(()),
         }
     }
 
@@ -290,6 +293,7 @@ impl ObjectStore for Faulty {
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
+        drop(self.stall_lists.lock());
         self.gate(StoreOp::List)?;
         self.maybe_panic();
         self.inner.list(level, after, limit).await

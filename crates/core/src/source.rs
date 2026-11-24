@@ -45,6 +45,12 @@ pub enum SourceError {
     /// a TRUNCATE would wait on them. Nothing is wrong with SQLite.
     #[error("the application's readers hold the WAL")]
     ReadersHeld,
+    /// The step needs to write to the database, and the replicator holds every writer out
+    /// (fail-stop's write gate: its own write transaction on a connection of its own, see
+    /// `crate::failstop`). It was not attempted: nothing is wrong with SQLite, and the step waits
+    /// until writes are allowed again.
+    #[error("the replicator holds the application's writes")]
+    WritesHeld,
     /// A database page read returned fewer bytes than a page.
     #[error("short read of page {pgno:?}")]
     Short {
@@ -253,30 +259,13 @@ impl Barrier {
     }
 }
 
-/// The database write lock, held between `begin_write_lock` and `end_write_lock`.
-#[derive(Debug, PartialEq, Eq)]
-#[must_use = "a write lock must be ended with Checkpointer::end_write_lock"]
-pub struct WriteLock(u64);
-
-impl WriteLock {
-    /// A token with the implementation's own id.
-    pub const fn new(id: u64) -> Self {
-        Self(id)
-    }
-
-    /// The implementation's id.
-    #[must_use]
-    pub const fn id(&self) -> u64 {
-        self.0
-    }
-}
-
 /// Everything the checkpoint protocol does to SQLite besides reading.
 pub trait Checkpointer {
     /// `BEGIN; INSERT INTO _litestream_lock (id) VALUES (1)` (Go `db.go:2660-2674`).
     ///
     /// # Errors
-    /// [`SourceError::Busy`] when a writer holds the lock; others on failure.
+    /// [`SourceError::Busy`] when a writer holds the lock; [`SourceError::WritesHeld`] while
+    /// the replicator holds the application's writes; others on failure.
     fn begin_barrier(&mut self) -> Result<Barrier, SourceError>;
 
     /// Rolls the barrier back.
@@ -289,24 +278,14 @@ pub trait Checkpointer {
     /// takes the read transaction again (Go `db.go:2805-2849`).
     ///
     /// # Errors
-    /// [`SourceError::ReadTxLost`] when the retake fails; others on failure.
+    /// [`SourceError::ReadTxLost`] when the retake fails; [`SourceError::WritesHeld`] while the
+    /// replicator holds the application's writes; others on failure.
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError>;
 
     /// Writes the frame that moves the WAL past the checkpoint (Go `db.go:1667`).
     ///
     /// # Errors
+    /// [`SourceError::WritesHeld`] while the replicator holds the application's writes;
     /// [`SourceError`] when the write fails.
     fn bump_seq(&mut self) -> Result<(), SourceError>;
-
-    /// Takes the write lock (Go `db.go:2759-2771`).
-    ///
-    /// # Errors
-    /// [`SourceError::Busy`] when another writer holds it.
-    fn begin_write_lock(&mut self) -> Result<WriteLock, SourceError>;
-
-    /// Releases the write lock (Go `db.go:2795`).
-    ///
-    /// # Errors
-    /// [`SourceError`] when the release fails.
-    fn end_write_lock(&mut self, lock: WriteLock) -> Result<(), SourceError>;
 }

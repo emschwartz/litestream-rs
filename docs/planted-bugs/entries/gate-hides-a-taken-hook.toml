@@ -1,4 +1,0 @@
-name = "gate-hides-a-taken-hook"
-fix = "70f61c6"
-package = "lsr-sqlite"
-tests = ["gate::tests::an_application_hook_set_first_is_reported_not_silently_replaced"]

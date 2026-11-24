@@ -1,0 +1,6 @@
+# Writes go through while the boot is still pending: an application writes before the
+# replicator has judged whether it may (docs/decisions/D192.md).
+name = "gate-not-held-while-pending"
+fix = "plant"
+package = "lsr-core"
+tests = ["failstop::tests::writes_are_blocked_by_a_held_gate_and_by_a_pending_boot_except_under_report"]

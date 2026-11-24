@@ -223,7 +223,16 @@ fn a_sink_given_at_start_sees_the_first_boot() {
         Stopped::Drained { .. }
     ));
     let seen = events.drain();
-    assert_eq!(seen.first(), Some(&recovered), "{seen:?}");
+    // The write gate's events come first: writes are held from the start until the boot.
+    let first = seen.iter().find(|event| matches!(event, Event::Engine(_)));
+    assert_eq!(first, Some(&recovered), "{seen:?}");
+    assert_eq!(
+        seen.first(),
+        Some(&Event::WritesBlocked {
+            why: lsr_replica::WhyBlocked::Booting
+        }),
+        "{seen:?}"
+    );
     assert_eq!(events.dropped(), 0);
     site.assert_restores(&*store);
 }
@@ -666,6 +675,8 @@ fn app_connection_sets_up_only_this_database() {
     let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let pooled = Connection::open(&site.db).unwrap();
     replicator.app_connection(&pooled).unwrap();
+    // Writes are held until the boot is judged, and a connection set up fails at once on them.
+    assert_eq!(booted(&replicator), Booted::Booted);
     lsr_sqlite::check_app_connection(&pooled).unwrap();
     let other = Site::new();
     assert!(matches!(

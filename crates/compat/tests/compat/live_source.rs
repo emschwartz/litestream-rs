@@ -497,17 +497,16 @@ fn the_barrier_waits_for_no_one() {
         .execute_batch("BEGIN IMMEDIATE")
         .expect("app writes");
     assert_eq!(rig.live.begin_barrier().err(), Some(SourceError::Busy));
-    assert_eq!(rig.live.begin_write_lock().err(), Some(SourceError::Busy));
     rig.app.execute_batch("ROLLBACK").expect("release");
     let barrier = rig.live.begin_barrier().expect("free now");
     assert_eq!(
-        rig.live.begin_write_lock().err().map(|_| ()),
+        rig.live.begin_barrier().err().map(|_| ()),
         Some(()),
         "one holder at a time"
     );
     rig.live.end_barrier(barrier).expect("end");
-    let lock = rig.live.begin_write_lock().expect("free again");
-    rig.live.end_write_lock(lock).expect("end");
+    let again = rig.live.begin_barrier().expect("free again");
+    rig.live.end_barrier(again).expect("end");
 }
 
 /// The step a recovery verdict calls for, as the actor builds it: a snapshot keeps the clock

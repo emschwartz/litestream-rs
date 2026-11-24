@@ -83,7 +83,10 @@ pub use created_at::{
 pub use env::{Clock, Entropy, Sleeper};
 #[cfg(any(test, feature = "testing"))]
 pub use env::{FakeClock, RecordingSleeper, SeededEntropy};
-pub use failstop::{AppGate, Gate, IfReplicationStops, Lag, MaxUnreplicatedAge, Trip, gate, trip};
+pub use failstop::{
+    AppGate, Gate, IfReplicationStops, Lag, MaxUnreplicatedAge, Trip, WhyBlocked, blocks_writes,
+    gate, trip,
+};
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub use fault::reporting_bugs;
@@ -127,7 +130,7 @@ pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classi
 pub use snapshot::SnapshotFailed;
 pub use source::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, SourceError,
-    WalSource, WriteLock,
+    WalSource,
 };
 #[cfg(any(test, feature = "testing"))]
 pub use source::{

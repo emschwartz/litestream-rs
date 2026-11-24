@@ -59,6 +59,8 @@ pub enum SourceClass {
     Busy,
     /// [`SourceError::ReadersHeld`].
     ReadersHeld,
+    /// [`SourceError::WritesHeld`].
+    WritesHeld,
     /// [`SourceError::Short`].
     Short,
     /// [`SourceError::Unlinked`].
@@ -84,12 +86,13 @@ pub const SOURCE_OPS: [SourceOp; 12] = [
 ];
 
 /// Every source error class, in declaration order ([`source_class`] checks it).
-pub const SOURCE_CLASSES: [SourceClass; 8] = [
+pub const SOURCE_CLASSES: [SourceClass; 9] = [
     SourceClass::Io,
     SourceClass::DiskFull,
     SourceClass::FsyncFailed,
     SourceClass::Busy,
     SourceClass::ReadersHeld,
+    SourceClass::WritesHeld,
     SourceClass::Short,
     SourceClass::Unlinked,
     SourceClass::ReadTxLost,
@@ -123,6 +126,7 @@ pub const fn source_class(err: SourceError) -> SourceClass {
         SourceError::FsyncFailed => SourceClass::FsyncFailed,
         SourceError::Busy => SourceClass::Busy,
         SourceError::ReadersHeld => SourceClass::ReadersHeld,
+        SourceError::WritesHeld => SourceClass::WritesHeld,
         SourceError::Short { .. } => SourceClass::Short,
         SourceError::Unlinked => SourceClass::Unlinked,
         SourceError::ReadTxLost => SourceClass::ReadTxLost,
@@ -134,6 +138,8 @@ const WRITES_NOTHING: &str = "the call writes nothing, so the disk cannot be ful
 const NOT_FSYNC: &str = "only WalSource::sync maps a failed fsync to FsyncFailed; SQLite reports its own as an I/O code";
 const NO_READERS_HELD: &str =
     "no source returns it: lsr-sqlite reports readers holding the WAL as a busy checkpoint";
+const NO_WRITES_HELD: &str = "lsr-sqlite never returns it: the replicator's checkpointer does while \
+                              its write gate holds, which the model's write gate door draws";
 const NOT_A_PAGE: &str = "only a database page read can end inside a page";
 const NOT_THE_WAL_PATH: &str = "only the calls that look at the WAL path can see it replaced";
 const UNLINK_UNMODELLED: &str = "an unlinked WAL is drawn as EnvFault::UnlinkWal, which the \
@@ -142,7 +148,8 @@ const RETAKE_ONLY: &str = "only a retake after a failed one reports it, and the 
                            draws the first failure; this call takes no read transaction of its own \
                            otherwise";
 
-/// The engine no longer calls these (docs/decisions/D190.md); the trait keeps them.
+/// The engine no longer calls these (docs/decisions/D190.md), and the `Checkpointer` trait no
+/// longer has them; the operations stay so recorded histories that name them still read.
 pub(crate) const NOT_CALLED: &str =
     "the engine takes no write lock: its boundary snapshot copies the database without one";
 
@@ -158,6 +165,7 @@ pub const fn source_cell(op: SourceOp, class: SourceClass) -> Cell {
         SourceClass::FsyncFailed => fsync_cell(op),
         SourceClass::Busy => busy_cell(op),
         SourceClass::ReadersHeld => Cell::Impossible(NO_READERS_HELD),
+        SourceClass::WritesHeld => Cell::Impossible(NO_WRITES_HELD),
         SourceClass::Short => short_cell(op),
         SourceClass::Unlinked => unlinked_cell(op),
         SourceClass::ReadTxLost => read_tx_lost_cell(op),
@@ -310,6 +318,7 @@ fn source_error(entropy: &SeededEntropy, class: SourceClass) -> SourceError {
         SourceClass::FsyncFailed => SourceError::FsyncFailed,
         SourceClass::Busy => SourceError::Busy,
         SourceClass::ReadersHeld => SourceError::ReadersHeld,
+        SourceClass::WritesHeld => SourceError::WritesHeld,
         SourceClass::Short => {
             let pgno = u32::try_from(below(entropy, 8))
                 .unwrap_or(0)
@@ -400,6 +409,7 @@ pub const fn source_stop(err: SourceError) -> Option<StopCause> {
         | SourceError::DiskFull
         | SourceError::Busy
         | SourceError::ReadersHeld
+        | SourceError::WritesHeld
         | SourceError::Short { .. }
         | SourceError::ReadTxLost => None,
     }

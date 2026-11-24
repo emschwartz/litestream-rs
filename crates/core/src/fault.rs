@@ -126,6 +126,11 @@ pub enum Fault {
     /// said its readers hold the WAL (or tracks none). Not `SqliteBusy`:
     /// no lock was contended, and it lasts as long as the readers do.
     ReadersHeld,
+    /// A step that writes to the database (a checkpoint, the write barrier, the sequence bump)
+    /// was not attempted: the replicator holds the application's writes (`crate::failstop`).
+    /// A wait, not a failure: no application commit can grow the WAL meanwhile, so nothing
+    /// is lost by waiting, and it is never counted, never stalls and never degrades the task.
+    WritesHeld,
     /// The WAL moved behind the reader; the next recover classifies how.
     WalMoved,
     /// The wal-index names a committed end inside a transaction.
@@ -591,7 +596,8 @@ impl Stall {
             Fault::WalChangedUnderRead => Some(Self::WalChangedUnderRead),
             Fault::NothingToSnapshot => Some(Self::NothingToSnapshot),
             Fault::ReadTxLost => Some(Self::ReadTxLost),
-            Fault::StoreDenied(_)
+            Fault::WritesHeld
+            | Fault::StoreDenied(_)
             | Fault::StoreRefused
             | Fault::RemoteCorrupt
             | Fault::RemoteAheadOfLocal
@@ -877,6 +883,9 @@ pub enum Policy {
     Persistent(PersistentCause),
     /// Stop: a drain's deadline passed with work left. Not configurable.
     Shutdown,
+    /// Wait without counting a failure, until writes are allowed again: the task never
+    /// stalls or degrades for it ([`Fault::WritesHeld`]).
+    Wait,
 }
 
 /// The action for a fault. Total and pure.
@@ -924,6 +933,7 @@ pub const fn policy(fault: &Fault) -> Policy {
             Policy::Persistent(PersistentCause::ConditionalWritesUnsupported)
         }
         Fault::ShutdownDeadline => Policy::Shutdown,
+        Fault::WritesHeld => Policy::Wait,
         Fault::Bug(_) => Policy::Persistent(PersistentCause::Bug),
     }
 }
@@ -1100,6 +1110,7 @@ impl Fault {
             SourceError::FsyncFailed => Self::WalSyncFailed,
             SourceError::Busy => Self::SqliteBusy,
             SourceError::ReadersHeld => Self::ReadersHeld,
+            SourceError::WritesHeld => Self::WritesHeld,
             SourceError::Unlinked => Self::WalUnlinked,
             SourceError::ReadTxLost => Self::ReadTxLost,
         }
@@ -1140,6 +1151,7 @@ impl Fault {
             | Self::WalSyncFailed
             | Self::SqliteBusy
             | Self::ReadersHeld
+            | Self::WritesHeld
             | Self::WalMoved
             | Self::WalIndexInconsistent
             | Self::WalChangedUnderRead

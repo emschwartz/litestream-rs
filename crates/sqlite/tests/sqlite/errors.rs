@@ -338,7 +338,7 @@ fn a_raw_handle_is_set_up_and_stays_open() {
         reason = "the test hands over the raw handle an application would"
     )]
     // SAFETY: `handle` is open on this crate's SQLite and used by no other thread during the call.
-    let setup = unsafe { app_connection_raw(handle, &database) };
+    let setup = unsafe { app_connection_raw(handle, &database, &lsr_sqlite::WritesHeld::new()) };
     setup.unwrap();
     check_app_connection(&conn).unwrap();
     conn.execute_batch("INSERT INTO t(v) VALUES (x'01')")

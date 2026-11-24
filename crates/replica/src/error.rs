@@ -8,7 +8,9 @@ use crate::local::CreateError;
 /// it returns one of these.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
-    /// The database path cannot be used (missing, unreadable, or naming no file).
+    /// The database path cannot be used (missing, unreadable, or naming no file), or named
+    /// another file by the time SQLite opened it (`NotFound`: the database was replaced while
+    /// the replicator started).
     #[error("the database cannot be opened: {kind:?}")]
     Open {
         /// What the file system said.

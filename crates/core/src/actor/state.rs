@@ -147,6 +147,12 @@ impl Retry {
         until
     }
 
+    /// Waits until `until` without counting a failure: the doubling and the stall count stay
+    /// as they were.
+    pub(super) const fn hold(&mut self, until: Timestamp) {
+        self.until = Some(until);
+    }
+
     /// Marks the task degraded by `cause`; returns when the degradation began,
     /// which a later failure of the same run keeps.
     pub(super) fn degrade(&mut self, cause: PersistentCause, now: Timestamp) -> Timestamp {
