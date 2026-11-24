@@ -85,6 +85,7 @@ impl Runner {
         let unstaged_only = matches!(trip, Some(lsr_core::Trip::UnreplicatedTooLong { .. }))
             && self.w.sqlite.mx_frame() > 0
             && self.nothing_staged_waits();
+        self.fail_stop.engine_clock(self.actor.unreplicated_since());
         let judged = self
             .fail_stop
             .judge(trip, tick, bound, booted, unstaged_only);

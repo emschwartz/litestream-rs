@@ -17,7 +17,9 @@
 //! A trip it accepted stands on the later ticks while its clock's start has not moved later and the
 //! replica still lacks commits: the engine clears a trip when the start moves on, never when the
 //! age falls under the bound (`lsr_core::failstop`, Clearing), so a clock stepped back that
-//! leaves the age short of the bound is the same trip, not an early one.
+//! leaves the age short of the bound is the same trip, not an early one. The same holds while
+//! the engine's own clock still runs, though the replica holds every commit the simulator knows:
+//! an accepted trip over frames the engine never read lasts until the engine lets go of them.
 //!
 //! What may trip, and what the judge asks of each:
 //! - a stop: the run already judges every stop against what it expects;
@@ -90,6 +92,11 @@ pub struct FailStopJudge {
     /// holds a trip until its clock's start moves on, whatever the age does meanwhile, so the
     /// same trip over the same commits is accepted on the later ticks too.
     accepted: Option<Timestamp>,
+    /// The start of the engine's own clock as of the last tick, while it runs. A trip accepted
+    /// for frames the engine never read stands until the engine itself lets go of them, which
+    /// it cannot do while it still dates them, whatever the replica holds (the engine cannot
+    /// tell a vacuum that rewrote identical pages from a lost commit).
+    engine_since: Option<Timestamp>,
     /// An upload's answer could not be believed and no clean upload has landed since: the
     /// replica may hold what the engine cannot know it holds, so a restore that finds
     /// everything there does not count as caught up.
@@ -317,7 +324,12 @@ impl FailStopJudge {
         else {
             return false;
         };
-        self.since.is_some() && since <= accepted
+        (self.since.is_some() || self.engine_since.is_some()) && since <= accepted
+    }
+
+    /// Tells the judge where the engine's own clock starts after a tick, when it runs.
+    pub const fn engine_clock(&mut self, since: Option<Timestamp>) {
+        self.engine_since = since;
     }
 
     fn judge_now(
@@ -490,6 +502,33 @@ mod tests {
         assert!(
             matches!(never_accepted, Err(Violation::FalseTrip { .. })),
             "{never_accepted:?}"
+        );
+    }
+
+    /// A trip accepted for frames the engine never read stands after the replica holds every
+    /// commit the simulator knows, while the engine's own clock still runs; once it stops, a
+    /// trip is judged afresh.
+    #[test]
+    fn an_accepted_trip_stands_while_the_engine_still_dates_the_frames() {
+        let mut judge = FailStopJudge::starting(ts(0), lsr_history::Digest::genesis());
+        judge.saw(tick(700_000, true));
+        judge
+            .judge(age_trip(0), tick(700_000, true), BOUND, true, true)
+            .unwrap();
+        judge.caught_up(lsr_history::Digest::genesis());
+        for _ in 0..=CLEAR_TICKS {
+            judge.saw(tick(700_000, false));
+            judge.engine_clock(Some(ts(0)));
+            judge
+                .judge(age_trip(0), tick(700_000, false), BOUND, true, false)
+                .unwrap();
+        }
+        judge.saw(tick(700_000, false));
+        judge.engine_clock(None);
+        let later = judge.judge(age_trip(0), tick(700_000, false), BOUND, true, false);
+        assert!(
+            matches!(later, Err(Violation::FalseTrip { .. })),
+            "{later:?}"
         );
     }
 

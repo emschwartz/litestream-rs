@@ -526,3 +526,131 @@ fn a_power_loss_inside_a_tick_that_drops_an_uploaded_staged_file_is_a_cause_for_
         Err(failure) => panic!("{}\n{}", failure.violation, failure.message(failure.steps)),
     }
 }
+
+/// The engine's trip over WAL frames it could not read stands after the replica holds every
+/// commit, while its own clock still dates the frames: the judge keeps the trip it accepted
+/// until the engine lets go (a day-long clock step under a source that fails to open, a
+/// checkpoint and a deleted WAL).
+#[test]
+fn an_accepted_trip_over_unread_frames_stands_until_the_engine_lets_go() {
+    use lsr_core::{SourceError, SourceOp};
+    use lsr_sim::OtherProcessMode;
+    use lsr_sim::generate::{AppAt, AppOp, EnvFault, Hold, WalOp};
+    let ops = [
+        Op::WalDamage {
+            op: WalOp::RegrowSameSalts(16571050836624415656),
+            ticks: 3,
+        },
+        Op::CommitInTick { pages: 2 },
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::Upload,
+            ahead: 3,
+            shape: FaultShape::Rate {
+                per_mille: 56,
+                err: StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: ErrorKind::ConnectionReset,
+                },
+            },
+        },
+        Op::CommitInTick { pages: 2 },
+        Op::WalDamage {
+            op: WalOp::TearHeader,
+            ticks: 1,
+        },
+        Op::SecondWriter { ticks: 2 },
+        Op::ClockJump(114138),
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::List,
+            ahead: 2,
+            shape: FaultShape::Error(StoreError::Transient {
+                op: StoreOp::List,
+                kind: ErrorKind::ConnectionReset,
+            }),
+        },
+        Op::CommitInTick { pages: 1 },
+        Op::CommitInTick { pages: 2 },
+        Op::CommitInTick { pages: 3 },
+        Op::AppInTick {
+            at: AppAt::Call(1),
+            op: AppOp::Checkpoint(OtherProcessMode::Restart),
+        },
+        Op::Hold {
+            hold: Hold::CredentialsRevoked,
+            ticks: 71,
+        },
+        Op::Commit {
+            pages: 1,
+            grow: false,
+        },
+        Op::Hold {
+            hold: Hold::LyingReads,
+            ticks: 56,
+        },
+        Op::Hold {
+            hold: Hold::LyingReads,
+            ticks: 105,
+        },
+        Op::CommitInTick { pages: 4 },
+        Op::WalDamage {
+            op: WalOp::FlipLastFrameBit,
+            ticks: 2,
+        },
+        Op::Tick,
+        Op::CommitInTick { pages: 2 },
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::Upload,
+            ahead: 3,
+            shape: FaultShape::ErrorAfterPublish(StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: ErrorKind::ConnectionReset,
+            }),
+        },
+        Op::Tick,
+        Op::EnvFault(EnvFault::WipeStaging),
+        Op::CommitInTick { pages: 1 },
+        Op::CommitInTick { pages: 1 },
+        Op::OtherProcessReader { begin: true },
+        Op::ClockJump(65406),
+        Op::CommitInTick { pages: 1 },
+        Op::CommitInTick { pages: 3 },
+        Op::EnvFault(EnvFault::Source(
+            SourceOp::Open,
+            SourceError::Io(ErrorKind::Other),
+        )),
+        Op::ClockJump(93600000),
+        Op::AppInTick {
+            at: AppAt::Call(18),
+            op: AppOp::Checkpoint(OtherProcessMode::Passive),
+        },
+        Op::CommitInTick { pages: 1 },
+        Op::AppInTick {
+            at: AppAt::Before(SourceOp::EndBarrier),
+            op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+        },
+        Op::CommitInTick { pages: 1 },
+        Op::CommitInTick { pages: 4 },
+        Op::AppInTick {
+            at: AppAt::Before(SourceOp::Sync),
+            op: AppOp::DeleteWal,
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: lsr_sim::AfterRestart::Busy,
+        overlap: true,
+        remote_s3: true,
+        no_create_only: true,
+        truncate_pages: std::num::NonZeroU32::new(4),
+        ..Opts::default()
+    };
+    match run_ops(Seed::new(0x6b06_17e5), &ops, &opts) {
+        Ok(_) => {}
+        Err(failure) => panic!("{}\n{}", failure.violation, failure.message(failure.steps)),
+    }
+}
