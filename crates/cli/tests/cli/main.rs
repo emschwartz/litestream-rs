@@ -12,6 +12,8 @@ mod crash_loop;
 #[cfg(test)]
 mod daemon;
 #[cfg(test)]
+mod provider;
+#[cfg(test)]
 mod s3;
 #[cfg(test)]
 mod sidecar;

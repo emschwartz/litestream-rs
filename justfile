@@ -361,20 +361,40 @@ compat-alternation $LSR_ALTERNATION_SEED:
     ./scripts/build-go-litestream.sh
     cargo nextest run -p lsr-compat --test compat --run-ignored all --locked --no-fail-fast --no-capture -E 'test(go_and_rust_alternate_on_one_prefix) | test(go_and_rust_sidecars_alternate_on_one_config_file)'
 
-# The store and the conformance suite against the real Tigris bucket.
-# Never part of check or CI: it needs credentials (a file outside the repo, or
-# AWS_* variables) and spends real requests (docs/spikes.md).
-# Everything it writes sits under one run prefix, deleted afterwards with the aws CLI.
-test-tigris:
+# The store, the conformance suite and the provider checks (create-only writes and their races,
+# listing and read consistency, error classification, abandoned uploads, and one `lsr replicate`
+# and restore) against one real provider's bucket: tigris, aws or r2. For Tigris it also runs the
+# Tigris-only probes. Never part of check or CI: it needs credentials (a file outside the repo,
+# see scripts/provider.sh) and spends real requests (docs/spikes.md, docs/release-bar.md R9).
+# Everything it writes sits under one run prefix, deleted afterwards with the aws CLI, and the
+# script fails if the prefix does not list empty (objects and multipart uploads).
+test-provider provider:
+    ./scripts/provider.sh {{provider}} just _provider-tests
+
+[private]
+_provider-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    store_filter='test(/^provider::/)'
+    [ "$LSR_PROVIDER" = tigris ] && store_filter="$store_filter | test(/^tigris::/)"
     # LSR_S3_TRANSPORT=reqwest runs the same tests over the reqwest client.
-    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^tigris::/)' --run-ignored only --no-capture --locked --no-fail-fast
+    status=0
+    # The tests run in parallel (a serial run of the long ones takes an hour on R2); each prints
+    # its output when it ends.
+    output='--success-output immediate --failure-output immediate'
+    cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E "$store_filter" --run-ignored only $output --locked --no-fail-fast || status=$?
+    cargo nextest run -p lsr-cli --test cli -E 'test(/^provider::/)' --run-ignored only $output --locked --no-fail-fast || status=$?
+    exit $status
+
+# The same as `just test-provider tigris`.
+test-tigris: (test-provider "tigris")
 
 # The consistency probe against the Tigris bucket (crates/store-s3/tests/store-s3/common/real.rs):
 # one client writes and deletes keys, a second lists and reads right after, and every stale answer
 # is counted in an `OBS consistency` table. About six requests a round. Never part of check or CI,
 # which hold no store credentials; `just test-s3` runs the same probe against MinIO at 20 rounds.
 consistency-probe-tigris $LSR_PROBE_ROUNDS="10000":
-    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^tigris::shared_cases::consistency_probe$/)' --run-ignored only --no-capture --locked
+    ./scripts/tigris.sh cargo nextest run -p lsr-store-s3 --features reqwest --test store-s3 -E 'test(/^provider::shared_cases::consistency_probe$/)' --run-ignored only --no-capture --locked
 
 # A production-shaped restore: Go v0.5.18 replicates the compat workload straight to Tigris
 # (a few hundred files, levels 0 to 3 and 9), then `lsr verify`, and `lsr restore`
