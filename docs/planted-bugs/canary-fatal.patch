@@ -1,13 +1,13 @@
 diff --git a/crates/ltx/src/checksum.rs b/crates/ltx/src/checksum.rs
-index 3341aef..339d065 100644
+index 5d0ee2e71..ba1ca2a5f 100644
 --- a/crates/ltx/src/checksum.rs
 +++ b/crates/ltx/src/checksum.rs
-@@ -41,7 +41,7 @@
+@@ -50,7 +50,7 @@ use crate::PageNo;
+ const FLAG: u64 = 0x8000_0000_0000_0000;
  
- use std::fmt;
+ /// The CRC every LTX checksum is: Go's `crc64.ISO` table.
+-const ALGORITHM: CrcAlgorithm = CrcAlgorithm::Crc64GoIso;
++const ALGORITHM: CrcAlgorithm = CrcAlgorithm::Crc64Ecma182;
  
--use crc::{CRC_64_GO_ISO, Crc, Digest, Table};
-+use crc::{CRC_64_ECMA_182 as CRC_64_GO_ISO, Crc, Digest, Table};
- 
- use crate::PageNo;
- 
+ /// `raw` when bit 63 is set, as on every checksum Go writes.
+ const fn flagged(raw: u64) -> Option<u64> {
