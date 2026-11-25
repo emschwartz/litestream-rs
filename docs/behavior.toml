@@ -959,6 +959,17 @@ detected_by = "store-s3::`an_object_over_the_store_limit_is_refused_before_a_byt
 notes = "Before, the refusal came from S3 at part 10001, after every part was sent. Health names the cause `store_refused` without the sizes (nothing carries a store error's text to the health snapshot); the typed error with them reaches library callers of the store. A dedicated cause would need its own response setting, which is user-visible, so it waits for the owner"
 
 [[row]]
+table = "Upload"
+id = "UP-22"
+circumstance = "More files are staged than one upload tick sends: the backlog after a store outage (staging holds up to 4096 files before the WAL grows instead)"
+response = "A tick uploads at most 256 files (`max-sync-ltx-files`, Go's default; the library's `SyncLimits::files_per_upload` defaults to the same), then the other tasks run: the WAL sync, the checkpoint, the health snapshot, a stop or drain. The next tick continues. The setting can raise the bound or, with 0 or less in YAML, remove it, as in Go"
+signal = "none while it drains; `replica.lag` falls tick by tick"
+at_risk = "None"
+recovery = "Automatic"
+detected_by = "replica::`the_default_bounds_the_files_an_upload_tick_sends`, core::`files_per_tick_is_honoured_and_asks_to_step_again`; plant::`library-uploads-whole-backlog`"
+notes = "Before, only the binary set the bound: the library's default was none, so its first tick after an outage sent every staged file, sequentially, with no WAL sync, checkpoint or health update between them, and a stop waited for the whole tick. The core test is the tick's own bound; the replica test is the default that feeds it"
+
+[[row]]
 table = "Maintenance and retention"
 id = "MAINT-1"
 circumstance = "A level's window opened (30 s, 5 min, 1 h by default): merge at most 32 contiguous files from the level below (`compact.rs`). Inputs are never deleted by the merge. A hole in the source ends the run; the next job starts after it"
