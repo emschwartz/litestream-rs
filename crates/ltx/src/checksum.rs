@@ -66,32 +66,11 @@ impl DbChecksum {
     /// The checksum of a database with no pages.
     pub const EMPTY: Self = Self(FLAG);
 
-    /// Returns `None` unless bit 63 is set, as on every checksum Go writes.
-    #[must_use]
-    pub const fn from_raw(raw: u64) -> Option<Self> {
-        match flagged(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-
-    /// The checksum as stored on the wire.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
     /// Adds a page's checksum to the database checksum, or removes it: XOR is
     /// its own inverse.
     #[must_use]
     pub const fn toggle(self, page: PageChecksum) -> Self {
         Self(FLAG | (self.0 ^ page.0))
-    }
-
-    /// The database checksum after one page changed from `old` to `new`.
-    #[must_use]
-    pub const fn replace(self, old: PageChecksum, new: PageChecksum) -> Self {
-        self.toggle(old).toggle(new)
     }
 }
 
@@ -100,15 +79,6 @@ impl DbChecksum {
 pub struct PageChecksum(u64);
 
 impl PageChecksum {
-    /// Returns `None` unless bit 63 is set, as on every checksum a page has.
-    #[must_use]
-    pub const fn from_raw(raw: u64) -> Option<Self> {
-        match flagged(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-
     /// The checksum of one page.
     #[must_use]
     pub fn of(pgno: PageNo, data: &[u8]) -> Self {
@@ -117,38 +87,35 @@ impl PageChecksum {
         digest.update(data);
         Self(FLAG | digest.finalize())
     }
-
-    /// The checksum as a number, flag bit set.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
 }
 
 /// The CRC over a whole LTX file's contents, as its trailer stores it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileChecksum(u64);
 
-impl FileChecksum {
-    /// Returns `None` unless bit 63 is set, as on every checksum Go writes.
-    #[must_use]
-    pub const fn from_raw(raw: u64) -> Option<Self> {
-        match flagged(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
+impl FileChecksum {}
 
-    /// The checksum as stored on the wire.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-/// Sixteen hex digits for `Display`, the type's name around them for `Debug`.
-macro_rules! hex_formatting {
+/// What the three checksum types share: `from_raw`, `get`, sixteen hex digits
+/// for `Display`, the type's name around them for `Debug`.
+macro_rules! wire_checksum {
     ($($name:ident),*) => {$(
+        impl $name {
+            /// Returns `None` unless bit 63 is set, as on every checksum Go writes.
+            #[must_use]
+            pub const fn from_raw(raw: u64) -> Option<Self> {
+                match flagged(raw) {
+                    Some(raw) => Some(Self(raw)),
+                    None => None,
+                }
+            }
+
+            /// The checksum as stored on the wire, flag bit set.
+            #[must_use]
+            pub const fn get(self) -> u64 {
+                self.0
+            }
+        }
+
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "{:016x}", self.0)
@@ -163,7 +130,7 @@ macro_rules! hex_formatting {
     )*};
 }
 
-hex_formatting!(DbChecksum, PageChecksum, FileChecksum);
+wire_checksum!(DbChecksum, PageChecksum, FileChecksum);
 
 /// A running CRC-64 over a byte stream.
 pub(crate) struct Crc64(Digest);
@@ -304,9 +271,7 @@ mod tests {
     fn database_checksum_is_incremental() {
         let a = PageChecksum::of(pgno(1), b"one");
         let b = PageChecksum::of(pgno(2), b"two");
-        let b2 = PageChecksum::of(pgno(2), b"too");
         let db = DbChecksum::EMPTY.toggle(a).toggle(b);
-        assert_eq!(db.replace(b, b2), DbChecksum::EMPTY.toggle(a).toggle(b2));
         assert_eq!(db.toggle(b).toggle(a), DbChecksum::EMPTY);
         assert_eq!(db.get() & FLAG, FLAG);
     }
