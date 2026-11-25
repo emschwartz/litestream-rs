@@ -64,11 +64,14 @@ commit-check base="":
 # The S3 store's HTTP clients: each builds
 # alone, which `clippy` over all features cannot show. Their tests run in `test`, which has ureq,
 # reqwest and native-tls on at once. Then lsr-sqlite and lsr-replica without `bundled` and without
-# `rusqlite`, as an application linking its own SQLite builds them.
+# `rusqlite`, as an application linking its own SQLite builds them. Last, every crate's tests build
+# with that crate alone selected: a test that leans on a feature only another crate turns on
+# compiles under `--workspace` and fails in a recipe that names one package (`test-s3` did).
 features:
     cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
     cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
     cargo clippy -p lsr-sqlite -p lsr-replica --no-default-features --lib --locked -- -D warnings
+    for dir in crates/*/; do cargo check -p "lsr-$(basename "$dir")" --tests --locked || exit 1; done
 
 # nextest does not run doctests, and the compile-fail proofs (a proof token is not Clone) live there.
 doctest:
