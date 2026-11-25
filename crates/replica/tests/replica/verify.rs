@@ -52,18 +52,22 @@ fn verifying_quietly() -> Config {
 /// The most polls the first level-1 file and level-9 snapshot take to land.
 const SETTLE_POLLS: usize = 10;
 
-/// Moves the clock a poll at a time until the replica holds a level-9 snapshot (written
-/// after the first level-1 file): from then on [`verifying_quietly`] writes neither.
+/// Moves the clock a poll at a time until the replica holds a level-9 snapshot and a level-1
+/// file (the snapshot is planned first, the level-1 file a poll or more later): from then on
+/// [`verifying_quietly`] writes neither. Stopping at the snapshot alone left the level-1 file
+/// to land in a later poll, where it could cover a level-0 file a test had just removed.
 fn settle_maintenance(replicator: &Replicator, clock: &lsr_replica::FakeClockHandle, site: &Site) {
     let store = FsStore::new(&site.replica);
     for _ in 0..SETTLE_POLLS {
         let snapshots = block_on(store.list(Level::SNAPSHOT, None, PageLimit::MAX)).unwrap();
-        if !snapshots.files.is_empty() {
+        let one = Level::new(1).unwrap();
+        let level_one = block_on(store.list(one, None, PageLimit::MAX)).unwrap();
+        if !snapshots.files.is_empty() && !level_one.files.is_empty() {
             return;
         }
         advance(replicator, clock, POLL);
     }
-    panic!("no level-9 snapshot after {SETTLE_POLLS} polls");
+    panic!("no level-9 snapshot and level-1 file after {SETTLE_POLLS} polls");
 }
 
 fn replicated(health: &Health) -> Option<Txid> {
