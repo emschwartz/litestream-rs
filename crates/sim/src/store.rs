@@ -27,8 +27,9 @@ use std::task::{Context, Poll};
 
 use lsr_core::WriteMode;
 use lsr_core::{
-    BatchKind, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore,
-    PageLimit, ReadAt, ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
+    BatchKind, BoxFuture, ByteTally, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt,
+    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, Reread, SeededEntropy, StoreError, StoreOp,
+    Upload,
 };
 use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_ltx::{HEADER_LEN, Header, Timestamp, TxidRange, WalOrigin};
@@ -716,18 +717,19 @@ async fn rewrite(
 
 impl<U: Upload> Upload for FaultsUpload<U> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        if let Verdict::Fail(err) = lock(&self.state).decide(Call::Write) {
-            return Err(err);
-        }
-        self.inner.write(chunk).await?;
-        self.wrote = self
-            .wrote
-            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        Ok(())
+        self.write_inner(chunk, None).await
+    }
+
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        self.write_inner(chunk, Some(again)).await
     }
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        self.commit_inner().await
+        self.commit_inner(None).await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        self.commit_inner(Some(again)).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
@@ -735,8 +737,46 @@ impl<U: Upload> Upload for FaultsUpload<U> {
     }
 }
 
+/// Commits `inner`, through the source the engine gave when it gave one.
+async fn commit_of<U: Upload>(
+    inner: U,
+    again: Option<&dyn Reread>,
+) -> Result<FileInfo, StoreError> {
+    match again {
+        Some(again) => inner.commit_from(again).await,
+        None => inner.commit().await,
+    }
+}
+
+/// Writes `chunk` to `inner`, with the source the engine gave when it gave one.
+async fn write_of<U: Upload>(
+    inner: &mut U,
+    chunk: &[u8],
+    again: Option<&dyn Reread>,
+) -> Result<(), StoreError> {
+    match again {
+        Some(again) => inner.write_from(chunk, again).await,
+        None => inner.write(chunk).await,
+    }
+}
+
 impl<U: Upload> FaultsUpload<U> {
-    async fn commit_inner(self) -> Result<FileInfo, StoreError> {
+    async fn write_inner(
+        &mut self,
+        chunk: &[u8],
+        again: Option<&dyn Reread>,
+    ) -> Result<(), StoreError> {
+        if let Verdict::Fail(err) = lock(&self.state).decide(Call::Write) {
+            return Err(err);
+        }
+        write_of(&mut self.inner, chunk, again).await?;
+        self.wrote = self
+            .wrote
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    async fn commit_inner(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
         let verdict = lock(&self.state).decide(Call::Commit);
         if matches!(
             verdict,
@@ -750,14 +790,14 @@ impl<U: Upload> FaultsUpload<U> {
                 Err(err)
             }
             Verdict::AfterPublish(err) => {
-                self.inner.commit().await?;
+                commit_of(self.inner, again).await?;
                 if let Some(volatile) = &self.volatile {
                     volatile.mark_volatile(self.key);
                 }
                 Err(err)
             }
             Verdict::SizeMismatch => {
-                let mut info = self.inner.commit().await?;
+                let mut info = commit_of(self.inner, again).await?;
                 // Not damage the store hid: it said the size, so the engine is
                 // told. A level-0 replace must not delete it (the key may have
                 // held an acknowledged object, D78), so the short object is
@@ -781,18 +821,18 @@ impl<U: Upload> FaultsUpload<U> {
                 Ok(info)
             }
             Verdict::Checksum => {
-                self.inner.commit().await?;
+                commit_of(self.inner, again).await?;
                 Err(checksum_mismatch(self.key))
             }
             Verdict::Corrupt => {
-                let info = self.inner.commit().await?;
+                let info = commit_of(self.inner, again).await?;
                 if let Some(raw) = &self.raw {
                     damage(raw, &info).await?;
                     lock(&self.state).damaged.push(info.key);
                 }
                 Err(checksum_mismatch(self.key))
             }
-            Verdict::Pass | Verdict::Flip(_) => self.inner.commit().await,
+            Verdict::Pass | Verdict::Flip(_) => commit_of(self.inner, again).await,
         }
     }
 }
@@ -899,9 +939,19 @@ impl<U: Upload> Upload for YieldUpload<U> {
         self.inner.write(chunk).await
     }
 
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        YieldNow(false).await;
+        self.inner.write_from(chunk, again).await
+    }
+
     async fn commit(self) -> Result<FileInfo, StoreError> {
         YieldNow(false).await;
         self.inner.commit().await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        YieldNow(false).await;
+        self.inner.commit_from(again).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
@@ -973,6 +1023,14 @@ pub struct RecorderCounts {
     pub max_write_bytes: u64,
     /// Every byte handed to `write`.
     pub written_bytes: u64,
+    /// Second reads (a store reading back, through the source the engine gave it, bytes it
+    /// was handed and let go of) that gave the bytes the engine first handed over.
+    pub rereads_given: u64,
+    /// Second reads that gave other bytes than the engine first handed over, or another
+    /// count than was asked for: bytes no first read verified, on their way to the store.
+    pub rereads_differing: u64,
+    /// Second reads the source refused.
+    pub rereads_refused: u64,
 }
 
 /// The latest time the code under test has been told, shared between the
@@ -1172,6 +1230,7 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
             head: Vec::new(),
             wrote: 0,
             digest: DIGEST_SEED,
+            first: Vec::new(),
             log: self.log.clone(),
         })
     }
@@ -1218,7 +1277,47 @@ pub struct TapUpload<S: ObjectStore> {
     head: Vec<u8>,
     wrote: u64,
     digest: u64,
+    /// The bytes handed over with a source to read them back from: the first read, which
+    /// every second read is compared with.
+    first: Vec<u8>,
     log: RecorderLog,
+}
+
+/// The source an engine gave with its bytes, watched: each second read is counted as what
+/// it was against the first read the recorder kept ([`RecorderCounts::rereads_given`] and
+/// the two beside it). It changes no answer.
+struct Watched<'u> {
+    inner: &'u dyn Reread,
+    first: &'u [u8],
+    log: &'u RecorderLog,
+}
+
+impl Reread for Watched<'_> {
+    fn read<'a>(
+        &'a self,
+        offset: u64,
+        was: &'a ByteTally,
+    ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let out = self.inner.read(offset, was).await;
+            self.log.with(|s| match &out {
+                Ok(bytes) => {
+                    let first = usize::try_from(offset)
+                        .ok()
+                        .and_then(|start| self.first.get(start..))
+                        .and_then(|rest| rest.get(..bytes.len()));
+                    let whole = u64::try_from(bytes.len()).is_ok_and(|len| len == was.size());
+                    if whole && first == Some(bytes.as_slice()) {
+                        bump(&mut s.counts.rereads_given);
+                    } else {
+                        bump(&mut s.counts.rereads_differing);
+                    }
+                }
+                Err(_) => bump(&mut s.counts.rereads_refused),
+            });
+            out
+        })
+    }
 }
 
 const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1256,7 +1355,45 @@ fn parse_header(head: &[u8]) -> Option<Header> {
 
 impl<S: ObjectStore> Upload for TapUpload<S> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        self.inner.write(chunk).await?;
+        self.write_inner(chunk, None).await
+    }
+
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        self.write_inner(chunk, Some(again)).await
+    }
+
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        self.commit_inner(None).await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        self.commit_inner(Some(again)).await
+    }
+
+    async fn abort(self) -> Result<(), StoreError> {
+        self.inner.abort().await
+    }
+}
+
+impl<S: ObjectStore> TapUpload<S> {
+    async fn write_inner(
+        &mut self,
+        chunk: &[u8],
+        again: Option<&dyn Reread>,
+    ) -> Result<(), StoreError> {
+        match again {
+            Some(again) => {
+                // The store may read back inside this write, so the first read is kept first.
+                self.first.extend_from_slice(chunk);
+                let watched = Watched {
+                    inner: again,
+                    first: &self.first,
+                    log: &self.log,
+                };
+                self.inner.write_from(chunk, &watched).await?;
+            }
+            None => self.inner.write(chunk).await?,
+        }
         self.digest = digest_more(self.digest, chunk);
         let room = HEADER_LEN.saturating_sub(self.head.len());
         self.head
@@ -1275,7 +1412,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
         Ok(())
     }
 
-    async fn commit(self) -> Result<FileInfo, StoreError> {
+    async fn commit_inner(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
         let Self {
             inner,
             key,
@@ -1284,10 +1421,21 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             head,
             wrote,
             digest,
+            first,
             log,
         } = self;
         let header = parse_header(&head);
-        let outcome = inner.commit().await;
+        let outcome = match again {
+            Some(again) => {
+                let watched = Watched {
+                    inner: again,
+                    first: &first,
+                    log: &log,
+                };
+                inner.commit_from(&watched).await
+            }
+            None => inner.commit().await,
+        };
         log.with(|s| {
             bump(&mut s.counts.commits);
             // An object the store accepted is recorded. The recorder sits below `Faults`, so a
@@ -1320,10 +1468,6 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             }
         });
         outcome
-    }
-
-    async fn abort(self) -> Result<(), StoreError> {
-        self.inner.abort().await
     }
 }
 
@@ -1648,8 +1792,18 @@ impl<U: Upload> Upload for StageUpload<U> {
         self.inner.write(chunk).await
     }
 
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        self.inner.write_from(chunk, again).await
+    }
+
     async fn commit(self) -> Result<FileInfo, StoreError> {
         let info = self.inner.commit().await?;
+        self.handle.fsync_all();
+        Ok(info)
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        let info = self.inner.commit_from(again).await?;
         self.handle.fsync_all();
         Ok(info)
     }

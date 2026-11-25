@@ -39,7 +39,7 @@ use crate::request::{HttpRequest, MAX_DELETE_KEYS, Precondition, RequestBuilder,
 use crate::response::{Head, parse_created_at_header, parse_delete_failure_codes, parse_head};
 use crate::signer::Signer;
 use crate::source::{CredentialSource, Expiring};
-use crate::transport::{HttpResponse, Transport};
+use crate::transport::{HttpResponse, StreamedRequest, Transport};
 use crate::upload::S3Upload;
 #[cfg(feature = "ureq")]
 use crate::ureq_transport::UreqTransport;
@@ -474,6 +474,20 @@ impl<T: Transport> Inner<T> {
     ) -> Vec<Result<HttpResponse, StoreError>> {
         self.transport
             .send_many(requests, limit)
+            .into_iter()
+            .map(|sent| sent.map_err(|err| classify_transport(op, &err)))
+            .collect()
+    }
+
+    /// [`Self::send_many`] for requests whose bodies are read while they are sent.
+    pub(crate) fn send_streamed(
+        &self,
+        op: StoreOp,
+        limit: NonZeroUsize,
+        requests: Vec<StreamedRequest<'_>>,
+    ) -> Vec<Result<HttpResponse, StoreError>> {
+        self.transport
+            .send_streamed(requests, limit)
             .into_iter()
             .map(|sent| sent.map_err(|err| classify_transport(op, &err)))
             .collect()

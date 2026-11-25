@@ -34,8 +34,8 @@ use crate::env::{Clock, Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, Upload,
-    WriteMode,
+    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, Reread, StoreError,
+    Upload, WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -541,6 +541,24 @@ pub struct RetryingUpload<S: ObjectStore, P, E> {
     core: Arc<Core<S, P, E>>,
 }
 
+impl<S: ObjectStore, P: Sleeper, E: Entropy> RetryingUpload<S, P, E> {
+    /// Commits the inner upload, through `again` when the upload was written from a source,
+    /// and checks the answer against the bytes written.
+    async fn commit_with(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
+        Counters::bump(&self.core.counters.calls);
+        let info = match again {
+            Some(again) => self.inner.commit_from(again).await?,
+            None => self.inner.commit().await?,
+        };
+        let core = &*self.core;
+        let keys = [self.key];
+        crate::publish::settle(info, self.key, self.written, self.mode, || {
+            core.run(|| core.inner.delete(&keys))
+        })
+        .await
+    }
+}
+
 impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
         Counters::bump(&self.core.counters.calls);
@@ -550,15 +568,20 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> 
         Ok(())
     }
 
-    async fn commit(self) -> Result<FileInfo, StoreError> {
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
         Counters::bump(&self.core.counters.calls);
-        let info = self.inner.commit().await?;
-        let core = &*self.core;
-        let keys = [self.key];
-        crate::publish::settle(info, self.key, self.written, self.mode, || {
-            core.run(|| core.inner.delete(&keys))
-        })
-        .await
+        self.inner.write_from(chunk, again).await?;
+        let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        self.written = self.written.saturating_add(len);
+        Ok(())
+    }
+
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        self.commit_with(None).await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        self.commit_with(Some(again)).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

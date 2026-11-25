@@ -1,0 +1,12 @@
+# The source the engine gives a store with a staged file's bytes answers a second read with
+# whatever the file now holds when the length is right, though the bytes no longer tally as
+# they did when the engine read and verified them: a file changed behind its send reaches the
+# replica unverified (docs/decisions/D222.md).
+name = "second-read-trusted-on-a-mismatch"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "reread::a_staged_file_changed_behind_the_send_is_lost_and_nothing_is_published",
+    "reread::a_second_read_that_differs_inside_a_write_ends_the_send_as_a_lost_staged_file",
+    "reread::a_second_read_is_one_bounded_read_that_must_tally",
+]

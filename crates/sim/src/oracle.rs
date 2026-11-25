@@ -26,6 +26,9 @@
 //!   window (`retention`);
 //! - after every tick, each level-0 file the replica took is bytes an engine
 //!   staged (`witness`);
+//! - after every tick, no second read of a staged file gave a store bytes the first read
+//!   did not hold, and a refused one published nothing and was not blamed on the replica
+//!   (`reread`);
 //! - after every tick, no file the replica took at a level 1 to 8 leaves a hole in its
 //!   level that holds a file of the level below (`levels`);
 //! - every staged file the engine gave up before the replica took it was
@@ -323,6 +326,21 @@ pub enum Violation {
     UnstagedPut {
         /// The file.
         key: String,
+    },
+    /// A store that read a staged file a second time was given bytes other than the ones the
+    /// engine first read, verified and handed over (`crate::oracle::reread`).
+    #[error("a second read gave the store bytes the first read did not hold")]
+    SecondReadDiffers,
+    /// A tick in which a second read of a staged file was refused ended with a file
+    /// published.
+    #[error("a file was published by a tick that refused a second read of a staged file")]
+    PublishedPastRefusedRead,
+    /// A refused second read of a staged file was reported as a fault of the replica's,
+    /// though none fired: the operator is sent to the wrong place.
+    #[error("a refused second read of a staged file was reported as the replica's: {fault}")]
+    RefusedReadBlamedOnReplica {
+        /// The fault the engine reported.
+        fault: String,
     },
     /// A compaction output left a hole in its level with a file of the level below inside
     /// it: the compaction jumped over that file, and Go's compaction of the level above
@@ -923,10 +941,12 @@ pub fn newest_of(files: &[FileInfo]) -> Option<Txid> {
 mod as_of;
 mod levels;
 pub mod lost_restore_points;
+mod reread;
 mod retention;
 mod witness;
 
 pub use levels::{LevelPut, judge_level_put};
+pub use reread::{SecondReads, judge_rereads};
 pub use retention::Windows;
 pub use witness::{Judged, judge_put};
 

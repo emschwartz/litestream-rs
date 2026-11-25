@@ -19,7 +19,8 @@ use std::sync::Arc;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     BatchKind, Clock, CreatedAt, FakeClock, FileInfo, FileKey, Level, ListAt, Listing, MemStore,
-    ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, Upload, WriteMode, parse_file_name,
+    ObjectStore, PageLimit, ReadAt, ReadLen, Reread, StoreError, Upload, WriteMode,
+    parse_file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 use lsr_store_s3::{
@@ -719,10 +720,24 @@ impl Upload for RemoteUpload {
         }
     }
 
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        match self {
+            Self::Mem(u) => u.write_from(chunk, again).await,
+            Self::S3(u) => u.write_from(chunk, again).await,
+        }
+    }
+
     async fn commit(self) -> Result<FileInfo, StoreError> {
         match self {
             Self::Mem(u) => u.commit().await,
             Self::S3(u) => u.commit().await,
+        }
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        match self {
+            Self::Mem(u) => u.commit_from(again).await,
+            Self::S3(u) => u.commit_from(again).await,
         }
     }
 

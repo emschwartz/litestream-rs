@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use lsr_core::{
-    CreatedAt, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, StoreError,
-    StoreOp, Upload, WriteMode,
+    CreatedAt, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, Reread,
+    StoreError, StoreOp, Upload, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 use tempfile::TempDir;
@@ -28,24 +28,46 @@ pub struct FlakyUpload<U> {
     failing: Arc<AtomicU32>,
 }
 
+/// What a failed commit says: the connection was reset.
+const fn reset() -> StoreError {
+    StoreError::Transient {
+        op: StoreOp::Upload,
+        kind: io::ErrorKind::ConnectionReset,
+    }
+}
+
+impl<U> FlakyUpload<U> {
+    /// Takes one owed failure, when one is owed.
+    fn owes(&self) -> bool {
+        self.failing
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+    }
+}
+
 impl<U: Upload> Upload for FlakyUpload<U> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
         self.inner.write(chunk).await
     }
 
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        self.inner.write_from(chunk, again).await
+    }
+
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        let owed = self
-            .failing
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok();
-        if owed {
+        if self.owes() {
             self.inner.abort().await?;
-            return Err(StoreError::Transient {
-                op: StoreOp::Upload,
-                kind: io::ErrorKind::ConnectionReset,
-            });
+            return Err(reset());
         }
         self.inner.commit().await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        if self.owes() {
+            self.inner.abort().await?;
+            return Err(reset());
+        }
+        self.inner.commit_from(again).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

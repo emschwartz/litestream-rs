@@ -32,14 +32,15 @@
 
 use std::io;
 
-use lsr_core::{CorruptCause, FileKey, PartNumber, StoreError, StoreOp, WriteMode};
+use lsr_core::{CorruptCause, FileKey, PartNumber, Reread, StoreError, StoreOp, WriteMode};
 use lsr_ltx::Timestamp;
 
+use crate::again::Sealed;
 use crate::classify::{S3Code, classify, error_in_ok_body, is_not_implemented};
 use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag, parse_complete, parse_create, parse_head};
 use crate::store::Inner;
-use crate::transport::{HttpResponse, Transport};
+use crate::transport::{HttpResponse, StreamedRequest, Transport};
 
 /// Whether a completed object's ETag can belong to an upload of `parts`
 /// parts: `false` only for the multipart form `<32 hex>-<n>` with another `n`.
@@ -146,6 +147,56 @@ impl<T: Transport> Inner<T> {
         )
         .into_iter()
         .collect()
+    }
+
+    /// [`Self::put_parts`] for parts the upload let go of: each request carries the length
+    /// and the MD5 taken when the part was first handed over, and its body is read again
+    /// through `again` while it is sent (`again.rs`). A part whose second read gave nothing
+    /// fails with the source's own error, whatever its request then came to; otherwise it is
+    /// judged as any part is. The first failure in part order is the result.
+    pub(crate) fn put_parts_from(
+        &self,
+        key: &FileKey,
+        id: &UploadId,
+        first: usize,
+        parts: &[Sealed],
+        again: &dyn Reread,
+    ) -> Result<Vec<String>, StoreError> {
+        let op = StoreOp::Upload;
+        let mut numbers = Vec::with_capacity(parts.len());
+        let mut requests = Vec::with_capacity(parts.len());
+        for (at, part) in parts.iter().enumerate() {
+            let raw = u16::try_from(first.saturating_add(at)).unwrap_or(0);
+            let number = PartNumber::new(raw).ok_or(StoreError::Refused {
+                op,
+                status: PAYLOAD_TOO_LARGE,
+            })?;
+            let sized = (part.len(), part.md5());
+            requests.push(self.request(op, |b, now| {
+                b.upload_part_streamed(now, key, id, number, sized)
+            })?);
+            numbers.push(number);
+        }
+        let mut bodies: Vec<_> = parts.iter().map(|part| part.body(again)).collect();
+        let streamed = requests
+            .into_iter()
+            .zip(parts)
+            .zip(bodies.iter_mut())
+            .map(|((request, part), body)| {
+                StreamedRequest::new(request.into_request(), part.len(), body)
+            })
+            .collect();
+        let sent = self.send_streamed(op, self.concurrency, streamed);
+        let mut etags = Vec::with_capacity(parts.len());
+        for (((response, body), part), number) in
+            sent.into_iter().zip(bodies).zip(parts).zip(numbers)
+        {
+            if let Some(unread) = body.failed() {
+                return Err(unread);
+            }
+            etags.push(judge_part(key, number, part.md5(), &response?)?);
+        }
+        Ok(etags)
     }
 
     /// CompleteMultipartUpload; returns the completed object's ETag. See the
