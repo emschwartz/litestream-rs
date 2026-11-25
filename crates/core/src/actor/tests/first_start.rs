@@ -41,6 +41,7 @@ fn quiet() -> Rig {
         staging: Counting::default(),
         remote: Counting::default(),
         takeover: None,
+        announced: Vec::new(),
     };
     rig.wal.append_tx(&[(pg(1), page_bytes(1, 1))], nz(PAGES));
     rig
