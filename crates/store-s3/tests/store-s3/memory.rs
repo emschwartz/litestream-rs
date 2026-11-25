@@ -260,7 +260,10 @@ fn assert_upload_holds_one_batch(part: usize, concurrency: usize, total: usize) 
     // One block per part, and a few for the request and the result: a part regrown from
     // empty by doubling is a dozen blocks a part, which the live count above never shows.
     let parts = total.div_ceil(part);
-    eprintln!("upload part {} MiB x {concurrency}: {large} large blocks for {parts} parts", part / MIB);
+    eprintln!(
+        "upload part {} MiB x {concurrency}: {large} large blocks for {parts} parts",
+        part / MIB
+    );
     assert!(
         large <= parts + 4,
         "{large} blocks of {} KiB or more for {parts} parts: a part buffer is allocated once, whole",
