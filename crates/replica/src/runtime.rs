@@ -95,8 +95,9 @@ impl Runtime {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Every critical section here leaves plain data behind, so a poisoned lock is usable.
+/// Locks `mutex`, ignoring poison: every critical section in this crate and in the sidecar
+/// leaves plain data behind, so a lock a panic poisoned is still usable.
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 

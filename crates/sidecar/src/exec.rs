@@ -30,11 +30,11 @@
 //! signal stay in the "subprocess ended" log line. Passing the child's code on, as a wrapper
 //! such as `env` or `timeout` does, is the alternative recorded in issue #41.
 
-use lsr_replica::stack;
+use lsr_replica::{lock, stack};
 use std::io;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 
@@ -350,11 +350,6 @@ struct Shared {
     killed: bool,
     /// How it ended, once reaped.
     status: Option<Status>,
-}
-
-fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
-    // Each critical section leaves plain data behind.
-    shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A running (or ended) child.
