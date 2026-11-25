@@ -38,16 +38,31 @@ use std::future::Future;
 use lsr_ltx::Timestamp;
 
 use crate::layout::{FileInfo, FileKey};
-use crate::store::{CorruptCause, ObjectStore, StoreError, Upload, WriteMode};
+use crate::store::{CorruptCause, DynUpload, ObjectStore, StoreError, Upload, WriteMode};
+use crate::upload::Unsent;
 
-/// An upload into `store` whose commit is checked against the bytes written.
-#[derive(Debug)]
-pub(crate) struct Writer<'s, S: ObjectStore> {
-    store: &'s S,
+/// An upload whose commit is checked against the bytes written. It borrows no store, so one
+/// can be kept between ticks; the commit is handed the store it was begun in.
+pub(crate) struct Writer<U> {
     key: FileKey,
-    upload: S::Upload,
+    upload: U,
     written: u64,
     mode: WriteMode,
+}
+
+/// An upload begun and not committed, of any store: what the engine keeps of a file part-way
+/// sent. Dropping one does no I/O and leaves scratch the store's `remove_scratch` clears at
+/// the next boot, as a crash does.
+pub(crate) type Open = Writer<Box<dyn DynUpload>>;
+
+impl<U> std::fmt::Debug for Writer<U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Writer")
+            .field("key", &self.key)
+            .field("written", &self.written)
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
 }
 
 /// How a key came to hold the engine's bytes.
@@ -113,14 +128,14 @@ impl Unpublished {
     }
 }
 
-impl<'s, S: ObjectStore> Writer<'s, S> {
+impl<U: Upload> Writer<U> {
     /// Opens an upload of `key` in `store`, which `mode` says may or may not
     /// replace an object already under the key.
     ///
     /// # Errors
     /// What the store's `begin_upload` returned.
-    pub(crate) async fn begin(
-        store: &'s S,
+    pub(crate) async fn begin<S: ObjectStore<Upload = U>>(
+        store: &S,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
@@ -128,12 +143,25 @@ impl<'s, S: ObjectStore> Writer<'s, S> {
     ) -> Result<Self, StoreError> {
         let upload = store.begin_sized_upload(key, created_at, mode, len).await?;
         Ok(Self {
-            store,
             key: *key,
             upload,
             written: 0,
             mode,
         })
+    }
+
+    /// The same upload with its store's type erased.
+    pub(crate) fn boxed(self) -> Open
+    where
+        U: 'static,
+    {
+        let upload: Box<dyn DynUpload> = Box::new(self.upload);
+        Writer {
+            key: self.key,
+            upload,
+            written: self.written,
+            mode: self.mode,
+        }
     }
 
     /// Appends a chunk.
@@ -155,13 +183,13 @@ impl<'s, S: ObjectStore> Writer<'s, S> {
         self.upload.abort().await
     }
 
-    /// Publishes the object, checked against the bytes written.
+    /// Publishes the object into `store`, the one it was begun in, checked against the bytes
+    /// written.
     ///
     /// # Errors
     /// [`Unpublished`], saying what the store left under the key.
-    pub(crate) async fn commit(self) -> Result<Published, Unpublished> {
+    pub(crate) async fn commit<S: ObjectStore>(self, store: &S) -> Result<Published, Unpublished> {
         let Self {
-            store,
             key,
             upload,
             written,
@@ -267,13 +295,15 @@ pub(crate) async fn remove_one<S: ObjectStore>(
 }
 
 /// Deletes staged files: the staging directory's own, which nothing else
-/// writes.
+/// writes. `_unsent` is the upload task's word that it is not part-way through sending one
+/// of them ([`Unsent`]).
 ///
 /// # Errors
 /// What the store's delete returned.
 pub(crate) async fn remove_staged<L: ObjectStore>(
     staging: &L,
     keys: &[FileKey],
+    _unsent: &Unsent<'_>,
 ) -> Result<(), StoreError> {
     staging.delete(keys).await
 }

@@ -1,0 +1,8 @@
+# The simulator's bound on slices sent in a row while a commit waits sees slices that starve the
+# WAL step (crates/sim/src/resources.rs, `SendTurns`).
+name = "slices-starve-the-wal-step-sim"
+patch = "slices-starve-the-wal-step"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["sliced::commits_between_slices_are_staged_and_checkpointed_while_the_file_goes_up"]

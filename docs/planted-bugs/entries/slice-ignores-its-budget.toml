@@ -1,0 +1,10 @@
+# A slice that reads on past the tick's bytes: the whole file goes to the replica in one tick, as it
+# did before a file was sent a slice a tick (docs/decisions/D217.md), and the engine neither syncs
+# nor checkpoints until it is done.
+name = "slice-ignores-its-budget"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "upload::tests::slices::a_step_hands_the_replica_its_budget_and_keeps_the_rest_of_the_file_in_flight",
+    "actor::tests::sliced::a_file_larger_than_the_ticks_bytes_goes_up_a_slice_a_tick",
+]

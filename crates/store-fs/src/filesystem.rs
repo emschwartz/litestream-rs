@@ -88,7 +88,7 @@ impl DirEntryInfo {
 /// The filesystem calls [`crate::FsStore`] makes. Each has the meaning of its `std::fs`
 /// namesake, errors included: a caller matches on [`io::ErrorKind`] (`NotFound`,
 /// `AlreadyExists`) exactly as it would on the real call.
-pub trait Fs: Clone + Send + Sync + Debug {
+pub trait Fs: Clone + Send + Sync + Debug + 'static {
     /// An open file.
     type File: FsFile;
 
