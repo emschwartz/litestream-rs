@@ -275,3 +275,31 @@ jobs:
             target/lazyfs/*.log
             target/lazyfs/*.stderr
           if-no-files-found: ignore
+
+  # The trial drill at a small size (docs/trial-drill.md, docs/decisions/D218.md): the pinned Go build
+  # replicates a synthetic database to MinIO, lsr takes over under load and is killed during a large
+  # upload, a compaction and a snapshot, both binaries restore and are compared with a ledger of commits,
+  # and Go takes the replica back. Every interval is compressed to seconds. The canary first: the drill's
+  # checkers must report planted damage. Exit 1 is a finding to file; the logs and summary.json are kept.
+  trial-drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: ./.github/actions/go-compat
+      - run: just trial-drill-canary
+      - run: just trial-drill-small
+      - if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: trial-drill-${{ github.run_id }}
+          path: |
+            target/trial-drill/nightly/summary.json
+            target/trial-drill/nightly/logs
+            target/trial-drill/nightly/litestream.yml
+          if-no-files-found: ignore
