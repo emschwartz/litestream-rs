@@ -37,9 +37,15 @@ use crate::trust::{self, Roots};
 /// Idle connections the pool keeps: the widest batch the store sends at once.
 const POOL_IDLE: usize = crate::CREATION_TIME_CONCURRENCY.get();
 
-/// Bytes of each of a connection's two buffers, and the largest response head: S3's heads are
-/// under 2 KiB, and a body is read through the buffer in as many reads as it takes.
+/// Bytes of a connection's read buffer, and the largest response head: S3's heads are under
+/// 2 KiB, and a body is read through the buffer in as many reads as it takes. Reads cost no CPU
+/// at 32 KiB that 128 KiB saves (a 1 GiB restore on a local MinIO: 0.97 s of CPU either way).
 const CONN_BUFFER: usize = 32 * 1024;
+
+/// Bytes of a connection's write buffer, ureq's own default: a part body leaves through it, so
+/// at 32 KiB a 1 GiB upload spent 0.14 s more CPU (2.12 s against 1.98 s, medians of five
+/// interleaved runs) in four times the writes.
+const WRITE_BUFFER: usize = 128 * 1024;
 
 /// A [`Transport`] over one shared connection pool.
 #[derive(Clone)]
@@ -77,7 +83,7 @@ impl UreqTransport {
             // Each connection, idle ones too, holds an input and an output buffer of this
             // size (ureq's 128 KiB each): 16 of them were 4 MiB of an idle process.
             .input_buffer_size(CONN_BUFFER)
-            .output_buffer_size(CONN_BUFFER)
+            .output_buffer_size(WRITE_BUFFER)
             .max_response_header_size(CONN_BUFFER)
             .tls_config(tls)
             .build();
