@@ -1,0 +1,22 @@
+diff --git a/crates/store-s3/src/response.rs b/crates/store-s3/src/response.rs
+index a36d87718..2c974faee 100644
+--- a/crates/store-s3/src/response.rs
++++ b/crates/store-s3/src/response.rs
+@@ -116,14 +116,16 @@ pub fn parse_list(
+         next_token: parsed.next_continuation_token,
+     };
+     let mut seen = BTreeSet::new();
++    let mut previous: Option<&str> = None;
+     for entry in &parsed.contents {
+         let name = entry
+             .key
+             .strip_prefix(lead.as_str())
+             .ok_or(ResponseError::KeyOutsidePrefix)?;
+-        if !seen.insert(name) {
++        if !seen.insert(name) || previous.is_some_and(|last| last >= name) {
+             return Err(ResponseError::RepeatedKey);
+         }
++        previous = Some(name);
+         if is_scratch_name(name) {
+             continue;
+         }
