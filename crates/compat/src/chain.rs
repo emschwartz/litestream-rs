@@ -337,16 +337,22 @@ pub fn clock_ending_now(commits: u32) -> Result<i64, CompatError> {
     Ok(real_now_ms()?.saturating_sub(span).saturating_sub(1000))
 }
 
-fn config() -> Result<ActorConfig, CompatError> {
+/// The schedule of [`Chain::start`]: two levels and a snapshot every few seconds, so a short
+/// run holds every shape.
+fn usual_schedule() -> Result<Maintenance, CompatError> {
     let secs = Duration::from_secs;
-    let maintenance = Maintenance::new(
+    Maintenance::new(
         vec![secs(1), secs(2)],
         secs(3),
         secs(10),
         L0Retention::After(secs(2)),
     )
-    .map_err(|e| CompatError::Fixture(format!("maintenance schedule: {e}")))?;
-    Ok(ActorConfig {
+    .map_err(|e| CompatError::Fixture(format!("maintenance schedule: {e}")))
+}
+
+fn config(maintenance: Maintenance) -> ActorConfig {
+    let secs = Duration::from_secs;
+    ActorConfig {
         sync: SyncConfig {
             cap: NonZeroU64::new(SYNC_CAP),
             node_id: 0,
@@ -363,7 +369,7 @@ fn config() -> Result<ActorConfig, CompatError> {
         // A fixture run must fail loudly on any persistent fault, not degrade.
         responses: Responses::STRICT,
         max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
-    })
+    }
 }
 
 fn pct(n: u32, p: u32) -> u32 {
@@ -378,6 +384,18 @@ impl Chain {
     /// [`CompatError`] when SQLite or the schedule refuses, and [`CompatError::Fixture`] for a
     /// fixture whose replica is on S3: the in-process chain writes a directory replica only.
     pub fn start(fixture: AppFixture, clock_ms: i64) -> Result<Self, CompatError> {
+        Self::start_scheduled(fixture, clock_ms, usual_schedule()?)
+    }
+
+    /// [`Chain::start`] with the compaction levels, snapshots and retention of `maintenance`.
+    ///
+    /// # Errors
+    /// As [`Chain::start`].
+    pub fn start_scheduled(
+        fixture: AppFixture,
+        clock_ms: i64,
+        maintenance: Maintenance,
+    ) -> Result<Self, CompatError> {
         if matches!(fixture.remote(), Remote::S3(_)) {
             return Err(CompatError::Fixture(
                 "the in-process chain writes a directory replica, not S3".to_owned(),
@@ -387,7 +405,7 @@ impl Chain {
         Ok(Self {
             staging: FsStore::new(&fixture.meta),
             remote: FsStore::new(&fixture.replica),
-            actor: Actor::new(config()?),
+            actor: Actor::new(config(maintenance)),
             fixture,
             live,
             clock: clock_ms,
@@ -548,8 +566,20 @@ impl Chain {
     /// # Errors
     /// [`CompatError`] from the actor or the copy.
     pub fn catch_up(&mut self) -> Result<(), CompatError> {
+        self.catch_up_with(|_, _| Ok(()))
+    }
+
+    /// [`Chain::catch_up`], handing each event to `each` as [`Chain::settle_with`] does: a
+    /// writer that commits while the actor works.
+    ///
+    /// # Errors
+    /// As [`Chain::catch_up`], and whatever `each` returns.
+    pub fn catch_up_with(
+        &mut self,
+        each: impl FnMut(&mut Self, &Event) -> Result<(), CompatError>,
+    ) -> Result<(), CompatError> {
         self.clock = self.clock.saturating_add(STEP_MS);
-        self.settle()?;
+        self.settle_with(each)?;
         self.archive_new()?;
         let txid = self.newest_staged()?;
         if self.points.last().is_none_or(|last| last.txid != txid) {
