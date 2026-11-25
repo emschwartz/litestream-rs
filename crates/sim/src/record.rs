@@ -178,6 +178,7 @@ fn app_op(op: AppOp) -> String {
         AppOp::ReaderEnd => "AppOp::ReaderEnd".to_owned(),
         AppOp::Checkpoint(mode) => format!("AppOp::Checkpoint({})", checkpoint(mode)),
         AppOp::DeleteWal => "AppOp::DeleteWal".to_owned(),
+        AppOp::Spill { pages } => format!("AppOp::Spill {{ pages: {pages} }}"),
     }
 }
 

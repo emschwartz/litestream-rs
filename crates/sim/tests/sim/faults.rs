@@ -400,6 +400,11 @@ fn busy_on_barrier() {
 }
 
 #[test]
+fn write_lock_held_at_the_barrier() {
+    run(scenario::write_lock_held_at_the_barrier);
+}
+
+#[test]
 fn readers_hold_the_wal() {
     run(scenario::readers_hold_the_wal);
 }
@@ -532,6 +537,11 @@ fn sealed_then_checkpoint_io() {
 #[test]
 fn sealed_then_bump_busy() {
     run(scenario::sealed_then_bump_busy);
+}
+
+#[test]
+fn bump_overtaken_then_the_wal_restarts() {
+    run(scenario::bump_overtaken_then_the_wal_restarts);
 }
 
 #[test]

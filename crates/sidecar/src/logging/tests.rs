@@ -100,6 +100,40 @@ fn lines_below_the_level_are_dropped_and_events_carry_the_database_and_cause() {
     );
 }
 
+/// The line for the application's checkpoints says a checkpoint ran only when one did: a WAL
+/// that grew with nothing copied is reported as that, and a skipped checkpoint of our own is
+/// a debug line, not a retry.
+#[test]
+fn a_stalled_wal_is_not_logged_as_an_application_checkpoint() {
+    let ran = "the application checkpointed the database";
+    assert_eq!(
+        app_checkpoint_message(AppCheckpoint::Backfilled { from: 1, to: 9 }),
+        ran
+    );
+    assert_eq!(app_checkpoint_message(AppCheckpoint::Restarted), ran);
+    let out = Captured::default();
+    let log = Arc::new(Logger::to(
+        LogLevel::Debug,
+        LogFormat::Text,
+        Arc::new(At),
+        Box::new(out.clone()),
+    ));
+    let mut events = DbEvents::new(Arc::clone(&log), Path::new("/data/app.db"));
+    events.event(&Event::AppCheckpoint {
+        seen: AppCheckpoint::Stalled { frames: 4616 },
+        total: 1,
+    });
+    events.event(&Event::Engine(EngineEvent::CheckpointDeferred {
+        until: lsr_ltx::Timestamp::from_unix_millis(10),
+    }));
+    let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        text,
+        "time=1970-01-01T00:00:00.000Z level=WARN msg=\"the WAL grew past the application's automatic checkpoint threshold with nothing new checkpointed\" db=app.db seen=\"Stalled { frames: 4616 }\" total=1\n\
+         time=1970-01-01T00:00:00.000Z level=DEBUG msg=\"checkpoint skipped: the database's write lock is busy\" db=app.db retry_at=1970-01-01T00:00:00.010Z\n"
+    );
+}
+
 /// The refusal's text is the operator's instruction, approved word for word.
 #[test]
 fn a_refusal_logs_the_approved_text() {

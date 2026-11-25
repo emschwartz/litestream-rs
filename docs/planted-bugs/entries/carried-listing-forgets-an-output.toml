@@ -1,0 +1,6 @@
+# The listing carried into the pass after the engine's own job does not gain the outputs
+# confirmed since it was made, so that pass knows only the newest file of each level.
+name = "carried-listing-forgets-an-output"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = ["maintain::short::tests::a_carried_listing_gains_every_output_confirmed_since_it_was_made"]

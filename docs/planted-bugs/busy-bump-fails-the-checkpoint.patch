@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index 4b74f5864..9fafaeb46 100644
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -617,9 +617,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
+     /// moves the WAL on in place of our frame.
+     fn bump(&mut self) -> Result<bool, Fault> {
+         let bumped = self.ck.bump_seq();
+-        if bumped == Err(SourceError::Busy) {
+-            return Ok(false);
+-        }
+         bumped.map_err(Fault::from_source)?;
+         Ok(true)
+     }

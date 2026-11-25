@@ -37,10 +37,12 @@ pub enum Action {
     CheckpointFull,
     /// [`AppOp::DeleteWal`].
     DeleteWal,
+    /// [`AppOp::Spill`].
+    Spill,
 }
 
 /// Every action.
-pub const ACTIONS: [Action; 8] = [
+pub const ACTIONS: [Action; 9] = [
     Action::Commit,
     Action::ReaderBegin,
     Action::ReaderEnd,
@@ -49,6 +51,7 @@ pub const ACTIONS: [Action; 8] = [
     Action::CheckpointTruncate,
     Action::CheckpointFull,
     Action::DeleteWal,
+    Action::Spill,
 ];
 
 impl Action {
@@ -64,6 +67,7 @@ impl Action {
             AppOp::Checkpoint(OtherProcessMode::Truncate) => Self::CheckpointTruncate,
             AppOp::Checkpoint(OtherProcessMode::Full) => Self::CheckpointFull,
             AppOp::DeleteWal => Self::DeleteWal,
+            AppOp::Spill { .. } => Self::Spill,
         }
     }
 
@@ -77,6 +81,7 @@ impl Action {
             Self::CheckpointTruncate => "Checkpoint.Truncate",
             Self::CheckpointFull => "Checkpoint.Full",
             Self::DeleteWal => "DeleteWal",
+            Self::Spill => "Spill",
         }
     }
 }
@@ -126,7 +131,8 @@ pub const fn point_cell(call: SourceOp, action: Action) -> Cell {
             | Action::CheckpointPassive
             | Action::CheckpointRestart
             | Action::CheckpointTruncate
-            | Action::DeleteWal,
+            | Action::DeleteWal
+            | Action::Spill,
         ) => Cell::Drawn,
         (
             SourceOp::Open

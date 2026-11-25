@@ -70,7 +70,7 @@ pub use app::{
 };
 pub use checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, CheckpointTrigger,
-    Checkpointed, Decision, Observed, Staged, checkpoint, decide,
+    Checkpointed, Decision, LOCK_BUSY_WAIT, Observed, Staged, checkpoint, decide, lock_busy_wait,
 };
 #[cfg(feature = "testing")]
 #[doc(hidden)]
@@ -142,8 +142,9 @@ pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
 pub use store::{
-    BatchKind, CorruptCause, Denied, ListAt, Listing, ListingStalled, ObjectStore, PageLimit,
-    PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode, build_listing,
+    BatchKind, BoxFuture, CorruptCause, Denied, DynUpload, ListAt, Listing, ListingStalled,
+    ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode,
+    build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use takeover::{TakeoverRecord, TakeoverRecordError};

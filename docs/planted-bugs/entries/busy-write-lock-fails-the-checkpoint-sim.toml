@@ -1,0 +1,8 @@
+# The same plant in the simulator, where an application's open write transaction holds the lock
+# (no fault injected) and where one is injected.
+name = "busy-write-lock-fails-the-checkpoint-sim"
+fix = "claude/own-checkpoint"
+package = "lsr-sim"
+test_bin = "sim"
+patch = "busy-write-lock-fails-the-checkpoint"
+tests = ["faults::write_lock_held_at_the_barrier", "faults::busy_on_barrier"]

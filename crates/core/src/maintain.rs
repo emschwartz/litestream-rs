@@ -30,11 +30,47 @@
 //! most [`MAX_INPUTS`]. The output carries the last input's timestamp
 //! (so a compaction never makes its output look older than its inputs), so a backlog keeps passing the window test until a run's last
 //! input is newer than the window start: 100 source files drain as four jobs
-//! in one window and the last one closes it. A hole in the source ends the run
-//! and the next job starts after it, so a hole one level down is the same hole
-//! here and no file claims transactions nobody wrote (Go merges across it).
+//! in one window and the last one closes it.
 //! When the source has nothing above the destination the level is idle: no
 //! write, no job, no wake time.
+//!
+//! # Holes
+//!
+//! The rule every compaction keeps: its inputs are the strictly contiguous run that starts
+//! at the first source file above the destination's newest file, and that file starts at the
+//! transaction after the destination's newest. A level therefore never gains a file that
+//! does not follow its newest one. Go needs this of a replica it is handed: its compaction
+//! reads every source file from the transaction after its destination's newest and refuses
+//! the whole set when one does not start where the one before ended (`non-contiguous
+//! transaction ids in input files`, ltx `compactor.go`), at every tick, for as long as the
+//! files on both sides of the hole are there (`docs/decisions/D228.md`). Go does not compare
+//! its first input with the destination, so a hole right above the destination's newest file
+//! it copies one level up without a word.
+//!
+//! Where the sources do not follow (a file removed from outside, or a hole an earlier
+//! version left):
+//!
+//! - A pass that lists only tails ([`View::Tail`]) plans nothing for that level and asks for
+//!   a whole listing ([`Step::Whole`]): a tail cannot tell a lost range from one a lower
+//!   level still holds.
+//! - A whole listing closes the first hole in any level's sources above the next level's
+//!   newest file before any other job and whatever the windows (`plan_fill`): one
+//!   compaction, into the hole's level, of the files the level below holds inside the hole.
+//!   When that level lacks the range too, its own hole is closed first. Each fill is followed
+//!   by another whole listing, so holes close one after the other, lowest level first.
+//!   A fill that fails waits out the backoff of the level it writes, and the level above the
+//!   hole waits with it (a tail that does not follow asks for no whole listing meanwhile):
+//!   a hole a lower level can close is never planned past. Nor is it closed or passed while
+//!   a level the fill could read or write holds a rejected output, whose delete goes first.
+//! - A range no lower level holds in files that line up is lost. The run ends at it and the
+//!   next job starts after it, so the hole is the same hole one level up and no file claims
+//!   transactions nothing holds (Go does the same when the hole is right above its
+//!   destination's newest file, and is stuck when it is further up).
+//!
+//! Holes in the top compaction level, and holes below the next level's newest file, are
+//! left: no compaction reads them again, Go's included, and restores and retention read all
+//! levels together. The actor checks the rule once more before a short pass's compaction is
+//! written ([`crate::BugSite::CompactionLeavesAHole`]).
 //!
 //! The first listing after a boot is read back before anything is planned
 //! from it (`audit`): the newest file of each level above 0 must verify, so
@@ -59,7 +95,9 @@ mod retain;
 mod short;
 mod state;
 
-use lsr_ltx::{TRAILER_LEN, Timestamp, Txid};
+use std::cmp::Ordering;
+
+use lsr_ltx::{TRAILER_LEN, Timestamp, Txid, TxidRange};
 use thiserror::Error;
 
 use crate::compact::{CompactError, Compacted, CompactionInputs, MAX_INPUTS, compact_in};
@@ -473,10 +511,24 @@ pub(crate) fn listing_after_upload(now: Timestamp, config: &Maintenance) -> Time
 }
 
 /// What one level, or the snapshot, wants.
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum Step {
     Run(Job),
     Wait(Timestamp),
     Idle,
+    /// The level's window is open and its sources do not follow its newest file. Only a
+    /// [`View::Tail`] says this: it cannot tell a lost range from a hole a lower level can
+    /// still fill, so the pass decides on a whole listing instead.
+    Whole,
+}
+
+/// How much of the replica a level is planned from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum View {
+    /// Every file of every level.
+    Whole,
+    /// What a short pass listed (`short`): the files below its tails are not in it.
+    Tail,
 }
 
 /// The next job, or when to ask again, or the one created-at time needed first. See the
@@ -563,8 +615,16 @@ fn decide(
         .iter()
         .skip(1)
         .take(usize::from(config.top().get()));
+    // A hole is closed before any other job, at whatever level it is: the next passes see
+    // only tails, where a hole that is not right above a level's newest file does not show.
+    for level in levels.clone() {
+        let fill = plan_fill(inventory, now, *level, state);
+        if let Some(job) = fill.and_then(|step| absorb(step, &mut until)) {
+            return Ok(Decided::job(job, gate));
+        }
+    }
     for level in levels {
-        let step = plan_level(inventory, now, config, *level, state, resolved)?;
+        let step = plan_level(inventory, now, config, *level, state, resolved, View::Whole)?;
         if let Some(job) = absorb(step, &mut until) {
             return Ok(Decided::job(job, gate));
         }
@@ -627,7 +687,8 @@ fn absorb(step: Step, until: &mut Option<Timestamp>) -> Option<Job> {
             *until = Some(until.map_or(at, |soonest| soonest.min(at)));
             None
         }
-        Step::Idle => None,
+        // A whole view never asks for itself, and a short pass takes the step before this.
+        Step::Idle | Step::Whole => None,
     }
 }
 
@@ -645,6 +706,7 @@ fn plan_level(
     dst: Level,
     state: &MaintainState,
     resolved: &ResolvedCreatedAt,
+    view: View,
 ) -> Result<Step, Need> {
     let (Some(src_level), Some(interval)) = (
         Level::new(dst.get().saturating_sub(1)),
@@ -670,14 +732,34 @@ fn plan_level(
         .iter()
         .filter(|info| dst_max.is_none_or(|max| info.key.range().min() > max))
         .peekable();
-    if above.peek().is_none() {
+    let Some(first) = above.peek().copied() else {
         return Ok(Step::Idle);
+    };
+    // A hole a fill can close is never planned past: the fill, or the wait for its level.
+    if view == View::Whole
+        && let Some(step) = plan_fill(inventory, now, dst, state)
+    {
+        return Ok(step);
     }
     let (start, next) = next_window(now, interval);
     if let Some(info) = dst_last
         && created_after(resolved, info, start)?
     {
         return Ok(Step::Wait(next));
+    }
+    // The rule every compaction keeps: its inputs are the contiguous run that starts at the
+    // first source file above the destination's newest, and that file starts at the
+    // transaction after it. A tail that shows otherwise is not planned from.
+    let follows = dst_max.is_none_or(|max| max.next() == Some(first.key.range().min()));
+    if !follows && view == View::Tail {
+        // One whole listing for each attempt: while a level a fill would write waits out a
+        // failure, another listing would find the same wait.
+        let retry = Level::ALL
+            .iter()
+            .filter(|level| **level <= src_level)
+            .filter_map(|level| state.backing_off_until(*level, now))
+            .min();
+        return Ok(retry.map_or(Step::Whole, Step::Wait));
     }
     let run = contiguous_run(above);
     Ok(
@@ -690,6 +772,94 @@ fn plan_level(
             None => Step::Idle,
         },
     )
+}
+
+/// The step that closes the first hole in `dst`'s sources above its newest file, whatever
+/// `dst`'s window: Go's compaction refuses to read across one, at every tick, for as long as
+/// it is there (see "Holes"). `None` when there is no hole, or none a lower level can close.
+fn plan_fill(
+    inventory: &Inventory,
+    now: Timestamp,
+    dst: Level,
+    state: &MaintainState,
+) -> Option<Step> {
+    let src_level = Level::new(dst.get().checked_sub(1)?)?;
+    let dst_max = inventory
+        .level(dst)
+        .last()
+        .map(|info| info.key.range().max());
+    // Every source counts, not only those that start above the destination's newest: one that
+    // starts at or below it and ends above holds the transactions between, and a fill would
+    // be written under it.
+    let hole = first_hole(dst_max, inventory.level(src_level).iter())?;
+    // A rejected output is never an input, and its level gains nothing before its delete.
+    // A fill may read or write any level up to the hole's, so the hole waits for the delete.
+    let rejected = |level: &Level| *level <= src_level && state.distrusted_at(*level).is_some();
+    if Level::ALL.iter().any(rejected) {
+        return Some(Step::Idle);
+    }
+    let job = fill(inventory, src_level, hole)?;
+    // The fill may start at a lower level than the hole's: it waits out the level it writes.
+    Some(match state.backing_off_until(job.level(), now) {
+        Some(retry) => Step::Wait(retry),
+        None => Step::Run(Job::Compact(job)),
+    })
+}
+
+/// The first transactions above `after` (the destination's newest) that `files` (the source
+/// level, ascending) do not hold: before the first file or between two neighbours. A
+/// destination with no file has no hole before the first source. Files that overlap leave none.
+fn first_hole<'a>(
+    after: Option<Txid>,
+    files: impl Iterator<Item = &'a FileInfo>,
+) -> Option<TxidRange> {
+    let mut held = after;
+    for info in files {
+        let range = info.key.range();
+        if let Some(next) = held.and_then(Txid::next)
+            && range.min() > next
+        {
+            return TxidRange::new(next, range.min().prev()?);
+        }
+        held = held.max(Some(range.max()));
+    }
+    None
+}
+
+/// The compaction that closes `hole` at `level`, or its first part, from the files the level
+/// below still holds: the contiguous run that starts at the hole's first transaction and ends
+/// inside it. When the level below lacks that transaction too, its own hole is closed first
+/// (from the level below it, and so on down), and a later pass closes this one from the
+/// result. `None` when no level holds a file that starts there (the range is lost, or files
+/// that do not line up hold it).
+fn fill(inventory: &Inventory, level: Level, hole: TxidRange) -> Option<CompactJob> {
+    let (mut level, mut hole) = (level, hole);
+    loop {
+        let below = Level::new(level.get().checked_sub(1)?)?;
+        let mut from = inventory
+            .level(below)
+            .iter()
+            .skip_while(|info| info.key.range().max() < hole.min())
+            .peekable();
+        let start = from.peek().map(|info| info.key.range().min());
+        match start.map(|start| start.cmp(&hole.min())) {
+            Some(Ordering::Equal) => {
+                let inside = from.take_while(|info| info.key.range().max() <= hole.max());
+                let inputs = CompactionInputs::new(contiguous_run(inside)).ok()?;
+                return CompactJob::new(inputs, level).ok();
+            }
+            // The level below holds the hole's first transaction in a file that starts
+            // before it.
+            Some(Ordering::Less) => return None,
+            // The level below lacks it too: its own hole, up to its next file, goes first.
+            Some(Ordering::Greater) | None => {}
+        }
+        let end = start
+            .and_then(Txid::prev)
+            .map_or(hole.max(), |before| before.min(hole.max()));
+        hole = TxidRange::new(hole.min(), end)?;
+        level = below;
+    }
 }
 
 /// The delete of a distrusted output, alone.

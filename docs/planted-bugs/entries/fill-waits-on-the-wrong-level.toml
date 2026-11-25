@@ -1,0 +1,6 @@
+# A fill that starts at a lower level than the hole's waits out the hole's level's backoff
+# and not that of the level it writes, so a fill that keeps failing is planned at every pass.
+name = "fill-waits-on-the-wrong-level"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = ["maintain::tests::a_fill_that_starts_two_levels_down_waits_for_the_level_it_writes"]

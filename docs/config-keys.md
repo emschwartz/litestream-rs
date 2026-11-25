@@ -4,7 +4,7 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 
 `lsr_config::load_plan` reads a `litestream.yml` and returns a `Plan`: per database a `lsr_replica::Config`, a `ReplicaPlan` (open it with `lsr_config::open_store`), and the restore-if-missing setting. The tables say what each key sets in it. "Daemon only" keys are read by `lsr replicate` and are not in a plan.
 
-`busy-timeout` has no effect, and the reason is worth a sentence: Go's `busy-timeout` is how long Go's own SQLite connections wait on a lock, while litestream-rs's connections never wait (a busy timeout of zero) and retry on their own backoff; the TRUNCATE wait it guarded in Go is replaced by the reader-guard rule, which runs TRUNCATE only under `litestream-rs.app-readers: none` (`ReaderTracking::Tracked`).
+`busy-timeout` has no effect, and the reason is worth a sentence: Go's `busy-timeout` is how long Go's own SQLite connections wait on a lock, while litestream-rs's connections never wait (a busy timeout of zero): a checkpoint that finds the write lock busy is skipped and asked for again within a second (`docs/decisions/D225.md`); the TRUNCATE wait it guarded in Go is replaced by the reader-guard rule, which runs TRUNCATE only under `litestream-rs.app-readers: none` (`ReaderTracking::Tracked`).
 
 ## Top level
 

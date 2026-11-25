@@ -61,6 +61,9 @@ pub const REQUIRED: &[&str] = &[
     "put.level.3",
     "put.level.9",
     "delete.calls",
+    // A compaction with more than one file to take, where one that takes only the newest
+    // leaves a hole (LevelHole; ledger: level-jumps-to-the-newest-input).
+    "levels.Joins",
     // Retried faults the ledger's fixes handle: a staged file read again before it is
     // deleted (delete-on-one-failed-read-boot), an upload whose outcome is unknown
     // (relist-after-failed-drop, relist-acknowledged-mark), the WAL moving under a read
@@ -87,6 +90,14 @@ pub const REQUIRED: &[&str] = &[
     // Staging on the real directory store over the in-memory filesystem, and a power loss there.
     "staging_fs.runs",
     "staging_fs.power_loss",
+    // A staged file sent a slice a tick: the bound on slices sent in a row while a commit
+    // waits is judged (ledger: slices-starve-the-wal-step), and a commit, a fault and the end
+    // of the process each land between two slices (ledger: failed-slice-carries-on).
+    "event.Sending",
+    "send.turns.judged",
+    "send.commit_between_slices",
+    "send.then_a_fault",
+    "send.then_the_process_ended",
 ];
 
 /// States printed even at zero but not required of the fixed seed set, each
@@ -112,6 +123,10 @@ pub const UNREQUIRED: &[(&str, &str)] = &[
     (
         "snapshot.LocalRewound",
         "the WAL is synced before staging, so only a disk that lies about that sync rewinds below it",
+    ),
+    (
+        "levels.LostOutside",
+        "a level's file taken from the replica from outside, then the level extended past it: only a bucket rollback takes one, and the mixes never draw it",
     ),
     (
         "staged.Dropped",

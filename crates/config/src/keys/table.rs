@@ -262,7 +262,8 @@ fn render() -> Result<String, String> {
          are read by `lsr replicate` and are not in a plan.\n\n\
          `busy-timeout` has no effect, and the reason is worth a sentence: Go's `busy-timeout` is how \
          long Go's own SQLite connections wait on a lock, while litestream-rs's connections never wait \
-         (a busy timeout of zero) and retry on their own backoff; the TRUNCATE wait it guarded in Go \
+         (a busy timeout of zero): a checkpoint that finds the write lock busy is skipped and asked \
+         for again within a second (`docs/decisions/D225.md`); the TRUNCATE wait it guarded in Go \
          is replaced by the reader-guard rule, which runs TRUNCATE only under \
          `litestream-rs.app-readers: none` (`ReaderTracking::Tracked`).\n",
     );

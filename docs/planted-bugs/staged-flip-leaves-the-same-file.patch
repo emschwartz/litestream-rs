@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
+index ea948668c..1b02208f1 100644
+--- a/crates/sim/src/world.rs
++++ b/crates/sim/src/world.rs
+@@ -138,7 +138,7 @@ fn flip_byte_from(bytes: &mut [u8], from: usize) {
+         if let Some(byte) = bytes.get_mut(at) {
+             *byte ^= 0xff;
+         }
+-        if whole.is_none() || reencoded(bytes, |_| {}, |_| {}) != whole {
++        if at == from {
+             return;
+         }
+         if let Some(byte) = bytes.get_mut(at) {
