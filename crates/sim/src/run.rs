@@ -1129,6 +1129,7 @@ impl Runner {
             Event::Booted { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -1162,6 +1163,14 @@ impl Runner {
         let (cause, at_boot) = match event {
             Event::Booted { cause: Some(cause) } => (cause, true),
             Event::Resnapshot(cause) => (cause, false),
+            // A busy answer from SQLite is no excuse for a later snapshot: a sync step it
+            // fails moves nothing, and a PASSIVE keeps its position pinned through one
+            // (`docs/decisions/D225.md`). Before, every retry excused the snapshots that
+            // followed it, and a busy sequence bump followed by a restart passed unseen.
+            Event::Retrying {
+                fault: Fault::SqliteBusy,
+                ..
+            } => return Ok(()),
             Event::Degraded { .. } | Event::Retrying { .. } => {
                 self.forcings.note_in_tick(Forcing::PositionUnproven);
                 return Ok(());
@@ -1169,6 +1178,7 @@ impl Runner {
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -1216,6 +1226,7 @@ impl Runner {
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -2250,12 +2261,7 @@ impl Runner {
                 done
             }
             MetaOp::DeleteNewest => w.delete_newest_staged().map_err(StagedEditError::from),
-            MetaOp::FlipNewestByte => w.edit_newest_staged(|bytes| {
-                let middle = bytes.len() / 2;
-                if let Some(byte) = bytes.get_mut(middle) {
-                    *byte ^= 0xff;
-                }
-            }),
+            MetaOp::FlipNewestByte => w.flip_newest_staged(),
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
             MetaOp::DeleteAll => {
                 self.takeover = None;
@@ -2767,7 +2773,9 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
             until,
             fault: Fault::StoreThrottled { retry_after },
         } => (*until, *retry_after),
-        Event::Retrying { until, .. } | Event::WritesHeld { until } => (*until, None),
+        Event::Retrying { until, .. }
+        | Event::WritesHeld { until }
+        | Event::CheckpointDeferred { until } => (*until, None),
         Event::Booted { .. }
         | Event::Synced { .. }
         | Event::Checkpointed { .. }

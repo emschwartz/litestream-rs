@@ -106,7 +106,7 @@ use state::{Gate, Live};
 use crate::app::AppCheckpoints;
 use crate::checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, Decision, Observed,
-    Staged, after_checkpoint, after_sync, checkpoint, decide, next_wake,
+    Staged, after_checkpoint, after_sync, checkpoint, decide, lock_busy_wait, next_wake,
 };
 use crate::counts::{Counted, WorkCounts};
 use crate::created_at::{ResolvedCreatedAt, resolve};
@@ -299,6 +299,13 @@ pub enum Event {
         fault: Fault,
         /// When the retry is due, read from where the wait is kept: the
         /// level's backoff for a maintenance job, the task's for the rest.
+        until: Timestamp,
+    },
+    /// A checkpoint was due and another connection held the database's write lock, so SQLite
+    /// was not asked ([`CheckpointOutcome::LockBusy`]). Not a failure: the application is
+    /// writing, nothing is counted, and the task never stalls or degrades for it.
+    CheckpointDeferred {
+        /// When the checkpoint is asked for again.
         until: Timestamp,
     },
     /// A step that writes to the database waited instead of running: the replicator holds the
@@ -1915,6 +1922,7 @@ impl Actor {
             Err(failed) => failed.run,
         };
         self.kept.app.ours(env.wal.committed().ok(), run);
+        let skips = self.engine.lock_busy.take();
         let done = match done {
             Ok(done) => done,
             Err(CheckpointFailed { fault, staged, .. }) => {
@@ -1923,11 +1931,22 @@ impl Actor {
             }
         };
         let position = self.took(done.staged);
-        if done.outcome == CheckpointOutcome::Truncated {
+        match done.outcome {
+            CheckpointOutcome::LockBusy => return self.lock_busy(skips, now),
             // A TRUNCATE that changed the WAL staged its boundary snapshot.
-            self.kept
+            CheckpointOutcome::Truncated => self
+                .kept
                 .snapshots
-                .count(&SnapshotCause::CheckpointBoundary);
+                .count(&SnapshotCause::CheckpointBoundary),
+            // The same snapshot, which the next sync stages and counts.
+            CheckpointOutcome::BoundaryOwed => self
+                .engine
+                .course
+                .snapshot_for(SnapshotCause::CheckpointBoundary, false),
+            CheckpointOutcome::Busy
+            | CheckpointOutcome::NotRestarted
+            | CheckpointOutcome::Overtaken
+            | CheckpointOutcome::Restarted => {}
         }
         let observed = Observed::of(now, &position, true);
         let (state, next) = after_checkpoint(
@@ -1940,8 +1959,29 @@ impl Actor {
         self.engine.checkpoint = state;
         self.engine.gate = Gate::of(next);
         self.kept.tasks.get_mut(Task::Checkpoint).succeed();
-        let busy = done.outcome == CheckpointOutcome::Busy;
+        // An overtaken checkpoint did not look at the WAL again: SQLite's own word stands.
+        let busy = match done.outcome {
+            CheckpointOutcome::Busy => true,
+            CheckpointOutcome::Overtaken => run.is_some_and(|run| run.busy),
+            CheckpointOutcome::LockBusy
+            | CheckpointOutcome::NotRestarted
+            | CheckpointOutcome::Restarted
+            | CheckpointOutcome::Truncated
+            | CheckpointOutcome::BoundaryOwed => false,
+        };
         self.ran(Event::Checkpointed { mode, busy }, now)
+    }
+
+    /// The write lock was busy when a checkpoint asked for its barrier, for the time after
+    /// `skips` in a row before it: the checkpoint gate holds for [`lock_busy_wait`], capped
+    /// at the retry interval. The checkpoint task counts no failure, so an application that
+    /// is writing never backs the checkpoint off or degrades it.
+    fn lock_busy(&mut self, skips: Option<NonZeroU32>, now: Timestamp) -> Tick {
+        let skips = skips.map_or(NonZeroU32::MIN, |skips| skips.saturating_add(1));
+        self.engine.lock_busy = Some(skips);
+        let until = now.saturating_add(lock_busy_wait(skips, self.kept.cfg.retry_interval));
+        self.engine.gate = Gate::Until(until);
+        self.ran(Event::CheckpointDeferred { until }, now)
     }
 
     /// What a checkpoint staged, finished or not: the files its steps staged

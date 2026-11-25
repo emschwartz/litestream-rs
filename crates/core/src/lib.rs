@@ -70,7 +70,7 @@ pub use app::{
 };
 pub use checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, CheckpointTrigger,
-    Checkpointed, Decision, Observed, Staged, checkpoint, decide,
+    Checkpointed, Decision, LOCK_BUSY_WAIT, Observed, Staged, checkpoint, decide, lock_busy_wait,
 };
 #[cfg(feature = "testing")]
 #[doc(hidden)]

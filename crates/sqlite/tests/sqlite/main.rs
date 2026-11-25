@@ -48,6 +48,8 @@ mod kill;
 #[cfg(test)]
 mod leaving_wal;
 #[cfg(test)]
+mod own_checkpoint;
+#[cfg(test)]
 mod power_loss;
 #[cfg(test)]
 mod sidecar_read_lock;
