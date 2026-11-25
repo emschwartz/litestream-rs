@@ -178,6 +178,8 @@ struct Log {
     commit_after: VecDeque<StoreError>,
     write_fail: VecDeque<StoreError>,
     lie_about_size: bool,
+    /// The key a commit names in its answer, in place of the one it wrote.
+    answer_as: Option<FileKey>,
     /// The modes uploads were begun with.
     modes: Vec<WriteMode>,
     /// A key whose whole reads from the start are let through this many
@@ -342,12 +344,13 @@ impl Upload for ProbeUpload {
     }
 
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
-        let (early, late, lie) = {
+        let (early, late, lie, answer_as) = {
             let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             (
                 log.commit_before.pop_front(),
                 log.commit_after.pop_front(),
                 log.lie_about_size,
+                log.answer_as,
             )
         };
         async move {
@@ -361,6 +364,9 @@ impl Upload for ProbeUpload {
             }
             if lie {
                 info.size = info.size.saturating_add(1);
+            }
+            if let Some(other) = answer_as {
+                info.key = other;
             }
             Ok(info)
         }
@@ -636,6 +642,18 @@ fn a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed() {
     let (staging, remote) = (MemStore::new(), Probe::default());
     stage(&staging, 1);
     remote.log().lie_about_size = true;
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadAmbiguous);
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+}
+
+/// A commit that answers for another key says nothing about the one that was sent: it is
+/// ambiguous, and a listing decides.
+#[test]
+fn a_commit_that_answers_for_another_key_is_ambiguous_not_confirmed() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.log().answer_as = Some(key(2));
     let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
     assert_eq!(failed.fault, Fault::UploadAmbiguous);
     assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
