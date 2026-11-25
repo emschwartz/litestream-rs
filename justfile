@@ -178,7 +178,7 @@ planted-bugs-apply:
 # Every planted-bug entry's named tests are defined somewhere under crates/ (a renamed test leaves
 # its entry unable to run, and only the nightly would say so). Seconds, no build.
 planted-bugs-names:
-    uv run scripts/planted-bugs.py --names
+    python3 scripts/planted-bugs.py --names
 
 # The planted bugs a pull request against `base` can have stopped catching (its diff touches the
 # entry, its patch, a file the patch edits or a file defining a named test, or the patch no longer
