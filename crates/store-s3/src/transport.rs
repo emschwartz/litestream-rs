@@ -293,7 +293,6 @@ impl Bounds {
 /// The largest response body held whole: twice the largest ranged read (a test pins
 /// the relation), which is room for a listing page or a delete result and no more. A
 /// streamed body ([`Transport::open`]) is read a piece at a time and has no such limit.
-#[cfg(any(feature = "ureq", feature = "reqwest"))]
 pub(crate) const MAX_BODY: u64 = 33_554_432;
 
 /// Maps an I/O failure kind to a transport kind, for every [`Transport`] built on sockets.
