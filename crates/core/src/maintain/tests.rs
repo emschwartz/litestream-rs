@@ -2578,6 +2578,136 @@ fn a_distrusted_output_gone_from_the_listing_is_forgotten() {
     );
 }
 
+/// The range of the level-1 compaction `due` is, when it is one.
+fn level_one_run(due: &Due) -> Option<(u64, u64)> {
+    if let Due::Run(Job::Compact(job)) = due
+        && job.level() == level(1)
+    {
+        let range = job.inputs().range();
+        Some((range.min().get(), range.max().get()))
+    } else {
+        None
+    }
+}
+
+/// A snapshot at 1 and level-0 files 2 to `last`, staged and on the replica, all an hour
+/// older than the tests' level-1 window.
+fn hour_old_level_zero(last: u64) -> (MemStore, MemStore) {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    put(&replica, 9, 1, T0 + 1);
+    for n in 2..=last {
+        let created = T0 + i64::try_from(n).unwrap() * 1000;
+        put(&local, 0, n, created);
+        put(&replica, 0, n, created);
+    }
+    (local, replica)
+}
+
+/// Runs the level-1 compaction due at `now` and records it; returns its range.
+fn compact_level_one(
+    local: &MemStore,
+    replica: &MemStore,
+    state: &mut MaintainState,
+    now: i64,
+) -> (u64, u64) {
+    let due = due_state(&load(replica), at(now), &defaults(), None, state);
+    let range = level_one_run(&due).unwrap_or_else(|| panic!("no level-1 job: {due:?}"));
+    let Due::Run(job @ Job::Compact(_)) = due else {
+        panic!("no compaction")
+    };
+    let (inputs, to) = job.merge().unwrap();
+    let ran = block_on(run_compaction(
+        inputs,
+        to,
+        &Staging(local),
+        &Replica(replica),
+        &Sent::default(),
+        Guard::BucketRefuses,
+    ));
+    assert!(matches!(ran, Outcome::Compacted { .. }), "{ran:?}");
+    state.record(at(now), &job, &ran);
+    range
+}
+
+/// Level 1's 30 second window that opens an hour after `T0`.
+const OPENS: i64 = T0 + 3_600_000;
+
+/// A level this engine compacted waits for its next window, as Go's level monitor fires
+/// once per window. The output cannot say so: it carries its last input's time, from before
+/// the window, so a process that remembers nothing compacts the next file at once.
+#[test]
+fn a_level_this_engine_compacted_waits_for_its_next_window() {
+    let (local, replica) = hour_old_level_zero(3);
+    let mut state = MaintainState::default();
+    // At the window's first instant, which is inside it.
+    assert_eq!(
+        compact_level_one(&local, &replica, &mut state, OPENS),
+        (2, 3)
+    );
+    put(&local, 0, 4, OPENS + 500);
+    put(&replica, 0, 4, OPENS + 500);
+    let ask = |state: &mut MaintainState, now: i64| {
+        level_one_run(&due_state(
+            &load(&replica),
+            at(now),
+            &defaults(),
+            None,
+            state,
+        ))
+    };
+    assert_eq!(
+        ask(&mut MaintainState::default(), OPENS + 1000),
+        Some((4, 4))
+    );
+    assert_eq!(ask(&mut state, OPENS + 1000), None);
+    assert_eq!(ask(&mut state, OPENS + 29_999), None);
+    assert_eq!(ask(&mut state, OPENS + 30_000), Some((4, 4)));
+}
+
+/// What closes a window is a compaction inside it: one in the window before does not.
+#[test]
+fn a_compaction_in_the_window_before_leaves_this_one_open() {
+    let (local, replica) = hour_old_level_zero(3);
+    let mut state = MaintainState::default();
+    assert_eq!(
+        compact_level_one(&local, &replica, &mut state, OPENS - 1),
+        (2, 3)
+    );
+    put(&local, 0, 4, OPENS - 1);
+    put(&replica, 0, 4, OPENS - 1);
+    let due = due_state(&load(&replica), at(OPENS), &defaults(), None, &mut state);
+    assert_eq!(level_one_run(&due), Some((4, 4)));
+}
+
+/// A compaction that took as many files as one job may did not take all there was: the
+/// backlog drains in the same window, and the job that ends it closes the window.
+#[test]
+fn a_full_compaction_leaves_the_window_open_for_the_backlog() {
+    let last = u64::try_from(MAX_INPUTS).unwrap() + 8;
+    let (local, replica) = hour_old_level_zero(last);
+    let mut state = MaintainState::default();
+    let full = u64::try_from(MAX_INPUTS).unwrap() + 1;
+    assert_eq!(
+        compact_level_one(&local, &replica, &mut state, OPENS),
+        (2, full)
+    );
+    let rest = compact_level_one(&local, &replica, &mut state, OPENS + 1000);
+    assert_eq!(rest, (full + 1, last));
+    put(&local, 0, last + 1, OPENS + 2000);
+    put(&replica, 0, last + 1, OPENS + 2000);
+    let ask = |state: &mut MaintainState, now: i64| {
+        level_one_run(&due_state(
+            &load(&replica),
+            at(now),
+            &defaults(),
+            None,
+            state,
+        ))
+    };
+    assert_eq!(ask(&mut state, OPENS + 3000), None);
+    assert_eq!(ask(&mut state, OPENS + 30_000), Some((last + 1, last + 1)));
+}
+
 #[test]
 fn a_failing_level_backs_off_and_others_run() {
     let (_local, replica, mut state, job) = rejected_setup();
@@ -2616,7 +2746,10 @@ fn a_failing_level_backs_off_and_others_run() {
         bytes_read: 0,
     };
     state.record(now, &Job::Compact(job), &ok);
-    assert!(matches!(ask(&mut state, now), Due::Run(Job::Compact(_))));
+    // The listing does not hold the output it records, so the level is due again: in its
+    // next window, since this engine's own compaction closed the one it ran in.
+    let next = ask(&mut state, at(T0 + 3_630_000));
+    assert!(level_one_run(&next).is_some(), "{next:?}");
 }
 
 #[test]

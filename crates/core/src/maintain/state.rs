@@ -1,6 +1,6 @@
 //! What the maintenance loop remembers between calls to [`super::due`].
 //!
-//! The planner reads a listing, not history, so two facts that a listing
+//! The planner reads a listing, not history, so the facts that a listing
 //! cannot carry live here, each bounded by the eight compaction levels:
 //!
 //! - Backoff. A job that failed is not planned again at its level until a
@@ -15,6 +15,12 @@
 //!   level, and retention holds until it is gone. A listing cannot tell such an
 //!   object from a good one, and the inputs it "covers" would be deleted.
 //!
+//! - Windows this engine closed. A level is compacted once per window, and the
+//!   output's time (its last input's) is usually from the window before, so it
+//!   cannot say the window is closed. The time of this engine's last compaction
+//!   into each level that took every source file is kept instead
+//!   ([`MaintainState::drained_since`]).
+//!
 //! - The kept restore point. While a task of the actor is degraded, the newest
 //!   transaction the replica held when the degradation began is pinned: the
 //!   files of its restore chain are not deleted, and the rest of the replica
@@ -25,7 +31,8 @@
 //! for that reason; see `retain`.)
 //!
 //! None of it survives a restart. That is safe for backoff (one extra
-//! attempt). A distrusted key forgotten by a crash between the corrupt publish
+//! attempt) and for a closed window (one more compaction in the window the
+//! process starts in). A distrusted key forgotten by a crash between the corrupt publish
 //! and its delete is found again by the read-back the next boot owes
 //! (`audit`), before anything is planned from the listing.
 
@@ -36,7 +43,7 @@ use std::time::Duration;
 use lsr_ltx::{Timestamp, Txid};
 
 use super::{CompactJob, DeleteJob, Job, MaintainError, Outcome};
-use crate::compact::CompactError;
+use crate::compact::{CompactError, MAX_INPUTS};
 use crate::fault::{Backoff, Fault, backoff_wait};
 use crate::layout::{FileKey, Level};
 use crate::store::StoreError;
@@ -87,6 +94,9 @@ pub struct MaintainState {
     /// A snapshot built from level-0 files failed: until a restart, the first snapshot is read
     /// from the database, which does not depend on those files.
     seed_refused: bool,
+    /// By level, when this engine last compacted into it everything its sources held
+    /// ([`Self::drained_since`]).
+    drained: BTreeMap<Level, Timestamp>,
 }
 
 impl MaintainState {
@@ -107,6 +117,16 @@ impl MaintainState {
     #[must_use]
     pub(crate) const fn seed_refused(&self) -> bool {
         self.seed_refused
+    }
+
+    /// Whether a compaction of this engine closed `level`'s window that began at `start`: one
+    /// that ran at or after `start` and took every source file the level had. Go compacts a
+    /// level once per window, at the window's start (`store.go`, `monitorCompactionLevel`).
+    /// The output's own time cannot say this: it is its last input's, which a compaction at
+    /// the start of a window finds in the window before (`docs/decisions/D240.md`).
+    #[must_use]
+    pub(crate) fn drained_since(&self, level: Level, start: Timestamp) -> bool {
+        self.drained.get(&level).is_some_and(|at| *at >= start)
     }
 
     /// Makes the first snapshot a read of the database.
@@ -155,6 +175,11 @@ impl MaintainState {
         match outcome {
             Outcome::Compacted { .. } => {
                 self.retries.remove(&level);
+                // A run shorter than the most one job takes ended where the sources did. A
+                // full one may have left a backlog, which drains inside the window.
+                if job.inputs().files().len() < MAX_INPUTS {
+                    self.drained.insert(level, now);
+                }
             }
             // The listing changed under the job; asking again is the answer.
             Outcome::Replan { .. } => {}

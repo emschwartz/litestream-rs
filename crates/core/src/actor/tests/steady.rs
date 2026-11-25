@@ -352,3 +352,13 @@ fn a_compaction_asks_nothing_about_its_output_key() {
     assert_eq!(bill.get(&(Request::Put, 2)), None, "{bill:?}");
     assert_eq!(count(&bill, Request::Get), 0, "{bill:?}");
 }
+/// A level is compacted once in each of its windows: the compaction at the window's start
+/// takes every level-0 file there is, and the files that arrive after it wait for the next
+/// window, whatever time the output carries (its last input's, which is before the window
+/// began). Go's level monitor fires once per window (`store.go`, `monitorCompactionLevel`).
+#[test]
+fn a_level_is_compacted_once_in_each_window() {
+    // Two minutes hold four of level 1's 30 second windows.
+    let bill = two_steady_minutes(paced());
+    assert_eq!(bill.get(&(Request::Put, 1)), Some(&4), "{bill:?}");
+}

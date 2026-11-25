@@ -1,8 +1,8 @@
 //! The maintenance planner and its executor.
 //!
 //! [`due`] is a function of a listing, an instant, a schedule and a small
-//! [`MaintainState`] (backoff and distrusted outputs; see `state`). A fresh
-//! state plans from the listing alone,
+//! [`MaintainState`] (backoff, distrusted outputs and the windows this engine's
+//! own compactions closed; see `state`). A fresh state plans from the listing alone,
 //! so a restarted process reading the same listing plans the same job. It
 //! returns one job; the caller runs it, records the outcome, lists again and
 //! asks again.
@@ -25,12 +25,19 @@
 //! the base of every restore between it and the next one.
 //!
 //! A level compacts when its destination's newest file was not created inside
-//! the current window (`go_truncate(now, interval)`), and then only the source
+//! the current window (`go_truncate(now, interval)`) and this engine has not
+//! compacted it inside that window, and then only the source
 //! files above the destination's max, as one strictly contiguous run of at
 //! most [`MAX_INPUTS`]. The output carries the last input's timestamp
-//! (so a compaction never makes its output look older than its inputs), so a backlog keeps passing the window test until a run's last
-//! input is newer than the window start: 100 source files drain as four jobs
-//! in one window and the last one closes it.
+//! (so a compaction never makes its output look older than its inputs), which a
+//! compaction at the start of a window finds in the window before: the file's own
+//! time cannot close the window, so the engine remembers, in memory, that its
+//! compaction did ([`MaintainState::drained_since`], `docs/decisions/D240.md`).
+//! A job of [`MAX_INPUTS`] files may have left a backlog and closes nothing:
+//! 100 source files drain as four jobs in one window and the last one closes it.
+//! A level is so compacted once per window, as Go's level monitor fires once per
+//! window; a new process, which remembers nothing, may compact once more in the
+//! window it starts in.
 //! When the source has nothing above the destination the level is idle: no
 //! write, no job, no wake time.
 //!
@@ -784,6 +791,10 @@ fn plan_level(
         return Ok(step);
     }
     let (start, next) = next_window(now, interval);
+    // This engine's own compaction closed the window, whatever time its output carries.
+    if state.drained_since(dst, start) {
+        return Ok(Step::Wait(next));
+    }
     if let Some(info) = dst_last
         && created_after(resolved, info, start)?
     {

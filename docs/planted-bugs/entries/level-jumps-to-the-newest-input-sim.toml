@@ -1,4 +1,7 @@
-# The same defect against the simulator's level judge (crates/sim/src/oracle/levels.rs).
+# The same defect in a simulator scenario (crates/sim/tests/sim/level_holes.rs): a window's
+# level-1 files are left out of the level-2 file written right after them. With an older
+# level-1 file still waiting below them that is a lag of one window, not a hole, and the
+# scenario's put order shows it.
 name = "level-jumps-to-the-newest-input-sim"
 patch = "level-jumps-to-the-newest-input"
 fix = "claude/level-holes"

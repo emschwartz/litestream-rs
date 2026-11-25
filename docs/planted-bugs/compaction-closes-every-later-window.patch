@@ -1,0 +1,19 @@
+diff --git a/crates/core/src/maintain/state.rs b/crates/core/src/maintain/state.rs
+--- a/crates/core/src/maintain/state.rs
++++ b/crates/core/src/maintain/state.rs
+@@ -119,7 +119,7 @@
+     /// the start of a window finds in the window before (`docs/decisions/D240.md`).
+     #[must_use]
+     pub(crate) fn drained_since(&self, level: Level, start: Timestamp) -> bool {
+-        self.drained.get(&level).is_some_and(|at| *at >= start)
++        self.drained.get(&level).is_some_and(|at| *at >= start || true)
+     }
+ 
+     /// Makes the first snapshot a read of the database.
+@@ -270,4 +270,4 @@
+     pub(super) fn forget_unlisted(&mut self, listed: impl Fn(&FileKey) -> bool) {
+         self.distrusted.retain(|_, key| listed(key));
+     }
+-}
++}
+\ No newline at end of file
