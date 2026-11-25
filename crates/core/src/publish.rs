@@ -38,7 +38,7 @@ use std::future::Future;
 use lsr_ltx::Timestamp;
 
 use crate::layout::{FileInfo, FileKey};
-use crate::store::{CorruptCause, DynUpload, ObjectStore, StoreError, Upload, WriteMode};
+use crate::store::{CorruptCause, DynUpload, ObjectStore, Reread, StoreError, Upload, WriteMode};
 use crate::upload::Unsent;
 
 /// An upload whose commit is checked against the bytes written. It borrows no store, so one
@@ -170,9 +170,28 @@ impl<U: Upload> Writer<U> {
     /// What the store's write returned.
     pub(crate) async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
         self.upload.write(chunk).await?;
+        self.wrote(chunk);
+        Ok(())
+    }
+
+    /// Appends a chunk the store may let go of and read back through `again`
+    /// ([`Upload::write_from`]).
+    ///
+    /// # Errors
+    /// What the store's write returned.
+    pub(crate) async fn write_from(
+        &mut self,
+        chunk: &[u8],
+        again: &dyn Reread,
+    ) -> Result<(), StoreError> {
+        self.upload.write_from(chunk, again).await?;
+        self.wrote(chunk);
+        Ok(())
+    }
+
+    fn wrote(&mut self, chunk: &[u8]) {
         let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.written = self.written.saturating_add(len);
-        Ok(())
     }
 
     /// Discards the written bytes.
@@ -189,13 +208,37 @@ impl<U: Upload> Writer<U> {
     /// # Errors
     /// [`Unpublished`], saying what the store left under the key.
     pub(crate) async fn commit<S: ObjectStore>(self, store: &S) -> Result<Published, Unpublished> {
+        self.commit_with(store, None).await
+    }
+
+    /// [`Self::commit`] of an upload written with [`Self::write_from`].
+    ///
+    /// # Errors
+    /// As [`Self::commit`].
+    pub(crate) async fn commit_from<S: ObjectStore>(
+        self,
+        store: &S,
+        again: &dyn Reread,
+    ) -> Result<Published, Unpublished> {
+        self.commit_with(store, Some(again)).await
+    }
+
+    async fn commit_with<S: ObjectStore>(
+        self,
+        store: &S,
+        again: Option<&dyn Reread>,
+    ) -> Result<Published, Unpublished> {
         let Self {
             key,
             upload,
             written,
             mode,
         } = self;
-        let info = match upload.commit().await {
+        let committed = match again {
+            Some(again) => upload.commit_from(again).await,
+            None => upload.commit().await,
+        };
+        let info = match committed {
             Ok(info) => info,
             Err(err) => return Err(unpublished(err, key, mode)),
         };
@@ -225,7 +268,16 @@ fn unpublished(err: StoreError, key: FileKey, mode: WriteMode) -> Unpublished {
             Unpublished::Taken(err)
         }
         _ if rejected => {
-            let own = (mode == WriteMode::New).then_some(Rejected(key));
+            // A part that came back wrong ended the upload before its commit asked the store
+            // for the key, so whatever the key holds is not this upload's to remove.
+            let whole = matches!(
+                err,
+                StoreError::Corrupt {
+                    cause: CorruptCause::ChecksumMismatch { part: None },
+                    ..
+                }
+            );
+            let own = (mode == WriteMode::New && whole).then_some(Rejected(key));
             Unpublished::Rejected(err, own)
         }
         _ => Unpublished::Failed(err),

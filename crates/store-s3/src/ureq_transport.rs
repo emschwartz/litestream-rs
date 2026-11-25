@@ -32,6 +32,7 @@ use crate::request::{HttpRequest, Method};
 use crate::transport::{
     HttpResponse, MAX_BODY, Transport, TransportError, map_io, send_on_threads,
 };
+use crate::transport::{StreamedRequest, on_threads};
 use crate::trust::{self, Roots};
 
 /// Idle connections the pool keeps: the widest batch the store sends at once.
@@ -154,13 +155,34 @@ fn read_body(
     Ok(body)
 }
 
-impl Transport for UreqTransport {
-    fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
-        let head_only = request.method() == Method::Head;
-        let mut response = self
-            .agent
-            .run(Self::build(&request)?)
-            .map_err(|err| map_error(&err))?;
+impl UreqTransport {
+    /// Sends `request`, its body read from the request's reader as it goes: the parts of an
+    /// upload that kept no buffer. The `Content-Length` that was signed frames it, so a body
+    /// that fails part-way leaves the server short of a whole one.
+    fn send_one_streamed(
+        &self,
+        mut streamed: StreamedRequest<'_>,
+    ) -> Result<HttpResponse, TransportError> {
+        let mut builder = http::Request::builder()
+            .method(method_name(streamed.request().method()))
+            .uri(streamed.request().url().as_str());
+        for (name, value) in streamed.request().headers() {
+            builder = builder.header(*name, value.as_str());
+        }
+        let body: &mut dyn io::Read = streamed.body();
+        let request = builder
+            .body(ureq::SendBody::from_reader(body))
+            .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))?;
+        self.exchange(request, false)
+    }
+
+    /// One request and its whole answer.
+    fn exchange(
+        &self,
+        request: http::Request<impl ureq::AsSendBody>,
+        head_only: bool,
+    ) -> Result<HttpResponse, TransportError> {
+        let mut response = self.agent.run(request).map_err(|err| map_error(&err))?;
         let status = response.status().as_u16();
         let headers: Vec<(String, String)> = response
             .headers()
@@ -183,6 +205,21 @@ impl Transport for UreqTransport {
         let body = read_body(&mut response, expected)?;
         let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
         Ok(HttpResponse::new(status, headers, body, complete))
+    }
+}
+
+impl Transport for UreqTransport {
+    fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        let head_only = request.method() == Method::Head;
+        self.exchange(Self::build(&request)?, head_only)
+    }
+
+    fn send_streamed(
+        &self,
+        requests: Vec<StreamedRequest<'_>>,
+        limit: NonZeroUsize,
+    ) -> Vec<Result<HttpResponse, TransportError>> {
+        on_threads(requests, limit, |request| self.send_one_streamed(request))
     }
 
     fn send_many(
@@ -357,6 +394,109 @@ mod tests {
             ]
         );
         let _released = release.send(());
+    }
+
+    /// Accepts one connection, reads what it is sent until the client stops or `want` body
+    /// bytes arrived, answers 200 and hands back everything it read.
+    fn serve_put(want: usize) -> (String, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let served = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut got = Vec::new();
+            let mut buf = [0_u8; 64 * 1024];
+            loop {
+                let head = got.windows(4).position(|w| w == b"\r\n\r\n");
+                if head.is_some_and(|at| got.len().saturating_sub(at).saturating_sub(4) >= want) {
+                    break;
+                }
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => return got,
+                    Ok(read) => got.extend_from_slice(&buf[..read]),
+                }
+            }
+            let _wrote = stream.write_all(OK);
+            got
+        });
+        (format!("http://{addr}/"), served)
+    }
+
+    fn put(url: &str, len: usize) -> HttpRequest {
+        let headers = vec![("content-length", len.to_string())];
+        HttpRequest::for_test(Method::Put, url::Url::parse(url).expect("url"), headers)
+    }
+
+    /// A body that gives `whole` in reads of at most 1000 bytes and then fails or ends.
+    struct Gives {
+        whole: Vec<u8>,
+        given: usize,
+        then_fails: bool,
+    }
+
+    impl Read for Gives {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let rest = &self.whole[self.given..];
+            if rest.is_empty() && self.then_fails {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            let count = rest.len().min(buf.len()).min(1000);
+            buf[..count].copy_from_slice(&rest[..count]);
+            self.given = self.given.saturating_add(count);
+            Ok(count)
+        }
+    }
+
+    /// A streamed request reaches the socket with the length it declared and the bytes its
+    /// body gave, read as they are sent.
+    #[test]
+    fn a_streamed_body_arrives_whole_under_its_declared_length() {
+        let whole: Vec<u8> = (0..300_000_u32).map(|n| n.to_le_bytes()[0]).collect();
+        let (url, served) = serve_put(whole.len());
+        let transport = UreqTransport::new(Duration::from_secs(5));
+        let mut body = Gives {
+            whole: whole.clone(),
+            given: 0,
+            then_fails: false,
+        };
+        let streamed = StreamedRequest::new(put(&url, whole.len()), 300_000, &mut body);
+        let sent = transport.send_streamed(vec![streamed], NonZeroUsize::MIN);
+        let [Ok(response)] = sent.as_slice() else {
+            panic!("{sent:?}");
+        };
+        assert_eq!(response.body(), b"ok");
+        let got = served.join().expect("server");
+        let head = got
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("head")
+            .saturating_add(4);
+        let text = String::from_utf8_lossy(&got[..head]).to_ascii_lowercase();
+        assert!(text.contains("content-length: 300000\r\n"), "{text}");
+        assert!(!text.contains("transfer-encoding"), "{text}");
+        assert!(got[head..] == whole[..]);
+    }
+
+    /// A body that fails part-way fails the request, and the server was sent fewer bytes
+    /// than the request declared: no server takes that as the whole body.
+    #[test]
+    fn a_streamed_body_that_fails_leaves_the_server_short_of_its_length() {
+        let (url, served) = serve_put(300_000);
+        let transport = UreqTransport::new(Duration::from_secs(5));
+        let mut body = Gives {
+            whole: vec![7; 100_000],
+            given: 0,
+            then_fails: true,
+        };
+        let streamed = StreamedRequest::new(put(&url, 300_000), 300_000, &mut body);
+        let sent = transport.send_streamed(vec![streamed], NonZeroUsize::MIN);
+        assert!(matches!(sent.as_slice(), [Err(_)]), "{sent:?}");
+        let got = served.join().expect("server");
+        let head = got
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map_or(0, |at| at.saturating_add(4));
+        let body = got.len().saturating_sub(head);
+        assert!(body <= 100_000, "{body} body bytes");
     }
 
     /// A bare bucket's empty path segment survives the `url` type, the `http` crate and ureq, in

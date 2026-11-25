@@ -16,14 +16,17 @@ use lsr_sim::{FaultShape, Op, Opts, RunReport, Seed, Target};
 const SLICE: u64 = 128;
 
 fn run(ops: &[Op]) -> RunReport {
-    run_sliced(ops, SLICE)
+    run_with(ops, SLICE, false)
 }
 
-/// The run with `slice` bytes of staged files a tick.
-fn run_sliced(ops: &[Op], slice: u64) -> RunReport {
+/// The run with `slice` bytes of staged files a tick, and the replica on the S3 store when
+/// `s3` says so: the store that lets go of what it is handed and reads the staged file again
+/// when it sends it.
+fn run_with(ops: &[Op], slice: u64, s3: bool) -> RunReport {
     let opts = Opts {
         slice_bytes: NonZeroU64::new(slice),
         record: true,
+        remote_s3: s3,
         ..Opts::default()
     };
     run_ops(Seed::new(1), ops, &opts)
@@ -219,7 +222,7 @@ fn a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snap
     ops.extend([Op::Tick, Op::Restart]);
     ops.extend(ticks(20));
     ops.push(Op::Restore);
-    let report = run_sliced(&ops, second);
+    let report = run_with(&ops, second, false);
     let all = events(&report);
     assert_eq!(all[11], &Event::Sending { bytes: second }, "{all:?}");
     assert!(
@@ -288,6 +291,62 @@ fn a_staged_file_damaged_under_its_send_is_never_published() {
     }
 }
 
+/// The staged file changes after the engine first read its middle and before the store reads
+/// it again. Every first read passed, so only the second read can tell. On the S3 store,
+/// which reads the file back when it sends it, that read is refused: the engine reports the
+/// staged file lost and nothing of it is published. On `MemStore`, which kept the bytes it was
+/// handed, the file the engine verified is what the replica holds and no read is a second one.
+#[test]
+fn a_staged_file_changed_between_its_two_reads_is_refused_at_the_second() {
+    // Three slices, then eighteen more: 2,688 bytes read, past the middle byte the damage flips.
+    let mut ops = in_flight();
+    ops.extend(ticks(18));
+    ops.push(Op::Meta(MetaOp::FlipNewestByte));
+    ops.extend(ticks(100));
+    ops.push(Op::Restore);
+
+    let report = run_with(&ops, SLICE, true);
+    let all = events(&report);
+    let lost = all
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::Retrying {
+                    fault: Fault::StagedLost,
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("{all:?}"));
+    let published = all
+        .iter()
+        .position(|event| matches!(event, Event::Uploaded(Did::Put(_))))
+        .unwrap_or_else(|| panic!("{all:?}"));
+    assert!(lost < published, "{all:?}");
+    // Every first read of the file passed: the refusal came after its last slice.
+    let slices: Vec<u64> = (1..=22_u64).map(|n| n.saturating_mul(SLICE)).collect();
+    assert_eq!(sent(&report)[..22], slices);
+    assert!(
+        all[..lost]
+            .iter()
+            .filter(|event| matches!(event, Event::Sending { .. }))
+            .count()
+            >= 22,
+        "{all:?}"
+    );
+    assert_eq!(report.reach.get("reread.refused"), 1);
+    assert_eq!(report.reach.get("reread.refused.reported"), 1);
+    // The snapshot that took the file's place was read back whole and given.
+    assert!(report.reach.get("reread.given") >= 1);
+
+    let report = run_with(&ops, SLICE, false);
+    assert_eq!(sent(&report)[..23], whole_file());
+    for key in ["reread.given", "reread.refused"] {
+        assert_eq!(report.reach.get(key), 0, "{key}");
+    }
+}
+
 /// Another writer takes the id of a file this engine has staged and not sent. Maintenance has
 /// its turn before the file is out and lists the replica with the other writer's file on it:
 /// not past what the engine staged, and not the engine's own. Nothing is compacted from that
@@ -314,7 +373,7 @@ fn another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted() {
     ops.push(Op::SecondWriter { ticks: 60 });
     ops.extend(ticks(40));
     ops.push(Op::Restore);
-    let report = run_sliced(&ops, 16);
+    let report = run_with(&ops, 16, false);
     assert_eq!(report.reach.get("remote.second_writer"), 1);
     let seen: Vec<&Seen> = report
         .seen

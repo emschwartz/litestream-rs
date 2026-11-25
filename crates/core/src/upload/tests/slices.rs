@@ -3,10 +3,10 @@
 
 use super::*;
 
-const QUARTER_MIB: u64 = 256 * 1024;
+pub(super) const QUARTER_MIB: u64 = 256 * 1024;
 
 /// One step that may read `budget` bytes; also the bytes of the budget it left.
-fn step<L: ObjectStore, S: ObjectStore>(
+pub(super) fn step<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     (staging, remote): (&L, &S),
     witnesses: &Witnesses,
@@ -25,7 +25,7 @@ fn step<L: ObjectStore, S: ObjectStore>(
 }
 
 /// Steps until a step ends; returns it and how many steps left the file in flight.
-fn finish<L: ObjectStore, S: ObjectStore>(
+pub(super) fn finish<L: ObjectStore, S: ObjectStore>(
     state: UploadState,
     stores: (&L, &S),
     witnesses: &Witnesses,
@@ -43,7 +43,7 @@ fn finish<L: ObjectStore, S: ObjectStore>(
 }
 
 /// Transaction 1 staged as a file of several read chunks, with its token.
-fn staged_big() -> (MemStore, Witnesses, Vec<u8>) {
+pub(super) fn staged_big() -> (MemStore, Witnesses, Vec<u8>) {
     let staging = MemStore::new();
     let bytes = big_file();
     put_bytes(&staging, key(1), &bytes);

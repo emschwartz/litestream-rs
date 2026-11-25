@@ -16,6 +16,9 @@
 //!   leaves a ladder of blocks of other sizes that macOS keeps mapped, so a long upload at a large
 //!   part size held about its own length (measured: 6 GB for four uploads of 1.5 GiB at 100 MiB
 //!   parts and a concurrency of 10), whatever the live count said.
+//! - An upload written from a file it can read again (`Upload::write_from`) holds no part:
+//!   a digest and a few tallies for each, and one 256 KiB read for each request being sent,
+//!   whatever the part size.
 //! - A restore holds one read window: `READ_CONCURRENCY` responses of the 4 MiB the engine
 //!   asks for, whatever the database's size, so each response holds its length and not the
 //!   capacity a read grown from empty ends with.
@@ -27,9 +30,11 @@
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::num::NonZeroUsize;
+use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -37,8 +42,9 @@ use std::thread;
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CompactionInputs, DatabaseSink, FakeClock, FileKey, Level, MAX_INPUTS, ObjectStore, PageLimit,
-    RestoreTarget, Upload, compact_staged, restore,
+    BoxFuture, ByteTally, CompactionInputs, DatabaseSink, FakeClock, FileKey, Level, MAX_INPUTS,
+    ObjectStore, PageLimit, Reread, RestoreTarget, StoreError, StoreOp, Upload, compact_staged,
+    restore,
 };
 use lsr_ltx::{
     DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
@@ -286,6 +292,128 @@ fn a_long_upload_at_a_large_part_size_holds_one_batch_and_allocates_each_part_on
 #[test]
 fn the_bound_follows_part_size_and_concurrency() {
     assert_upload_holds_one_batch(8 * MIB, 3, 56 * MIB);
+}
+
+/// A file on disk as an upload reads it again: the bytes at an offset, given only when they
+/// tally as they did when the upload was first handed them.
+struct OnDisk(File);
+
+impl Reread for OnDisk {
+    fn read<'a>(
+        &'a self,
+        offset: u64,
+        was: &'a ByteTally,
+    ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let failed = |kind| StoreError::Transient {
+                op: StoreOp::Read,
+                kind,
+            };
+            let mut bytes = vec![0_u8; usize::try_from(was.size()).unwrap()];
+            self.0
+                .read_exact_at(&mut bytes, offset)
+                .map_err(|err| failed(err.kind()))?;
+            let mut now = ByteTally::new();
+            now.add(&bytes);
+            if now == *was {
+                Ok(bytes)
+            } else {
+                Err(failed(io::ErrorKind::InvalidData))
+            }
+        })
+    }
+}
+
+/// What an upload written from a file may hold for each request being sent, whatever the
+/// part size: the 256 KiB read again and the client's buffers (measured: 768 KiB a request).
+const FROM_A_FILE_EACH: usize = 768 * KIB;
+
+/// What it may hold besides: the tallies, the read buffer this test hands over (256 KiB) and
+/// the results.
+const FROM_A_FILE_MARGIN: usize = MIB;
+
+/// Uploads a file of `total` bytes that never repeat, handing the store each 256 KiB with
+/// the file to read again, and checks that the store held no part of it.
+fn assert_upload_from_a_file_holds_no_part(part: usize, concurrency: usize, total: usize) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("staged");
+    {
+        let mut file = File::create(&path).unwrap();
+        let mut block = vec![0_u8; MIB];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..total / MIB {
+            for word in block.chunks_mut(8) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                word.copy_from_slice(&state.to_le_bytes());
+            }
+            file.write_all(&block).unwrap();
+        }
+    }
+    let fake = fake();
+    let store = store_on(serve(&fake), part, concurrency);
+    let key = FileKey::snapshot(txid(1));
+    // The peak is a high-water mark, so a part held for one request would show in it.
+    let (done, peak) = process_peak_of(|| {
+        let again = OnDisk(File::open(&path).unwrap());
+        let mut first = File::open(&path).unwrap();
+        let mut chunk = vec![0_u8; 256 * KIB];
+        block_on(async {
+            let mut upload = store
+                .begin_upload(
+                    &key,
+                    Timestamp::from_unix_millis(1_700_000_000_000),
+                    WriteMode::New,
+                )
+                .await
+                .unwrap();
+            for _ in 0..total / chunk.len() {
+                first.read_exact(&mut chunk).unwrap();
+                upload.write_from(&chunk, &again).await.unwrap();
+            }
+            upload.commit_from(&again).await
+        })
+    });
+    assert_eq!(done.unwrap().size, u64::try_from(total).unwrap());
+    let stored = fake
+        .body_of(&object_key(config().prefix(), &key))
+        .expect("the object is in the bucket");
+    assert!(
+        stored == std::fs::read(&path).unwrap(),
+        "the bucket holds other bytes than the file"
+    );
+    eprintln!(
+        "upload from a file, part {} MiB x {concurrency}: {} KiB",
+        part / MIB,
+        peak.extra >> 10,
+    );
+    let bound = concurrency * FROM_A_FILE_EACH + FROM_A_FILE_MARGIN;
+    assert!(
+        peak.extra <= bound,
+        "an upload from a file held {} bytes, over {bound}: {concurrency} parts of {part} are \
+         {} and none of them is to be held",
+        peak.extra,
+        concurrency * part
+    );
+    assert!(
+        bound < part,
+        "the gate cannot tell a held part from the bound"
+    );
+}
+
+/// The gate of `docs/decisions/D222.md`: twelve parts of 16 MiB, three at a time, from a
+/// file. Held as buffers that is 48 MiB; from a file it is under 4 MiB.
+#[test]
+fn an_upload_from_a_file_at_a_large_part_size_holds_no_part() {
+    assert_upload_from_a_file_holds_no_part(16 * MIB, 3, 12 * 16 * MIB);
+}
+
+/// The same law at the smallest part, five at a time, and for an object that ends on a
+/// part that is not full: the bound follows the concurrency and never the part size.
+#[test]
+fn an_upload_from_a_file_holds_the_same_at_any_part_size() {
+    assert_upload_from_a_file_holds_no_part(PartSize::MIN.get().try_into().unwrap(), 5, 56 * MIB);
 }
 
 /// A destination that keeps a page count and nothing else.

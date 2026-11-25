@@ -411,6 +411,8 @@ impl Upload for MemUpload {
 }
 
 #[cfg(test)]
+pub(crate) mod reread;
+#[cfg(test)]
 pub(crate) mod short;
 #[cfg(test)]
 pub(crate) mod wrapped;

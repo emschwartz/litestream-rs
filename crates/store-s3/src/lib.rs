@@ -15,6 +15,7 @@
 //! it, trusts the system's certificate authorities (the operating system's verifier on macOS and
 //! Windows), or Mozilla's when a Linux or BSD system has none (the `trust` module).
 
+mod again;
 mod chain;
 mod classify;
 mod config;
@@ -75,7 +76,7 @@ pub use response::{
 };
 pub use source::{CredentialSource, Expiring, REFRESH_BEFORE};
 pub use store::{ListStats, S3Store, SystemClock, WriteStats};
-pub use transport::{HttpResponse, Transport, TransportError, send_on_threads};
+pub use transport::{HttpResponse, StreamedRequest, Transport, TransportError, send_on_threads};
 pub use upload::S3Upload;
 #[cfg(feature = "ureq")]
 pub use ureq_transport::UreqTransport;
