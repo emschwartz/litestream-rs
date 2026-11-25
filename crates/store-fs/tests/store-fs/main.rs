@@ -4,4 +4,6 @@
 #[cfg(test)]
 mod memory;
 #[cfg(test)]
+mod opens;
+#[cfg(test)]
 mod review;
