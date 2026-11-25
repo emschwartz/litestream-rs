@@ -1,28 +1,144 @@
 # litestream-rs (working name)
 
-An in-process Rust library that replicates a WAL-mode SQLite database to S3-compatible storage and restores from it, interchangeable with [Litestream](https://github.com/benbjohnson/litestream) 0.5.x on the same bucket. Not affiliated with or endorsed by the Litestream project.
+litestream-rs is an in-process Rust port of [Litestream](https://github.com/benbjohnson/litestream) 0.5.x. It is a library, `lsr-replica`, and a binary, `lsr`, that replicate a WAL-mode SQLite database to S3-compatible storage and restore from it. It writes Litestream's own replica format (the same bucket layout and LTX files), so either program restores what the other wrote. It is not affiliated with or endorsed by the Litestream project.
 
-Status: early. Nothing here is ready to protect data.
+**Status: unpublished and unproven.** The version is 0.0.0, nothing is on crates.io, the name is a working name, and nobody has run it in production. Read [docs/limitations.md](docs/limitations.md) before you trust it with data.
 
-The contract is the replica, not Litestream's behaviour: this library reads whatever Go Litestream wrote, and Go `litestream restore` and the Go VFS read whatever this library writes.
+- **Tested:** restores compared page for page with Go Litestream's for every v0.5 release, a deterministic simulator with injected faults, real SQLite under a power-loss model, the real binary killed and partitioned against an S3 server (MinIO), and one conformance run each on AWS S3, Cloudflare R2 and Tigris.
+- **Not tested:** a production workload, a long soak on any provider at the current code, and a review by anyone outside the project.
 
-- Plan, design goals and phases: `docs/PLAN.md`
-- Rules for working in this repository: `AGENTS.md`
+The code and these documents were written by Claude models under the repository owner's direction ([docs/how-it-was-built.md](docs/how-it-was-built.md)).
 
-## Crates
+## Why it exists
 
-Each crate is `crates/<name>`, package `lsr-<name>`. The crate map, with what each owns and the rules it follows, is `docs/PLAN.md` section 3. Entry points: `lsr` (the `cli` crate) is the binary, `replica` is the library API.
+- **In-process.** `lsr-replica` replicates from one thread inside the application: no second process to deploy, supervise and keep in step with the application. The `lsr` binary runs the same engine as a sidecar and takes Go's `litestream.yml` and Go's `replicate` and `restore` arguments, for applications that cannot embed Rust.
+- **A typed health handle.** `Replicator::health()` is one lock and no I/O. Every failure that lasts is a named degraded state or stop cause, in the handle, in `/healthz` and in `/metrics`, never only a log line.
+- **Bounded memory.** The library's buffers are bounded by named constants, and a test pins each bound and fails when it grows. A restore's memory does not grow with the database or the length of its history.
+- **Never silently wrong.** Every file is verified before its pages are used. A restore that cannot be exact is an error, never a shorter history. A start on a bucket the database cannot account for stops and asks, where Go carries on.
 
-## SQLite builds
+## Quickstart: the binary
 
-The library and the application share one SQLite: `libsqlite3-sys` declares `links = "sqlite3"`, so a build holds one version of it. `lsr-replica` accepts `libsqlite3-sys` 0.37 to 0.40 (SQLite 3.51.3 to 3.54.1, never 3.51.2, which shipped a WAL-reset bug), so an application on sqlx 0.9 (`just sqlx-check` builds one) or on rusqlite 0.39 to 0.43 builds beside it.
+Build it, then replicate a database to a local directory and restore it. Flags go after the command.
 
-- **Bundled (the default):** the `bundled` feature compiles the SQLite that `libsqlite3-sys` bundles. Every such build in the range is verified.
-- **Your own SQLite:** `lsr-replica = { default-features = false }` links the system's or the application's SQLite instead. It must be one of the verified builds, or `Replicator::start` refuses it with `StartError::SqliteBuild`, naming the version found and the versions verified.
-- **Verified builds:** 3.51.3, 3.53.1, 3.53.2, 3.54.0 and 3.54.1, each by version and source id (`crates/sqlite/src/version.rs`). The engine reads SQLite's private file and wal-index layouts, so each build is added only after those reads are checked against its source and the whole `lsr-sqlite` suite has passed on it in CI (`just sqlite-build`, `docs/decisions/D200.md`).
-- **Connections:** `app_connection_raw` sets up a connection from any binding's raw handle; `Replicator::app_connection` takes a rusqlite connection (feature `rusqlite`).
+```sh
+cargo build --release -p lsr-cli --bin lsr
+lsr="$PWD/target/release/lsr"
+cd "$(mktemp -d)"
+sqlite3 app.db "PRAGMA journal_mode=wal; CREATE TABLE t(x); INSERT INTO t VALUES (1);"
+"$lsr" replicate -once app.db "file://$PWD/replica"
+"$lsr" restore -o restored.db "file://$PWD/replica"
+sqlite3 restored.db "SELECT count(*) FROM t;"
+```
 
-## Tests by what they need
+`-once` syncs, uploads and exits. Without it `lsr replicate` runs until a signal: it polls the WAL every second, uploads each new commit, and on SIGINT or SIGTERM uploads what is left before it exits.
+
+For S3-compatible storage, name the replica in a config file. `lsr` reads Go Litestream's `litestream.yml`:
+
+```yaml
+dbs:
+  - path: /data/app.db
+    replica:
+      url: s3://my-bucket/app
+      endpoint: https://fly.storage.tigris.dev  # leave out for AWS S3
+```
+
+```sh
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+"$lsr" replicate -config litestream.yml
+```
+
+[docs/running.md](docs/running.md) covers the config file, credentials, running an application under `-exec`, restore targets, log lines, exit codes and the health and metrics endpoints.
+
+## Quickstart: the library
+
+The crates are not published, so depend on the repository:
+
+```toml
+[dependencies]
+lsr-replica = { git = "https://github.com/emschwartz/litestream-rs" }
+lsr-store-s3 = { git = "https://github.com/emschwartz/litestream-rs" }
+```
+
+```rust
+use std::{path::Path, sync::Arc, time::Duration};
+
+use lsr_replica::{Booted, Config, Replicator, Stopped};
+use lsr_store_s3::{BucketName, CredentialChain, Endpoint, Prefix, S3Config, S3Store};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The replica is a bucket and a prefix. The keys come from AWS_ACCESS_KEY_ID and
+    // AWS_SECRET_ACCESS_KEY, or from the AWS shared files.
+    let config = S3Config::new(
+        Endpoint::new("https://s3.us-east-1.amazonaws.com")?,
+        BucketName::new("my-bucket")?,
+        Prefix::new("app")?,
+    );
+    let keys = CredentialChain::from_process().resolve()?;
+    let store = Arc::new(S3Store::resolved(config, &keys)?);
+
+    // Start before the application opens its own connections.
+    let replicator = Replicator::start(Path::new("app.db"), store, Config::default())?;
+    match replicator.wait_booted(Duration::from_secs(30)) {
+        Booted::Booted => {}
+        other => return Err(format!("replication did not start: {other:?}").into()),
+    }
+
+    // The application runs here. replicator.health() says where replication stands.
+
+    // At shutdown, after the application's connections close.
+    match replicator.stop(Duration::from_secs(30)).wait() {
+        Stopped::Drained { .. } => Ok(()),
+        other => Err(format!("not everything reached the replica: {other:?}").into()),
+    }
+}
+```
+
+No async runtime is needed, and nothing runs on the application's threads. Writes are refused with SQLite's "database is locked" until `wait_booted` answers `Booted` (see `if-replication-stops` in [docs/how-it-works.md](docs/how-it-works.md)). The crate documentation of `lsr-replica` covers connection setup (`app_connection`, `app_connection_raw`), events, restore and the memory bounds.
+
+The library and the application share one SQLite, because `libsqlite3-sys` allows one copy per build. `lsr-replica` accepts `libsqlite3-sys` 0.37 to 0.40 (SQLite 3.51.3 to 3.54.1), so an application on rusqlite 0.39 to 0.43 or sqlx 0.9 builds beside it. With `default-features = false` it links the application's own SQLite, which must be one of the verified builds (`crates/sqlite/src/version.rs`) or `Replicator::start` refuses it.
+
+## How it differs from Go Litestream
+
+- **The replica is the same.** Either implementation restores the other's files (Go from v0.5.16 for files written here) and takes over the other's bucket and local files with a plain restart. Never run both at once on one bucket path ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
+- **It stops where Go carries on.** A start that finds files in the bucket this database cannot account for stops with `other_writer` until an operator chooses the database or the bucket.
+- **It can hold the application back.** The `if-replication-stops` setting decides whether a replicator that cannot start, or has stopped, blocks the application's writes. The default holds them at start only.
+- **Restores are checked.** Every file is verified before use, and a restore the replica cannot give exactly fails with `Gap`. Go's restore does not check by default.
+- **The WAL is synced before it is copied**, so a power loss does not leave the bucket ahead of the database on an honest disk.
+- **The config is strict.** An unknown key, a key set twice or a feature that is not built is refused at load, naming the key and line.
+- **Not built:** storage other than S3 and a local directory, the VFS read replica, the control socket and its commands, encryption settings, and a few credential sources.
+
+The full list is [docs/differences-from-go.md](docs/differences-from-go.md).
+
+## Known limitations
+
+- Nobody runs it in production, and no long soak has run at the current code.
+- Go Litestream and `lsr` writing one bucket path at the same time can leave restores that are wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
+- A disk that loses writes it acknowledged, followed by an application that redoes the same last write, can leave a replica whose history differs from the database's, with no report ([#12](https://github.com/emschwartz/litestream-rs/issues/12)).
+- The first start on a database reads and uploads it twice ([#340](https://github.com/emschwartz/litestream-rs/issues/340)), and writes are held while the first snapshot is prepared ([#351](https://github.com/emschwartz/litestream-rs/issues/351)).
+- Two memory terms still grow with the database: the page checksum table ([#64](https://github.com/emschwartz/litestream-rs/issues/64)) and the replica listing ([#68](https://github.com/emschwartz/litestream-rs/issues/68)). A snapshot's read load on the application's disk is not limited ([#315](https://github.com/emschwartz/litestream-rs/issues/315)).
+- A filesystem where SQLite's locks or shared memory do not work (NFS, some container file sharing) is not refused ([#332](https://github.com/emschwartz/litestream-rs/issues/332)).
+- It is built and tested on Linux and macOS only. Assumed-role and SSO credentials are not built ([#176](https://github.com/emschwartz/litestream-rs/issues/176)).
+
+The full list, grouped by kind, is [docs/limitations.md](docs/limitations.md).
+
+## How it was built
+
+Claude Code agents wrote the code, directed by the repository's owner. What they had to meet is a contract, not Go's behaviour: the replica format, and equality with Go on restored database pages. The evidence is layered: differential tests against pinned Go binaries, a deterministic simulator with fault injection and judges that share no code with the engine, real-SQLite crash and power-loss rigs, fuzzing, a ledger of planted bugs that the tests must catch every night, and a behaviour table that names the test behind each claim. [docs/how-it-was-built.md](docs/how-it-was-built.md) says what that method caught and what it has not proven.
+
+## Where the rest lives
+
+- [docs/how-it-works.md](docs/how-it-works.md): the mechanism on one page.
+- [docs/running.md](docs/running.md): running the binary.
+- [docs/differences-from-go.md](docs/differences-from-go.md) and [docs/go-terms.md](docs/go-terms.md): differences from Go, and a vocabulary map.
+- [docs/limitations.md](docs/limitations.md) and [docs/release-bar.md](docs/release-bar.md): what is not done, and what must be true before first use.
+- [docs/BEHAVIOR.md](docs/BEHAVIOR.md): every circumstance the code distinguishes, what it does, and what a test has shown.
+- [docs/config-keys.md](docs/config-keys.md): every `litestream.yml` key and what it sets.
+- [docs/PLAN.md](docs/PLAN.md) and `docs/decisions/`: the design, the crate map (section 3) and each trade-off, one file per decision.
+- [AGENTS.md](AGENTS.md): the rules for working in this repository.
+
+## Developing
+
+Each crate is `crates/<name>`, package `lsr-<name>`. `just check` is the land gate. Tests by what they need:
 
 | Needs | Command | What runs |
 |---|---|---|

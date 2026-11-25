@@ -5,6 +5,16 @@ Compared with Go Litestream 0.5.x at upstream 041a8c3. This page describes v1 as
 
 The replica is the same: the bucket layout and the LTX files. Either implementation restores what the other wrote (Go from v0.5.16 for files written here), and either takes over the other's bucket and local files with a plain restart.
 
+## The differences that matter most
+
+- **Never run both at once on one bucket path.** Taking turns with a restart is safe. Go and litestream-rs writing together can leave restores that are wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
+- **litestream-rs stops at start when the bucket holds files this database cannot account for** (`other_writer`). Go adopts the bucket and carries on. An operator chooses with `lsr trust-local` or `lsr restore`.
+- **It can hold the application's writes.** Under the default `if-replication-stops: hold-start`, writes fail with "database is locked" until the start is judged, and stay held if the replicator stops there. `report` is Go's behaviour.
+- **Restores are verified, and exact or refused.** A corrupt file or a missing one fails the restore with a named error, where Go can exit 0.
+- **The config is read strictly.** An unknown key or a feature that is not built is refused at load.
+- **No TRUNCATE checkpoint unless the config says the application holds no long readers.** Go truncates by default.
+- **Missing:** storage other than S3 and a local directory, the VFS read replica, the control socket and its commands, and encryption settings.
+
 ## Same as Go
 
 | Situation | What both do |
@@ -51,7 +61,7 @@ The replicator saves each batch of changes in its working folder (the folder whe
 | The WAL is damaged below the last commit | Reads it as the end of the WAL | Reports `wal_corrupt` and replicates nothing past the damage |
 | A writer stopped mid-commit left frames in the WAL | Releases through v0.5.18 can replicate them | Never reads past the last commit |
 | A failure that persists | A log line | A named degraded state in `health()`, `/healthz` and `/metrics` |
-| Two replicators start on one working folder (an overlapping deploy on one disk) | Runs both, which can corrupt the local files | The second waits for the first to exit |
+| Two replicators start on one working folder (an overlapping deploy on one disk) | Runs both, which can corrupt the local files | The second `lsr replicate` waits for the first to exit. Used as a library, the second start is refused |
 | The working folder is lost and the database is kept | Adopts the bucket's newest file and snapshots on top | Compares the database with the bucket and continues when they are equal. When the database was written after the bucket's newest file and holds at least half of its pages, it takes a snapshot on top and warns (`ahead_of_replica`): the lost folder held changes the bucket never got. Otherwise it stops, as in the first row above ([decisions/D194.md](decisions/D194.md)) |
 | The S3 provider has no conditional writes | Does not use them | Runs as Go does, and reports `conditional_writes_unsupported` |
 | `restore` over an existing database | Deletes the old file first | Keeps the old file until the new one is complete and checked |
@@ -63,7 +73,9 @@ The replicator saves each batch of changes in its working folder (the folder whe
 
 - Storage other than S3 and a local directory.
 - The VFS read replica (Go's VFS reads a replica written here).
-- The control socket and the commands that use it (`status`, `sync`, `list`, `info`), `reset`, `ltx`, `wal`, and the Windows service commands (issue #177).
+- The control socket and the commands that use it (`status`, `sync`, `list`, `info`), `reset`, `restore -f` (follow mode), and the Windows service commands ([#177](https://github.com/emschwartz/litestream-rs/issues/177)). `databases`, `ltx` and `wal` are built.
+- Settings for features that are not built, each refused at load: server-side encryption, storage classes, age encryption, heartbeats, `watch` on a directory, `auto-recover` and the MCP server ([config-keys.md](config-keys.md)).
+- S3 credentials from an assumed role, IAM Identity Center or a login session ([#176](https://github.com/emschwartz/litestream-rs/issues/176)).
 - `/debug/pprof`, and the `/metrics` series the engine cannot count.
 - The v0.3 `generations/` layout.
 
