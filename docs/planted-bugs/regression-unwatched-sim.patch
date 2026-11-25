@@ -1,10 +1,8 @@
-diff --git a/crates/core/src/actor/short.rs b/crates/core/src/actor/short.rs
-index 2fb93f3be..e259a92a0 100644
 --- a/crates/core/src/actor/short.rs
 +++ b/crates/core/src/actor/short.rs
-@@ -83,7 +83,7 @@ impl Actor {
-                 now,
-             )));
+@@ -79,7 +79,7 @@
+         if let Some(tick) = self.listing_untrusted(listed, now) {
+             return Err(Box::new(tick));
          }
 -        if listed < tail.baseline() {
 +        if listed < None::<lsr_ltx::Txid> {
