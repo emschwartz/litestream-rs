@@ -3249,19 +3249,25 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let refused = unvouched.filter(|tip| gate.refuses(*tip));
     let resized = page_size.zip(now).filter(|(was, now)| was != now);
     let (refused_through, ahead) = match refused {
-        Some(tip) if resized.is_none() && gate.fresh() => {
-            // Said in the tick that lists the replica: a tick of its own to announce it would
-            // list the replica again, and a crash between the two would leave the check unrun.
-            (env.notice)(&Event::CheckingIdentity { tip });
-            let local =
-                identity::local_against_replica(env.wal, reader, committed, env.db, remote, tip)
-                    .await?;
-            match local {
-                Identity::Same => (None, None),
-                Identity::Ahead => (None, Some(tip)),
-                Identity::Other => (Some(tip), None),
+        Some(tip) if resized.is_none() && gate.fresh() => match page_size {
+            Some(page_size) => {
+                // Said in the tick that lists the replica: a tick of its own to announce it
+                // would list the replica again, and a crash between the two would leave the
+                // check unrun.
+                (env.notice)(&Event::CheckingIdentity { tip });
+                let local = identity::local_against_replica(
+                    env.wal, reader, committed, env.db, remote, tip, page_size,
+                )
+                .await?;
+                match local {
+                    Identity::Same => (None, None),
+                    Identity::Ahead => (None, Some(tip)),
+                    Identity::Other => (Some(tip), None),
+                }
             }
-        }
+            // No page size is no replica to compare with: the refusal stands.
+            None => (refused, None),
+        },
         Some(_) | None => (refused, None),
     };
     let recovered = match (resized, refused_through, ahead) {

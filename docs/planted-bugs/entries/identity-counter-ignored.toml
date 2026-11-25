@@ -1,0 +1,10 @@
+# The replicator's counter is read and never compared: an older copy of the database, written
+# after the replica's newest file and holding most of its pages, is taken for the replica plus
+# more, and the replica's newest state goes back to it.
+name = "identity-counter-ignored"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "older_copy::an_older_copy_with_a_lower_counter_stops",
+    "older_copy::an_older_copy_with_an_empty_counter_table_stops",
+]

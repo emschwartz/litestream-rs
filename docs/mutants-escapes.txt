@@ -53,6 +53,13 @@ replace match guard opened == self.shared.database with true in Worker::connecti
 replace > with < in Progress::advance
 # replica thread.rs ran: the engine never answers an idle tick with "run again now"; the guard keeps the thread from spinning if it ever did.
 replace match guard !idle with true in Worker::ran
+# core identity/counter.rs readers: the shifted operand's low bits are zero, so OR and XOR of the next byte agree (docs/mutants.md).
+identity/counter\.rs:\d+:\d+: replace \| with \^ in (be16|varint|serial_int)
+# core identity/counter.rs locate: the walk returns at the first read past the cap, so the count never reaches a later value and `>` and `==` agree.
+identity/counter\.rs:\d+:\d+: replace > with == in locate
+# core identity.rs local_against_replica: the two page-size guards cannot fail on a path the actor reaches (docs/mutants.md).
+replace match guard reader\.header\(\)\.page_size\(\) != page_size with false in local_against_replica
+replace match guard restored\.page_size\(\) == page_size with true in local_against_replica
 # replica thread.rs count: a sync event with no files comes only from a maintenance step that neither reached the committed end nor found a reset WAL, which no deterministic test produces.
 replace match guard \*files > 0 with true in Worker::count
 replace > with >= in Worker::count

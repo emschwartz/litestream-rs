@@ -431,6 +431,11 @@ struct Runner {
     /// The staging recorder's length when a staging backup was last put
     /// back: staged files are the engine's only if it wrote them since.
     put_back: usize,
+    /// The file backup of the database [`Op::SaveDatabase`] took.
+    saved_database: Option<Vec<u8>>,
+    /// [`Op::PutBackDatabase`] ran: the database is an older copy, so a refusal is not the
+    /// operator's own database to trust but the stop the run expects.
+    database_put_back: bool,
     /// A store fault fails calls at a rate and has not healed: a drain may
     /// end at its deadline.
     rate_active: bool,
@@ -573,6 +578,8 @@ impl Runner {
             fail_stop_seen: 0,
             puts_judged: 0,
             put_back: 0,
+            saved_database: None,
+            database_put_back: false,
             rate_active: false,
             failed_boots: 0,
             restore_files: 0,
@@ -1012,6 +1019,10 @@ impl Runner {
         };
         if self.foreign_stands()? {
             self.report.reach.bump("refusal.foreign");
+            return Ok(step);
+        }
+        if self.database_put_back {
+            self.report.reach.bump("refusal.older_copy");
             return Ok(step);
         }
         // With staging intact, everything this engine put on the replica is at
@@ -1566,6 +1577,25 @@ impl Runner {
         } else {
             self.spilled = all;
         }
+    }
+
+    /// The application's commit of [`Op::Structured`].
+    fn structured(&mut self, seq: u32, data: u8) {
+        let size = self.w.sqlite.page_size();
+        let before = self.w.sqlite.db_size();
+        let mut pages = vec![
+            (1, crate::structured::schema_page(size)),
+            (2, crate::structured::counter_page(size, seq)),
+            (3, vec![data; size.bytes()]),
+        ];
+        for n in before.saturating_add(1).max(4)..=crate::structured::PAGES {
+            pages.push((n, vec![u8::try_from(n).unwrap_or_default(); size.bytes()]));
+        }
+        let pages = pages
+            .into_iter()
+            .filter_map(|(n, bytes)| Some((PageNo::new(n, size)?, bytes)))
+            .collect();
+        self.app_commit(pages, before.max(crate::structured::PAGES));
     }
 
     fn commit(&mut self, count: u8, grow: bool) {
@@ -2475,6 +2505,19 @@ impl Runner {
             Op::Hold { hold, ticks } => self.hold_marked(*hold, *ticks)?,
             Op::Verify => self.verify()?,
             Op::Heal => self.heal_faults(),
+            Op::Structured { seq, data } => self.structured(*seq, *data),
+            Op::SaveDatabase => self.saved_database = Some(self.w.sqlite.image()),
+            Op::PutBackDatabase { adopt } => {
+                let done = self
+                    .saved_database
+                    .as_deref()
+                    .is_some_and(|image| self.w.sqlite.put_back_database(image));
+                Self::scenario_step("PutBackDatabase", Ok(done))?;
+                self.database_put_back = true;
+                if *adopt {
+                    self.w.adopt_local_state();
+                }
+            }
             Op::OurReader { begin } => {
                 let done = if *begin {
                     self.w.sqlite.our_reader_begin()
