@@ -91,7 +91,7 @@ impl Actor {
             let mut step = |resolved: &ResolvedCreatedAt| {
                 due_short(&tail, now, cfg, confirmed, state, resolved)
             };
-            resolve(env.remote, &mut step).await
+            resolve_knowing(env.remote, &mut self.engine.known, &mut step).await
         };
         let decided = match decided {
             Ok(decided) => decided,

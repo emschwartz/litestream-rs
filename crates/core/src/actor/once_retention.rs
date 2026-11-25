@@ -22,7 +22,7 @@
 use lsr_ltx::Timestamp;
 
 use super::{Actor, Env, Event, MaintainedEvent, Tick};
-use crate::created_at::{ResolvedCreatedAt, resolve};
+use crate::created_at::{ResolvedCreatedAt, resolve_knowing};
 use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::inventory::Inventory;
@@ -138,7 +138,7 @@ impl Actor {
             let mut step = |resolved: &ResolvedCreatedAt| {
                 once_retention(&inventory, now, cfg, published, state, resolved)
             };
-            resolve(env.remote, &mut step).await
+            resolve_knowing(env.remote, &mut self.engine.known, &mut step).await
         };
         let decided = match decided {
             Ok(decided) => decided.value,

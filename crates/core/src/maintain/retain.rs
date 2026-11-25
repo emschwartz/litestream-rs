@@ -23,7 +23,8 @@
 //! measured from the anchor, computed afresh on every call. The anchor is
 //! `min(now, newest created-at time among the last file of each non-empty level and
 //! every snapshot start)`: a listing that carries no exact created-at times costs a
-//! request per file asked for, so only those files are read, plus the level 0
+//! request per file asked for (none for a file this process put itself, whose time the
+//! engine remembers from the put's answer, `crate::created_at`), so only those files are read, plus the level 0
 //! files a rule would delete, in key order up to and including the first young
 //! one (at most [`MAX_DELETE`], past which the job is full anyway). On a store
 //! that runs batches the anchors are read side by side, and the level 0 scan

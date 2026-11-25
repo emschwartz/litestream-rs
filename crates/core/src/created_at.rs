@@ -15,19 +15,99 @@
 //!
 //! A step that asks for the same file twice is a bug in the step, and
 //! [`resolve`] fails closed with [`ResolveError::Repeated`] instead of looping.
+//!
+//! What a process wrote is not something it must read back. The engine lends each
+//! maintenance decision the created-at times of the files it put itself ([`Known`],
+//! [`resolve_knowing`]), as the store's answer to each put gave them, and a file found
+//! there costs no request. Nothing read from the store is added to it
+//! (`docs/decisions/D238.md`).
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
 use thiserror::Error;
 
-use crate::layout::{CreatedAt, FileInfo, FileKey, ListedTime};
+use lsr_ltx::Txid;
+
+use crate::layout::{CreatedAt, FileInfo, FileKey, Level, ListedTime};
 use crate::store::{BatchKind, ObjectStore, StoreError};
+
+/// The most level-0 files [`Known`] remembers, at about 64 bytes each (1 MiB in all):
+/// four and a half hours of level-0 retention at one file a second. Past it the oldest
+/// goes, and its created-at time is read from the store when retention reaches it.
+pub(crate) const MAX_KNOWN: usize = 16_384;
+
+/// The created-at times a process knows without asking the store: those of the files it
+/// put itself, as the store's answer to each put gave them. A listing that carries only a
+/// last-modified time costs a request per file a decision ages (see the module docs), and
+/// level-0 retention ages every file it deletes; for a file in here it costs none.
+///
+/// This is what the process wrote, not something it read back: an answer to a put names
+/// the created-at time the store was given with the object. It is kept in memory only, and
+/// a listed file is taken for the one remembered only under the same key with the same
+/// length. A level above 0 keeps its newest file, the one a decision's anchor reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Known {
+    /// Level-0 files by their last transaction.
+    zero: BTreeMap<Txid, FileInfo>,
+    /// The newest file put at each level above 0.
+    above: BTreeMap<Level, FileInfo>,
+}
+
+impl Known {
+    /// Remembers `info`, the store's answer to a put of this process, when it carries the
+    /// created-at time stored; an answer with only a last-modified time is not remembered.
+    pub(crate) fn put(&mut self, info: FileInfo) {
+        if info.created_at().is_none() {
+            return;
+        }
+        if info.key.level() == Level::ZERO {
+            self.zero.insert(info.key.range().max(), info);
+            while self.zero.len() > MAX_KNOWN {
+                self.zero.pop_first();
+            }
+        } else {
+            self.above.insert(info.key.level(), info);
+        }
+    }
+
+    /// The created-at time of the listed file `info`, when this process put that file:
+    /// the same key, and the length the store acknowledged.
+    pub(crate) fn exact(&self, info: &FileInfo) -> Option<CreatedAt> {
+        let known = if info.key.level() == Level::ZERO {
+            self.zero.get(&info.key.range().max())
+        } else {
+            self.above.get(&info.key.level())
+        }?;
+        if known.key == info.key && known.size == info.size {
+            known.created_at()
+        } else {
+            None
+        }
+    }
+
+    /// Forgets the level-0 files among `keys`: they were deleted from the replica.
+    pub(crate) fn deleted(&mut self, keys: &[FileKey]) {
+        for key in keys {
+            if key.level() == Level::ZERO {
+                self.zero.remove(&key.range().max());
+            }
+        }
+    }
+
+    /// How many files are remembered.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.zero.len().saturating_add(self.above.len())
+    }
+}
 
 /// The exact created-at times resolved during one decision.
 #[derive(Clone, Debug, Default)]
 pub struct ResolvedCreatedAt {
     resolved: BTreeMap<FileKey, CreatedAt>,
+    /// What the caller knew before the decision began ([`resolve_knowing`]).
+    known: Known,
 }
 
 impl ResolvedCreatedAt {
@@ -37,7 +117,11 @@ impl ResolvedCreatedAt {
     pub fn exact(&self, info: &FileInfo) -> Option<CreatedAt> {
         match info.listed {
             ListedTime::Created(created_at) => Some(created_at),
-            ListedTime::LastModified(_) => self.resolved.get(&info.key).copied(),
+            ListedTime::LastModified(_) => self
+                .resolved
+                .get(&info.key)
+                .copied()
+                .or_else(|| self.known.exact(info)),
         }
     }
 
@@ -179,10 +263,50 @@ pub async fn resolve_counted<S: ObjectStore, P: Step>(
     step: &mut P,
     created_at_read: &mut u64,
 ) -> Result<P::Output, ResolveError> {
-    let mut resolved = ResolvedCreatedAt::default();
+    drive(
+        store,
+        step,
+        &mut ResolvedCreatedAt::default(),
+        created_at_read,
+    )
+    .await
+}
+
+/// [`resolve`] for a caller that knows some created-at times already: a file `known`
+/// holds is answered from it and costs no read. `known` is lent to the decision and handed
+/// back as it was, whatever the decision's end; a future dropped before it ends leaves
+/// `known` empty, which costs reads and nothing else.
+///
+/// # Errors
+/// As [`resolve`].
+pub(crate) async fn resolve_knowing<S: ObjectStore, P: Step>(
+    store: &S,
+    known: &mut Known,
+    step: &mut P,
+) -> Result<Resolved<P::Output>, ResolveError> {
+    let mut created_at_read = 0_u64;
+    let mut resolved = ResolvedCreatedAt {
+        resolved: BTreeMap::new(),
+        known: std::mem::take(known),
+    };
+    let value = drive(store, step, &mut resolved, &mut created_at_read).await;
+    *known = resolved.known;
+    Ok(Resolved {
+        value: value?,
+        created_at_read,
+    })
+}
+
+/// Advances `step` until it is done, reading what it needs into `resolved`.
+async fn drive<S: ObjectStore, P: Step>(
+    store: &S,
+    step: &mut P,
+    resolved: &mut ResolvedCreatedAt,
+    created_at_read: &mut u64,
+) -> Result<P::Output, ResolveError> {
     let width = store.batch_width(BatchKind::ResolvedCreatedAt).get();
     loop {
-        let need = match step.advance(&resolved) {
+        let need = match step.advance(resolved) {
             Resolve::Done(value) => return Ok(value),
             Resolve::Need(need) => need,
         };
@@ -199,7 +323,7 @@ pub async fn resolve_counted<S: ObjectStore, P: Step>(
                 batch.push(info);
             }
         }
-        read_batch(store, &batch, &mut resolved, created_at_read).await?;
+        read_batch(store, &batch, resolved, created_at_read).await?;
     }
 }
 
@@ -316,6 +440,128 @@ mod tests {
         };
         block_on(resolve(&store, &mut step)).unwrap();
         assert_eq!(seen, vec![(0, true), (1, false), (2, false)]);
+    }
+
+    /// A file as a store's answer to a put names it: created at `at`, `size` bytes long.
+    fn put_answer(key: FileKey, size: u64, at: i64) -> FileInfo {
+        FileInfo {
+            key,
+            size,
+            listed: ListedTime::Created(CreatedAt::metadata(Timestamp::from_unix_millis(at))),
+        }
+    }
+
+    /// The same file as a listing with only a last-modified time shows it.
+    fn as_listed(info: &FileInfo) -> FileInfo {
+        FileInfo {
+            listed: ListedTime::LastModified(Timestamp::from_unix_millis(7)),
+            ..*info
+        }
+    }
+
+    /// What is remembered answers for the listed file it was put as, and for no other: not
+    /// another key that ends at the same transaction, not the same key at another length.
+    #[test]
+    fn a_remembered_put_answers_only_for_the_file_it_was() {
+        let mut known = Known::default();
+        let two = put_answer(key(2), 10, 200);
+        known.put(two);
+        assert_eq!(
+            known
+                .exact(&as_listed(&two))
+                .map(|at| at.at().unix_millis()),
+            Some(200)
+        );
+        assert_eq!(known.exact(&as_listed(&put_answer(key(3), 10, 200))), None);
+        assert_eq!(
+            known.exact(&FileInfo {
+                size: 11,
+                ..as_listed(&two)
+            }),
+            None
+        );
+        let wider = FileKey::new(
+            Level::ZERO,
+            TxidRange::new(Txid::new(1).unwrap(), Txid::new(2).unwrap()).unwrap(),
+        );
+        assert_eq!(known.exact(&as_listed(&put_answer(wider, 10, 200))), None);
+        // An answer that carries only a last-modified time is not remembered.
+        known.put(as_listed(&put_answer(key(4), 10, 400)));
+        assert_eq!(known.exact(&as_listed(&put_answer(key(4), 10, 400))), None);
+        assert_eq!(known.len(), 1);
+    }
+
+    /// A level above 0 keeps its newest file, the one an anchor reads; level 0 keeps every
+    /// file until it is deleted, up to the cap, where the oldest goes.
+    #[test]
+    fn level_zero_is_kept_until_deleted_and_a_level_above_keeps_its_newest() {
+        let mut known = Known::default();
+        let one = Level::new(1).unwrap();
+        let level_one = |n: u64| FileKey::new(one, TxidRange::single(Txid::new(n).unwrap()));
+        let (old, new) = (
+            put_answer(level_one(3), 5, 300),
+            put_answer(level_one(6), 5, 600),
+        );
+        known.put(old);
+        known.put(new);
+        assert_eq!(known.exact(&as_listed(&old)), None);
+        assert!(known.exact(&as_listed(&new)).is_some());
+        for n in 1..=3 {
+            known.put(put_answer(key(n), 1, 100));
+        }
+        assert_eq!(known.len(), 4);
+        // A delete of level-0 files forgets those, and nothing at another level.
+        known.deleted(&[key(1), key(2), level_one(3)]);
+        assert_eq!(known.exact(&as_listed(&put_answer(key(1), 1, 100))), None);
+        assert_eq!(known.exact(&as_listed(&put_answer(key(2), 1, 100))), None);
+        assert!(
+            known
+                .exact(&as_listed(&put_answer(key(3), 1, 100)))
+                .is_some()
+        );
+        assert!(known.exact(&as_listed(&new)).is_some());
+        let mut full = Known::default();
+        let cap = u64::try_from(MAX_KNOWN).unwrap();
+        for n in 1..=cap {
+            full.put(put_answer(key(n), 1, 100));
+        }
+        assert_eq!(full.len(), MAX_KNOWN);
+        assert!(
+            full.exact(&as_listed(&put_answer(key(1), 1, 100)))
+                .is_some()
+        );
+        full.put(put_answer(key(cap + 1), 1, 100));
+        assert_eq!(full.len(), MAX_KNOWN);
+        assert_eq!(full.exact(&as_listed(&put_answer(key(1), 1, 100))), None);
+        assert!(
+            full.exact(&as_listed(&put_answer(key(2), 1, 100)))
+                .is_some()
+        );
+        assert!(
+            full.exact(&as_listed(&put_answer(key(cap + 1), 1, 100)))
+                .is_some()
+        );
+    }
+
+    /// A decision that knows a file's created-at time reads nothing for it, reads the
+    /// others, and hands back what it was lent, on an error too.
+    #[test]
+    fn a_known_created_at_time_costs_no_read() {
+        let store = MemStore::with_listed_last_modified();
+        let files = filled(&store, 3);
+        let mut known = Known::default();
+        known.put(put_answer(files[0].key, files[0].size, 100));
+        known.put(put_answer(files[2].key, files[2].size, 300));
+        let lent = known.clone();
+        let got = block_on(resolve_knowing(&store, &mut known, &mut all_of(&files))).unwrap();
+        assert_eq!((got.value, got.created_at_read), (3, 1));
+        assert_eq!(store.created_at_calls(), 1);
+        assert_eq!(known, lent);
+        let file = files[1];
+        let mut twice = |_: &ResolvedCreatedAt| Resolve::<()>::Need(file.into());
+        let got = block_on(resolve_knowing(&store, &mut known, &mut twice));
+        assert_eq!(got, Err(ResolveError::Repeated { key: file.key }));
+        assert_eq!(known, lent);
     }
 
     #[test]

@@ -284,3 +284,60 @@ fn a_drain_does_not_wait_for_the_interval() {
     let seen = rig.settle(&mut actor, at + 1);
     assert_eq!(synced(&seen), 1, "{seen:?}");
 }
+/// How many requests of `kind` a bill holds, at every level.
+fn count(bill: &BTreeMap<(Request, u8), usize>, kind: Request) -> usize {
+    bill.iter()
+        .filter(|((request, _), _)| *request == kind)
+        .map(|(_, n)| *n)
+        .sum()
+}
+
+/// Level-0 retention ages each file it deletes by the created-at time the file's put was
+/// answered with, and its anchors by those of the newest files this process put: no HEAD.
+/// A listing with only a last-modified time once cost one HEAD per level-0 file deleted.
+/// Go ages by the listed last-modified time and asks nothing.
+#[test]
+fn retention_reads_no_created_at_time_of_a_file_this_process_put() {
+    let mut rig = s3_like();
+    let mut actor = Actor::new(paced());
+    let start = 600_000_000;
+    // Seven minutes in, level-0 retention (five minutes) has made its first delete.
+    let now = drive(&mut rig, &mut actor, start, start + 420_000);
+    let mark = rig.remote.requests_made();
+    drive(&mut rig, &mut actor, now, now + 240_000);
+    let bill = bill(&rig, mark);
+    assert!(bill.contains_key(&(Request::Delete, 0)), "{bill:?}");
+    assert_eq!(count(&bill, Request::Head), 0, "{bill:?}");
+    // What is remembered is let go with the files: about five minutes of them.
+    assert!(
+        actor.engine.known.len() < 450,
+        "{}",
+        actor.engine.known.len()
+    );
+}
+
+/// A new process knows no created-at time of the files the one before it put: each of
+/// those costs one HEAD when retention reaches it, and the files it puts itself none.
+#[test]
+fn after_a_restart_retention_reads_the_created_at_times_it_does_not_know() {
+    let mut rig = s3_like();
+    let mut actor = Actor::new(paced());
+    let start = 600_000_000;
+    let now = drive(&mut rig, &mut actor, start, start + 420_000);
+    let left = Rig::files(&rig.remote, Level::ZERO).len();
+    let mark = rig.remote.requests_made();
+    let mut restarted = Actor::new(paced());
+    // Long enough for retention to pass every file the first process left.
+    let now = drive(&mut rig, &mut restarted, now, now + 480_000);
+    let first = bill(&rig, mark);
+    let heads = first.get(&(Request::Head, 0)).copied().unwrap_or(0);
+    assert!(heads > 0 && heads <= left + 8, "{left} left: {first:?}");
+    let mark = rig.remote.requests_made();
+    drive(&mut rig, &mut restarted, now, now + 240_000);
+    let second = bill(&rig, mark);
+    assert!(second.contains_key(&(Request::Delete, 0)), "{second:?}");
+    // One level-0 file the first process left stays (the first file, which level 1 starts
+    // above), and each retention check reads its time again: two checks in four minutes.
+    let again = second.get(&(Request::Head, 0)).copied().unwrap_or(0);
+    assert!(again <= 2, "{second:?}");
+}

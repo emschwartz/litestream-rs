@@ -113,7 +113,7 @@ use crate::checkpoint::{
     Staged, after_checkpoint, after_sync, checkpoint, decide, lock_busy_wait, next_wake,
 };
 use crate::counts::{Counted, WorkCounts};
-use crate::created_at::{ResolvedCreatedAt, resolve};
+use crate::created_at::{ResolvedCreatedAt, resolve_knowing};
 use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
 use crate::fault::role::{Replica, Role, Staging};
@@ -2055,10 +2055,11 @@ impl Actor {
                         return Some(self.diverged(env, uploaded.state, from, now).await);
                     }
                     // Before the confirmed position lets the token go.
-                    if let Did::Put(info) = &uploaded.did
-                        && let Some(token) = self.engine.witnesses.get(&info.key)
-                    {
-                        self.engine.sent.put(*token);
+                    if let Did::Put(info) = &uploaded.did {
+                        self.engine.known.put(*info);
+                        if let Some(token) = self.engine.witnesses.get(&info.key) {
+                            self.engine.sent.put(*token);
+                        }
                     }
                     self.set_upload(uploaded.state);
                     last = uploaded.did;
@@ -2338,7 +2339,7 @@ impl Actor {
             let mut step = |resolved: &ResolvedCreatedAt| {
                 due_full(&inventory, now, cfg, published, state, resolved)
             };
-            resolve(env.remote, &mut step).await
+            resolve_knowing(env.remote, &mut self.engine.known, &mut step).await
         };
         // A failed created-at time read leaves the listing owed: the next tick lists again.
         let decided = match decided {
@@ -2437,8 +2438,16 @@ impl Actor {
         }
         self.engine.maintain.state.record(now, job, &outcome);
         let event = match outcome {
-            Outcome::Compacted { info, .. } => MaintainedEvent::Compacted(info),
-            Outcome::Deleted { count } => MaintainedEvent::Deleted(count),
+            Outcome::Compacted { info, .. } => {
+                self.engine.known.put(info);
+                MaintainedEvent::Compacted(info)
+            }
+            Outcome::Deleted { count } => {
+                if let Job::Delete(delete) = job {
+                    self.engine.known.deleted(delete.keys());
+                }
+                MaintainedEvent::Deleted(count)
+            }
             Outcome::Replan { .. } => MaintainedEvent::Replan,
             Outcome::Failed(err) => {
                 let waiter = self.job_waiter(job, now);
@@ -2524,6 +2533,7 @@ impl Actor {
     /// A snapshot the store took.
     fn snapshot_written(&mut self, info: FileInfo, now: Timestamp, created_at_read: u64) -> Tick {
         self.maintained(now);
+        self.engine.known.put(info);
         let event = MaintainedEvent::Snapshot(info);
         self.ran(
             Event::Maintained {

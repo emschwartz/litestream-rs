@@ -29,6 +29,7 @@ use super::state::{Gate, Live, Maintain, Phase, Tasks};
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::counts::WorkCounts;
+use crate::created_at::Known;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
 use crate::layout::FileKey;
@@ -449,6 +450,9 @@ pub(super) struct Engine {
     /// The tokens of the staged files this engine put on the replica and has not pruned:
     /// what a level-1 compaction knows of the replica's copies without reading them.
     pub(super) sent: Sent,
+    /// The created-at times of the files this engine put, as the store answered: what
+    /// retention ages them by without asking again.
+    pub(super) known: Known,
     /// When the last sync step began, for [`super::ActorConfig::sync_interval`].
     pub(super) synced_at: Option<Timestamp>,
     /// When the sync step this tick held back may run: the tick's wake.
@@ -487,6 +491,7 @@ impl Engine {
             dropped_through: None,
             witnesses: Witnesses::new(),
             sent: Sent::default(),
+            known: Known::default(),
             synced_at: None,
             sync_due: None,
             attempted: None,
