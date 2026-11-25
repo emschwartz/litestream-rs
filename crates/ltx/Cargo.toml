@@ -17,7 +17,7 @@ workspace = true
 testing = []
 
 [dependencies]
-crc.workspace = true
+crc-fast.workspace = true
 jiff.workspace = true
 lz4_flex.workspace = true
 thiserror.workspace = true
@@ -25,5 +25,7 @@ thiserror.workspace = true
 [dev-dependencies]
 # The integration tests read pages out of order.
 lsr-ltx = { workspace = true, features = ["testing"] }
+# The second, independent CRC-64 the SIMD one is tested against (tests/ltx/common.rs and checksum.rs).
+crc.workspace = true
 proptest.workspace = true
 sha2.workspace = true
