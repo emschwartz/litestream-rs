@@ -213,6 +213,19 @@ pub struct Maintenance {
     /// Whether `l0_check` was set rather than defaulted.
     l0_check_set: bool,
     retention: RetentionMode,
+    /// Whether the engine runs the schedule at all; see [`Self::one_off`].
+    run: Run,
+}
+
+/// Whether a [`Maintenance`] runs its schedule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Run {
+    /// The daemon's loop: levels compact, snapshots are taken and retention deletes as the
+    /// schedule says.
+    Scheduled,
+    /// A `replicate -once` run: nothing is scheduled. Only the retention pass the drain is
+    /// asked to end with uses the rest of the settings.
+    OneOff,
 }
 
 impl Maintenance {
@@ -263,6 +276,7 @@ impl Maintenance {
             l0_check: Interval(DEFAULT_L0_CHECK_MILLIS),
             l0_check_set: false,
             retention: RetentionMode::Enforce,
+            run: Run::Scheduled,
         })
     }
 
@@ -319,7 +333,26 @@ impl Maintenance {
             l0_check: Interval(DEFAULT_L0_CHECK_MILLIS),
             l0_check_set: false,
             retention: RetentionMode::Enforce,
+            run: Run::Scheduled,
         }
+    }
+
+    /// The same settings for a `replicate -once` run: the engine plans no compaction, no
+    /// snapshot and no retention pass of its own. Go switches every background monitor off
+    /// before it opens the store under `-once` (`cmd/litestream/replicate.go:374-383`:
+    /// `CompactionMonitorEnabled = false`, `L0RetentionCheckInterval = 0`, `MonitorInterval = 0`),
+    /// and its one-off run only syncs, uploads and then snapshots and enforces retention when
+    /// asked. The settings stay for that retention pass (`docs/decisions/D221.md`).
+    #[must_use]
+    pub const fn one_off(mut self) -> Self {
+        self.run = Run::OneOff;
+        self
+    }
+
+    /// Whether this is [`Self::one_off`]: the engine runs none of the schedule.
+    #[must_use]
+    pub const fn is_one_off(&self) -> bool {
+        matches!(self.run, Run::OneOff)
     }
 
     /// The highest compaction level in use (1 to 8).
