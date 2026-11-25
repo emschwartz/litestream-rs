@@ -439,11 +439,10 @@ pub(crate) fn json_credentials(
 ) -> Result<Expiring, CredentialError> {
     let malformed = || source_error(SourceError::Malformed { provider: source });
     let value = json(response).ok_or_else(malformed)?;
-    document_credentials(source, &value, token_key, cap).ok_or_else(malformed)
+    document_credentials(&value, token_key, cap).ok_or_else(malformed)
 }
 
 pub(crate) fn document_credentials(
-    _source: &'static str,
     value: &serde_json::Value,
     token_key: &str,
     cap: Option<Timestamp>,
