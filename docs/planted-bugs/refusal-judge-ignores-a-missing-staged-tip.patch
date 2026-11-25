@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
+index 6b52fc163..64b94413b 100644
+--- a/crates/sim/src/world.rs
++++ b/crates/sim/src/world.rs
+@@ -1087,7 +1087,7 @@ impl World {
+         let remote = found(read_all(&self.remote_raw, &key))?;
+         Ok(match (staged, remote) {
+             (Some(staged), Some(remote)) => staged != remote,
+-            (None, Some(_)) => true,
++            (None, Some(_)) => false,
+             (Some(_) | None, None) => false,
+         })
+     }

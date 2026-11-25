@@ -28,7 +28,6 @@ fn restore_latest_is_the_default_target() {
         Ok(Command::Restore(Box::new(RestoreArgs {
             from: RestoreFrom::Replica(Replica::Dir("r".into())),
             output: Some("o".into()),
-            no_expand_env: false,
             target: RestoreTarget::Latest,
             as_of_inside: AsOfInside::Refuse,
             clear_journal_files: false,
@@ -124,13 +123,16 @@ fn files_takes_replica_and_json() {
             resolved: false,
         }))
     );
+    let Ok(Command::Files(args)) = parsed("files --replica s3://b/p --created-at") else {
+        panic!("--created-at is refused beside an s3 replica");
+    };
+    assert!(args.resolved);
+    // A directory has no per-file reads to ask for, so the flag would change nothing there.
     assert_eq!(
-        parsed("files --replica r --created-at"),
-        Ok(Command::Files(FilesArgs {
-            replica: Replica::Dir("r".into()),
-            json: false,
-            resolved: true,
-        }))
+        usage("files --replica r --created-at"),
+        UsageError::S3FlagForDirectory {
+            flag: "--created-at"
+        }
     );
 }
 
@@ -685,4 +687,374 @@ fn trust_local_takes_the_database_first_then_its_flags() {
         Err(UsageError::MissingDatabase)
     );
     assert_eq!(parsed("trust-local"), Err(UsageError::MissingDatabase));
+}
+/// The words after `lsr` that the dispatcher takes are `CommandName::ALL`, and the error that
+/// names them lists the same ones, so no command can be accepted and left out of the help.
+#[test]
+fn every_command_the_dispatcher_accepts_is_in_the_top_level_help() {
+    let help = crate::render::help();
+    let listed: std::collections::BTreeSet<&str> = COMMAND_WORDS.split(", ").collect();
+    let all: std::collections::BTreeSet<&str> = CommandName::ALL
+        .into_iter()
+        .map(CommandName::word)
+        .collect();
+    assert_eq!(listed, all, "COMMAND_WORDS drifted from CommandName::ALL");
+    assert_eq!(all.len(), CommandName::ALL.len(), "a word is listed twice");
+    for command in CommandName::ALL {
+        let word = command.word();
+        assert_eq!(CommandName::from_word(word), Some(command));
+        assert!(
+            !matches!(
+                parsed(&format!("{word} -h")),
+                Err(UsageError::UnknownCommand { .. } | UsageError::FlagBeforeCommand { .. })
+            ),
+            "{word} is listed but the dispatcher does not take it"
+        );
+        let usage = command
+            .usage_line()
+            .map_or_else(|| format!("\nlsr {word}"), |line| format!("\n{line}"));
+        assert!(
+            help.contains(&usage),
+            "{word} has no usage line in the help"
+        );
+        assert!(help.contains(command.summary()), "{word} has no summary");
+    }
+    assert_eq!(
+        usage("frobnicate"),
+        UsageError::UnknownCommand {
+            name: "frobnicate".into()
+        }
+    );
+}
+
+/// The flags each Go-grammar command's help lists are exactly the flags its parser defines,
+/// with the same arity, so help text and parser cannot drift apart.
+#[test]
+fn help_lists_exactly_the_flags_each_go_grammar_parser_defines() {
+    let tables = [
+        (CommandName::Restore, &restore::DEFINED[..]),
+        (CommandName::Databases, &inspect::DATABASES[..]),
+        (CommandName::Ltx, &inspect::LTX[..]),
+        (CommandName::Wal, &inspect::LTX[..]),
+    ];
+    for (command, defined) in tables {
+        let listed = help_flags(command);
+        let mut want: Vec<(&str, bool)> = defined.iter().map(|d| (d.name, d.value)).collect();
+        let mut have: Vec<(&str, bool)> = listed
+            .iter()
+            .map(|f| (f.name.trim_start_matches('-'), f.value.is_some()))
+            .collect();
+        want.sort_unstable();
+        have.sort_unstable();
+        assert_eq!(have, want, "{}: help and parser disagree", command.word());
+    }
+}
+
+/// How a flag is written in the walk below: its value, or none for a switch.
+fn sample(flag: &str) -> &'static [&'static str] {
+    match flag {
+        "--replica" => &["r2"],
+        "--endpoint" => &["http://h:9"],
+        "--region" => &["eu-west-1"],
+        "--output" | "-o" => &["p"],
+        "--txid" => &["000000000000002a"],
+        "--timestamp" => &["2025-01-01T00:00:00Z"],
+        "--integrity-check" => &["quick"],
+        "-config" => &["c.yml"],
+        "-parallelism" => &["4"],
+        "-follow-interval" => &["2s"],
+        "-level" => &["all"],
+        "--depth" => &["names"],
+        "--meta-dir" => &["m"],
+        "--force-path-style"
+        | "--allow-earlier"
+        | "--clear-journal-files"
+        | "--if-db-not-exists"
+        | "--if-replica-exists"
+        | "--dry-run"
+        | "-no-expand-env"
+        | "-force"
+        | "-f"
+        | "--json"
+        | "-json"
+        | "--created-at" => &[],
+        other => {
+            panic!("{other} has no sample: give a new flag one, and so a proof it does something")
+        }
+    }
+}
+
+/// One way of naming a replica, its base command line, and the flags that line already uses.
+struct Form {
+    label: &'static str,
+    command: CommandName,
+    base: &'static str,
+    in_base: &'static [&'static str],
+    /// Flags that change nothing here, and why. Each is held to that: it must change nothing.
+    inert: &'static [(&'static str, &'static str)],
+}
+
+const GO_IGNORES_IT_BESIDE_A_URL: &str = "Go reads it only for a config; beside a URL it takes the flag and does nothing, and a URL needs no expansion";
+const FOLLOW_ONLY: &str =
+    "Go reads it only with -f, which this build refuses, so it is accepted and unused as in Go";
+
+const FORMS: &[Form] = &[
+    Form {
+        label: "restore --replica dir",
+        command: CommandName::Restore,
+        base: "restore --replica r --output o",
+        in_base: &["--replica", "--output"],
+        inert: &[("-follow-interval", FOLLOW_ONLY)],
+    },
+    Form {
+        label: "restore --replica s3",
+        command: CommandName::Restore,
+        base: "restore --replica s3://b/p --output o",
+        in_base: &["--replica", "--output"],
+        inert: &[("-follow-interval", FOLLOW_ONLY)],
+    },
+    Form {
+        label: "restore REPLICA_URL",
+        command: CommandName::Restore,
+        base: "restore -o o s3://b/p",
+        in_base: &["-o"],
+        inert: &[
+            ("-no-expand-env", GO_IGNORES_IT_BESIDE_A_URL),
+            ("-follow-interval", FOLLOW_ONLY),
+        ],
+    },
+    Form {
+        label: "restore DB_PATH",
+        command: CommandName::Restore,
+        base: "restore /data/db",
+        in_base: &[],
+        inert: &[("-follow-interval", FOLLOW_ONLY)],
+    },
+    Form {
+        label: "databases",
+        command: CommandName::Databases,
+        base: "databases",
+        in_base: &[],
+        inert: &[],
+    },
+    Form {
+        label: "ltx REPLICA_URL",
+        command: CommandName::Ltx,
+        base: "ltx s3://b/p",
+        in_base: &[],
+        inert: &[("-no-expand-env", GO_IGNORES_IT_BESIDE_A_URL)],
+    },
+    Form {
+        label: "ltx DB_PATH",
+        command: CommandName::Ltx,
+        base: "ltx /data/db",
+        in_base: &[],
+        inert: &[],
+    },
+    Form {
+        label: "wal REPLICA_URL",
+        command: CommandName::Wal,
+        base: "wal s3://b/p",
+        in_base: &[],
+        inert: &[("-no-expand-env", GO_IGNORES_IT_BESIDE_A_URL)],
+    },
+    Form {
+        label: "wal DB_PATH",
+        command: CommandName::Wal,
+        base: "wal /data/db",
+        in_base: &[],
+        inert: &[],
+    },
+    Form {
+        label: "verify dir",
+        command: CommandName::Verify,
+        base: "verify --replica r",
+        in_base: &["--replica"],
+        inert: &[],
+    },
+    Form {
+        label: "verify s3",
+        command: CommandName::Verify,
+        base: "verify --replica s3://b/p",
+        in_base: &["--replica"],
+        inert: &[],
+    },
+    Form {
+        label: "files dir",
+        command: CommandName::Files,
+        base: "files --replica r",
+        in_base: &["--replica"],
+        inert: &[],
+    },
+    Form {
+        label: "files s3",
+        command: CommandName::Files,
+        base: "files --replica s3://b/p",
+        in_base: &["--replica"],
+        inert: &[],
+    },
+    Form {
+        label: "trust-local dir",
+        command: CommandName::TrustLocal,
+        base: "trust-local app.db --replica r",
+        in_base: &["--replica"],
+        inert: &[],
+    },
+    Form {
+        label: "trust-local s3",
+        command: CommandName::TrustLocal,
+        base: "trust-local app.db --replica s3://b/p",
+        in_base: &["--replica"],
+        inert: &[],
+    },
+];
+
+/// Every flag a command's help lists, beside every way of naming a replica, either changes
+/// what the command line means or is refused; a flag that is read and dropped is a request
+/// the binary does not meet, and it must be an error instead (the owner's rule for
+/// `--endpoint` beside a bare URL). The few flags Go itself takes and drops are named, with
+/// why, and held to changing nothing.
+#[test]
+fn every_flag_changes_the_command_or_is_refused() {
+    let mut walked = 0_usize;
+    for form in FORMS {
+        let flags = help_flags(form.command);
+        assert!(!flags.is_empty(), "{}", form.label);
+        for flag in flags {
+            let name = flag.name.as_str();
+            let inert = form.inert.iter().any(|(inert, _)| *inert == name);
+            let base: Vec<String> = words(form.base);
+            let (with, without) = if form.in_base.contains(&name) {
+                // The line already uses it: dropping it, and its value, is the comparison.
+                let mut dropped = Vec::new();
+                let mut skip = 0;
+                for word in &base {
+                    if skip > 0 {
+                        skip -= 1;
+                    } else if word == name {
+                        skip = usize::from(flag.value.is_some());
+                    } else {
+                        dropped.push(word.clone());
+                    }
+                }
+                (base, dropped)
+            } else {
+                let mut with = base.clone();
+                let mut add = vec![name.to_owned()];
+                add.extend(sample(name).iter().map(|s| (*s).to_owned()));
+                // Go's flag package stops at the first positional argument, so a Go-grammar
+                // line takes its flags right after the command word; `lsr`'s own commands
+                // take them anywhere after it.
+                let at = match form.command {
+                    CommandName::Restore
+                    | CommandName::Databases
+                    | CommandName::Ltx
+                    | CommandName::Wal => 1,
+                    CommandName::Verify
+                    | CommandName::Files
+                    | CommandName::TrustLocal
+                    | CommandName::Replicate
+                    | CommandName::Config => with.len(),
+                };
+                with.splice(at..at, add);
+                (with, base)
+            };
+            let after = parse(&with);
+            let before = parse(&without);
+            if inert {
+                assert_eq!(
+                    after, before,
+                    "{}: {name} is listed as inert but is not",
+                    form.label
+                );
+            } else {
+                assert!(
+                    after.is_err() || after != before,
+                    "{}: {name} is read and dropped: {with:?} parses as it does without",
+                    form.label
+                );
+            }
+            walked += 1;
+        }
+    }
+    assert!(walked > 100, "walked {walked} flags");
+}
+
+/// A flag name never runs into its help text: the column is as wide as the longest name
+/// (`--clear-journal-files` once printed as `--clear-journal-filesfirst remove ...`).
+#[test]
+fn help_columns_leave_a_gap_after_every_flag() {
+    for line in crate::render::help().lines() {
+        let Some(row) = line.strip_prefix("  -") else {
+            continue;
+        };
+        let name_end = row.find(' ').unwrap_or(row.len());
+        assert!(
+            row.get(name_end..)
+                .is_some_and(|rest| rest.starts_with("  ")),
+            "{line}"
+        );
+    }
+}
+
+/// Go has no `--endpoint`: a bare replica URL carries its endpoint in the query, so the flag
+/// beside one (or beside a DB_PATH, whose config sets it) was read and dropped, and a restore
+/// then went to AWS. It is refused now, with the query form named.
+#[test]
+fn an_s3_flag_beside_a_bare_url_or_database_is_refused_and_the_query_form_is_kept() {
+    for flag in [
+        "--endpoint http://h:9",
+        "--region eu-west-1",
+        "--force-path-style",
+    ] {
+        let name = flag.split(' ').next().unwrap_or_default();
+        let line = format!("restore {flag} -o o s3://b/p");
+        assert_eq!(
+            usage(&line),
+            UsageError::S3FlagWithUrl {
+                flag: name.to_owned().leak()
+            },
+            "{line}"
+        );
+        let line = format!("restore {flag} /data/db");
+        assert_eq!(
+            usage(&line),
+            UsageError::S3FlagWithDatabase {
+                flag: name.to_owned().leak()
+            },
+            "{line}"
+        );
+    }
+    let message = usage("restore --endpoint http://h:9 -o o s3://b/p").to_string();
+    assert!(message.contains("?endpoint="), "{message}");
+    // Go's form: the query rides on the URL, untouched, for the daemon's reader.
+    assert_eq!(
+        parsed("restore -o o s3://b/p?endpoint=http://h:9"),
+        Ok(Command::Restore(Box::new(RestoreArgs {
+            from: RestoreFrom::Url("s3://b/p?endpoint=http://h:9".into()),
+            output: Some("o".into()),
+            target: RestoreTarget::Latest,
+            as_of_inside: AsOfInside::Refuse,
+            clear_journal_files: false,
+            integrity_check: IntegrityCheck::Off,
+            if_db_not_exists: false,
+            if_replica_exists: false,
+            dry_run: false,
+            json: false,
+            force: false,
+            parallelism: false,
+            txid_and_timestamp: false,
+            timestamp_given: false,
+        })))
+    );
+    // `lsr`'s own `--replica` form still takes them, and `-o` with `--output` is one flag twice.
+    parsed("restore --replica s3://b/p --endpoint http://h:9 -o o").unwrap();
+    assert_eq!(
+        usage("restore --replica r -o a --output b"),
+        UsageError::DuplicateFlag { flag: "--output" }
+    );
+    assert_eq!(
+        usage("restore --replica r --output o -config c.yml"),
+        UsageError::ConfigFlagWithReplica { flag: "-config" }
+    );
 }

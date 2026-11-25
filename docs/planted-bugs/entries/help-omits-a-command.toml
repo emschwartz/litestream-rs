@@ -1,0 +1,6 @@
+# `lsr --help` left out `databases`, `ltx` and `wal`, commands the dispatcher takes.
+name = "help-omits-a-command"
+fix = "claude/cli-truth"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["every_command_the_dispatcher_accepts_is_in_the_top_level_help"]

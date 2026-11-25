@@ -157,6 +157,10 @@ pub struct Env<'a, W, P, C, L, R> {
     /// So a stamp is read here, after the committed read that bounds the
     /// file: every transaction the file carries committed before it.
     pub clock: &'a dyn Clock,
+    /// Told of long work inside the tick before it starts, so the driver can say what holds the
+    /// start while the tick runs ([`Event::CheckingIdentity`]); the tick goes on whatever it
+    /// does. A notice changes nothing the engine decides or reads.
+    pub notice: &'a mut dyn FnMut(&Event),
 }
 
 impl<
@@ -298,6 +302,16 @@ pub enum Event {
     /// driver writes it, hands it back with [`Actor::remember_takeover`], and
     /// ticks again. Nothing else ran.
     TakeoverWanted(TakeoverRecord),
+    /// A boot with a brand-new meta directory found replica files through `tip` that nothing
+    /// local vouches for: before it decides, it restores the replica's state at `tip` and
+    /// compares it with the database, page by page (`crate::identity`), which takes about a
+    /// restore's time. Never a tick's event: the boot hands it to [`Env::notice`] as the check
+    /// starts, in the tick that runs it, and the start is held through it
+    /// (`docs/decisions/D201.md`).
+    CheckingIdentity {
+        /// The replica's newest transaction, the state compared.
+        tip: Txid,
+    },
 }
 
 /// How a tick ended.
@@ -742,6 +756,7 @@ impl Actor {
             staging: &staging,
             remote: &remote,
             clock: env.clock,
+            notice: &mut *env.notice,
         };
         // Boxed: the tick's state machine is the largest future the replicator thread polls,
         // and on the heap it is not part of every poll frame below `block_on`, which in a
@@ -868,26 +883,21 @@ impl Actor {
             Policy::Persistent(cause) => self.persistent(waiter, cause, Backoff::Doubling, now),
             Policy::Shutdown => self.stop(StopCause::Shutdown),
             Policy::Wait => {
-                // A boot not yet judged is held by its own start: the host lets its write through
-                // (`docs/decisions/D192.md`), so it tries again at once. A hold for a trip waits.
-                let at_once = !self.boot_judged() && self.trip().is_none();
-                let until = self.hold(waiter, now, at_once);
+                // Only a trip holds a judged start, and nothing writes before the boot decides
+                // (`docs/decisions/D201.md`): the hold lasts, so the task waits.
+                let until = self.hold(waiter, now);
                 self.ran(Event::WritesHeld { until }, now)
             }
         }
     }
 
-    /// Waits one retry interval, or not at all (`at_once`), without counting a failure
-    /// ([`Policy::Wait`]); returns when the wait ends.
-    fn hold(&mut self, waiter: Waiter, now: Timestamp, at_once: bool) -> Timestamp {
+    /// Waits one retry interval without counting a failure ([`Policy::Wait`]); returns when
+    /// the wait ends.
+    fn hold(&mut self, waiter: Waiter, now: Timestamp) -> Timestamp {
         match waiter {
             Waiter::Kept(until) => until,
             Waiter::Task(task) => {
-                let until = if at_once {
-                    now
-                } else {
-                    now.saturating_add(self.kept.cfg.retry_interval)
-                };
+                let until = now.saturating_add(self.kept.cfg.retry_interval);
                 self.kept.tasks.get_mut(task).hold(until);
                 until
             }
@@ -1581,7 +1591,26 @@ impl Actor {
         self.engine.page_size = Some(size);
         let step = match self.plan_step(len, &mut reader, committed)? {
             Ok(step) => step,
-            Err(verdict) => return Ok(verdict),
+            Err(verdict) => {
+                // The frames are read after the length: a TRUNCATE checkpoint that lands
+                // between shows as frames gone from a file now shorter than the one first
+                // statted, what a power loss leaves with no power loss. The step runs again
+                // over the file as it is.
+                if matches!(
+                    verdict,
+                    Stepped::Resnapshot(SnapshotCause::LocalRewound { .. })
+                ) && let Some(was) = len
+                    && env
+                        .wal
+                        .len()
+                        .map_err(Fault::from_source)?
+                        .map_or(0, WalFileLen::bytes)
+                        < was.bytes()
+                {
+                    return Err(Fault::WalMoved);
+                }
+                return Ok(verdict);
+            }
         };
         wal_barrier(&mut *env.wal)?;
         let synced = sync_step(
@@ -2916,7 +2945,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     (len, committed): (Option<WalFileLen>, CommittedRead),
     confirmed: Option<Txid>,
     gate: BootGate,
-) -> Result<Booted, Fault> {
+) -> Result<Booted, BootStep> {
     let (staging, remote) = (env.staging, env.remote);
     let end = committed.end();
     let staged = NewestStagedFile::load(staging, boot_wal_of(reader.as_deref_mut(), end)).await?;
@@ -2932,7 +2961,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
             match NewestStagedFile::load_remote(remote, wal, tip).await {
                 Ok(file) => file,
                 Err(Fault::RemoteCorrupt) if staged.is_some() => None,
-                Err(fault) => return Err(fault),
+                Err(fault) => return Err(fault.into()),
             }
         }
         None => None,
@@ -2957,6 +2986,9 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let resized = page_size.zip(now).filter(|(was, now)| was != now);
     let (refused_through, ahead) = match refused {
         Some(tip) if resized.is_none() && gate.fresh() => {
+            // Said in the tick that lists the replica: a tick of its own to announce it would
+            // list the replica again, and a crash between the two would leave the check unrun.
+            (env.notice)(&Event::CheckingIdentity { tip });
             let local =
                 identity::local_against_replica(env.wal, reader, committed, env.db, remote, tip)
                     .await?;
@@ -3006,7 +3038,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
             .map_or(0, WalFileLen::bytes)
             < was.bytes()
     {
-        return Err(Fault::WalMoved);
+        return Err(Fault::WalMoved.into());
     }
     Ok(Booted {
         newest_staged,

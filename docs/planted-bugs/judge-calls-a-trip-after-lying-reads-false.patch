@@ -1,0 +1,13 @@
+diff --git a/crates/sim/src/failstop.rs b/crates/sim/src/failstop.rs
+index 909550c80..e9acae985 100644
+--- a/crates/sim/src/failstop.rs
++++ b/crates/sim/src/failstop.rs
+@@ -302,7 +302,7 @@ impl FailStopJudge {
+                     self.excused.unread_wal = self.excused.unread_wal.saturating_add(1);
+                     Ok(())
+                 }
+-                Err(_) if age_trip && (tick.reads_lying || self.dated_by_lying_reads()) => {
++                Err(_) if age_trip && (tick.reads_lying) => {
+                     self.excused.lying_reads = self.excused.lying_reads.saturating_add(1);
+                     Ok(())
+                 }

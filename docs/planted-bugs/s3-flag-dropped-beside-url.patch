@@ -1,0 +1,14 @@
+diff --git a/crates/cli/src/args/restore.rs b/crates/cli/src/args/restore.rs
+index 665486c73..e7af51ec9 100644
+--- a/crates/cli/src/args/restore.rs
++++ b/crates/cli/src/args/restore.rs
+@@ -349,9 +349,6 @@ fn from(set: &Set) -> Result<RestoreFrom, UsageError> {
+             if config.is_some() {
+                 return Err(UsageError::GoUrlAndConfig);
+             }
+-            if let Some(flag) = s3_flag_given(set)? {
+-                return Err(UsageError::S3FlagWithUrl { flag });
+-            }
+             Ok(RestoreFrom::Url(url.clone()))
+         }
+         ([path], None) => {

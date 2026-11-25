@@ -1,7 +1,8 @@
 # Fuzzing
 
 Phase 1's exit asks that the decoders survive a 24-hour fuzz run. This is how to run it and what
-counts as passing. It has not been run yet: a cloud session is too short for it.
+counts as passing. The first run (2026-11-23 to 2026-11-24, pull request 321) covered `decode`, `index`, `key`
+and `wal` with no finding; `plan` still owes its 24 hours (issue 322).
 
 ## Targets
 
