@@ -166,7 +166,7 @@ impl Sender {
     }
 
     /// How many threads are alive.
-    #[cfg(test)]
+    #[cfg(all(test, not(shuttle)))]
     fn threads(&self) -> usize {
         lock(&self.queue.waiting).threads
     }
