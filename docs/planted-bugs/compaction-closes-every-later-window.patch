@@ -2,7 +2,7 @@ diff --git a/crates/core/src/maintain/state.rs b/crates/core/src/maintain/state.
 --- a/crates/core/src/maintain/state.rs
 +++ b/crates/core/src/maintain/state.rs
 @@ -119,7 +119,7 @@
-     /// the start of a window finds in the window before (`docs/decisions/D240.md`).
+     /// the start of a window finds in the window before (`docs/decisions/D242.md`).
      #[must_use]
      pub(crate) fn drained_since(&self, level: Level, start: Timestamp) -> bool {
 -        self.drained.get(&level).is_some_and(|at| *at >= start)

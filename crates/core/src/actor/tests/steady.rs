@@ -464,7 +464,7 @@ fn short_bill() -> BTreeMap<(Request, u8), usize> {
 /// `maintain/retain.rs`), and a whole listing, one request per level, for each snapshot
 /// (level 5 is only ever listed by a whole listing) and at start. A snapshot that finds
 /// commits since its last sync takes its proof after their upload from the same decision, not
-/// from another whole listing (`docs/decisions/D241.md`). The level-9 listing of each
+/// from another whole listing (`docs/decisions/D243.md`). The level-9 listing of each
 /// retention check is not guarded by a Go defect and is left for the owner to rule on.
 /// Level 1 and level 2 GET one more than Go in this run (inputs read, as Go's; the bounds
 /// allow it, and the difference is not explained further).

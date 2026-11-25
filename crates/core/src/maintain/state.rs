@@ -123,7 +123,7 @@ impl MaintainState {
     /// that ran at or after `start` and took every source file the level had. Go compacts a
     /// level once per window, at the window's start (`store.go`, `monitorCompactionLevel`).
     /// The output's own time cannot say this: it is its last input's, which a compaction at
-    /// the start of a window finds in the window before (`docs/decisions/D240.md`).
+    /// the start of a window finds in the window before (`docs/decisions/D242.md`).
     #[must_use]
     pub(crate) fn drained_since(&self, level: Level, start: Timestamp) -> bool {
         self.drained.get(&level).is_some_and(|at| *at >= start)
