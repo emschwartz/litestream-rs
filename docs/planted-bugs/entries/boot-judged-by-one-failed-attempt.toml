@@ -1,0 +1,9 @@
+# One failed boot attempt of any kind judges the boot: writes are released and the -exec child starts, though the next attempt may find another writer.
+name = "boot-judged-by-one-failed-attempt"
+fix = "e3a93d4"
+package = "lsr-core"
+tests = [
+    "a_local_failure_before_the_listing_does_not_release_a_start_another_writer_stops",
+    "a_store_down_for_the_bound_judges_the_boot",
+    "a_timeout_at_boot_is_no_refusal",
+]

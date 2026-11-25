@@ -19,6 +19,7 @@ use crate::source::{CheckpointCall, FakeCheckpointer, FakeDb, FakeWal, SourceErr
 use crate::store::WriteMode;
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
+mod after_delete;
 mod ahead;
 mod audit;
 
@@ -81,6 +82,11 @@ struct Counting {
     /// Keys every listing leaves out though the store holds them, as a
     /// listing that lags a write does.
     hidden: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// What every `remove_scratch` answers instead of sweeping, while set: a store that
+    /// refuses the boot's first call.
+    scratch_error: Arc<std::sync::Mutex<Option<StoreError>>>,
+    /// `remove_scratch` calls made.
+    scratch_calls: Arc<AtomicU32>,
 }
 
 impl Counting {
@@ -126,9 +132,14 @@ impl Counting {
 impl ObjectStore for Counting {
     type Upload = <MemStore as ObjectStore>::Upload;
 
-    /// Forwards to the store it wraps.
+    /// Forwards to the store it wraps, unless a test made it fail.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
-        self.inner.remove_scratch().await
+        self.scratch_calls.fetch_add(1, Ordering::SeqCst);
+        let error = self.scratch_error.lock().unwrap().clone();
+        match error {
+            Some(err) => Err(err),
+            None => self.inner.remove_scratch().await,
+        }
     }
 
     fn list(
@@ -2285,6 +2296,7 @@ mod wal_barrier;
 mod wal_truncated_mid_step;
 mod witness;
 mod work;
+mod writes_held;
 
 /// Ticks at `now` onto a staged file that fails verification for the first
 /// time: one failed read deletes nothing and the task retries. Returns when

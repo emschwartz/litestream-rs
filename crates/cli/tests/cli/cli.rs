@@ -34,6 +34,20 @@ fn lsr_os(args: &[OsString]) -> Run {
     }
 }
 
+/// `lsr` with the config named by `LITESTREAM_CONFIG`, as a deploy script sets it.
+fn lsr_with_config(args: &[&str], config: &Path) -> Run {
+    let out = Command::new(env!("CARGO_BIN_EXE_lsr"))
+        .args(args)
+        .env("LITESTREAM_CONFIG", config)
+        .output()
+        .expect("run lsr");
+    Run {
+        code: out.status.code().expect("exited with a code"),
+        stdout: String::from_utf8(out.stdout).expect("stdout is UTF-8"),
+        stderr: String::from_utf8(out.stderr).expect("stderr is UTF-8"),
+    }
+}
+
 fn lsr(args: &[&str]) -> Run {
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
     lsr_os(&args)
@@ -558,6 +572,25 @@ fn help_and_version_print_to_stdout_and_exit_0() {
     assert!(version.stdout.starts_with("lsr "));
 }
 
+/// Go's `litestream version`, which a runbook calls: a bare version line on stdout, exit 0,
+/// and the command is in the help.
+#[test]
+fn the_version_command_prints_go_s_bare_line() {
+    let run = lsr(&["version"]);
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (0, concat!(env!("CARGO_PKG_VERSION"), "\n"), "")
+    );
+    let verbose = lsr(&["version", "-verbose"]);
+    assert_eq!(verbose.code, 0);
+    assert!(
+        verbose.stdout.starts_with("Version:     "),
+        "{}",
+        verbose.stdout
+    );
+    assert!(lsr(&["--help"]).stdout.contains("lsr version"));
+}
+
 /// A WAL-mode SQLite database of 512-byte pages with a table and an index.
 fn sqlite_pages() -> Vec<u8> {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -648,14 +681,107 @@ fn integrity_check_publishes_a_valid_database_in_every_mode() {
         if let Some(line) = line {
             assert!(run.stdout.contains(line), "{check}: {}", run.stdout);
         }
-        // The database and its meta directory, which holds only the takeover record a
-        // restore leaves for the replicator started on it.
-        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 2, "{check}");
-        let meta = dir.path().join(".out.db-litestream");
-        assert_eq!(fs::read_dir(&meta).expect("meta").count(), 1, "{check}");
+        // Only the database: no config names it, so no replicator is going to start on it.
+        assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 1, "{check}");
+        assert!(!run.stdout.contains("takeover"), "{check}: {}", run.stdout);
+    }
+}
+
+/// Go's restore leaves the database and nothing else, and a script that removes
+/// `backup.sqlite*` relies on it. A restore to a path no config names (a backup, a copy, a
+/// drill) leaves no working folder and no takeover line, in every way of naming the replica.
+#[test]
+fn a_restore_to_a_path_no_config_names_leaves_only_the_database() {
+    let (staged, _manifest) = small_fixture();
+    let config = tempfile::tempdir().expect("tempdir");
+    let elsewhere = config.path().join("litestream.yml");
+    fs::write(
+        &elsewhere,
+        "dbs:\n  - path: /not/this/one.db\n    replica:\n      url: file:///nowhere\n",
+    )
+    .expect("config");
+    let replica = staged.replica();
+    let replica_dir = path_str(&replica);
+    let url = format!("file://{}", replica.display());
+    for form in ["url", "replica", "url-with-an-unrelated-config"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("backup.sqlite");
+        let args: Vec<&str> = match form {
+            "replica" => vec![
+                "restore",
+                "--replica",
+                replica_dir,
+                "--output",
+                path_str(&out),
+            ],
+            _ => vec!["restore", "-o", path_str(&out), &url],
+        };
+        let run = if form == "url-with-an-unrelated-config" {
+            lsr_with_config(&args, &elsewhere)
+        } else {
+            lsr(&args)
+        };
+        assert_eq!(run.code, 0, "{form}: {}", run.stderr);
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["backup.sqlite"], "{form}");
+        assert!(!run.stdout.contains("takeover"), "{form}: {}", run.stdout);
+    }
+}
+
+/// The disaster-recovery flow, restore then start: a database a config names has the takeover
+/// record in that config's meta directory (its `meta-path`, else the default beside it), so the
+/// replicator started on it builds on the replica it came from, whatever way the restore named
+/// the replica.
+#[test]
+fn a_restore_to_a_path_a_config_names_records_the_takeover_where_the_replicator_looks() {
+    let (staged, _manifest) = small_fixture();
+    let replica = staged.replica();
+    let replica_dir = path_str(&replica);
+    let url = format!("file://{}", replica.display());
+    for (form, meta_path) in [("url", None), ("url", Some("elsewhere")), ("replica", None)] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("app.db");
+        let config = dir.path().join("litestream.yml");
+        let meta_line = meta_path.map_or_else(String::new, |name| {
+            format!("    meta-path: {}\n", dir.path().join(name).display())
+        });
+        fs::write(
+            &config,
+            format!(
+                "dbs:\n  - path: {}\n{meta_line}    replica:\n      url: {url}\n",
+                db.display()
+            ),
+        )
+        .expect("config");
+        let args: Vec<&str> = match form {
+            "replica" => vec![
+                "restore",
+                "--replica",
+                replica_dir,
+                "--output",
+                path_str(&db),
+            ],
+            _ => vec!["restore", "-o", path_str(&db), &url],
+        };
+        let run = lsr_with_config(&args, &config);
+        assert_eq!(run.code, 0, "{form}: {}", run.stderr);
+        let meta = meta_path.map_or_else(
+            || dir.path().join(".app.db-litestream"),
+            |n| dir.path().join(n),
+        );
         let record = fs::read(meta.join("lsr-takeover")).expect("takeover record");
-        assert!(lsr_core::TakeoverRecord::decode(&record).is_ok(), "{check}");
-        assert!(run.stdout.contains("takeover recorded through"), "{check}");
+        assert!(lsr_core::TakeoverRecord::decode(&record).is_ok(), "{form}");
+        assert!(
+            run.stdout.contains("takeover recorded through"),
+            "{form}: {}",
+            run.stdout
+        );
+        if meta_path.is_some() {
+            assert!(!dir.path().join(".app.db-litestream").exists(), "{form}");
+        }
     }
 }
 
@@ -1254,8 +1380,8 @@ fn trust_local_records_the_replicas_newest_transaction() {
     lsr_core::TakeoverRecord::decode(&record).expect("a takeover record");
 }
 
-/// `lsr restore` to an output that names no file is refused with exit 1 (as Go's commands
-/// exit) before anything is written: it has no meta directory for the takeover record.
+/// `lsr restore` to an output that is not a file's name (here a directory) is refused with exit 1
+/// (as Go's commands exit) before anything is written.
 #[test]
 fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
     let db = sqlite_pages();
@@ -1266,7 +1392,7 @@ fn restore_to_an_output_with_no_file_name_is_refused_before_writing() {
     let output = dir.path().join("sub").join("..");
     let run = restore_checked(&replica, &output, "none");
     assert_eq!(run.code, 1, "{}", run.stderr);
-    assert!(run.stderr.contains("no meta directory"), "{}", run.stderr);
+    assert!(run.stderr.contains("already exists"), "{}", run.stderr);
     assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
 }
 

@@ -155,9 +155,14 @@ pub(super) struct Kept {
     pub(super) listed: bool,
     /// The last boot failure before the first listing was the store refusing access.
     pub(super) refused_at_boot: Option<Denied>,
-    /// A boot attempt of this process has failed: with no refusal behind it, the boot is
-    /// judged and the application may start (`crate::failstop`).
-    pub(super) boot_failed: bool,
+    /// When the current run of boot attempts that failed, none by a refusal, began (the first
+    /// failure after the last refusal, or after the start). Only a run that outlasts
+    /// `BOOT_UNDECIDED_BOUND` without a decision judges the boot and lets the application
+    /// start (`crate::failstop`); one failed attempt never does.
+    pub(super) boot_failing_since: Option<Timestamp>,
+    /// The run above has outlasted the bound and the last failure was not a refusal, as of
+    /// the last tick: the boot is judged without having decided.
+    pub(super) boot_overdue: bool,
     /// Pending staged files that hold no commit of the application's: a file that changes no
     /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
     /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
@@ -168,6 +173,10 @@ pub(super) struct Kept {
     /// Recoveries that found a commit abandoned after the read lock was taken: a report,
     /// kept across rebuilds, since the snapshot that follows names only the generation change.
     pub(super) read_lock_violations: u64,
+    /// The replica refused the boot's sweep of its scratch files and open uploads for want of
+    /// permission, and the process does not ask again: the sweep is best effort. Kept across
+    /// rebuilds.
+    pub(super) scratch_sweep_denied: bool,
 }
 
 impl Kept {
@@ -195,10 +204,12 @@ impl Kept {
             lag: Lag::default(),
             listed: false,
             refused_at_boot: None,
-            boot_failed: false,
+            boot_failing_since: None,
+            boot_overdue: false,
             quiet: BTreeSet::new(),
             doubt_baseline: None,
             read_lock_violations: 0,
+            scratch_sweep_denied: false,
         }
     }
 
@@ -230,10 +241,12 @@ impl Kept {
             lag,
             listed,
             refused_at_boot,
-            boot_failed,
+            boot_failing_since,
+            boot_overdue,
             quiet: _,
             doubt_baseline: _,
             read_lock_violations,
+            scratch_sweep_denied,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -261,11 +274,13 @@ impl Kept {
             lag: *lag,
             listed: *listed,
             refused_at_boot: *refused_at_boot,
-            boot_failed: *boot_failed,
+            boot_failing_since: *boot_failing_since,
+            boot_overdue: *boot_overdue,
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),
             doubt_baseline: None,
             read_lock_violations: *read_lock_violations,
+            scratch_sweep_denied: *scratch_sweep_denied,
         }
     }
 

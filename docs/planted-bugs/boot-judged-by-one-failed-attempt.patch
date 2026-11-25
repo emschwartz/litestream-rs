@@ -1,0 +1,20 @@
+diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+index 0000000..0000000 100644
+--- a/crates/core/src/actor/lag.rs
++++ b/crates/core/src/actor/lag.rs
+@@ -100,7 +100,7 @@ impl Actor {
+         self.kept
+             .boot_failing_since
+             .filter(|_| !self.kept.listed && self.kept.refused_at_boot.is_none())
+-            .map(|since| since.saturating_add(BOOT_UNDECIDED_BOUND))
++            .map(|since| since)
+     }
+ 
+     /// Lets the sync and upload waits go when the bound has passed with no probe made for it.
+@@ -324,4 +324,4 @@ impl Actor {
+     pub const fn listed(&self) -> bool {
+         self.kept.listed
+     }
+-}
++}
+\ No newline at end of file

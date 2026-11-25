@@ -194,7 +194,13 @@ fn compare(rig: &Rig, case: &Case) -> Result<String, TestCaseError> {
             && args.first().is_some_and(|c| c == "databases")
             && !go_out.contains("Usage");
         if dir_entry {
-            let cwd = rig.dir.path().display().to_string();
+            // Go prints the directory the operating system reports for its working directory,
+            // which is the resolved path (macOS puts temporary directories behind a symlink,
+            // `/var` for `/private/var`); the entry's own path is printed as the config gave it.
+            let cwd = std::fs::canonicalize(rig.dir.path())
+                .unwrap_or_else(|_| rig.dir.path().to_path_buf())
+                .display()
+                .to_string();
             let scan = rig.path("scan");
             let collapse = |text: &str| -> Vec<String> {
                 text.lines()

@@ -1,0 +1,8 @@
+# A boot the store fails is not counted as a failed sync step: an alert on litestream_sync_error_count never fires for a store that refuses the credentials.
+name = "boot-failure-not-a-failed-sync"
+fix = "claude/dropin-gaps"
+package = "lsr-core"
+tests = [
+    "a_boot_the_store_fails_counts_as_a_failed_sync_step",
+    "each_boot_attempt_that_fails_counts_once",
+]

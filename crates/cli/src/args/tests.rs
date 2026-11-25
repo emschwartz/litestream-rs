@@ -153,6 +153,33 @@ fn help_and_version_in_every_spelling() {
     }
 }
 
+/// `version` is Go's command, not `--version`: Go's flag grammar, no positional needed, and a
+/// stray argument ignored as Go ignores it (`cmd/litestream/version.go`).
+#[test]
+fn version_is_a_command_with_go_s_one_flag() {
+    assert_eq!(
+        parsed("version"),
+        Ok(Command::VersionLine(VersionArgs { verbose: false }))
+    );
+    for line in [
+        "version -verbose",
+        "version --verbose",
+        "version -verbose=true",
+    ] {
+        assert_eq!(
+            parsed(line),
+            Ok(Command::VersionLine(VersionArgs { verbose: true })),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        parsed("version stray"),
+        Ok(Command::VersionLine(VersionArgs { verbose: false }))
+    );
+    assert_eq!(parsed("version -h"), Ok(Command::Help));
+    assert!(matches!(usage("version -json"), UsageError::GoFlag(_)));
+}
+
 #[test]
 fn no_command() {
     assert_eq!(parse(&[]), Err(UsageError::NoCommand));
@@ -736,6 +763,7 @@ fn help_lists_exactly_the_flags_each_go_grammar_parser_defines() {
         (CommandName::Databases, &inspect::DATABASES[..]),
         (CommandName::Ltx, &inspect::LTX[..]),
         (CommandName::Wal, &inspect::LTX[..]),
+        (CommandName::Version, &inspect::VERSION[..]),
     ];
     for (command, defined) in tables {
         let listed = help_flags(command);
@@ -777,6 +805,7 @@ fn sample(flag: &str) -> &'static [&'static str] {
         | "-f"
         | "--json"
         | "-json"
+        | "-verbose"
         | "--created-at" => &[],
         other => {
             panic!("{other} has no sample: give a new flag one, and so a proof it does something")
@@ -834,6 +863,13 @@ const FORMS: &[Form] = &[
         label: "databases",
         command: CommandName::Databases,
         base: "databases",
+        in_base: &[],
+        inert: &[],
+    },
+    Form {
+        label: "version",
+        command: CommandName::Version,
+        base: "version",
         in_base: &[],
         inert: &[],
     },
@@ -949,7 +985,8 @@ fn every_flag_changes_the_command_or_is_refused() {
                     CommandName::Restore
                     | CommandName::Databases
                     | CommandName::Ltx
-                    | CommandName::Wal => 1,
+                    | CommandName::Wal
+                    | CommandName::Version => 1,
                     CommandName::Verify
                     | CommandName::Files
                     | CommandName::TrustLocal

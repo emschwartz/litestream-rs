@@ -186,6 +186,8 @@ struct Seen {
     counters: Counters,
     /// The application checkpoint total last reported as an event.
     app_reported: u64,
+    /// The skipped scratch sweep was reported as an event.
+    scratch_reported: bool,
     stopped_reported: bool,
 }
 
@@ -605,6 +607,7 @@ impl Worker {
             self.emit(&Event::Engine(event));
         }
         self.report_app();
+        self.report_scratch();
         if self.stop.is_some() && progress {
             return Turn::Again;
         }
@@ -681,6 +684,14 @@ impl Worker {
                 seen,
                 total: app.total(),
             });
+        }
+    }
+
+    /// Reports once that the replica refused the boot's sweep of scratch files.
+    fn report_scratch(&mut self) {
+        if self.actor.scratch_sweep_denied() && !self.seen.scratch_reported {
+            self.seen.scratch_reported = true;
+            self.emit(&Event::ScratchSweepDenied);
         }
     }
 
@@ -802,6 +813,7 @@ impl Worker {
         let wal_synced_offset = self.actor.synced_wal_offset();
         let final_snapshot = self.actor.final_snapshot();
         let read_lock_violations = self.actor.read_lock_violations();
+        let scratch_sweeps_denied = u64::from(self.actor.scratch_sweep_denied());
         let ran = self.app_ran_total();
         let app = self.app_total();
         let verification = self
@@ -837,6 +849,7 @@ impl Worker {
                 snapshots,
                 work,
                 read_lock_violations,
+                scratch_sweeps_denied,
                 ..seen.counters
             };
             health.final_retention = final_retention;
