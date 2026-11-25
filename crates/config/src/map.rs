@@ -79,7 +79,6 @@ mod go {
     pub(super) const MIN_CHECKPOINT_PAGES: u32 = 1000;
     pub(super) const TRUNCATE_PAGES: u32 = 121_359;
     pub(super) const MAX_SYNC_WAL_BYTES: u64 = 64 << 20;
-    pub(super) const MAX_SYNC_LTX_FILES: u32 = 256;
 }
 
 /// Everything the daemon starts, in config order.
@@ -532,7 +531,7 @@ fn sync_limits(db: &DbConfig) -> Option<SyncLimits> {
         Some(value) => u64::try_from(value).ok().and_then(NonZeroU64::new),
     };
     let files_per_upload = match db.replica().and_then(|r| r.max_sync_ltx_files()) {
-        None => NonZeroU32::new(go::MAX_SYNC_LTX_FILES),
+        None => Some(SyncLimits::FILES_PER_UPLOAD),
         Some(value) if value <= 0 => None,
         Some(value) => count(value),
     };

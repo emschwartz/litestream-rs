@@ -518,15 +518,16 @@ impl ObjectStore for Bucket {
         }
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<BucketUpload, StoreError> {
         match self {
             Self::Mem(store) => store
-                .begin_upload(key, created_at, mode)
+                .begin_sized_upload(key, created_at, mode, len)
                 .await
                 .map(BucketUpload::Mem),
             Self::S3(wire) => Ok(BucketUpload::S3 {
@@ -644,19 +645,20 @@ impl ObjectStore for RemoteBackend {
         }
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<RemoteUpload, StoreError> {
         match self {
             Self::Mem(s) => s
-                .begin_upload(key, created_at, mode)
+                .begin_sized_upload(key, created_at, mode, len)
                 .await
                 .map(RemoteUpload::Mem),
             Self::S3(s) => s
-                .begin_upload(key, created_at, mode)
+                .begin_sized_upload(key, created_at, mode, len)
                 .await
                 .map(RemoteUpload::S3),
         }

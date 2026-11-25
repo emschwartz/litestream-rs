@@ -1,0 +1,8 @@
+# A chain that fails only at the instance metadata service reads as a credentials refusal, not as an outage
+# that passes, so health reports the wrong cause.
+name = "fetch-error-ignores-the-metadata-look"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "a_chain_that_cannot_be_reached_fails_each_request_transient_and_sends_nothing",
+]

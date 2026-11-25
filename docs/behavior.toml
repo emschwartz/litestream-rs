@@ -949,6 +949,39 @@ detected_by = "core::`a_store_without_create_only_writes_degrades_and_uploads_by
 notes = "Before, the S3 store dropped the condition on its own after the first refusal and counted it in `WriteStats`, which nothing read: the engine went on claiming create-only writes it was not making. The simulator draws a store without create-only writes in a quarter of its swarm mixes, and its judge fails a run that takes a level-0 replace on such a store while the upload task is not degraded. A task holds one degraded cause, so while another fault holds it health names that one. store-fs's hard-link create-only on a filesystem without links is an open question (D79)"
 
 [[row]]
+table = "Upload"
+id = "UP-20"
+circumstance = "A staged file is longer than 10000 parts of the configured part size (48.8 GiB at the default 5 MiB part, 977 GiB at 100 MB). S3 takes at most 10000 parts in one upload"
+response = "The part size is chosen per upload from the staged file's length: the configured size, or the smallest one that fits the file in 10000 parts when that is larger (`part_plan.rs`). Never below the configured size, so a file that fit before is cut as before"
+signal = "none"
+at_risk = "None. Memory: an upload holds up to `concurrency` parts, so the bound is `concurrency x max(part size, length / 10000)`; at the 5 TiB ceiling that is about 524 MB a part, 5.5 GB at a concurrency of 10"
+recovery = "Automatic"
+detected_by = "store-s3::`an_object_over_ten_thousand_configured_parts_fills_a_larger_part`, store-s3::`an_object_that_fits_is_cut_at_the_configured_part`, store-s3::`every_object_up_to_the_limit_fits_in_ten_thousand_legal_parts`, store-s3::`the_part_grows_only_when_the_configured_one_does_not_fit`, core::`an_upload_is_begun_with_the_staged_files_length`; plant::`part-size-ignores-length`"
+notes = "Before, such a file uploaded 10000 parts, was refused at part 10001 (`StoreRefused`), waited and sent the same bytes again without end, each try costing 48.8 GiB of egress at the default part. Go's level-0 upload hands the AWS SDK uploader a sized, seekable file, and the SDK raises the part size to fit 10000 parts, so this is Go's behaviour. A file whose length is not known when its upload begins (a compaction's output, still being encoded) is cut at the configured part and meets the old refusal, **untested** at that size: no run writes 50 GiB"
+
+[[row]]
+table = "Upload"
+id = "UP-21"
+circumstance = "A staged file is longer than 5 TiB, S3's limit for one object, so no part size carries it"
+response = "The upload is refused before a byte is sent, `StoreError::ObjectTooLarge` (the key, the length, the limit), and reported as `StoreRefused`. The engine keeps trying under the default response, at the cost of reading the first chunk of the staged file each time, and stops under `responses: {store-refused: stop}` (and `STRICT`)"
+signal = "`store_refused`"
+at_risk = "Replication of that database stops at that file. Staged files accumulate on the staging disk"
+recovery = "Operator"
+detected_by = "store-s3::`an_object_over_the_store_limit_is_refused_before_a_byte_is_sent`, store-s3::`an_object_of_exactly_the_store_limit_begins`, store-s3::`the_largest_object_is_carried_and_one_byte_more_is_refused`, core::`an_object_over_the_store_limit_is_a_store_refusal`, core::`an_object_over_the_store_limit_is_permanent`; plant::`object-over-the-limit-begins`"
+notes = "Before, the refusal came from S3 at part 10001, after every part was sent. Health names the cause `store_refused` without the sizes (nothing carries a store error's text to the health snapshot); the typed error with them reaches library callers of the store. A dedicated cause would need its own response setting, which is user-visible, so it waits for the owner"
+
+[[row]]
+table = "Upload"
+id = "UP-22"
+circumstance = "More files are staged than one upload tick sends: the backlog after a store outage (staging holds up to 4096 files before the WAL grows instead)"
+response = "A tick uploads at most 256 files (`max-sync-ltx-files`, Go's default; the library's `SyncLimits::files_per_upload` defaults to the same), then the other tasks run: the WAL sync, the checkpoint, the health snapshot, a stop or drain. The next tick continues. The setting can raise the bound or, with 0 or less in YAML, remove it, as in Go"
+signal = "none while it drains; `replica.lag` falls tick by tick"
+at_risk = "None"
+recovery = "Automatic"
+detected_by = "replica::`the_default_bounds_the_files_an_upload_tick_sends`, core::`files_per_tick_is_honoured_and_asks_to_step_again`; plant::`library-uploads-whole-backlog`"
+notes = "Before, only the binary set the bound: the library's default was none, so its first tick after an outage sent every staged file, sequentially, with no WAL sync, checkpoint or health update between them, and a stop waited for the whole tick. The core test is the tick's own bound; the replica test is the default that feeds it"
+
+[[row]]
 table = "Maintenance and retention"
 id = "MAINT-1"
 circumstance = "A level's window opened (30 s, 5 min, 1 h by default): merge at most 32 contiguous files from the level below (`compact.rs`). Inputs are never deleted by the merge. A hole in the source ends the run; the next job starts after it"
@@ -1006,11 +1039,11 @@ detected_by = "core::`a_commit_that_fails_after_publish_is_failed_and_the_next_p
 table = "Maintenance and retention"
 id = "MAINT-6"
 circumstance = "The snapshot interval passed (24 h by default)"
-response = "A level-9 snapshot of every page, under a fresh sync proof"
+response = "A level-9 snapshot of every page, under a fresh sync proof. The first one, when level 0 holds every file from transaction 1 to the newest (at most 32), is a merge of those files and reads no database page (D205); one that fails is read from the database next"
 signal = "Event `Snapshot`"
 at_risk = "None"
 recovery = "n/a"
-detected_by = "core::`snapshot_job_writes_level_9`, sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`"
+detected_by = "core::`snapshot_job_writes_level_9`, core::`the_first_start_reads_each_page_once`, core::`the_snapshot_of_a_first_start_restores_the_database`, core::`a_failed_first_snapshot_from_level_zero_is_read_from_the_database_next`, sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`; plant::`first-snapshot-reads-the-database`, plant::`failed-first-snapshot-not-refused`"
 recovered_by = "sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`"
 
 [[row]]
@@ -1281,6 +1314,17 @@ detected_by = "replica::`a_failed_forced_restore_leaves_a_target_that_shares_the
 notes = "The kill's on-disk state is made by hand with a hard link in the tests. Pages reach the scratch before the file's trailer checksum is checked, so the sentence in the docs that every checksum is checked before any page is applied holds only for the target, which is untouched until publish"
 
 [[row]]
+table = "Restore"
+id = "REST-18"
+circumstance = "The replica's endpoint takes connections and never answers, or answers every listing with a failure, during a `restore` (or its `-dry-run`)"
+response = "Every listing of the restore together is held to 120 seconds from the first (`RESTORE_LISTING_BUDGET`): a failed listing is retried under the usual policy until the next retry would begin at or after that time, then the restore fails. A request already in flight is not cut short, so the bound is 120 seconds plus one request deadline (60 seconds by default). Before, each level was retried five times at the request deadline in turn, about 33 minutes with a silent endpoint. The retry rules of replication and of the restore's reads are unchanged. Go retries nothing here (D211)"
+signal = "exit 1, the error names the endpoint, the seconds, how many listing requests were made and what the last one failed with"
+at_risk = "A restore against a slow but live endpoint whose listing takes longer than the budget fails where it might have finished; run it again"
+recovery = "Operator: check the endpoint, run the restore again"
+detected_by = "core::`a_spent_listing_budget_stops_the_retries_and_says_what_was_tried`, core::`the_budget_ends_a_retry_that_would_begin_at_its_end`, core::`the_budget_starts_at_the_first_listing`, core::`a_spent_budget_leaves_later_listings_one_attempt_each`, core::`a_batch_listing_is_held_to_the_budget_too`, core::`reads_keep_the_policys_attempts_after_the_budget_is_spent`, core::`a_store_without_a_budget_retries_listings_by_the_policy_alone`, core::`a_budget_that_is_never_spent_reports_nothing`, cli::`a_restore_that_cannot_list_names_the_endpoint_and_what_was_tried`, cli::`a_restore_error_with_the_budget_unspent_is_not_renamed`, cli::`the_restore_listing_budget_is_two_minutes`; plant::`listing-budget-never-spent`, plant::`restore-timeout-not-named`"
+notes = "The daemon's restore-if-missing at start keeps the retry policy alone (it is not a person waiting, and its failure is a reported start state)."
+
+[[row]]
 table = "Verify"
 id = "VERIFY-1"
 circumstance = "`lsr verify`: every file is decoded, its checksums and name checked, every hole reported, then a real restore of the latest state runs into a sink that writes nothing (`verify.rs`)"
@@ -1498,12 +1542,12 @@ detected_by = "cli::`a_database_created_after_start_is_picked_up`"
 table = "Config and startup"
 id = "CFG-7"
 circumstance = "Credentials from a source that fetches them: web identity (`AWS_WEB_IDENTITY_TOKEN_FILE` or a profile's `web_identity_token_file`), a profile's `credential_process`, container credentials (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or `_FULL_URI`), the EC2 instance metadata service"
-response = "continue with the first source that answers, in the order of Go's SDK; refuse the start when the source the chain reaches fails (a refusal, a body that holds no credentials, a token file that cannot be read, a container URL that is not loopback or a container address, the metadata service off and nothing else configured), as Go. The metadata service is the source reached when nothing is configured, so its failure is reported in the list of every source tried"
-signal = "error at start, naming the source"
-at_risk = "Nothing starts when the source fails"
-recovery = "Operator: fix the role, the token or the endpoint"
-detected_by = "compat::`go_and_rust_fetch_the_same_temporary_credentials`, store-s3::`instance_metadata_falls_back_without_a_token`, store-s3::`container_host_must_be_loopback_or_a_container_address`, store-s3::`credential_process_output_is_checked`, store-s3::`environment_keys_come_before_web_identity_and_web_identity_before_the_host`; plant::`imds-token-fallback-narrow`, plant::`container-host-unchecked`, plant::`process-version-unchecked`, plant::`web-identity-before-env-keys`"
-notes = "Built for #176 (D44). The compat test is a differential against Go's SDK through the dumper, both pointed at one fake STS, container endpoint and metadata service by the SDK's endpoint variables, over 1024 generated cases a run. It found two differences, fixed toward Go: the metadata token now falls back to asking without one on any failure but a 400, and a body that is not JSON is malformed before its code is read. Server errors (5xx) are not generated, since Go retries them with backoff; their class is a store-s3 unit test"
+response = "continue with the first source that answers, in the order of Go's SDK. A source that fails to answer at start (a refusal, a body that holds no credentials, a token file that cannot be read, an unreachable or erroring endpoint, a container URL that is not loopback or a container address, the metadata service failing when nothing else is configured) does not refuse the start: the store opens and asks the chain again with each request, as Go's SDK fetches credentials per request, and the log says `credentials not available yet, retrying` with the source's words. Each request meanwhile fails without reaching the bucket: `Transient` when waiting may fix it (no answer, 5xx, 429), as a credentials refusal otherwise; the engine retries as for any store refusal, and the first request after the source answers signs and goes. A configuration no source can satisfy (nothing named and the metadata service switched off, a profile that cannot be used, a shared file that cannot be read) refuses the start naming the source, since asking again cannot change it. The metadata service is the source reached when nothing is configured, so its failure is reported in the list of every source tried"
+signal = "`credentials not available yet, retrying` in the log at start; then `/healthz` and health name the failure as for any store refusal (`credentials`, or retrying and then stalled for a transient one); an error at start naming the source for a configuration no source can satisfy"
+at_risk = "Under the default `if-replication-stops: hold-start`, writes are held until the boot is judged. A source that does not answer or answers 5xx fails the boot transiently, so writes are released after 15 s of failing (`BOOT_UNDECIDED_BOUND`), as for any store that is down. A source that refuses (a 403, a rejected token) is a credentials refusal, which holds until healed (FS-6); `report` does not hold. Nothing is lost: commits are staged and uploaded once the credentials come"
+recovery = "Automatic when the source answers, with no restart; operator for a configuration no source can satisfy"
+detected_by = "compat::`go_and_rust_fetch_the_same_temporary_credentials`, store-s3::`instance_metadata_falls_back_without_a_token`, store-s3::`container_host_must_be_loopback_or_a_container_address`, store-s3::`credential_process_output_is_checked`, store-s3::`environment_keys_come_before_web_identity_and_web_identity_before_the_host`, store-s3::`only_a_source_that_failed_to_answer_is_a_fetch_failure`, store-s3::`a_chain_that_cannot_be_reached_fails_each_request_transient_and_sends_nothing`, store-s3::`a_chain_the_service_refuses_is_a_credentials_refusal_and_sends_nothing`, store-s3::`the_store_signs_once_the_chain_answers_and_asks_no_more`, config::`a_source_that_is_down_at_start_opens_a_store_that_asks_again`, config::`a_configuration_that_cannot_yield_credentials_is_refused`; plant::`imds-token-fallback-narrow`, plant::`container-host-unchecked`, plant::`process-version-unchecked`, plant::`web-identity-before-env-keys`, plant::`credential-failure-at-open-refuses-the-start`, plant::`fetch-error-ignores-the-metadata-look`"
+notes = "Before, the start was refused for any source failure (this row said \"as Go\", which was wrong: Go's `Init` loads the SDK config without fetching, and the SDK fetches on the first request), so a pod that started before its credential agent answered, or an instance metadata service answering 5xx once, left that database unreplicated, with no replicator and no hold, until someone restarted the daemon. Not tested end to end through the daemon: the process environment cannot be set under the suite, so the store's and the open function's own tests carry it. Built for #176 (D44). The compat test is a differential against Go's SDK through the dumper, both pointed at one fake STS, container endpoint and metadata service by the SDK's endpoint variables, over 1024 generated cases a run. It found two differences, fixed toward Go: the metadata token now falls back to asking without one on any failure but a 400, and a body that is not JSON is malformed before its code is read. Server errors (5xx) are not generated, since Go retries them with backoff; their class is a store-s3 unit test"
 
 [[row]]
 table = "Config and startup"

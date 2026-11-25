@@ -1,0 +1,12 @@
+diff --git a/crates/store-s3/src/part_plan.rs b/crates/store-s3/src/part_plan.rs
+--- a/crates/store-s3/src/part_plan.rs
++++ b/crates/store-s3/src/part_plan.rs
+@@ -41,7 +41,7 @@
+     if len > MAX_OBJECT {
+         return None;
+     }
+-    Some(configured.at_least(len.div_ceil(MAX_PARTS)))
++    Some(configured)
+ }
+ 
+ #[cfg(test)]

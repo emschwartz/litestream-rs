@@ -9,9 +9,9 @@
 //! and a tracked snapshot whose post-apply checksum is not its pages'. The
 //! index is kept in memory as varint bytes, at most 30 bytes a page.
 
-use std::io::Write;
+use std::io::{self, Write};
 
-use lz4_flex::block::compress;
+use lz4_flex::block::{compress_into, get_maximum_output_size};
 
 use crate::checksum::Crc64;
 use crate::conv::u64_from;
@@ -30,6 +30,8 @@ pub struct Encoder<W> {
     file: Crc64,
     offset: u64,
     index: Vec<u8>,
+    /// The compressor's output for one page, reused so a page costs no allocation.
+    block: Vec<u8>,
     /// The database checksum so far, for tracked snapshots only.
     db: Option<DbChecksum>,
     failed: bool,
@@ -61,6 +63,7 @@ impl<W: Write> Encoder<W> {
             file,
             offset: u64_from(HEADER_LEN),
             index: Vec::new(),
+            block: vec![0; get_maximum_output_size(header.page_size().bytes())],
             db: (header.tracked() && header.is_snapshot()).then_some(DbChecksum::EMPTY),
             failed: false,
         })
@@ -85,19 +88,28 @@ impl<W: Write> Encoder<W> {
         }
         let mut seq = self.seq;
         let pgno = seq.push(pgno.nonzero())?;
-        let block = compress(data);
-        let len = u32::try_from(block.len()).unwrap_or(u32::MAX);
+        let mut block = std::mem::take(&mut self.block);
+        let Ok(used) = compress_into(data, &mut block) else {
+            // The buffer holds the compressor's worst case for a page, so this cannot happen.
+            self.failed = true;
+            return Err(EncodeError::Io(io::Error::other(
+                "lz4 output buffer too small",
+            )));
+        };
+        let len = u32::try_from(used).unwrap_or(u32::MAX);
         let mut head = [0_u8; PAGE_HEADER_LEN + 4];
         head[0..4].copy_from_slice(&pgno.get().to_be_bytes());
         head[4..6].copy_from_slice(&1_u16.to_be_bytes());
         head[6..10].copy_from_slice(&len.to_be_bytes());
+        let packed = block.get(..used).unwrap_or_default();
         self.write(&head)?;
-        self.write(&block)?;
+        self.write(packed)?;
         self.seq = seq;
         self.file.update(&head);
         self.file.update(data);
         self.db = self.db.map(|db| db.toggle(PageChecksum::of(pgno, data)));
-        let size = u64_from(head.len()).saturating_add(u64_from(block.len()));
+        let size = u64_from(head.len()).saturating_add(u64_from(packed.len()));
+        self.block = block;
         put_uvarint(&mut self.index, u64::from(pgno.get()));
         put_uvarint(&mut self.index, self.offset);
         put_uvarint(&mut self.index, size);
@@ -250,5 +262,47 @@ mod tests {
             rest = &rest[used..];
         }
         assert_eq!(decoder.finish().unwrap().page_count(), 3);
+    }
+
+    #[test]
+    fn page_blocks_are_the_compressors_own_output_whatever_the_reused_buffer_held() {
+        let size = PageSize::new(512).unwrap();
+        let header = Header::new(HeaderFields {
+            tracked: false,
+            page_size: size,
+            commit: 3,
+            txids: TxidRange::single(Txid::MIN),
+            timestamp: Timestamp::from_unix_millis(1),
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .unwrap();
+        // An incompressible page, a compressible one, then a short-lived pattern: the buffer
+        // holds the previous page's block when the next is compressed.
+        let pages: Vec<Vec<u8>> = vec![
+            (0..512_u32)
+                .map(|i| u8::try_from((i.wrapping_mul(2_654_435_761) >> 13) & 0xff).unwrap())
+                .collect(),
+            vec![7; 512],
+            (0..512_u32).map(|i| u8::try_from(i % 5).unwrap()).collect(),
+        ];
+        let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+        for (n, page) in (1..=3_u32).zip(&pages) {
+            encoder
+                .write_page(PageNo::new(n, size).unwrap(), page)
+                .unwrap();
+        }
+        let (bytes, _) = encoder.finish(None).unwrap();
+        let mut at = HEADER_LEN;
+        for page in &pages {
+            let len = usize::try_from(u32::from_be_bytes(
+                bytes[at + 6..at + 10].try_into().unwrap(),
+            ))
+            .unwrap();
+            let block = &bytes[at + PAGE_HEADER_LEN + 4..at + PAGE_HEADER_LEN + 4 + len];
+            assert_eq!(block, lz4_flex::block::compress(page).as_slice());
+            at += PAGE_HEADER_LEN + 4 + len;
+        }
     }
 }

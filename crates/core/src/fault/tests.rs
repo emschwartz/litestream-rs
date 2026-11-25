@@ -704,6 +704,19 @@ fn from_remote_checksum_mismatch_and_refusal_have_their_own_faults() {
     assert_eq!(store_fault(&refused), Fault::StoreRefused);
 }
 
+/// An object over the store's limit is the replica's refusal, never a staging fault and never
+/// a retry that would send it again: it reports as `StoreRefused`, which health names.
+#[test]
+fn an_object_over_the_store_limit_is_a_store_refusal() {
+    let err = StoreError::ObjectTooLarge {
+        key: key(),
+        len: 6,
+        max: 5,
+    };
+    assert_eq!(store_fault(&err), Fault::StoreRefused);
+    assert_eq!(Fault::from_staging(&err), Fault::LocalIo);
+}
+
 #[test]
 fn from_staging_refused_is_local_io_and_checksum_is_fsync() {
     let refused = StoreError::Refused {

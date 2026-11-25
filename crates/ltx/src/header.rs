@@ -133,9 +133,10 @@ pub struct HeaderFields {
     pub txids: TxidRange,
     /// When the writer stamped the file. For a level-0 file that is when its
     /// last transaction was synced, and compaction copies its newest input's,
-    /// so on levels 0 to 8 it dates the last transaction. A snapshot is
-    /// stamped when it is written, which can be long after its last
-    /// transaction committed.
+    /// so on levels 0 to 8 it dates the last transaction. A snapshot read
+    /// from the database is stamped when it is written, which can be long
+    /// after its last transaction committed; one merged from level-0 files
+    /// (the first snapshot of a first start) keeps its newest input's stamp.
     pub timestamp: Timestamp,
     /// The database checksum before this file applies: present exactly when
     /// the file is tracked and not a snapshot.
