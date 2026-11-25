@@ -258,7 +258,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 
 | Fault | Scope | What the engine does | Rig |
 |---|---|---|---|
-| Errors, 5xx, connection reset, timeout (60 s per request, `store-s3/src/config.rs`) | In | UP-2 | sim `store_flaky_5pct`; store-s3 `the_deadline_bounds_a_silent_server` |
+| Errors, 5xx, connection reset, timeout (60 s without progress, and a cap that grows with an upload's length, D235; `store-s3/src/config.rs`) | In | UP-2 | sim `store_flaky_5pct`; store-s3 `the_deadline_bounds_a_silent_server`, `an_upload_that_keeps_moving_outlives_the_stall_bound` |
 | Throttling (429, `SlowDown`) | In | UP-3 | sim `store_429_retry_after` |
 | A response body cut short | In | Treated as transient (`store-s3/src/classify.rs`) | store-s3 `a_truncated_body_is_never_a_whole_response`. No proxy rig drives a real client through it |
 | A commit that fails after the object became visible | In | UP-6 | sim `commit_fails_after_publish` |

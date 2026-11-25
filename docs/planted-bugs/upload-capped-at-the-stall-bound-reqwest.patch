@@ -1,0 +1,16 @@
+diff --git a/crates/store-s3/src/reqwest_transport.rs b/crates/store-s3/src/reqwest_transport.rs
+index f5b9d171d..994238407 100644
+--- a/crates/store-s3/src/reqwest_transport.rs
++++ b/crates/store-s3/src/reqwest_transport.rs
+@@ -172,10 +172,7 @@ impl ReqwestTransport {
+         let mut builder = self
+             .client
+             .request(method(request.method()), request.url().as_str())
+-            .timeout(
+-                self.bounds
+-                    .cap(u64::try_from(request.body().len()).unwrap_or(u64::MAX)),
+-            )
++            .timeout(self.bounds.stall())
+             .body(request.body().to_vec());
+         // Every header is sent as signed, `content-length` included: hyper keeps a
+         // given length (it equals the body's), and without it an empty PUT goes

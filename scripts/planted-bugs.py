@@ -187,6 +187,8 @@ def env() -> dict[str, str]:
 def nextest_args(bug: dict) -> list[str]:
     args = ["cargo", "nextest", "run", "--locked", "--no-tests=fail", "-p", bug["package"],
             "--config-file", str(PATCHES / "nextest.toml")]
+    if "features" in bug:
+        args += ["--features", ",".join(bug["features"])]
     if "bin" in bug:
         args += ["--bin", bug["bin"]]
     elif "test_bin" in bug:
