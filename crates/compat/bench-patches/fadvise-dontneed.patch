@@ -27,7 +27,7 @@ index a42525557..a5fb8eb4a 100644
  # The descriptor test drives a full sync and checkpoint cycle through core's in-memory store.
  lsr-core = { workspace = true, features = ["testing"] }
 diff --git a/crates/sqlite/src/conn.rs b/crates/sqlite/src/conn.rs
-index 3496ec6bd..8f3ab83f2 100644
+index 2bcd7129c..7bca57c74 100644
 --- a/crates/sqlite/src/conn.rs
 +++ b/crates/sqlite/src/conn.rs
 @@ -107,6 +107,8 @@ pub(crate) struct Inner {
@@ -38,8 +38,8 @@ index 3496ec6bd..8f3ab83f2 100644
 +    pub(crate) advise: Option<(u64, u64)>,
  }
  
- /// Which file a path named: device and inode.
-@@ -259,6 +261,7 @@ impl Sqlite {
+ /// The file a stat described, where a stat identifies one (Unix only).
+@@ -249,6 +251,7 @@ impl Sqlite {
              epoch: ReadLockHold::first(),
              issued: 0,
              returned: 0,

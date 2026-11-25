@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/response.rs b/crates/store-s3/src/response.rs
+index 61e3900b8..1df3893f0 100644
+--- a/crates/store-s3/src/response.rs
++++ b/crates/store-s3/src/response.rs
+@@ -39,7 +39,7 @@ pub enum ResponseError {
+     #[error("listing repeats a key or goes back")]
+     RepeatedKey,
+     /// The created-at time header is present and does not parse.
+-    #[error("litestream-timestamp header does not parse")]
++    #[error("litestream-timelitestream-timestamp header does not parse")]
+     BadCreatedAt,
+ }
+ 

@@ -197,6 +197,11 @@ planted-bugs *args:
 planted-bugs-unaided seeds="1000" *args:
     uv run scripts/planted-bugs.py --unaided --seeds {{seeds}} {{args}}
 
+# Production lines per shipped crate (code, comment, blank; tests and the "testing" feature left
+# out) and the change in code lines against `base`. Pull requests write it to the CI job summary.
+prod-lines base="origin/main":
+    uv run scripts/prod-lines.py --base {{base}}
+
 # Mutation-tests the lines this branch changed in core and ltx against `base`; fails on a missed
 # mutant not in docs/mutants-escapes.txt. Runs on pull requests in CI.
 mutants-diff base="origin/main":

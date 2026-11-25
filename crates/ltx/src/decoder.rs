@@ -22,6 +22,7 @@
 use std::io::{self, Read};
 use std::mem;
 
+use crate::PageChecksum;
 use crate::checksum::Crc64;
 use crate::conv::{Cursor, u64_from};
 use crate::frame::{FrameParser, Progress};
@@ -257,7 +258,6 @@ struct Body {
     /// Bytes of the file consumed.
     offset: u64,
     frame_start: u64,
-    current: Option<PageNo>,
     /// The database checksum so far, for tracked snapshots only.
     db: Option<DbChecksum>,
     frames: Crc64,
@@ -282,8 +282,7 @@ impl Body {
             file,
             offset: u64_from(HEADER_LEN),
             frame_start: 0,
-            current: None,
-            db: (header.tracked() && header.is_snapshot()).then_some(DbChecksum::EMPTY),
+            db: header.snapshot_db_checksum(),
             frames: Crc64::new(),
             frame_count: 0,
             listed: Crc64::new(),
@@ -343,15 +342,15 @@ impl Body {
             Progress::More => Ok(Step::Continue),
             Progress::PageStart(pgno) => {
                 self.frame_start = start;
-                self.current = Some(self.seq.push(pgno)?);
+                self.seq.push(pgno)?;
                 Ok(Step::Continue)
             }
-            Progress::Page(_) => {
-                let pgno = self.current.ok_or(DecodeError::Poisoned)?;
-                let page = PageRef::new(pgno, self.header.page_size(), self.frame.page())
-                    .ok_or(DecodeError::Poisoned)?;
-                self.file.update(page.data());
-                self.db = self.db.map(|db| db.toggle(page.checksum()));
+            Progress::Page(pgno) => {
+                // `PageStart` put this number through `seq.push`, which checked the lock page.
+                let pgno = PageNo::checked(pgno);
+                let data = self.frame.page();
+                self.file.update(data);
+                self.db = self.db.map(|db| db.toggle(PageChecksum::of(pgno, data)));
                 hash_entry(
                     &mut self.frames,
                     [
