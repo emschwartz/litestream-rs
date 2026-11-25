@@ -84,6 +84,9 @@ pub struct MaintainState {
     distrusted: BTreeMap<Level, FileKey>,
     /// The restore point retention keeps with its chain.
     kept_restore_point: Option<Txid>,
+    /// A snapshot built from level-0 files failed: until a restart, the first snapshot is read
+    /// from the database, which does not depend on those files.
+    seed_refused: bool,
 }
 
 impl MaintainState {
@@ -97,6 +100,18 @@ impl MaintainState {
     #[must_use]
     pub const fn kept_restore_point(&self) -> Option<Txid> {
         self.kept_restore_point
+    }
+
+    /// Whether the first snapshot must be read from the database: one built from the
+    /// replica's level-0 files failed.
+    #[must_use]
+    pub(crate) const fn seed_refused(&self) -> bool {
+        self.seed_refused
+    }
+
+    /// Makes the first snapshot a read of the database.
+    pub(crate) const fn refuse_seed(&mut self) {
+        self.seed_refused = true;
     }
 
     /// Notes how `job` ended at `now`.

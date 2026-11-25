@@ -1,0 +1,4 @@
+name = "failed-first-snapshot-not-refused"
+fix = "plant"
+package = "lsr-core"
+tests = ["a_failed_first_snapshot_from_level_zero_is_read_from_the_database_next"]

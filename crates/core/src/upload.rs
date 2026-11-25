@@ -835,7 +835,7 @@ async fn copy_verified<'s, L: Role, S: Role>(
             (None, Some(header)) => {
                 names_key(&header, key)?;
                 // Stored before the first write so a failed write still aborts it.
-                let open = upload.insert(begin(remote, key, &header, mode).await?);
+                let open = upload.insert(begin(remote, key, &header, mode, token.len()).await?);
                 held.extend_from_slice(&chunk);
                 write_chunk(open, &held).await?;
                 held = Vec::new();
@@ -861,8 +861,9 @@ async fn begin<'s, S: Role>(
     key: &FileKey,
     header: &Header,
     mode: WriteMode,
+    len: u64,
 ) -> Result<Writer<'s, S>, PutError> {
-    Writer::begin(remote, key, header.fields().timestamp, mode)
+    Writer::begin(remote, key, header.fields().timestamp, mode, Some(len))
         .await
         .map_err(|err| PutError::Before(S::fault(&err)))
 }

@@ -360,6 +360,19 @@ pub enum StoreError {
         /// The key being written.
         key: FileKey,
     },
+    /// An upload of `len` bytes that no request shape the store may use can
+    /// carry (`max` is the most it can hold), refused before a byte was sent.
+    /// Retrying the same file cannot help: the object is bigger than the store
+    /// allows, and a person has to change what is being replicated.
+    #[error("object {key} of {len} bytes is over the store's limit of {max} bytes")]
+    ObjectTooLarge {
+        /// The key being uploaded.
+        key: FileKey,
+        /// The object's size in bytes.
+        len: u64,
+        /// The largest object the store can hold.
+        max: u64,
+    },
     /// The backend refused a request that retrying cannot fix and that is not
     /// an authorization failure: a 4xx outside the mapped codes, 501, or an
     /// object too large for the store's mode.
@@ -537,13 +550,29 @@ pub trait ObjectStore: Send + Sync {
 
     /// Starts writing `key` with `created_at` as its created-at time; `mode`
     /// says whether the commit may replace an object already there. Nothing is
-    /// visible yet.
+    /// visible yet. `len` is the exact number of bytes the upload will write
+    /// when the caller knows it before the first one (a staged file being
+    /// copied), so a store can plan its request shape and refuse an object it
+    /// cannot hold before sending anything; `None` when the caller does not
+    /// know (an object still being encoded). A store treats it as a plan, never
+    /// as a promise: the bytes written are what count.
+    fn begin_sized_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+        mode: WriteMode,
+        len: Option<u64>,
+    ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send;
+
+    /// [`Self::begin_sized_upload`] for an object of unknown length.
     fn begin_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
-    ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send;
+    ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send {
+        self.begin_sized_upload(key, created_at, mode, None)
+    }
 
     /// Removes the keys. A key that is already gone is not an error, so a
     /// retried delete converges.

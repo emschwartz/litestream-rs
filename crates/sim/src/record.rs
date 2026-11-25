@@ -264,6 +264,7 @@ fn store_error(err: &StoreError) -> Result<String, Unprintable> {
         | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::CreateOnlyUnsupported { .. }
+        | StoreError::ObjectTooLarge { .. }
         | StoreError::Corrupt { .. } => Err(Unprintable(format!("{err:?}"))),
     }
 }

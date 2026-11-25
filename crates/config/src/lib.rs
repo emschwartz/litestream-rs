@@ -77,7 +77,7 @@ pub use map::{
     ReplicaProblem, S3Overrides, S3Url, default_meta, plan, s3_config,
 };
 pub use size::{SizeError, parse_byte_size};
-pub use store::{OpenStoreError, open_store};
+pub use store::{OpenStoreError, Opened, open_store, open_store_noting};
 
 use error::Problem as P;
 use walk::Walk;

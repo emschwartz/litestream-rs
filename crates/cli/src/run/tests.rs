@@ -262,6 +262,89 @@ fn a_403_is_an_environment_error_that_names_no_secret() {
     );
 }
 
+/// A restore against an endpoint whose listings keep failing stops retrying when the budget is
+/// spent and says which endpoint, how many requests and what the last one failed with. A zero
+/// budget is spent at the first failure, so the test needs no waiting.
+#[test]
+fn a_restore_that_cannot_list_names_the_endpoint_and_what_was_tried() {
+    let staged = staged_fixtures().remove(0);
+    let (fake, _) = bucket_of(&staged, true);
+    let faults = FaultTransport::new(fake);
+    for _ in 0..20 {
+        faults.push(Fault::Status {
+            on: Shape::List,
+            status: 503,
+            code: Some("SlowDown"),
+            retry_after: None,
+        });
+    }
+    let wire = Arc::new(faults);
+    let store = crate::replica::restore_remote(
+        S3Store::with_transport(config(), creds(), Shared(Arc::clone(&wire)), clock()).unwrap(),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let output = staged.output("out.db");
+    let done = block_on(restore_on(&store, &output, how(RestoreTarget::Latest)));
+    let replica = Replica::S3(Box::new(config()));
+    let err = name_listing_timeout(done.map(|_| ()), &store, &replica).unwrap_err();
+    let CliError::ListingTimedOut {
+        endpoint,
+        budget,
+        listings,
+        last,
+    } = &err
+    else {
+        panic!("not a listing timeout: {err:?}");
+    };
+    assert_eq!(endpoint, "http://127.0.0.1:9000/");
+    // One request per level in the first batch, none retried.
+    assert_eq!((*budget, *listings), (Duration::ZERO, 8));
+    assert!(matches!(last, StoreError::Throttled { .. }), "{last:?}");
+    assert_eq!(exit_for_error(&err), Exit::Environment);
+    let line = crate::render::error_line(&err);
+    assert!(
+        line.contains("http://127.0.0.1:9000/") && line.contains("8 listing requests"),
+        "{line}"
+    );
+    assert!(!line.contains("CANARY"), "{line}");
+    assert_eq!(wire.requests().len(), 8);
+}
+
+/// An error that is not a spent budget is passed through as it came.
+#[test]
+fn a_restore_error_with_the_budget_unspent_is_not_renamed() {
+    let staged = staged_fixtures().remove(0);
+    let (fake, _) = bucket_of(&staged, true);
+    let faults = FaultTransport::new(fake);
+    faults.push(Fault::Status {
+        on: Shape::List,
+        status: 403,
+        code: Some("AccessDenied"),
+        retry_after: None,
+    });
+    let store = crate::replica::restore_remote(
+        S3Store::with_transport(config(), creds(), faults, clock()).unwrap(),
+        crate::replica::RESTORE_LISTING_BUDGET,
+    )
+    .unwrap();
+    let output = staged.output("out.db");
+    let done = block_on(restore_on(&store, &output, how(RestoreTarget::Latest)));
+    let replica = Replica::S3(Box::new(config()));
+    let err = name_listing_timeout(done.map(|_| ()), &store, &replica).unwrap_err();
+    assert!(!matches!(err, CliError::ListingTimedOut { .. }), "{err:?}");
+}
+
+/// The stated deadline: a person waiting on a recovery hears within minutes, where the retry
+/// policy alone took about half an hour (five tries of the 60 s request deadline per level).
+#[test]
+fn the_restore_listing_budget_is_two_minutes() {
+    assert_eq!(
+        crate::replica::RESTORE_LISTING_BUDGET,
+        Duration::from_secs(120)
+    );
+}
+
 #[test]
 fn a_throttled_listing_is_retried() {
     let staged = staged_fixtures().remove(0);
@@ -419,13 +502,16 @@ impl<S: ObjectStore> ObjectStore for Unlisting<S> {
         self.inner.read_with_created_at(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &lsr_core::FileKey,
         created_at: Timestamp,
         mode: lsr_core::WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, lsr_core::StoreError> {
-        self.inner.begin_upload(key, created_at, mode).await
+        self.inner
+            .begin_sized_upload(key, created_at, mode, len)
+            .await
     }
 
     async fn delete(&self, keys: &[lsr_core::FileKey]) -> Result<(), lsr_core::StoreError> {

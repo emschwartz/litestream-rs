@@ -727,7 +727,7 @@ fn decide(
         let step = match (waits, state.distrusted_at(Level::SNAPSHOT)) {
             (Some(retry), _) => Step::Wait(retry),
             (None, Some(bad)) => delete_first(bad),
-            (None, None) => plan_snapshot(&tail.planning, now, config, published, resolved)?,
+            (None, None) => plan_snapshot(&tail.planning, now, config, published, state, resolved)?,
         };
         if let Step::Wait(at) = step {
             snapshot_quiet = Some(at);

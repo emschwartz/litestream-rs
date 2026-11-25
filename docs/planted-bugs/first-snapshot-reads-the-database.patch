@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+index 77105041e..cfa39d46c 100644
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -765,7 +765,7 @@ fn level_zero_from_one(inventory: &Inventory) -> Option<CompactionInputs> {
+     let run = contiguous_run(inventory.level(Level::ZERO).iter());
+     run.first().filter(|first| is_snapshot_start(first))?;
+     let inputs = CompactionInputs::new(run).ok()?;
+-    (Some(inputs.range().max()) >= inventory.newest()).then_some(inputs)
++    (Some(inputs.range().max()) >= inventory.newest() && false).then_some(inputs)
+ }
+ 
+ /// Whether the file was recorded as created after `start`, or the request for its created-at time.
