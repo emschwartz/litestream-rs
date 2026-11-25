@@ -61,8 +61,12 @@ const READ: ReadLen = ReadLen::CHUNK;
 /// position in the stream, so any split of the same bytes into `add` calls gives the same
 /// digest; up to 31 bytes wait in `pending` for the next call. It is an equality check
 /// between two reads of one file, not a defence against an adversary, and it is never stored.
+///
+/// It is public for one use outside the engine: a store that lets go of bytes it was handed
+/// keeps a tally of them, and [`crate::Reread`] gives the bytes back only when a second read
+/// of them tallies the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ByteTally {
+pub struct ByteTally {
     size: u64,
     lanes: [u64; LANES],
     pending: [u8; BLOCK],
@@ -87,9 +91,16 @@ const SEEDS: [u64; LANES] = [
 /// An odd multiplier with well-spread bits.
 const MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
 
+impl Default for ByteTally {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ByteTally {
     /// No bytes yet.
-    pub(crate) const fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             size: 0,
             lanes: SEEDS,
@@ -102,8 +113,14 @@ impl ByteTally {
         usize::try_from(self.size & HELD_MASK).unwrap_or(0)
     }
 
+    /// How many bytes were taken in.
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
     /// Takes in the next bytes of the stream.
-    pub(crate) fn add(&mut self, bytes: &[u8]) {
+    pub fn add(&mut self, bytes: &[u8]) {
         let held = self.held();
         self.size = self
             .size

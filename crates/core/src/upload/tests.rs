@@ -190,6 +190,8 @@ struct Log {
     flip_whole_reads: Vec<u32>,
     /// Whole reads from the start of a key seen so far.
     whole_reads: u32,
+    /// The read, counted from one over every read of the store, that fails, and with what.
+    fail_read: Option<(u32, StoreError)>,
 }
 
 /// A [MemStore] that counts calls and can fail a commit before it publishes
@@ -259,8 +261,16 @@ impl ObjectStore for Probe {
                 Some(_) | None => false,
             }
         };
+        let failed = {
+            let mut log = self.log();
+            let nth = log.reads;
+            log.fail_read.take_if(|(at, _)| *at == nth)
+        };
         let read = self.inner.read(key, offset, len);
         async move {
+            if let Some((_, err)) = failed {
+                return Err(err);
+            }
             let mut bytes = read.await?;
             let middle = bytes.len() / 2;
             if flip && let Some(byte) = bytes.get_mut(middle) {
@@ -1582,6 +1592,7 @@ fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twic
 }
 
 mod endless;
+mod reread;
 mod slices;
 
 /// A rejected write deletes only an object it created. A create-only put

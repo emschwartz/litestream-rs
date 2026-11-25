@@ -28,7 +28,7 @@ use std::task::{Context, Poll};
 use lsr_core::WriteMode;
 use lsr_core::{
     BatchKind, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore,
-    PageLimit, ReadAt, ReadLen, SeededEntropy, StoreError, StoreOp, Upload,
+    PageLimit, ReadAt, ReadLen, Reread, SeededEntropy, StoreError, StoreOp, Upload,
 };
 use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_ltx::{HEADER_LEN, Header, Timestamp, TxidRange, WalOrigin};
@@ -716,18 +716,19 @@ async fn rewrite(
 
 impl<U: Upload> Upload for FaultsUpload<U> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        if let Verdict::Fail(err) = lock(&self.state).decide(Call::Write) {
-            return Err(err);
-        }
-        self.inner.write(chunk).await?;
-        self.wrote = self
-            .wrote
-            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        Ok(())
+        self.write_inner(chunk, None).await
+    }
+
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        self.write_inner(chunk, Some(again)).await
     }
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        self.commit_inner().await
+        self.commit_inner(None).await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        self.commit_inner(Some(again)).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
@@ -735,8 +736,46 @@ impl<U: Upload> Upload for FaultsUpload<U> {
     }
 }
 
+/// Commits `inner`, through the source the engine gave when it gave one.
+async fn commit_of<U: Upload>(
+    inner: U,
+    again: Option<&dyn Reread>,
+) -> Result<FileInfo, StoreError> {
+    match again {
+        Some(again) => inner.commit_from(again).await,
+        None => inner.commit().await,
+    }
+}
+
+/// Writes `chunk` to `inner`, with the source the engine gave when it gave one.
+async fn write_of<U: Upload>(
+    inner: &mut U,
+    chunk: &[u8],
+    again: Option<&dyn Reread>,
+) -> Result<(), StoreError> {
+    match again {
+        Some(again) => inner.write_from(chunk, again).await,
+        None => inner.write(chunk).await,
+    }
+}
+
 impl<U: Upload> FaultsUpload<U> {
-    async fn commit_inner(self) -> Result<FileInfo, StoreError> {
+    async fn write_inner(
+        &mut self,
+        chunk: &[u8],
+        again: Option<&dyn Reread>,
+    ) -> Result<(), StoreError> {
+        if let Verdict::Fail(err) = lock(&self.state).decide(Call::Write) {
+            return Err(err);
+        }
+        write_of(&mut self.inner, chunk, again).await?;
+        self.wrote = self
+            .wrote
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    async fn commit_inner(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
         let verdict = lock(&self.state).decide(Call::Commit);
         if matches!(
             verdict,
@@ -750,14 +789,14 @@ impl<U: Upload> FaultsUpload<U> {
                 Err(err)
             }
             Verdict::AfterPublish(err) => {
-                self.inner.commit().await?;
+                commit_of(self.inner, again).await?;
                 if let Some(volatile) = &self.volatile {
                     volatile.mark_volatile(self.key);
                 }
                 Err(err)
             }
             Verdict::SizeMismatch => {
-                let mut info = self.inner.commit().await?;
+                let mut info = commit_of(self.inner, again).await?;
                 // Not damage the store hid: it said the size, so the engine is
                 // told. A level-0 replace must not delete it (the key may have
                 // held an acknowledged object, D78), so the short object is
@@ -781,18 +820,18 @@ impl<U: Upload> FaultsUpload<U> {
                 Ok(info)
             }
             Verdict::Checksum => {
-                self.inner.commit().await?;
+                commit_of(self.inner, again).await?;
                 Err(checksum_mismatch(self.key))
             }
             Verdict::Corrupt => {
-                let info = self.inner.commit().await?;
+                let info = commit_of(self.inner, again).await?;
                 if let Some(raw) = &self.raw {
                     damage(raw, &info).await?;
                     lock(&self.state).damaged.push(info.key);
                 }
                 Err(checksum_mismatch(self.key))
             }
-            Verdict::Pass | Verdict::Flip(_) => self.inner.commit().await,
+            Verdict::Pass | Verdict::Flip(_) => commit_of(self.inner, again).await,
         }
     }
 }
@@ -899,9 +938,19 @@ impl<U: Upload> Upload for YieldUpload<U> {
         self.inner.write(chunk).await
     }
 
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        YieldNow(false).await;
+        self.inner.write_from(chunk, again).await
+    }
+
     async fn commit(self) -> Result<FileInfo, StoreError> {
         YieldNow(false).await;
         self.inner.commit().await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        YieldNow(false).await;
+        self.inner.commit_from(again).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
@@ -1256,7 +1305,33 @@ fn parse_header(head: &[u8]) -> Option<Header> {
 
 impl<S: ObjectStore> Upload for TapUpload<S> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        self.inner.write(chunk).await?;
+        self.write_inner(chunk, None).await
+    }
+
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        self.write_inner(chunk, Some(again)).await
+    }
+
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        self.commit_inner(None).await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        self.commit_inner(Some(again)).await
+    }
+
+    async fn abort(self) -> Result<(), StoreError> {
+        self.inner.abort().await
+    }
+}
+
+impl<S: ObjectStore> TapUpload<S> {
+    async fn write_inner(
+        &mut self,
+        chunk: &[u8],
+        again: Option<&dyn Reread>,
+    ) -> Result<(), StoreError> {
+        write_of(&mut self.inner, chunk, again).await?;
         self.digest = digest_more(self.digest, chunk);
         let room = HEADER_LEN.saturating_sub(self.head.len());
         self.head
@@ -1275,7 +1350,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
         Ok(())
     }
 
-    async fn commit(self) -> Result<FileInfo, StoreError> {
+    async fn commit_inner(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
         let Self {
             inner,
             key,
@@ -1287,7 +1362,7 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             log,
         } = self;
         let header = parse_header(&head);
-        let outcome = inner.commit().await;
+        let outcome = commit_of(inner, again).await;
         log.with(|s| {
             bump(&mut s.counts.commits);
             // An object the store accepted is recorded. The recorder sits below `Faults`, so a
@@ -1320,10 +1395,6 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
             }
         });
         outcome
-    }
-
-    async fn abort(self) -> Result<(), StoreError> {
-        self.inner.abort().await
     }
 }
 
@@ -1648,8 +1719,18 @@ impl<U: Upload> Upload for StageUpload<U> {
         self.inner.write(chunk).await
     }
 
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        self.inner.write_from(chunk, again).await
+    }
+
     async fn commit(self) -> Result<FileInfo, StoreError> {
         let info = self.inner.commit().await?;
+        self.handle.fsync_all();
+        Ok(info)
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        let info = self.inner.commit_from(again).await?;
         self.handle.fsync_all();
         Ok(info)
     }

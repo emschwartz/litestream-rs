@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
     BatchKind, Clock, CreatedAt, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit,
-    ReadAt, ReadLen, StoreError, Upload,
+    ReadAt, ReadLen, Reread, StoreError, Upload,
 };
 pub use lsr_core::{BoxFuture, DynUpload};
 use lsr_ltx::{Timestamp, TxidRange};
@@ -353,16 +353,20 @@ pub(crate) struct MeteredUpload {
     written: u64,
 }
 
-impl Upload for MeteredUpload {
-    async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
+impl MeteredUpload {
+    /// A write, with the source the engine gave when it gave one.
+    async fn write_with(
+        &mut self,
+        chunk: &[u8],
+        again: Option<&dyn Reread>,
+    ) -> Result<(), StoreError> {
         let clock = Arc::clone(&self.clock);
         let meters = Arc::clone(&self.meters);
-        let result = metered(
-            &*clock,
-            &meters.write,
-            DynUpload::write_boxed(&mut *self.inner, chunk),
-        )
-        .await;
+        let write = match again {
+            Some(again) => DynUpload::write_from_boxed(&mut *self.inner, chunk, again),
+            None => DynUpload::write_boxed(&mut *self.inner, chunk),
+        };
+        let result = metered(&*clock, &meters.write, write).await;
         if result.is_ok() {
             let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
             self.written = self.written.saturating_add(len);
@@ -370,19 +374,37 @@ impl Upload for MeteredUpload {
         result
     }
 
-    async fn commit(self) -> Result<FileInfo, StoreError> {
-        let result = metered(
-            &*self.clock,
-            &self.meters.commit,
-            DynUpload::commit_boxed(self.inner),
-        )
-        .await;
+    /// The commit, through the source the engine gave when it gave one.
+    async fn commit_with(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
+        let commit = match again {
+            Some(again) => DynUpload::commit_from_boxed(self.inner, again),
+            None => DynUpload::commit_boxed(self.inner),
+        };
+        let result = metered(&*self.clock, &self.meters.commit, commit).await;
         if result.is_ok() {
             self.meters
                 .bytes_uploaded
                 .fetch_add(self.written, Ordering::Relaxed);
         }
         result
+    }
+}
+
+impl Upload for MeteredUpload {
+    async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
+        self.write_with(chunk, None).await
+    }
+
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        self.write_with(chunk, Some(again)).await
+    }
+
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        self.commit_with(None).await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        self.commit_with(Some(again)).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

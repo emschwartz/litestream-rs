@@ -38,6 +38,8 @@ mod request_counts;
 #[path = "common/rig.rs"]
 mod rig;
 #[cfg(test)]
+mod sourced;
+#[cfg(test)]
 mod store;
 #[cfg(test)]
 mod tigris;

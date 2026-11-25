@@ -143,8 +143,8 @@ pub use source::{
 };
 pub use store::{
     BatchKind, BoxFuture, CorruptCause, Denied, DynUpload, ListAt, Listing, ListingStalled,
-    ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode,
-    build_listing,
+    ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen, Reread, StoreError, StoreOp, Upload,
+    WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use takeover::{TakeoverRecord, TakeoverRecordError};
@@ -153,4 +153,4 @@ pub use verify::{
     Compared, Depth, Finding, LevelSummary, LivePages, MAX_FINDINGS, Report, Severity, Verified,
     VerifyError, verify, verify_against,
 };
-pub use witness::{Witnessed, Witnesses};
+pub use witness::{ByteTally, Witnessed, Witnesses};
