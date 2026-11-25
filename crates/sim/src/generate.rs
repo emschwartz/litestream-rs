@@ -363,6 +363,14 @@ pub enum AppOp {
     /// The last connection closes and the WAL is deleted, when no connection, ours
     /// included, holds a transaction.
     DeleteWal,
+    /// It begins a write transaction and writes `pages` pages it does not commit yet: it
+    /// holds SQLite's write lock from that call on, across the engine's later calls, until
+    /// a commit or a rollback after the tick. An ordinary writer, not a fault: the engine's
+    /// barrier and its sequence bump find the lock busy.
+    Spill {
+        /// How many pages it writes.
+        pages: u8,
+    },
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of
@@ -1209,14 +1217,15 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
 
 /// An [`Op::AppInTick`]: at one of the tick's first 24 calls into SQLite or before its
 /// first call of a kind, half each, a commit (a sixth of them growing), a reader
-/// beginning or ending, a checkpoint of each mode, or a deleted WAL.
+/// beginning or ending, a checkpoint of each mode, a deleted WAL, or a write transaction
+/// left open.
 fn app_in_tick(entropy: &SeededEntropy) -> Op {
     let at = if below(entropy, 2) == 0 {
         AppAt::Call(small(entropy, 24))
     } else {
         AppAt::Before(choose(entropy, &SOURCE_OPS).unwrap_or(SourceOp::Committed))
     };
-    let op = match below(entropy, 7) {
+    let op = match below(entropy, 8) {
         0 | 1 => AppOp::Commit {
             pages: small(entropy, 4).saturating_add(1),
             grow: below(entropy, 6) == 0,
@@ -1235,7 +1244,10 @@ fn app_in_tick(entropy: &SeededEntropy) -> Op {
             .unwrap_or(OtherProcessMode::Passive),
         ),
         5 => AppOp::Checkpoint(OtherProcessMode::Truncate),
-        _ => AppOp::DeleteWal,
+        6 => AppOp::DeleteWal,
+        _ => AppOp::Spill {
+            pages: small(entropy, 3).saturating_add(1),
+        },
     };
     Op::AppInTick { at, op }
 }

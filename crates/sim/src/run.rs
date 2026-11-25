@@ -1124,6 +1124,14 @@ impl Runner {
         let (cause, at_boot) = match event {
             Event::Booted { cause: Some(cause) } => (cause, true),
             Event::Resnapshot(cause) => (cause, false),
+            // A busy answer from SQLite is no excuse for a later snapshot: a sync step it
+            // fails moves nothing, and a PASSIVE keeps its position pinned through one
+            // (`docs/decisions/D225.md`). Before, every retry excused the snapshots that
+            // followed it, and a busy sequence bump followed by a restart passed unseen.
+            Event::Retrying {
+                fault: Fault::SqliteBusy,
+                ..
+            } => return Ok(()),
             Event::Degraded { .. } | Event::Retrying { .. } => {
                 self.forcings.note_in_tick(Forcing::PositionUnproven);
                 return Ok(());

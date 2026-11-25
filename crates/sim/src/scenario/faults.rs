@@ -18,7 +18,7 @@ use super::{
     CauseKind, EventMatch, Expect, SEED, SETTLE, Scenario, build, commit, ticks,
     vacuum_page_size_change, vacuum_page_size_change_and_back,
 };
-use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp};
+use crate::generate::{AppAt, AppOp, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp};
 use crate::run::{RunReport, Seen};
 use crate::seed::Seed;
 use crate::sqlite::OtherProcessMode;
@@ -1291,6 +1291,74 @@ fn nothing_failed_and_nothing_snapshotted(report: &RunReport) -> Result<(), Stri
         )
     });
     bad.map_or(Ok(()), |seen| Err(format!("the run saw {seen:?}")))
+}
+
+/// A writer begins its transaction between the PASSIVE's barrier and the sequence bump, in a
+/// WAL the checkpoint copied whole, so it restarts the WAL and holds the write lock when the
+/// bump asks for it (nine frames make the checkpoint due; the commit after the tick ends the
+/// writer's transaction). No fault is injected: this is an application writing. The engine
+/// follows the restart with no retry and no snapshot, the needless-snapshot oracle judges
+/// the run with nothing to excuse one, and the restore holds every commit. That the restart
+/// happens is held by the planted bug `unpinned-after-own-checkpoint`, which this scenario
+/// must fail under.
+#[must_use]
+pub fn bump_overtaken_then_the_wal_restarts() -> Scenario {
+    let mut ops = vec![
+        commit(9, true),
+        Op::AppInTick {
+            at: AppAt::Before(SourceOp::BumpSeq),
+            op: AppOp::Spill { pages: 2 },
+        },
+        commit(2, false),
+    ];
+    ops.extend(ticks(SETTLE));
+    ops.push(Op::Restore);
+    let mut s = build(
+        "bump_overtaken_then_the_wal_restarts",
+        vec![live(), ops],
+        vec![
+            Expect::Event(EventMatch::Checkpointed(lsr_core::CheckpointMode::Passive)),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(overtaken_at_the_bump);
+    s
+}
+
+/// The writer began right before the bump, and nothing failed or snapshotted.
+fn overtaken_at_the_bump(report: &RunReport) -> Result<(), String> {
+    if report.reach.get("point.BumpSeq.Spill.ran") != 1 {
+        return Err("no write transaction began right before the sequence bump".to_owned());
+    }
+    nothing_failed_and_nothing_snapshotted(report)
+}
+
+/// A writer holds the write lock, with frames it has not committed, when the checkpoint comes
+/// due: no fault is injected. The tick defers the checkpoint and fails nothing; the writer
+/// commits, the wait (ten milliseconds) passes, the checkpoint runs, and the restore holds
+/// every commit.
+#[must_use]
+pub fn write_lock_held_at_the_barrier() -> Scenario {
+    let mut ops = vec![
+        commit(9, true),
+        Op::Spill,
+        Op::Tick,
+        commit(2, false),
+        Op::ClockJump(10),
+    ];
+    ops.extend(ticks(SETTLE));
+    ops.push(Op::Restore);
+    let mut s = build(
+        "write_lock_held_at_the_barrier",
+        vec![live(), ops],
+        vec![
+            Expect::Event(EventMatch::CheckpointDeferred),
+            Expect::Event(EventMatch::Checkpointed(lsr_core::CheckpointMode::Passive)),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(nothing_failed_and_nothing_snapshotted);
+    s
 }
 
 /// The application's readers hold the WAL when a checkpoint is asked for: it is
