@@ -616,6 +616,99 @@ mod tests {
         assert_eq!(mem.scratch(), 0);
     }
 
+    /// An upload that notes which way it was written and committed.
+    struct Noting {
+        inner: <MemStore as ObjectStore>::Upload,
+        calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl Noting {
+        fn note(&self, call: &'static str) {
+            self.calls.lock().unwrap().push(call);
+        }
+    }
+
+    impl Upload for Noting {
+        async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
+            self.note("write");
+            self.inner.write(chunk).await
+        }
+
+        async fn write_from(
+            &mut self,
+            chunk: &[u8],
+            _again: &dyn Reread,
+        ) -> Result<(), StoreError> {
+            self.note("write_from");
+            self.inner.write(chunk).await
+        }
+
+        async fn commit(self) -> Result<FileInfo, StoreError> {
+            self.note("commit");
+            self.inner.commit().await
+        }
+
+        async fn commit_from(self, _again: &dyn Reread) -> Result<FileInfo, StoreError> {
+            self.note("commit_from");
+            self.inner.commit().await
+        }
+
+        async fn abort(self) -> Result<(), StoreError> {
+            self.inner.abort().await
+        }
+    }
+
+    /// A source no test reads.
+    struct Unread;
+
+    impl Reread for Unread {
+        fn read<'a>(
+            &'a self,
+            _offset: u64,
+            _was: &'a lsr_core::ByteTally,
+        ) -> lsr_core::BoxFuture<'a, Result<Vec<u8>, StoreError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    /// The meters sit between the engine and the S3 store in the sidecar. A layer that took
+    /// the defaults would turn every write from a staged file into a plain one, and the store
+    /// would hold its parts again with nothing failing.
+    #[test]
+    fn the_meters_hand_the_source_of_a_write_and_a_commit_on() {
+        let mem = MemStore::new();
+        let meters = Arc::new(Meters::default());
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let key = FileKey::new(Level::ZERO, TxidRange::new(Txid::MIN, Txid::MIN).unwrap());
+        block_on(async {
+            let inner = mem
+                .begin_upload(&key, Timestamp::from_unix_millis(0), WriteMode::Replace)
+                .await
+                .unwrap();
+            let noting = Noting {
+                inner,
+                calls: Arc::clone(&calls),
+            };
+            let mut upload = MeteredUpload {
+                inner: Box::new(noting),
+                meters: Arc::clone(&meters),
+                clock: Arc::new(FakeClock::new(Timestamp::from_unix_millis(0))),
+                written: 0,
+            };
+            upload.write_from(b"abc", &Unread).await.unwrap();
+            upload.write(b"de").await.unwrap();
+            upload.commit_from(&Unread).await.unwrap();
+        });
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["write_from", "write", "commit_from"]
+        );
+        let counted = meters.read();
+        assert_eq!(counted.bytes_uploaded, 5);
+        assert_eq!(counted.write.calls, 2);
+        assert_eq!(counted.commit.calls, 1);
+    }
+
     #[test]
     fn metered_calls_and_bytes_are_counted() {
         let store: Arc<dyn DynStore> = Arc::new(MemStore::new());
