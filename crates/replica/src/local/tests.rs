@@ -352,6 +352,55 @@ fn a_restore_publishes_the_database_and_nothing_else() {
     assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
 }
 
+/// A restore killed after it hard-linked the scratch to the target and before it unlinked the
+/// scratch's name leaves both names on one inode. The next `-force` restore must not write
+/// through the scratch name: that is the live database.
+fn linked_scratch(dir: &TempDir) -> (PathBuf, PathBuf) {
+    let target = dir.path().join("db");
+    fs::write(&target, vec![0xAA; 1536]).unwrap();
+    fs::hard_link(&target, dir.path().join("db.restore")).unwrap();
+    (target, dir.path().join("keep"))
+}
+
+#[test]
+fn a_failed_forced_restore_leaves_a_target_that_shares_the_scratch_inode_as_it_was() {
+    let dir = TempDir::new().unwrap();
+    let (target, _) = linked_scratch(&dir);
+    let mut damaged = snapshot_bytes(3, 7);
+    let middle = damaged.len() / 2;
+    damaged[middle] ^= 0xFF;
+    let store = replica(&damaged);
+    let sink = FileSink::create_over(&target, Existing::Any).unwrap();
+    assert!(
+        fs::read(&target).unwrap() == vec![0xAA; 1536],
+        "the open alone"
+    );
+    let failed = block_on(restore(&store, RestoreTarget::Latest, sink));
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(fs::read(&target).unwrap() == vec![0xAA; 1536]);
+    assert_eq!(names(&dir), BTreeSet::from(["db".to_owned()]));
+}
+
+#[test]
+fn a_forced_restore_over_a_target_that_shares_the_scratch_inode_replaces_it_whole() {
+    let dir = TempDir::new().unwrap();
+    let (target, keep) = linked_scratch(&dir);
+    // Another name of the live database: the old inode must stay what it was.
+    fs::hard_link(&target, &keep).unwrap();
+    let store = replica(&snapshot_bytes(3, 7));
+    let sink = FileSink::create_over(&target, Existing::Any).unwrap();
+    block_on(restore(&store, RestoreTarget::Latest, sink)).unwrap();
+    assert!(fs::read(&target).unwrap() == vec![7; 1536], "the target");
+    assert!(
+        fs::read(&keep).unwrap() == vec![0xAA; 1536],
+        "the old inode"
+    );
+    assert_eq!(
+        names(&dir),
+        BTreeSet::from(["db".to_owned(), "keep".to_owned()])
+    );
+}
+
 /// A real SQLite database in WAL mode (its header says so, as a
 /// replicated one does), 512-byte pages, a table and an index over it.
 fn sqlite_pages() -> Vec<u8> {

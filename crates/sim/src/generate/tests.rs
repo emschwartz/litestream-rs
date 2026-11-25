@@ -112,6 +112,8 @@ fn a_fault_shape_only_pairs_with_the_operation_it_means() {
                 | FaultShape::CorruptPublish => assert_eq!(op, StoreOp::Upload),
                 FaultShape::FlipByteOnRead { .. } => assert_eq!(op, StoreOp::Read),
                 FaultShape::Error(_) | FaultShape::Rate { .. } => {}
+                // A scenario step: drawing it would move every frozen schedule.
+                FaultShape::Scratch(_) => panic!("drawn: {shape:?}"),
             }
         }
     }

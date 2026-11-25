@@ -8,6 +8,11 @@
 //! interleave, and a scratch left by a crashed restore (the lock died with its
 //! process) is reclaimed instead of lingering at up to the database's size.
 //!
+//! A scratch that is also the target (a restore killed between the link and the unlink of the
+//! scratch's name leaves one file under both names) or that has any other name is never written:
+//! its name is dropped and a fresh file made, so the live database is neither truncated nor
+//! rewritten, whether the restore then fails or succeeds.
+//!
 //! Journal files: SQLite replays a stale `<target>-wal` and treats a stale
 //! `<target>-journal` as a hot journal, either of which corrupts the restored
 //! pages on first open. A restore never deletes a file it does not own, so
@@ -447,6 +452,53 @@ fn first_present(target: &Path) -> io::Result<Option<PathBuf>> {
     Ok(None)
 }
 
+/// Opens the scratch for reading and writing without truncating it; `fresh` insists the name
+/// is new.
+fn open_scratch(scratch: &Path, fresh: bool) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    if fresh {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(false);
+    }
+    options.open(scratch)
+}
+
+/// Takes the scratch's exclusive advisory lock, or says a restore of the target runs.
+fn lock_scratch(file: &File, scratch: &Path) -> Result<(), CreateError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(CreateError::RestoreInProgress(scratch.to_path_buf())),
+        Err(TryLockError::Error(source)) => Err(CreateError::Scratch {
+            path: scratch.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Whether `scratch` still names the file `held` was opened as.
+fn names_what_it_holds(scratch: &Path, held: &File) -> bool {
+    fs::metadata(scratch).is_ok_and(|named| {
+        held.metadata()
+            .is_ok_and(|held| (named.dev(), named.ino()) == (held.dev(), held.ino()))
+    })
+}
+
+/// Whether the scratch file is also the target or has another name: either way, writing it
+/// writes a file the restore does not own.
+fn aliases_the_target(scratch: &File, target: &Path) -> io::Result<bool> {
+    let held = scratch.metadata()?;
+    if held.nlink() > 1 {
+        return Ok(true);
+    }
+    match fs::metadata(target) {
+        Ok(there) => Ok((there.dev(), there.ino()) == (held.dev(), held.ino())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 impl FileSink {
     /// Starts a restore of [target]: opens and locks the scratch file
     /// `<target>.restore`, empty. Nothing exists at [target] or its journal files.
@@ -475,26 +527,29 @@ impl FileSink {
             path: scratch.clone(),
             source,
         };
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&scratch)
-            .map_err(scratch_fault)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(CreateError::RestoreInProgress(scratch)),
-            Err(TryLockError::Error(source)) => return Err(scratch_fault(source)),
-        }
+        let mut file = open_scratch(&scratch, false).map_err(scratch_fault)?;
+        lock_scratch(&file, &scratch)?;
         // The lock holder before us may have removed the name while we waited
         // to open it; a file that is no longer the scratch is not ours to use.
-        let same = fs::metadata(&scratch).is_ok_and(|named| {
-            file.metadata()
-                .is_ok_and(|held| (named.dev(), named.ino()) == (held.dev(), held.ino()))
-        });
-        if !same {
+        if !names_what_it_holds(&scratch, &file) {
             return Err(CreateError::RestoreInProgress(scratch));
+        }
+        if aliases_the_target(&file, target).map_err(scratch_fault)? {
+            // A restore killed between the link and the unlink of the scratch's name left the
+            // target and the scratch as one file. Truncating it is truncating the live
+            // database, and a restore that then fails leaves it damaged. Drop the name, which
+            // leaves the target's, and start a fresh file: no sync is needed, since a crash
+            // that brings the old name back brings it back to this same check.
+            fs::remove_file(&scratch).map_err(scratch_fault)?;
+            drop(file);
+            file = open_scratch(&scratch, true).map_err(|source| {
+                if source.kind() == io::ErrorKind::AlreadyExists {
+                    CreateError::RestoreInProgress(scratch.clone())
+                } else {
+                    scratch_fault(source)
+                }
+            })?;
+            lock_scratch(&file, &scratch)?;
         }
         file.set_len(0).map_err(scratch_fault)?;
         Ok(Self {
