@@ -3,6 +3,7 @@
 /.worktrees
 /.claude/worktrees
 /fuzz/target
+/sqlx-check/target
 /fuzz/artifacts
 /fuzz/coverage
 *.sqlite

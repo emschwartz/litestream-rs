@@ -20,7 +20,7 @@ signal-hook.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
 tempfile.workspace = true
 
 [lints]

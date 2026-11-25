@@ -24,7 +24,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use rusqlite::{Connection, ErrorCode};
+use lsr_sqlite::{SqliteError, ffi};
 use thiserror::Error;
 
 /// How many problems are kept in an [IntegrityFailure].
@@ -134,8 +134,8 @@ fn immutable_uri(path: &Path) -> io::Result<String> {
 
 /// Whether a SQLite error is SQLite judging the file, not the environment
 /// failing: those refuse the restore like a failed check.
-const fn is_verdict(code: ErrorCode) -> bool {
-    matches!(code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
+const fn is_verdict(code: std::ffi::c_int) -> bool {
+    matches!(code & 0xff, ffi::SQLITE_CORRUPT | ffi::SQLITE_NOTADB)
 }
 
 /// SQLite's problem lines, without the per-database headings.
@@ -146,20 +146,10 @@ fn problems(rows: &[String]) -> impl Iterator<Item = &str> {
         .filter(|line| !line.is_empty() && !line.starts_with("*** in database"))
 }
 
-fn run_pragma(path: &Path, pragma: &str) -> rusqlite::Result<Vec<String>> {
-    // The URI's `mode=ro` makes the connection read-only whatever the
-    // default flags ask for, and stops SQLite creating a missing file.
-    let conn = Connection::open(immutable_uri(path).map_err(|err| {
-        rusqlite::Error::InvalidPath(format!("{}: {err}", path.display()).into())
-    })?)?;
-    let rows = {
-        let mut stmt = conn.prepare(&format!("PRAGMA {pragma}({CHECK_LIMIT})"))?;
-        stmt.query_map([], |row| row.get::<_, String>(0))?
-            .take(CHECK_LIMIT)
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    conn.close().map_err(|(_conn, err)| err)?;
-    Ok(rows)
+fn run_pragma(uri: &str, pragma: &str) -> Result<Vec<String>, SqliteError> {
+    // The URI's `mode=ro` makes the connection read-only, and stops SQLite
+    // creating a missing file.
+    lsr_sqlite::read_only_rows(uri, &format!("PRAGMA {pragma}({CHECK_LIMIT})"), CHECK_LIMIT)
 }
 
 /// Runs [check] on the database at [path] and closes the connection.
@@ -171,12 +161,13 @@ pub(crate) fn check(path: &Path, check: IntegrityCheck) -> Result<(), CheckError
     let Some(pragma) = check.pragma() else {
         return Ok(());
     };
-    let messages = match run_pragma(path, pragma) {
+    let uri = immutable_uri(path).map_err(CheckError::Failed)?;
+    let messages = match run_pragma(&uri, pragma) {
         Ok(rows) if rows.len() == 1 && rows.first().is_some_and(|row| row == "ok") => {
             return Ok(());
         }
         Ok(rows) => problems(&rows).map(str::to_owned).collect::<Vec<_>>(),
-        Err(err) if err.sqlite_error_code().is_some_and(is_verdict) => vec![err.to_string()],
+        Err(err) if err.code().is_some_and(is_verdict) => vec![err.to_string()],
         Err(err) => return Err(CheckError::Failed(io::Error::other(err))),
     };
     Err(CheckError::Refused(IntegrityFailure::keeping_the_first(

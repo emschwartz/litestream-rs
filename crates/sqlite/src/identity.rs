@@ -15,16 +15,16 @@ use crate::conn::DatabaseFile;
 
 #[cfg(unix)]
 mod unix {
-    use std::ffi::{CStr, c_int, c_void};
+    use std::ffi::{c_int, c_void};
     use std::fs::File;
     use std::mem::ManuallyDrop;
     use std::os::fd::{FromRawFd, RawFd};
-    use std::ptr::{self, NonNull};
+    use std::ptr::NonNull;
 
-    use rusqlite::{Connection, ffi};
-
+    use crate::capi::{Handle, MAIN};
     use crate::conn::DatabaseFile;
-    use crate::pages::{file_pointer, handle};
+    use crate::ffi;
+    use crate::pages::file_pointer;
 
     /// The head of SQLite's `struct unixFile`, up to the descriptor.
     #[repr(C)]
@@ -33,37 +33,6 @@ mod unix {
         vfs: *mut c_void,
         inode: *mut c_void,
         h: c_int,
-    }
-
-    /// The name of the VFS `conn`'s main database was opened with.
-    #[expect(
-        unsafe_code,
-        reason = "SQLITE_FCNTL_VFS_POINTER has no safe wrapper in rusqlite"
-    )]
-    fn vfs_name(conn: &Connection) -> Option<String> {
-        let mut vfs: *mut ffi::sqlite3_vfs = ptr::null_mut();
-        // SAFETY: a live handle, a NUL-terminated schema name, and VFS_POINTER writes exactly one
-        // `sqlite3_vfs*` through its argument.
-        let rc = unsafe {
-            ffi::sqlite3_file_control(
-                handle(conn),
-                rusqlite::MAIN_DB.as_ptr(),
-                ffi::SQLITE_FCNTL_VFS_POINTER,
-                (&raw mut vfs).cast::<c_void>(),
-            )
-        };
-        if rc != ffi::SQLITE_OK || vfs.is_null() {
-            return None;
-        }
-        // SAFETY: a registered VFS lives as long as the connection that uses it, and its
-        // `zName` is a NUL-terminated string.
-        let name = unsafe { (*vfs).zName };
-        if name.is_null() {
-            return None;
-        }
-        // SAFETY: as above, `zName` is NUL-terminated and outlives this borrow.
-        let name = unsafe { CStr::from_ptr(name) };
-        name.to_str().ok().map(str::to_owned)
     }
 
     /// Whether `name` is one of SQLite's own unix VFSes, all of which open a `unixFile`.
@@ -97,11 +66,11 @@ mod unix {
             .map(|meta| DatabaseFile::of_metadata(&meta))
     }
 
-    pub(super) fn opened(conn: &Connection) -> Option<DatabaseFile> {
-        if !is_unix_family(&vfs_name(conn)?) {
+    pub(super) fn opened(conn: Handle<'_>) -> Option<DatabaseFile> {
+        if !is_unix_family(&conn.vfs_name()?) {
             return None;
         }
-        let file = file_pointer(conn, rusqlite::MAIN_DB).ok()?;
+        let file = file_pointer(conn, MAIN).ok()?;
         stat(descriptor(file)?)
     }
 }
@@ -109,12 +78,12 @@ mod unix {
 /// The file `conn` holds open as its main database; `None` when the VFS is not SQLite's unix
 /// VFS or the platform is not Unix, where it cannot be told.
 #[cfg(unix)]
-pub(crate) fn opened(conn: &rusqlite::Connection) -> Option<DatabaseFile> {
+pub(crate) fn opened(conn: crate::capi::Handle<'_>) -> Option<DatabaseFile> {
     unix::opened(conn)
 }
 
 #[cfg(not(unix))]
-pub(crate) const fn opened(_conn: &rusqlite::Connection) -> Option<DatabaseFile> {
+pub(crate) const fn opened(_conn: crate::capi::Handle<'_>) -> Option<DatabaseFile> {
     None
 }
 

@@ -1,21 +1,20 @@
 //! The two connections, the read transaction that pins the WAL, and the WAL door.
 
-use std::ffi::{OsString, c_int};
+use std::ffi::OsString;
 use std::fs::{File, Metadata};
 use std::io;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
+use crate::capi::{Connection, Handle, MAIN, SqliteError};
+use crate::error::{OpenError, SetupError, SplitOpen};
+use crate::ffi;
+use crate::pages::{FileHandle, WalSync, file_pointer};
+use crate::shm::{self, Region};
 use lsr_core::{CommittedRead, ReadLockHold, SourceError, WalFileLen, WalSource};
 use lsr_ltx::{PageSize, Timestamp};
 use lsr_wal::{CommittedEnd, Salts};
-use rusqlite::{Connection, FileControl, OpenFlags};
-
-use crate::error::{OpenError, SetupError, SplitOpen};
-use crate::pages::{FileHandle, WalSync, file_pointer};
-use crate::shm::{self, Region};
 
 /// [`SqliteConfig::journal_size_limit`]'s default: 64 MiB.
 ///
@@ -140,19 +139,25 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-pub(crate) fn connect(path: &Path, config: &SqliteConfig) -> Result<Connection, rusqlite::Error> {
+pub(crate) fn connect(path: &Path, config: &SqliteConfig) -> Result<Connection, SqliteError> {
     // No CREATE: a path that names no database is an error, never a new empty one.
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = match &config.vfs {
-        Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs.as_str())?,
-        None => Connection::open_with_flags(path, flags)?,
-    };
-    conn.busy_timeout(Duration::ZERO)?;
-    conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    let flags = ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_NOMUTEX;
+    let conn = Connection::open(path, flags, config.vfs.as_deref())?;
+    let handle = conn.handle();
+    handle.busy_timeout(0)?;
+    handle.exec("PRAGMA wal_autocheckpoint = 0")?;
     // These connections run the checkpoints: set, not left to a build default that
     // `LIBSQLITE3_FLAGS` can lower, so a backfill always syncs the database file.
-    conn.pragma_update(None, "synchronous", "FULL")?;
+    handle.exec("PRAGMA synchronous = FULL")?;
     Ok(conn)
+}
+
+/// `PRAGMA journal_size_limit` set to `limit` (see [`journal_size_limit`]).
+fn set_journal_size_limit(conn: Handle<'_>, limit: Option<NonZeroU64>) -> Result<(), SqliteError> {
+    conn.exec(&format!(
+        "PRAGMA journal_size_limit = {}",
+        journal_size_limit(limit)
+    ))
 }
 
 /// The size SQLite reported, as the type pages are counted in.
@@ -160,20 +165,12 @@ pub(crate) fn page_size(bytes: u32) -> Result<PageSize, OpenError> {
     PageSize::new(bytes).ok_or(OpenError::PageSize { bytes })
 }
 
-/// `SQLITE_FCNTL_PERSIST_WAL` on: the connection's close, when it is the last, keeps the WAL file.
-pub(crate) fn persist_wal(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let mut on: c_int = 1;
-    conn.file_control(Some(rusqlite::MAIN_DB), FileControl::PersistWal(&mut on))
-}
-
 /// `BEGIN; SELECT COUNT(1) FROM _litestream_seq` (Go `db.go:1288`): the select takes the read mark.
-fn begin_read(reader: &Connection) -> Result<(), rusqlite::Error> {
-    reader.execute_batch("BEGIN")?;
-    let read: Result<i64, _> =
-        reader.query_row("SELECT COUNT(1) FROM _litestream_seq", [], |row| row.get(0));
-    if let Err(err) = read {
+fn begin_read(reader: Handle<'_>) -> Result<(), SqliteError> {
+    reader.exec("BEGIN")?;
+    if let Err(err) = reader.query_int("SELECT COUNT(1) FROM _litestream_seq") {
         // The transaction is only open to be dropped; its error is the one to report.
-        drop(reader.execute_batch("ROLLBACK"));
+        drop(reader.exec("ROLLBACK"));
         return Err(err);
     }
     Ok(())
@@ -195,8 +192,8 @@ impl Sqlite {
     /// transaction (the first epoch of a holder no earlier open had) and maps the wal-index. It
     /// returns once the read transaction is held, so nothing can checkpoint past it.
     ///
-    /// It first checks that the SQLite answering is the bundled build this crate's layout
-    /// reads follow (the `version` module), and refuses any other.
+    /// It first checks that the SQLite answering is one of the builds this crate's layout reads
+    /// are verified against (the `version` module), and refuses any other.
     ///
     /// # Errors
     /// [`OpenError`]; nothing stays open or pinned.
@@ -208,8 +205,9 @@ impl Sqlite {
         };
         let reader = connect(path, config).map_err(sqlite)?;
         let writer = connect(path, config).map_err(sqlite)?;
-        let mode: String = writer
-            .query_row("PRAGMA journal_mode = wal", [], |row| row.get(0))
+        let mode = writer
+            .handle()
+            .query_text("PRAGMA journal_mode = wal")
             .map_err(sqlite)?;
         if mode != "wal" {
             return Err(OpenError::NotWal { mode });
@@ -217,32 +215,33 @@ impl Sqlite {
         // When the replicator closes last, SQLite checkpoints; without this it also deletes the
         // WAL, and the next start finds nothing to continue.
         for conn in [&reader, &writer] {
-            persist_wal(conn).map_err(sqlite)?;
+            conn.handle().persist_wal().map_err(sqlite)?;
         }
         // The writer only: its sequence bump is the write that restarts the log after the
         // replicator's checkpoints, and SQLite cuts the file on the restarting connection alone.
         // Should a later step fail, the writer closes before the reader (declaration order), so
         // a last close is the reader's, which has no limit and keeps the WAL (see `Inner`'s drop).
+        set_journal_size_limit(writer.handle(), config.journal_size_limit).map_err(sqlite)?;
         writer
-            .pragma_update(
-                None,
-                "journal_size_limit",
-                journal_size_limit(config.journal_size_limit),
-            )
-            .map_err(sqlite)?;
-        writer
-            .execute_batch(
+            .handle()
+            .exec(
                 "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);
                  CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER);",
             )
             .map_err(sqlite)?;
-        let bytes: u32 = reader
-            .query_row("PRAGMA page_size", [], |row| row.get(0))
+        let bytes = reader
+            .handle()
+            .query_int("PRAGMA page_size")
             .map_err(sqlite)?;
+        let bytes = u32::try_from(bytes).map_err(|_range| {
+            sqlite(SqliteError::Type {
+                wanted: "a page size",
+            })
+        })?;
         let page_size = page_size(bytes)?;
-        begin_read(&reader).map_err(sqlite)?;
-        shm::guard(&reader, path)?;
-        let file = FileHandle::new(file_pointer(&reader, rusqlite::MAIN_DB)?)?;
+        begin_read(reader.handle()).map_err(sqlite)?;
+        shm::guard(reader.handle(), path)?;
+        let file = FileHandle::new(file_pointer(reader.handle(), MAIN)?)?;
         let region = shm::map(&file)?;
         let wal_path = suffixed(path, "-wal");
         // The read transaction holds the WAL open, so this is the file SQLite writes.
@@ -276,8 +275,8 @@ impl Sqlite {
     /// [`SplitOpen`] when the reader and the writer hold different files.
     pub fn database_file(&self) -> Result<Option<DatabaseFile>, SplitOpen> {
         let inner = self.lock();
-        let reader = crate::identity::opened(&inner.reader);
-        let writer = crate::identity::opened(&inner.writer);
+        let reader = crate::identity::opened(inner.reader.handle());
+        let writer = crate::identity::opened(inner.writer.handle());
         match (reader, writer) {
             (Some(reader), Some(writer)) if reader != writer => Err(SplitOpen { reader, writer }),
             (Some(reader), Some(_)) => Ok(Some(reader)),
@@ -307,10 +306,7 @@ impl Drop for Inner {
         // to zero bytes, so the next start would find no WAL to continue and snapshot. With the
         // limit off the close keeps the WAL, as `PERSIST_WAL` intends. A failure only leaves
         // that truncation possible, and a drop has no one to report it to.
-        drop(
-            self.writer
-                .pragma_update(None, "journal_size_limit", journal_size_limit(None)),
-        );
+        drop(set_journal_size_limit(self.writer.handle(), None));
     }
 }
 
@@ -350,17 +346,17 @@ impl Inner {
 
     /// Whether the reader holds its read transaction now.
     pub(crate) fn read_lock_held(&self) -> bool {
-        !self.reader.is_autocommit()
+        !self.reader.handle().is_autocommit()
     }
 
     /// Whether the writer holds a barrier or write lock now.
     fn held(&self) -> bool {
-        !self.writer.is_autocommit()
+        !self.writer.handle().is_autocommit()
     }
 
     /// Takes the read transaction again (a new epoch).
-    pub(crate) fn begin_read(&mut self) -> Result<(), rusqlite::Error> {
-        begin_read(&self.reader)?;
+    pub(crate) fn begin_read(&mut self) -> Result<(), SqliteError> {
+        begin_read(self.reader.handle())?;
         self.epoch = self.epoch.next();
         Ok(())
     }
@@ -369,7 +365,8 @@ impl Inner {
     pub(crate) fn end_read(&mut self) -> Result<(), SourceError> {
         if self.read_lock_held() {
             self.reader
-                .execute_batch("ROLLBACK")
+                .handle()
+                .exec("ROLLBACK")
                 .map_err(|e| crate::error::source_error(&e))?;
         }
         Ok(())
@@ -389,27 +386,28 @@ impl Inner {
     /// would roll it back). A transaction still open with none outstanding (its ROLLBACK failed
     /// after the lock was handed back) is rolled back first: a `BEGIN` inside it would fail on
     /// every later call, and a write inside it would be undone by the next lock's release.
-    pub(crate) fn free_writer(&mut self) -> Result<&Connection, SourceError> {
+    pub(crate) fn free_writer(&mut self) -> Result<Handle<'_>, SourceError> {
         if self.issued != self.returned {
             return Err(SourceError::Io(io::ErrorKind::InvalidInput));
         }
         if self.held() {
             self.writer
-                .execute_batch("ROLLBACK")
+                .handle()
+                .exec("ROLLBACK")
                 .map_err(|e| crate::error::source_error(&e))?;
         }
-        Ok(&self.writer)
+        Ok(self.writer.handle())
     }
 
     /// `BEGIN` then the lock-table insert (Go `db.go:2660`, `2759`), which is rolled back.
     /// One holder at a time ([`Inner::free_writer`]).
     pub(crate) fn begin_writer(&mut self) -> Result<u64, SourceError> {
-        self.free_writer()?;
-        self.writer
-            .execute_batch("BEGIN")
+        let writer = self.free_writer()?;
+        writer
+            .exec("BEGIN")
             .map_err(|e| crate::error::source_error(&e))?;
-        if let Err(err) = self.writer.execute(TAKE_WRITE_LOCK, []) {
-            drop(self.writer.execute_batch("ROLLBACK"));
+        if let Err(err) = writer.exec(TAKE_WRITE_LOCK) {
+            drop(writer.exec("ROLLBACK"));
             return Err(crate::error::source_error(&err));
         }
         self.issued = self.issued.saturating_add(1);
@@ -428,7 +426,8 @@ impl Inner {
             return Ok(());
         }
         self.writer
-            .execute_batch("ROLLBACK")
+            .handle()
+            .exec("ROLLBACK")
             .map_err(|e| crate::error::source_error(&e))
     }
 }
@@ -500,7 +499,7 @@ impl WalSource for Sqlite {
         // A failed sync is not remembered: the kernel reports a failed writeback once, so the
         // next sync may succeed over bytes that never reached the disk. v1 goes on, as Go does
         // (`docs/decisions/D173.md`).
-        match crate::pages::sync_wal(&inner.reader) {
+        match crate::pages::sync_wal(inner.reader.handle()) {
             Ok(()) => Ok(()),
             Err(WalSync::NoWal) => Err(SourceError::Io(io::ErrorKind::NotFound)),
             Err(WalSync::Failed(_rc)) => Err(SourceError::FsyncFailed),
@@ -546,8 +545,14 @@ impl WalSource for Sqlite {
 ///
 /// # Errors
 /// [`SetupError::Sqlite`] when the pragma fails.
-pub fn app_connection(conn: &Connection) -> Result<(), SetupError> {
-    conn.pragma_update(None, "wal_autocheckpoint", 0)
+#[cfg(feature = "rusqlite")]
+pub fn app_connection(conn: &rusqlite::Connection) -> Result<(), SetupError> {
+    setup(Handle::of_rusqlite(conn).map_err(SetupError::Sqlite)?)
+}
+
+/// [`app_connection`] on any handle.
+fn setup(conn: Handle<'_>) -> Result<(), SetupError> {
+    conn.exec("PRAGMA wal_autocheckpoint = 0")
         .map_err(SetupError::Sqlite)
 }
 
@@ -599,16 +604,28 @@ impl DatabaseFile {
 /// # Errors
 /// [`SetupError::NoFile`] for a connection with no file (in-memory or temporary);
 /// [`SetupError::OtherDatabase`] when its file is not `database`; else as [`app_connection`].
-pub fn app_connection_for(conn: &Connection, database: &DatabaseFile) -> Result<(), SetupError> {
+#[cfg(feature = "rusqlite")]
+pub fn app_connection_for(
+    conn: &rusqlite::Connection,
+    database: &DatabaseFile,
+) -> Result<(), SetupError> {
+    setup_for(
+        Handle::of_rusqlite(conn).map_err(SetupError::Sqlite)?,
+        database,
+    )
+}
+
+/// [`app_connection_for`] on any handle.
+fn setup_for(conn: Handle<'_>, database: &DatabaseFile) -> Result<(), SetupError> {
     let path = conn
-        .path()
+        .main_filename()
         .filter(|path| !path.is_empty())
         .ok_or(SetupError::NoFile)?;
-    let found = DatabaseFile::of(Path::new(path)).map_err(|err| SetupError::Stat(err.kind()))?;
+    let found = DatabaseFile::of(Path::new(&path)).map_err(|err| SetupError::Stat(err.kind()))?;
     if &found != database {
         return Err(SetupError::OtherDatabase);
     }
-    app_connection(conn)
+    setup(conn)
 }
 
 /// [`app_connection_for`] on a raw SQLite handle, for an application on sqlx, diesel or its own FFI,
@@ -623,21 +640,37 @@ pub fn app_connection_for(conn: &Connection, database: &DatabaseFile) -> Result<
 ///
 /// # Errors
 /// As [`app_connection_for`] and `fail_fast_while`; [`SetupError::Sqlite`] when the handle
-/// cannot be wrapped.
+/// is null.
 #[expect(
     unsafe_code,
-    reason = "an application's raw handle can only be borrowed through rusqlite's unsafe from_handle"
+    reason = "only the caller can promise the raw handle is open and its own for the call"
 )]
 pub unsafe fn app_connection_raw(
-    db: *mut rusqlite::ffi::sqlite3,
+    db: *mut ffi::sqlite3,
     database: &DatabaseFile,
     held: &crate::WritesHeld,
 ) -> Result<(), SetupError> {
     // SAFETY: the caller promises an open handle of this library's SQLite that no other thread
-    // uses during the call; `from_handle` borrows it and its drop does not close it.
-    let conn = unsafe { Connection::from_handle(db) }.map_err(SetupError::Sqlite)?;
-    app_connection_for(&conn, database)?;
-    crate::fail_fast_while(&conn, held)
+    // uses during the call, and the view lives only for the call; nothing closes it.
+    let conn =
+        unsafe { Handle::borrow(db) }.ok_or_else(|| SetupError::Sqlite(SqliteError::misuse()))?;
+    setup_for(conn, database)?;
+    crate::gate::install(conn, held)
+}
+
+/// Opens the `file:` URI `uri` read-only, runs `sql`, and returns the first column of at most
+/// `limit` rows as text, closing the connection before it returns. For a caller outside this
+/// crate that needs one query on a file of its own (`lsr-replica`'s integrity check of a
+/// restored database) and may not use `unsafe`.
+///
+/// # Errors
+/// [`SqliteError`] when the open, the query or the close fails, or a value is not text.
+pub fn read_only_rows(uri: &str, sql: &str, limit: usize) -> Result<Vec<String>, SqliteError> {
+    let flags = ffi::SQLITE_OPEN_READONLY | ffi::SQLITE_OPEN_URI | ffi::SQLITE_OPEN_NOMUTEX;
+    let conn = Connection::open_name(uri, flags, None)?;
+    let rows = conn.handle().query_texts(sql, limit)?;
+    conn.close()?;
+    Ok(rows)
 }
 
 /// Reads back what [`app_connection`] sets, and that the connection syncs at all: its
@@ -647,15 +680,17 @@ pub unsafe fn app_connection_raw(
 /// [`SetupError::AutocheckpointOn`] for a connection that is not set up;
 /// [`SetupError::SynchronousOff`] for one that never syncs; [`SetupError::Sqlite`] when a read
 /// itself fails.
-pub fn check_app_connection(conn: &Connection) -> Result<(), SetupError> {
-    let pages: i64 = conn
-        .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+#[cfg(feature = "rusqlite")]
+pub fn check_app_connection(conn: &rusqlite::Connection) -> Result<(), SetupError> {
+    let conn = Handle::of_rusqlite(conn).map_err(SetupError::Sqlite)?;
+    let pages = conn
+        .query_int("PRAGMA wal_autocheckpoint")
         .map_err(SetupError::Sqlite)?;
     if pages != 0 {
         return Err(SetupError::AutocheckpointOn { pages });
     }
-    let level: i64 = conn
-        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+    let level = conn
+        .query_int("PRAGMA synchronous")
         .map_err(SetupError::Sqlite)?;
     if level == 0 {
         return Err(SetupError::SynchronousOff);
@@ -669,7 +704,7 @@ mod tests {
 
     fn opened(dir: &Path) -> Sqlite {
         let db = dir.join("app.db");
-        let conn = Connection::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
         conn.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
             .unwrap();
         conn.execute_batch("CREATE TABLE t(x)").unwrap();
@@ -685,9 +720,7 @@ mod tests {
         let sqlite = opened(dir.path());
         let inner = sqlite.lock();
         for conn in [&inner.reader, &inner.writer] {
-            let level: i64 = conn
-                .query_row("PRAGMA synchronous", [], |row| row.get(0))
-                .unwrap();
+            let level = conn.handle().query_int("PRAGMA synchronous").unwrap();
             assert_eq!(level, 2, "FULL");
         }
     }
@@ -702,7 +735,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let sqlite = opened(dir.path());
         let mut inner = sqlite.lock();
-        inner.writer.execute_batch("BEGIN").unwrap();
+        inner.writer.handle().exec("BEGIN").unwrap();
         let token = inner.begin_writer().unwrap();
         assert!(inner.held());
         assert_eq!(
@@ -753,7 +786,7 @@ mod tests {
         let mut inner = sqlite.lock();
         assert!(inner.read_lock_held());
         let epoch = inner.epoch;
-        inner.reader.execute_batch("ROLLBACK").unwrap();
+        inner.reader.handle().exec("ROLLBACK").unwrap();
         inner.ensure_read_lock_held().unwrap();
         assert!(inner.read_lock_held());
         assert_eq!(inner.epoch, epoch.next());

@@ -11,10 +11,17 @@
 //!   (`docs/decisions/D192.md`). [`Replicator::ready`] (a future that needs no runtime) and
 //!   [`Replicator::wait_booted`] say when writes go through; [`Health::writes`] and the
 //!   `WritesBlocked` and `WritesAllowed` events say whether they are held, and why.
-//! - Each connection the application opens may go through [`Replicator::app_connection`]
-//!   (feature `rusqlite`) or [`app_connection_raw`]: optional, it checks the connection opens
+//! - Each connection the application opens may go through `Replicator::app_connection`
+//!   (feature `rusqlite`, any rusqlite from 0.39 to 0.43) or [`app_connection_raw`] (any
+//!   binding's raw handle: sqlx, diesel, its own FFI): optional, it checks the connection opens
 //!   this database, sets `wal_autocheckpoint = 0` (PLAN section 6), and makes a blocked write
 //!   fail at once instead of after the busy timeout.
+//! - The application and the replicator share one SQLite: `libsqlite3-sys` 0.37 to 0.40 (SQLite
+//!   3.51.3 to 3.54.1), so an application's rusqlite, sqlx or other binding in that range builds
+//!   beside this crate. The default `bundled` feature compiles the SQLite `libsqlite3-sys`
+//!   bundles; with default features off the application links its own, which must be one of the
+//!   builds `lsr-sqlite` lists as verified, or [`Replicator::start`] refuses it
+//!   ([`StartError::SqliteBuild`], `docs/decisions/D200.md`).
 //! - Each long read the application starts holds a [`ReaderGuard`] from [`Replicator::long_reader`];
 //!   under [`ReaderTracking::Tracked`] no TRUNCATE checkpoint runs while one lives.
 //! - [`Replicator::health`] can be read at any time: one lock, no I/O.

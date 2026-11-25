@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
+use rusqlite::Connection;
 use tempfile::TempDir;
 
 use super::*;
@@ -46,8 +47,12 @@ fn fresh_db() -> (TempDir, PathBuf) {
 }
 
 fn guarded_map(conn: &Connection, path: &Path) -> Result<Region, OpenError> {
-    guard(conn, path)?;
-    let file = FileHandle::new(file_pointer(conn, rusqlite::MAIN_DB)?)?;
+    let handle = crate::capi::Handle::of_rusqlite(conn).map_err(|source| OpenError::Sqlite {
+        path: path.to_owned(),
+        source,
+    })?;
+    guard(handle, path)?;
+    let file = FileHandle::new(file_pointer(handle, crate::capi::MAIN)?)?;
     Ok(map(&file)?)
 }
 
@@ -152,7 +157,14 @@ fn an_unguarded_map_on_a_rollback_connection_opens_a_descriptor() {
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("CREATE TABLE t (v INTEGER)").unwrap();
     let before = descriptors_under(dir.path());
-    let file = FileHandle::new(file_pointer(&conn, rusqlite::MAIN_DB).unwrap()).unwrap();
+    let file = FileHandle::new(
+        file_pointer(
+            crate::capi::Handle::of_rusqlite(&conn).unwrap(),
+            crate::capi::MAIN,
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         map(&file).err(),
         Some(Refusal::Unmapped),
