@@ -30,3 +30,13 @@ pub use vfs::{
     BlockSize, CrashLaw, Effect, Fault, FaultVfs, FileKind, Fired, HANG_LINE, Op, VfsError,
     seed_prng,
 };
+
+/// `SQLITE_FCNTL_PERSIST_WAL` on for an application's rusqlite connection, as the replicator sets
+/// it on its own: for the tests that show why an application must not, on every rusqlite in the
+/// range (`Connection::file_control` is newer than its oldest release).
+///
+/// # Errors
+/// What SQLite answered.
+pub fn persist_wal(conn: &rusqlite::Connection) -> Result<(), crate::SqliteError> {
+    crate::capi::Handle::of_rusqlite(conn)?.persist_wal()
+}

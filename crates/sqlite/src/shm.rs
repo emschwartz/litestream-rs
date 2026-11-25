@@ -27,9 +27,9 @@ use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, Ordering, fence};
 
-use rusqlite::{Connection, TransactionState, ffi};
-
+use crate::capi::Handle;
 use crate::error::{OpenError, Refusal};
+use crate::ffi;
 use crate::pages::FileHandle;
 
 /// The wal-index region size every SQLite caller passes (`WALINDEX_PGSZ`, 32 KiB).
@@ -83,23 +83,16 @@ impl Region {
     }
 }
 
-fn query(conn: &Connection, path: &Path, sql: &str) -> Result<String, OpenError> {
-    conn.query_row(sql, [], |row| row.get(0))
-        .map_err(|source| OpenError::Sqlite {
-            path: path.to_owned(),
-            source,
-        })
+fn query(conn: Handle<'_>, path: &Path, sql: &str) -> Result<String, OpenError> {
+    conn.query_text(sql).map_err(|source| OpenError::Sqlite {
+        path: path.to_owned(),
+        source,
+    })
 }
 
 /// The states in which the connection's WAL has already mapped `-shm`, so `xShmMap` opens nothing.
-pub(crate) fn guard(conn: &Connection, path: &Path) -> Result<(), OpenError> {
-    let state = conn
-        .transaction_state(Some(rusqlite::MAIN_DB))
-        .map_err(|source| OpenError::Sqlite {
-            path: path.to_owned(),
-            source,
-        })?;
-    if !matches!(state, TransactionState::Read | TransactionState::Write) {
+pub(crate) fn guard(conn: Handle<'_>, path: &Path) -> Result<(), OpenError> {
+    if !conn.in_transaction() {
         return Err(Refusal::NoReadTransaction.into());
     }
     let mode = query(conn, path, "PRAGMA main.journal_mode")?;

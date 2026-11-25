@@ -109,6 +109,8 @@ impl Real {
         let Some(mut conn) = self.connect() else {
             return Vec::new();
         };
+        // Through `&mut`, which newer rusqlite asks for and older accepts.
+        let conn: &mut Connection = &mut conn;
         conn.serialize(rusqlite::MAIN_DB)
             .map(|data| data.to_vec())
             .unwrap_or_default()

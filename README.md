@@ -13,6 +13,15 @@ The contract is the replica, not Litestream's behaviour: this library reads what
 
 Each crate is `crates/<name>`, package `lsr-<name>`. The crate map, with what each owns and the rules it follows, is `docs/PLAN.md` section 3. Entry points: `lsr` (the `cli` crate) is the binary, `replica` is the library API.
 
+## SQLite builds
+
+The library and the application share one SQLite: `libsqlite3-sys` declares `links = "sqlite3"`, so a build holds one version of it. `lsr-replica` accepts `libsqlite3-sys` 0.37 to 0.40 (SQLite 3.51.3 to 3.54.1, never 3.51.2, which shipped a WAL-reset bug), so an application on sqlx 0.9 (`just sqlx-check` builds one) or on rusqlite 0.39 to 0.43 builds beside it.
+
+- **Bundled (the default):** the `bundled` feature compiles the SQLite that `libsqlite3-sys` bundles. Every such build in the range is verified.
+- **Your own SQLite:** `lsr-replica = { default-features = false }` links the system's or the application's SQLite instead. It must be one of the verified builds, or `Replicator::start` refuses it with `StartError::SqliteBuild`, naming the version found and the versions verified.
+- **Verified builds:** 3.51.3, 3.53.1, 3.53.2, 3.54.0 and 3.54.1, each by version and source id (`crates/sqlite/src/version.rs`). The engine reads SQLite's private file and wal-index layouts, so each build is added only after those reads are checked against its source and the whole `lsr-sqlite` suite has passed on it in CI (`just sqlite-build`, `docs/decisions/D200.md`).
+- **Connections:** `app_connection_raw` sets up a connection from any binding's raw handle; `Replicator::app_connection` takes a rusqlite connection (feature `rusqlite`).
+
 ## Tests by what they need
 
 | Needs | Command | What runs |

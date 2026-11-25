@@ -1,5 +1,7 @@
 use std::sync::atomic::Ordering;
 
+use rusqlite::Connection;
+
 use super::*;
 
 fn database() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -29,26 +31,16 @@ fn rows(conn: &Connection) -> i64 {
         .unwrap()
 }
 
-/// The handler's state on `conn`, read back.
-fn state(conn: &Connection) -> &Busy {
-    #[expect(
-        unsafe_code,
-        reason = "rusqlite hands out the raw handle only through an unsafe fn"
-    )]
-    // SAFETY: the handle is used only while `conn` lives, by this thread.
-    let handle = unsafe { conn.handle() };
-    #[expect(unsafe_code, reason = "the test reads the handler's state back")]
-    // SAFETY: `handle` is open.
-    let state = unsafe { ffi::sqlite3_get_clientdata(handle, KEY.as_ptr()) };
-    #[expect(unsafe_code, reason = "the test reads the handler's state back")]
-    // SAFETY: the client data under KEY is a `Busy` that lives as long as the connection.
-    unsafe {
-        &*state.cast_const().cast::<Busy>()
-    }
+/// The handler's timeout and call count on `conn`, read back.
+fn state(conn: &Connection) -> (c_int, u32) {
+    Handle::of_rusqlite(conn)
+        .unwrap()
+        .busy_state(|busy: &Busy| (busy.timeout_ms, busy.calls.load(Ordering::Relaxed)))
+        .unwrap()
 }
 
 fn calls(conn: &Connection) -> u32 {
-    state(conn).calls.load(Ordering::Relaxed)
+    state(conn).1
 }
 
 /// While the gate holds, a connection nothing set up cannot write (SQLite's own "database is
@@ -131,17 +123,15 @@ fn while_the_gate_is_clear_the_handler_waits_as_sqlite_s_default() {
     let state = |held: bool, timeout_ms| {
         let flag = WritesHeld::new();
         flag.set(held);
-        Box::into_raw(Box::new(Busy {
+        Busy {
             held: flag,
             timeout_ms,
             calls: std::sync::atomic::AtomicU32::new(0),
-        }))
-        .cast::<c_void>()
+        }
     };
-    for (held, timeout_ms, retry) in [(false, 1000, 1), (false, 0, 0), (true, 1000, 0)] {
-        let arg = state(held, timeout_ms);
-        assert_eq!(on_busy(arg, 0), retry, "held={held} timeout={timeout_ms}");
-        release(arg);
+    for (held, timeout_ms, retry) in [(false, 1000, true), (false, 0, false), (true, 1000, false)] {
+        let busy = state(held, timeout_ms);
+        assert_eq!(busy.retry(0), retry, "held={held} timeout={timeout_ms}");
     }
 }
 
@@ -156,7 +146,7 @@ fn the_handler_is_set_up_once_and_freed_with_its_connection() {
         .unwrap();
     fail_fast_while(&app, &held).unwrap();
     fail_fast_while(&app, &held).unwrap();
-    assert_eq!(state(&app).timeout_ms, 1500);
+    assert_eq!(state(&app).0, 1500);
     assert_eq!(
         Arc::strong_count(&held.0),
         2,

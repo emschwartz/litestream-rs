@@ -19,7 +19,7 @@ lsr-spec.workspace = true
 [dev-dependencies]
 # `WalBuilder` for the seeds and the target's own tests.
 lsr-wal = { workspace = true, features = ["testing"] }
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
 tempfile.workspace = true
 
 [lints]

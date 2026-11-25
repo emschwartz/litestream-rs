@@ -852,12 +852,7 @@ fn persist_wal_keeps_a_wal_a_page_size_change_makes_stale() {
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.query_row("PRAGMA journal_mode = wal", [], |_row| Ok(()))
         .unwrap();
-    let mut on = 1;
-    conn.file_control(
-        Some(rusqlite::MAIN_DB),
-        rusqlite::FileControl::PersistWal(&mut on),
-    )
-    .unwrap();
+    lsr_sqlite::testing::persist_wal(&conn).unwrap();
     conn.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (randomblob(3000));")
         .unwrap();
     let changed = conn.execute_batch(

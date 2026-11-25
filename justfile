@@ -63,10 +63,12 @@ commit-check base="":
 
 # The S3 store's HTTP clients: each builds
 # alone, which `clippy` over all features cannot show. Their tests run in `test`, which has ureq,
-# reqwest and native-tls on at once.
+# reqwest and native-tls on at once. Then lsr-sqlite and lsr-replica without `bundled` and without
+# `rusqlite`, as an application linking its own SQLite builds them.
 features:
     cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
     cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
+    cargo clippy -p lsr-sqlite -p lsr-replica --no-default-features --lib --locked -- -D warnings
 
 # nextest does not run doctests, and the compile-fail proofs (a proof token is not Clone) live there.
 doctest:
@@ -112,8 +114,9 @@ tsan:
         cargo +{{nightly}} test -Zbuild-std --target x86_64-unknown-linux-gnu --locked \
         -p lsr-sqlite -p lsr-replica --lib --tests
 
-# Miri over the pure crates (ltx, wal) and the core's decision code (plan, retry, position,
-# layout, checkpoint, compact): no I/O, no FFI. Miri runs about 1000 times slower than native,
+# Miri over the pure crates (ltx, wal), the core's decision code (plan, retry, position,
+# layout, checkpoint, compact), and lsr-sqlite's tests that call no SQLite (the build check, result
+# codes, offsets, and the io_methods and wal-index checks on synthetic tables): no I/O, no FFI. Miri runs about 1000 times slower than native,
 # so the core's engine-sized suites (actor, maintain, recover, sync and the rest, 500 tests) are
 # left to the native run, the few whole-database tests inside the chosen modules are ignored
 # under `cfg(miri)`, and the proptest case count is cut. Environment reaches the program only
@@ -126,6 +129,11 @@ miri:
         PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
         cargo +{{nightly}} miri test --locked -p lsr-core --lib -- \
         plan:: retry:: position:: layout:: checkpoint:: compact::
+    MIRIFLAGS="-Zmiri-strict-provenance" CARGO_TARGET_DIR=target/miri \
+        cargo +{{nightly}} miri test --locked -p lsr-sqlite --lib -- \
+        version::tests::every version::tests::another version::tests::the_refusal error::tests \
+        checkpoint::tests::checkpoint_results pages::tests::page_offsets pages::tests::a_missing \
+        shm::tests::missing_methods identity::tests
 
 # Schedule exploration with shuttle: the replica thread's command handshake and the S3 batch's
 # scoped threads, under many random interleavings. Shuttle is a dev-dependency behind
@@ -189,6 +197,43 @@ mutants crate *args:
 # A branch in its own worktree under the main checkout's .worktrees/, off main's newest staged file.
 spawn name:
     git -C "{{justfile_directory()}}" worktree add ".worktrees/{{name}}" -b "{{name}}" main
+
+# The lsr-sqlite suite on the SQLite one libsqlite3-sys version bundles, with the rusqlite
+# release that pairs with it: `just sqlite-build 0.37.0 0.39.0`. CI runs it for every build the
+# `version` module lists (crates/sqlite/src/version.rs). Cargo.lock is moved for the run and put
+# back afterwards; the update needs the network.
+sqlite-build $LSR_SQLITE_SYS $LSR_RUSQLITE:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target
+    cp Cargo.lock target/sqlite-build.lock
+    trap 'cp target/sqlite-build.lock Cargo.lock' EXIT
+    cargo update -p rusqlite --precise "$LSR_RUSQLITE"
+    cargo update -p libsqlite3-sys --precise "$LSR_SQLITE_SYS"
+    cargo tree -p lsr-sqlite --all-features -i libsqlite3-sys --depth 0
+    cargo nextest run -p lsr-sqlite --all-features --no-fail-fast
+
+# The lsr-sqlite build against the system's SQLite in place of the bundled one
+# (`LIBSQLITE3_SYS_USE_PKG_CONFIG`, which overrides `bundled`): the open accepts it exactly when
+# it is a listed build, and when its version is in the range the whole suite runs on it.
+sqlite-system:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export LIBSQLITE3_SYS_USE_PKG_CONFIG=1 CARGO_TARGET_DIR=target/sqlite-system
+    echo "system SQLite: $(pkg-config --modversion sqlite3)"
+    cargo nextest run -p lsr-sqlite --all-features --locked --lib -E 'test(=version::tests::the_linked_build_is_accepted_exactly_when_it_is_listed)'
+    if pkg-config --atleast-version=3.51.3 sqlite3; then
+        cargo nextest run -p lsr-sqlite --all-features --locked --no-fail-fast
+    else
+        echo "sqlite-system: below 3.51.3, so only the refusal is checked"
+    fi
+
+# An application on sqlx's SQLite and lsr-replica in one build (`sqlx-check/`, outside the
+# workspace). Its lock holds sqlx 0.9.0, which needs libsqlite3-sys below 0.38, so lsr-sqlite links
+# 0.37, the oldest end of its range. Builds only; nothing runs.
+sqlx-check:
+    cargo build --manifest-path sqlx-check/Cargo.toml --locked
+    cargo tree --manifest-path sqlx-check/Cargo.toml --locked -i libsqlite3-sys --depth 0
 
 # The large real-SQLite cases: a 16 KiB-page
 # database past 1 GiB, one past 4 GiB (skipped below 20 GB free disk), a WAL past the sync cap.

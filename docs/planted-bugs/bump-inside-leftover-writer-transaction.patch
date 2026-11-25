@@ -1,11 +1,14 @@
+diff --git a/crates/sqlite/src/checkpoint.rs b/crates/sqlite/src/checkpoint.rs
+index 689dcdc56..49855c63f 100644
 --- a/crates/sqlite/src/checkpoint.rs
 +++ b/crates/sqlite/src/checkpoint.rs
-@@ -97,7 +97,7 @@
+@@ -75,7 +75,8 @@ impl Checkpointer for Sqlite {
  
      fn bump_seq(&mut self) -> Result<(), SourceError> {
          self.lock()
 -            .free_writer()?
 +            .writer
-             .execute(
++            .handle()
+             .exec(
                  "INSERT INTO _litestream_seq (id, seq) VALUES (1, 1) ON CONFLICT (id) DO UPDATE SET seq = seq + 1",
-                 [],
+             )

@@ -1,0 +1,18 @@
+# Builds only, never runs: an application on sqlx's SQLite and lsr-replica in one dependency graph
+# (`just sqlx-check`). libsqlite3-sys declares `links = "sqlite3"`, so the two must resolve to one
+# libsqlite3-sys. The lock holds sqlx 0.9.0, which accepts libsqlite3-sys 0.30.1 up to 0.37, so the
+# two meet at 0.37, the oldest end of lsr-sqlite's range (0.37 to 0.40). Outside the workspace
+# (the root Cargo.toml excludes it) with its own lock file, so the workspace's own lock never has
+# to hold sqlx.
+[package]
+name = "lsr-sqlx-check"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+lsr-replica = { path = "../crates/replica" }
+sqlx = { version = "0.9", default-features = false, features = ["sqlite", "runtime-tokio"] }

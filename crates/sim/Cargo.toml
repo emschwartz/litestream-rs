@@ -15,7 +15,7 @@ lsr-store-fs.workspace = true
 # The replica on the real S3 store over its in-memory bucket and fault layer (`remote`).
 lsr-store-s3 = { workspace = true, features = ["testing"] }
 lsr-wal = { workspace = true, features = ["testing"] }
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
 tempfile.workspace = true
 thiserror.workspace = true
 

@@ -54,6 +54,61 @@ jobs:
       - if: steps.changed.outputs.relevant == 'true'
         run: just shuttle
 
+  # The lsr-sqlite suite on every SQLite build crates/sqlite/src/version.rs lists, one job per
+  # libsqlite3-sys version, with the rusqlite release that pairs with it (`just sqlite-build`).
+  # `check` runs the same suite on the lock's own build, libsqlite3-sys 0.40.0 (SQLite 3.54.1,
+  # which 0.39.1 bundles too). A new libsqlite3-sys gets a row here with its entry in the list
+  # (docs/decisions/D200.md).
+  sqlite-builds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { sys: "0.37.0", rusqlite: "0.39.0" } # SQLite 3.51.3
+          - { sys: "0.38.0", rusqlite: "0.40.0" } # SQLite 3.53.1
+          - { sys: "0.38.2", rusqlite: "0.40.2" } # SQLite 3.53.2, which 0.38.1 bundles too
+          - { sys: "0.39.0", rusqlite: "0.41.1" } # SQLite 3.54.0
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just sqlite-build "$SYS" "$RUSQLITE"
+        env:
+          SYS: ${{ matrix.sys }}
+          RUSQLITE: ${{ matrix.rusqlite }}
+
+  # lsr-sqlite with `bundled` overridden, on the runner's own SQLite (`just sqlite-system`): the
+  # open accepts it exactly when it is a listed build, and the whole suite runs on it when its
+  # version is in the range. Ubuntu 24.04's 3.45.1 is not, so today this checks the refusal.
+  sqlite-system:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just sqlite-system
+
+  # An application on sqlx's SQLite and lsr-replica in one build (`just sqlx-check`): its lock
+  # holds sqlx 0.9.0, so the two meet at libsqlite3-sys 0.37. Builds only.
+  sqlx-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just sqlx-check
+
   # Advisories, bans, licenses and sources (deny.toml), over all features.
   deny:
     runs-on: ubuntu-latest

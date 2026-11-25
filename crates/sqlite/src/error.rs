@@ -6,7 +6,9 @@ use std::io;
 use std::path::PathBuf;
 
 use lsr_core::SourceError;
-use rusqlite::ffi;
+
+pub use crate::capi::SqliteError;
+use crate::ffi;
 
 /// Why [`crate::Sqlite::open`] gave no handle. Nothing is pinned when it returns one of these.
 #[derive(Debug, thiserror::Error)]
@@ -18,21 +20,24 @@ pub enum OpenError {
         /// The database path as given.
         path: PathBuf,
         /// What SQLite said.
-        source: rusqlite::Error,
+        source: SqliteError,
     },
-    /// The SQLite answering at run time is not the build this crate's reads of SQLite's private
-    /// layouts were written for, so those reads cannot be trusted. The process links another
-    /// SQLite (a system library, SQLCipher, a loadable-extension build).
+    /// The SQLite answering at run time is not one of the builds this crate's reads of SQLite's
+    /// private layouts have been verified against, so those reads cannot be trusted. The process
+    /// links another SQLite (a system library outside the verified list, SQLCipher, a
+    /// loadable-extension build, a libsqlite3-sys version outside the supported range).
     #[error(
-        "the SQLite in use is version {found} ({source_id}), not the bundled build {expected} this library requires: link only the SQLite that rusqlite bundles"
+        "the SQLite in use is version {} ({source_id}), not a build this library is verified against ({}): link the SQLite bundled by libsqlite3-sys 0.37 to 0.40, or one of those builds",
+        dotted(*.found),
+        .verified.iter().map(|v| dotted(*v)).collect::<Vec<_>>().join(", ")
     )]
     SqliteBuild {
         /// `sqlite3_libversion_number()` of the running library.
-        found: std::ffi::c_int,
+        found: c_int,
         /// `sqlite3_sourceid()` of the running library.
         source_id: String,
-        /// The version the layout reads were written for.
-        expected: std::ffi::c_int,
+        /// The version numbers of the verified builds, oldest first.
+        verified: &'static [c_int],
     },
     /// `PRAGMA journal_mode = wal` left the database in another mode (an in-memory database, or a
     /// VFS without shared memory). Replication reads the WAL, so there is nothing to replicate.
@@ -52,6 +57,19 @@ pub enum OpenError {
     /// descriptor of its own.
     #[error("SQLite's own file handle cannot be used: {0}")]
     Refused(#[from] Refusal),
+}
+
+/// A `SQLITE_VERSION_NUMBER` as SQLite writes it: 3054001 is "3.54.1".
+#[must_use]
+pub fn dotted(number: c_int) -> String {
+    let major = number.checked_div(1_000_000).unwrap_or(0);
+    let minor = number
+        .checked_rem(1_000_000)
+        .unwrap_or(0)
+        .checked_div(1_000)
+        .unwrap_or(0);
+    let patch = number.checked_rem(1_000).unwrap_or(0);
+    format!("{major}.{minor}.{patch}")
 }
 
 /// The reader and the writer opened different database files: the path was swapped between
@@ -136,7 +154,7 @@ pub enum Refusal {
 pub enum SetupError {
     /// A pragma failed.
     #[error("SQLite refused a setup pragma: {0}")]
-    Sqlite(rusqlite::Error),
+    Sqlite(SqliteError),
     /// The connection would checkpoint on its own, behind the replicator's back.
     #[error("wal_autocheckpoint is {pages}, not 0")]
     AutocheckpointOn {
@@ -168,20 +186,21 @@ pub(crate) const fn rc_error(rc: c_int) -> SourceError {
     }
 }
 
-/// [`rc_error`] for a rusqlite error; one that is not SQLite's own is an I/O error.
-pub(crate) fn source_error(err: &rusqlite::Error) -> SourceError {
-    err.sqlite_error()
-        .map_or(SourceError::Io(io::ErrorKind::Other), |e| {
-            rc_error(e.extended_code)
-        })
+/// [`rc_error`] for a failed call; one that is not SQLite's own is an I/O error.
+pub(crate) fn source_error(err: &SqliteError) -> SourceError {
+    err.code()
+        .map_or(SourceError::Io(io::ErrorKind::Other), rc_error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn failure(rc: c_int) -> rusqlite::Error {
-        rusqlite::Error::SqliteFailure(ffi::Error::new(rc), None)
+    fn failure(code: c_int) -> SqliteError {
+        SqliteError::Code {
+            code,
+            message: String::new(),
+        }
     }
 
     #[test]
@@ -204,7 +223,7 @@ mod tests {
             SourceError::Io(io::ErrorKind::Other)
         );
         assert_eq!(
-            source_error(&rusqlite::Error::QueryReturnedNoRows),
+            source_error(&SqliteError::NoRow),
             SourceError::Io(io::ErrorKind::Other)
         );
     }

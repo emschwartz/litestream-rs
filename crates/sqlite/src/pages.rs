@@ -13,14 +13,13 @@
 use std::ffi::{CStr, c_int, c_void};
 use std::io;
 use std::mem::offset_of;
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 
+use crate::capi::Handle;
+use crate::error::{Refusal, rc_error};
+use crate::{Sqlite, ffi};
 use lsr_core::{PageSource, SourceError};
 use lsr_ltx::{DbPages, PageNo};
-use rusqlite::{Connection, ffi};
-
-use crate::Sqlite;
-use crate::error::{Refusal, rc_error};
 
 type XRead = unsafe extern "C" fn(*mut ffi::sqlite3_file, *mut c_void, c_int, i64) -> c_int;
 type XFileSize = unsafe extern "C" fn(*mut ffi::sqlite3_file, *mut i64) -> c_int;
@@ -37,40 +36,14 @@ pub(crate) struct FileHandle {
     pub(crate) shm_map: XShmMap,
 }
 
-/// The raw handle, for SQLite calls made while `conn` is borrowed.
-#[expect(
-    unsafe_code,
-    reason = "rusqlite gives the raw handle only through an unsafe fn"
-)]
-pub(crate) fn handle(conn: &Connection) -> *mut ffi::sqlite3 {
-    // SAFETY: the pointer is used only for calls made while `conn` is borrowed, and it is never closed.
-    unsafe { conn.handle() }
-}
-
-/// The pager's `sqlite3_file` for `schema`.
-#[expect(
-    unsafe_code,
-    reason = "SQLITE_FCNTL_FILE_POINTER has no safe wrapper in rusqlite"
-)]
+/// The pager's `sqlite3_file` for `schema` (`sqlite3.c:192592`).
 pub(crate) fn file_pointer(
-    conn: &Connection,
+    conn: Handle<'_>,
     schema: &CStr,
 ) -> Result<NonNull<ffi::sqlite3_file>, Refusal> {
-    let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
-    let db = handle(conn);
-    // SAFETY: a live handle, a NUL-terminated name, and FILE_POINTER writes exactly one
-    // `sqlite3_file*` through its argument (`sqlite3.c:192592`).
-    let rc = unsafe {
-        ffi::sqlite3_file_control(
-            db,
-            schema.as_ptr(),
-            ffi::SQLITE_FCNTL_FILE_POINTER,
-            (&raw mut file).cast::<c_void>(),
-        )
-    };
-    if rc != ffi::SQLITE_OK {
-        return Err(Refusal::NoFilePointer { rc });
-    }
+    let file = conn
+        .file_pointer(schema)
+        .map_err(|rc| Refusal::NoFilePointer { rc })?;
     NonNull::new(file).ok_or(Refusal::FileNotOpen)
 }
 
@@ -96,23 +69,13 @@ pub(crate) enum WalSync {
 /// SQLite's own.
 #[expect(
     unsafe_code,
-    reason = "SQLITE_FCNTL_JOURNAL_POINTER has no safe wrapper, and xSync is a call through the VFS"
+    reason = "the WAL's io_methods table is C memory, and xSync is a call through the VFS"
 )]
-pub(crate) fn sync_wal(conn: &Connection) -> Result<(), WalSync> {
-    let mut file: *mut ffi::sqlite3_file = ptr::null_mut();
-    let db = handle(conn);
-    // SAFETY: a live handle, a NUL-terminated name, and JOURNAL_POINTER writes exactly one
-    // `sqlite3_file*` through its argument.
-    let rc = unsafe {
-        ffi::sqlite3_file_control(
-            db,
-            rusqlite::MAIN_DB.as_ptr(),
-            ffi::SQLITE_FCNTL_JOURNAL_POINTER,
-            (&raw mut file).cast::<c_void>(),
-        )
-    };
-    let file = NonNull::new(file)
-        .filter(|_| rc == ffi::SQLITE_OK)
+pub(crate) fn sync_wal(conn: Handle<'_>) -> Result<(), WalSync> {
+    let file = conn
+        .journal_pointer()
+        .ok()
+        .and_then(NonNull::new)
         .ok_or(WalSync::NoWal)?;
     // SAFETY: `file` points to a live `sqlite3_file`, whose first field is `pMethods`.
     let methods = unsafe { (*file.as_ptr()).pMethods };
@@ -259,6 +222,8 @@ impl PageSource for Sqlite {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use super::*;
 
     #[test]
@@ -298,9 +263,9 @@ mod tests {
 
     #[test]
     fn an_unknown_schema_has_no_file_pointer() {
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
         assert_eq!(
-            file_pointer(&conn, c"nope").err(),
+            file_pointer(Handle::of_rusqlite(&conn).unwrap(), c"nope").err(),
             Some(Refusal::NoFilePointer {
                 rc: ffi::SQLITE_ERROR
             })

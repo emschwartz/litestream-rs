@@ -43,7 +43,11 @@ fn every_method_delegates_to_unix() {
     assert!(day > 2_400_000.0);
     a.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
         .unwrap();
-    let file = crate::pages::file_pointer(&a, rusqlite::MAIN_DB).unwrap();
+    let file = crate::pages::file_pointer(
+        crate::capi::Handle::of_rusqlite(&a).unwrap(),
+        crate::capi::MAIN,
+    )
+    .unwrap();
     let methods = methods_of(file);
     let mut reserved = -1;
     let (check, sector, device) = (
@@ -352,12 +356,12 @@ fn a_durability_query_follows_a_symlink_and_refuses_an_unknown_file() {
 fn a_sync_on_a_lying_disk_keeps_nothing() {
     let (_dir, db, vfs, conn) = two_unsynced_rows("lying-sync");
     vfs.lie_on_syncs(true);
-    crate::pages::sync_wal(&conn).unwrap();
+    crate::pages::sync_wal(crate::capi::Handle::of_rusqlite(&conn).unwrap()).unwrap();
     vfs.lie_on_syncs(false);
     assert_eq!(rows_after_power_loss(&vfs, &db, conn), [1]);
 
     let (_dir, db, vfs, conn) = two_unsynced_rows("honest-sync");
-    crate::pages::sync_wal(&conn).unwrap();
+    crate::pages::sync_wal(crate::capi::Handle::of_rusqlite(&conn).unwrap()).unwrap();
     assert_eq!(rows_after_power_loss(&vfs, &db, conn), [1, 2, 3]);
 }
 
@@ -374,15 +378,15 @@ fn a_failed_wal_sync_loses_its_writes_through_a_later_good_sync() {
         1,
         Effect::Error(ffi::SQLITE_IOERR_FSYNC),
     ));
-    assert!(crate::pages::sync_wal(&conn).is_err());
+    assert!(crate::pages::sync_wal(crate::capi::Handle::of_rusqlite(&conn).unwrap()).is_err());
     vfs.set_window(false);
     conn.execute_batch("INSERT INTO t VALUES (4)").unwrap();
-    crate::pages::sync_wal(&conn).unwrap();
+    crate::pages::sync_wal(crate::capi::Handle::of_rusqlite(&conn).unwrap()).unwrap();
     assert_eq!(rows_after_power_loss(&vfs, &db, conn), [1]);
 
     let (_dir, db, vfs, conn) = two_unsynced_rows("kept-writeback");
     conn.execute_batch("INSERT INTO t VALUES (4)").unwrap();
-    crate::pages::sync_wal(&conn).unwrap();
+    crate::pages::sync_wal(crate::capi::Handle::of_rusqlite(&conn).unwrap()).unwrap();
     assert_eq!(rows_after_power_loss(&vfs, &db, conn), [1, 2, 3, 4]);
 }
 
