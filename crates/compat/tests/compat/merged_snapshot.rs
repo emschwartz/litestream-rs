@@ -12,9 +12,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use lsr_compat::{
-    AppFixture, Chain, GoBuild, GoRestore, PageEncoding, Replicator, Target, Written, builds_in,
-    clock_ending_now, hash_pages, integrity_check, list, scrub_env, wait_until, write_config,
-    write_config_no_scheduled_snapshot,
+    AppFixture, Chain, GoBuild, GoRestore, PageEncoding, Replicator, Shape, Target, Written,
+    builds_in, clock_ending_now, hash_pages, integrity_check, list, scrub_env, wait_until,
+    write_config, write_config_no_scheduled_snapshot,
 };
 use lsr_core::Level;
 use lsr_ltx::{Decoder, Header};
@@ -109,6 +109,59 @@ fn the_first_snapshot_of_a_first_start_is_merged_from_level_zero_files() {
     );
 }
 
+/// A run long enough to compact: the first and last transaction of each level's oldest file, as
+/// the run's archive (every file it ever wrote) shows, and the first snapshot's last transaction.
+fn level_starts(written: &Written) -> (u64, Vec<(u8, u64)>) {
+    let mut first_snapshot_max: Option<u64> = None;
+    let mut starts: Vec<(u8, u64)> = Vec::new();
+    for path in &written.archive {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let Some((level, rest)) = name.split_once('-') else {
+            continue;
+        };
+        let (Ok(level), Some((min, max))) = (
+            level.parse::<u8>(),
+            rest.trim_end_matches(".ltx").split_once('-'),
+        ) else {
+            continue;
+        };
+        let (Ok(min), Ok(max)) = (u64::from_str_radix(min, 16), u64::from_str_radix(max, 16))
+        else {
+            continue;
+        };
+        if level == 9 {
+            first_snapshot_max = Some(first_snapshot_max.map_or(max, |m| m.min(max)));
+        } else if level > 0 {
+            match starts.iter_mut().find(|(l, _)| *l == level) {
+                Some((_, m)) => *m = (*m).min(min),
+                None => starts.push((level, min)),
+            }
+        }
+    }
+    (first_snapshot_max.expect("a snapshot"), starts)
+}
+
+/// Levels 1 to 3 start above the first snapshot (`docs/decisions/D224.md`): a first start that
+/// runs on through several windows never carries the database into them. Needs no Go.
+#[test]
+fn levels_start_above_the_first_snapshot() {
+    let fixture = AppFixture::create(4096, 31).expect("fixture");
+    let mut chain = Chain::start(fixture, clock_ending_now(120).expect("clock")).expect("start");
+    chain.run(120).expect("run");
+    let written = chain.finish().expect("finish");
+    let (snapshot, starts) = level_starts(&written);
+    assert!(!starts.is_empty(), "the run compacted nothing");
+    for (level, min) in starts {
+        assert!(
+            min > snapshot,
+            "level {level} starts at {min}, inside the first snapshot (through {snapshot})"
+        );
+    }
+}
+
 /// Go's own snapshot of the database the Rust one holds: Go replicates a copy of it to a fresh
 /// replica and takes its first snapshot there.
 fn go_snapshot_of(build: &GoBuild, db_copy: &Path, dir: &Path) -> PathBuf {
@@ -152,6 +205,81 @@ fn go_ltx_listing(build: &GoBuild, config: &Path, db: &Path, home: &Path) -> Str
 /// `just compat-live` selects the tests by this module.
 mod live {
     use super::*;
+
+    /// Go takes over a replica whose levels start above the snapshot and runs its own compaction
+    /// over it, with no error (it refuses inputs that do not follow each other), and restores
+    /// the database, as Rust does on the combined chain.
+    #[test]
+    #[ignore = "runs the pinned Go binary; just compat"]
+    fn go_compacts_over_levels_that_start_above_the_snapshot() {
+        let fixture = AppFixture::create(4096, 32).expect("fixture");
+        let mut chain = Chain::start(fixture, clock_ending_now(60).expect("clock")).expect("start");
+        chain.run(60).expect("run");
+        let mut written = chain.finish().expect("finish");
+        let (snapshot, starts) = level_starts(&written);
+        assert!(
+            starts.iter().all(|(_, min)| *min > snapshot),
+            "levels do not start above the snapshot: {starts:?} / {snapshot}"
+        );
+        let counts = |replica: &Path, level: u8| {
+            list(replica)
+                .expect("list")
+                .files
+                .iter()
+                .filter(|f| f.key.level().get() == level)
+                .count()
+        };
+        let config = written.fixture.dir().join("go-takeover.yml");
+        write_config_no_scheduled_snapshot(&config, &written.fixture.db, &written.fixture.replica)
+            .expect("config");
+        for build in builds_in(PageEncoding::Block) {
+            let name = build.name().to_owned();
+            let bin = build.binary().expect("the build under test is present");
+            let log = written
+                .fixture
+                .dir()
+                .join(format!("go-takeover-{name}.log"));
+            let before = [1, 2, 3].map(|l| counts(&written.fixture.replica, l));
+            let mut go = Replicator::start(&bin, &config, &log).expect("start");
+            let replica = written.fixture.replica.clone();
+            let mut commits = 0_u32;
+            let fixture = &mut written.fixture;
+            wait_until(
+                "Go's compaction over the replica",
+                Duration::from_secs(60),
+                || {
+                    go.ensure_running()?;
+                    if commits < 40 {
+                        fixture.commit(Shape::Insert { bytes: 300 })?;
+                        commits += 1;
+                    }
+                    let now = [1, 2, 3].map(|l| counts(&replica, l));
+                    Ok(now.iter().sum::<usize>() > before.iter().sum::<usize>() + 2)
+                },
+            )
+            .map_err(|err| go.explain(err))
+            .expect("Go compacts");
+            go.stop().expect("stop");
+            let text = fs::read_to_string(&log).expect("log");
+            let errors: Vec<&str> = text
+                .lines()
+                .filter(|line| line.contains("level=ERROR") || line.contains("non-contiguous"))
+                .collect();
+            assert!(errors.is_empty(), "{name}: Go reported errors: {errors:#?}");
+            let want = written.fixture.hash_now().expect("hash");
+            let out = written.fixture.dir().join(format!("takeover-{name}.db"));
+            let result = lsr_compat::restore_with_go(
+                &bin,
+                &config,
+                &written.fixture.db,
+                &out,
+                Target::Latest,
+            )
+            .expect("go runs");
+            assert_eq!(result, GoRestore::Restored, "{name}");
+            assert_eq!(restored_pages(&out), want, "{name}");
+        }
+    }
 
     /// Go restores the merged snapshot's prefix to the database's pages, with the level-0 files
     /// still there and with only the snapshot left, lists it with `ltx`, and finds on it the

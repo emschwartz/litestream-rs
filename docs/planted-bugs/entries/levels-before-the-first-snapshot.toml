@@ -1,0 +1,4 @@
+name = "levels-before-the-first-snapshot"
+fix = "plant"
+package = "lsr-core"
+tests = ["the_first_snapshot_goes_before_level_one", "the_first_start_uploads_the_database_twice_and_downloads_none"]
