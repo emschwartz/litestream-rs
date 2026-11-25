@@ -60,8 +60,8 @@ response = "retry once, then: if recovery continues from the newest file left, c
 signal = "\"retrying\", then none or `newest_staged_file_unreadable`"
 at_risk = "When a snapshot follows: the restore points of the deleted, unpublished files. Their end state is in the snapshot. No committed data is lost"
 recovery = "Automatic"
-detected_by = "core::`one_bad_read_of_a_staged_file_at_boot_drops_nothing`, core::`witness::one_lying_read_of_the_newest_staged_header_retries_the_boot`, core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`, core::`a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot`, core::`a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next`, sim::`a_torn_staged_file_is_dropped_seed_0x25`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`; plant::`delete-on-one-failed-read-boot`, plant::`boot-snapshot-after-unreadable`"
-recovered_by = "sim::`a_torn_staged_file_is_dropped_seed_0x25`"
+detected_by = "core::`one_bad_read_of_a_staged_file_at_boot_drops_nothing`, core::`witness::one_lying_read_of_the_newest_staged_header_retries_the_boot`, core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`, core::`a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot`, core::`a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`; plant::`delete-on-one-failed-read-boot`, plant::`boot-snapshot-after-unreadable`"
+recovered_by = "core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`"
 notes = "A deleted file the replica already holds leaves staging behind the replica, which recovery answers with `BehindRemote`, so continuing never stages new content under a transaction the replica shows. Before, the snapshot was taken even when the WAL could regenerate the files (D14)"
 
 [[row]]
@@ -106,7 +106,7 @@ response = "snapshot, `LocalRewound`"
 signal = "`local_rewound`; `RecoverEvent::LocalRewound`"
 at_risk = "The replica holds commits the database lost. They stay restorable by id until retention removes them. The latest state becomes the rewound database (G2). Not detected, as under Go (issue #12): a regrown last transaction byte-identical in the staged range over an earlier transaction that differs, once the staged copies of that earlier range are pruned (about 30 s after upload) or with a brand-new meta directory; the replica then keeps the earlier transaction as it was and the database holds another. A staged snapshot that took a page from a dropped frame, over a regrown WAL that agrees on every page it holds, is caught late: the boot carries on, the next file is uploaded over a mixed state, and `DatabasePageMismatch` follows at the next read of that page (D173 note)"
 recovery = "Automatic"
-detected_by = "core::`a_committed_end_before_the_newest_staged_file_is_a_rewind`, core::`a_range_regrown_with_another_commit_size_is_a_rewind`, core::`a_shorter_chain_regrown_in_front_of_residue_is_a_rewind_without_the_wal_index`, sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`, sim::`unaided::swarm_seed_44_restores_only_committed_states`; plant::`anchor-any-tail`"
+detected_by = "core::`a_committed_end_before_the_newest_staged_file_is_a_rewind`, core::`a_range_regrown_with_another_commit_size_is_a_rewind`, core::`a_shorter_chain_regrown_in_front_of_residue_is_a_rewind_without_the_wal_index`, sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`; plant::`anchor-any-tail`"
 recovered_by = "sim::`power_loss_wal_rewind`, sim::`a_redo_replays_past_the_commits_a_power_loss_took`, sim::`a_power_loss_on_a_lying_disk_leaves_the_replica_restorable_while_it_lies`"
 in_review = "#89 keeps the staged snapshot if the process dies before uploading it. On main the next boot deletes it and takes a second one"
 
@@ -152,8 +152,8 @@ response = "At boot: **stop**, `OtherWriter`, before anything is written, unless
 signal = "`other_writer` and the refusal log line; or `newest_staged_file_unreadable`"
 at_risk = "None at a refusal. Otherwise the local commits those staged files held are in the snapshot; their restore points are lost"
 recovery = "Operator (`lsr trust-local` if this database is the right one, `lsr restore` if the replica is, or remove the other writer's file); automatic otherwise"
-detected_by = "core::`a_verifying_listed_key_unlike_the_staged_file_is_never_written_over`, sim::`a_verifying_replica_object_is_not_written_over_seed_0xc6b2`; core::`second_writer::a_running_engine_stops_when_another_writer_took_its_next_id`; plant::`verifying-object-written-over`, plant::`boot-divergence-snapshots-above-another-writer`"
-recovered_by = "sim::`a_verifying_replica_object_is_not_written_over_seed_0xc6b2`"
+detected_by = "core::`a_verifying_listed_key_unlike_the_staged_file_is_never_written_over`, sim::`a_verifying_replica_object_is_not_written_over`; core::`second_writer::a_running_engine_stops_when_another_writer_took_its_next_id`; plant::`verifying-object-written-over`, plant::`boot-divergence-snapshots-above-another-writer`"
+recovered_by = "sim::`a_verifying_replica_object_is_not_written_over`"
 
 [[row]]
 table = "Boot"
@@ -175,7 +175,7 @@ response = "degraded, `PageSizeChanged`, before anything is staged"
 signal = "`page_size_changed`"
 at_risk = "Replication does not start. The old prefix keeps every state up to the change"
 recovery = "Restart onto a new replica prefix"
-detected_by = "core::`a_page_size_change_stops_at_boot_before_anything_is_staged`, sim::`a_page_size_change_stops_and_the_old_states_restore`, core::`a_newest_replica_header_that_does_not_decode_still_names_the_page_size`, sim::`a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13`; plant::`replica-page-size-unread`"
+detected_by = "core::`a_page_size_change_stops_at_boot_before_anything_is_staged`, sim::`a_page_size_change_stops_and_the_old_states_restore`, core::`a_newest_replica_header_that_does_not_decode_still_names_the_page_size`, sim::`a_boot_whose_replica_reads_lie_never_writes_a_new_page_size`; plant::`replica-page-size-unread`"
 survived_by = "sim::`a_page_size_change_stops_and_the_old_states_restore`"
 notes = "Fixed on this branch (`claude/survival-tests`): with staging gone and the replica's newest file's header unreadable (rot, or a read a proxy changed), the boot took no page size and snapshotted the new size onto the prefix. It now reads the newest headers in turn, up to eight, and fails `RemoteCorrupt` when none decodes"
 
@@ -293,8 +293,8 @@ response = "It asks the driver for a takeover record through what staging vouche
 signal = "`TakeoverWanted`; `TakeoverNotRecorded` when the write fails"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::a_takeover_record_is_spent_once_a_snapshot_above_it_is_confirmed`, core::`vouch::a_power_loss_boot_over_puts_the_record_covers_does_not_stop`, core::`vouch::a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`, sim::`a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it`, sim::`survival::a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7`, core::`the_takeover_before_a_refused_copy_drop_covers_a_torn_looking_tail`; plant::`takeover-before-drop-skipped`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`takeover-ask-spins`"
-recovered_by = "sim::`survival::an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd`"
+detected_by = "core::`vouch::a_crash_between_the_engines_own_drop_and_its_snapshot_is_not_a_refusal`, core::`vouch::a_takeover_record_is_spent_once_a_snapshot_above_it_is_confirmed`, core::`vouch::a_power_loss_boot_over_puts_the_record_covers_does_not_stop`, core::`vouch::a_takeover_before_a_running_drop_reaches_no_further_than_the_puts_it_sent`, core::`vouch::a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits`, sim::`a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it`, core::`the_takeover_before_a_refused_copy_drop_covers_a_torn_looking_tail`; plant::`takeover-before-drop-skipped`, plant::`running-drop-record-capped-at-confirmed`, plant::`boot-drop-record-capped-at-confirmed`, plant::`takeover-ask-spins`"
+recovered_by = "sim::`a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_through_it`"
 notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and waits its backoff, and nothing is deleted unrecorded. Pending files above every replica key vouch for nothing there, so one put back from a backup never raises the record"
 
 [[row]]
@@ -591,7 +591,7 @@ response = "continue. The commit is stamped no earlier than it landed: the stamp
 signal = "None"
 at_risk = "None"
 recovery = "None needed"
-detected_by = "core::`a_commit_after_the_tick_began_is_not_stamped_before_it_landed`, sim::`a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681`; plant::`stamp-before-committed-read`, plant::`stamp-before-committed-read-sim`"
+detected_by = "core::`a_commit_after_the_tick_began_is_not_stamped_before_it_landed`, sim::`a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it`; plant::`stamp-before-committed-read`, plant::`stamp-before-committed-read-sim`"
 notes = "The simulator reaches this only under its per-read clock law, where each clock read is later than the one before; under the per-tick law a tick has one instant and the window does not exist. A stamp earlier than the commit lets a restore as of an instant before the commit contain it (G3)"
 
 [[row]]
@@ -602,7 +602,7 @@ response = "continue. The seal is stamped after the barrier is held, so the comm
 signal = "None"
 at_risk = "None"
 recovery = "None needed"
-detected_by = "core::`a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed`, sim::`a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552`; plant::`seal-stamped-at-checkpoint-start`"
+detected_by = "core::`a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed`, sim::`a_commit_before_the_barrier_is_not_stamped_before_it`; plant::`seal-stamped-at-checkpoint-start`"
 notes = "As RUN-25, under the per-read clock law"
 
 [[row]]
@@ -817,7 +817,7 @@ response = "Never taken as published (`CommitSizeMismatch`), for every engine co
 signal = "\"retrying\""
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`size_mismatch_on_commit`, sim::`short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets`, sim::`fixed_seeds::fixed::a_torn_staged_file_is_dropped_seed_0x46`, core::`a_create_only_commit_acknowledged_short_is_deleted_and_reported`, core::`a_replace_acknowledged_short_is_reported_and_never_deleted`, core::`a_replace_commit_size_mismatch_never_deletes_the_key`, core::`an_output_acknowledged_short_is_reported_and_left_to_the_caller`, core::`a_commit_that_answers_with_a_wrong_size_leaves_no_object`; plant::`compact-commit-unchecked`, plant::`short-commit-object-kept`, plant::`replace-short-deleted`"
+detected_by = "sim::`size_mismatch_on_commit`, sim::`short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets`, core::`a_create_only_commit_acknowledged_short_is_deleted_and_reported`, core::`a_replace_acknowledged_short_is_reported_and_never_deleted`, core::`a_replace_commit_size_mismatch_never_deletes_the_key`, core::`an_output_acknowledged_short_is_reported_and_left_to_the_caller`, core::`a_commit_that_answers_with_a_wrong_size_leaves_no_object`; plant::`compact-commit-unchecked`, plant::`short-commit-object-kept`, plant::`replace-short-deleted`"
 recovered_by = "sim::`size_mismatch_on_commit`, sim::`short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets`"
 
 [[row]]
@@ -839,8 +839,8 @@ response = "The uploader is made to list first, from below the divergence, so no
 signal = "\"retrying\""
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it_seed_0xd79`, core::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it`; plant::`relist-after-failed-drop`"
-recovered_by = "sim::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it_seed_0xd79`"
+detected_by = "sim::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it`, core::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it`; plant::`relist-after-failed-drop`"
+recovered_by = "sim::`a_failed_drop_after_a_divergence_uploads_nothing_built_on_it`"
 
 [[row]]
 table = "Upload"
@@ -850,7 +850,7 @@ response = "**stop**, `OtherWriter` (default). No upload, compaction or delete f
 signal = "`other_writer`; `/healthz` 503"
 at_risk = "Everything committed after the stop is unreplicated until an operator acts. The steady state makes no listing, so the other writer is seen only at the next maintenance listing or after an ambiguous commit. A maintenance listing follows this engine's own upload by at most one compaction window (30 s by default) once uploads are idle; an engine with nothing to upload lists only when its next scheduled job is due. Every maintenance listing includes level 0 whole, so another writer's level-0 file is seen by the pass that lists it; level 0 is listed at every retention check (the set `l0-retention-check-interval`, 120 s when unset; MAINT-14, D193). A file at level 1 to 8 below the newest this engine knows there, a foreign snapshot, a file at a level above the configured top (never listed by a short pass) and a replica that lost files below the tail wait for the next whole listing, at most 15 minutes. No bound on detection is asserted: **code only**"
 recovery = "An operator removes the other writer, then restarts"
-detected_by = "core::`maintenance_stops_on_a_file_past_its_position`, core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer_seed_0x50c`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`, core::`vouch::a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy`, core::`vouch::maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload`, core::`another_writers_level_zero_file_is_caught_by_the_next_short_pass`, core::`another_writers_compaction_output_below_the_newest_known_waits_for_the_whole_listing`, core::`a_clock_stepped_back_forces_a_whole_listing`, sim::`second_writer_between_whole_listings`, oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
+detected_by = "core::`maintenance_stops_on_a_file_past_its_position`, core::`rule_2_running_behind_the_remote_stops`, sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`, sim::`maintenance_stops_on_another_writer`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`, core::`vouch::a_snapshot_on_an_id_a_running_drop_vouched_for_gives_way_to_the_replicas_copy`, core::`vouch::maintenance_after_a_running_drop_waits_for_the_listing_that_confirms_its_upload`, core::`another_writers_level_zero_file_is_caught_by_the_next_short_pass`, core::`another_writers_compaction_output_below_the_newest_known_waits_for_the_whole_listing`, core::`a_clock_stepped_back_forces_a_whole_listing`, sim::`second_writer_between_whole_listings`, oracle::`OtherWriterMissed`, plant::`maintenance-another-writer`"
 recovered_by = "sim::`second_writer_mid_run`, sim::`under_go_like_a_second_writer_stops_uploads_and_maintenance`"
 notes = "R only after the other writer's files were removed. No restore is judged with two writers' files in the bucket"
 in_review = "#96"
@@ -956,8 +956,8 @@ response = "continue"
 signal = "Event `Compacted`"
 at_risk = "None. A crash leaves the inputs, and the output either visible or absent"
 recovery = "n/a"
-detected_by = "core::`inputs_are_capped_at_the_fan_in`, core::`a_hole_in_the_source_is_the_same_hole_in_the_destination`, core::`restoring_the_snapshot_and_the_chain_equals_restoring_the_compacted_file`, sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages_seed_0x433`"
-recovered_by = "sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages_seed_0x433`"
+detected_by = "core::`inputs_are_capped_at_the_fan_in`, core::`a_hole_in_the_source_is_the_same_hole_in_the_destination`, core::`restoring_the_snapshot_and_the_chain_equals_restoring_the_compacted_file`, sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages`"
+recovered_by = "sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages`"
 
 [[row]]
 table = "Maintenance and retention"
@@ -1052,7 +1052,7 @@ response = "**stop**, `OtherWriter`. Nothing is planned from that listing"
 signal = "`other_writer`"
 at_risk = "As UP-10"
 recovery = "Operator"
-detected_by = "sim::`maintenance_stops_on_another_writer_seed_0x50c`"
+detected_by = "sim::`maintenance_stops_on_another_writer`"
 
 [[row]]
 table = "Maintenance and retention"
@@ -1062,7 +1062,7 @@ response = "A hole after the newest snapshot holds retention (MAINT-8); restores
 signal = "`Waiting { held: Hole }`"
 at_risk = "The transactions in the hole, until the next snapshot. Restores to the latest state fail meanwhile"
 recovery = "Automatic at the next snapshot (up to 24 h), or an operator requests one"
-detected_by = "sim::`removing_a_file_a_boot_built_on_loses_its_transaction_seed_0xf85`"
+detected_by = "sim::`removing_a_file_a_boot_built_on_loses_its_transaction`"
 notes = "The time to heal is **untested**"
 
 [[row]]
@@ -1308,7 +1308,7 @@ response = "Replication goes on. The last good restore point is kept from retent
 signal = "`Health.verification.failing`, `lsr_verify_failing`, with the first differing page and the transaction"
 at_risk = "The replica is wrong from some point after the last good run"
 recovery = "The next passing run clears it. An operator requests a snapshot"
-detected_by = "core::`against::a_transaction_the_replica_does_not_hold_fails_to_restore`, replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_a_rollback_took_seed_0xd`; plant::`verify-no-plan-called-merged`"
+detected_by = "core::`against::a_transaction_the_replica_does_not_hold_fails_to_restore`, replica::`a_wrong_page_in_the_replica_is_degraded_with_the_page_and_txid_and_pins_the_last_good_point`, replica::`the_scheduled_verify_runs_on_its_interval_and_a_clean_replica_passes`, sim::`verify_reports_a_live_transaction_a_rollback_took`; plant::`verify-no-plan-called-merged`"
 
 [[row]]
 table = "Verify"
@@ -2473,7 +2473,7 @@ response = "The oracle fails the run at the end of the final drain or after idle
 signal = "oracle `StuckRetrying`"
 at_risk = "None (a checker)"
 recovery = "None"
-detected_by = "core::`degraded::a_retried_fault_that_persists_ends_degraded_as_a_stall`, sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
+detected_by = "core::`degraded::a_retried_fault_that_persists_ends_degraded_as_a_stall`, sim::`stall_liveness::a_stall_ends_with_the_fault_that_caused_it`; oracle::`StuckRetrying`, plant::`success-keeps-a-stall`"
 notes = "Before, any stall ended a liveness judgment and excused an undrained shutdown, so an engine still retrying a fault nothing caused any more, or reporting degraded for nothing, passed. The run's end now also heals the SQLite source failures still queued"
 
 [[row]]
@@ -2495,7 +2495,7 @@ response = "trip `UnreplicatedTooLong`; held only under `stop-app` (decision D17
 signal = "`/healthz` 503, `held_by` = `unreplicated_too_long`; `lsr_unreplicated_age_seconds`"
 at_risk = "Commits newer than the bound, until uploads land. While writes are held the replicator keeps the database's write lock, so every writer in any process gets \"database is locked\"; one transaction already writing when the hold comes may still commit, and a stopped replicator holds nothing (decision D192)"
 recovery = "Automatic once uploads land"
-detected_by = "core::`a_store_down_past_the_bound_trips_at_the_probe`, core::`a_trip_for_age_clears_once_caught_up`, core::`a_steady_writer_whose_uploads_trail_by_a_tick_never_trips`, core::`failstop::tests::a_trip_for_age_clears_once_its_commits_land`, core::`failstop::tests::staged_frames_never_date_a_newer_file`, core::`failstop::tests::staged_frames_carry_their_date_until_the_replica_holds_them`, sim::`a_store_down_past_the_bound_trips_in_time_and_clears_after`, sim::`seed_0x330_does_not_trip`, sim::`seed_0x9f9_does_not_trip`, sim::`seed_0xa4d_does_not_trip`, plant::`failstop-never-trips`, plant::`failstop-no-probe`, plant::`failstop-no-clear`, plant::`failstop-clock-from-last-failure`, plant::`failstop-dates-the-run`, plant::`failstop-carried-outlives-its-file`, plant::`failstop-carries-to-the-newest-file`, plant::`failstop-trip-held-to-zero-age`"
+detected_by = "core::`a_store_down_past_the_bound_trips_at_the_probe`, core::`a_trip_for_age_clears_once_caught_up`, core::`a_steady_writer_whose_uploads_trail_by_a_tick_never_trips`, core::`failstop::tests::a_trip_for_age_clears_once_its_commits_land`, core::`failstop::tests::staged_frames_never_date_a_newer_file`, core::`failstop::tests::staged_frames_carry_their_date_until_the_replica_holds_them`, sim::`a_store_down_past_the_bound_trips_in_time_and_clears_after`, plant::`failstop-never-trips`, plant::`failstop-no-probe`, plant::`failstop-no-clear`, plant::`failstop-clock-from-last-failure`, plant::`failstop-dates-the-run`, plant::`failstop-carried-outlives-its-file`, plant::`failstop-carries-to-the-newest-file`, plant::`failstop-trip-held-to-zero-age`"
 recovered_by = "sim::`a_store_down_past_the_bound_trips_in_time_and_clears_after`"
 
 [[row]]
@@ -2528,7 +2528,7 @@ response = "not lag: no clock, no trip however long the replica refuses it; a bo
 signal = "none"
 at_risk = "None"
 recovery = "n/a"
-detected_by = "core::`a_file_that_changes_nothing_is_not_lag`, core::`a_file_that_changes_nothing_is_not_lag_after_a_restart`, core::`an_operator_snapshot_while_caught_up_is_not_lag`, core::`a_commit_after_a_file_that_changes_nothing_is_lag`, core::`a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag`, core::`a_commit_after_a_doubt_at_boot_is_lag`, sim::`seed_0xf4342::a_flipped_staged_byte_after_a_day_long_step_does_not_trip_seed_0xf4342`, sim::`seed_0x8ef_does_not_trip`, plant::`failstop-no-op-file-is-lag`, plant::`failstop-no-op-forgotten-at-boot`, plant::`failstop-operator-snapshot-is-lag`, plant::`failstop-quiet-hides-commits`, plant::`failstop-checkpoint-quiet-forgotten`, plant::`failstop-doubt-baseline-ignored`, plant::`failstop-doubt-snapshot-is-lag`"
+detected_by = "core::`a_file_that_changes_nothing_is_not_lag`, core::`a_file_that_changes_nothing_is_not_lag_after_a_restart`, core::`an_operator_snapshot_while_caught_up_is_not_lag`, core::`a_commit_after_a_file_that_changes_nothing_is_lag`, core::`a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag`, core::`a_commit_after_a_doubt_at_boot_is_lag`, sim::`a_checkpoint_file_that_changes_no_page_does_not_trip_after_a_day_long_step`, plant::`failstop-no-op-file-is-lag`, plant::`failstop-no-op-forgotten-at-boot`, plant::`failstop-operator-snapshot-is-lag`, plant::`failstop-quiet-hides-commits`, plant::`failstop-checkpoint-quiet-forgotten`, plant::`failstop-doubt-baseline-ignored`, plant::`failstop-doubt-snapshot-is-lag`"
 notes = "Found by the false-trip judge over random histories; the checkpoint's files and the doubt at boot were found later on main (seeds 0x8ef, 0xf4342, 0x14b)"
 
 [[row]]
@@ -2633,7 +2633,7 @@ response = "The simulator's error domain (`sim/src/domain.rs`) lists every SQLit
 signal = "None (a checker)"
 at_risk = "None (a checker)"
 recovery = "None"
-detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`, sim::`fixed_seeds::compaction_takes_a_staging_denial_as_staging_seed_0x68f`"
+detected_by = "sim::`domain::tests::every_cell_is_drawn_or_says_why_not`, sim::`domain::tests::the_source_draw_reaches_every_drawable_cell_and_no_other`, sim::`domain::tests::the_store_draw_reaches_every_drawable_class_and_no_other`"
 notes = "Before, histories drew two store errors and two SQLite errors on nine of twelve operations. The whole domain (now 22 source cells and 41 store cells drawn, 4 source cells unmodelled; drawn last in the swarm mix) found a defect in compaction classifying staging errors as the replica's (1 seed, fixed in #145, its seed must pass). A failed WAL sync is not drawn: D173 makes it a scenario of its own, since the engine goes on after it and the simulator's model of SQLite cannot follow what the kernel then drops. Other unmodelled cells are gaps in the simulator listed in section 6 (C9): an unlinked WAL. A checkpoint whose read-transaction retake is lost is drawn: the simulated checkpointer ends and retakes the read transaction around a failed checkpoint as lsr-sqlite does. WAL damage while a failed sync's writeback is lost is skipped and counted (`wal.damage_skipped.writeback_lost`)"
 
 [[row]]
@@ -2657,4 +2657,5 @@ at_risk = "None (a checker)"
 recovery = "None"
 detected_by = "sim::`kill_after_fault::half_the_swarm_draws_the_law_and_the_default_mix_never`"
 notes = "The law showed the second-writer judge charging a stop to a process it had just killed (fixed: a crash ends the watch, as a boot does), and a lost acknowledged transaction on seed 0x1dc, under triage. The engine journal and its obligation ledger, which the law once proved, are gone (D173)"
+
 

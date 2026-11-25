@@ -20,6 +20,9 @@ mod restored;
 mod second_writer;
 #[cfg(test)]
 mod verify;
+#[cfg(test)]
+#[path = "../../../core/tests/core/waves.rs"]
+mod waves;
 // Schedule exploration, only under `--cfg shuttle` (`just shuttle`).
 #[cfg(test)]
 #[cfg(shuttle)]
