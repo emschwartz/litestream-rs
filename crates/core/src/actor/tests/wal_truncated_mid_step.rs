@@ -63,6 +63,7 @@ fn a_wal_truncated_during_a_step_is_not_a_rewound_wal() {
         staging: &rig.staging,
         remote: &rig.remote,
         clock: &FakeClock::new(ts(T0 + 2)),
+        notice: &mut |_| {},
     };
     let tick = block_on(actor.tick(env, ts(T0 + 2)));
     assert!(

@@ -1,0 +1,8 @@
+# The replicator's thread forwards the engine's notice of the identity check but never names it
+# as the reason writes are held: health and the writes-blocked line say booting through a hold
+# that lasts as long as a restore (docs/decisions/D201.md).
+name = "failstop-identity-check-not-in-health"
+fix = "plant"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["failstop::a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds"]
