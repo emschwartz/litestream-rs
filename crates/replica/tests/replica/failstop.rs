@@ -73,7 +73,7 @@ fn raw(site: &Site, replicator: &Replicator) -> Connection {
 
 /// The write-gate events a replicator emitted, in order.
 #[derive(Clone, Default)]
-struct Gates(Arc<Mutex<Vec<Event>>>);
+struct Gates(Arc<(Mutex<Vec<Event>>, Condvar)>);
 
 impl EventSink for Gates {
     fn event(&mut self, event: &Event) {
@@ -88,14 +88,15 @@ impl EventSink for Gates {
                 )
         );
         if keep {
-            self.0.lock().unwrap().push(event.clone());
+            self.0.0.lock().unwrap().push(event.clone());
+            self.0.1.notify_all();
         }
     }
 }
 
 impl Gates {
     fn changes(&self) -> Vec<Event> {
-        let events = self.0.lock().unwrap();
+        let events = self.0.0.lock().unwrap();
         events
             .iter()
             .filter(|e| matches!(e, Event::WritesBlocked { .. } | Event::WritesAllowed))
@@ -104,7 +105,25 @@ impl Gates {
     }
 
     fn any(&self, want: impl Fn(&Event) -> bool) -> bool {
-        self.0.lock().unwrap().iter().any(want)
+        self.0.0.lock().unwrap().iter().any(want)
+    }
+
+    /// Every event kept so far.
+    fn events(&self) -> Vec<Event> {
+        self.0.0.lock().unwrap().clone()
+    }
+
+    /// Waits until `want` holds of the events kept. Health is published before the event that
+    /// reports the same change is sent, so a test that waited on health may not yet see the
+    /// event; it waits on the event instead.
+    fn wait_for(&self, want: impl Fn(&[Event]) -> bool) {
+        let events = self.0.0.lock().unwrap();
+        let (events, timeout) = self
+            .0
+            .1
+            .wait_timeout_while(events, PATIENCE, |events| !want(events))
+            .unwrap();
+        assert!(!timeout.timed_out(), "the events never came: {events:?}");
     }
 }
 
@@ -325,7 +344,8 @@ fn a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds() {
     )
     .unwrap();
     assert_eq!(block_on(replicator.ready(PATIENCE)), Booted::Booted);
-    let seen: Vec<Event> = gates.0.lock().unwrap().clone();
+    gates.wait_for(|events| events.contains(&Event::WritesAllowed));
+    let seen: Vec<Event> = gates.events();
     let checking = WhyBlocked::CheckingIdentity;
     let at = seen
         .iter()
@@ -414,6 +434,11 @@ fn a_stop_found_before_the_decision_still_holds_the_start() {
     wait(&replicator, |h| {
         h.writes == Writes::Blocked(WhyBlocked::Tripped(trip))
     });
+    gates.wait_for(|events| {
+        events.contains(&Event::WritesBlocked {
+            why: WhyBlocked::Tripped(trip),
+        })
+    });
     assert!(
         !gates.any(|e| matches!(e, Event::WritesAllowed)),
         "{:?}",
@@ -455,6 +480,11 @@ fn a_stop_the_boot_snapshot_finds_blocks_writes_again_under_stop_app() {
         ),
         "{health:?}"
     );
+    gates.wait_for(|events| {
+        events.contains(&Event::WritesBlocked {
+            why: WhyBlocked::Tripped(trip),
+        })
+    });
     assert_eq!(
         gates.changes(),
         vec![
