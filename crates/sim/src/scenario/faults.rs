@@ -291,6 +291,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::StoreRefused => &[store_refuses_upload],
         FaultKind::RemoteCorrupt => &[remote_bitrot_on_list_read],
         FaultKind::RemoteAheadOfLocal => &[
+            older_copy_on_a_new_host,
             second_writer_mid_run,
             second_writer_survives_restart,
             second_writer_between_whole_listings,
@@ -2286,4 +2287,18 @@ pub fn sealed_then_bump_io() -> Scenario {
         SourceOp::BumpSeq,
         SourceError::Io(std::io::ErrorKind::Other),
     )
+}
+
+/// Host A replicates, a file backup of the database is taken, A commits more (the replicator's
+/// counter goes up with its checkpoints) and replicates, and A is lost: the backup goes in
+/// place of the database with no working folder, as a plain `cp` puts it on a new host. It
+/// holds most of the replica's pages and was written after the replica's newest file, but its
+/// counter is below the replica's: the boot stops instead of snapshotting the older database
+/// above the replica's newest state (`docs/decisions/D214.md`).
+#[must_use]
+pub fn older_copy_on_a_new_host() -> Scenario {
+    let mut s = super::older_copy_history("older_copy_on_a_new_host", 2, false);
+    s.expect = vec![Expect::Stopped(StopCause::OtherWriter), Expect::Oracle];
+    s.check = Some(quiet_after_stop);
+    s
 }

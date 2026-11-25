@@ -158,6 +158,9 @@ classes! {
     PowerLoss = "PowerLoss", Undrawn;
     LyingWalSync = "LyingWalSync", Undrawn;
     OurReader = "OurReader", Undrawn;
+    Structured = "Structured", Undrawn;
+    SaveDatabase = "SaveDatabase", Undrawn;
+    PutBackDatabase = "PutBackDatabase", Undrawn;
     AppAutocheckpoint = "AppAutocheckpoint", Undrawn;
     CrashProcess = "Crash.Process", Once;
     CrashPower = "Crash.Power", Once;
@@ -318,6 +321,9 @@ impl Class {
             Op::PowerLoss => Self::PowerLoss,
             Op::LyingWalSync => Self::LyingWalSync,
             Op::OurReader { .. } => Self::OurReader,
+            Op::Structured { .. } => Self::Structured,
+            Op::SaveDatabase => Self::SaveDatabase,
+            Op::PutBackDatabase { .. } => Self::PutBackDatabase,
             Op::AppAutocheckpoint(_) => Self::AppAutocheckpoint,
             Op::HttpFault(_) => Self::HttpFault,
             Op::Crash(CrashKind::Process) => Self::CrashProcess,
