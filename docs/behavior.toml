@@ -2640,7 +2640,7 @@ signal = "none"
 at_risk = "None"
 recovery = "n/a"
 detected_by = "core::`a_file_that_changes_nothing_is_not_lag`, core::`a_file_that_changes_nothing_is_not_lag_after_a_restart`, core::`an_operator_snapshot_while_caught_up_is_not_lag`, core::`a_commit_after_a_file_that_changes_nothing_is_lag`, core::`a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag`, core::`a_commit_after_a_doubt_at_boot_is_lag`, sim::`a_checkpoint_file_that_changes_no_page_does_not_trip_after_a_day_long_step`, plant::`failstop-no-op-file-is-lag`, plant::`failstop-no-op-forgotten-at-boot`, plant::`failstop-operator-snapshot-is-lag`, plant::`failstop-quiet-hides-commits`, plant::`failstop-checkpoint-quiet-forgotten`, plant::`failstop-doubt-baseline-ignored`, plant::`failstop-doubt-snapshot-is-lag`"
-notes = "Found by the false-trip judge over random histories; the checkpoint's files and the doubt at boot were found later on main (seeds 0x8ef, 0xf4342, 0x14b)"
+notes = "Found by the false-trip judge over random histories; the checkpoint's files and the doubt at boot were found later on main (seeds 0x8ef, 0xf4342, 0x14b). Accepted, open (D227, #366): a first pending file with no staged file before it, over a WAL generation other than the replica's newest file's, counts as a commit after a restart even when it holds none, so a store outage past the bound can trip fail-stop (held only under stop-app) with nothing unreplicated. Go and lsr both write untracked files, so no checksum in the files says the snapshot equals the replica, and a restore to compare reads the whole database"
 
 [[row]]
 table = "Fail-stop"

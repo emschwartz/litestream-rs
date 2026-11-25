@@ -573,6 +573,38 @@ fault-rig-canary *args: minio-up toxiproxy-up
     eval "$(./scripts/toxiproxy.sh env)"
     uv run scripts/fault_rig.py canary {{args}}
 
+# The trial drill (scripts/trial_drill.py, docs/trial-drill.md): the pinned Go build replicates a
+# synthetic database of the given GiB to local MinIO, lsr takes over under load (with kill -9 during a
+# large upload, a compaction and a snapshot), both binaries restore and are compared with a ledger of
+# commits, and Go takes it back. Defaults are Litestream's own config and take hours; arguments after the
+# size (durations, intervals, budgets, --work DIR) go to the script. Exit 1 on a failed phase or budget.
+trial-drill gib *args: minio-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --locked -p lsr-cli
+    ./scripts/build-go-litestream.sh 041a8c3
+    eval "$(./scripts/minio.sh env)"
+    uv run scripts/trial_drill.py run --gib {{gib}} {{args}}
+
+# The same drill against a real provider's bucket (tigris, aws or r2), under one run prefix that
+# scripts/provider.sh deletes afterwards, multipart uploads included, failing if it lists non-empty.
+trial-drill-provider provider gib *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --locked -p lsr-cli
+    ./scripts/build-go-litestream.sh 041a8c3
+    ./scripts/provider.sh {{provider}} uv run scripts/trial_drill.py run --store provider --gib {{gib}} {{args}}
+
+# The drill's own canary: damage planted in a restored database (a flipped byte, a state that never
+# existed, a state newer than the instant) must be reported, and the intact database must pass.
+trial-drill-canary:
+    uv run scripts/trial_drill.py canary
+
+# The nightly's small run: 0.05 GiB on MinIO behind a 4 MiB/s upload limit, with every interval
+# compressed to seconds so the snapshot, level 3 and the retention pass all happen in minutes.
+trial-drill-small:
+    just trial-drill 0.05 --work target/trial-drill/nightly --throttle-mib-s 4 --snapshot-interval 90s --snapshot-retention 300s --levels 10s,20s,40s --l0-check 10s --l0-retention 30s --sync-interval 1s --part-size 8MB --truncate-page-n 250000 --burst-mib 12 --go-seconds 20 --min-run 4 --max-run 20 --budget-catchup 180 --first-timeout 600
+
 # The fault rig against a planted engine defect (docs/planted-bugs/<name>.patch), until its first
 # anomaly: just fault-rig-plant restart-abandoned-at-synced-end 200
 fault-rig-plant name cycles="200" *args: minio-up toxiproxy-up
