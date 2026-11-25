@@ -1,0 +1,7 @@
+# Writes stay held until the boot's snapshot is staged, not just until the boot has listed the
+# replica and decided how to start: a start over a large database blocks every writer for as long
+# as the copy takes (docs/decisions/D201.md).
+name = "failstop-held-until-the-boot-snapshot"
+fix = "plant"
+package = "lsr-core"
+tests = ["lag::a_boot_is_judged_once_it_decides_not_once_its_snapshot_is_staged"]

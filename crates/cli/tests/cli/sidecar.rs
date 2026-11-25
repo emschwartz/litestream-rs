@@ -834,7 +834,8 @@ fn stop_app_without_exec_is_accepted() {
 }
 
 /// A plain sidecar under `stop-app` whose boot stops for an unsafe cause blocks every
-/// writer: the log says `writes blocked` and why, and a write that waits for no lock gets
+/// writer: the log says `writes blocked` and why (at INFO while the start decides, at WARN for
+/// the trip), and a write that waits for no lock gets
 /// "database is locked".
 #[test]
 fn a_plain_sidecar_blocks_writes_under_stop_app() {
@@ -842,11 +843,17 @@ fn a_plain_sidecar_blocks_writes_under_stop_app() {
                  litestream-rs:\n  if-replication-stops: stop-app\n  responses:\n    \
                  page-size-changed: stop\n";
     let setup = setup(extra, "    monitor-interval: 20ms\n");
-    change_the_page_size(&setup);
+    let _wal = change_the_page_size(&setup);
     let mut command = lsr();
     command.args(["replicate", "-config"]).arg(&setup.config);
     let mut daemon = Daemon::spawn(command);
-    daemon.wait_for(&["msg=\"writes blocked\"", "held_by=page_size_changed"]);
+    // Every start holds writes while it decides, at INFO; a trip holds them at WARN.
+    daemon.wait_for(&["level=INFO", "msg=\"writes blocked\"", "held_by=booting"]);
+    daemon.wait_for(&[
+        "level=WARN",
+        "msg=\"writes blocked\"",
+        "held_by=page_size_changed",
+    ]);
     let writer = rusqlite::Connection::open(&setup.db).unwrap();
     writer.busy_timeout(std::time::Duration::ZERO).unwrap();
     let err = writer.execute_batch("CREATE TABLE blocked(x)").unwrap_err();
@@ -860,12 +867,14 @@ fn a_plain_sidecar_blocks_writes_under_stop_app() {
 }
 
 /// Replicates `setup`'s database at 4096-byte pages, then rewrites the database at 8192: the
-/// next boot finds the replica's page size is not the database's.
+/// next boot finds the replica's page size is not the database's, before it decides how to
+/// start, from the WAL the returned connection keeps open (SQLite deletes it at the last close,
+/// and a boot with no WAL would meet the new size only in its snapshot, after the release).
 ///
 /// The first daemon runs on a config of its own with the default shutdown deadline, not the
 /// test's: its drain must upload the file it just staged, and a short deadline the test sets
 /// for its own daemon would make that a race under load.
-fn change_the_page_size(setup: &Setup) {
+fn change_the_page_size(setup: &Setup) -> rusqlite::Connection {
     let app = database(&setup.db);
     write(&app, 5);
     drop(app);
@@ -892,9 +901,65 @@ fn change_the_page_size(setup: &Setup) {
     )
     .unwrap();
     drop(app);
-    // A WAL at the new size, kept when the connection closes, which boot reads.
+    // A WAL at the new size, which boot reads while this connection keeps it.
     let app = database(&setup.db);
     write(&app, 1);
+    app
+}
+
+/// The `-exec` child starts once the boot has decided how to start, before its snapshot is
+/// staged (`docs/decisions/D201.md`). The test holds the database's write lock over a WAL with no
+/// header, so the first snapshot cannot be taken (it must write once to give the WAL a header);
+/// the boot needs no write, decides, and the child starts while the replica is still empty.
+/// Once the lock goes the snapshot is taken, and the drain the child's exit starts restores
+/// every row.
+#[test]
+fn the_child_starts_before_the_boot_snapshot_is_staged() {
+    let setup = setup("addr: 127.0.0.1:0\n", "    monitor-interval: 20ms\n");
+    let app = database(&setup.db);
+    write(&app, 5);
+    // The replicator's own tables, which it would otherwise create with a write at open.
+    app.execute_batch(
+        "CREATE TABLE _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);
+         CREATE TABLE _litestream_lock (id INTEGER);",
+    )
+    .unwrap();
+    drop(app);
+    let holder = rusqlite::Connection::open(&setup.db).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut daemon = Daemon::spawn(with_child(&setup, "signal", 0));
+    daemon.wait_for(&["child: ready"]);
+    assert_eq!(
+        ltx_files(&setup.replica),
+        0,
+        "the boot snapshot is not on the replica yet"
+    );
+    holder.execute_batch("ROLLBACK").unwrap();
+    drop(holder);
+    daemon.signal("TERM");
+    let (status, out) = daemon.finish();
+    assert_eq!(status.code(), Some(0), "{out:#?}");
+    let child = index(&out, "child: ready");
+    let decided = index(&out, "snapshot required");
+    assert!(decided < child, "{out:#?}");
+    restores_to(setup.dir.path(), &setup.replica, &database(&setup.db));
+}
+
+/// How many LTX files are under `dir`, at any depth.
+fn ltx_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .map(|entry| entry.unwrap().path())
+        .map(|path| {
+            if path.is_dir() {
+                ltx_files(&path)
+            } else {
+                usize::from(path.extension().is_some_and(|ext| ext == "ltx"))
+            }
+        })
+        .sum()
 }
 
 /// Under `hold-start` (the default), an unsafe stop at boot keeps the `-exec` child from
@@ -905,7 +970,7 @@ fn an_unsafe_stop_at_boot_holds_the_child() {
     let extra = "addr: 127.0.0.1:0\nshutdown-sync-timeout: 100ms\n\
                  litestream-rs:\n  responses:\n    page-size-changed: stop\n";
     let setup = setup(extra, "    monitor-interval: 20ms\n");
-    change_the_page_size(&setup);
+    let _wal = change_the_page_size(&setup);
     let mut daemon = Daemon::spawn(with_child(&setup, "exit", 0));
     let addr = bound(&mut daemon);
     daemon.wait_for(&["msg=\"start refused\"", "why=page_size_changed"]);

@@ -1,5 +1,6 @@
 # Writes go through while the boot is still pending: an application writes before the
-# replicator has judged whether it may (docs/decisions/D192.md).
+# replicator has listed the replica and decided how to start, so before it knows whether it may
+# (docs/decisions/D192.md, docs/decisions/D201.md).
 name = "gate-not-held-while-pending"
 fix = "plant"
 package = "lsr-core"

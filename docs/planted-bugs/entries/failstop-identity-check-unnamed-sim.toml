@@ -1,0 +1,7 @@
+# failstop-identity-check-unnamed in the simulator: the run's write gate never names the check.
+name = "failstop-identity-check-unnamed-sim"
+patch = "failstop-identity-check-unnamed"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::writes_held_while_the_boot_checks_identity"]

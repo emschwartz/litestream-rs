@@ -58,6 +58,7 @@ fn a_wal_truncated_during_the_boot_is_not_a_rewound_wal() {
         staging: &rig.staging,
         remote: &rig.remote,
         clock: &FakeClock::new(ts(T0 + 2)),
+        notice: &mut |_| {},
     };
     let tick = block_on(booted.tick(env, ts(T0 + 2)));
     assert!(

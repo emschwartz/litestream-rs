@@ -121,3 +121,49 @@ fn with_staging_gone_a_replica_newest_staged_file_naming_another_transaction_sto
         "{seen:?}"
     );
 }
+
+/// Staging is gone and the replica's newest staged file reads well for the upload task's
+/// read-back, then badly for the boot's own read of it: with nothing staged, the corrupt
+/// read is the boot's fault.
+#[test]
+fn with_nothing_staged_a_replica_newest_staged_file_that_reads_badly_at_boot_stops_corrupt() {
+    let (mut rig, mut actor) = wiped();
+    rig.remote
+        .other_bytes_on_read(newest_staged_file_key(), 2, vec![0x5a; 200]);
+    let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(boot, Tick::Stopped(StopCause::RemoteCorrupt), "{boot:?}");
+    assert_eq!(rig.remote.reads_of(&newest_staged_file_key()), 2);
+}
+
+/// The replica is a transaction past the newest staged file and that file reads well for the
+/// upload task's read-back, then badly for the boot's own read: the boot goes on without the
+/// WAL's word on it, and the staged file's position gives the verdict.
+#[test]
+fn with_a_staged_file_a_replica_newest_staged_file_that_reads_badly_at_boot_does_not_fail_the_boot()
+{
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    // Staging holds transaction 1 alone: its copy of the replica's first file.
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let one = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
+    let bytes = block_on(rig.remote.inner.read(&one, 0, all)).unwrap();
+    block_on(rig.staging.inner.delete(&[newest_staged_file_key()])).unwrap();
+    block_on(async {
+        let mut up = rig
+            .staging
+            .inner
+            .begin_upload(&one, ts(T0), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&bytes).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    assert_eq!(staged(&rig), vec![1]);
+    rig.remote
+        .other_bytes_on_read(newest_staged_file_key(), 2, vec![0x5a; 200]);
+    let mut actor = Actor::new(cfg());
+    let boot = rig.tick(&mut actor, T0 + 2);
+    // The read-back, the boot's read (the lie), then the page size's header read.
+    assert_eq!(rig.remote.reads_of(&newest_staged_file_key()), 3);
+    assert_eq!(boot, Tick::Stopped(StopCause::OtherWriter), "{boot:?}");
+}

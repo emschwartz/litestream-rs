@@ -1,0 +1,8 @@
+# failstop-identity-check-unnamed against the library: health and the events say booting, never
+# checking_identity, through the check.
+name = "failstop-identity-check-unnamed-replica"
+patch = "failstop-identity-check-unnamed"
+fix = "plant"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["failstop::a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds"]

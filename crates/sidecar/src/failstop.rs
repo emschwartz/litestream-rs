@@ -16,6 +16,7 @@
 //! gate held while the child runs stops it: SIGTERM, the shutdown grace, SIGKILL, one last
 //! drain, then the CLI's own exit code (decision D19).
 
+use lsr_config::LogLevel;
 use lsr_replica::{Gate, Trip, WhyBlocked};
 
 use crate::health::stop_name;
@@ -40,12 +41,26 @@ pub(crate) const fn gate_name(gate: Gate) -> &'static str {
     }
 }
 
-/// Why writes are held, as the `writes blocked` line names it: `booting`, or the trip's name.
+/// Why writes are held, as the `writes blocked` line names it: `booting`,
+/// `checking_identity` (a start with an empty meta directory comparing the database with the
+/// replica before it decides), or the trip's name.
 #[must_use]
 pub(crate) const fn why_name(why: WhyBlocked) -> &'static str {
     match why {
         WhyBlocked::Booting => "booting",
+        WhyBlocked::CheckingIdentity => "checking_identity",
         WhyBlocked::Tripped(trip) => trip_name(trip),
+    }
+}
+
+/// The level of the `writes blocked` line: INFO for the hold every start makes while it lists
+/// the replica and decides (a second or two, or a restore's time when it checks identity), WARN
+/// for a trip (`docs/decisions/D201.md`).
+#[must_use]
+pub(crate) const fn writes_blocked_level(why: WhyBlocked) -> LogLevel {
+    match why {
+        WhyBlocked::Booting | WhyBlocked::CheckingIdentity => LogLevel::Info,
+        WhyBlocked::Tripped(_) => LogLevel::Warn,
     }
 }
 
