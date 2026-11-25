@@ -104,7 +104,7 @@ fn commits_between_slices_are_staged_and_checkpointed_while_the_file_goes_up() {
     let slice = |event: &&Event| matches!(event, Event::Sending { .. });
     // Three slices went before the first commit: five more, the WAL step's tick, eight, its
     // tick again, and the six that are left.
-    let turns: Vec<usize> = (0..21).filter(|at| !slice(&&during[*at])).collect();
+    let turns: Vec<usize> = (0..21).filter(|at| !slice(&during[*at])).collect();
     assert_eq!(turns, [5, 14], "{during:?}");
     let checkpoints = during
         .iter()
