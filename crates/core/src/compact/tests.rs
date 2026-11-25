@@ -1369,6 +1369,10 @@ fn an_output_acknowledged_short_is_reported_and_left_to_the_caller() {
 /// every write but the last is about 256 KiB (spelled out, so a changed constant is seen), and the file is several of them. A
 /// flush size gone wrong, or an index that went out in pieces of its own size, shows here.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "builds and compacts 40000 pages twice; native runs check the flush size"
+)]
 fn the_output_reaches_the_upload_in_writes_of_the_flush_size() {
     let ps = size(512);
     let source = MemStore::new();

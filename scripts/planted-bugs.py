@@ -10,7 +10,10 @@ HEAD, then must each fail once the entry's patch is applied. Exits 1 when a plan
 (a defect in the tests), a patch no longer applies (re-express the entry's patch against the
 current tree, or retire the entry with a reason), a test does not run, or a build breaks.
 
-    uv run scripts/planted-bugs.py [--only NAME]... [--keep] [--no-wait]
+    uv run scripts/planted-bugs.py [--only NAME]... [--shard K/N] [--keep] [--no-wait]
+
+`--shard K/N` runs every N-th entry starting at the K-th (by file name), plus the canaries, so
+the nightly can split the ledger across N runners.
 
 One run at a time: the scratch tree and its target dir are shared, so a run takes a lock on
 `target/planted-bugs/lock` before it touches them, and waits for one already held (`--no-wait`
@@ -246,6 +249,8 @@ def passed(verdict: str) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", action="append", default=[], help="run just this entry (repeatable)")
+    ap.add_argument("--shard", default="0/1", metavar="K/N",
+                    help="run only the K-th of N interleaved slices of the entries (canaries always run)")
     ap.add_argument("--keep", action="store_true", help="leave the scratch worktree and target dir")
     ap.add_argument("--unaided", action="store_true",
                     help="seeds the swarm needs to find each plant, with no named test run")
@@ -274,6 +279,16 @@ def main() -> int:
         return 1
     # The canaries always run: they are what says the verdicts below mean anything.
     bugs = [b for b in bugs if not opts.only or b["name"] in opts.only or "canary" in b]
+    try:
+        k, n = (int(part) for part in opts.shard.split("/"))
+    except ValueError:
+        k, n = -1, 0
+    if not 0 <= k < n:
+        print(f"planted-bugs: --shard wants K/N with 0 <= K < N, got {opts.shard}", file=sys.stderr)
+        return 1
+    real = [b for b in bugs if "canary" not in b]
+    mine = {b["name"] for b in real[k::n]}
+    bugs = [b for b in bugs if "canary" in b or b["name"] in mine]
     try:
         take_lock(wait=not opts.no_wait)
     except Busy as busy:
