@@ -114,6 +114,14 @@ fn upstream() -> BTreeSet<(String, String)> {
 /// The variable naming the file `just upstream-test-map-fresh` writes `cargo nextest list` to.
 const RUST_TESTS_VAR: &str = "LSR_UPSTREAM_TEST_MAP_RUST_TESTS";
 
+/// Counterparts that only a Linux build has (they read `/proc/self/fd`). On another system the
+/// listing lacks exactly these, so the check runs everywhere and excuses nothing else: a name
+/// here that the test map no longer names, or that this system does list, fails the check.
+const LINUX_ONLY: [&str; 2] = [
+    "lsr-sqlite::sqlite::descriptors::a_sync_and_checkpoint_cycle_opens_and_closes_no_descriptor_on_the_database_or_shm",
+    "lsr-sqlite::sqlite::descriptors::closing_a_descriptor_on_shm_drops_the_locks_sqlite_holds",
+];
+
 /// Every Rust test as `<binary id>::<test path>`, from nextest's one-line listing.
 fn rust_tests(listing: &str) -> BTreeSet<String> {
     listing
@@ -233,7 +241,25 @@ fn every_counterpart_exists() {
         tests.len()
     );
     let test_map = test_map();
-    let unknown = unknown_counterparts(&test_map, &tests);
+    let mut unknown = unknown_counterparts(&test_map, &tests);
+    let named: BTreeSet<&str> = entries(&test_map)
+        .filter_map(|(_, _, e)| e.counterpart.as_ref())
+        .flat_map(Counterparts::names)
+        .collect();
+    let stale: Vec<&str> = LINUX_ONLY
+        .into_iter()
+        .filter(|name| {
+            !named.contains(name) || (!cfg!(target_os = "linux") && tests.contains(*name))
+        })
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "LINUX_ONLY names a test the test map does not, or one this system lists:\n{}",
+        stale.join("\n")
+    );
+    if !cfg!(target_os = "linux") {
+        unknown.retain(|name| !LINUX_ONLY.contains(name));
+    }
     assert!(
         unknown.is_empty(),
         "counterpart(s) in docs/upstream-test-map.toml that `cargo nextest list` lacks:\n{}",
