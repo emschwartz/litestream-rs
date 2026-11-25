@@ -311,7 +311,11 @@ fn dump_config(config: &GoConfig) -> DumpConfig {
         snapshot_interval: Some(nanos(config.snapshot().interval())),
         snapshot_retention: Some(nanos(config.snapshot().retention())),
         l0_retention: Some(nanos(config.l0_retention())),
-        l0_retention_check_interval: Some(nanos(config.l0_retention_check_interval())),
+        l0_retention_check_interval: Some(nanos(
+            config
+                .l0_retention_check_interval()
+                .unwrap_or(lsr_config::defaults::L0_RETENTION_CHECK_INTERVAL),
+        )),
         retention_enabled: Some(config.retention_enabled()),
         shutdown_sync_timeout: Some(nanos(config.shutdown_sync_timeout())),
         dbs: config.dbs().iter().map(dump_db_config).collect(),

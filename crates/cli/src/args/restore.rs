@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use lsr_core::{AsOfInside, RestoreTarget};
 use lsr_ltx::{Timestamp, Txid};
 use lsr_replica::local::IntegrityCheck;
-use lsr_sidecar::goflag::{self, Def, FlagError, Scan, Set};
+use lsr_sidecar::goflag::{self, Def, FlagError, Set};
 
+use super::inspect::{self, Inspect};
 use super::{FlagRow, Replica, UsageError, replica_of};
 
 /// Where a restore reads from.
@@ -250,28 +251,16 @@ pub(super) fn is_url(text: &str) -> bool {
     })
 }
 
-/// What a `restore` command line asks for.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Restore {
-    /// Run it.
-    Run(Box<RestoreArgs>),
-    /// `-h` or `-help`, literally.
-    Help,
-}
-
 /// Parses the arguments after `restore`.
 ///
 /// # Errors
 /// [`UsageError`], the first Go would report.
-pub fn parse(args: &[String]) -> Result<Restore, UsageError> {
-    let set = match goflag::scan(&DEFINED, args).map_err(UsageError::GoFlag)? {
-        Scan::Set(set) => set,
-        Scan::Help if goflag::literal_help(args) => return Ok(Restore::Help),
-        Scan::Help => return Err(UsageError::HelpNotLiteral),
+pub fn parse(args: &[String]) -> Result<Inspect<Box<RestoreArgs>>, UsageError> {
+    let Some(set) = inspect::scan(&DEFINED, args)? else {
+        return Ok(Inspect::Help);
     };
     let from = from(&set)?;
-    let boolean = |name| set.boolean(name).map_err(UsageError::GoFlag);
-    if boolean("f")? {
+    if set.boolean("f")? {
         return Err(UsageError::FollowNotBuilt);
     }
     let integrity_check = match set.value("integrity-check").as_deref() {
@@ -287,7 +276,7 @@ pub fn parse(args: &[String]) -> Result<Restore, UsageError> {
     let target = target(&set)?;
     let txid_and_timestamp = matches!(target, RestoreTarget::Txid(_))
         && set.value("timestamp").is_some_and(|t| !t.is_empty());
-    let as_of_inside = match (boolean("allow-earlier")?, target) {
+    let as_of_inside = match (set.boolean("allow-earlier")?, target) {
         (false, _) => AsOfInside::Refuse,
         (true, RestoreTarget::AsOf(_)) => AsOfInside::TakeEarlier,
         (true, RestoreTarget::Latest | RestoreTarget::Txid(_)) => {
@@ -303,18 +292,18 @@ pub fn parse(args: &[String]) -> Result<Restore, UsageError> {
         .or_else(|| set.value("output"))
         .filter(|o| !o.is_empty())
         .map(PathBuf::from);
-    Ok(Restore::Run(Box::new(RestoreArgs {
+    Ok(Inspect::Run(Box::new(RestoreArgs {
         from,
         output,
         target,
         as_of_inside,
-        clear_journal_files: boolean("clear-journal-files")?,
+        clear_journal_files: set.boolean("clear-journal-files")?,
         integrity_check,
-        if_db_not_exists: boolean("if-db-not-exists")?,
-        if_replica_exists: boolean("if-replica-exists")?,
-        dry_run: boolean("dry-run")?,
-        json: boolean("json")?,
-        force: boolean("force")?,
+        if_db_not_exists: set.boolean("if-db-not-exists")?,
+        if_replica_exists: set.boolean("if-replica-exists")?,
+        dry_run: set.boolean("dry-run")?,
+        json: set.boolean("json")?,
+        force: set.boolean("force")?,
         parallelism: set.visited("parallelism"),
         txid_and_timestamp,
         timestamp_given: set.value("timestamp").is_some_and(|t| !t.is_empty()),
@@ -334,15 +323,13 @@ fn from(set: &Set) -> Result<RestoreFrom, UsageError> {
             if config.is_some() {
                 return Err(UsageError::ConfigFlagWithReplica { flag: "-config" });
             }
-            if set.boolean("no-expand-env").map_err(UsageError::GoFlag)? {
+            if set.boolean("no-expand-env")? {
                 return Err(UsageError::ConfigFlagWithReplica {
                     flag: "-no-expand-env",
                 });
             }
             let over = |name: &str| set.value(name).filter(|v| !v.is_empty());
-            let style = set
-                .boolean("force-path-style")
-                .map_err(UsageError::GoFlag)?;
+            let style = set.boolean("force-path-style")?;
             replica_of(&replica, over("endpoint"), over("region"), style).map(RestoreFrom::Replica)
         }
         ([url], None) if is_url(url) => {
@@ -361,7 +348,7 @@ fn from(set: &Set) -> Result<RestoreFrom, UsageError> {
             Ok(RestoreFrom::Database {
                 path: path.clone(),
                 config,
-                no_expand_env: set.boolean("no-expand-env").map_err(UsageError::GoFlag)?,
+                no_expand_env: set.boolean("no-expand-env")?,
             })
         }
     }
@@ -376,9 +363,7 @@ pub(super) fn s3_flag_given(set: &Set) -> Result<Option<&'static str>, UsageErro
             return Ok(Some(flag));
         }
     }
-    let style = set
-        .boolean("force-path-style")
-        .map_err(UsageError::GoFlag)?;
+    let style = set.boolean("force-path-style")?;
     Ok(style.then_some("--force-path-style"))
 }
 

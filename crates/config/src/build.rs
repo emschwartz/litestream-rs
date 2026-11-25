@@ -17,12 +17,13 @@
 
 use std::num::NonZeroU32;
 
+use lsr_core::{OtherWriter, Response, Responses};
 use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge};
 
 use crate::config::{
     AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
-    OtherWriterSetting, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings,
-    RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
+    ReplicaConfig, ReplicaKind, RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride,
+    defaults,
 };
 use crate::duration::GoDuration;
 use crate::error::{KeyPath, ProblemKind, WarningKind};
@@ -71,10 +72,7 @@ pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
         l0_retention: top
             .duration("l0-retention", walk)
             .unwrap_or(defaults::L0_RETENTION),
-        l0_retention_check_interval: top
-            .duration("l0-retention-check-interval", walk)
-            .unwrap_or(defaults::L0_RETENTION_CHECK_INTERVAL),
-        l0_check_set: top.duration("l0-retention-check-interval", walk).is_some(),
+        l0_retention_check_interval: top.duration("l0-retention-check-interval", walk),
         retention_enabled: top
             .map("retention", walk)
             .and_then(|r| r.boolean("enabled", walk))
@@ -515,27 +513,43 @@ fn parse_level(value: &str) -> Option<LogLevel> {
     }
 }
 
+/// A `litestream-rs` key that takes one of a few words: the word's value, or `None` (with a
+/// problem listing the words, in table order) when the key is absent or not one of them.
+fn choice<T: Copy>(
+    fields: Option<&Fields>,
+    name: &'static str,
+    table: &[(&str, T)],
+    walk: &mut Walk,
+) -> Option<T> {
+    let fields = fields?;
+    let text = fields.string(name, walk)?;
+    if let Some((_, value)) = table.iter().find(|(word, _)| *word == text) {
+        return Some(*value);
+    }
+    let words: Vec<&str> = table.iter().map(|(word, _)| *word).collect();
+    unsupported(fields, name, text, words.join(", "), walk);
+    None
+}
+
+/// The `UnsupportedValue` problem for `value` at key `name` of `fields`.
+fn unsupported(fields: &Fields, name: &str, value: String, allowed: String, walk: &mut Walk) {
+    let kind = ProblemKind::UnsupportedValue { value, allowed };
+    walk.problem(fields.path.key(name), fields.line(name), kind);
+}
+
 fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
-    let app_readers = match fields
-        .and_then(|f| f.string("app-readers", walk))
-        .as_deref()
-    {
-        None | Some("unknown") => AppReaders::Unknown,
-        Some("none") => AppReaders::None,
-        Some(other) => {
-            let path = KeyPath::root().key("litestream-rs").key("app-readers");
-            let line = fields.and_then(|f| f.line("app-readers"));
-            let (value, allowed) = (other.to_owned(), "none, unknown");
-            walk.problem(path, line, ProblemKind::UnsupportedValue { value, allowed });
-            AppReaders::Unknown
-        }
-    };
+    let app_readers = choice(
+        fields,
+        "app-readers",
+        &[("none", AppReaders::None), ("unknown", AppReaders::Unknown)],
+        walk,
+    );
     let responses = fields
         .and_then(|f| f.map("responses", walk))
         .map(|r| responses(r, walk))
-        .unwrap_or_default();
+        .unwrap_or(Responses::GO_LIKE);
     RustSettings {
-        app_readers,
+        app_readers: app_readers.unwrap_or(AppReaders::Unknown),
         app_autocheckpoint: app_autocheckpoint(fields, walk),
         responses,
         if_replication_stops: if_replication_stops(fields, walk),
@@ -545,118 +559,105 @@ fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
 
 /// `if-replication-stops` (decisions D13, D14): `hold-start` when absent.
 fn if_replication_stops(fields: Option<&Fields>, walk: &mut Walk) -> IfReplicationStops {
-    let name = "if-replication-stops";
-    match fields.and_then(|f| f.string(name, walk)).as_deref() {
-        None | Some("hold-start") => IfReplicationStops::HoldStart,
-        Some("report") => IfReplicationStops::Report,
-        Some("stop-app") => IfReplicationStops::StopApp,
-        Some(other) => {
-            let path = KeyPath::root().key("litestream-rs").key(name);
-            let line = fields.and_then(|f| f.line(name));
-            let (value, allowed) = (other.to_owned(), "report, hold-start, stop-app");
-            walk.problem(path, line, ProblemKind::UnsupportedValue { value, allowed });
-            IfReplicationStops::HoldStart
-        }
-    }
+    let table = [
+        ("report", IfReplicationStops::Report),
+        ("hold-start", IfReplicationStops::HoldStart),
+        ("stop-app", IfReplicationStops::StopApp),
+    ];
+    choice(fields, "if-replication-stops", &table, walk).unwrap_or(IfReplicationStops::HoldStart)
 }
 
 /// `max-unreplicated-age` (decision D22): 10 minutes when absent; below 5 minutes is refused,
 /// so one retry at the backoff cap always fits inside it.
 fn max_unreplicated_age(fields: Option<&Fields>, walk: &mut Walk) -> MaxUnreplicatedAge {
     let name = "max-unreplicated-age";
-    let Some(value) = fields.and_then(|f| f.duration(name, walk)) else {
+    let Some((fields, value)) = fields.and_then(|f| Some((f, f.duration(name, walk)?))) else {
         return MaxUnreplicatedAge::DEFAULT;
     };
     if let Some(bound) = value.to_std().and_then(MaxUnreplicatedAge::new) {
         return bound;
     }
-    let path = KeyPath::root().key("litestream-rs").key(name);
-    let line = fields.and_then(|f| f.line(name));
-    let (value, allowed) = (value.to_string(), "a duration of at least 5m");
-    walk.problem(path, line, ProblemKind::UnsupportedValue { value, allowed });
+    let allowed = "a duration of at least 5m".to_owned();
+    unsupported(fields, name, value.to_string(), allowed, walk);
     MaxUnreplicatedAge::DEFAULT
 }
 
 /// `app-autocheckpoint`: frames, or `0` and `off` for none; SQLite's 1000 when absent.
 fn app_autocheckpoint(fields: Option<&Fields>, walk: &mut Walk) -> Option<NonZeroU32> {
-    let Some(text) = fields.and_then(|f| f.string("app-autocheckpoint", walk)) else {
+    let name = "app-autocheckpoint";
+    let Some((fields, text)) = fields.and_then(|f| Some((f, f.string(name, walk)?))) else {
         return NonZeroU32::new(SQLITE_AUTOCHECKPOINT);
     };
     if text == "off" {
         return None;
     }
-    match text.parse::<u32>() {
-        Ok(frames) => NonZeroU32::new(frames),
-        Err(_) => {
-            let path = KeyPath::root()
-                .key("litestream-rs")
-                .key("app-autocheckpoint");
-            let line = fields.and_then(|f| f.line("app-autocheckpoint"));
-            let allowed = "a page count, 0 or off";
-            walk.problem(
-                path,
-                line,
-                ProblemKind::UnsupportedValue {
-                    value: text,
-                    allowed,
-                },
-            );
-            NonZeroU32::new(SQLITE_AUTOCHECKPOINT)
-        }
+    if let Ok(frames) = text.parse::<u32>() {
+        return NonZeroU32::new(frames);
     }
+    unsupported(
+        fields,
+        name,
+        text,
+        "a page count, 0 or off".to_owned(),
+        walk,
+    );
+    NonZeroU32::new(SQLITE_AUTOCHECKPOINT)
 }
 
-fn responses(fields: &Fields, walk: &mut Walk) -> ResponseSettings {
-    let mut one = |name: &'static str| match fields.string(name, walk).as_deref() {
-        None => None,
-        Some("keep-trying") => Some(ResponseSetting::KeepTrying),
-        Some("stop") => Some(ResponseSetting::Stop),
-        Some(other) => {
-            let (value, allowed) = (other.to_owned(), "keep-trying, stop");
-            walk.problem(
-                fields.path.key(name),
-                fields.line(name),
-                ProblemKind::UnsupportedValue { value, allowed },
-            );
-            None
-        }
+fn responses(fields: &Fields, walk: &mut Walk) -> Responses {
+    let base = Responses::GO_LIKE;
+    let mut one = |name: &'static str, default: Response| {
+        let table = [
+            ("keep-trying", Response::KeepTrying),
+            ("stop", Response::Stop),
+        ];
+        choice(Some(fields), name, &table, walk).unwrap_or(default)
     };
-    let mut settings = ResponseSettings {
-        credentials: one("credentials"),
-        permission_denied: one("permission-denied"),
-        clock_skew: one("clock-skew"),
-        bucket_missing: one("bucket-missing"),
-        tls: one("tls"),
-        store_refused: one("store-refused"),
-        remote_corrupt: one("remote-corrupt"),
-        remote_regressed: one("remote-regressed"),
-        wal_corrupt: one("wal-corrupt"),
-        wal_truncated: one("wal-truncated"),
-        wal_unlinked: one("wal-unlinked"),
-        wal_sync_failed: one("wal-sync-failed"),
-        page_size_changed: one("page-size-changed"),
-        conditional_writes_unsupported: one("conditional-writes-unsupported"),
-        bug: one("bug"),
-        other_writer: None,
-    };
-    settings.other_writer = match fields.string("other-writer", walk).as_deref() {
-        None => None,
-        Some("stop") => Some(OtherWriterSetting::Stop),
-        Some("continue-and-interleave-histories") => {
-            Some(OtherWriterSetting::ContinueAndInterleaveHistories)
-        }
-        Some(other) => {
-            let (value, allowed) = (other.to_owned(), "stop, continue-and-interleave-histories");
-            let name = "other-writer";
-            walk.problem(
-                fields.path.key(name),
-                fields.line(name),
-                ProblemKind::UnsupportedValue { value, allowed },
-            );
-            None
-        }
-    };
-    settings
+    let credentials = one("credentials", base.credentials);
+    let permission_denied = one("permission-denied", base.permission_denied);
+    let clock_skew = one("clock-skew", base.clock_skew);
+    let bucket_missing = one("bucket-missing", base.bucket_missing);
+    let tls = one("tls", base.tls);
+    let store_refused = one("store-refused", base.store_refused);
+    let remote_corrupt = one("remote-corrupt", base.remote_corrupt);
+    let remote_regressed = one("remote-regressed", base.remote_regressed);
+    let wal_corrupt = one("wal-corrupt", base.wal_corrupt);
+    let wal_truncated = one("wal-truncated", base.wal_truncated);
+    let wal_unlinked = one("wal-unlinked", base.wal_unlinked);
+    let wal_sync_failed = one("wal-sync-failed", base.wal_sync_failed);
+    let page_size_changed = one("page-size-changed", base.page_size_changed);
+    let conditional_writes_unsupported = one(
+        "conditional-writes-unsupported",
+        base.conditional_writes_unsupported,
+    );
+    let bug = one("bug", base.bug);
+    let other_writer = [
+        ("stop", OtherWriter::Stop),
+        (
+            "continue-and-interleave-histories",
+            OtherWriter::ContinueAndInterleaveHistories,
+        ),
+    ];
+    Responses {
+        credentials,
+        permission_denied,
+        clock_skew,
+        bucket_missing,
+        tls,
+        store_refused,
+        remote_corrupt,
+        remote_regressed,
+        wal_corrupt,
+        wal_truncated,
+        wal_unlinked,
+        wal_sync_failed,
+        page_size_changed,
+        database_page_mismatch: base.database_page_mismatch,
+        conditional_writes_unsupported,
+        bug,
+        other_writer: choice(Some(fields), "other-writer", &other_writer, walk)
+            .unwrap_or(base.other_writer),
+    }
 }
 
 #[cfg(test)]

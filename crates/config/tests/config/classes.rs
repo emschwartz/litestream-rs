@@ -3,6 +3,7 @@
 //! secrets kept out of every message.
 
 use lsr_config::{Expand, GoConfig, KeyClass, ProblemKind, ReplicaKind, WarningKind};
+use lsr_core::{OtherWriter, Response, Responses};
 use proptest::prelude::*;
 
 use crate::common::{TestEnv, config, parse, problem_at, refused, warnings_at};
@@ -283,14 +284,12 @@ fn rust_settings_live_under_one_key() {
     );
     let rust = config.rust();
     assert_eq!(rust.app_readers(), lsr_config::AppReaders::None);
+    let responses = rust.responses();
+    assert_eq!(responses.credentials, Response::Stop);
+    assert_eq!(responses.wal_corrupt, Responses::GO_LIKE.wal_corrupt);
     assert_eq!(
-        rust.responses().credentials,
-        Some(lsr_config::ResponseSetting::Stop)
-    );
-    assert_eq!(rust.responses().wal_corrupt, None);
-    assert_eq!(
-        rust.responses().other_writer,
-        Some(lsr_config::OtherWriterSetting::ContinueAndInterleaveHistories)
+        responses.other_writer,
+        OtherWriter::ContinueAndInterleaveHistories
     );
     let problems = refused("litestream-rs:\n  app-reader: none\n  responses:\n    bug: maybe\n");
     assert_eq!(
@@ -343,7 +342,8 @@ proptest! {
             format!("{name}: \"{secret}\nunclosed: [\n"),
         ];
         for text in texts {
-            let report = lsr_config::check_text(&text, Expand::Off, &TestEnv::default());
+            let report = GoConfig::parse(&text, Expand::Off, &TestEnv::default())
+                .map_or_else(|error| error.report().clone(), |loaded| loaded.report);
             prop_assert!(!report.is_ok());
             let printed = format!("{report}{report:?}");
             prop_assert!(!printed.contains(&secret), "{}", printed);
