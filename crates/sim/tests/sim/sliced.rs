@@ -198,6 +198,60 @@ fn a_drain_finishes_the_file_in_flight() {
     assert!(published < next_boot.map(|at| at + 1), "{all:?}");
 }
 
+/// A staged file is damaged after the last byte of it was read for its send and before the
+/// tick that publishes it. Every byte sent was verified on its own read, so the file is
+/// published as it was staged: the replica's copy is whole and the staged one is not. No read
+/// of the upload met the damage, so the upload does not put the edit behind the engine. The
+/// next process finds its newest staged file unreadable and drops it, which leaves staging
+/// behind the replica, and snapshots above the replica's copy: that snapshot has the edit for
+/// its cause. Before, the judge forgot the edit at the upload and called the snapshot needless.
+#[test]
+fn a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snapshot() {
+    // A tick's bytes are the size of the file the first checkpoint's frame makes, the second
+    // staged file: one tick reads it whole, the next publishes it.
+    let second: u64 = 660;
+    let mut ops = vec![Op::Commit {
+        pages: 3,
+        grow: true,
+    }];
+    // The first file goes up in five ticks, the snapshot follows, and the checkpoint the idle
+    // engine runs stages the second file, beside the first. The twelfth tick reads it.
+    ops.extend(ticks(12));
+    ops.push(Op::Meta(MetaOp::FlipNewestByte));
+    // The publish. The process ends before anything prunes the staged file.
+    ops.extend([Op::Tick, Op::Restart]);
+    ops.extend(ticks(20));
+    ops.push(Op::Restore);
+    let report = run_sliced(&ops, second);
+    let all = events(&report);
+    assert_eq!(all[11], &Event::Sending { bytes: second }, "{all:?}");
+    assert!(
+        matches!(all[12], Event::Uploaded(Did::Put(info)) if info.size == second),
+        "{all:?}"
+    );
+    // The send met no damage; the boot after it did, twice, and snapshots.
+    assert!(
+        matches!(
+            all[13],
+            Event::Retrying {
+                fault: Fault::StagedLost,
+                ..
+            }
+        ),
+        "{all:?}"
+    );
+    let snapshot = Event::Booted {
+        cause: Some(SnapshotCause::NewestStagedFileUnreadable),
+    };
+    assert!(all[14..].contains(&&snapshot), "{all:?}");
+    assert_eq!(
+        report
+            .reach
+            .get("needless_snapshot.forced.NewestStagedFileUnreadable"),
+        1
+    );
+}
+
 /// The staged file changes, or goes, under its send. The bytes already sent were verified on
 /// their own reads, the reads after them refuse the file, and its upload is aborted: nothing
 /// of it is published. A second refusal drops it, and the snapshot that takes its place goes
