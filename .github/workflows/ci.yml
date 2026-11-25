@@ -213,6 +213,59 @@ jobs:
       - run: just compat-s3
 
 
+  # Plants again the planted bugs a pull request can have stopped catching (docs/planted-bugs.md),
+  # so a test or a scenario that loses its teeth fails the change that did it, not the next
+  # nightly. A cheap job counts the affected entries; plants run only when there are some, in as
+  # many shards as the count needs (12 entries to a shard, at most 4: a shard of 12 takes about
+  # 5 minutes, the full ledger of 316 about 30 minutes a shard).
+  planted-bugs-select:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.pick.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - id: pick
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          count=$(uv run scripts/planted-bugs.py --changed "origin/${BASE_REF}" --list | grep -c . || true)
+          shards=$(( (count + 11) / 12 ))
+          [ "$shards" -le 4 ] || shards=4
+          echo "$count affected entries, $shards shards"
+          list="[]"
+          [ "$shards" -eq 0 ] || list="[$(seq 0 $((shards - 1)) | paste -sd, -)]"
+          echo "shards=$list" >> "$GITHUB_OUTPUT"
+
+  planted-bugs-diff:
+    needs: planted-bugs-select
+    if: github.event_name == 'pull_request' && needs.planted-bugs-select.outputs.shards != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.planted-bugs-select.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      # The shard count was decided from the same diff, so `K/N` here uses the same N.
+      - run: just planted-bugs-diff "origin/${BASE_REF}" "${SHARD}/${SHARDS}"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+
   # Mutation-tests only the lines the pull request changed in lsr-core and lsr-ltx. Fails on a missed
   # mutant that docs/mutants-escapes.txt does not list (docs/mutants.md). Bounded: 40 minutes of
   # mutants (MUTANTS_DIFF_BUDGET) inside the job's 50.

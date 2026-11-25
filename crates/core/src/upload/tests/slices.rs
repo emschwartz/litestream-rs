@@ -161,6 +161,109 @@ fn a_file_replaced_between_two_slices_is_refused_and_its_upload_aborted() {
     assert_eq!(in_flight.sent(), None);
 }
 
+/// Transaction 1 staged as [`staged_big`] stages it, in a store that holds a file open when
+/// a send asks it to.
+fn staged_big_held_open() -> (Probe, Witnesses, Vec<u8>) {
+    let (staging, witnesses, bytes) = staged_big();
+    let staging = Probe {
+        inner: staging,
+        log: Arc::default(),
+    };
+    staging.log().hold_open = true;
+    (staging, witnesses, bytes)
+}
+
+/// A staging store that holds a file open for a run of reads is asked to once a send, at the
+/// file's first byte, and every chunk of every slice is read through what it gave: the store
+/// is not read by range at all.
+#[test]
+fn a_send_opens_a_store_that_holds_its_file_once_and_reads_only_what_it_holds() {
+    let (staging, witnesses, bytes) = staged_big_held_open();
+    let remote = Probe::default();
+    let stores = (&staging, &remote);
+    let state = UploadState::At(None);
+    let mut in_flight = InFlight::default();
+    let (put, slices) = finish(state, stores, &witnesses, &mut in_flight, QUARTER_MIB);
+    assert!(matches!(put.unwrap().did, Did::Put(_)));
+    assert!(slices > 2, "{slices}");
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    let log = staging.log();
+    assert_eq!(log.opens, 1);
+    assert_eq!(log.reads, 0);
+    // A chunk a slice, and the read that comes back short and ends the file.
+    let len = u64::try_from(bytes.len()).unwrap();
+    assert_eq!(u64::from(log.held_reads), len / QUARTER_MIB + 1);
+}
+
+/// What a store holds open is the file that was opened. Another file put under the key
+/// between two slices is not what the send reads: the file the send began with goes up,
+/// every chunk verified on the read that produced it and the whole against what was
+/// witnessed. (A store read by range refuses such a send:
+/// `a_file_replaced_between_two_slices_is_refused_and_its_upload_aborted`. Either way
+/// nothing unverified is published.)
+#[test]
+fn a_file_replaced_under_a_send_that_holds_it_open_goes_up_as_it_was_opened() {
+    let (staging, witnesses, bytes) = staged_big_held_open();
+    let remote = Probe::default();
+    let stores = (&staging, &remote);
+    let state = UploadState::At(None);
+    let mut in_flight = InFlight::default();
+    let (first, _) = step(state, stores, &witnesses, &mut in_flight, QUARTER_MIB);
+    assert_eq!(first, Ok(None));
+    put_bytes(&staging.inner, key(1), &big_file_for(1, 77));
+    let (put, _) = finish(state, stores, &witnesses, &mut in_flight, QUARTER_MIB);
+    assert!(matches!(put.unwrap().did, Did::Put(_)));
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    assert_eq!(remote.log().aborts, 0);
+    assert_eq!(staging.log().opens, 1);
+}
+
+/// A send that failed is over, and what it held open goes with it: the retry opens the
+/// file again and reads it from its first byte.
+#[test]
+fn a_retry_after_a_failed_read_of_a_file_held_open_opens_it_again() {
+    let (staging, witnesses, bytes) = staged_big_held_open();
+    staging.log().fail_held_read = Some((2, transient()));
+    let remote = Probe::default();
+    let stores = (&staging, &remote);
+    let state = UploadState::At(None);
+    let mut in_flight = InFlight::default();
+    let (first, _) = step(state, stores, &witnesses, &mut in_flight, QUARTER_MIB);
+    assert_eq!(first, Ok(None));
+    let (failed, _) = step(state, stores, &witnesses, &mut in_flight, QUARTER_MIB);
+    let ours = Staging::<MemStore>::fault(&transient());
+    assert_eq!(failed, Err(fail(state, ours)));
+    assert_eq!(remote.log().aborts, 1);
+    assert_eq!(in_flight.sent(), None);
+    assert_eq!(staging.log().opens, 1);
+    let (put, _) = finish(state, stores, &witnesses, &mut in_flight, QUARTER_MIB);
+    assert!(matches!(put.unwrap().did, Did::Put(_)));
+    assert_eq!(staging.log().opens, 2);
+    assert_eq!(staging.log().reads, 0);
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+}
+
+/// A file a store could not open for a send is staging's failure, before anything is begun.
+#[test]
+fn a_file_that_cannot_be_opened_for_a_send_fails_it_before_an_upload_is_begun() {
+    let (staging, witnesses, _) = staged_big_held_open();
+    block_on(staging.inner.delete(&[key(1)])).unwrap();
+    let remote = Probe::default();
+    let state = UploadState::At(None);
+    let mut in_flight = InFlight::default();
+    let (failed, _) = step(
+        state,
+        (&staging, &remote),
+        &witnesses,
+        &mut in_flight,
+        QUARTER_MIB,
+    );
+    let gone = Staging::<MemStore>::fault(&StoreError::NotFound { key: key(1) });
+    assert_eq!(failed, Err(fail(state, gone)));
+    assert!(remote.log().begins.is_empty());
+    assert_eq!(in_flight.sent(), None);
+}
+
 /// Nothing of a send is kept past a failure: the retry reads the file from its first byte
 /// into a new upload.
 #[test]

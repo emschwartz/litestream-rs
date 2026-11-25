@@ -248,6 +248,13 @@ impl Tasks {
         self.get(task).ready(now)
     }
 
+    /// Moves `from`'s retry memory to `to` and leaves `from` as a task that never failed:
+    /// boot attempts change task when a local course begins or ends (`super::local`), and
+    /// their run of failures goes with them.
+    pub(super) fn hand(&mut self, from: Task, to: Task) {
+        *self.get_mut(to) = std::mem::take(self.get_mut(from));
+    }
+
     /// Whether any task is degraded.
     pub(super) fn any_degraded(&self) -> bool {
         Task::ALL

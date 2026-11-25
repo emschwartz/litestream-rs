@@ -2,7 +2,7 @@
 default: check
 
 # The land gate: format, lints, tests. A branch lands only when this is green.
-check: fmt-check clippy test test-opt doctest features upstream-test-map-fresh evidence-fresh
+check: fmt-check clippy test test-opt doctest features upstream-test-map-fresh evidence-fresh planted-bugs-names
 
 fmt-check:
     cargo fmt --all -- --check
@@ -174,6 +174,17 @@ planted-bugs-apply:
         exit 1
     fi
     echo "planted-bugs-apply: all $found patches apply"
+
+# Every planted-bug entry's named tests are defined somewhere under crates/ (a renamed test leaves
+# its entry unable to run, and only the nightly would say so). Seconds, no build.
+planted-bugs-names:
+    python3 scripts/planted-bugs.py --names
+
+# The planted bugs a pull request against `base` can have stopped catching (its diff touches the
+# entry, its patch, a file the patch edits or a file defining a named test, or the patch no longer
+# applies), planted again and run: `just planted-bugs-diff origin/main [K/N]`. Pull requests in CI.
+planted-bugs-diff base shard="0/1":
+    uv run scripts/planted-bugs.py --changed {{base}} --shard {{shard}}
 
 # Every fixed defect is re-planted in a scratch tree and its named tests must fail
 # (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.

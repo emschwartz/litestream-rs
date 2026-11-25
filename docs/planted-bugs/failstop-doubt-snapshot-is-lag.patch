@@ -2,12 +2,12 @@ diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
 index f30192c..818b6ae 100644
 --- a/crates/core/src/actor/lag.rs
 +++ b/crates/core/src/actor/lag.rs
-@@ -185,7 +185,7 @@ impl Actor {
-         // No clock running: the last observation found every staged file on the replica, or
-         // only quiet ones.
-         let caught_up = self.kept.lag.since().is_none();
+@@ -205,7 +205,7 @@ impl Actor {
+         key: FileKey,
+         end: &StepEnd,
+     ) {
 -        let quiet_end = self.ended_where_synced(end) || self.ended_at_doubt_baseline(end);
 +        let quiet_end = self.ended_where_synced(end);
-         if doubt_only(cause) && caught_up && quiet_end {
+         if doubt_only(cause) && quiet_end {
              self.kept.quiet.insert(key.range().max());
          }
