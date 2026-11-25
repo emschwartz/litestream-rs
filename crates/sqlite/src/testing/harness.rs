@@ -778,6 +778,7 @@ impl<B: Backend> Rig<B> {
             }
             Event::Booted { .. }
             | Event::Synced { .. }
+            | Event::Sending { .. }
             | Event::Checkpointed { .. }
             | Event::CheckpointDeferred { .. }
             | Event::Maintained { .. }

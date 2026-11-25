@@ -1,0 +1,6 @@
+# A pass that lists tails asks for a whole listing although the level a fill would write is
+# waiting out a failure: every pass then lists the whole replica to find the same wait.
+name = "tail-lists-whole-while-a-fill-backs-off"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = ["maintain::tests::a_tail_waits_out_a_failed_fill_instead_of_listing_whole_again"]

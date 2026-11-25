@@ -415,6 +415,55 @@ fn a_hole_after_the_newest_snapshot_holds() {
     );
 }
 
+// Holes above level 1.
+
+/// The ladder with the shape a compaction that took only the newest file below left
+/// (`docs/decisions/D228.md`): level 1 whole, level 2 without 11 to 15 and 25 to 27, level 3
+/// without 11 to 27.
+fn holed_ladder() -> Vec<FileInfo> {
+    let mut files: Vec<FileInfo> = [10, 20, 30]
+        .into_iter()
+        .map(|n| file(9, 1, n, created_at_of(n)))
+        .collect();
+    let levels: [(u8, &[(u64, u64)]); 3] = [
+        (
+            1,
+            &[(1, 10), (11, 15), (16, 20), (21, 24), (25, 27), (28, 30)],
+        ),
+        (2, &[(1, 10), (16, 20), (21, 24), (28, 30)]),
+        (3, &[(1, 10), (28, 30)]),
+    ];
+    for (level, ranges) in levels {
+        files.extend(
+            ranges
+                .iter()
+                .map(|(a, b)| file(level, *a, *b, created_at_of(*b))),
+        );
+    }
+    files.extend((25..=30).map(|n| file(0, n, n, created_at_of(n))));
+    files
+}
+
+/// Retention decides by what the files of levels 1 to 8 cover together, never by one level:
+/// a hole in level 2 or 3 that level 1 covers holds nothing back, and no delete leaves a
+/// transaction that restored before without a restore.
+#[test]
+fn holes_in_levels_two_and_three_cost_retention_nothing() {
+    let files = holed_ladder();
+    let now = at(newest_created_at(&files));
+    let before = inv(files);
+    let Retention::Delete(job) = retention(&before, now, &defaults(), None) else {
+        panic!("held on holes level 1 covers");
+    };
+    check_delete(&before, &job, now, &defaults(), true);
+    // What the whole ladder loses, level by level: the files below the floor (20), and the
+    // level-0 files level 1 covers.
+    let mut want: Vec<FileKey> = (25..=29).map(|n| key(0, n, n)).collect();
+    want.extend([key(1, 1, 10), key(1, 11, 15), key(2, 1, 10), key(3, 1, 10)]);
+    want.extend([key(9, 1, 10), key(9, 1, 20)]);
+    assert_eq!(job.keys(), want);
+}
+
 // The trust gate, one variant each.
 
 #[test]

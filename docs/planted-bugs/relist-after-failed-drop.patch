@@ -1,14 +1,16 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 791ddb66f..2da32709c 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2065,7 +2065,6 @@
+@@ -2080,7 +2080,6 @@ impl Actor {
          let vouched = self
              .staged()
              .map(|staged| cap.map_or(staged, |cap| staged.min(cap)));
 -        self.engine.witnesses.drop_from(from);
-         if let Err(fault) = drop_staged_from(env.staging, from).await {
+         let unsent = self.engine.in_flight.stop().await;
+         if let Err(fault) = drop_staged_from(env.staging, from, &unsent).await {
              // The staged files from `from` on are still there, and the next
-             // upload would take the one after the confirmed transaction as
-@@ -2073,7 +2072,6 @@
+@@ -2089,7 +2088,6 @@ impl Actor {
              // judges the divergence again and this runs again before anything
              // is uploaded.
              let confirmed = self.engine.upload.confirmed().min(from.prev());

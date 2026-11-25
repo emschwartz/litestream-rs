@@ -561,6 +561,12 @@ pub struct Weights {
     pub truncate_pages: Option<std::num::NonZeroU32>,
     /// [`Op::HttpFault`]: a step that does anything only with the replica on S3.
     pub http_fault: u32,
+    /// The bytes of staged files the engine sends in one tick, when not its own 8 MiB (which
+    /// no file here reaches): a level-0 file larger than this goes up a slice a tick, and
+    /// whatever the history does next lands between two slices (`docs/decisions/D217.md`).
+    /// Not an operation, for the same reason as `block_crash_law`; drawn last in the swarm
+    /// mix.
+    pub slice_bytes: Option<std::num::NonZeroU64>,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -658,6 +664,9 @@ impl Default for Weights {
             verify: 0,
             truncate_pages: None,
             http_fault: 0,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            slice_bytes: None,
         }
     }
 }
@@ -798,6 +807,7 @@ impl Weights {
             verify: 0,
             truncate_pages: None,
             http_fault: 0,
+            slice_bytes: None,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -853,6 +863,12 @@ impl Weights {
         mix.http_fault = weight(false);
         // And after that: a store without conditional writes in a quarter of the swarm.
         mix.no_create_only = below(&entropy, 4) == 0;
+        // And after that: half the swarm sends staged files a slice a tick, of 256 bytes or
+        // 1 KiB with even odds (most staged files are a few hundred bytes, and a sync step
+        // stages up to 16 KiB and a transaction).
+        mix.slice_bytes = (below(&entropy, 2) == 0)
+            .then(|| if below(&entropy, 2) == 0 { 256 } else { 1024 })
+            .and_then(std::num::NonZeroU64::new);
         mix
     }
 

@@ -1,0 +1,15 @@
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -617,12 +617,6 @@
+         .take(usize::from(config.top().get()));
+     // A hole is closed before any other job, at whatever level it is: the next passes see
+     // only tails, where a hole that is not right above a level's newest file does not show.
+-    for level in levels.clone() {
+-        let fill = plan_fill(inventory, now, *level, state);
+-        if let Some(job) = fill.and_then(|step| absorb(step, &mut until)) {
+-            return Ok(Decided::job(job, gate));
+-        }
+-    }
+     for level in levels {
+         let step = plan_level(inventory, now, config, *level, state, resolved, View::Whole)?;
+         if let Some(job) = absorb(step, &mut until) {

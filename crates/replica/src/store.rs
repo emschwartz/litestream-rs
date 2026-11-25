@@ -12,7 +12,6 @@
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,14 +19,12 @@ use lsr_core::{
     BatchKind, Clock, CreatedAt, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit,
     ReadAt, ReadLen, StoreError, Upload,
 };
+pub use lsr_core::{BoxFuture, DynUpload};
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::health::{OpCounters, StoreCounters};
 use crate::runtime::millis_until;
 use lsr_core::WriteMode;
-
-/// A boxed future that may move between threads.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// [`ObjectStore`] with boxed futures, so a store can sit behind `Arc<dyn DynStore>`.
 /// Implemented for every `ObjectStore`; an application never implements it itself.
@@ -97,30 +94,6 @@ pub trait DynStore: Send + Sync {
         pages: &'a [ListAt],
         limit: PageLimit,
     ) -> BoxFuture<'a, Vec<Result<Listing, StoreError>>>;
-}
-
-/// [`Upload`] with boxed futures.
-pub trait DynUpload: Send {
-    /// [`Upload::write`].
-    fn write_boxed<'a>(&'a mut self, chunk: &'a [u8]) -> BoxFuture<'a, Result<(), StoreError>>;
-    /// [`Upload::commit`].
-    fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<FileInfo, StoreError>>;
-    /// [`Upload::abort`].
-    fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>>;
-}
-
-impl<U: Upload + 'static> DynUpload for U {
-    fn write_boxed<'a>(&'a mut self, chunk: &'a [u8]) -> BoxFuture<'a, Result<(), StoreError>> {
-        Box::pin(self.write(chunk))
-    }
-
-    fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<FileInfo, StoreError>> {
-        Box::pin((*self).commit())
-    }
-
-    fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>> {
-        Box::pin((*self).abort())
-    }
 }
 
 impl<S> DynStore for S
@@ -207,26 +180,6 @@ where
         files: &'a [FileInfo],
     ) -> BoxFuture<'a, Vec<Result<CreatedAt, StoreError>>> {
         Box::pin(self.created_at_many(files))
-    }
-}
-
-/// A type-erased upload as an [`Upload`] again. Each call names the trait object's method:
-/// `Box<dyn DynUpload>` is itself a `DynUpload` through the blanket impl, and a method call
-/// on the box would find that one and recurse.
-impl Upload for Box<dyn DynUpload> {
-    async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        let upload: &mut dyn DynUpload = &mut **self;
-        upload.write_boxed(chunk).await
-    }
-
-    async fn commit(self) -> Result<FileInfo, StoreError> {
-        let upload: Box<dyn DynUpload> = self;
-        DynUpload::commit_boxed(upload).await
-    }
-
-    async fn abort(self) -> Result<(), StoreError> {
-        let upload: Box<dyn DynUpload> = self;
-        DynUpload::abort_boxed(upload).await
     }
 }
 

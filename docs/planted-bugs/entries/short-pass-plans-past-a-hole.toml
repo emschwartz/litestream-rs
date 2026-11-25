@@ -1,0 +1,9 @@
+# A pass that lists only tails plans a compaction whose first input does not start right
+# after its level's newest file, instead of asking for a whole listing.
+name = "short-pass-plans-past-a-hole"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = [
+    "maintain::tests::a_tail_whose_sources_do_not_follow_the_destination_asks_for_a_whole_listing",
+    "maintain::short::tests::a_short_pass_that_meets_a_hole_decides_nothing_and_asks_for_a_whole_listing",
+]
