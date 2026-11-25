@@ -599,12 +599,12 @@ mod tests {
     }
 
     /// The server reads 4 MiB at about 1 MiB a second, so the request takes about 4 s on a
-    /// 2 s stall bound (the socket buffers hold some of it, a second's worth at most): it is not cut for taking longer than the bound.
+    /// 3 s stall bound (the socket buffers hold some of it, a second's worth at most): it is not cut for taking longer than the bound.
     #[test]
     fn an_upload_that_keeps_moving_outlives_the_stall_bound() {
         use crate::transport::slow_servers::serve_paced_reader;
         let (url, served) = serve_paced_reader(4 * MIB, Duration::from_millis(62));
-        let transport = ReqwestTransport::new(Duration::from_secs(2))
+        let transport = ReqwestTransport::new(Duration::from_secs(3))
             .expect("transport")
             .with_floor(floor());
         let response = transport

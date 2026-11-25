@@ -60,23 +60,26 @@ pub(crate) fn serve_paced_reader(want: usize, pause: Duration) -> (String, JoinH
         let mut buf = [0_u8; CHUNK];
         let mut body = 0_usize;
         let mut in_body = false;
-        while !in_body || body < want {
-            if in_body {
-                thread::sleep(pause);
-            }
+        while !in_body {
             let read = match stream.read(&mut buf) {
                 Ok(0) | Err(_) => return body,
                 Ok(read) => read,
             };
-            if in_body {
-                body = body.saturating_add(read);
-            } else {
-                head.extend_from_slice(&buf[..read]);
-                if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
-                    in_body = true;
-                    body = head.len().saturating_sub(at).saturating_sub(4);
-                }
+            head.extend_from_slice(&buf[..read]);
+            if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                in_body = true;
+                body = head.len().saturating_sub(at).saturating_sub(4);
             }
+        }
+        // A whole 64 KiB then a pause, whatever size the kernel hands a read: with a small
+        // receive buffer (Linux's smallest is a few KiB) a pause per read would be far slower.
+        while body < want {
+            thread::sleep(pause);
+            let take = CHUNK.min(want.saturating_sub(body));
+            if stream.read_exact(&mut buf[..take]).is_err() {
+                return body;
+            }
+            body = body.saturating_add(take);
         }
         let _wrote = stream.write_all(OK);
         body
