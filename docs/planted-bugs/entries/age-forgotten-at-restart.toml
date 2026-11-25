@@ -2,7 +2,7 @@
 # sight, not from the database's last write: a process restarted every few seconds over a staging
 # directory that takes no file starts the age over with each restart (issue #331).
 name = "age-forgotten-at-restart"
-fix = "c0f1d45"
+fix = "plant"
 package = "lsr-replica"
 tests = [
     "failstop::a_crash_loop_over_a_staging_disk_that_takes_nothing_reports_a_growing_age",
