@@ -49,7 +49,7 @@ reqwest = { workspace = true, optional = true }
 # Root certificates from the system; for reqwest also its TLS config on ring,
 # and recognising a TLS failure inside reqwest's error chain.
 rustls = { workspace = true, optional = true, features = ["std"] }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
 native-tls = { workspace = true, optional = true }
 url.workspace = true
 zeroize.workspace = true

@@ -218,9 +218,9 @@ pub enum TransportError {
 /// A request fails as [`TransportError::Timeout`] when it makes no progress for `stall`: no
 /// connection, no response head after its body was sent, or (where the client can tell) no write
 /// or read. Progress is not enough on its own, because a peer that takes a byte a minute never
-/// stalls, so a whole request also has a cap: `stall` plus the time its body needs at `floor`
-/// bytes a second. A request with no body is capped at `stall`, as it was when one deadline
-/// bounded every request (D235).
+/// stalls, so a whole request also has a cap: `stall` plus the time the bytes it moves need at `floor`
+/// bytes a second: an upload's body, a download's declared length. A request that moves no bytes
+/// is capped at `stall`, as it was when one deadline bounded every request (D235).
 #[cfg(any(feature = "ureq", feature = "reqwest"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Bounds {

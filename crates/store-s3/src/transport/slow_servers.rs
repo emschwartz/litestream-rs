@@ -96,3 +96,35 @@ pub(crate) fn serve_never_reading() -> (String, Sender<()>) {
     });
     (format!("http://{addr}/key"), done)
 }
+
+/// A server that answers one request with `len` body bytes sent steadily, `chunk` bytes and then
+/// `pause`, so the answer takes `len / chunk * pause` and never goes quiet for longer than
+/// `pause`, under a declared length.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the server is the slow peer: it paces its writes on the real clock"
+)]
+pub(crate) fn serve_paced_writer(len: usize, chunk: usize, pause: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut head = [0_u8; 4096];
+        let _read = stream.read(&mut head);
+        let reply =
+            format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n");
+        if stream.write_all(reply.as_bytes()).is_err() {
+            return;
+        }
+        let mut left = len;
+        while left > 0 {
+            let now = left.min(chunk);
+            if stream.write_all(&vec![9_u8; now]).is_err() {
+                return;
+            }
+            left = left.saturating_sub(now);
+            thread::sleep(pause);
+        }
+    });
+    format!("http://{addr}/key")
+}
