@@ -75,9 +75,10 @@ pub use request::{OpenUpload, abandon_upload, abort_upload, open_uploads};
 pub use reqwest_transport::{ReqwestSetupError, ReqwestTransport};
 pub use response::{
     EtagCheck, Head, ListPage, ListedFile, ResponseError, Unrecognized, check_etag, hex,
-    parse_complete, parse_create, parse_delete_failure_codes, parse_delete_failures, parse_head,
-    parse_list, quoted_md5,
+    parse_complete, parse_create, parse_delete_failure_codes, parse_head, parse_list,
 };
+#[cfg(feature = "testing")]
+pub use response::{parse_delete_failures, quoted_md5};
 pub use source::{CredentialSource, Expiring, REFRESH_BEFORE};
 pub use store::{ListStats, S3Store, SystemClock, WriteStats};
 pub use transport::{HttpResponse, StreamedRequest, Transport, TransportError, send_on_threads};

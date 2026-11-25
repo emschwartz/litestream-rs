@@ -80,7 +80,7 @@ use lsr_core::{
 use lsr_ltx::Timestamp;
 
 use crate::again::{Run, Sealed};
-use crate::classify::{classify, is_not_implemented};
+use crate::classify::{classify, invalid_data, is_not_implemented, transient_other};
 use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
 use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part};
 use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
@@ -196,10 +196,10 @@ impl<T> Drop for Report<T> {
     fn drop(&mut self) {
         // The part's buffer, or its open file, goes before anyone hears the part ended.
         drop(self.bytes.take());
-        let sent = self.sent.take().unwrap_or(Err(StoreError::Transient {
-            op: StoreOp::Upload,
-            kind: io::ErrorKind::Other,
-        }));
+        let sent = self
+            .sent
+            .take()
+            .unwrap_or(Err(transient_other(StoreOp::Upload)));
         let wake = {
             let mut ends = self.shared.ends();
             ends.done.push(Done {
@@ -474,10 +474,7 @@ impl<T: Transport> Inner<T> {
                 size: wrote,
                 listed: ListedTime::Created(CreatedAt::metadata(created_at)),
             }),
-            EtagCheck::Missing => Err(StoreError::Transient {
-                op,
-                kind: io::ErrorKind::InvalidData,
-            }),
+            EtagCheck::Missing => Err(invalid_data(op)),
             EtagCheck::Mismatch => Err(self.delete_bad_object(key, None)),
         }
     }

@@ -5,25 +5,23 @@
 //! [`ResponseError`], which converts to a retryable or corrupt [`StoreError`].
 
 use std::collections::BTreeSet;
-use std::io;
 
 use lsr_core::{
     CorruptCause, FileKey, Level, StoreError, StoreOp, is_scratch_name, parse_file_name,
 };
 use lsr_ltx::Timestamp;
+#[cfg(any(test, feature = "testing"))]
 use md5::{Digest as _, Md5};
 use rusty_s3::actions::{
     CompleteMultipartUploadResponse, CreateMultipartUpload, DeleteObjectsResponse, ListObjectsV2,
 };
 use thiserror::Error;
 
-use crate::classify::S3Code;
+use crate::classify::{S3Code, invalid_data};
 use crate::config::Prefix;
+use crate::request::CREATED_AT_HEADER;
 use crate::request::{UploadId, level_prefix, object_key};
 use crate::transport::HttpResponse;
-
-/// The metadata header a file's created-at time is stored in.
-const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
 
 /// Why a 2xx response could not be used.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -53,10 +51,7 @@ impl ResponseError {
                 key,
                 cause: CorruptCause::BadCreatedAt,
             },
-            Self::Malformed | Self::KeyOutsidePrefix | Self::RepeatedKey => StoreError::Transient {
-                op,
-                kind: io::ErrorKind::InvalidData,
-            },
+            Self::Malformed | Self::KeyOutsidePrefix | Self::RepeatedKey => invalid_data(op),
         }
     }
 }
@@ -217,6 +212,7 @@ pub fn parse_complete(r: &HttpResponse) -> Result<String, ResponseError> {
 ///
 /// # Errors
 /// [`ResponseError::Malformed`].
+#[cfg(any(test, feature = "testing"))]
 pub fn parse_delete_failures(r: &HttpResponse) -> Result<usize, ResponseError> {
     parse_delete_failure_codes(r).map(|codes| codes.len())
 }
@@ -281,6 +277,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// The quoted hex MD5 of `body`, as a part's ETag reads on S3.
 #[must_use]
+#[cfg(any(test, feature = "testing"))]
 pub fn quoted_md5(body: &[u8]) -> String {
     format!("\"{}\"", hex(&Md5::digest(body)))
 }
@@ -289,6 +286,7 @@ pub fn quoted_md5(body: &[u8]) -> String {
 mod tests {
     use super::*;
     use lsr_ltx::{Txid, TxidRange};
+    use std::io;
 
     const NS: &str = "xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"";
 

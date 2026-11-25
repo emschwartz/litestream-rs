@@ -29,12 +29,10 @@
 //! Parts are sent one request each on the store's lanes (`upload.rs`, `lanes.rs`); each is
 //! judged alone when its upload collects its answer, and its ETag is kept by its number.
 
-use std::io;
-
 use lsr_core::{CorruptCause, FileKey, PartNumber, StoreError, StoreOp, WriteMode};
 use lsr_ltx::Timestamp;
 
-use crate::classify::{S3Code, classify, error_in_ok_body, is_not_implemented};
+use crate::classify::{S3Code, classify, error_in_ok_body, invalid_data, is_not_implemented};
 use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag, parse_complete, parse_create, parse_head};
 use crate::store::Inner;
@@ -154,10 +152,7 @@ impl<T: Transport> Inner<T> {
     /// for the caller to list and read back.
     fn settle_spent_upload(&self, key: &FileKey, sent: Sent) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
-        let ambiguous = StoreError::Transient {
-            op,
-            kind: io::ErrorKind::InvalidData,
-        };
+        let ambiguous = invalid_data(op);
         let request = self.request(op, |b, now| b.head(now, key))?;
         let response = self.send(op, request)?;
         if !(200..300).contains(&response.status()) {

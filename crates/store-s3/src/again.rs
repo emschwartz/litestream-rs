@@ -36,6 +36,8 @@ use std::thread::{self, Thread};
 use lsr_core::{Again, Seeing, Seen, StoreError, StoreOp};
 use md5::{Digest as _, Md5};
 
+use crate::classify::invalid_data;
+
 /// Bytes one [`Seen`] covers, and so one second read asks for: 256 KiB, the size the engine
 /// first read them in. A part being sent holds one cell's bytes at a time.
 pub(crate) const CELL: u64 = 256 * 1024;
@@ -83,10 +85,7 @@ fn cell(
     // The source answers with the bytes seen or with an error. One that gives other bytes
     // broke that, and they must not be hashed or leave for the store.
     if Seen::of(&bytes) != *was {
-        return Err(StoreError::Transient {
-            op: StoreOp::Upload,
-            kind: io::ErrorKind::InvalidData,
-        });
+        return Err(invalid_data(StoreOp::Upload));
     }
     Ok(bytes)
 }

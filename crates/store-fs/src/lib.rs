@@ -155,6 +155,14 @@ fn sync_dir(fs: &impl Fs, dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// A key-named entry that is no regular file: history that cannot be read.
+const fn not_a_regular_file(key: FileKey) -> StoreError {
+    StoreError::Corrupt {
+        key: Some(key),
+        cause: CorruptCause::NotARegularFile,
+    }
+}
+
 /// Renames `from` over `to`, and notes it.
 fn rename(fs: &impl Fs, from: &Path, to: &Path) -> io::Result<()> {
     fs.rename(from, to)?;
@@ -295,19 +303,15 @@ impl<F: Fs> FsStore<F> {
     /// The regular file under `key`, open, and its metadata.
     fn open_file(&self, key: &FileKey) -> Result<(F::File, Meta), StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Read, Some(*key), &err);
-        let not_a_file = || StoreError::Corrupt {
-            key: Some(*key),
-            cause: CorruptCause::NotARegularFile,
-        };
         let path = self.file_path(key);
         // Before the open: opening a FIFO blocks until a writer appears.
         if !self.fs.metadata(&path).map_err(fail)?.is_file() {
-            return Err(not_a_file());
+            return Err(not_a_regular_file(*key));
         }
         let file = self.fs.open(&path).map_err(fail)?;
         let meta = file.metadata().map_err(fail)?;
         if !meta.is_file() {
-            return Err(not_a_file());
+            return Err(not_a_regular_file(*key));
         }
         Ok((file, meta))
     }
@@ -319,10 +323,7 @@ impl<F: Fs> FsStore<F> {
             .metadata(&self.file_path(&key))
             .map_err(|err| StoreError::from_io(StoreOp::Read, Some(key), &err))?;
         if !meta.is_file() {
-            return Err(StoreError::Corrupt {
-                key: Some(key),
-                cause: CorruptCause::NotARegularFile,
-            });
+            return Err(not_a_regular_file(key));
         }
         if meta.len() != file.size {
             return Err(StoreError::Transient {
@@ -472,16 +473,12 @@ fn classify(
         return Ok(Entry::Unrecognized);
     };
     let key = FileKey::new(level, range);
-    let not_a_file = StoreError::Corrupt {
-        key: Some(key),
-        cause: CorruptCause::NotARegularFile,
-    };
     // Follows symlinks, as the open in `read` does.
     let meta = match fs.metadata(&dir.join(entry.name())) {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return if entry.is_symlink() {
-                Err(not_a_file)
+                Err(not_a_regular_file(key))
             } else {
                 Ok(Entry::Gone)
             };
@@ -489,7 +486,7 @@ fn classify(
         Err(err) => return Err(StoreError::from_io(StoreOp::List, Some(key), &err)),
     };
     if !meta.is_file() {
-        return Err(not_a_file);
+        return Err(not_a_regular_file(key));
     }
     let created_at = mtime_created_at(&meta, key)?;
     Ok(Entry::File(FileInfo {
