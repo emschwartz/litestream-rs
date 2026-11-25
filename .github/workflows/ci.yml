@@ -135,6 +135,20 @@ jobs:
           tool: just
       - run: just commit-check origin/${{ github.base_ref }}
 
+  # The change in production lines per crate (scripts/prod-lines.py), written to the job summary
+  # for the reviewer. A report, never a failing gate: a change may need the lines (AGENTS.md).
+  prod-lines:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: python3 scripts/prod-lines.py --base "origin/${BASE_REF}" --markdown >> "$GITHUB_STEP_SUMMARY"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+
   # The S3 store against a real server: MinIO in Docker, with the throwaway local credentials
   # already in scripts/minio.sh, and Toxiproxy in front of it for the network-fault tests (built
   # from source at a pinned version by scripts/toxiproxy.sh, hence Go). Nothing else is
