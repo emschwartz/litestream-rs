@@ -37,7 +37,7 @@ pub enum ResponseError {
     #[error("listing repeats a key or goes back")]
     RepeatedKey,
     /// The created-at time header is present and does not parse.
-    #[error("litestream-timelitestream-timestamp header does not parse")]
+    #[error("litestream-timestamp header does not parse")]
     BadCreatedAt,
 }
 
@@ -287,6 +287,14 @@ mod tests {
     use super::*;
     use lsr_ltx::{Txid, TxidRange};
     use std::io;
+
+    #[test]
+    fn the_bad_created_at_text_names_the_header() {
+        assert_eq!(
+            ResponseError::BadCreatedAt.to_string(),
+            "litestream-timestamp header does not parse"
+        );
+    }
 
     const NS: &str = "xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"";
 

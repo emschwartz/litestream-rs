@@ -364,8 +364,10 @@ fn db_replica(fields: &Fields, top: &Fields, walk: &mut Walk) -> Option<ReplicaC
         .and_then(|replica| build_replica(replica, top, walk))
 }
 
-/// Go's `^\w+://`.
-fn is_url(text: &str) -> bool {
+/// Go's `litestream.IsURL`: `^\w+://`, where Go's `\w` is ASCII only (RE2), so a Unicode
+/// letter in the scheme makes the text a path.
+#[must_use]
+pub fn is_url(text: &str) -> bool {
     text.split_once("://").is_some_and(|(scheme, _)| {
         !scheme.is_empty()
             && scheme

@@ -137,9 +137,6 @@ fn is_own_scratch(name: &str) -> bool {
     own && parse_file_name(&format!("{key}.ltx")).is_ok()
 }
 
-/// Creates `dir` and any missing ancestors, top down, calling `sync` on the
-/// parent of each directory it made so the new entry is durable. A directory
-/// that turns out to exist (another creator won the race) gets the same sync.
 /// Syncs `file`'s bytes, and notes it in the test journal: one call, so the sync and the
 /// note cannot part.
 fn sync_file(file: &impl FsFile, path: &Path) -> io::Result<()> {
@@ -173,6 +170,9 @@ fn rename(fs: &impl Fs, from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Creates `dir` and any missing ancestors, top down, calling `sync` on the
+/// parent of each directory it made so the new entry is durable. A directory
+/// that turns out to exist (another creator won the race) gets the same sync.
 fn create_dirs_durably(
     fs: &impl Fs,
     dir: &Path,
