@@ -1,0 +1,10 @@
+# A whole listing computes the cover cursor from the first level-0 file again, throwing away the
+# position a short pass reached past a level-0 file no rule deletes: level 1 is listed from far
+# back at every retention check.
+name = "whole-listing-resets-the-cover-cursor"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "maintain::short::tests::a_whole_listing_keeps_the_cover_cursor_past_a_level_zero_file_that_stays",
+    "actor::tests::listing::an_hour_with_a_level_zero_file_that_stays_lists_a_bounded_number_of_requests",
+]

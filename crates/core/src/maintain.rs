@@ -56,6 +56,7 @@
 mod audit;
 mod config;
 mod retain;
+mod short;
 mod state;
 
 use lsr_ltx::{TRAILER_LEN, Timestamp, Txid};
@@ -73,6 +74,9 @@ use retain::{Retention, retention};
 pub use config::{
     ConfigError, Interval, IntervalError, L0Retention, Maintenance, RetentionMode, Setting,
 };
+#[cfg(test)]
+pub(crate) use short::FULL_LISTING_INTERVAL;
+pub(crate) use short::{Gate, Remembered, ShortDecided, Tail, due_short};
 pub use state::MaintainState;
 
 #[cfg(test)]
@@ -403,6 +407,17 @@ fn next_window(now: Timestamp, interval: Interval) -> (Timestamp, Timestamp) {
     (start, next)
 }
 
+/// When the window of a level that compacts every `interval` next opens, if `output` (a file
+/// this engine just wrote there) was created inside the current one: the planner then waits for
+/// the next window ([`created_after`]). `None` when the window stays open.
+fn window_closed_by(output: &FileInfo, now: Timestamp, interval: Interval) -> Option<Timestamp> {
+    let (start, next) = next_window(now, interval);
+    output
+        .created_at()
+        .filter(|created| created.at() > start)
+        .map(|_| next)
+}
+
 /// When maintenance next lists the replica after an upload at `now`: the
 /// earliest of the next window of every compaction level and of the snapshot,
 /// and, while retention deletes level 0, `now` plus the level-0 retention
@@ -412,8 +427,8 @@ fn next_window(now: Timestamp, interval: Interval) -> (Timestamp, Timestamp) {
 /// inside one window, so listing before the next window opens can only find
 /// level-0 files to delete; Go looks for those on its check interval
 /// (`store.go:658-680`) and for compactions on each level's window
-/// (`store.go:591-656`). Listing at once after every upload instead lists the
-/// whole replica once a second for a database that writes once a second.
+/// (`store.go:591-656`). Listing at once after every upload instead lists level 0
+/// and a tail of every level once a second for a database that writes once a second.
 #[must_use]
 pub(crate) fn listing_after_upload(now: Timestamp, config: &Maintenance) -> Timestamp {
     let check = match (config.retention(), config.l0_retention()) {
@@ -460,9 +475,48 @@ pub fn due(
     state: &mut MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Due> {
+    match due_full(inventory, now, config, published, state, resolved) {
+        Resolve::Done(decided) => Resolve::Done(decided.due),
+        Resolve::Need(file) => Resolve::Need(file),
+    }
+}
+
+/// [`due`] with what a whole listing also shows: whether the retention gate was clear and when
+/// snapshot retention next has something to delete. The engine remembers both to know how long
+/// short listings may stand in for whole ones.
+pub(crate) fn due_full(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &mut MaintainState,
+    resolved: &ResolvedCreatedAt,
+) -> Resolve<Decided> {
     match decide(inventory, now, config, published, state, resolved) {
-        Ok(due) => Resolve::Done(due),
+        Ok(decided) => Resolve::Done(decided),
         Err(file) => Resolve::Need(file),
+    }
+}
+
+/// A decision on a whole listing, with what the short listings that follow it rely on.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Decided {
+    /// What to do.
+    pub(crate) due: Due,
+    /// Whether the retention gate passes on this listing.
+    pub(crate) gate: Gate,
+    /// The earliest instant retention would delete more without a new write (a retained
+    /// snapshot aging out), from the retention rules alone.
+    pub(crate) retention_wake: Option<Timestamp>,
+}
+
+impl Decided {
+    const fn job(job: Job, gate: Gate) -> Self {
+        Self {
+            due: Due::Run(job),
+            gate,
+            retention_wake: None,
+        }
     }
 }
 
@@ -473,8 +527,17 @@ fn decide(
     published: Option<Txid>,
     state: &mut MaintainState,
     resolved: &ResolvedCreatedAt,
-) -> Result<Due, Need> {
+) -> Result<Decided, Need> {
     state.forget_unlisted(|key| inventory.level(key.level()).iter().any(|f| f.key == *key));
+    // What the short listings that follow rely on: asked of every whole listing, so a job
+    // that comes before retention does not leave it unknown.
+    let gate = if config.retention() == RetentionMode::Off
+        || retain::gate_is_clear(inventory, published, state)
+    {
+        Gate::Clear
+    } else {
+        Gate::Held
+    };
     let mut until: Option<Timestamp> = None;
     let levels = Level::ALL
         .iter()
@@ -483,7 +546,7 @@ fn decide(
     for level in levels {
         let step = plan_level(inventory, now, config, *level, state, resolved)?;
         if let Some(job) = absorb(step, &mut until) {
-            return Ok(Due::Run(job));
+            return Ok(Decided::job(job, gate));
         }
     }
     let waits = state.backing_off_until(Level::SNAPSHOT, now);
@@ -494,10 +557,16 @@ fn decide(
         (None, None) => plan_snapshot(inventory, now, config, published, resolved)?,
     };
     if let Some(job) = absorb(step, &mut until) {
-        return Ok(Due::Run(job));
+        return Ok(Decided::job(job, gate));
     }
     let retained = match config.retention() {
-        RetentionMode::Off => return Ok(Due::Wait { until, held: None }),
+        RetentionMode::Off => {
+            return Ok(Decided {
+                due: Due::Wait { until, held: None },
+                gate: Gate::Clear,
+                retention_wake: None,
+            });
+        }
         RetentionMode::Enforce => {
             match retention(inventory, now, config, published, state, resolved) {
                 Resolve::Done(retained) => retained,
@@ -506,14 +575,26 @@ fn decide(
         }
     };
     Ok(match retained {
-        Retention::Delete(job) => Due::Run(Job::Delete(job)),
-        Retention::Wait { until: wake } => Due::Wait {
-            until: soonest(until, wake),
-            held: None,
+        Retention::Delete(job) => Decided {
+            due: Due::Run(Job::Delete(job)),
+            gate: Gate::Clear,
+            retention_wake: None,
         },
-        Retention::Held(hold) => Due::Wait {
-            until,
-            held: Some(hold),
+        Retention::Wait { until: wake } => Decided {
+            due: Due::Wait {
+                until: soonest(until, wake),
+                held: None,
+            },
+            gate: Gate::Clear,
+            retention_wake: wake,
+        },
+        Retention::Held(hold) => Decided {
+            due: Due::Wait {
+                until,
+                held: Some(hold),
+            },
+            gate: Gate::Held,
+            retention_wake: None,
         },
     })
 }
