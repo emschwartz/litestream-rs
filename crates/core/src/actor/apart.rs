@@ -2,8 +2,6 @@
 //! runs over, and the move of its files up to level 0 once a boot has listed the replica.
 //! `super::local`'s docs say why they are kept apart.
 
-use std::num::NonZeroUsize;
-
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::compact::CompactError;
@@ -12,7 +10,7 @@ use crate::fault::role::Role;
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::publish::{Unpublished, Writer, remove_staged};
 use crate::store::{
-    BatchKind, Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode, exists,
+    Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode, exists,
 };
 use crate::upload::{StagedPages, same_bytes};
 
@@ -155,10 +153,6 @@ impl<L: ObjectStore> ObjectStore for Apart<'_, L> {
 
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         self.inner.remove_scratch().await
-    }
-
-    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
-        self.inner.batch_width(kind)
     }
 }
 

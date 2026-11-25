@@ -43,6 +43,85 @@ fn held(store: &MemStore, level: Level) -> Vec<u64> {
         .collect()
 }
 
+/// A store that counts the writes aborted in it; everything else is the store it wraps.
+struct Aborts {
+    inner: MemStore,
+    aborted: Arc<AtomicU32>,
+}
+
+struct CountedUpload {
+    inner: <MemStore as ObjectStore>::Upload,
+    aborted: Arc<AtomicU32>,
+}
+
+impl Upload for CountedUpload {
+    async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
+        self.inner.write(chunk).await
+    }
+
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        self.inner.commit().await
+    }
+
+    async fn abort(self) -> Result<(), StoreError> {
+        self.aborted.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort().await
+    }
+}
+
+impl ObjectStore for Aborts {
+    type Upload = CountedUpload;
+
+    async fn remove_scratch(&self) -> Result<u64, StoreError> {
+        self.inner.remove_scratch().await
+    }
+
+    async fn list(
+        &self,
+        level: Level,
+        after: Option<TxidRange>,
+        limit: PageLimit,
+    ) -> Result<Listing, StoreError> {
+        self.inner.list(level, after, limit).await
+    }
+
+    async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+        self.inner.read(key, offset, len).await
+    }
+
+    async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+        self.inner.created_at(file).await
+    }
+
+    async fn read_with_created_at(
+        &self,
+        file: &FileInfo,
+        len: ReadLen,
+    ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
+        self.inner.read_with_created_at(file, len).await
+    }
+
+    async fn begin_sized_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+        mode: WriteMode,
+        len: Option<u64>,
+    ) -> Result<CountedUpload, StoreError> {
+        Ok(CountedUpload {
+            inner: self
+                .inner
+                .begin_sized_upload(key, created_at, mode, len)
+                .await?,
+            aborted: Arc::clone(&self.aborted),
+        })
+    }
+
+    async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
+        self.inner.delete(keys).await
+    }
+}
+
 /// Every page of level 0 through `view`, `limit` files at a time, following its cursors.
 fn paged(view: &Apart<'_, MemStore>, limit: u16) -> Vec<FileKey> {
     let limit = PageLimit::new(limit).unwrap();
@@ -115,6 +194,26 @@ fn with_no_base_every_file_is_the_slots() {
     assert!(paged(&Apart::over(&MemStore::new(), None), 1).is_empty());
 }
 
+/// An abort reaches the store, which is where a real one frees what the write took.
+#[test]
+fn an_abort_reaches_the_store() {
+    let store = Aborts {
+        inner: store(&[1], &[]),
+        aborted: Arc::default(),
+    };
+    let view = Apart::over(&store, base(1));
+    block_on(async {
+        let mut upload = view
+            .begin_upload(&l0(2), ts(T0), WriteMode::New)
+            .await
+            .unwrap();
+        upload.write(b"gone").await.unwrap();
+        upload.abort().await.unwrap();
+    });
+    assert_eq!(store.aborted.load(Ordering::SeqCst), 1);
+    assert_eq!(held(&store.inner, Level::LOCAL_COURSE), Vec::<u64>::new());
+}
+
 /// A write, a stat and a delete above the base go to the slot, and the commit names the file
 /// as the course does; at or below the base they are level 0's.
 #[test]
@@ -174,11 +273,9 @@ fn other_levels_pass_through() {
         block_on(view.read(&key(Level::SNAPSHOT, 7), 0, ReadLen::CHUNK)).unwrap(),
         b"snapshot"
     );
-    assert_eq!(
-        view.batch_width(crate::store::BatchKind::Reads),
-        store.batch_width(crate::store::BatchKind::Reads)
-    );
-    assert_eq!(block_on(view.remove_scratch()).unwrap(), 0);
+    store.plant_scratch(3);
+    assert_eq!(block_on(view.remove_scratch()).unwrap(), 3);
+    assert_eq!(store.scratch(), 0);
 }
 
 /// The slot's files move up to level 0 with their bytes and the time they were staged

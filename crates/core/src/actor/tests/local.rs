@@ -77,9 +77,9 @@ fn is_local(actor: &Actor) -> bool {
 }
 
 /// A process that stopped with transactions 2 and 3 staged and the replica at 1, restarted
-/// under `cfg` with the store down, ticked until the boot has failed for the bound: the
-/// rig, the restarted actor and the time.
-fn restarted_down(cfg: ActorConfig) -> (Rig, Actor, i64) {
+/// under `cfg` with the store down, ticked through the tick that began the course, of which
+/// no step has run: the rig, the restarted actor and the time.
+fn just_begun(cfg: ActorConfig) -> (Rig, Actor, i64) {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
     assert_eq!(
@@ -89,7 +89,17 @@ fn restarted_down(cfg: ActorConfig) -> (Rig, Actor, i64) {
     down(&rig);
     let mut actor = Actor::new(cfg);
     let at = (T0 + 1_000).saturating_add(bound());
-    run(&mut rig, &mut actor, T0 + 1_000, at);
+    run(&mut rig, &mut actor, T0 + 1_000, at.saturating_sub(1));
+    assert!(!is_local(&actor));
+    rig.tick(&mut actor, at);
+    assert!(is_local(&actor));
+    (rig, actor, at)
+}
+
+/// [`just_begun`], ticked until the course has nothing more to do at that time.
+fn restarted_down(cfg: ActorConfig) -> (Rig, Actor, i64) {
+    let (mut rig, mut actor, at) = just_begun(cfg);
+    run(&mut rig, &mut actor, at, at);
     (rig, actor, at)
 }
 
@@ -685,6 +695,40 @@ fn a_draining_course_syncs_without_checkpointing() {
     assert!(matches!(tick, Tick::DeadlineReached(_)), "{tick:?}");
 }
 
+/// The staged files the course began over, and each it stages, count toward the cap on
+/// staged files, as a booted engine's pending files do.
+#[test]
+fn the_courses_files_count_toward_the_cap_on_staged_files() {
+    let (mut rig, mut actor, at) = restarted_down(go_like());
+    assert_eq!(actor.engine.witnesses.len(), 1, "file 3, after the oldest");
+    rig.commit(4);
+    rig.settle(&mut actor, at.saturating_add(1));
+    assert_eq!(actor.engine.witnesses.len(), 2);
+}
+
+/// A WAL that returns at another page size is reported before anything is staged, as a
+/// booted engine reports it, from the course's first step on: the course knows the size its
+/// files have.
+#[test]
+fn a_wal_at_another_page_size_is_reported_by_the_course() {
+    let (mut rig, mut actor, at) = just_begun(go_like());
+    let before = (all_staged(&rig), apart(&rig));
+    resize(&mut rig, big());
+    let tick = rig.tick(&mut actor, at);
+    assert!(
+        matches!(
+            event(&tick),
+            Some(Event::Degraded {
+                task: Task::Sync,
+                cause: PersistentCause::PageSizeChanged { .. },
+                ..
+            })
+        ),
+        "{tick:?}"
+    );
+    assert_eq!((all_staged(&rig), apart(&rig)), before);
+}
+
 /// The course wakes for its own checkpoint schedule, not only for the next boot attempt.
 #[test]
 fn the_course_wakes_for_its_checkpoint_schedule() {
@@ -696,15 +740,25 @@ fn the_course_wakes_for_its_checkpoint_schedule() {
         },
         ..go_like()
     };
-    let (mut rig, mut actor, at) = restarted_down(cfg);
+    let (mut rig, mut actor, at) = just_begun(cfg);
     rig.commit(4);
-    let seen = rig.settle(&mut actor, at.saturating_add(1));
+    let seen = run(&mut rig, &mut actor, at, at);
+    // The interval runs from when the course began, as a booted engine's does from its boot.
+    assert!(
+        !seen
+            .iter()
+            .any(|tick| matches!(event(tick), Some(Event::Checkpointed { .. }))),
+        "{seen:?}"
+    );
     let boot = actor.kept.tasks.get(Task::Upload).until().unwrap();
     let wake = match seen.last().and_then(next_of) {
         Some(Next::At(wake)) => wake,
         other => panic!("{other:?}: {seen:?}"),
     };
+    assert_eq!(wake, ts(at + 2_000));
     assert!(wake < boot, "{wake:?} {boot:?}");
+    // Its own work is work at once, whether or not a boot attempt is due with it.
+    assert!(matches!(actor.next(wake), Next::Now));
     let seen = run(&mut rig, &mut actor, wake.unix_millis(), wake.unix_millis());
     assert!(
         seen.iter()
@@ -1045,15 +1099,25 @@ fn a_course_goes_on_over_the_files_a_boot_moved_up() {
     assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3], vec![4]));
     // The replica holds transaction 1, below level 0's newest.
     let moved = block_on(actor.settle_course(&Staging(&rig.staging), &Replica(&rig.remote)));
-    assert_eq!(moved, Ok(true));
+    assert_eq!(moved, Ok(()));
     assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3, 4], vec![]));
     assert!(is_local(&actor));
+    // The next attempt fails, and finds the course's newest file where it now is.
+    let due = actor
+        .kept
+        .tasks
+        .get(Task::Upload)
+        .until()
+        .unwrap()
+        .unix_millis();
+    rig.tick(&mut actor, due);
+    assert!(is_local(&actor));
     rig.commit(5);
-    rig.settle(&mut actor, at.saturating_add(2));
+    rig.settle(&mut actor, due.saturating_add(1));
     assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3, 4], vec![5]));
     assert_eq!(actor.staged(), Txid::new(5));
     up(&rig);
-    let seen = run(&mut rig, &mut actor, at + 600_000, at + 600_000);
+    let seen = run(&mut rig, &mut actor, due + 600_000, due + 600_000);
     no_stop(&seen);
     assert_eq!(commits_restorable(&rig), (1..=5).collect::<Vec<u8>>());
 }
@@ -1076,8 +1140,8 @@ fn slot_files_over_an_empty_level_zero_are_settled_against_the_replica() {
         if replica_holds {
             super::second_writer::put_whole(&rig.remote.inner, &l0(1), b"its own");
         }
-        let moved = block_on(actor.settle_course(&Staging(&rig.staging), &Replica(&rig.remote)));
-        assert_eq!(moved, Ok(!replica_holds));
+        let settled = block_on(actor.settle_course(&Staging(&rig.staging), &Replica(&rig.remote)));
+        assert_eq!(settled, Ok(()));
         let want = if replica_holds { vec![] } else { vec![1] };
         assert_eq!((staged(&rig), apart(&rig)), (want, vec![]));
     }

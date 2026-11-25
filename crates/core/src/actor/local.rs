@@ -44,7 +44,7 @@
 //! the replica past it, the slot's files are deleted, and the boot decides as if no course
 //! had run.
 
-use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
+use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use super::apart::{Apart, raise_course};
 use super::parts::{Course, Engine, Stop, Tail};
@@ -97,7 +97,6 @@ fn lend<'e, W, P, C, L, R>(
 /// and continues from its end. Only [`agree`] makes one.
 struct Agreed {
     position: Position,
-    page_size: PageSize,
     /// A token for every staged file after the oldest: they count toward the cap on staged
     /// files, and none of them is ever shown to an upload.
     tokens: Vec<Witnessed>,
@@ -177,16 +176,15 @@ async fn agree<W: WalSource, L: Role, R: Role>(
     }
     let within = boot_wal_of(reader.as_mut(), end);
     let newest = NewestStagedFile::load_in(staging, within, &found.scanned).await?;
-    let Some(NewestStagedFile::Readable { page_size, .. }) = newest else {
+    if !matches!(newest, Some(NewestStagedFile::Readable { .. })) {
         return Ok(None);
-    };
+    }
     let view = wal_view(len, reader.as_ref(), committed);
     // No replica: the verdict rests on the staged file and the WAL alone.
     let verdict = recover_traced(newest.as_ref().map(PositionSource::Boot), &view, None);
     Ok(match verdict.recovered {
         Recovered::Continue(position) => Some(Agreed {
             position,
-            page_size,
             tokens: found.tokens,
         }),
         Recovered::WalRestarted(_) | Recovered::Snapshot { .. } | Recovered::Stop(_) => None,
@@ -279,7 +277,6 @@ impl Actor {
         };
         self.engine = Engine {
             course: Course::local(&agreed, base),
-            page_size: Some(agreed.page_size),
             checkpoint: CheckpointState::boot(now),
             witnesses: agreed.tokens.into_iter().collect(),
             ..Engine::fresh()
@@ -295,7 +292,9 @@ impl Actor {
     /// The boot's listing ([`boot_listing`]), with the files a local course left in its slot
     /// settled before anything is made of it (the module docs say why they are kept apart).
     /// The slot is looked at on every boot whose listing answers, whatever this process
-    /// knows: the course may have been an earlier process's.
+    /// knows: the course may have been an earlier process's. The listing stands whatever
+    /// became of the slot: what it decided is about keys the replica holds, and files that
+    /// moved up are all above those.
     pub(super) async fn boot_listed<W, P, C, L, R>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
@@ -312,26 +311,23 @@ impl Actor {
             .list(Level::LOCAL_COURSE, None, PageLimit::ONE)
             .await
             .map_err(|err| L::fault(&err))?;
-        if slot.files.is_empty() || !self.settle_course(env.staging, env.remote).await? {
-            return Ok(listed);
+        if !slot.files.is_empty() {
+            self.settle_course(env.staging, env.remote).await?;
         }
-        // Level 0 gained the course's files: the listing is made again over them.
-        let denied = &mut self.kept.scratch_sweep_denied;
-        boot_listing(env.staging, env.remote, denied, takeover).await
+        Ok(listed)
     }
 
     /// Settles the files in the course's slot against the replica as listed now. The
     /// replica's newest transaction, at any level, at or below the newest level-0 staged
     /// file: every file in the slot is above the replica, as a file staged after a boot is,
     /// and moves up to level 0. Past it: the slot's files number transactions the replica
-    /// holds, so they are deleted and a course in progress ends. Says whether level 0 gained
-    /// files. Called once the boot's own listing answered, so a boot that cannot reach the
+    /// holds, so they are deleted and a course in progress ends. Called once the boot's own listing answered, so a boot that cannot reach the
     /// replica leaves staging as it found it.
     pub(super) async fn settle_course<L: Role, R: Role>(
         &mut self,
         staging: &L,
         remote: &R,
-    ) -> Result<bool, Fault> {
+    ) -> Result<(), Fault> {
         let base = newest_level_zero(staging)
             .await?
             .map(|info| info.key.range().max());
@@ -344,13 +340,13 @@ impl Actor {
             if matches!(self.engine.course, Course::Local(_)) {
                 self.leave_local();
             }
-            return Ok(false);
+            return Ok(());
         }
         raise_course(staging).await?;
         if let Course::Local(at) = self.engine.course {
             self.engine.course = Course::Local(at.raised());
         }
-        Ok(true)
+        Ok(())
     }
 
     /// `tick`, the end of a boot attempt, which leaves a local course as it was. One that
