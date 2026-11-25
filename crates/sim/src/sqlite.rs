@@ -1846,6 +1846,21 @@ impl SimSqlite {
         });
     }
 
+    /// Puts `image` (the bytes [`Self::image`] gave once) in place of the database file, the
+    /// WAL gone, as a plain copy over it would. False while a connection is open.
+    pub fn put_back_database(&self, image: &[u8]) -> bool {
+        self.with(|state| {
+            if !state.close_all() {
+                return false;
+            }
+            state.db = image.to_vec();
+            state.db_durable = image.to_vec();
+            let pages = state.db_pages();
+            state.index = Index::empty(state.index.salts, pages);
+            true
+        })
+    }
+
     /// The database as a new reader sees it, `db_size` pages.
     #[must_use]
     pub fn image(&self) -> Vec<u8> {

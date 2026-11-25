@@ -16,7 +16,9 @@
 //! same rules as when the application makes it between ticks: a commit is the armed
 //! [`SimSqlite::arm_commit_in_tick`] commit, made here instead of at the barrier; a reader's
 //! transaction takes the mark SQLite's rules give it; a checkpoint is refused while the app
-//! is in a transaction; a WAL is deleted only when no connection holds a transaction.
+//! is in a transaction; a WAL is deleted only when no connection holds a transaction; a write
+//! transaction left open holds the write lock across the engine's later calls, which is how
+//! an ordinary writer makes the engine's barrier or its sequence bump find the lock busy.
 
 use lsr_core::SourceOp;
 use lsr_wal::{Salts, WalOffset};
@@ -49,6 +51,10 @@ pub enum InTickOp {
     Checkpoint(OtherProcessMode),
     /// The last connection closes and the WAL is deleted.
     DeleteWal,
+    /// It begins a write transaction and writes the pages armed with
+    /// [`SimSqlite::arm_commit_in_tick`] without committing them: the write lock is held until
+    /// the application commits or rolls back.
+    Spill,
 }
 
 /// What an operation inside the tick did.
@@ -75,6 +81,9 @@ pub enum InTickDone {
     },
     /// Whether the WAL was deleted.
     WalDeleted(bool),
+    /// Whether the write transaction began (`false`: another connection held the write lock,
+    /// or nothing was armed to write).
+    Spilled(bool),
 }
 
 /// What an operation inside the tick did, and what it did to the WAL file: the forcing
@@ -217,6 +226,14 @@ impl State {
                     self.present = false;
                 }
                 InTickDone::WalDeleted(deleted)
+            }
+            InTickOp::Spill => {
+                let armed = self
+                    .in_tick
+                    .take_if(|armed| armed.site == InTickSite::AtCall);
+                InTickDone::Spilled(
+                    armed.is_some_and(|armed| self.write(Conn::App, &armed.pages, None)),
+                )
             }
         }
     }

@@ -171,3 +171,48 @@ fn an_operation_anchored_to_a_kind_runs_before_the_first_call_of_it() {
         Some(InTickDone::ReaderBegan(_))
     ));
 }
+
+/// A write transaction the application begins right before the sequence bump, in a WAL the
+/// checkpoint copied whole, restarts the WAL and holds the write lock: the bump is refused,
+/// with no fault injected, and so is the next barrier, until the application commits.
+#[test]
+fn a_write_transaction_begun_before_the_bump_restarts_the_wal_and_refuses_the_bump() {
+    let db = db();
+    let mut ck = db.checkpointer();
+    let salts = db.salts();
+    db.arm_commit_in_tick(tx(&[3], 2), 4, InTickSite::AtCall, Box::new(|| (0, 0)));
+    db.app_tick_begins();
+    db.arm_app_in_tick(InTickAt::Before(SourceOp::BumpSeq), InTickOp::Spill);
+    let barrier = ck.begin_barrier().unwrap();
+    let run = ck.checkpoint(CheckpointMode::Passive).unwrap();
+    assert_eq!(run.checkpointed, run.log, "everything was copied");
+    ck.end_barrier(barrier).unwrap();
+    assert_eq!(ck.bump_seq(), Err(lsr_core::SourceError::Busy));
+    let ran = db.take_app_in_tick().unwrap();
+    assert_eq!(ran.done, InTickDone::Spilled(true));
+    assert!(ran.restarted, "the writer's first frame restarted the WAL");
+    assert_ne!(db.salts(), salts);
+    assert_eq!(db.mx_frame(), 0, "nothing is committed in the new WAL yet");
+    assert_eq!(
+        ck.begin_barrier().map(|_barrier| ()),
+        Err(lsr_core::SourceError::Busy)
+    );
+    db.commit(&tx(&[3], 2), 4).unwrap();
+    let barrier = ck.begin_barrier().unwrap();
+    ck.end_barrier(barrier).unwrap();
+    ck.bump_seq().unwrap();
+}
+
+/// With nothing armed to write, or the write lock held, no transaction begins.
+#[test]
+fn a_write_transaction_with_nothing_armed_does_not_begin() {
+    let db = db();
+    let mut ck = db.checkpointer();
+    db.app_tick_begins();
+    db.arm_app_in_tick(InTickAt::Call(0), InTickOp::Spill);
+    ck.bump_seq().unwrap();
+    assert_eq!(
+        db.take_app_in_tick().map(|ran| ran.done),
+        Some(InTickDone::Spilled(false))
+    );
+}

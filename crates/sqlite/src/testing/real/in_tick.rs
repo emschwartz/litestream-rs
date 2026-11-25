@@ -93,6 +93,13 @@ impl Real {
                 }
             }
             InTickOp::DeleteWal => InTickDone::WalDeleted(false),
+            InTickOp::Spill => {
+                let armed = self
+                    .tick
+                    .commit
+                    .take_if(|armed| armed.site == InTickSite::AtCall);
+                InTickDone::Spilled(armed.is_some_and(|armed| self.spill(&armed.pages)))
+            }
         };
         let after = Index::read(self);
         let wal = self.wal_file();

@@ -29,7 +29,7 @@ type Hook = Box<dyn FnMut(SourceOp)>;
 
 thread_local! {
     /// What runs before each of the engine's calls, when a case arms it.
-    static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    pub(crate) static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
 }
 
 fn hook(op: SourceOp) {
@@ -42,7 +42,7 @@ fn hook(op: SourceOp) {
 
 /// The engine's real backend, with [`HOOK`] run before each call.
 #[derive(Clone, Debug)]
-struct Hooked(Sqlite);
+pub(crate) struct Hooked(Sqlite);
 
 impl WalSource for Hooked {
     type Wal = <Sqlite as WalSource>::Wal;
@@ -126,7 +126,7 @@ impl Backend for Hooked {
 
 /// A connection of the application's or another process's, through the rig's VFS, that never
 /// waits on a lock.
-fn connect(db: &Path, vfs: &str) -> Connection {
+pub(crate) fn connect(db: &Path, vfs: &str) -> Connection {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE;
     let conn = Connection::open_with_flags_and_vfs(db, flags, vfs).unwrap();
     conn.busy_timeout(std::time::Duration::ZERO).unwrap();

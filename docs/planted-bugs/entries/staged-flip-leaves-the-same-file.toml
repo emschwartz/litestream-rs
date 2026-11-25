@@ -1,0 +1,7 @@
+# The simulator's own damage: flipping the middle byte of a staged file wherever it falls. On a
+# page of long runs that byte can be an LZ4 match offset, and the flipped file is another encoding
+# of the same pages, which a boot accepts and the judge of uploads calls bytes no engine staged.
+name = "staged-flip-leaves-the-same-file"
+fix = "claude/own-checkpoint"
+package = "lsr-sim"
+tests = ["world::tests::a_flipped_staged_byte_never_leaves_another_encoding_of_the_same_file"]

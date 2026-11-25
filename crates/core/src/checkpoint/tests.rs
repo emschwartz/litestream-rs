@@ -673,12 +673,233 @@ fn the_seal_takes_every_committed_transaction_whatever_the_cap() {
     assert_eq!(run(&capped), run(&SyncConfig::default()));
 }
 
+/// The read transaction a PASSIVE retakes under its barrier pins the position from the moment
+/// the call returns: a fault after it (here the bump) leaves the position pinned, so a writer
+/// that restarts the WAL next is followed and costs no snapshot.
 #[test]
-fn a_position_after_a_checkpoint_fault_is_unpinned() {
-    let (_, result) = fail_at(SourceOp::BumpSeq, CheckpointMode::Passive);
+fn a_fault_after_the_passive_ran_leaves_the_position_pinned() {
+    let (rig, result) = fail_at(SourceOp::BumpSeq, CheckpointMode::Passive);
     let failed = result.unwrap_err();
+    assert_eq!(
+        failed.staged.position().continuity(),
+        Continuity::Held(rig.wal.epoch())
+    );
+    assert_eq!(failed.staged.position().txid().get(), 2);
+    assert_eq!(
+        failed.staged.proof(),
+        None,
+        "pinned, but the proof was spent"
+    );
+}
+
+/// A checkpoint call that failed some other way than by losing the retake still holds a read
+/// transaction begun under the barrier: the position is pinned to the hold the WAL names.
+#[test]
+fn a_passive_call_that_failed_leaves_the_position_pinned() {
+    let (rig, result) = fail_at(SourceOp::Checkpoint, CheckpointMode::Passive);
+    let failed = result.unwrap_err();
+    assert_eq!(failed.fault, Fault::LocalIo);
+    assert_eq!(
+        failed.staged.position().continuity(),
+        Continuity::Held(rig.wal.epoch())
+    );
+    assert_eq!(failed.run, None);
+}
+
+/// A retake that was lost is the one answer that proves nothing: no read transaction holds
+/// the WAL, so the position is unpinned.
+#[test]
+fn a_lost_retake_leaves_the_position_unpinned() {
+    let mut rig = Rig::new();
+    let proof = rig.proof();
+    rig.commit(&[3]);
+    rig.wal
+        .inject(SourceOp::Checkpoint, SourceError::ReadTxLost);
+    let failed = rig.run(proof, CheckpointMode::Passive).unwrap_err();
+    assert_eq!(failed.fault, Fault::ReadTxLost);
     assert_eq!(failed.staged.position().continuity(), Continuity::Broken);
     assert_eq!(failed.staged.position().txid().get(), 2);
+}
+
+/// A TRUNCATE takes no barrier, so a commit may sit between its proof and the read
+/// transaction it retakes: a fault after it leaves the position unpinned.
+#[test]
+fn a_fault_after_a_truncate_leaves_the_position_unpinned() {
+    let (_, result) = fail_at(SourceOp::BumpSeq, CheckpointMode::Truncate);
+    let failed = result.unwrap_err();
+    assert_eq!(failed.staged.position().continuity(), Continuity::Broken);
+}
+
+/// Another connection holds the write lock when the PASSIVE asks for its barrier: SQLite is
+/// not asked to checkpoint, nothing is staged, and the proof the caller gave comes back.
+#[test]
+fn a_write_lock_busy_at_the_barrier_is_an_outcome_not_a_fault() {
+    let mut rig = Rig::new();
+    let proof = rig.proof();
+    rig.wal.inject(SourceOp::BeginBarrier, SourceError::Busy);
+    let done = rig.run(proof, CheckpointMode::Passive).unwrap();
+    assert_eq!(done.outcome, CheckpointOutcome::LockBusy);
+    assert_eq!(rig.ck.calls(), [CheckpointCall::BeginBarrier]);
+    assert_eq!(done.run, None);
+    assert!(done.staged.files().is_empty());
+    assert!(done.staged.proof().is_some(), "nothing moved");
+}
+
+/// Another connection holds the write lock when the PASSIVE's bump is due: its commit moves
+/// the WAL on. The checkpoint ran, the seal is staged, and the position is pinned to the read
+/// transaction retaken under the barrier.
+#[test]
+fn a_passive_overtaken_at_its_bump_is_pinned_and_not_a_fault() {
+    let mut rig = Rig::new();
+    let proof = rig.proof();
+    rig.commit(&[3]);
+    rig.wal.inject(SourceOp::BumpSeq, SourceError::Busy);
+    let done = rig.run(proof, CheckpointMode::Passive).unwrap();
+    assert_eq!(done.outcome, CheckpointOutcome::Overtaken);
+    assert_eq!(done.staged.files().len(), 1, "the seal");
+    assert_eq!(
+        done.staged.position().continuity(),
+        Continuity::Held(rig.wal.epoch())
+    );
+    assert_eq!(done.staged.position().txid().get(), 2);
+    let run = done.run.unwrap();
+    assert_eq!((run.busy, run.log, run.checkpointed), (false, 2, 2));
+}
+
+/// A TRUNCATE whose bump finds the write lock held acts on what SQLite reported. With every
+/// frame copied the boundary snapshot is owed: the writer that holds the lock starts the new
+/// generation. With frames left uncopied the WAL cannot restart, and the checkpoint was busy.
+#[test]
+fn a_truncate_overtaken_at_its_bump_owes_the_snapshot_only_when_everything_was_copied() {
+    let mut rig = Rig::new();
+    let proof = rig.proof();
+    rig.wal.inject(SourceOp::BumpSeq, SourceError::Busy);
+    let done = rig.run(proof, CheckpointMode::Truncate).unwrap();
+    assert_eq!(done.outcome, CheckpointOutcome::BoundaryOwed);
+    assert!(done.staged.files().is_empty(), "no snapshot yet");
+    assert_eq!(done.staged.position().continuity(), Continuity::Broken);
+
+    let mut rig = Rig::new();
+    let proof = rig.proof();
+    rig.commit(&[3]);
+    rig.commit(&[4]);
+    rig.ck.script(script(true, CheckpointEffect::Backfill(1)));
+    rig.wal.inject(SourceOp::BumpSeq, SourceError::Busy);
+    let done = rig.run(proof, CheckpointMode::Truncate).unwrap();
+    assert_eq!(done.outcome, CheckpointOutcome::Busy);
+    let run = done.run.unwrap();
+    assert!(run.checkpointed < run.log, "{run:?}");
+}
+
+#[test]
+fn the_wait_for_a_busy_write_lock_doubles_to_the_cap() {
+    let cap = Duration::from_secs(1);
+    let waits: Vec<u128> = (1..=9)
+        .map(|skips| lock_busy_wait(nz(skips), cap).as_millis())
+        .collect();
+    assert_eq!(waits, [10, 20, 40, 80, 160, 320, 640, 1000, 1000]);
+    assert_eq!(lock_busy_wait(nz(u32::MAX), cap), cap);
+    assert_eq!(
+        lock_busy_wait(nz(1), Duration::from_millis(3)),
+        Duration::from_millis(3),
+        "never past the cap"
+    );
+    assert_eq!(LOCK_BUSY_WAIT, Duration::from_millis(10));
+}
+
+/// A write lock that was busy at the barrier changes nothing in the policy: the same state,
+/// asked again.
+#[test]
+fn a_busy_write_lock_leaves_the_policy_where_it_was() {
+    let c = cfg(Some(1000), 5, 10);
+    for kind in 0..4 {
+        let state = state_of(kind, 7);
+        for decision in [
+            Decision::Passive(CheckpointTrigger::TruncateThreshold),
+            Decision::Passive(CheckpointTrigger::MinPages),
+            Decision::Passive(CheckpointTrigger::Interval),
+            Decision::Truncate,
+        ] {
+            let after = after_checkpoint(
+                state,
+                decision,
+                &CheckpointOutcome::LockBusy,
+                &obs(50, 10, true),
+                &c,
+            );
+            assert_eq!(after, (state, Next::Now), "{state:?} {decision:?}");
+        }
+    }
+}
+
+/// An overtaken PASSIVE wrote no frame of ours. At the truncate threshold it did not restart
+/// the WAL as far as the policy knows, so the TRUNCATE is next unless the following sync
+/// shows the writer's restart; below it the checkpoint is done and expects no bump frame.
+#[test]
+fn an_overtaken_passive_is_finished_and_expects_no_bump_frame() {
+    let c = cfg(Some(1000), 5, 10);
+    let o = obs(50, 10, true);
+    let pending = CheckpointState::Pending { last: ts(0) };
+    let overtaken = CheckpointOutcome::Overtaken;
+    assert_eq!(
+        after_checkpoint(
+            pending,
+            Decision::Passive(CheckpointTrigger::TruncateThreshold),
+            &overtaken,
+            &o,
+            &c
+        ),
+        (
+            CheckpointState::PassiveFailedAtTruncate { last: ts(50) },
+            Next::Now
+        )
+    );
+    let idle = CheckpointState::Idle {
+        last: ts(50),
+        expect_bump: false,
+    };
+    for trigger in [CheckpointTrigger::MinPages, CheckpointTrigger::Interval] {
+        assert_eq!(
+            after_checkpoint(pending, Decision::Passive(trigger), &overtaken, &o, &c),
+            (idle, Next::OnWalChange),
+            "{trigger:?}"
+        );
+    }
+    assert_eq!(
+        after_checkpoint(pending, Decision::Truncate, &overtaken, &o, &c),
+        (
+            CheckpointState::PassiveFailedAtTruncate { last: ts(50) },
+            Next::At(ts(1050))
+        )
+    );
+    // The same writer's commit is one sync of one transaction: it arms the triggers again,
+    // where a bump frame of ours would have been absorbed.
+    assert_eq!(
+        after_sync(idle, 1, 1, &c),
+        CheckpointState::Pending { last: ts(50) }
+    );
+}
+
+/// A TRUNCATE that owes its boundary snapshot is finished, as one that staged it is.
+#[test]
+fn a_truncate_that_owes_its_snapshot_is_finished() {
+    let c = cfg(Some(1000), 5, 10);
+    assert_eq!(
+        after_checkpoint(
+            CheckpointState::PassiveFailedAtTruncate { last: ts(0) },
+            Decision::Truncate,
+            &CheckpointOutcome::BoundaryOwed,
+            &obs(50, 10, true),
+            &c
+        ),
+        (
+            CheckpointState::Idle {
+                last: ts(50),
+                expect_bump: false
+            },
+            Next::OnWalChange
+        )
+    );
 }
 
 #[test]

@@ -596,6 +596,7 @@ impl Worker {
             | EngineEvent::TakeoverWanted(_)
             | EngineEvent::CheckingIdentity { .. } => true,
             EngineEvent::Checkpointed { .. }
+            | EngineEvent::CheckpointDeferred { .. }
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
             | EngineEvent::Degraded { .. }
@@ -659,8 +660,10 @@ impl Worker {
             | EngineEvent::Idle
             | EngineEvent::Resnapshot(_)
             | EngineEvent::Clamped(_)
-            // A wait on held writes is not a failure: nothing is counted.
+            // A wait on held writes, or for a write lock the application holds, is not a
+            // failure: nothing is counted.
             | EngineEvent::WritesHeld { .. }
+            | EngineEvent::CheckpointDeferred { .. }
             | EngineEvent::TakeoverWanted(_)
             | EngineEvent::CheckingIdentity { .. } => {}
         }

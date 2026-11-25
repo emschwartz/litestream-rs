@@ -47,6 +47,9 @@ pub enum EventMatch {
     Checkpointed(CheckpointMode),
     /// A step failed with a fault whose policy is to retry it.
     Retrying(FaultKind),
+    /// A checkpoint was due and the write lock was busy, so it waits
+    /// (`lsr_core::CheckpointOutcome::LockBusy`).
+    CheckpointDeferred,
     /// A step that writes to the database waited: the replicator held the application's
     /// writes (`lsr_core::Fault::WritesHeld`).
     WritesHeld,
@@ -104,7 +107,11 @@ impl Expect {
                 Seen::Event(Event::Retrying { fault, .. }),
             ) => FaultKind::from(fault) == *want,
             (Self::Event(EventMatch::Clamped), Seen::Event(Event::Clamped(_)))
-            | (Self::Event(EventMatch::WritesHeld), Seen::Event(Event::WritesHeld { .. })) => true,
+            | (Self::Event(EventMatch::WritesHeld), Seen::Event(Event::WritesHeld { .. }))
+            | (
+                Self::Event(EventMatch::CheckpointDeferred),
+                Seen::Event(Event::CheckpointDeferred { .. }),
+            ) => true,
             (
                 Self::Event(EventMatch::Repaired(want)),
                 Seen::Event(Event::Maintained {
@@ -241,6 +248,7 @@ pub fn scenario_of(cause: SnapshotCause) -> &'static [fn() -> Scenario] {
         SnapshotCause::OperatorRequested => &[cli_snapshot],
         SnapshotCause::StagedUnverified { .. } => &[pending_file_that_does_not_chain],
         SnapshotCause::AheadOfReplica { .. } => &[
+            older_copy_taken_after_the_last_counter_bump,
             meta_lost_with_commits_not_uploaded,
             meta_wiped_wal_restarted,
         ],
@@ -458,6 +466,48 @@ pub fn meta_lost_with_commits_not_uploaded() -> Scenario {
         ],
         snapshot_after_boot(CauseKind::AheadOfReplica),
     )
+}
+
+/// The history of [`faults::older_copy_on_a_new_host`]: the application's database is made
+/// with the replicator's counter at 1, backed up, committed on to a counter of `later_seq`, and
+/// replicated; then the backup goes back in place of the database and the working folder is
+/// gone. The expectations are the caller's.
+fn older_copy_history(name: &'static str, later_seq: u32, adopt: bool) -> Scenario {
+    build(
+        name,
+        vec![
+            vec![Op::Structured { seq: 1, data: 1 }, Op::Shutdown],
+            vec![Op::SaveDatabase],
+            vec![
+                Op::Structured {
+                    seq: later_seq,
+                    data: 2,
+                },
+                Op::Shutdown,
+            ],
+            vec![
+                Op::EnvFault(EnvFault::WipeStaging),
+                Op::OurReader { begin: false },
+                Op::PutBackDatabase { adopt },
+            ],
+            vec![Op::Tick],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        Vec::new(),
+    )
+}
+
+/// The window the counter rule leaves, pinned: the same history with the counter unchanged
+/// since the backup (the backup was taken after the replica's last counter bump, and the
+/// commits after it did not reach another). The older database passes for the replica plus
+/// more and the boot snapshots above it (`AheadOfReplica`), as it would for a database the
+/// application did write on (issue 329).
+#[must_use]
+pub fn older_copy_taken_after_the_last_counter_bump() -> Scenario {
+    let mut s = older_copy_history("older_copy_taken_after_the_last_counter_bump", 1, true);
+    s.expect = snapshot_after_boot(CauseKind::AheadOfReplica);
+    s
 }
 
 /// The newest staged file is gone but an older one remains: the replica is ahead.

@@ -22,6 +22,7 @@ use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 mod after_delete;
 mod ahead;
 mod audit;
+mod older_copy;
 
 const PS: PageSize = PageSize::MIN;
 const T0: i64 = 1_000_000;
@@ -2287,6 +2288,7 @@ mod no_wal_yet;
 mod once;
 mod once_retention;
 mod one_off;
+mod own_checkpoint;
 mod pages;
 mod rejected_snapshot;
 mod requested_snapshot_after_restart;
