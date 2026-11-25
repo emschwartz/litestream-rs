@@ -1,0 +1,8 @@
+# The library default leaves the files per upload tick unbounded: the first tick after an outage
+# uploads the whole backlog before anything else runs.
+name = "library-uploads-whole-backlog"
+fix = "plant"
+package = "lsr-replica"
+tests = [
+    "the_default_bounds_the_files_an_upload_tick_sends",
+]

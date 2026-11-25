@@ -923,6 +923,7 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
         | StoreError::AlreadyExists { .. }
         | StoreError::ScratchExhausted { .. }
         | StoreError::CreateOnlyUnsupported { .. }
+        | StoreError::ObjectTooLarge { .. }
         | StoreError::Refused { .. } => false,
     }
 }

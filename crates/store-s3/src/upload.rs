@@ -45,6 +45,7 @@ use lsr_ltx::Timestamp;
 
 use crate::classify::{classify, is_not_implemented};
 use crate::multipart::{Sent, completed_etag_fits};
+use crate::part_plan::{MAX_OBJECT, plan_part_size};
 use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag};
 use crate::store::Inner;
@@ -71,6 +72,9 @@ pub struct S3Upload<T> {
     key: FileKey,
     created_at: Timestamp,
     mode: WriteMode,
+    /// The part size this upload cuts its object into, planned from the object's
+    /// length when it was known at the start ([`plan_part_size`]).
+    part: usize,
     written: u64,
     state: UploadState,
 }
@@ -91,20 +95,37 @@ impl<T> std::fmt::Debug for S3Upload<T> {
 }
 
 impl<T> S3Upload<T> {
+    /// An upload of `key`; `len` is its exact length when the caller knows it.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectTooLarge`] when no part size can carry `len` bytes,
+    /// before any request is sent.
     pub(crate) fn new(
         inner: Arc<Inner<T>>,
         key: FileKey,
         created_at: Timestamp,
         mode: WriteMode,
-    ) -> Self {
-        Self {
+        len: Option<u64>,
+    ) -> Result<Self, StoreError> {
+        let planned = match len {
+            None => inner.part_size,
+            Some(len) => {
+                plan_part_size(inner.part_size, len).ok_or(StoreError::ObjectTooLarge {
+                    key,
+                    len,
+                    max: MAX_OBJECT,
+                })?
+            }
+        };
+        Ok(Self {
             inner,
             key,
             created_at,
             mode,
+            part: usize::try_from(planned.get()).unwrap_or(usize::MAX),
             written: 0,
             state: UploadState::Buffering(Vec::new()),
-        }
+        })
     }
 
     /// The capacity of every buffer held (parts waiting and the one
@@ -215,14 +236,10 @@ impl<T: Transport> Inner<T> {
 }
 
 impl<T: Transport> S3Upload<T> {
-    fn part_len(&self) -> usize {
-        usize::try_from(self.inner.part_size.get()).unwrap_or(usize::MAX)
-    }
-
     /// Fills the buffer from `chunk`, uploading each part as it fills.
     fn append(&mut self, mut chunk: &[u8]) -> Result<(), StoreError> {
         let start = self.inner.now();
-        let part = self.part_len();
+        let part = self.part;
         self.written = self
             .written
             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));

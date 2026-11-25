@@ -129,6 +129,23 @@ impl fmt::Debug for CredentialChain {
     }
 }
 
+/// A source that resolves the whole chain each time it is asked, for a store opened before the
+/// chain could answer (`S3Store::deferred`). A failed fetch is the chain's error, which the
+/// signer classifies as it does any failed fetch: `Transient` when waiting may fix it,
+/// `Denied(Credentials)` otherwise.
+#[derive(Debug)]
+pub(crate) struct Deferred(pub(crate) CredentialChain);
+
+impl CredentialSource for Deferred {
+    fn fetch(&self) -> Result<Expiring, CredentialError> {
+        self.0.resolve().map(|resolved| resolved.expiring())
+    }
+
+    fn name(&self) -> &'static str {
+        "credential chain"
+    }
+}
+
 impl CredentialChain {
     /// The chain over this process's environment and files.
     #[must_use]
@@ -889,6 +906,30 @@ pub enum CredentialError {
         /// The limit.
         limit: u64,
     },
+}
+
+impl CredentialError {
+    /// Why a source that fetches credentials gave none, when that is why the chain failed: a
+    /// source's own failure, or the instance metadata service, the last source, failing with
+    /// nothing else configured. Everything else is about the configuration or the files (no
+    /// source named, a profile that cannot be used), which another try cannot change.
+    #[must_use]
+    pub fn fetch_failure(&self) -> Option<&SourceError> {
+        match self {
+            Self::Source(error) => Some(error),
+            Self::Missing(tried) => match tried.instance_metadata() {
+                MetadataLook::Failed(error) => Some(error),
+                MetadataLook::NotReached | MetadataLook::NoClient | MetadataLook::Disabled => None,
+            },
+            Self::ProfileNotFound(_)
+            | Self::PartialProfile { .. }
+            | Self::MalformedLine { .. }
+            | Self::NotBuilt { .. }
+            | Self::ProfileInvalid { .. }
+            | Self::ReadFailed { .. }
+            | Self::FileTooLarge { .. } => None,
+        }
+    }
 }
 
 /// Why a source that fetches credentials gave none. No variant holds a credential.

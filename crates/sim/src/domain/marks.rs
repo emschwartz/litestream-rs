@@ -85,6 +85,7 @@ const fn store_class_name(class: StoreClass) -> &'static str {
         StoreClass::ScratchExhausted => "ScratchExhausted",
         StoreClass::Corrupt => "Corrupt",
         StoreClass::Refused => "Refused",
+        StoreClass::ObjectTooLarge => "ObjectTooLarge",
         StoreClass::CreateOnlyUnsupported => "CreateOnlyUnsupported",
     }
 }

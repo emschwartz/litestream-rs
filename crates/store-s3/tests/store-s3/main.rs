@@ -8,6 +8,8 @@ mod bare_bucket;
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+mod deferred;
+#[cfg(test)]
 mod fake;
 #[cfg(test)]
 mod faults;
@@ -23,6 +25,8 @@ mod list_order;
 mod memory;
 #[cfg(test)]
 mod minio;
+#[cfg(test)]
+mod part_size;
 #[cfg(test)]
 mod provider;
 #[cfg(test)]
