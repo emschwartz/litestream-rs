@@ -383,7 +383,8 @@ pub enum MetaOp {
     Restore,
     /// Deletes the newest level-0 file.
     DeleteNewest,
-    /// Flips one byte in the middle of the newest level-0 file.
+    /// Flips one byte of the newest level-0 file: the middle one, or the first after it whose
+    /// flip changes what the file reads as (`World::flip_newest_staged`).
     FlipNewestByte,
     /// Cuts the newest level-0 file to half its length.
     TruncateNewest,

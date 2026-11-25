@@ -2224,12 +2224,7 @@ impl Runner {
                 done
             }
             MetaOp::DeleteNewest => w.delete_newest_staged().map_err(StagedEditError::from),
-            MetaOp::FlipNewestByte => w.edit_newest_staged(|bytes| {
-                let middle = bytes.len() / 2;
-                if let Some(byte) = bytes.get_mut(middle) {
-                    *byte ^= 0xff;
-                }
-            }),
+            MetaOp::FlipNewestByte => w.flip_newest_staged(),
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
             MetaOp::DeleteAll => {
                 self.takeover = None;

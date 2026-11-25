@@ -287,3 +287,44 @@ fn a_power_loss_keeps_the_acknowledgements() {
     w.crash(CrashKind::Power);
     assert_eq!(w.acked.highest(), Some(acked));
 }
+
+/// One page of zeros broken by two short stretches of other bytes: its LZ4 block copies the
+/// later zeros from earlier ones, and such a copy reads the same from many distances.
+fn file_of_runs() -> Vec<u8> {
+    let plain = crate::testkit::ltx(1, 1, 1, 0, None);
+    let runs = |page: &mut Vec<u8>| {
+        let eighth = page.len() / 8;
+        for (eighths, stretch) in [(5_usize, [1, 2, 3, 4]), (6, [5, 6, 7, 8])] {
+            let at = eighth.saturating_mul(eighths);
+            page.splice(at..at.saturating_add(4), stretch);
+        }
+    };
+    reencoded(&plain, |_| {}, runs).unwrap()
+}
+
+#[test]
+fn a_flipped_staged_byte_never_leaves_another_encoding_of_the_same_file() {
+    let original = file_of_runs();
+    let reads_as = |bytes: &[u8]| reencoded(bytes, |_| {}, |_| {});
+    let whole = reads_as(&original);
+    assert_eq!(whole.as_ref(), Some(&original));
+    let mut unseen = 0;
+    for at in 0..original.len() {
+        let mut one = original.clone();
+        one[at] ^= 0xff;
+        if reads_as(&one) == whole {
+            unseen += 1;
+        }
+        let mut flipped = original.clone();
+        flip_byte_from(&mut flipped, at);
+        assert_ne!(flipped, original, "from byte {at}");
+        assert!(
+            reads_as(&flipped) != whole,
+            "the flip from byte {at} left another encoding of the same file"
+        );
+    }
+    assert!(
+        unseen > 0,
+        "no byte of this file flips to another encoding of it"
+    );
+}
