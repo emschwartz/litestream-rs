@@ -239,10 +239,10 @@ fn written(
         match tick {
             Tick::Ran {
                 next: Next::Now, ..
-            } => *now += SLICE_MILLIS,
+            } => *now = now.saturating_add(SLICE_MILLIS),
             Tick::Ran {
                 next: Next::At(at), ..
-            } => *now = (*now + SLICE_MILLIS).max(at.unix_millis()),
+            } => *now = now.saturating_add(SLICE_MILLIS).max(at.unix_millis()),
             Tick::Ran {
                 next: Next::OnWalChange,
                 ..
