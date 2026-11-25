@@ -453,7 +453,13 @@ fn settings(
         verify_interval: config.validation_interval().and_then(positive),
         if_replication_stops: config.rust().if_replication_stops(),
         max_unreplicated_age: config.rust().max_unreplicated_age(),
+        write_behind: more_than_one_core(),
     })
+}
+
+/// Whether a thread beside the engine's has a core to run on: the binary writes behind then.
+fn more_than_one_core() -> bool {
+    std::thread::available_parallelism().is_ok_and(|cores| cores.get() > 1)
 }
 
 fn positive(value: GoDuration) -> Option<NonZeroDuration> {

@@ -1,0 +1,14 @@
+diff --git a/crates/store-fs/src/lib.rs b/crates/store-fs/src/lib.rs
+index a3015148e..5eb1362d2 100644
+--- a/crates/store-fs/src/lib.rs
++++ b/crates/store-fs/src/lib.rs
+@@ -802,7 +802,8 @@ impl<T: FsFile> Behind<T> {
+             && !self.pending.is_empty()
+         {
+             // A thread that stopped has said why in its result.
+-            let _sent = tx.send(std::mem::take(&mut self.pending));
++            drop(std::mem::take(&mut self.pending));
++            drop(tx);
+         }
+         match self.thread.take().map(JoinHandle::join) {
+             Some(Ok((file, result))) => (Some(file), result),

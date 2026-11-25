@@ -285,7 +285,11 @@ impl Worker {
             shared,
             sqlite: Some(sqlite),
             database: database.to_owned(),
-            staging: FsStore::new(meta),
+            staging: if config.write_behind {
+                FsStore::new(meta).with_write_behind()
+            } else {
+                FsStore::new(meta)
+            },
             remote,
             actor,
             next_poll: later(now, config.poll_interval.get()),

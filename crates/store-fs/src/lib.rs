@@ -75,6 +75,8 @@ use std::future::{Future, ready};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, sync_channel};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use journal::{Step, note};
@@ -201,6 +203,7 @@ pub struct FsStore<F: Fs = RealFs> {
     root: PathBuf,
     fs: F,
     scratch_counter: AtomicU64,
+    behind: bool,
 }
 
 impl FsStore {
@@ -219,7 +222,19 @@ impl<F: Fs> FsStore<F> {
             root: root.into(),
             fs,
             scratch_counter: AtomicU64::new(0),
+            behind: false,
         }
+    }
+
+    /// Has each upload write on a thread of its own, one block of [`BLOCK`] bytes behind the
+    /// caller, so the caller's reading and checking overlap the disk's writing. Off by default:
+    /// a library caller and the simulator get today's single thread. A write that fails
+    /// is reported by the next `write` or by `commit`, in block order (see
+    /// `docs/decisions/D244.md`).
+    #[must_use]
+    pub const fn with_write_behind(mut self) -> Self {
+        self.behind = true;
+        self
     }
 
     /// The filesystem under the store.
@@ -357,13 +372,18 @@ impl<F: Fs> FsStore<F> {
         create_dirs_durably(&self.fs, &dir, &mut |parent| sync_dir(&self.fs, parent))
             .map_err(fail)?;
         let (scratch, file) = self.open_scratch(&dir, key)?;
+        let sink = if self.behind {
+            Sink::Behind(Behind::start(file).map_err(fail)?)
+        } else {
+            Sink::Here(file)
+        };
         Ok(FsUpload {
             fs: self.fs.clone(),
             key: *key,
             dir,
             target: self.file_path(key),
             scratch,
-            file,
+            sink,
             mtime,
             created_at,
             mode,
@@ -618,7 +638,7 @@ pub struct FsUpload<F: Fs = RealFs> {
     dir: PathBuf,
     target: PathBuf,
     scratch: PathBuf,
-    file: F::File,
+    sink: Sink<F::File>,
     mtime: SystemTime,
     created_at: Timestamp,
     mode: WriteMode,
@@ -652,12 +672,16 @@ impl<F: Fs> FsUpload<F> {
         Ok(true)
     }
 
-    fn commit_now(self) -> Result<FileInfo, StoreError> {
+    fn commit_now(mut self) -> Result<FileInfo, StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Upload, None, &err);
+        // Behind a thread, every block is on disk or failed before the size is read.
+        let settled = self.sink.settle();
         let result = (|| {
-            self.file.set_modified(self.mtime)?;
-            sync_file(&self.file, &self.scratch)?;
-            let size = self.file.metadata()?.len();
+            settled?;
+            let file = self.sink.file()?;
+            file.set_modified(self.mtime)?;
+            sync_file(file, &self.scratch)?;
+            let size = file.metadata()?.len();
             if size != self.written {
                 return Ok(Err(Some(size)));
             }
@@ -705,7 +729,7 @@ impl<F: Fs> FsUpload<F> {
 
 impl<F: Fs> Upload for FsUpload<F> {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
-        ready(match self.file.write_all(chunk) {
+        ready(match self.sink.write(chunk) {
             Ok(()) => {
                 note(|| Step::Write(self.scratch.clone()));
                 self.written = self
@@ -722,11 +746,130 @@ impl<F: Fs> Upload for FsUpload<F> {
     }
 
     fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send {
-        ready(match self.fs.remove_file(&self.scratch) {
+        let FsUpload {
+            fs, scratch, sink, ..
+        } = self;
+        // The thread is done with the scratch file before it is removed.
+        drop(sink);
+        ready(match fs.remove_file(&scratch) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(StoreError::from_io(StoreOp::Upload, None, &err)),
         })
+    }
+}
+
+/// How much a write-behind upload gathers before it hands a block to its thread: the upload
+/// holds at most one block being written and one being filled.
+pub const BLOCK: usize = 1 << 20;
+
+/// Where an upload's bytes go: the caller's thread, or a thread that writes one block behind.
+#[derive(Debug)]
+enum Sink<T: FsFile> {
+    Here(T),
+    Behind(Behind<T>),
+}
+
+impl<T: FsFile> Sink<T> {
+    fn write(&mut self, chunk: &[u8]) -> io::Result<()> {
+        match self {
+            Self::Here(file) => file.write_all(chunk),
+            Self::Behind(behind) => behind.write(chunk),
+        }
+    }
+
+    /// Has every byte given so far written or failed, and the file back in hand.
+    fn settle(&mut self) -> io::Result<()> {
+        if let Self::Behind(behind) = self {
+            let (file, result) = behind.finish();
+            if let Some(file) = file {
+                *self = Self::Here(file);
+            }
+            return result;
+        }
+        Ok(())
+    }
+
+    /// The file, once [`Self::settle`] returned it.
+    fn file(&self) -> io::Result<&T> {
+        match self {
+            Self::Here(file) => Ok(file),
+            Self::Behind(_) => Err(io::Error::other("the upload's thread kept the file")),
+        }
+    }
+}
+
+/// A thread that appends the blocks it is sent, in order, and stops at the first failure.
+#[derive(Debug)]
+struct Behind<T: FsFile> {
+    pending: Vec<u8>,
+    tx: Option<SyncSender<Vec<u8>>>,
+    thread: Option<JoinHandle<(T, io::Result<()>)>>,
+}
+
+impl<T: FsFile> Behind<T> {
+    fn start(mut file: T) -> io::Result<Self> {
+        // No buffer in the channel: a block is taken only when the last one is written.
+        let (tx, rx) = sync_channel::<Vec<u8>>(0);
+        let thread = std::thread::Builder::new()
+            .name("lsr-write-behind".into())
+            .spawn(move || {
+                let mut result = Ok(());
+                for block in rx.iter() {
+                    if let Err(err) = file.write_all(&block) {
+                        result = Err(err);
+                        break;
+                    }
+                }
+                (file, result)
+            })?;
+        Ok(Self {
+            pending: Vec::with_capacity(BLOCK),
+            tx: Some(tx),
+            thread: Some(thread),
+        })
+    }
+
+    fn write(&mut self, chunk: &[u8]) -> io::Result<()> {
+        self.pending.extend_from_slice(chunk);
+        if self.pending.len() < BLOCK {
+            return Ok(());
+        }
+        let block = std::mem::replace(&mut self.pending, Vec::with_capacity(BLOCK));
+        let sent = self.tx.as_ref().is_some_and(|tx| tx.send(block).is_ok());
+        if sent {
+            return Ok(());
+        }
+        // The thread stopped: a write failed. Its error is the answer.
+        let (_file, result) = self.finish();
+        result.and(Err(io::Error::other("the write-behind thread ended")))
+    }
+
+    /// Sends what is gathered, waits for the thread and returns its file and its first error.
+    fn finish(&mut self) -> (Option<T>, io::Result<()>) {
+        if let Some(tx) = self.tx.take()
+            && !self.pending.is_empty()
+        {
+            // A thread that stopped has said why in its result.
+            let _sent = tx.send(std::mem::take(&mut self.pending));
+        }
+        match self.thread.take().map(JoinHandle::join) {
+            Some(Ok((file, result))) => (Some(file), result),
+            Some(Err(_)) => (
+                None,
+                Err(io::Error::other("the write-behind thread panicked")),
+            ),
+            None => (
+                None,
+                Err(io::Error::other("the write-behind thread is gone")),
+            ),
+        }
+    }
+}
+
+impl<T: FsFile> Drop for Behind<T> {
+    fn drop(&mut self) {
+        let _finished = self.finish();
     }
 }
 
