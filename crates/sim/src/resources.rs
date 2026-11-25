@@ -20,7 +20,7 @@ use crate::store::RecorderCounts;
 const HELD_HEADER: u64 = 100;
 
 /// Slices that may run after the application commits before a tick ends in anything else:
-/// with a file in flight the WAL step and the slices take turns (`docs/decisions/D205.md`).
+/// with a file in flight the WAL step and the slices take turns (`docs/decisions/D217.md`).
 pub const SLICES_AHEAD: u64 = 1;
 
 /// The largest piece the engine hands a store at once: its flush threshold
@@ -306,6 +306,7 @@ impl SendTurns {
             }
             Some(
                 Event::Booted { .. }
+                | Event::CheckingIdentity { .. }
                 | Event::Synced { .. }
                 | Event::Checkpointed { .. }
                 | Event::Uploaded(_)

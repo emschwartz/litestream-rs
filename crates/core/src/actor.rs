@@ -258,7 +258,7 @@ pub enum Event {
     /// Uploads ran; this is what the last one did.
     Uploaded(Did),
     /// A slice of a staged file went to the replica and more of the file is left: the tick
-    /// handed the replica as much as one tick may (`docs/decisions/D205.md`), and the next
+    /// handed the replica as much as one tick may (`docs/decisions/D217.md`), and the next
     /// upload step reads on. Nothing is published until the file is whole.
     Sending {
         /// How many bytes of the file were handed to the replica so far.

@@ -911,7 +911,9 @@ impl Runner {
         per_tick(&stats, self.limits())?;
         let reach = &mut self.report.reach;
         self.turns.tick(stats.event.as_ref(), began, reach)?;
-        if in_tick.is_some() {
+        // A commit that landed inside the tick waits for the WAL step unless the tick staged a
+        // file after it (a checkpoint's seal stages the commit that lands before its barrier).
+        if in_tick.is_some_and(|(_, from)| self.w.staging_recorder.len() <= from) {
             self.turns.committed();
         }
         let step = self.after_refusal(step)?;

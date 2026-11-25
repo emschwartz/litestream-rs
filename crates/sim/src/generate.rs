@@ -554,7 +554,7 @@ pub struct Weights {
     pub http_fault: u32,
     /// The bytes of staged files the engine sends in one tick, when not its own 8 MiB (which
     /// no file here reaches): a level-0 file larger than this goes up a slice a tick, and
-    /// whatever the history does next lands between two slices (`docs/decisions/D205.md`).
+    /// whatever the history does next lands between two slices (`docs/decisions/D217.md`).
     /// Not an operation, for the same reason as `block_crash_law`; drawn last in the swarm
     /// mix.
     pub slice_bytes: Option<std::num::NonZeroU64>,

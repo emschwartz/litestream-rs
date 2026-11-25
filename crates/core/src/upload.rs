@@ -69,7 +69,7 @@
 //!
 //! **A slice per step.** A step hands the replica at most its budget of file bytes
 //! ([`SLICE`] a tick), so a file as long as the database does not hold the engine for its
-//! length (`docs/decisions/D205.md`). What is left of a file is a [`Sending`]: the decoder
+//! length (`docs/decisions/D217.md`). What is left of a file is a [`Sending`]: the decoder
 //! part-way through it, the bytes tallied so far and the upload begun for it, kept by the
 //! caller between steps in an [`InFlight`]. The next step reads on from where the last
 //! stopped, so every byte sent is still verified on the read that produced it, and the
@@ -99,7 +99,7 @@ const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
 
 /// The most bytes of staged files one tick hands the replica unless the configuration says
 /// otherwise: 8 MiB, 32 reads of [`CHUNK`]. A tick with a slice makes at most that many
-/// reads and writes, each within its store's own deadline (`docs/decisions/D205.md`).
+/// reads and writes, each within its store's own deadline (`docs/decisions/D217.md`).
 const SLICE: NonZeroU64 = NonZeroU64::MIN.saturating_add(8 * 1024 * 1024 - 1);
 
 /// What this engine knows about the replica's newest transaction.
@@ -170,7 +170,7 @@ pub struct UploadConfig {
     pub files_per_tick: Option<NonZeroU32>,
     /// Bytes of staged files one tick reads and hands the replica before yielding: 8 MiB
     /// unless a test or the simulator says otherwise. A file they run out in stays in flight,
-    /// and the next upload step sends on from there (`docs/decisions/D205.md`).
+    /// and the next upload step sends on from there (`docs/decisions/D217.md`).
     pub bytes_per_tick: NonZeroU64,
 }
 
