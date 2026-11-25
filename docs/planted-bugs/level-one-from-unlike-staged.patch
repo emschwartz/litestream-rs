@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -1107,7 +1107,7 @@
-     replica: &R,
+@@ -1125,7 +1125,7 @@
      sent: &Sent,
+     mode: WriteMode,
  ) -> Result<Compacted, CompactError> {
 -    if !local_is_replica(local, replica, inputs, sent).await? {
 +    if false && !local_is_replica(local, replica, inputs, sent).await? {
-         return compact_in(replica, replica, inputs, level).await;
+         return compact_in(replica, replica, inputs, level, mode).await;
      }
      // The source is staging here, so a failed read is staging's error

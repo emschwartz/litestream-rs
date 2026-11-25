@@ -2092,7 +2092,8 @@ impl Actor {
         }
     }
 
-    /// How level-0 uploads write: create-only until the store said it cannot (D79).
+    /// How level-0 uploads and compaction outputs write: create-only until the store said it
+    /// cannot (D79).
     const fn guard(&self) -> Guard {
         match self.kept.unguarded {
             Some(_) => Guard::Unguarded,
@@ -2427,12 +2428,20 @@ impl Actor {
     ) -> Tick {
         // One call site for every merge, so the tick's future holds one compaction.
         let outcome = if let Some((inputs, level)) = job.merge() {
-            run_compaction(inputs, level, env.staging, env.remote, &self.engine.sent).await
+            let (sent, guard) = (&self.engine.sent, self.guard());
+            run_compaction(inputs, level, env.staging, env.remote, sent, guard).await
         } else if let Job::Delete(delete) = job {
             run_delete(delete, env.remote).await
         } else {
             return self.snapshot_job(env, job, now, created_at_read).await;
         };
+        if let Outcome::Failed(err) = &outcome
+            && Fault::from_maintain(err) == Fault::CreateOnlyUnsupported
+        {
+            // Nothing was published. The fault degrades the task (or stops), and from here
+            // on outputs and level-0 uploads replace, as after a refused upload (D79).
+            self.kept.unguarded = self.kept.unguarded.or(Some(now));
+        }
         if let Job::Snapshot(_) = job {
             return self.snapshot_merged(job, outcome, now, created_at_read);
         }

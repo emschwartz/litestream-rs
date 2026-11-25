@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1073,8 +1073,7 @@
+ ) -> Outcome {
+     let output = FileKey::new(level, inputs.range());
+     match guard {
+-        Guard::BucketRefuses => {}
+-        Guard::Unguarded => match crate::store::exists(replica, &output).await {
++        Guard::BucketRefuses | Guard::Unguarded => match crate::store::exists(replica, &output).await {
+             Ok(true) => return Outcome::Replan { key: output },
+             Ok(false) => {}
+             Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),

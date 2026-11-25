@@ -110,7 +110,18 @@ pub(super) async fn run_compact<L: Role, R: Role>(
     local: &L,
     replica: &R,
 ) -> Outcome {
-    run_compaction(job.inputs(), job.level(), local, replica, &Sent::default()).await
+    run_compact_as(job, local, replica, Guard::BucketRefuses).await
+}
+
+/// [`run_compact`] writing its output as `guard` says.
+async fn run_compact_as<L: Role, R: Role>(
+    job: &CompactJob,
+    local: &L,
+    replica: &R,
+    guard: Guard,
+) -> Outcome {
+    let sent = Sent::default();
+    run_compaction(job.inputs(), job.level(), local, replica, &sent, guard).await
 }
 
 /// `due` for a replica whose first snapshot is backing off, so the levels are planned as they
@@ -1919,6 +1930,7 @@ fn a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replic
         &Staging(&local),
         &Replica(&replica),
         &sent,
+        Guard::BucketRefuses,
     ));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_eq!(whole(&replica, &job.output_key()), level_one_of_three());
@@ -1941,6 +1953,7 @@ fn a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replic
         &Staging(&local),
         &Replica(&fresh),
         &sent_of(&local, &[1, 2]),
+        Guard::BucketRefuses,
     ));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_ne!(whole(&fresh, &job.output_key()), level_one_of_three());
@@ -1969,6 +1982,7 @@ fn a_staged_copy_that_changed_since_it_was_sent_is_not_compacted_from() {
         &Staging(&local),
         &Replica(&replica),
         &sent,
+        Guard::BucketRefuses,
     ));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_eq!(whole(&replica, &job.output_key()), level_one_of_three());
@@ -2001,6 +2015,7 @@ fn a_replica_object_of_another_size_than_was_sent_is_read_from_the_replica() {
         &Staging(&local),
         &Replica(&replica),
         &sent,
+        Guard::BucketRefuses,
     ));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_ne!(whole(&replica, &job.output_key()), level_one_of_three());
@@ -2081,21 +2096,83 @@ fn a_local_source_read_error_is_failed_and_publishes_nothing() {
 
 #[test]
 fn running_a_job_twice_leaves_one_file_at_the_key() {
+    // Create-only, the bucket refuses the second write; on a store that cannot, a read of
+    // the key finds the output first.
+    for guard in [Guard::BucketRefuses, Guard::Unguarded] {
+        let (local, replica) = (MemStore::new(), MemStore::new());
+        three_l0(&local, &replica);
+        let job = l1_job(&replica);
+        let (from, to) = (Staging(&local), Replica(&replica));
+        let out = block_on(run_compact_as(&job, &from, &to, guard));
+        assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+        let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+        // The second run finds the output there and writes nothing over it.
+        let again = block_on(run_compact_as(&job, &from, &to, guard));
+        assert!(
+            matches!(again, Outcome::Replan { key } if key == job.output_key()),
+            "{guard:?}: {again:?}"
+        );
+        assert_eq!(listed(&replica, 1), vec![job.output_key()]);
+        let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+        assert_eq!(first, after);
+    }
+}
+
+/// An output key that holds something other than this run would write is left as it is:
+/// the bucket refuses the create-only commit, and the job is planned again from a listing
+/// that shows what is there.
+#[test]
+fn an_output_key_that_holds_another_file_is_not_written_over() {
+    for guard in [Guard::BucketRefuses, Guard::Unguarded] {
+        let (local, replica) = (MemStore::new(), MemStore::new());
+        three_l0(&local, &replica);
+        let job = l1_job(&replica);
+        let other = b"another hand's output".to_vec();
+        block_on(async {
+            let mut up = replica
+                .begin_upload(&job.output_key(), at(T0), WriteMode::Replace)
+                .await
+                .unwrap();
+            up.write(&other).await.unwrap();
+            up.commit().await.unwrap();
+        });
+        let out = block_on(run_compact_as(
+            &job,
+            &Staging(&local),
+            &Replica(&replica),
+            guard,
+        ));
+        assert!(
+            matches!(out, Outcome::Replan { key } if key == job.output_key()),
+            "{guard:?}: {out:?}"
+        );
+        assert_eq!(whole(&replica, &job.output_key()), other, "{guard:?}");
+    }
+}
+
+/// A store that cannot make create-only writes fails the output's commit and publishes
+/// nothing; told so, the compaction reads the key and replaces.
+#[test]
+fn a_store_without_create_only_writes_takes_no_create_only_output() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
-    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
-    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
-    let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    // The second run finds the output there and writes nothing over it.
-    let again = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+    replica.refuse_create_only();
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let out = block_on(run_compact_as(&job, &from, &to, Guard::BucketRefuses));
     assert!(
-        matches!(again, Outcome::Replan { key } if key == job.output_key()),
-        "{again:?}"
+        matches!(
+            &out,
+            Outcome::Failed(MaintainError::Compact(CompactError::Dest(
+                StoreError::CreateOnlyUnsupported { .. }
+            )))
+        ),
+        "{out:?}"
     );
+    assert!(listed(&replica, 1).is_empty());
+    let out = block_on(run_compact_as(&job, &from, &to, Guard::Unguarded));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_eq!(listed(&replica, 1), vec![job.output_key()]);
-    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    assert_eq!(first, after);
 }
 
 /// A compaction whose output key already holds an object (an earlier run's
@@ -2104,21 +2181,54 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
 /// write created.
 #[test]
 fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
+    for guard in [Guard::BucketRefuses, Guard::Unguarded] {
+        let (local, replica, _, job) = rejected_setup();
+        let (from, to) = (Staging(&local), Replica(&replica));
+        let first = block_on(run_compact_as(&job, &from, &to, guard));
+        assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
+        let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+        replica.inject_failure_after_publish(StoreError::Corrupt {
+            key: None,
+            cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+        });
+        let again = block_on(run_compact_as(&job, &from, &to, guard));
+        assert!(
+            matches!(again, Outcome::Replan { key } if key == job.output_key()),
+            "{guard:?}: {again:?}"
+        );
+        let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+        assert_eq!(after, held, "the output that was there is untouched");
+    }
+}
+
+/// A create-only output asked nobody whether its key was free. A part the store rejects
+/// ends the upload before its commit asks the bucket for the key, so what the key holds
+/// then is an earlier output, and the failed attempt deletes nothing.
+#[test]
+fn a_rejected_part_of_a_create_only_output_deletes_nothing_under_its_key() {
     let (local, replica, _, job) = rejected_setup();
-    let first = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let first = block_on(run_compact_as(&job, &from, &to, Guard::BucketRefuses));
     assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
-    let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    replica.inject_failure_after_publish(StoreError::Corrupt {
-        key: None,
-        cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
-    });
-    let again = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+    let held = whole(&replica, &job.output_key());
+    replica.inject_failure(
+        StoreOp::Upload,
+        StoreError::Corrupt {
+            key: None,
+            cause: crate::store::CorruptCause::ChecksumMismatch {
+                part: crate::store::PartNumber::new(1),
+            },
+        },
+    );
+    let again = block_on(run_compact_as(&job, &from, &to, Guard::BucketRefuses));
     assert!(
-        matches!(again, Outcome::Replan { key } if key == job.output_key()),
+        matches!(
+            again,
+            Outcome::Failed(MaintainError::Compact(CompactError::Dest(_)))
+        ),
         "{again:?}"
     );
-    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    assert_eq!(after, held, "the output that was there is untouched");
+    assert_eq!(whole(&replica, &job.output_key()), held);
 }
 
 #[test]
@@ -2344,21 +2454,36 @@ fn rejected_setup() -> (MemStore, MemStore, MaintainState, CompactJob) {
 
 #[test]
 fn a_rejected_compaction_output_is_deleted_by_the_executor() {
-    for mismatch in [
-        corrupt_output_error(false),
-        StoreError::Corrupt {
-            key: None,
-            cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+    let whole_object = StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+    };
+    // A replacing write read its key as free first, so a rejected part's leavings are its own.
+    let a_part = StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::ChecksumMismatch {
+            part: crate::store::PartNumber::new(1),
         },
+    };
+    for (mismatch, guard) in [
+        (corrupt_output_error(false), Guard::BucketRefuses),
+        (whole_object.clone(), Guard::BucketRefuses),
+        (whole_object, Guard::Unguarded),
+        (a_part, Guard::Unguarded),
     ] {
         let (local, replica, _, job) = rejected_setup();
         replica.inject_failure_after_publish(mismatch);
-        let ran = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+        let ran = block_on(run_compact_as(
+            &job,
+            &Staging(&local),
+            &Replica(&replica),
+            guard,
+        ));
         assert!(
             matches!(ran, Outcome::Failed(MaintainError::Compact(_))),
-            "{ran:?}"
+            "{guard:?}: {ran:?}"
         );
-        assert!(load(&replica).level(level(1)).is_empty());
+        assert!(load(&replica).level(level(1)).is_empty(), "{guard:?}");
     }
 }
 

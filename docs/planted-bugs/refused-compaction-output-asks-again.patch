@@ -1,0 +1,11 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2440,7 +2440,6 @@
+         {
+             // Nothing was published. The fault degrades the task (or stops), and from here
+             // on outputs and level-0 uploads replace, as after a refused upload (D79).
+-            self.kept.unguarded = self.kept.unguarded.or(Some(now));
+         }
+         if let Job::Snapshot(_) = job {
+             return self.snapshot_merged(job, outcome, now, created_at_read);

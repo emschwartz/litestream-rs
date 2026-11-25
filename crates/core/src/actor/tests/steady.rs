@@ -341,3 +341,14 @@ fn after_a_restart_retention_reads_the_created_at_times_it_does_not_know() {
     let again = second.get(&(Request::Head, 0)).copied().unwrap_or(0);
     assert!(again <= 2, "{second:?}");
 }
+/// A compaction asks the replica nothing about its output key before it writes: the write
+/// is create-only, and the bucket's refusal is the answer the read gave. Go asks nothing
+/// either, and writes over whatever the key holds.
+#[test]
+fn a_compaction_asks_nothing_about_its_output_key() {
+    // Two minutes with four level-1 compactions and none into level 2.
+    let bill = two_steady_minutes(paced());
+    assert!(bill.contains_key(&(Request::Put, 1)), "{bill:?}");
+    assert_eq!(bill.get(&(Request::Put, 2)), None, "{bill:?}");
+    assert_eq!(count(&bill, Request::Get), 0, "{bill:?}");
+}

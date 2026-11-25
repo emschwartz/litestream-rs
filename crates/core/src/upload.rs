@@ -143,9 +143,10 @@ pub enum UploadPlan {
     Upload(FileKey),
 }
 
-/// Whether a level-0 upload asks the bucket to refuse a key that is taken (D79). A store that
-/// cannot make that check fails the write with `CreateOnlyUnsupported`; the actor then raises
-/// the cause and uploads [`Guard::Unguarded`] for the rest of the process.
+/// Whether a level-0 upload, or a compaction's output, asks the bucket to refuse a key that is
+/// taken (D79, `docs/decisions/D239.md`). A store that cannot make that check fails the write
+/// with `CreateOnlyUnsupported`; the actor then raises the cause and writes
+/// [`Guard::Unguarded`] for the rest of the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(crate) enum Guard {
     /// A create-only write: the bucket refuses a taken key ([`WriteMode::New`]).
@@ -157,8 +158,8 @@ pub(crate) enum Guard {
 }
 
 impl Guard {
-    /// The write mode a level-0 upload takes.
-    const fn mode(self) -> WriteMode {
+    /// The write mode a level-0 upload or a compaction's output takes.
+    pub(crate) const fn mode(self) -> WriteMode {
         match self {
             Self::BucketRefuses => WriteMode::New,
             Self::Unguarded => WriteMode::Replace,

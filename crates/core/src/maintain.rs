@@ -106,7 +106,8 @@ use crate::fault::role::Role;
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
-use crate::store::{CorruptCause, ObjectStore, ReadLen, StoreError};
+use crate::store::{CorruptCause, ObjectStore, ReadLen, StoreError, WriteMode};
+use crate::upload::Guard;
 use crate::witness::Sent;
 use retain::{Retention, retention};
 
@@ -1049,33 +1050,45 @@ pub enum Outcome {
 /// reads the replica. The output always goes to the replica. Inputs are never
 /// deleted.
 ///
+/// An output key that already holds an object (an earlier run's output a listing did not
+/// show, Go's output for the same range) is never written over, and the job is planned
+/// again from a fresh listing. The bucket says so: the output is a create-only write
+/// ([`Guard::BucketRefuses`]), so a taken key refuses the commit and costs no request to
+/// find out (`docs/decisions/D239.md`). Go writes over whatever the key holds. On a store
+/// that said it cannot make create-only writes ([`Guard::Unguarded`]) the key is read first
+/// and the output replaces.
+///
 /// When the store rejected the output's commit, the output key is deleted
 /// before returning: a listing would otherwise show it as coverage. That
 /// delete may only take the object this attempt wrote, never one the key held
 /// before (an earlier run's output that retention may already count as
-/// cover): an output key a read finds taken before the write is not written
-/// over, and the job is planned again from a fresh listing.
+/// cover), see [`leaves_bad_output`].
 pub(crate) async fn run_compaction<L: Role, R: Role>(
     inputs: &CompactionInputs,
     level: Level,
     local: &L,
     replica: &R,
     sent: &Sent,
+    guard: Guard,
 ) -> Outcome {
     let output = FileKey::new(level, inputs.range());
-    match crate::store::exists(replica, &output).await {
-        Ok(true) => return Outcome::Replan { key: output },
-        Ok(false) => {}
-        Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
+    match guard {
+        Guard::BucketRefuses => {}
+        Guard::Unguarded => match crate::store::exists(replica, &output).await {
+            Ok(true) => return Outcome::Replan { key: output },
+            Ok(false) => {}
+            Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
+        },
     }
+    let mode = guard.mode();
     let result = if inputs
         .files()
         .iter()
         .all(|info| info.key.level() == Level::ZERO)
     {
-        compact_from_level_zero(inputs, level, local, replica, sent).await
+        compact_from_level_zero(inputs, level, local, replica, sent, mode).await
     } else {
-        compact_in(replica, replica, inputs, level).await
+        compact_in(replica, replica, inputs, level, mode).await
     };
     match result {
         Ok(done) => Outcome::Compacted {
@@ -1083,7 +1096,11 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
             bytes_read: done.bytes_read(),
         },
         Err(CompactError::InputVanished { key }) => Outcome::Replan { key },
-        Err(CompactError::Dest(err)) if leaves_bad_output(&err) => {
+        // The key is taken, and what it holds stands: the answer a read of the key gives.
+        Err(CompactError::Dest(StoreError::AlreadyExists { .. })) => {
+            Outcome::Replan { key: output }
+        }
+        Err(CompactError::Dest(err)) if leaves_bad_output(&err, mode) => {
             remove_rejected(replica, output, err).await
         }
         Err(
@@ -1106,15 +1123,16 @@ async fn compact_from_level_zero<L: Role, R: Role>(
     local: &L,
     replica: &R,
     sent: &Sent,
+    mode: WriteMode,
 ) -> Result<Compacted, CompactError> {
     if !local_is_replica(local, replica, inputs, sent).await? {
-        return compact_in(replica, replica, inputs, level).await;
+        return compact_in(replica, replica, inputs, level, mode).await;
     }
     // The source is staging here, so a failed read is staging's error
     // (`CompactError::Local`), by its role.
-    match compact_in(local, replica, inputs, level).await {
+    match compact_in(local, replica, inputs, level, mode).await {
         Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
-            compact_in(replica, replica, inputs, level).await
+            compact_in(replica, replica, inputs, level, mode).await
         }
         other => other,
     }
@@ -1181,13 +1199,23 @@ async fn local_is_replica<L: Role, R: Role>(
     Ok(true)
 }
 
-/// Whether a failed destination commit may have left an object under the output
-/// key that a listing would show and that does not decode.
-const fn leaves_bad_output(err: &StoreError) -> bool {
+/// Whether a failed destination commit, of an output written under `mode`, may have left
+/// an object of this attempt under the output key that a listing would show and that does
+/// not decode.
+///
+/// A replacing write began after a read found the key free, so whatever a rejected commit
+/// left there is taken for this attempt's. A create-only write asked nobody first: only a
+/// commit the bucket let into the key can have left something, and a part the store
+/// rejected ended the upload before its commit asked for the key, so what the key holds
+/// then is an earlier object, never this attempt's to delete.
+const fn leaves_bad_output(err: &StoreError, mode: WriteMode) -> bool {
     match err {
         StoreError::Corrupt { cause, .. } => match cause {
             CorruptCause::CommitSizeMismatch { removed, .. } => !*removed,
-            CorruptCause::ChecksumMismatch { .. } => true,
+            CorruptCause::ChecksumMismatch { part } => match mode {
+                WriteMode::Replace => true,
+                WriteMode::New => part.is_none(),
+            },
             CorruptCause::NotARegularFile
             | CorruptCause::TimestampOutOfRange
             | CorruptCause::BadCreatedAt => false,

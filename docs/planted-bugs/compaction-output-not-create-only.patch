@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1080,7 +1080,7 @@
+             Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
+         },
+     }
+-    let mode = guard.mode();
++    let mode = WriteMode::Replace;
+     let result = if inputs
+         .files()
+         .iter()
