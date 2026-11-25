@@ -97,6 +97,19 @@ impl HttpRequest {
         }
     }
 
+    /// A request as a test server read it off a socket, to hand to [`FakeS3`](crate::FakeS3)
+    /// behind a real HTTP listener.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn from_wire(
+        method: Method,
+        url: Url,
+        headers: Vec<(&'static str, String)>,
+        body: Vec<u8>,
+    ) -> Self {
+        Self::new(method, url, headers, body)
+    }
+
     /// A request to `url` with these headers and no body, for transport tests.
     #[cfg(test)]
     pub(crate) fn for_test(method: Method, url: Url, headers: Vec<(&'static str, String)>) -> Self {

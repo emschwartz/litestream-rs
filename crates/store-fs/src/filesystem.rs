@@ -252,7 +252,11 @@ impl FsFile for File {
 
     fn read_at(&mut self, offset: u64, len: u64) -> io::Result<Vec<u8>> {
         self.seek(SeekFrom::Start(offset))?;
-        let mut bytes = Vec::new();
+        // Sized to what the file still holds, so a read holds its length and not the
+        // doubled capacity `read_to_end` grows to from empty: a compaction keeps one
+        // such read per input.
+        let left = File::metadata(self)?.len().saturating_sub(offset);
+        let mut bytes = Vec::with_capacity(usize::try_from(left.min(len)).unwrap_or(0));
         Read::by_ref(self).take(len).read_to_end(&mut bytes)?;
         Ok(bytes)
     }

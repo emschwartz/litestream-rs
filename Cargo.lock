@@ -1091,6 +1091,7 @@ dependencies = [
  "jiff",
  "lsr-core",
  "lsr-ltx",
+ "lsr-store-fs",
  "lsr-store-s3",
  "lsr-wal",
  "md-5",

@@ -72,6 +72,9 @@ pub use checkpoint::{
     CheckpointConfig, CheckpointFailed, CheckpointOutcome, CheckpointState, CheckpointTrigger,
     Checkpointed, Decision, Observed, Staged, checkpoint, decide,
 };
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub use compact::compact_staged;
 pub use compact::{
     CompactError, Compacted, CompactionInputs, InputFault, InputsError, MAX_INPUTS, compact,
 };

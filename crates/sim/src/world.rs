@@ -903,6 +903,18 @@ impl World {
             .max()
     }
 
+    /// How many files the replica holds at every level, read around the wrappers: what a restore
+    /// of its whole state could read.
+    #[must_use]
+    pub fn remote_file_count(&self) -> u64 {
+        use lsr_core::{Level, ObjectStore, PageLimit};
+        Level::ALL
+            .into_iter()
+            .filter_map(|level| block_on(self.remote_raw.list(level, None, PageLimit::MAX)).ok())
+            .map(|listing| u64::try_from(listing.files.len()).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add)
+    }
+
     /// Whether a file on the replica, at any level, ends at `txid`: a
     /// restore to `txid` has a file to end on.
     #[must_use]

@@ -12,7 +12,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::conformance::block_on;
-use crate::fault::role::Replica;
+use crate::fault::role::{Replica, Role, STAGING_WINDOW, Staging};
 use crate::layout::CreatedAt;
 use crate::layout::ListedTime;
 use crate::mem::{MemStore, MemUpload};
@@ -1229,6 +1229,62 @@ fn the_first_unrewritten_page_skips_the_lock_page_and_stops_at_the_bound() {
 #[test]
 fn the_chunk_is_one_mebibyte() {
     assert_eq!(CHUNK_BYTES, 1 << 20);
+    assert_eq!(
+        <Replica<'_, MemStore> as Role>::COMPACT_WINDOW,
+        ReadLen::CHUNK
+    );
+}
+
+/// A level-1 compaction reads the staged files in the staging window, so its inputs hold
+/// a few hundred KiB where the replica's window would hold tens of MiB. The same files
+/// read as a replica's are the control: they do hold a window each.
+#[test]
+fn staged_inputs_are_read_in_the_staging_window() {
+    let ps = size(512);
+    let source = MemStore::new();
+    let infos: Vec<FileInfo> = (1..=32_u64)
+        .map(|n| {
+            let mut spec = Spec::plain(512, 2000, n, n, &[]);
+            spec.pages = (1..=2000_u32)
+                .map(|p| (p, noisy(ps, n * 10_000 + u64::from(p))))
+                .collect();
+            put(&source, 0, &spec)
+        })
+        .collect();
+    let page = ps.bytes();
+    let window = usize::try_from(STAGING_WINDOW.get()).unwrap();
+    assert_eq!(window, 128 * 1024);
+
+    let staged_dest = MemStore::new();
+    let done = block_on(compact_in(
+        &Staging(&source),
+        &staged_dest,
+        &inputs(&infos),
+        level(1),
+    ))
+    .unwrap();
+    let flush = usize::try_from(CHUNK_BYTES).unwrap();
+    let bound = MAX_INPUTS * (window + page) + flush + 2 * page;
+    assert!(done.peak_buffered() <= bound, "{}", done.peak_buffered());
+    assert!(
+        done.peak_buffered() >= MAX_INPUTS * window / 2,
+        "every input holds a window at once: {}",
+        done.peak_buffered()
+    );
+    assert_eq!(done.pages(), 2000);
+
+    let dest = MemStore::new();
+    let control = compact_infos(&source, &dest, &infos, 1).unwrap();
+    assert!(
+        control.peak_buffered() > 4 * bound,
+        "{}",
+        control.peak_buffered()
+    );
+    // The window changes what is held, never what is written.
+    assert_eq!(
+        read_all(&staged_dest, &done.info().key),
+        read_all(&dest, &control.info().key)
+    );
 }
 
 /// Output is handed to the upload when the buffer reaches the flush size, not

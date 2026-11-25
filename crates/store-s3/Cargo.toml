@@ -79,6 +79,8 @@ proptest = { workspace = true, features = ["default"] }
 tempfile.workspace = true
 # The recover count names the WAL reader type its None argument needs.
 lsr-wal.workspace = true
+# The memory gate for compaction reads its inputs from a directory, as the engine does.
+lsr-store-fs.workspace = true
 
 # Schedule exploration: `send_on_threads` runs on shuttle's scheduler under `--cfg shuttle`
 # (`just shuttle`). A normal dependency, since the library code names it, but only for that cfg,

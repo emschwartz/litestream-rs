@@ -31,7 +31,17 @@ pub(crate) trait Role: ObjectStore {
 
     /// Compaction's error for a failed read of an input from this store.
     fn compact_input(err: StoreError) -> CompactError;
+
+    /// Bytes a compaction asks of this store per read of an input. A merge holds one
+    /// such read for every input at once, so this times the fan-in is its memory. The
+    /// staging directory answers a read from the page cache for the price of a system
+    /// call, so a small window costs it nothing; a replica answers each read with a
+    /// request, so its window stays large.
+    const COMPACT_WINDOW: ReadLen;
 }
+
+/// What a compaction reads of each staged file at a time: twice the largest page.
+pub(crate) const STAGING_WINDOW: ReadLen = ReadLen::or_chunk(128 * 1024);
 
 /// The staging directory.
 #[derive(Debug)]
@@ -65,6 +75,8 @@ impl<S: ObjectStore> Role for Staging<'_, S> {
     fn compact_input(err: StoreError) -> CompactError {
         CompactError::Local(err)
     }
+
+    const COMPACT_WINDOW: ReadLen = STAGING_WINDOW;
 }
 
 impl<S: ObjectStore> Role for Replica<'_, S> {
@@ -75,6 +87,8 @@ impl<S: ObjectStore> Role for Replica<'_, S> {
     fn compact_input(err: StoreError) -> CompactError {
         CompactError::Source(err)
     }
+
+    const COMPACT_WINDOW: ReadLen = ReadLen::CHUNK;
 }
 
 /// Passes every call of a store through to the wrapped one.

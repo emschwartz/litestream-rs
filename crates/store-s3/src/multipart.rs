@@ -142,7 +142,7 @@ impl<T: Transport> Inner<T> {
                 let sent = request.md5();
                 Ok((request.into_request(), (number, sent)))
             },
-            |(number, sent), response| judge_part(key, number, sent, response),
+            |(number, sent), response| judge_part(key, number, sent, &response),
         )
         .into_iter()
         .collect()
