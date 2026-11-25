@@ -1273,6 +1273,10 @@ fn the_replica_window_is_the_budget_shared_out() {
 /// a few hundred KiB where the replica's window would hold tens of MiB. The same files
 /// read as a replica's are the control: they do hold a window each.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "compacts 128000 pages twice; native runs measure the bound"
+)]
 fn staged_inputs_are_read_in_the_staging_window() {
     let ps = size(512);
     let source = MemStore::new();

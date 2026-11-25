@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
 use lsr_core::Task;
-use lsr_core::{Clock, Event as EngineEvent, MaintainedEvent, SnapshotCause};
+use lsr_core::{AppCheckpoint, Clock, Event as EngineEvent, MaintainedEvent, SnapshotCause};
 use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
 use crate::failstop;
@@ -344,7 +344,7 @@ impl EventSink for DbEvents {
             },
             Event::AppCheckpoint { seen, total } => (
                 LogLevel::Warn,
-                "the application checkpointed the database",
+                app_checkpoint_message(*seen),
                 vec![("seen", debug(seen)), ("total", (*total).into())],
             ),
             Event::ScratchSweepDenied => (
@@ -398,11 +398,13 @@ impl EventSink for DbEvents {
 }
 
 /// The text for a boot with a brand-new meta directory that found the database ahead of the
-/// replica: not its newest state, but written after it and holding most of its pages
-/// (`lsr_core::SnapshotCause::AheadOfReplica`). A warning, not an error: the engine goes on.
+/// replica: not its newest state, but written after it, holding most of its pages and not showing
+/// a replicator counter below the replica's (`lsr_core::SnapshotCause::AheadOfReplica`). Two
+/// images cannot show that it is not an older copy, so the text says what is known and what a
+/// start on an older copy costs. A warning, not an error: the engine goes on.
 fn ahead_message(tip: Txid) -> String {
     format!(
-        "the meta directory has no record of the replica's newest transaction {tip}, but this database was written after it and holds most of its pages: replicating it as the same database with commits that never reached the replica, starting with a snapshot above {tip}. If another replicator writes to this prefix, stop it."
+        "the meta directory has no record of the replica's newest transaction {tip}. This database was written after it, holds most of its pages and shows no sign of being older, so it is replicated as that state plus commits that never reached the replica, starting with a snapshot above {tip}. If it is an older copy of the database, the commits the replica holds after it leave the newest state and stay reachable by transaction id until retention removes them. If another replicator writes to this prefix, stop it."
     )
 }
 
@@ -500,6 +502,20 @@ fn store_line(event: &MaintainedEvent) -> Option<(&'static str, Vec<(&'static st
     })
 }
 
+/// What an observation of the application's checkpoints says happened. A stall is the one
+/// where nothing was checkpointed, by the application or anyone: the line says what was read
+/// (a WAL past the threshold, nothing new copied) and not that a checkpoint ran.
+const fn app_checkpoint_message(seen: AppCheckpoint) -> &'static str {
+    match seen {
+        AppCheckpoint::Backfilled { .. } | AppCheckpoint::Restarted => {
+            "the application checkpointed the database"
+        }
+        AppCheckpoint::Stalled { .. } => {
+            "the WAL grew past the application's automatic checkpoint threshold with nothing new checkpointed"
+        }
+    }
+}
+
 fn engine_line(event: &EngineEvent) -> Option<Line> {
     Some(match event {
         EngineEvent::Idle => return None,
@@ -540,6 +556,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
                 ("error", debug(fault)),
                 ("retry_at", until.to_string().into()),
             ],
+        ),
+        EngineEvent::CheckpointDeferred { until } => (
+            LogLevel::Debug,
+            "checkpoint skipped: the database's write lock is busy",
+            vec![("retry_at", until.to_string().into())],
         ),
         EngineEvent::WritesHeld { until } => (
             LogLevel::Debug,

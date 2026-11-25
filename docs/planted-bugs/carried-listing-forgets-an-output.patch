@@ -1,0 +1,10 @@
+--- a/crates/core/src/maintain/short.rs
++++ b/crates/core/src/maintain/short.rs
+@@ -346,7 +346,6 @@
+         self.note(info);
+         // The carried listing stands in for one made now, which would show this file: a pass
+         // that plans from it must see every output since, not only the newest of each level.
+-        self.carry = self.carry.take().and_then(|carry| carry.with(info));
+         self.own.insert(level);
+         self.fresh.insert(level);
+         if let Some(next) = config

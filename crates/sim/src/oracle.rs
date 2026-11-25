@@ -26,6 +26,8 @@
 //!   window (`retention`);
 //! - after every tick, each level-0 file the replica took is bytes an engine
 //!   staged (`witness`);
+//! - after every tick, no file the replica took at a level 1 to 8 leaves a hole in its
+//!   level that holds a file of the level below (`levels`);
 //! - every staged file the engine gave up before the replica took it was
 //!   forced by something in effect (`lost_restore_points`).
 
@@ -321,6 +323,16 @@ pub enum Violation {
     UnstagedPut {
         /// The file.
         key: String,
+    },
+    /// A compaction output left a hole in its level with a file of the level below inside
+    /// it: the compaction jumped over that file, and Go's compaction of the level above
+    /// refuses to read across the hole (`crate::oracle::levels`).
+    #[error("{key} was put leaving a hole in its level that holds {skipped}")]
+    LevelHole {
+        /// The file put.
+        key: String,
+        /// A file of the level below inside the hole.
+        skipped: String,
     },
     /// A restore made while a lasting fault held, through the fault as a restore
     /// would meet it, published another database than the replica holds for that
@@ -909,10 +921,12 @@ pub fn newest_of(files: &[FileInfo]) -> Option<Txid> {
 }
 
 mod as_of;
+mod levels;
 pub mod lost_restore_points;
 mod retention;
 mod witness;
 
+pub use levels::{LevelPut, judge_level_put};
 pub use retention::Windows;
 pub use witness::{Judged, judge_put};
 

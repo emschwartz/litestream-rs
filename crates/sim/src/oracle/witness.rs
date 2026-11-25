@@ -9,7 +9,8 @@
 //! other bytes, or a staged file replaced by another while the engine runs,
 //! is bytes no engine staged. A file replaced while the engine is down passes
 //! the boot's checks by design (`docs/decisions/D175.md`), and the draws never
-//! make one.
+//! make one: a flipped byte that would leave another encoding of the same file
+//! is moved to the next byte (`World::flip_newest_staged`).
 
 use lsr_core::{ObjectStore, ReadLen, conformance::block_on};
 

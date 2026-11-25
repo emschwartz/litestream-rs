@@ -1,0 +1,12 @@
+# A PASSIVE whose sequence bump found the write lock taken left the position unpinned, although
+# the read transaction retaken under the barrier proved it. The writer that held the lock then
+# restarted the WAL the checkpoint had copied whole, and the next sync took a snapshot of the
+# whole database (GenerationChanged) for a restart it could have followed
+# (docs/decisions/D225.md).
+name = "unpinned-after-own-checkpoint"
+fix = "claude/own-checkpoint"
+package = "lsr-core"
+tests = [
+    "a_restart_after_an_overtaken_bump_is_followed_without_a_snapshot",
+    "a_passive_overtaken_at_its_bump_is_pinned_and_not_a_fault",
+]

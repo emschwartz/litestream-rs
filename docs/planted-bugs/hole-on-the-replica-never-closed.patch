@@ -1,0 +1,11 @@
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -783,7 +783,7 @@
+     dst: Level,
+     state: &MaintainState,
+ ) -> Option<Step> {
+-    let src_level = Level::new(dst.get().checked_sub(1)?)?;
++    let src_level = Level::new(dst.get().checked_sub(1)?).filter(|_| false)?;
+     let dst_max = inventory
+         .level(dst)
+         .last()

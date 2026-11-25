@@ -1,0 +1,7 @@
+# The same defect against the simulator's level judge (crates/sim/src/oracle/levels.rs).
+name = "level-jumps-to-the-newest-input-sim"
+patch = "level-jumps-to-the-newest-input"
+fix = "claude/level-holes"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["level_holes::level_one_files_that_share_a_window_all_reach_level_two"]

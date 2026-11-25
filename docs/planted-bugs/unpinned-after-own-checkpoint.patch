@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index 4b74f5864..b93355e3a 100644
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -636,6 +636,7 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
+         let run = sealed?;
+         released.map_err(Fault::from_source)?;
+         if !self.bump()? {
++            self.release_read_lock();
+             return Ok(CheckpointOutcome::Overtaken);
+         }
+         if self.header()? == before {

@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index 4b74f5864..9e945bb1b 100644
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -627,9 +627,6 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
+     async fn passive(&mut self) -> Result<CheckpointOutcome, Fault> {
+         let before = self.header()?;
+         let barrier = self.ck.begin_barrier();
+-        if barrier == Err(SourceError::Busy) {
+-            return Ok(CheckpointOutcome::LockBusy);
+-        }
+         let barrier = barrier.map_err(Fault::from_source)?;
+         let sealed = self.seal_and_checkpoint().await;
+         let released = self.ck.end_barrier(barrier);

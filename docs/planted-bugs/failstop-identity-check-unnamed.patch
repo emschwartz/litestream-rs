@@ -1,11 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 0000000..0000000 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2969,7 +2969,6 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
-         Some(tip) if resized.is_none() && gate.fresh() => {
-             // Said in the tick that lists the replica: a tick of its own to announce it would
-             // list the replica again, and a crash between the two would leave the check unrun.
--            (env.notice)(&Event::CheckingIdentity { tip });
-             let local =
-                 identity::local_against_replica(env.wal, reader, committed, env.db, remote, tip)
-                     .await?;
+@@ -2990,7 +2990,6 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
+                 // Said in the tick that lists the replica: a tick of its own to announce it
+                 // would list the replica again, and a crash between the two would leave the
+                 // check unrun.
+-                (env.notice)(&Event::CheckingIdentity { tip });
+                 let local = identity::local_against_replica(
+                     env.wal, reader, committed, env.db, remote, tip, page_size,
+                 )

@@ -34,6 +34,8 @@ mod dropin_roles;
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]
+mod go_compacts_levels;
+#[cfg(test)]
 mod handover;
 #[cfg(test)]
 mod layout;

@@ -47,6 +47,7 @@ pub mod side;
 pub mod sqlite;
 pub mod staging;
 pub mod store;
+pub mod structured;
 #[cfg(test)]
 mod testkit;
 pub mod world;

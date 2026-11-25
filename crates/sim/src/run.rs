@@ -27,7 +27,7 @@ use crate::forcing::Forcing;
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
-use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_put, within};
+use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_level_put, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, SendTurns, TickStats, delta, memory,
@@ -431,6 +431,11 @@ struct Runner {
     /// The staging recorder's length when a staging backup was last put
     /// back: staged files are the engine's only if it wrote them since.
     put_back: usize,
+    /// The file backup of the database [`Op::SaveDatabase`] took.
+    saved_database: Option<Vec<u8>>,
+    /// [`Op::PutBackDatabase`] ran: the database is an older copy, so a refusal is not the
+    /// operator's own database to trust but the stop the run expects.
+    database_put_back: bool,
     /// A store fault fails calls at a rate and has not healed: a drain may
     /// end at its deadline.
     rate_active: bool,
@@ -573,6 +578,8 @@ impl Runner {
             fail_stop_seen: 0,
             puts_judged: 0,
             put_back: 0,
+            saved_database: None,
+            database_put_back: false,
             rate_active: false,
             failed_boots: 0,
             restore_files: 0,
@@ -764,13 +771,18 @@ impl Runner {
         }
     }
 
-    /// Judges every level-0 put the replica took since the last call ([`judge_put`]).
+    /// Judges every put the replica took since the last call: a level-0 file is bytes an
+    /// engine staged ([`judge_put`]), and a file at a level above leaves no hole the level
+    /// below could have closed ([`judge_level_put`]).
     fn judge_puts(&mut self) -> Result<(), Violation> {
         let remote = self.w.remote_recorder.events();
         let staging = self.w.staging_recorder.events();
+        let held = (remote.len() > self.puts_judged).then(|| self.w.remote_raw.stored());
         for put in remote.iter().skip(self.puts_judged) {
             let judged = judge_put(&staging, &self.w.remote_raw, put)?;
             self.report.reach.bump(format!("witness.{judged:?}"));
+            let level = judge_level_put(&remote, held.as_deref().unwrap_or_default(), put)?;
+            self.report.reach.bump(format!("levels.{level:?}"));
         }
         self.puts_judged = remote.len();
         Ok(())
@@ -1005,6 +1017,10 @@ impl Runner {
             self.report.reach.bump("refusal.foreign");
             return Ok(step);
         }
+        if self.database_put_back {
+            self.report.reach.bump("refusal.older_copy");
+            return Ok(step);
+        }
         // With staging intact, everything this engine put on the replica is at
         // or below what staging holds, under the bytes staging holds: a
         // refusal then has no cause. A staged copy that differs from the
@@ -1120,6 +1136,7 @@ impl Runner {
             Event::Booted { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -1153,6 +1170,14 @@ impl Runner {
         let (cause, at_boot) = match event {
             Event::Booted { cause: Some(cause) } => (cause, true),
             Event::Resnapshot(cause) => (cause, false),
+            // A busy answer from SQLite is no excuse for a later snapshot: a sync step it
+            // fails moves nothing, and a PASSIVE keeps its position pinned through one
+            // (`docs/decisions/D225.md`). Before, every retry excused the snapshots that
+            // followed it, and a busy sequence bump followed by a restart passed unseen.
+            Event::Retrying {
+                fault: Fault::SqliteBusy,
+                ..
+            } => return Ok(()),
             Event::Degraded { .. } | Event::Retrying { .. } => {
                 self.forcings.note_in_tick(Forcing::PositionUnproven);
                 return Ok(());
@@ -1160,6 +1185,7 @@ impl Runner {
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -1207,6 +1233,7 @@ impl Runner {
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -1546,6 +1573,25 @@ impl Runner {
         } else {
             self.spilled = all;
         }
+    }
+
+    /// The application's commit of [`Op::Structured`].
+    fn structured(&mut self, seq: u32, data: u8) {
+        let size = self.w.sqlite.page_size();
+        let before = self.w.sqlite.db_size();
+        let mut pages = vec![
+            (1, crate::structured::schema_page(size)),
+            (2, crate::structured::counter_page(size, seq)),
+            (3, vec![data; size.bytes()]),
+        ];
+        for n in before.saturating_add(1).max(4)..=crate::structured::PAGES {
+            pages.push((n, vec![u8::try_from(n).unwrap_or_default(); size.bytes()]));
+        }
+        let pages = pages
+            .into_iter()
+            .filter_map(|(n, bytes)| Some((PageNo::new(n, size)?, bytes)))
+            .collect();
+        self.app_commit(pages, before.max(crate::structured::PAGES));
     }
 
     fn commit(&mut self, count: u8, grow: bool) {
@@ -2241,12 +2287,7 @@ impl Runner {
                 done
             }
             MetaOp::DeleteNewest => w.delete_newest_staged().map_err(StagedEditError::from),
-            MetaOp::FlipNewestByte => w.edit_newest_staged(|bytes| {
-                let middle = bytes.len() / 2;
-                if let Some(byte) = bytes.get_mut(middle) {
-                    *byte ^= 0xff;
-                }
-            }),
+            MetaOp::FlipNewestByte => w.flip_newest_staged(),
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
             MetaOp::DeleteAll => {
                 self.takeover = None;
@@ -2460,6 +2501,19 @@ impl Runner {
             Op::Hold { hold, ticks } => self.hold_marked(*hold, *ticks)?,
             Op::Verify => self.verify()?,
             Op::Heal => self.heal_faults(),
+            Op::Structured { seq, data } => self.structured(*seq, *data),
+            Op::SaveDatabase => self.saved_database = Some(self.w.sqlite.image()),
+            Op::PutBackDatabase { adopt } => {
+                let done = self
+                    .saved_database
+                    .as_deref()
+                    .is_some_and(|image| self.w.sqlite.put_back_database(image));
+                Self::scenario_step("PutBackDatabase", Ok(done))?;
+                self.database_put_back = true;
+                if *adopt {
+                    self.w.adopt_local_state();
+                }
+            }
             Op::OurReader { begin } => {
                 let done = if *begin {
                     self.w.sqlite.our_reader_begin()
@@ -2758,7 +2812,9 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
             until,
             fault: Fault::StoreThrottled { retry_after },
         } => (*until, *retry_after),
-        Event::Retrying { until, .. } | Event::WritesHeld { until } => (*until, None),
+        Event::Retrying { until, .. }
+        | Event::WritesHeld { until }
+        | Event::CheckpointDeferred { until } => (*until, None),
         Event::Booted { .. }
         | Event::Synced { .. }
         | Event::Checkpointed { .. }
