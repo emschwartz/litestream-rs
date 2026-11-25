@@ -44,6 +44,12 @@
 //!    planned from a listing made in its own tick, so a delete never acts on
 //!    an older one.
 //!
+//!    A turn taken while uploads are busy can list the replica before the uploader has
+//!    looked at an id it staged. A listed file above what the uploader confirmed is not
+//!    yet known to be this engine's own: maintenance plans nothing from that listing and
+//!    lists again after the retry interval (`Actor::listing_untrusted`,
+//!    `docs/decisions/D230.md`).
+//!
 //! Every failure becomes a [`Fault`] and goes through [`policy`] once, in
 //! [`Actor::fault`]. A retry waits on its own task; the others keep running.
 //! Every store call is an await point, and a future dropped at any of them is
@@ -2273,11 +2279,7 @@ impl Actor {
             Ok(inventory) => inventory,
             Err(fault) => return Some(self.fault(Task::Maintenance, fault, now)),
         };
-        // Uploads are idle, so everything this engine wrote is at or below
-        // its position: a file past it is another writer's. In steady state
-        // this listing is the first to see one, and nothing may be planned
-        // from it (no compaction, snapshot or delete takes it as input).
-        if let Some(tick) = self.listing_untrusted(&inventory, now) {
+        if let Some(tick) = self.listing_untrusted(inventory.newest(), now) {
             return Some(tick);
         }
         if let Some(tick) = self.listing_regressed(&inventory, now) {
@@ -2417,18 +2419,32 @@ impl Actor {
         )
     }
 
-    /// What ends a maintenance tick before anything is planned from `inventory`: a file
-    /// past everything this engine staged or confirmed is another writer's, and nothing may
-    /// be planned from that listing (no compaction, snapshot or delete takes it as input).
-    /// In steady state this listing is the first to see one.
-    fn listing_untrusted(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
-        (inventory.newest() > self.staged().max(self.engine.upload.confirmed()))
-            .then(|| self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now))
+    /// What ends a maintenance tick before anything is planned from a listing whose newest
+    /// file ends at `listed`: a file this engine does not know to be its own. No compaction,
+    /// snapshot or delete takes such a file as input.
+    ///
+    /// - Past everything this engine staged or confirmed, the file is another writer's
+    ///   (`RemoteAheadOfLocal`). In steady state this listing is the first to see one.
+    /// - Above what the uploader confirmed, at an id this engine staged and has not put yet,
+    ///   it is unjudged: another writer's, or this engine's own put whose answer was lost.
+    ///   Maintenance has its turn while uploads are busy (`run`), between the slices of a
+    ///   file in flight too, so it can list before the uploader has looked. Only the uploader
+    ///   tells the two apart, by the bytes (`crate::upload`), and it does so at its next put
+    ///   or listing of that id: maintenance lists again after the retry interval and plans
+    ///   nothing meanwhile. Taken as this engine's own, another writer's file went into a
+    ///   compaction, and the boot after the stop took that output as holding the commit.
+    fn listing_untrusted(&mut self, listed: Option<Txid>, now: Timestamp) -> Option<Tick> {
+        let confirmed = self.engine.upload.confirmed();
+        if listed > self.staged().max(confirmed) {
+            return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
+        }
+        (listed > confirmed).then(|| self.list_again_later(now))
     }
 
     /// Maintenance plans nothing from this listing and lists again after the
-    /// retry interval: a read contradicted it, or a failed read must fail
-    /// again on a later tick before anything acts on it.
+    /// retry interval: a read contradicted it, a failed read must fail
+    /// again on a later tick before anything acts on it, or the listing shows
+    /// a file the uploader has yet to judge (`Self::listing_untrusted`).
     fn list_again_later(&mut self, now: Timestamp) -> Tick {
         let again = now.saturating_add(self.kept.cfg.retry_interval);
         self.engine.maintain.stale = false;

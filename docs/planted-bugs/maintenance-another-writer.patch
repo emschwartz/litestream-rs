@@ -1,11 +1,11 @@
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2418,7 +2418,7 @@
-     /// be planned from that listing (no compaction, snapshot or delete takes it as input).
-     /// In steady state this listing is the first to see one.
-     fn listing_untrusted(&mut self, inventory: &Inventory, now: Timestamp) -> Option<Tick> {
--        (inventory.newest() > self.staged().max(self.engine.upload.confirmed()))
-+        (false && inventory.newest() > self.staged().max(self.engine.upload.confirmed()))
-             .then(|| self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now))
-     }
- 
+@@ -2432,7 +2432,7 @@
+     ///   compaction, and the boot after the stop took that output as holding the commit.
+     fn listing_untrusted(&mut self, listed: Option<Txid>, now: Timestamp) -> Option<Tick> {
+         let confirmed = self.engine.upload.confirmed();
+-        if listed > self.staged().max(confirmed) {
++        if false && listed > self.staged().max(confirmed) {
+             return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
+         }
+         (listed > confirmed).then(|| self.list_again_later(now))

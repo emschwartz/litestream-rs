@@ -1,0 +1,10 @@
+--- a/crates/sim/src/run.rs
++++ b/crates/sim/src/run.rs
+@@ -2241,7 +2241,6 @@
+     /// finds the file gone or torn has that for a cause.
+     fn restart(&mut self, kind: CrashKind) {
+         let lost = self.w.crash(kind);
+-        self.note_lost(&lost);
+         if self.trace && !lost.is_empty() {
+             self.report
+                 .trace

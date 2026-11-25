@@ -2236,8 +2236,17 @@ impl Runner {
         Ok(())
     }
 
+    /// The process ends, or the power goes, between two ticks. What a power loss took from
+    /// staging is noted as it is for one inside a tick ([`Runner::crash_tick`]): the boot that
+    /// finds the file gone or torn has that for a cause.
     fn restart(&mut self, kind: CrashKind) {
-        self.w.crash(kind);
+        let lost = self.w.crash(kind);
+        self.note_lost(&lost);
+        if self.trace && !lost.is_empty() {
+            self.report
+                .trace
+                .push(format!("    {kind:?} loss between ticks, lost: {lost:?}"));
+        }
         self.crashed(kind);
     }
 

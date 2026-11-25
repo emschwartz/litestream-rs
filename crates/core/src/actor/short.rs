@@ -24,8 +24,8 @@ impl Actor {
     }
 
     /// One maintenance pass's decision over a short listing, or the tick of the fault it found.
-    /// The checks the whole pass makes on its listing (a file past this engine's position, a
-    /// replica below what it confirmed) are made on the listed files only.
+    /// The checks the whole pass makes on its listing (a file this engine does not know to be
+    /// its own, a replica below what it confirmed) are made on the listed files only.
     ///
     /// The caller acts on the decision: this future's frames are gone before a job runs, which
     /// keeps the replicator thread's stack under the headroom gate (crates/replica/src/stack.rs).
@@ -76,12 +76,8 @@ impl Actor {
             Err(fault) => return Err(Box::new(self.fault(Task::Maintenance, fault, now))),
         };
         let listed = tail.newest_listed();
-        if listed > self.staged().max(confirmed) {
-            return Err(Box::new(self.fault(
-                Task::Maintenance,
-                Fault::RemoteAheadOfLocal,
-                now,
-            )));
+        if let Some(tick) = self.listing_untrusted(listed, now) {
+            return Err(Box::new(tick));
         }
         if listed < tail.baseline() {
             return Err(Box::new(self.fault(

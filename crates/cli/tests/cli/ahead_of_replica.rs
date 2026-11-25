@@ -46,6 +46,15 @@ fn newest(replica: &Path) -> u64 {
         .unwrap()
 }
 
+/// Points the name the configuration gives the replica at `to`, in one step: a new link renamed
+/// over the old one. Whatever the replicator is in the middle of, it finds the old place or the
+/// new one, never a missing directory, which an upload would create again under the test.
+fn point(link: &Path, to: &Path) {
+    let next = link.with_extension("next");
+    std::os::unix::fs::symlink(to, &next).unwrap();
+    std::fs::rename(&next, link).unwrap();
+}
+
 /// The rows of the replica's state at `target`, restored into `dir`.
 fn restored(dir: &Path, replica: &Path, target: RestoreTarget, name: &str) -> Vec<(i64, Vec<u8>)> {
     let store: Arc<dyn DynStore> = Arc::new(FsStore::new(replica));
@@ -59,7 +68,8 @@ fn a_new_meta_directory_after_an_unreachable_replica_and_a_kill_carries_on() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("app.db");
     let replica = dir.path().join("replica");
-    let away = dir.path().join("replica-away");
+    let held = dir.path().join("replica-held");
+    let blocked = dir.path().join("replica-blocked");
     let staging: PathBuf = dir.path().join(".app.db-litestream");
     let config = dir.path().join("litestream.yml");
     let text = format!(
@@ -68,6 +78,9 @@ fn a_new_meta_directory_after_an_unreachable_replica_and_a_kill_carries_on() {
         replica.display()
     );
     std::fs::write(&config, text).unwrap();
+    std::fs::create_dir(&held).unwrap();
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    point(&replica, &held);
 
     // The replica takes the first commits.
     let app = database(&db);
@@ -81,8 +94,7 @@ fn a_new_meta_directory_after_an_unreachable_replica_and_a_kill_carries_on() {
 
     // The replica becomes unreachable: a file stands where its directory was, which refuses
     // every write whoever runs the test. The application goes on writing; the uploads fail.
-    std::fs::rename(&replica, &away).unwrap();
-    std::fs::write(&replica, b"not a directory").unwrap();
+    point(&replica, &blocked);
     write(&app, 5);
     next_with(&mut daemon, &["msg=retrying"]);
     daemon.signal("KILL");
@@ -95,8 +107,7 @@ fn a_new_meta_directory_after_an_unreachable_replica_and_a_kill_carries_on() {
     drop(database(&db));
 
     // The replica is reachable again, and the meta directory is gone.
-    std::fs::remove_file(&replica).unwrap();
-    std::fs::rename(&away, &replica).unwrap();
+    point(&replica, &held);
     std::fs::remove_dir_all(&staging).unwrap();
 
     let mut daemon = replicate(&config);
