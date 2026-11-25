@@ -12,7 +12,7 @@ use crate::publish::{Unpublished, Writer, remove_staged};
 use crate::store::{
     Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload, WriteMode, exists,
 };
-use crate::upload::{StagedPages, same_bytes};
+use crate::upload::{StagedPages, Unsent, same_bytes};
 
 /// The staging directory as a local course sees it: level 0 through `base`, and above it the
 /// files in the course's slot under the level-0 keys the engine knows them by. Every other
@@ -168,13 +168,14 @@ impl<L: Role> Role for Apart<'_, L> {
     const COMPACT_WINDOW: ReadLen = L::COMPACT_WINDOW;
 }
 
-/// Moves every file in the course's slot up to level 0, oldest first.
-pub(super) async fn raise_course<L: Role>(staging: &L) -> Result<(), Fault> {
+/// Moves every file in the course's slot up to level 0, oldest first. `unsent` is the upload
+/// task's word that it is sending none of them.
+pub(super) async fn raise_course<L: Role>(staging: &L, unsent: &Unsent<'_>) -> Result<(), Fault> {
     let course = Apart::over(staging, None);
     let mut pages = StagedPages::from(None);
     while let Some(page) = pages.next(&course).await? {
         for file in &page {
-            raise(&course, staging, file).await?;
+            raise(&course, staging, file, unsent).await?;
         }
     }
     Ok(())
@@ -184,18 +185,23 @@ pub(super) async fn raise_course<L: Role>(staging: &L) -> Result<(), Fault> {
 /// on a second read of both, and only then deleted from the slot. A crash anywhere leaves a
 /// state this runs over again, and a copy that differs is deleted, so one read that lied
 /// costs a boot attempt and no file.
-async fn raise<L: Role>(course: &Apart<'_, L>, staging: &L, file: &FileInfo) -> Result<(), Fault> {
+async fn raise<L: Role>(
+    course: &Apart<'_, L>,
+    staging: &L,
+    file: &FileInfo,
+    unsent: &Unsent<'_>,
+) -> Result<(), Fault> {
     let key = &file.key;
     if !exists(staging, key).await.map_err(|err| L::fault(&err))? {
         copy(course, staging, file).await?;
     }
     if !same_bytes(course, staging, key).await? {
-        remove_staged(staging, &[*key])
+        remove_staged(staging, &[*key], unsent)
             .await
             .map_err(|err| L::fault(&err))?;
         return Err(Fault::LocalIo);
     }
-    remove_staged(course, &[*key])
+    remove_staged(course, &[*key], unsent)
         .await
         .map_err(|err| L::fault(&err))
 }
@@ -231,7 +237,7 @@ async fn copy<L: Role>(course: &Apart<'_, L>, staging: &L, file: &FileInfo) -> R
             break;
         }
     }
-    match to.commit().await {
+    match to.commit(staging).await {
         // Taken: a boot attempt that died here before left the copy, which the caller
         // compares.
         Ok(_) | Err(Unpublished::Taken(_)) => Ok(()),

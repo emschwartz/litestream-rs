@@ -1,0 +1,8 @@
+# The simulator sees a failed slice whose send carries on: the file is not sent again from its
+# first byte, and the replica's copy does not restore.
+name = "failed-slice-carries-on-sim"
+patch = "failed-slice-carries-on"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["sliced::a_store_fault_between_two_slices_sends_the_file_again_from_its_first_byte"]

@@ -294,7 +294,7 @@ impl Witnesses {
     /// Keeps `token`, replacing one for the same file. Every token is kept:
     /// the stagers ask [`Self::has_room`] first, so the count stays within
     /// [`MAX_WITNESSED`].
-    pub(crate) fn insert(&mut self, token: Witnessed) {
+    pub fn insert(&mut self, token: Witnessed) {
         self.by_txid.insert(token.key.range().max(), token);
         debug_assert!(
             self.by_txid.len() <= MAX_WITNESSED,

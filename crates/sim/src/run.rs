@@ -30,7 +30,8 @@ use crate::generate::{
 use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
-    CheckpointTally, CountingCheckpointer, IdleWindow, Limits, TickStats, delta, memory, per_tick,
+    CheckpointTally, CountingCheckpointer, IdleWindow, Limits, SendTurns, TickStats, delta, memory,
+    per_tick,
 };
 use crate::scenario::{CauseKind, FaultKind};
 use crate::seed::{Seed, replay_line};
@@ -232,6 +233,9 @@ pub struct Opts {
     /// The engine's TRUNCATE threshold, when not the usual ([`Weights::truncate_pages`]).
     /// [`run_with`] sets it.
     pub truncate_pages: Option<NonZeroU32>,
+    /// The bytes of staged files the engine sends in one tick, when not its own
+    /// ([`Weights::slice_bytes`]). [`run_with`] sets it.
+    pub slice_bytes: Option<NonZeroU64>,
     /// The process dies right after every tick in which an injected fault fired
     /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
     pub kill_after_fault: bool,
@@ -337,6 +341,9 @@ struct Runner {
     error_domain: bool,
     // The engine's TRUNCATE threshold, when the run sets one ([`Opts::truncate_pages`]).
     truncate_pages: Option<NonZeroU32>,
+    // A tick's bytes of staged files, when the run sets them ([`Opts::slice_bytes`]).
+    slice_bytes: Option<NonZeroU64>,
+    turns: SendTurns,
     spilled: Vec<(PageNo, Vec<u8>)>,
     /// A freshly started driver has not seen the WAL yet, so it ticks once more
     /// before it believes a wait on a WAL change.
@@ -493,6 +500,7 @@ impl Runner {
         runner.overlap = opts.overlap.then(|| SeededEntropy::new(seed.stream(21)));
         runner.error_domain = opts.error_domain;
         runner.truncate_pages = opts.truncate_pages;
+        runner.slice_bytes = opts.slice_bytes;
         runner.write_gate = write_gate::WriteGate::new(opts.write_gate);
         if opts.no_create_only {
             runner.refuse_create_only();
@@ -521,6 +529,8 @@ impl Runner {
             overlap: None,
             error_domain: false,
             truncate_pages: None,
+            slice_bytes: None,
+            turns: SendTurns::default(),
             spilled: Vec::new(),
             unwatched: true,
             readers: Vec::new(),
@@ -594,6 +604,10 @@ impl Runner {
                 truncate_pages: self.truncate_pages.or(base.checkpoint.truncate_pages),
                 ..base.checkpoint
             },
+            upload: UploadConfig {
+                bytes_per_tick: self.slice_bytes.unwrap_or(base.upload.bytes_per_tick),
+                ..base.upload
+            },
             ..base
         });
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
@@ -615,8 +629,12 @@ impl Runner {
         let size = u64::try_from(self.w.sqlite.page_size().bytes()).unwrap_or(u64::MAX);
         let tx = self.max_tx_pages.saturating_mul(size.saturating_add(64));
         let db = u64::from(self.w.sqlite.db_size()).saturating_mul(size.saturating_add(64));
+        let slice = self
+            .slice_bytes
+            .unwrap_or(UploadConfig::default().bytes_per_tick);
         Limits {
             staged_bytes: SYNC_CAP.saturating_add(tx).max(db).saturating_add(4096),
+            slice_bytes: slice.get(),
         }
     }
 
@@ -903,6 +921,13 @@ impl Runner {
             checkpoints: self.tally.total().saturating_sub(total0),
         };
         per_tick(&stats, self.limits())?;
+        let reach = &mut self.report.reach;
+        self.turns.tick(stats.event.as_ref(), began, reach)?;
+        // A commit that landed inside the tick waits for the WAL step unless the tick staged a
+        // file after it (a checkpoint's seal stages the commit that lands before its barrier).
+        if in_tick.is_some_and(|(_, from)| self.w.staging_recorder.len() <= from) {
+            self.turns.committed();
+        }
         let step = self.after_refusal(step)?;
         let step = self.kill_after_fault(step, fired0, taken0);
         self.report.max_wal_frames = self.report.max_wal_frames.max(self.w.sqlite.mx_frame());
@@ -1100,6 +1125,7 @@ impl Runner {
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
             | Event::Uploaded(_)
+            | Event::Sending { .. }
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Retrying { .. }
@@ -1139,6 +1165,7 @@ impl Runner {
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
             | Event::Uploaded(_)
+            | Event::Sending { .. }
             | Event::Maintained { .. }
             | Event::Idle
             | Event::WritesHeld { .. }
@@ -1185,6 +1212,7 @@ impl Runner {
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
             | Event::Uploaded(_)
+            | Event::Sending { .. }
             | Event::Maintained { .. }
             | Event::Idle
             | Event::WritesHeld { .. }
@@ -2739,6 +2767,7 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Synced { .. }
         | Event::Checkpointed { .. }
         | Event::Uploaded(_)
+        | Event::Sending { .. }
         | Event::Maintained { .. }
         | Event::Idle
         | Event::Resnapshot(_)
@@ -2792,6 +2821,7 @@ pub fn run_with(
         error_domain: weights.error_domain,
         staging_fs: weights.staging_fs,
         truncate_pages: weights.truncate_pages,
+        slice_bytes: weights.slice_bytes,
         kill_after_fault: weights.kill_after_fault,
         remote_s3: weights.remote_s3,
         no_create_only: weights.no_create_only,

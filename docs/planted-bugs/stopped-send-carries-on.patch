@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 581d4fbd2..4db70f3f3 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -771,9 +771,6 @@ impl InFlight {
+     /// Ends the send in flight and aborts the upload it had begun, so that any staged file
+     /// may be deleted.
+     pub(crate) async fn stop(&mut self) -> Unsent<'_> {
+-        if let Some(sending) = self.0.take() {
+-            abort(sending.open).await;
+-        }
+         Unsent(PhantomData)
+     }
+ 

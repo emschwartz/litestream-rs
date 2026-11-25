@@ -72,6 +72,18 @@ fn commits_restorable(rig: &Rig) -> Vec<u8> {
     seen
 }
 
+/// The boot's settling of the course's slot, with no send in flight.
+fn settled(rig: &Rig, actor: &mut Actor) -> Result<(), Fault> {
+    use crate::fault::role::{Replica, Staging};
+    block_on(async {
+        let mut none = crate::upload::InFlight::default();
+        let unsent = none.stop().await;
+        actor
+            .settle_course(&Staging(&rig.staging), &Replica(&rig.remote), &unsent)
+            .await
+    })
+}
+
 fn is_local(actor: &Actor) -> bool {
     matches!(actor.engine.course, Course::Local(_))
 }
@@ -1092,14 +1104,12 @@ fn a_later_process_goes_on_from_the_course_of_the_first() {
 /// slot's again.
 #[test]
 fn a_course_goes_on_over_the_files_a_boot_moved_up() {
-    use crate::fault::role::{Replica, Staging};
     let (mut rig, mut actor, at) = restarted_down(go_like());
     rig.commit(4);
     rig.settle(&mut actor, at.saturating_add(1));
     assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3], vec![4]));
     // The replica holds transaction 1, below level 0's newest.
-    let moved = block_on(actor.settle_course(&Staging(&rig.staging), &Replica(&rig.remote)));
-    assert_eq!(moved, Ok(()));
+    assert_eq!(settled(&rig, &mut actor), Ok(()));
     assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3, 4], vec![]));
     assert!(is_local(&actor));
     // The next attempt fails, and finds the course's newest file where it now is.
@@ -1126,7 +1136,6 @@ fn a_course_goes_on_over_the_files_a_boot_moved_up() {
 /// holds anything is past them, and they are deleted; over an empty replica they move up.
 #[test]
 fn slot_files_over_an_empty_level_zero_are_settled_against_the_replica() {
-    use crate::fault::role::{Replica, Staging};
     let slot = |n: u64| {
         FileKey::new(
             Level::LOCAL_COURSE,
@@ -1140,8 +1149,7 @@ fn slot_files_over_an_empty_level_zero_are_settled_against_the_replica() {
         if replica_holds {
             super::second_writer::put_whole(&rig.remote.inner, &l0(1), b"its own");
         }
-        let settled = block_on(actor.settle_course(&Staging(&rig.staging), &Replica(&rig.remote)));
-        assert_eq!(settled, Ok(()));
+        assert_eq!(settled(&rig, &mut actor), Ok(()));
         let want = if replica_holds { vec![] } else { vec![1] };
         assert_eq!((staged(&rig), apart(&rig)), (want, vec![]));
     }

@@ -5,6 +5,7 @@ use super::second_writer::{put_whole, read_whole};
 use super::*;
 use crate::actor::apart::{Apart, raise_course};
 use crate::fault::role::Staging;
+use crate::upload::InFlight;
 
 fn key(level: Level, n: u64) -> FileKey {
     FileKey::new(level, TxidRange::single(Txid::new(n).unwrap()))
@@ -32,6 +33,14 @@ fn store(level_zero: &[u64], in_slot: &[u64]) -> MemStore {
         put_whole(&store, &slot(n), format!("slot, {n}").as_bytes());
     }
     store
+}
+
+/// [`raise_course`] with no send in flight.
+fn raised(store: &MemStore) -> Result<(), Fault> {
+    block_on(async {
+        let mut none = InFlight::default();
+        raise_course(&Staging(store), &none.stop().await).await
+    })
 }
 
 fn held(store: &MemStore, level: Level) -> Vec<u64> {
@@ -303,7 +312,7 @@ fn the_slots_files_move_up_with_their_bytes_and_times() {
         });
     }
     assert_eq!(held(&store, Level::LOCAL_COURSE), vec![2, 3, 4, 5]);
-    block_on(raise_course(&Staging(&store))).unwrap();
+    raised(&store).unwrap();
     assert_eq!(held(&store, Level::ZERO), vec![1, 2, 3, 4, 5]);
     assert!(held(&store, Level::LOCAL_COURSE).is_empty());
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
@@ -333,15 +342,12 @@ fn a_copy_left_behind_is_compared_before_the_slots_file_goes() {
     let store = store(&[1], &[2, 3]);
     put_whole(&store, &l0(2), b"slot, 2");
     put_whole(&store, &l0(3), b"not it");
-    assert_eq!(
-        block_on(raise_course(&Staging(&store))),
-        Err(Fault::LocalIo)
-    );
+    assert_eq!(raised(&store), Err(Fault::LocalIo));
     assert_eq!(
         (held(&store, Level::ZERO), held(&store, Level::LOCAL_COURSE)),
         (vec![1, 2], vec![3])
     );
-    block_on(raise_course(&Staging(&store))).unwrap();
+    raised(&store).unwrap();
     assert_eq!(
         (held(&store, Level::ZERO), held(&store, Level::LOCAL_COURSE)),
         (vec![1, 2, 3], vec![])
@@ -361,9 +367,9 @@ fn a_failed_move_leaves_the_slots_file() {
     ] {
         let store = store(&[1], &[2]);
         store.inject_failure(op, transient(op));
-        assert!(block_on(raise_course(&Staging(&store))).is_err(), "{op:?}");
+        assert!(raised(&store).is_err(), "{op:?}");
         assert_eq!(held(&store, Level::LOCAL_COURSE), vec![2], "{op:?}");
-        block_on(raise_course(&Staging(&store))).unwrap();
+        raised(&store).unwrap();
         assert_eq!(
             (held(&store, Level::ZERO), held(&store, Level::LOCAL_COURSE)),
             (vec![1, 2], vec![])

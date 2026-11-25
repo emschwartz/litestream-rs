@@ -66,23 +66,41 @@
 //! except a checksum mismatch: the store may hold wrong bytes under the key, so
 //! the state stays, the key is deleted (best effort, so readers do not see the
 //! bad position while the retry is pending) and the same key is written again.
-//! Core runs no timer: the actor steps [`upload_next`] up to its per-tick limit.
+//!
+//! **A slice per step.** A step hands the replica at most its budget of file bytes
+//! ([`SLICE`] a tick), so a file as long as the database does not hold the engine for its
+//! length (`docs/decisions/D217.md`). What is left of a file is a [`Sending`]: the decoder
+//! part-way through it, the bytes tallied so far and the upload begun for it, kept by the
+//! caller between steps in an [`InFlight`]. The next step reads on from where the last
+//! stopped, so every byte sent is still verified on the read that produced it, and the
+//! upload is committed only when the whole file verified against its token. Nothing of a
+//! send is on disk: a fault, a restart or a rebuild starts the file again from its first
+//! byte, and the upload it had begun is aborted, or left as scratch the next boot clears.
+//! Whatever deletes staged files asks the [`InFlight`] first ([`Unsent`]), so a file is
+//! never deleted under a send of it. [`upload_next`] is the same steps run until a file is
+//! whole. Core runs no timer: the actor steps [`upload_step`] up to its per-tick limits.
 
-use std::num::NonZeroU32;
+use std::marker::PhantomData;
+use std::num::{NonZeroU32, NonZeroU64};
 
-use lsr_ltx::{Decoder, Header, Txid, TxidRange, Verified};
+use lsr_ltx::{Decoder, Txid, TxidRange, Verified};
 
 use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{BugSite, Fault};
 use crate::inventory::{Inventory, InventoryError};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{verified, verifies};
-use crate::publish::{self, Unpublished, Writer};
+use crate::publish::{self, Open, Unpublished, Writer};
 use crate::store::{ListAt, ObjectStore, PageLimit, ReadLen, WriteMode};
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
 /// How much of a staged file is read at once.
 const CHUNK: ReadLen = ReadLen::or_chunk(256 * 1024);
+
+/// The most bytes of staged files one tick hands the replica unless the configuration says
+/// otherwise: 8 MiB, 32 reads of [`CHUNK`]. A tick with a slice makes at most that many
+/// reads and writes, each within its store's own deadline (`docs/decisions/D217.md`).
+const SLICE: NonZeroU64 = NonZeroU64::MIN.saturating_add(8 * 1024 * 1024 - 1);
 
 /// What this engine knows about the replica's newest transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,11 +163,24 @@ impl Guard {
 }
 
 /// Upload limits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadConfig {
     /// Files uploaded per tick before yielding (Go `MaxSyncLTXFiles`,
     /// `replica.go:208-218`). `None`: all that are staged.
     pub files_per_tick: Option<NonZeroU32>,
+    /// Bytes of staged files one tick reads and hands the replica before yielding: 8 MiB
+    /// unless a test or the simulator says otherwise. A file they run out in stays in flight,
+    /// and the next upload step sends on from there (`docs/decisions/D217.md`).
+    pub bytes_per_tick: NonZeroU64,
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            files_per_tick: None,
+            bytes_per_tick: SLICE,
+        }
+    }
 }
 
 /// What one step did.
@@ -253,25 +284,65 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     .await
 }
 
-/// [`upload_next`] with each store as its role, and level-0 writes as `guard` says.
+/// [`upload_next`] with each store as its role, and level-0 writes as `guard` says: the
+/// steps of [`upload_step`], a slice each, until one ends.
 pub(crate) async fn upload_next_in<L: Role, S: Role>(
     state: UploadState,
     staging: &L,
     remote: &S,
     newest_staged: Option<Txid>,
-    (witnesses, guard): (&Witnesses, Guard),
+    with: (&Witnesses, Guard),
 ) -> Result<Uploaded, UploadFailed> {
-    match plan_upload(&state, newest_staged) {
-        UploadPlan::Idle => Ok(Uploaded {
+    let mut in_flight = InFlight::default();
+    loop {
+        let mut budget = SLICE.get();
+        let step = upload_step(
+            state,
+            (staging, remote),
+            newest_staged,
+            with,
+            (&mut in_flight, &mut budget),
+        );
+        if let Some(uploaded) = step.await? {
+            return Ok(uploaded);
+        }
+    }
+}
+
+/// One step of [`plan_upload`]: a listing, nothing, or the planned file sent until it is
+/// whole or `budget`, bytes of staged files this step may still read, runs out. `None` is
+/// the budget running out part-way through a file, which `in_flight` then keeps for the
+/// next step. A send in flight that is not of the planned file is ended first.
+///
+/// # Errors
+/// As [`upload_next`]. A failed step leaves nothing in flight.
+pub(crate) async fn upload_step<L: Role, S: Role>(
+    state: UploadState,
+    (staging, remote): (&L, &S),
+    newest_staged: Option<Txid>,
+    (witnesses, guard): (&Witnesses, Guard),
+    (in_flight, budget): (&mut InFlight, &mut u64),
+) -> Result<Option<Uploaded>, UploadFailed> {
+    let plan = plan_upload(&state, newest_staged);
+    let token = match plan {
+        UploadPlan::Upload(key) => witnesses.get(&key),
+        UploadPlan::Idle | UploadPlan::List => None,
+    };
+    let sending = in_flight.take_for(token, guard.mode()).await;
+    match (plan, sending) {
+        (UploadPlan::Idle, _) => Ok(Some(Uploaded {
             state,
             did: Did::Nothing,
-        }),
-        UploadPlan::List => list_step(state, staging, remote, newest_staged).await,
-        UploadPlan::Upload(key) => match witnesses.get(&key) {
-            Some(token) => put_step(state, (staging, remote), token, newest_staged, guard).await,
-            // No witness: the file is refused unread, as a lost one is.
-            None => Err(fail(state, Fault::StagedLost)),
-        },
+        })),
+        (UploadPlan::List, _) => list_step(state, staging, remote, newest_staged)
+            .await
+            .map(Some),
+        (UploadPlan::Upload(_), Some(sending)) => {
+            let stores = (staging, remote);
+            put_step(state, stores, sending, newest_staged, (in_flight, budget)).await
+        }
+        // No witness: the file is refused unread, as a lost one is.
+        (UploadPlan::Upload(_), None) => Err(fail(state, Fault::StagedLost)),
     }
 }
 
@@ -584,7 +655,11 @@ pub(crate) async fn staged_from<L: Role>(
 ///
 /// # Errors
 /// The staging store's fault when it cannot list or delete.
-pub(crate) async fn drop_staged_from<L: Role>(staging: &L, from: Txid) -> Result<(), Fault> {
+pub(crate) async fn drop_staged_from<L: Role>(
+    staging: &L,
+    from: Txid,
+    unsent: &Unsent<'_>,
+) -> Result<(), Fault> {
     loop {
         let mut last = Vec::new();
         let mut pages = StagedPages::from(Some(from));
@@ -597,7 +672,7 @@ pub(crate) async fn drop_staged_from<L: Role>(staging: &L, from: Txid) -> Result
             return Ok(());
         }
         for info in last.iter().rev() {
-            publish::remove_staged(staging, &[info.key])
+            publish::remove_staged(staging, &[info.key], unsent)
                 .await
                 .map_err(|err| L::fault(&err))?;
         }
@@ -619,17 +694,112 @@ enum PutError {
     Rejected(Fault, Option<publish::Rejected>),
 }
 
+/// One staged file part-way to the replica: what the verified copy of it holds between two
+/// slices. It is in memory only.
+#[derive(Debug)]
+pub(crate) struct Sending {
+    /// The file, and the bytes a whole read of it must turn out to be.
+    token: Witnessed,
+    mode: WriteMode,
+    /// Fed every byte read so far, in order.
+    decoder: Decoder,
+    /// How many bytes were read: where the next read starts.
+    offset: u64,
+    tally: ByteTally,
+    /// What was read before the header was whole; empty once the upload is begun.
+    held: Vec<u8>,
+    /// Begun as soon as the header is known.
+    open: Option<Open>,
+}
+
+/// The upload task's file part-way sent, if any: at most one, kept between steps.
+#[derive(Debug, Default)]
+pub(crate) struct InFlight(Option<Box<Sending>>);
+
+/// The upload task's word that no send in flight is reading the staged files a caller is
+/// about to delete. Only an [`InFlight`] gives it, and no send starts while it is held.
+#[derive(Debug)]
+pub(crate) struct Unsent<'a>(PhantomData<&'a mut InFlight>);
+
+impl InFlight {
+    /// How many bytes of the file in flight were read and handed to the replica.
+    pub(crate) fn sent(&self) -> Option<u64> {
+        self.0.as_ref().map(|sending| sending.offset)
+    }
+
+    /// Ends the send in flight and aborts the upload it had begun, so that any staged file
+    /// may be deleted.
+    pub(crate) async fn stop(&mut self) -> Unsent<'_> {
+        if let Some(sending) = self.0.take() {
+            abort(sending.open).await;
+        }
+        Unsent(PhantomData)
+    }
+
+    /// For a delete of staged files through `through` and no later: `None` while the file in
+    /// flight is one of them.
+    pub(crate) fn unsent_through(&mut self, through: Txid) -> Option<Unsent<'_>> {
+        self.0
+            .as_ref()
+            .is_none_or(|sending| sending.token.key().range().min() > through)
+            .then_some(Unsent(PhantomData))
+    }
+
+    /// The send in flight when it is of `token`'s file, as witnessed; any other is ended, and
+    /// a new send of `token`'s file, when there is one, starts at its first byte.
+    async fn take_for(
+        &mut self,
+        token: Option<&Witnessed>,
+        mode: WriteMode,
+    ) -> Option<Box<Sending>> {
+        match (self.0.take(), token) {
+            (Some(sending), Some(token)) if sending.token == *token => Some(sending),
+            (stale, token) => {
+                if let Some(stale) = stale {
+                    abort(stale.open).await;
+                }
+                token.map(|token| Sending::start(*token, mode))
+            }
+        }
+    }
+}
+
+/// Ends an upload begun and not committed. Abort only releases scratch; a failure leaves
+/// nothing visible either way.
+async fn abort(open: Option<Open>) {
+    if let Some(open) = open {
+        drop(open.abort().await);
+    }
+}
+
+/// Sends `sending` until its file is whole or the budget runs out, and settles the outcome.
 async fn put_step<L: Role, S: Role>(
     state: UploadState,
     (staging, remote): (&L, &S),
-    token: &Witnessed,
+    mut sending: Box<Sending>,
     newest_staged: Option<Txid>,
-    guard: Guard,
-) -> Result<Uploaded, UploadFailed> {
-    let key = token.key();
-    match put_staged(staging, remote, token, guard.mode()).await {
-        Err(PutError::Taken) => taken(state, staging, remote, token, newest_staged).await,
-        outcome => settle_put(state, remote, key, outcome).await,
+    (in_flight, budget): (&mut InFlight, &mut u64),
+) -> Result<Option<Uploaded>, UploadFailed> {
+    let token = sending.token;
+    let outcome = match sending.advance(staging, remote, budget).await {
+        Ok(Reached::Budget) => {
+            in_flight.0 = Some(sending);
+            return Ok(None);
+        }
+        Ok(Reached::End) => sending.commit(remote).await,
+        Err(err) => {
+            abort(sending.open.take()).await;
+            Err(err)
+        }
+    };
+    match outcome {
+        Err(PutError::Taken) => {
+            let stores = (staging, remote);
+            taken(state, stores, &token, newest_staged, in_flight).await
+        }
+        outcome => settle_put(state, remote, token.key(), outcome)
+            .await
+            .map(Some),
     }
 }
 
@@ -679,11 +849,11 @@ fn list_first(state: UploadState) -> UploadState {
 /// the module docs for what each read-back finds.
 async fn taken<L: Role, S: Role>(
     state: UploadState,
-    staging: &L,
-    remote: &S,
+    (staging, remote): (&L, &S),
     token: &Witnessed,
     newest_staged: Option<Txid>,
-) -> Result<Uploaded, UploadFailed> {
+    in_flight: &mut InFlight,
+) -> Result<Option<Uploaded>, UploadFailed> {
     let key = token.key();
     let relist = |fault| fail(list_first(state), fault);
     let already = Uploaded {
@@ -691,7 +861,7 @@ async fn taken<L: Role, S: Role>(
         did: Did::AlreadyPut(key),
     };
     if same_bytes(staging, remote, &key).await.map_err(relist)? {
-        return Ok(already);
+        return Ok(Some(already));
     }
     // One read never condemns a file: the staged copy must verify on a read
     // of its own before the replica's object is judged against it.
@@ -699,42 +869,18 @@ async fn taken<L: Role, S: Role>(
         return Err(fail(state, Fault::StagedLost));
     }
     if remote_torn(remote, &key).await.map_err(relist)? {
-        let outcome = put_staged(staging, remote, token, WriteMode::Replace).await;
-        return settle_put(state, remote, key, outcome).await;
+        // The staged file replaces it, sent a slice a step from its first byte as any file is.
+        in_flight.0 = Some(Sending::start(*token, WriteMode::Replace));
+        return Ok(None);
     }
     // Both verify: a second compare decides, as the listing's read-back does.
     if same_bytes(staging, remote, &key).await.map_err(relist)? {
-        return Ok(already);
+        return Ok(Some(already));
     }
     // The relist judges the refused key from a fresh listing and a byte compare.
-    list_step(list_first(state), staging, remote, newest_staged).await
-}
-
-async fn put_staged<L: Role, S: Role>(
-    staging: &L,
-    remote: &S,
-    token: &Witnessed,
-    mode: WriteMode,
-) -> Result<FileInfo, PutError> {
-    let key = &token.key();
-    let mut upload = None;
-    if let Err(err) = copy_verified(staging, remote, token, mode, &mut upload).await {
-        if let Some(open) = upload {
-            // Abort only releases scratch; a failure leaves nothing visible either way.
-            drop(open.abort().await);
-        }
-        return Err(err);
-    }
-    let Some(open) = upload else {
-        return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
-    };
-    match open.commit().await {
-        Ok(published) if published.key() == *key => Ok(published.info()),
-        Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
-        Err(Unpublished::Taken(_)) => Err(PutError::Taken),
-        Err(Unpublished::Rejected(err, own)) => Err(PutError::Rejected(S::fault(&err), own)),
-        Err(Unpublished::Failed(err)) => Err(PutError::Commit(S::fault(&err))),
-    }
+    list_step(list_first(state), staging, remote, newest_staged)
+        .await
+        .map(Some)
 }
 
 /// Feeds a chunk to the decoder; `false` when it refuses the bytes.
@@ -750,84 +896,117 @@ fn feed_all(decoder: &mut Decoder, chunk: &[u8]) -> Result<bool, Fault> {
     Ok(true)
 }
 
-fn names_key(header: &Header, key: &FileKey) -> Result<(), PutError> {
-    if header.txids() == key.range() {
-        Ok(())
-    } else {
-        Err(PutError::Before(Fault::StagedLost))
-    }
+/// Where a slice stopped.
+enum Reached {
+    /// The budget ran out before the staged file ended.
+    Budget,
+    /// The staged file ended.
+    End,
 }
 
-/// Reads the staged file in chunks, decodes each, and forwards it to an upload
-/// begun as soon as the header is known. Returns once the decoder has
-/// verified the whole file and its length and trailer checksum, on this read,
-/// are the ones `token` was minted for: a file replaced after it was
-/// witnessed is refused before the commit. The upload counts the bytes it
-/// writes; its commit checks the store holds them ([`Writer`]).
-async fn copy_verified<'s, L: Role, S: Role>(
-    staging: &L,
-    remote: &'s S,
-    token: &Witnessed,
-    mode: WriteMode,
-    upload: &mut Option<Writer<'s, S>>,
-) -> Result<(), PutError> {
-    let key = &token.key();
-    let len = CHUNK;
-    let mut decoder = Decoder::new();
-    let mut held = Vec::new();
-    let mut offset = 0_u64;
-    let mut bytes = ByteTally::new();
-    loop {
-        let chunk = staging
-            .read(key, offset, len)
-            .await
-            .map_err(|err| PutError::Before(L::fault(&err)))?;
-        bytes.add(&chunk);
-        if !feed_all(&mut decoder, &chunk).map_err(PutError::Before)? {
+impl Sending {
+    /// A send of `token`'s file from its first byte, written as `mode` says.
+    fn start(token: Witnessed, mode: WriteMode) -> Box<Self> {
+        Box::new(Self {
+            token,
+            mode,
+            decoder: Decoder::new(),
+            offset: 0,
+            tally: ByteTally::new(),
+            held: Vec::new(),
+            open: None,
+        })
+    }
+
+    /// Reads the staged file on from where the last slice stopped, in chunks, decodes each
+    /// and forwards it to an upload begun as soon as the header is known, until the file
+    /// ends or `budget` bytes were read. The upload counts the bytes it writes; its commit
+    /// checks the store holds them ([`Writer`]).
+    async fn advance<L: Role, S: Role>(
+        &mut self,
+        staging: &L,
+        remote: &S,
+        budget: &mut u64,
+    ) -> Result<Reached, PutError> {
+        let key = &self.token.key();
+        while *budget > 0 {
+            // Never past the budget: a tick hands the replica no more than it may.
+            let len = u32::try_from((*budget).min(CHUNK.get()))
+                .ok()
+                .and_then(ReadLen::new)
+                .unwrap_or(CHUNK);
+            let chunk = staging
+                .read(key, self.offset, len)
+                .await
+                .map_err(|err| PutError::Before(L::fault(&err)))?;
+            self.tally.add(&chunk);
+            if !feed_all(&mut self.decoder, &chunk).map_err(PutError::Before)? {
+                return Err(PutError::Before(Fault::StagedLost));
+            }
+            let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+            self.offset = self.offset.saturating_add(read);
+            *budget = budget.saturating_sub(read);
+            let header = self.decoder.header().copied();
+            match (self.open.as_mut(), header) {
+                (Some(open), _) => write_chunk::<S>(open, &chunk).await?,
+                (None, Some(header)) => {
+                    if header.txids() != key.range() {
+                        return Err(PutError::Before(Fault::StagedLost));
+                    }
+                    // Stored before the first write so a failed write still aborts it.
+                    let len = Some(self.token.len());
+                    let begun =
+                        Writer::begin(remote, key, header.fields().timestamp, self.mode, len)
+                            .await
+                            .map_err(|err| PutError::Before(S::fault(&err)))?;
+                    let open = self.open.insert(begun.boxed());
+                    self.held.extend_from_slice(&chunk);
+                    write_chunk::<S>(open, &std::mem::take(&mut self.held)).await?;
+                }
+                (None, None) => self.held.extend_from_slice(&chunk),
+            }
+            if read < len.get() {
+                return Ok(Reached::End);
+            }
+        }
+        Ok(Reached::Budget)
+    }
+
+    /// The staged file ended: commits the upload once the decoder has verified the whole
+    /// file and its length and trailer checksum, on the reads that were sent, are the ones
+    /// the token was minted for. A file replaced after it was witnessed, between two slices
+    /// as before the first, is refused here and its upload aborted.
+    async fn commit<S: Role>(self: Box<Self>, remote: &S) -> Result<FileInfo, PutError> {
+        let Self {
+            token,
+            decoder,
+            tally,
+            open,
+            ..
+        } = *self;
+        let key = token.key();
+        let sound = decoder.finish().is_ok_and(|verified| {
+            verified.header().txids() == key.range()
+                && token.matches(tally, verified.trailer().file_checksum())
+        });
+        if !sound {
+            abort(open).await;
             return Err(PutError::Before(Fault::StagedLost));
         }
-        let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-        offset = offset.saturating_add(read);
-        let header = decoder.header().copied();
-        match (upload.as_mut(), header) {
-            (Some(open), _) => write_chunk(open, &chunk).await?,
-            (None, Some(header)) => {
-                names_key(&header, key)?;
-                // Stored before the first write so a failed write still aborts it.
-                let open = upload.insert(begin(remote, key, &header, mode, token.len()).await?);
-                held.extend_from_slice(&chunk);
-                write_chunk(open, &held).await?;
-                held = Vec::new();
-            }
-            (None, None) => held.extend_from_slice(&chunk),
-        }
-        if read < len.get() {
-            break;
+        let Some(open) = open else {
+            return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
+        };
+        match open.commit(remote).await {
+            Ok(published) if published.key() == key => Ok(published.info()),
+            Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
+            Err(Unpublished::Taken(_)) => Err(PutError::Taken),
+            Err(Unpublished::Rejected(err, own)) => Err(PutError::Rejected(S::fault(&err), own)),
+            Err(Unpublished::Failed(err)) => Err(PutError::Commit(S::fault(&err))),
         }
     }
-    let verified = decoder
-        .finish()
-        .map_err(|_undecodable| PutError::Before(Fault::StagedLost))?;
-    names_key(verified.header(), key)?;
-    if !token.matches(bytes, verified.trailer().file_checksum()) {
-        return Err(PutError::Before(Fault::StagedLost));
-    }
-    Ok(())
 }
 
-async fn begin<'s, S: Role>(
-    remote: &'s S,
-    key: &FileKey,
-    header: &Header,
-    mode: WriteMode,
-    len: u64,
-) -> Result<Writer<'s, S>, PutError> {
-    Writer::begin(remote, key, header.fields().timestamp, mode, Some(len))
-        .await
-        .map_err(|err| PutError::Before(S::fault(&err)))
-}
-
-async fn write_chunk<S: Role>(upload: &mut Writer<'_, S>, chunk: &[u8]) -> Result<(), PutError> {
+async fn write_chunk<S: Role>(upload: &mut Open, chunk: &[u8]) -> Result<(), PutError> {
     upload
         .write(chunk)
         .await

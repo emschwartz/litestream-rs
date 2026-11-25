@@ -90,6 +90,14 @@ pub const REQUIRED: &[&str] = &[
     // Staging on the real directory store over the in-memory filesystem, and a power loss there.
     "staging_fs.runs",
     "staging_fs.power_loss",
+    // A staged file sent a slice a tick: the bound on slices sent in a row while a commit
+    // waits is judged (ledger: slices-starve-the-wal-step), and a commit, a fault and the end
+    // of the process each land between two slices (ledger: failed-slice-carries-on).
+    "event.Sending",
+    "send.turns.judged",
+    "send.commit_between_slices",
+    "send.then_a_fault",
+    "send.then_the_process_ended",
 ];
 
 /// States printed even at zero but not required of the fixed seed set, each

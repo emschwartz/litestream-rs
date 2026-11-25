@@ -167,15 +167,18 @@ fn ended() -> StoreError {
     }
 }
 
+/// Buffer size past which an upload reserves a whole part.
+const GROW_TO_PART: usize = 256 * 1024;
+
 /// Appends `bytes` (which fit under `part`) growing the buffer geometrically
 /// but never past one part, so a part-sized buffer is the most memory held.
 fn append_bounded(buf: &mut Vec<u8>, bytes: &[u8], part: usize) {
     let need = buf.len().saturating_add(bytes.len());
     if need > buf.capacity() {
-        let target = need
-            .max(buf.capacity().saturating_mul(2))
-            .max(4096)
-            .min(part);
+        let grown = need.max(buf.capacity().saturating_mul(2)).max(4096);
+        // Past 256 KiB the object is on its way to being a part: take the whole part at once
+        // rather than reallocating (and copying) a part-sized buffer a dozen times.
+        let target = if grown > GROW_TO_PART { part } else { grown }.min(part);
         buf.reserve_exact(target.saturating_sub(buf.len()));
     }
     buf.extend_from_slice(bytes);

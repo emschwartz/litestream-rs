@@ -63,7 +63,7 @@ use crate::recover::{
 };
 use crate::source::{Checkpointer, PageSource, WalSource};
 use crate::store::{PageLimit, exists};
-use crate::upload::{drop_staged_from, inventory_fault};
+use crate::upload::{Unsent, drop_staged_from, inventory_fault};
 use crate::witness::{Base, Witnessed, scan};
 
 /// Whether this process may still try the local course.
@@ -299,6 +299,7 @@ impl Actor {
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         takeover: Takeover,
+        unsent: &Unsent<'_>,
     ) -> Result<Listed, BootStep>
     where
         L: Role,
@@ -312,7 +313,7 @@ impl Actor {
             .await
             .map_err(|err| L::fault(&err))?;
         if !slot.files.is_empty() {
-            self.settle_course(env.staging, env.remote).await?;
+            self.settle_course(env.staging, env.remote, unsent).await?;
         }
         Ok(listed)
     }
@@ -327,6 +328,7 @@ impl Actor {
         &mut self,
         staging: &L,
         remote: &R,
+        unsent: &Unsent<'_>,
     ) -> Result<(), Fault> {
         let base = newest_level_zero(staging)
             .await?
@@ -336,13 +338,13 @@ impl Actor {
             .map_err(|err| inventory_fault::<R>(&err))?
             .newest();
         if held > base {
-            drop_staged_from(&Apart::over(staging, None), Txid::MIN).await?;
+            drop_staged_from(&Apart::over(staging, None), Txid::MIN, unsent).await?;
             if matches!(self.engine.course, Course::Local(_)) {
                 self.leave_local();
             }
             return Ok(());
         }
-        raise_course(staging).await?;
+        raise_course(staging, unsent).await?;
         if let Course::Local(at) = self.engine.course {
             self.engine.course = Course::Local(at.raised());
         }

@@ -398,7 +398,9 @@ impl<S, P: Sleeper, E: Entropy> Core<S, P, E> {
     }
 }
 
-impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
+impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> ObjectStore
+    for Retrying<S, P, E>
+{
     type Upload = RetryingUpload<S, P, E>;
 
     async fn list(
