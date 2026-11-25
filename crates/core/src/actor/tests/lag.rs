@@ -592,6 +592,50 @@ fn an_operator_snapshot_while_caught_up_is_not_lag() {
     assert_eq!(first_trip(&seen), None, "{seen:?}");
 }
 
+/// A snapshot for a doubt alone, staged while an earlier commit's file still waits for the
+/// replica and the WAL holds nothing past that file, holds no commit the file does not. Here
+/// the commit's first upload is refused, the operator asks for a snapshot meanwhile, the
+/// commit's file lands, and then the replica refuses every upload: the clock stops when the
+/// commit lands, and the snapshot kept off the replica past the bound trips nothing.
+#[test]
+fn an_operator_snapshot_behind_a_pending_commit_is_not_lag() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(ActorConfig {
+        upload: UploadConfig {
+            files_per_tick: Some(nz(1)),
+            ..go_like().upload
+        },
+        ..go_like()
+    });
+    rig.settle(&mut actor, T0);
+    rig.remote.refuse_uploads.store(true, Ordering::SeqCst);
+    rig.commit(2);
+    rig.tick(&mut actor, T0 + 10);
+    let commit = actor.staged();
+    assert!(
+        commit > actor.replicated(),
+        "the commit waits for the replica"
+    );
+    actor.request_snapshot();
+    rig.tick(&mut actor, T0 + 20);
+    assert!(actor.staged() > commit, "the snapshot is staged");
+    rig.remote.refuse_uploads.store(false, Ordering::SeqCst);
+    let mut now = T0 + 30;
+    while actor.replicated() < commit && now < T0 + BOUND / 2 {
+        rig.tick(&mut actor, now);
+        now += 1_000;
+    }
+    assert_eq!(actor.replicated(), commit, "the commit's file landed alone");
+    rig.remote.refuse_uploads.store(true, Ordering::SeqCst);
+    let seen = drive(&mut rig, &mut actor, now, now + 2 * BOUND);
+    assert!(
+        actor.staged() > actor.replicated(),
+        "the snapshot is still off the replica"
+    );
+    assert_eq!(actor.unreplicated_since(), None);
+    assert_eq!(first_trip(&seen), None, "{seen:?}");
+}
+
 /// An operator's snapshot staged while caught up holds no commit. A restart whose boot takes a
 /// snapshot of its own (the WAL restarted while the engine was down) must still find the older
 /// one quiet: dated by its stamp it would, after a long pause, trip for age over a replica that
@@ -795,6 +839,35 @@ fn a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag() {
     assert!(
         actor.staged() > actor.replicated(),
         "the snapshot is staged, not uploaded"
+    );
+    assert_eq!(actor.unreplicated_since(), None);
+    assert_eq!(first_trip(&seen), None, "{seen:?}");
+}
+
+/// The same doubt while staging refuses the snapshot: before any snapshot is staged, only the
+/// end the WAL had when the doubt was first observed says its frames are on the replica, so
+/// they start no clock however long staging and the replica stay down.
+#[test]
+fn a_doubt_at_boot_over_a_replicated_wal_is_not_lag_before_its_snapshot() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    tear(&rig, 3, flipped);
+    let mut actor = Actor::new(go_like());
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+    remote_down(&rig, 10_000);
+    staging_down(&rig);
+    let boot = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::NewestStagedFileUnreadable)
+        })
+    );
+    let seen = drive(&mut rig, &mut actor, again, again + 2 * BOUND);
+    assert!(
+        actor.staged() <= actor.replicated(),
+        "no snapshot was staged"
     );
     assert_eq!(actor.unreplicated_since(), None);
     assert_eq!(first_trip(&seen), None, "{seen:?}");

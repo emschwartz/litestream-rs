@@ -15,6 +15,8 @@
 - Bounded everything: channels, retries, fan-in, memory per file. No unbounded queue. Every retry wait is capped, and a failure that persists is a typed degraded state the health handle reports (D7); it never retries silently and never spins.
 - No panic in release builds. Assertions come in three tiers: `debug_assert!` for cheap pre and postconditions (positive and negative space); `invariant!(cond, BugSite::X)` for invariants whose violation release must report, a panic in debug and test builds and `Fault::Bug` in release, which rebuilds the engine instead of killing the host; the `verify` feature (`lsr_core::VERIFY`, on in the sim, fuzz and tests, off in release) for expensive checks.
 - No caching and no parallelism unless a measurement in the PR justifies it.
+- Production code should not grow without need; test code may. Keep it concise and readable, and prefer a type that makes an invalid state unrepresentable over code that checks for it. `just prod-lines` prints the change per crate, and CI writes it to each pull request's job summary (docs/decisions/D241.md).
+- No request beyond Go's. In the same scenario lsr makes no more store requests than Go does, unless the extra request guards against something Go does wrong and makes replication safer; each such request names the Go defect it guards against in a comment at the request and in a decision file (docs/decisions/D241.md). Every request is billed.
 
 ## Rust style
 - The lint set is in `Cargo.toml`; gates run with `-D warnings`. No `unwrap`, `expect`, `panic`, `as`, indexing or unchecked arithmetic in non-test code. An exception is `#[expect(lint, reason = "the invariant")]` on the smallest item, never `allow`.
