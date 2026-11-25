@@ -66,6 +66,35 @@ fn names(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Every level of `dir`'s replica with each file's age, for a failure message: which file
+/// carries a fresh time decides what retention measures from.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a failure message compares file times with the wall clock the files were stamped by"
+)]
+fn listing(dir: &Path) -> String {
+    let now = SystemTime::now();
+    let mut out = String::new();
+    for level in ["0", "1", "2", "3", "9"] {
+        let path = dir.join("replica").join("ltx").join(level);
+        let mut files: Vec<PathBuf> = std::fs::read_dir(path)
+            .map(|d| d.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        files.sort();
+        for file in files {
+            let age = now
+                .duration_since(std::fs::metadata(&file).unwrap().modified().unwrap())
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  L{level} {} {}s old\n",
+                file.file_name().unwrap().to_string_lossy(),
+                age.as_secs()
+            ));
+        }
+    }
+    out
+}
+
 fn rows(db: &Path) -> Vec<Vec<u8>> {
     let conn = rusqlite::Connection::open(db).unwrap();
     let mut stmt = conn.prepare("SELECT x FROM t ORDER BY rowid").unwrap();
@@ -199,8 +228,9 @@ fn go_and_lsr_delete_the_same_aged_snapshots() {
     let fixture = replica_with_snapshots(&go, &lsr, [72 * HOUR, 48 * HOUR, HOUR]);
     let all = names(fixture.path());
     let [go_left, lsr_left] = after_retention(&go, &lsr, fixture.path());
-    assert_eq!(go_left, all[2..].to_vec());
-    assert_eq!(lsr_left, go_left);
+    let listed = listing(fixture.path());
+    assert_eq!(go_left, all[2..].to_vec(), "after retention:\n{listed}");
+    assert_eq!(lsr_left, go_left, "after retention:\n{listed}");
 }
 
 /// The departure, stated as a test: on an idle replica whose snapshots are all days old, Go
@@ -213,8 +243,17 @@ fn on_an_idle_replica_lsr_keeps_a_snapshot_go_deletes() {
     let fixture = replica_with_snapshots(&go, &lsr, [120 * HOUR, 90 * HOUR, 72 * HOUR]);
     let all = names(fixture.path());
     let [go_left, lsr_left] = after_retention(&go, &lsr, fixture.path());
-    assert_eq!(go_left, all[2..].to_vec(), "Go keeps only the newest");
-    assert_eq!(lsr_left, all[1..].to_vec(), "lsr keeps the newest two");
+    let listed = listing(fixture.path());
+    assert_eq!(
+        go_left,
+        all[2..].to_vec(),
+        "Go keeps only the newest; lsr replica after retention:\n{listed}"
+    );
+    assert_eq!(
+        lsr_left,
+        all[1..].to_vec(),
+        "lsr keeps the newest two; lsr replica after retention:\n{listed}"
+    );
     for name in &lsr_left {
         assert_eq!(parse_file_name(name).unwrap().min().get(), 1);
     }

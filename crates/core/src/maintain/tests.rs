@@ -2525,3 +2525,18 @@ fn an_output_closes_the_window_only_when_created_after_its_start() {
         Some(at(T0 + 30_000))
     );
 }
+
+/// A one-off schedule is the same settings with the run switched off; nothing else changes,
+/// since the retention pass a `-once` drain ends with reads them.
+#[test]
+fn a_one_off_schedule_keeps_its_settings_and_is_not_run() {
+    let ordinary = defaults();
+    assert!(!ordinary.is_one_off());
+    let once = ordinary.clone().one_off();
+    assert!(once.is_one_off());
+    assert_eq!(once.top(), ordinary.top());
+    assert_eq!(once.snapshot_retention(), ordinary.snapshot_retention());
+    assert_eq!(once.retention(), ordinary.retention());
+    assert_ne!(once, ordinary);
+    assert!(!Maintenance::go_default().is_one_off());
+}
