@@ -10,7 +10,7 @@
 //! newest input's time, so every file of levels 0 to 8 holds the stamp of a
 //! staged file that ended at the same transaction. A level-9 snapshot read
 //! from the database is stamped when it is written, so it holds a time from its own put;
-//! one built from level 0 (the first, `docs/decisions/D203.md`) is a compaction and holds
+//! one built from level 0 (the first, `docs/decisions/D205.md`) is a compaction and holds
 //! the stamp of a staged file that ended at its last transaction ([`stamps`]).
 //! Together they pin the answer without copying the planner.
 //!

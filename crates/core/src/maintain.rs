@@ -828,7 +828,7 @@ pub enum Outcome {
     Failed(MaintainError),
 }
 
-/// Runs one merge of `inputs` into `level`: a compaction, or the first snapshot (D203). A merge
+/// Runs one merge of `inputs` into `level`: a compaction, or the first snapshot (D205). A merge
 /// of level-0 files reads `local` when every input's local copy is the replica's object
 /// ([`local_is_replica`]), and the replica otherwise or once when an input is missing or does not
 /// decode locally (the local copy may be gone after a restart, or rotten); every other level

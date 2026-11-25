@@ -1,4 +1,4 @@
-//! The Go half of the merged first snapshot (`docs/decisions/D203.md`): a first start that meets
+//! The Go half of the merged first snapshot (`docs/decisions/D205.md`): a first start that meets
 //! writes leaves the replica's level-9 snapshot built by merging level-0 files, an object Go
 //! never writes (Go snapshots by reading the database again). The contract is that Go restores
 //! what lsr wrote, so the pinned Go builds restore from that prefix with the level-0 files still
