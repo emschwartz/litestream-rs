@@ -977,6 +977,23 @@ mod tests {
         }
     }
 
+    /// What a store keeps of bytes it let go of counts them as they pass, says when there are
+    /// none, and is the same however the bytes were cut.
+    #[test]
+    fn a_seen_counts_its_bytes_and_does_not_depend_on_how_they_were_cut() {
+        let mut seeing = Seeing::new();
+        assert_eq!((seeing.len(), seeing.is_empty()), (0, true));
+        assert!(Seen::of(&[]).is_empty());
+        seeing.add(b"abc");
+        assert_eq!((seeing.len(), seeing.is_empty()), (3, false));
+        seeing.add(b"defg");
+        assert_eq!(seeing.len(), 7);
+        let whole = Seen::of(b"abcdefg");
+        assert_eq!(seeing.seen(), whole);
+        assert_eq!((whole.len(), whole.is_empty()), (7, false));
+        assert_ne!(whole, Seen::of(b"abcdefh"));
+    }
+
     #[test]
     fn part_number_bounds() {
         assert_eq!(PartNumber::new(0), None);
