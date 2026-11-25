@@ -439,3 +439,91 @@ fn maintenance_takes_its_turn_between_the_slices_of_a_file() {
     );
     assert_eq!(newest_replica_file(&rig), Some(6));
 }
+
+/// Another writer's level-0 file at the id of a file in flight is not this engine's, though it
+/// is not past what the engine staged. Maintenance has its turn between the slices and lists
+/// the replica with that file on it, the whole replica when `whole` and its tails otherwise:
+/// it plans nothing from the listing, so no compaction takes the other writer's pages into a
+/// level above. The engine's own put of the id is refused and it stops; once the file is
+/// removed, a restart sends its own file and the replica restores the commit. Before, the
+/// compaction ran, the restart took level 1 as holding the commit and dropped its staged
+/// file, and the replica restored a database no commit made.
+fn another_writers_file_at_the_id_in_flight_is_not_compacted(whole: bool) {
+    let (mut rig, mut actor) = caught_up_with(slicing(8));
+    for n in 2..=5 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    // The first snapshot goes before any level (`crate::maintain`), so it is written first.
+    // The commit after it is level 1's to compact, in a listing its upload makes due.
+    rig.settle(&mut actor, T0 + 60_000);
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
+    commit_and_settle(&mut rig, &mut actor, 6, T0 + 60_001);
+    let now = T0 + 120_000;
+    rig.commit(7);
+    assert_eq!(
+        event(&rig.tick(&mut actor, now)),
+        Some(&Event::Synced { files: 1 })
+    );
+    let theirs = super::second_writer::put_foreign(&rig, 7);
+    if whole {
+        actor.engine.maintain.remembered.owe_full();
+    }
+    let above_level_zero = |rig: &Rig| -> Vec<FileKey> {
+        Level::ALL
+            .into_iter()
+            .filter(|level| *level != Level::ZERO)
+            .flat_map(|level| Rig::files(&rig.remote, level))
+            .map(|info| info.key)
+            .filter(|key| key.range().max().get() >= 7)
+            .collect()
+    };
+    let all = u32::try_from(Level::ALL.len()).unwrap();
+    let mut seen = Vec::new();
+    let mut waits = Vec::new();
+    for _ in 0..200 {
+        let lists = rig.remote.lists();
+        let tick = rig.tick(&mut actor, now);
+        assert_eq!(above_level_zero(&rig), [], "after {tick:?}: {seen:?}");
+        if let Some(Event::Maintained { event, .. }) = event(&tick) {
+            // The prune of staged files reports as maintenance and lists nothing. A pass that
+            // lists the replica plans nothing from what it shows.
+            let listed = rig.remote.lists().saturating_sub(lists);
+            if listed == 0 {
+                assert!(matches!(event, MaintainedEvent::Deleted(_)), "{seen:?}");
+            } else {
+                assert_eq!(*event, MaintainedEvent::Waiting { held: None }, "{seen:?}");
+                waits.push(listed);
+            }
+        }
+        let stopped = matches!(tick, Tick::Stopped(_));
+        seen.push(tick);
+        if stopped {
+            break;
+        }
+    }
+    assert_eq!(
+        seen.last(),
+        Some(&Tick::Stopped(StopCause::OtherWriter)),
+        "{seen:?}"
+    );
+    // The listing is not asked for again at every turn: once, then after the retry interval.
+    assert_eq!(waits.len(), 1, "{waits:?} in {seen:?}");
+    assert_eq!(waits[0] >= all, whole, "{waits:?}");
+    // The operator removes the other writer's file and restarts.
+    block_on(rig.remote.inner.delete(&[theirs])).unwrap();
+    let mut next = Actor::new(slicing(8));
+    let seen = rig.follow(&mut next, now + 1000, 400);
+    no_stop(&seen);
+    assert_eq!(newest_replica_file(&rig), Some(7));
+    assert_eq!(restored(&rig), 7);
+}
+
+#[test]
+fn a_whole_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight() {
+    another_writers_file_at_the_id_in_flight_is_not_compacted(true);
+}
+
+#[test]
+fn a_short_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight() {
+    another_writers_file_at_the_id_in_flight_is_not_compacted(false);
+}

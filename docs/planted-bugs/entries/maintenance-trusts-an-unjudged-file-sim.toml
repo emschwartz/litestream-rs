@@ -1,0 +1,9 @@
+# Maintenance takes a listed file above what the uploader confirmed as its own (the same plant
+# as maintenance-trusts-an-unjudged-file): in the simulator's history of another writer at the
+# id of an unsent file, the replica restores a database no commit made.
+name = "maintenance-trusts-an-unjudged-file-sim"
+patch = "maintenance-trusts-an-unjudged-file"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["sliced::another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted"]
