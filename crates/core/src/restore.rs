@@ -68,7 +68,7 @@ pub const MAX_ATTEMPTS: u8 = 3;
 
 /// Bytes asked of the store per read: memory per file stays one chunk plus one
 /// page, whatever the file's size.
-const CHUNK_BYTES: u32 = 1024 * 1024;
+const CHUNK_BYTES: u32 = 4 * 1024 * 1024;
 
 // `ReadLen::or_chunk` falls back to 1 MiB for a size it refuses, which would
 // silently change the memory per file this constant states.

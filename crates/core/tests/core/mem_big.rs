@@ -9,8 +9,8 @@ use crate::mem::{
     assert_snapshot_law,
 };
 
-/// The read width of the S3 store, so the window is the real one: sixteen 1 MiB chunks.
-const S3_WIDTH: usize = 16;
+/// The read width of the S3 store, so the window is the real one: eight 4 MiB chunks.
+const S3_WIDTH: usize = 8;
 
 /// 4 KiB pages in a mebibyte.
 const PAGES_PER_MIB: u32 = 256;

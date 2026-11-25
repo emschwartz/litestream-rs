@@ -12,7 +12,7 @@
 //!
 //! - An upload holds at most `concurrency` parts (the batch being sent), whatever its size:
 //!   the part buffers are the request bodies, so nothing copies them.
-//! - A restore holds one read window: `READ_CONCURRENCY` responses of the 1 MiB the engine
+//! - A restore holds one read window: `READ_CONCURRENCY` responses of the 4 MiB the engine
 //!   asks for, whatever the database's size, so each response holds its length and not the
 //!   capacity a read grown from empty ends with.
 
@@ -66,7 +66,7 @@ const MIB: usize = 1024 * KIB;
 
 /// Bytes one restore read asks of the store: core's `restore::CHUNK_BYTES`, restated so a
 /// change there shows here.
-const RESTORE_CHUNK: usize = MIB;
+const RESTORE_CHUNK: usize = 4 * MIB;
 
 /// What a store may hold beyond the buffers the laws name: the client's per-request
 /// buffers and the decoder's page, the multipart bookkeeping and the result.

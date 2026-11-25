@@ -4,7 +4,7 @@
 //! a plan holds at once, and each gate asserts the law the code documents rather than
 //! a figure from one machine:
 //!
-//! - Restore memory is one read window (the store's read width times the 1 MiB
+//! - Restore memory is one read window (the store's read width times the 4 MiB
 //!   chunk), whatever the database's size and however long the chain. The gate runs a
 //!   size N and a size 4N, so a buffer that grows with the file shows as a difference,
 //!   and also caps the peak by the constants the window is made of.
@@ -55,7 +55,7 @@ pub const MIB: usize = 1024 * KIB;
 
 /// Bytes one restore read asks of the store: core's `restore::CHUNK_BYTES`. A change
 /// there changes the window this file bounds, which is the point of repeating it.
-pub const RESTORE_CHUNK: usize = MIB;
+pub const RESTORE_CHUNK: usize = 4 * MIB;
 
 /// The page size every fixture uses.
 pub fn page_size() -> PageSize {

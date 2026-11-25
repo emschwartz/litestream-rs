@@ -55,7 +55,7 @@
 //! pinned by a gate that fails when the buffer grows (the tests are named). The configuration
 //! terms are: part size `P` (`S3Config::with_part_size`, 5 MiB by default and 16 MiB on
 //! Tigris), upload concurrency `C` (`S3Config::with_concurrency`, 5), the compaction fan-in
-//! `F` (`MAX_INPUTS`, 32), and the restore read concurrency `R` (`READ_CONCURRENCY`, 16).
+//! `F` (`MAX_INPUTS`, 32), and the restore read concurrency `R` (`READ_CONCURRENCY`, 8).
 //! Larger parts or more concurrency raise `C x P`, and nothing else.
 //!
 //! - **Upload:** `C x P` plus 4 MiB, the parts of the batch being sent. A part body is sent by
@@ -75,12 +75,12 @@
 //!   about 30 MiB with the defaults (`a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts`).
 //!   A compaction above level 1 holds its 17 MiB of windows instead of 5, to about 42 MiB (the
 //!   sum of the two gates above).
-//! - **Restore:** `R x 1 MiB` plus 3 MiB: 19 MiB, whatever the database's size or the chain's
+//! - **Restore:** `R x 4 MiB` plus 3 MiB: 35 MiB, whatever the database's size or the chain's
 //!   length (`a_restore_through_the_real_client_holds_one_read_window`; the same law at one
 //!   to four GiB in `crates/core/tests/core/mem_big.rs`).
 //! - **Idle:** a replicator on a quiet database holds about 1 MiB of live heap (the page
-//!   checksum table and the HTTP client's idle connections: up to 16, 160 KiB of buffers each, which only a 16-wide
-//!   restore leaves open).
+//!   checksum table and the HTTP client's idle connections: up to 16, 160 KiB of buffers each, which only a
+//!   16-wide batch leaves open).
 //! - **Snapshot:** 18 bytes a page on top of the above, 4 MiB at 1 GiB of 4 KiB pages and 74 MiB
 //!   at 16 GiB: an 8-byte slot a page in the page checksum table, which a replicator holds for
 //!   good, and about 9 bytes of the file's page index, which it holds while the snapshot is

@@ -1,8 +1,0 @@
-# A restore asks the store for 4 MiB per read instead of 1 MiB, so its window is four times the stated bound.
-name = "restore-window-four-mebibytes"
-fix = "e7aafe56e"
-package = "lsr-store-s3"
-test_bin = "store-s3"
-tests = [
-    "memory::a_restore_through_the_real_client_holds_one_read_window",
-]

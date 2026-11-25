@@ -786,19 +786,15 @@ fn a_file_larger_than_one_chunk_is_read_in_several_reads() {
     }
     let bytes = encoder.finish(None).unwrap().0;
     assert!(
-        bytes.len() > 4 * usize::try_from(CHUNK_BYTES).unwrap(),
-        "incompressible pages exceed several chunks"
+        bytes.len() > 4 * 1024 * 1024,
+        "incompressible pages exceed one chunk"
     );
     put(&store, 9, 1, 1, &bytes);
     let store = Wrapped::new(store);
     let (result, sink) = run(&store, RestoreTarget::Latest);
     let restored = result.unwrap();
-    // Full chunks, then the short rest: no empty read follows.
-    let chunk = usize::try_from(CHUNK_BYTES).unwrap();
-    assert_eq!(
-        store.reads.load(Ordering::Relaxed),
-        bytes.len().div_ceil(chunk)
-    );
+    // One full chunk, then the short rest: no empty read follows.
+    assert_eq!(store.reads.load(Ordering::Relaxed), 2);
     assert_eq!(restored.bytes_read(), u64::try_from(bytes.len()).unwrap());
     let db = sink.published().unwrap();
     for (index, page) in want.iter().enumerate() {

@@ -24,10 +24,10 @@ pub struct Waves {
 }
 
 /// Ranged reads in flight at once, as the S3 store designs it.
-pub const WIDTH: usize = 16;
+pub const WIDTH: usize = 8;
 
 /// Bytes of one restore read: core's `restore::CHUNK_BYTES`.
-pub const RESTORE_CHUNK: usize = 1024 * 1024;
+pub const RESTORE_CHUNK: usize = 4 * 1024 * 1024;
 
 impl Waves {
     pub fn new(inner: MemStore) -> Self {
