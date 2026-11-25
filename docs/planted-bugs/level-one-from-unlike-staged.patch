@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
-index 083a5f96..5dffaca9 100644
+index 77105041e..9008c8531 100644
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -727,7 +727,7 @@ async fn compact_level_one<L: Role, R: Role>(
+@@ -891,7 +891,7 @@ async fn compact_from_level_zero<L: Role, R: Role>(
      local: &L,
      replica: &R,
  ) -> Result<Compacted, CompactError> {
--    if !local_is_replica(local, replica, job.inputs()).await? {
-+    if false && !local_is_replica(local, replica, job.inputs()).await? {
-         return compact_in(replica, replica, job.inputs(), job.level()).await;
+-    if !local_is_replica(local, replica, inputs).await? {
++    if false && !local_is_replica(local, replica, inputs).await? {
+         return compact_in(replica, replica, inputs, level).await;
      }
      // The source is staging here, so a failed read is staging's error

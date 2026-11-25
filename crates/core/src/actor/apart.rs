@@ -134,15 +134,16 @@ impl<L: ObjectStore> ObjectStore for Apart<'_, L> {
             .await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
         let upload = self
             .inner
-            .begin_upload(&self.held(key), created_at, mode)
+            .begin_sized_upload(&self.held(key), created_at, mode, len)
             .await?;
         Ok(ApartUpload(upload))
     }
@@ -213,7 +214,7 @@ async fn copy<L: Role>(course: &Apart<'_, L>, staging: &L, file: &FileInfo) -> R
         .created_at(file)
         .await
         .map_err(|err| L::fault(&err))?;
-    let mut to = Writer::begin(staging, key, stamp.at(), WriteMode::New)
+    let mut to = Writer::begin(staging, key, stamp.at(), WriteMode::New, Some(file.size))
         .await
         .map_err(|err| L::fault(&err))?;
     let len = ReadLen::CHUNK;

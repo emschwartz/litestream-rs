@@ -47,14 +47,17 @@ impl ObjectStore for SizeLiar {
         self.0.read_with_created_at(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<LyingUpload, StoreError> {
         Ok(LyingUpload(
-            self.0.begin_upload(key, created_at, mode).await?,
+            self.0
+                .begin_sized_upload(key, created_at, mode, len)
+                .await?,
         ))
     }
 
@@ -119,14 +122,17 @@ impl ObjectStore for DigestLiar {
         self.0.read_with_created_at(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<RejectedUpload, StoreError> {
         Ok(RejectedUpload(
-            self.0.begin_upload(key, created_at, mode).await?,
+            self.0
+                .begin_sized_upload(key, created_at, mode, len)
+                .await?,
         ))
     }
 

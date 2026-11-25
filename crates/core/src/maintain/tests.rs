@@ -103,6 +103,15 @@ pub(super) fn due_state(
     }
 }
 
+/// `run_compaction` for a compaction job.
+pub(super) async fn run_compact<L: Role, R: Role>(
+    job: &CompactJob,
+    local: &L,
+    replica: &R,
+) -> Outcome {
+    run_compaction(job.inputs(), job.level(), local, replica).await
+}
+
 fn due_at(i: &Inventory, now: i64) -> Due {
     due(i, at(now), &defaults(), None)
 }
@@ -420,7 +429,8 @@ fn a_published_position_alone_asks_for_the_first_snapshot() {
         got,
         Due::Run(Job::Snapshot(SnapshotJob {
             after: None,
-            through: txid(5)
+            through: txid(5),
+            from: None,
         }))
     );
 }
@@ -584,13 +594,77 @@ fn a_first_snapshot_is_due_at_once() {
         file(3, 1, 3, T0 - 1),
     ]);
     let got = due_at(&inv(files), T0 + 1);
+    // Level 0 holds the database from transaction 1, so the snapshot is built from it.
+    let Due::Run(Job::Snapshot(job)) = got else {
+        panic!("{got:?}");
+    };
+    assert_eq!((job.after, job.through), (None, txid(3)));
+    assert_eq!(
+        job.from.as_ref().map(CompactionInputs::files),
+        Some(i.level(Level::ZERO))
+    );
+}
+
+/// Level 0 that does not start at transaction 1 holds no database to build from: the
+/// snapshot reads the database file.
+#[test]
+fn a_first_snapshot_is_read_from_the_database_when_level_zero_starts_later() {
+    let mut files = l0_run(2, 4, T0);
+    files.extend([
+        file(1, 2, 4, T0 - 1),
+        file(2, 2, 4, T0 - 1),
+        file(3, 2, 4, T0 - 1),
+    ]);
+    let got = due_at(&inv(files), T0 + 1);
     assert_eq!(
         got,
         Due::Run(Job::Snapshot(SnapshotJob {
             after: None,
-            through: txid(3)
+            through: txid(4),
+            from: None,
         }))
     );
+}
+
+/// A first snapshot built from level 0 failed: the next one reads the database.
+#[test]
+fn a_refused_seed_makes_the_first_snapshot_a_read_of_the_database() {
+    let mut files = l0_run(1, 3, T0);
+    files.extend([
+        file(1, 1, 3, T0 - 1),
+        file(2, 1, 3, T0 - 1),
+        file(3, 1, 3, T0 - 1),
+    ]);
+    let i = inv(files);
+    let mut state = MaintainState::default();
+    state.refuse_seed();
+    let got = due_state(&i, at(T0 + 1), &defaults(), None, &mut state);
+    assert_eq!(
+        got,
+        Due::Run(Job::Snapshot(SnapshotJob {
+            after: None,
+            through: txid(3),
+            from: None,
+        }))
+    );
+}
+
+/// Level 0 with a hole, or more files than one compaction takes, does not reach the newest
+/// transaction: the snapshot reads the database, at that transaction.
+#[test]
+fn a_level_zero_that_stops_short_of_the_newest_transaction_gives_no_inputs() {
+    let mut files = l0_run(1, 2, T0);
+    files.extend(l0_run(5, 6, T0));
+    files.extend([
+        file(1, 1, 6, T0 - 1),
+        file(2, 1, 6, T0 - 1),
+        file(3, 1, 6, T0 - 1),
+    ]);
+    let got = due_at(&inv(files), T0 + 1);
+    let Due::Run(Job::Snapshot(job)) = got else {
+        panic!("{got:?}");
+    };
+    assert_eq!((job.through, job.from), (txid(6), None));
 }
 
 #[test]
@@ -603,13 +677,10 @@ fn a_malformed_snapshot_does_not_count_as_one() {
         file(3, 1, 5, T0 - 1),
     ]);
     let got = due_at(&inv(files), T0 + 1);
-    assert_eq!(
-        got,
-        Due::Run(Job::Snapshot(SnapshotJob {
-            after: None,
-            through: txid(5)
-        }))
-    );
+    let Due::Run(Job::Snapshot(job)) = got else {
+        panic!("{got:?}");
+    };
+    assert_eq!((job.after, job.through), (None, txid(5)));
 }
 
 fn converged(snapshot_created: i64, snapshot_max: u64, pos: u64) -> Inventory {
@@ -655,7 +726,8 @@ fn an_old_snapshot_and_a_newer_position_ask_for_a_new_snapshot() {
         got,
         Due::Run(Job::Snapshot(SnapshotJob {
             after: Some(txid(3)),
-            through: txid(4)
+            through: txid(4),
+            from: None,
         }))
     );
     let got = due(&i, at(T0 + 5000), &defaults(), Some(txid(9)));
@@ -663,7 +735,8 @@ fn an_old_snapshot_and_a_newer_position_ask_for_a_new_snapshot() {
         got,
         Due::Run(Job::Snapshot(SnapshotJob {
             after: Some(txid(3)),
-            through: txid(9)
+            through: txid(9),
+            from: None,
         }))
     );
 }
@@ -718,7 +791,8 @@ fn a_go_shaped_snapshot_waits_inside_its_window_and_runs_after() {
         got,
         Due::Run(Job::Snapshot(SnapshotJob {
             after: Some(txid(4)),
-            through: txid(6)
+            through: txid(6),
+            from: None,
         }))
     );
 }
@@ -1070,6 +1144,18 @@ fn same_decision(a: &Due, b: &Due) -> bool {
     match (a, b) {
         (Due::Run(Job::Compact(x)), Due::Run(Job::Compact(y))) => {
             x.output_key() == y.output_key() && input_keys(x) == input_keys(y)
+        }
+        (Due::Run(Job::Snapshot(x)), Due::Run(Job::Snapshot(y))) => {
+            let keys = |job: &SnapshotJob| {
+                job.from.as_ref().map(|inputs| {
+                    inputs
+                        .files()
+                        .iter()
+                        .map(|info| info.key)
+                        .collect::<Vec<_>>()
+                })
+            };
+            (x.after, x.through, keys(x)) == (y.after, y.through, keys(y))
         }
         _ => a == b,
     }
@@ -1925,13 +2011,14 @@ impl ObjectStore for FailsWholeReads {
         }
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl std::future::Future<Output = Result<Self::Upload, StoreError>> + Send {
-        self.inner.begin_upload(key, created_at, mode)
+        self.inner.begin_sized_upload(key, created_at, mode, len)
     }
 
     fn delete(

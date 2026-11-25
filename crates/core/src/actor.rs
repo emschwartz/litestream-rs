@@ -116,8 +116,8 @@ use crate::identity::{self, Identity};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due_full,
-    listing_after_upload, read_back, run_compact, run_delete,
+    Due, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, RetentionHold, due_full,
+    listing_after_upload, read_back, run_compaction, run_delete,
 };
 use crate::pages::{PageChecksumTable, Seeding, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
@@ -2349,11 +2349,17 @@ impl Actor {
         now: Timestamp,
         created_at_read: u64,
     ) -> Tick {
-        let outcome = match job {
-            Job::Compact(compact) => run_compact(compact, env.staging, env.remote).await,
-            Job::Delete(delete) => run_delete(delete, env.remote).await,
-            Job::Snapshot(_) => return self.snapshot_job(env, job, now, created_at_read).await,
+        // One call site for every merge, so the tick's future holds one compaction.
+        let outcome = if let Some((inputs, level)) = job.merge() {
+            run_compaction(inputs, level, env.staging, env.remote).await
+        } else if let Job::Delete(delete) = job {
+            run_delete(delete, env.remote).await
+        } else {
+            return self.snapshot_job(env, job, now, created_at_read).await;
         };
+        if let Job::Snapshot(_) = job {
+            return self.snapshot_merged(job, outcome, now, created_at_read);
+        }
         self.engine.maintain.state.record(now, job, &outcome);
         let event = match outcome {
             Outcome::Compacted { info, .. } => MaintainedEvent::Compacted(info),
@@ -2437,6 +2443,48 @@ impl Actor {
             },
             now,
         )
+    }
+
+    /// How a snapshot built from the replica's level-0 files ended ([`Job::merge`]): no step, no
+    /// proof and no read of the database file. A failure makes the next snapshot a read of the
+    /// database, so a replica whose files cannot be merged still gets one.
+    fn snapshot_merged(
+        &mut self,
+        job: &Job,
+        outcome: Outcome,
+        now: Timestamp,
+        created_at_read: u64,
+    ) -> Tick {
+        let state = &mut self.engine.maintain.state;
+        match outcome {
+            Outcome::Compacted { info, .. } => {
+                state.record_snapshot(now, None);
+                self.snapshot_written(info, now, created_at_read)
+            }
+            // The listing changed under the job; the next listing is what to plan from.
+            Outcome::Replan { .. } | Outcome::Deleted { .. } => {
+                self.engine.maintain.remembered.owe_full();
+                self.maintained(now);
+                let event = MaintainedEvent::Replan;
+                self.ran(
+                    Event::Maintained {
+                        event,
+                        created_at_read,
+                    },
+                    now,
+                )
+            }
+            Outcome::Failed(err) => {
+                if let MaintainError::OutputDistrusted { key, .. } = &err {
+                    state.distrust_snapshot(*key);
+                }
+                let fault = Fault::from_maintain(&err);
+                state.record_snapshot(now, Some(&fault));
+                state.refuse_seed();
+                let waiter = self.job_waiter(job, now);
+                self.fault(waiter, fault, now)
+            }
+        }
     }
 
     /// A level-9 snapshot of a fresh proof. A sync that staged a file first

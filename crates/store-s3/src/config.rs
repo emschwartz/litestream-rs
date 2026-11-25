@@ -285,6 +285,12 @@ impl PartSize {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    /// This size, or `bytes` when that is larger: never below the configured size.
+    #[must_use]
+    pub(crate) const fn at_least(self, bytes: u64) -> Self {
+        if bytes > self.0 { Self(bytes) } else { self }
+    }
 }
 
 /// Where a replica lives and how to talk to it. Holds no credentials.

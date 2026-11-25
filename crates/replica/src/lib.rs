@@ -58,7 +58,9 @@
 //! the compaction fan-in `F` (`MAX_INPUTS`, 32), and the restore read concurrency `R`
 //! (`READ_CONCURRENCY`, 8). Larger parts or more concurrency raise `C x P`, and nothing else.
 //!
-//! - **Upload:** `C x P` plus 4 MiB, the parts of the batch being sent. A part body is sent by
+//! - **Upload:** `C x P` plus 4 MiB, the parts of the batch being sent. For a file over 10000
+//!   parts of `P` (48.8 GiB at 5 MiB, 977 GiB at 100 MB) the part is the file's length over
+//!   10000 instead, 524 MB at S3's 5 TiB ceiling (`docs/decisions/D208.md`). A part body is sent by
 //!   reference, so nothing holds it twice: 26 MiB at the defaults, at most 84 MiB on Tigris
 //!   (`crates/store-s3/tests/store-s3/memory.rs`, `an_upload_through_the_real_client_holds_five_parts`
 //!   and `the_bound_follows_part_size_and_concurrency`).

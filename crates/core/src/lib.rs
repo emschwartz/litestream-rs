@@ -129,7 +129,9 @@ pub use restore::{
 };
 #[cfg(any(test, feature = "testing"))]
 pub use restore::{Database, MemPublishError, MemSink};
-pub use retry::{Class, RetryPolicy, RetryStats, Retrying, RetryingUpload, classify};
+pub use retry::{
+    Class, ListingExpired, RetryPolicy, RetryStats, Retrying, RetryingUpload, classify,
+};
 pub use snapshot::SnapshotFailed;
 pub use source::{
     Barrier, CheckpointMode, CheckpointRun, Checkpointer, CommittedRead, PageSource, SourceError,
