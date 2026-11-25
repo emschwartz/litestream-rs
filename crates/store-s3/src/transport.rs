@@ -164,7 +164,7 @@ pub(crate) fn map_io(kind: io::ErrorKind) -> TransportError {
 
 /// A blocking HTTP client. It follows no redirects and retries nothing: both
 /// are decisions for the layers above.
-pub trait Transport: Send + Sync {
+pub trait Transport: Send + Sync + 'static {
     /// Sends `request`.
     ///
     /// # Errors

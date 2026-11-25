@@ -2290,6 +2290,7 @@ mod rejected_snapshot;
 mod requested_snapshot_after_restart;
 mod rewound;
 mod second_writer;
+mod sliced;
 mod stamp;
 mod tasks;
 mod vouch;

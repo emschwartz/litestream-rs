@@ -13,7 +13,12 @@
 //!    the checkpoint decision wants a proof; then, in the same tick, the
 //!    checkpoint the decision calls for, consuming that sync's proof (no
 //!    checkpoint runs without one, and a proof never outlives its tick).
-//! 2. Upload while staged files are not on the replica.
+//! 2. Upload while staged files are not on the replica. One step sends files until the
+//!    tick's bytes run out; a file they run out in stays in flight, and the next step
+//!    sends on from there (`docs/decisions/D217.md`). A file in flight goes first, and
+//!    the sync takes a turn after every [`state::FAIR_SHARE`] slices, so commits are staged
+//!    and checkpoints run while it goes up; with no file in flight an upload goes first
+//!    only after that many syncs in a row.
 //! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
 //!    newest staged file.
 //! 4. Maintenance. Its first listing after a
@@ -130,8 +135,9 @@ use crate::store::{Denied, ObjectStore, PageLimit, StoreError};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
-    Did, Guard, Swept, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
-    drop_staged_from, inventory_fault, plan_upload, sweep_staged, upload_next, upload_next_in,
+    Did, Guard, InFlight, Swept, Unsent, UploadConfig, UploadFailed, UploadPlan, UploadState,
+    Uploaded, drop_staged_from, inventory_fault, plan_upload, sweep_staged, upload_next,
+    upload_step,
 };
 use crate::verify::LivePages;
 use crate::witness::{Pending, Witnesses, check_pending, still_holds};
@@ -256,6 +262,13 @@ pub enum Event {
     },
     /// Uploads ran; this is what the last one did.
     Uploaded(Did),
+    /// A slice of a staged file went to the replica and more of the file is left: the tick
+    /// handed the replica as much as one tick may (`docs/decisions/D217.md`), and the next
+    /// upload step reads on. Nothing is published until the file is whole.
+    Sending {
+        /// How many bytes of the file were handed to the replica so far.
+        bytes: u64,
+    },
     /// A maintenance step ran.
     Maintained {
         /// What it did.
@@ -1043,6 +1056,9 @@ impl Actor {
         // stand above staging or under a key staging holds another copy of
         // (`crate::takeover`).
         self.kept.stop = Stop::Stopped(cause);
+        // No tick runs again to send the rest of a file in flight or to abort its upload: it is
+        // dropped, and what it wrote is scratch the next boot clears.
+        self.engine.in_flight = InFlight::default();
         Tick::Stopped(cause)
     }
 
@@ -1216,8 +1232,12 @@ impl Actor {
         let takeover = self.boot_takeover();
         let doubted = self.kept.suspect_staged;
         let suspect = &mut self.kept.suspect_staged;
+        // Nothing is in flight before a boot; the boot's drops of staged files ask all the same.
+        let mut in_flight = std::mem::take(&mut self.engine.in_flight);
+        let unsent = in_flight.stop().await;
         let denied = &mut self.kept.scratch_sweep_denied;
-        let listed = boot_listing(env.staging, env.remote, suspect, denied, takeover).await;
+        let stores = (env.staging, env.remote);
+        let listed = boot_listing(stores, suspect, denied, takeover, &unsent).await;
         let Listed {
             upload,
             dropped,
@@ -1236,7 +1256,7 @@ impl Actor {
                     page_size,
                     refused_through,
                 },
-        } = match boot_judge(env, upload, gate).await {
+        } = match boot_judge(env, upload, gate, &unsent).await {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, took(), now),
         };
@@ -1302,8 +1322,6 @@ impl Actor {
             }
         }
         if let Some(tick) = self.upload_unit(env, now).await {
-            let maintain = &mut self.engine.maintain;
-            maintain.passed_over = maintain.passed_over.saturating_add(1);
             return tick;
         }
         if let Some(tick) = self.prune_unit(env, now).await {
@@ -1388,6 +1406,8 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
+        // A file part-way sent is abandoned: its upload is aborted, and it counts as not uploaded.
+        self.engine.in_flight.stop().await;
         let unfinished = self.unfinished(env).await;
         match self.fault(Task::Sync, Fault::ShutdownDeadline, now) {
             Tick::Stopped(StopCause::Shutdown) => Tick::DeadlineReached(unfinished),
@@ -1912,7 +1932,8 @@ impl Actor {
         }
     }
 
-    /// Staged files to the replica, up to the per-tick limit.
+    /// Staged files to the replica, up to the per-tick limits: so many files, and so many
+    /// bytes of them. A file the bytes run out in is left in flight, and the tick says so.
     async fn upload_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
@@ -1922,6 +1943,9 @@ impl Actor {
             return None;
         }
         self.engine.syncs_ahead = 0;
+        // Owed or in its own turn, an upload tick is one that passed prune and maintenance over.
+        let maintain = &mut self.engine.maintain;
+        maintain.passed_over = maintain.passed_over.saturating_add(1);
         let limit = self
             .kept
             .cfg
@@ -1929,21 +1953,29 @@ impl Actor {
             .files_per_tick
             .map_or(u32::MAX, NonZeroU32::get);
         let mut last = Did::Nothing;
+        let mut budget = self.kept.cfg.upload.bytes_per_tick.get();
         for _ in 0..limit {
             let plan = plan_upload(&self.engine.upload, self.staged());
             self.note_attempt(plan);
             let bound = self.upload_bound(plan);
-            let witnesses = &self.engine.witnesses;
-            let uploaded = upload_next_in(
+            let with = (&self.engine.witnesses, self.guard());
+            let uploaded = upload_step(
                 self.engine.upload,
-                env.staging,
-                env.remote,
+                (env.staging, env.remote),
                 bound,
-                (witnesses, self.guard()),
+                with,
+                (&mut self.engine.in_flight, &mut budget),
             )
             .await;
             match uploaded {
-                Ok(uploaded) => {
+                Ok(None) if last == Did::Nothing => {
+                    self.engine.slices_ahead = self.engine.slices_ahead.saturating_add(1);
+                    let bytes = self.engine.in_flight.sent().unwrap_or_default();
+                    return Some(self.ran(Event::Sending { bytes }, now));
+                }
+                // The tick published a file before this one ran out of budget: it says that.
+                Ok(None) => break,
+                Ok(Some(uploaded)) => {
                     if let Did::Diverged { from, .. } = uploaded.did {
                         return Some(self.diverged(env, uploaded.state, from, now).await);
                     }
@@ -2079,7 +2111,8 @@ impl Actor {
             .staged()
             .map(|staged| cap.map_or(staged, |cap| staged.min(cap)));
         self.engine.witnesses.drop_from(from);
-        if let Err(fault) = drop_staged_from(env.staging, from).await {
+        let unsent = self.engine.in_flight.stop().await;
+        if let Err(fault) = drop_staged_from(env.staging, from, &unsent).await {
             // The staged files from `from` on are still there, and the next
             // upload would take the one after the confirmed transaction as
             // following it. List first, from below `from`, so the listing
@@ -2120,6 +2153,9 @@ impl Actor {
         now: Timestamp,
     ) -> Option<Tick> {
         let bound = self.prune_ready(now)?;
+        // The upload task sends the file after the confirmed one, which is past any bound;
+        // a file in flight at or below it would be deleted under its send, so nothing is.
+        let unsent = self.engine.in_flight.unsent_through(bound)?;
         let listing = match env.staging.list(Level::ZERO, None, PageLimit::MAX).await {
             Ok(listing) => listing,
             Err(err) => return Some(self.fault(Task::Prune, L::fault(&err), now)),
@@ -2139,7 +2175,7 @@ impl Actor {
             .filter(|_| more)
             .map_or(bound, |key| key.range().max());
         if !keys.is_empty()
-            && let Err(err) = crate::publish::remove_staged(env.staging, &keys).await
+            && let Err(err) = crate::publish::remove_staged(env.staging, &keys, &unsent).await
         {
             return Some(self.fault(Task::Prune, L::fault(&err), now));
         }
@@ -2574,12 +2610,21 @@ impl Actor {
 
     /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row ended
     /// in the WAL step; it runs only when uploads are ready, and resets the count when it does.
+    /// A file in flight turns the share around: its slices go first, and the WAL step (and
+    /// with it prune and maintenance) has the tick after each [`state::FAIR_SHARE`] of them.
+    /// A turn after every slice would have an application that commits before each tick pay
+    /// a sync, and stage a file, for every slice (`docs/decisions/D217.md`).
     async fn owed_upload<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Option<Tick> {
-        if self.engine.syncs_ahead < state::FAIR_SHARE {
+        let owed = match self.engine.in_flight.sent() {
+            Some(_) => self.engine.slices_ahead < state::FAIR_SHARE,
+            None => self.engine.syncs_ahead >= state::FAIR_SHARE,
+        };
+        if !owed {
+            self.engine.slices_ahead = 0;
             return None;
         }
         self.upload_unit(env, now).await
@@ -2826,11 +2871,11 @@ enum Dropped {
 /// operator's hand a boot divergence is a second writer (the contested id).
 /// The boot refuses it before touching staging (`BootStep::Refused`).
 async fn boot_listing<L: Role, R: Role>(
-    staging: &L,
-    remote: &R,
+    (staging, remote): (&L, &R),
     suspect: &mut Option<FileKey>,
     denied: &mut bool,
     takeover: Takeover,
+    unsent: &Unsent<'_>,
 ) -> Result<Listed, BootStep> {
     remove_scratch(staging, remote, denied).await?;
     // Where staging stood before this boot dropped anything of its own: the
@@ -2861,7 +2906,7 @@ async fn boot_listing<L: Role, R: Role>(
             return Err(BootStep::Refused(tip));
         }
         gate.vouch(remote, tip).await?;
-        drop_staged_from(staging, from).await?;
+        drop_staged_from(staging, from, unsent).await?;
     }
     let lost = match sweep_staged(staging, tip, *suspect).await? {
         Swept::Clean => None,
@@ -2871,7 +2916,7 @@ async fn boot_listing<L: Role, R: Role>(
         }
         Swept::Condemned(from) => {
             gate.vouch(remote, tip).await?;
-            drop_staged_from(staging, from).await?;
+            drop_staged_from(staging, from, unsent).await?;
             Some(from)
         }
     };
@@ -2909,10 +2954,10 @@ struct Listed {
 /// the replica holds it and is confirmed: new content never takes a
 /// transaction the replica holds, so the snapshot goes above it.
 async fn boot_witness<L: Role, R: Role>(
-    staging: &L,
-    remote: &R,
+    (staging, remote): (&L, &R),
     upload: UploadState,
     gate: BootGate,
+    unsent: &Unsent<'_>,
 ) -> Result<(Pending, UploadState), BootStep> {
     let confirmed = upload.confirmed();
     let first = check_pending(staging, remote, confirmed).await?;
@@ -2924,7 +2969,7 @@ async fn boot_witness<L: Role, R: Role>(
         return Err(Fault::LocalIo.into());
     }
     gate.vouch(remote, confirmed).await?;
-    drop_staged_from(staging, from).await?;
+    drop_staged_from(staging, from, unsent).await?;
     let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
     let key = FileKey::new(Level::ZERO, TxidRange::single(from));
     // A read, not a listing: a listing may lag the replica's writes, and one that leaves the
@@ -2993,13 +3038,15 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     upload: UploadState,
     gate: BootGate,
+    unsent: &Unsent<'_>,
 ) -> Result<Judged, BootStep> {
     // The length first: a file that shrinks after it shows in the header or the wal-index read
     // after it (a missing WAL, a new generation), never as a short file.
     let len = env.wal.len().map_err(Fault::from_source)?;
     let committed = env.wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(env.wal)?;
-    let (pending, upload) = boot_witness(env.staging, env.remote, upload, gate).await?;
+    let stores = (env.staging, env.remote);
+    let (pending, upload) = boot_witness(stores, upload, gate, unsent).await?;
     let booted = boot_recover(
         env,
         reader.as_mut(),

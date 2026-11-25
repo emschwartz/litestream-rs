@@ -24,7 +24,7 @@ fn write<S: ObjectStore>(
             Writer::begin(store, &key(), Timestamp::from_unix_millis(1), mode, None).await?;
         up.write(&bytes[..2]).await?;
         up.write(&bytes[2..]).await?;
-        Ok(up.commit().await)
+        Ok(up.commit(store).await)
     })
 }
 
@@ -167,4 +167,21 @@ fn a_removal_deletes_the_keys_it_names() {
     assert_eq!(removal.why, Why::Retention);
     block_on(remove(&store, &removal)).unwrap();
     assert_eq!(listed(&store), 0);
+}
+
+#[test]
+fn an_open_upload_prints_its_key_what_it_wrote_and_its_mode() {
+    let store = MemStore::new();
+    let printed = block_on(async {
+        let at = Timestamp::from_unix_millis(1);
+        let mut up = Writer::begin(&store, &key(), at, WriteMode::New, None)
+            .await
+            .unwrap();
+        up.write(b"abcd").await.unwrap();
+        format!("{up:?}")
+    });
+    assert!(printed.starts_with("Writer {"), "{printed}");
+    assert!(printed.contains(&format!("key: {:?}", key())), "{printed}");
+    assert!(printed.contains("written: 4"), "{printed}");
+    assert!(printed.contains("mode: New"), "{printed}");
 }

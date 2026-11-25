@@ -14,6 +14,12 @@
 //!
 //! A compaction also holds one output buffer for the file, not one per flush: the count of
 //! 256 KiB-and-over allocations is pinned (`a_compaction_allocates_few_large_blocks`).
+//! The upload of a staged file is measured too. It goes to the replica a slice a step
+//! (`docs/decisions/D217.md`), and between two slices the engine keeps the decoder that
+//! verifies the file and the upload it has open. Neither grows with the file, so a file four
+//! times the size, sent in four times the slices, must peak where the small one does. The
+//! whole-file upload it replaced peaked at 533,268 bytes on this gate (two read chunks and
+//! 9 KiB); the send's own state adds 504.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -21,15 +27,21 @@
 )]
 
 use std::cell::Cell;
+use std::io::Cursor;
+use std::num::NonZeroU32;
 
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    CompactionInputs, FileKey, Level, MAX_INPUTS, ObjectStore, PageLimit, Upload, compact,
-    compact_staged,
+    CommittedRead, CompactionInputs, Did, FakeWal, FileKey, Level, MAX_INPUTS, ObjectStore,
+    PageChecksumTable, PageLimit, PageSource, SnapshotCause, SourceError, Step, SyncConfig, Synced,
+    Upload, UploadState, Witnesses, compact, compact_staged, sync_step, upload_next,
 };
-use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
+use lsr_ltx::{
+    DbPages, Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange,
+};
 use lsr_store_fs::FsStore;
+use lsr_wal::{Salts, WalReader};
 
 #[path = "../../../core/tests/core/heap.rs"]
 #[expect(
@@ -199,5 +211,118 @@ fn a_compaction_allocates_few_large_blocks() {
     assert!(
         large <= LARGE_BLOCKS,
         "{large} large blocks, over {LARGE_BLOCKS}"
+    );
+}
+
+/// A database whose pages are computed when read, and do not compress: the staged file is as
+/// large as the database.
+struct GeneratedDb {
+    pages: u32,
+}
+
+impl PageSource for GeneratedDb {
+    fn page_count(&mut self) -> Result<DbPages, SourceError> {
+        Ok(DbPages::new(self.pages))
+    }
+
+    fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
+        fill(&Cell::new(u64::from(pgno.get()) | 1 << 40), buf);
+        Ok(())
+    }
+}
+
+/// A database of `pages` pages staged in a directory by the sync step, as the engine stages
+/// its first file, with the token the uploader needs for it.
+fn staged_database(pages: u32) -> (tempfile::TempDir, FsStore, Witnesses, u64) {
+    let size = PageSize::new(4096).unwrap();
+    let wal = FakeWal::new(
+        size,
+        Salts {
+            salt1: 10,
+            salt2: 20,
+        },
+    );
+    wal.append_tx(
+        &[(PageNo::new(1, size).unwrap(), vec![7; size.bytes()])],
+        NonZeroU32::new(pages).unwrap(),
+    );
+    let committed = CommittedRead::new(wal.committed_end(), wal.backfilled(), wal.epoch()).unwrap();
+    let mut reader = WalReader::open(Cursor::new(wal.file_bytes())).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let staging = FsStore::new(dir.path());
+    let step = Step::Snapshot {
+        after: None,
+        prev_timestamp: None,
+        cause: SnapshotCause::FirstSync,
+    };
+    let synced = block_on(sync_step(
+        step,
+        &mut reader,
+        committed,
+        &mut GeneratedDb { pages },
+        &mut PageChecksumTable::new(),
+        &staging,
+        &SyncConfig::default(),
+        Timestamp::from_unix_millis(1_700_000_000_000),
+    ));
+    let Synced::Wrote { file, witness, .. } = synced.unwrap() else {
+        panic!("the sync step staged no file");
+    };
+    let mut witnesses = Witnesses::new();
+    witnesses.insert(witness);
+    (dir, staging, witnesses, file.size)
+}
+
+/// The most heap an upload of a staged database of `pages` pages holds, and the file's size.
+fn upload_peak(pages: u32) -> (usize, u64) {
+    let (_dir, staging, witnesses, size) = staged_database(pages);
+    let to = tempfile::tempdir().unwrap();
+    let replica = FsStore::new(to.path());
+    let (done, peak) = peak_of(|| {
+        block_on(upload_next(
+            UploadState::At(None),
+            &staging,
+            &replica,
+            Some(txid(1)),
+            &witnesses,
+        ))
+    });
+    assert!(matches!(done.unwrap().did, Did::Put(_)));
+    (peak.extra, size)
+}
+
+/// What one read of a staged file for its upload asks for, and the bytes one step sends:
+/// core's `upload::CHUNK` and `upload::SLICE`, restated so a change to either shows here.
+const UPLOAD_CHUNK: usize = 256 * KIB;
+const UPLOAD_SLICE: u64 = 8 * 1024 * 1024;
+
+/// A staged file goes up a slice a step, and what the engine keeps between two slices does
+/// not grow with the file: a file sent in two slices and one four times its size peak at the
+/// same heap, which is what one whole-file upload held.
+#[test]
+fn an_upload_holds_the_same_however_large_the_file_and_however_many_its_slices() {
+    let (small, small_size) = upload_peak(3 * 1024);
+    let (large, large_size) = upload_peak(12 * 1024);
+    eprintln!(
+        "upload of {} MiB: {} KiB; of {} MiB: {} KiB",
+        small_size >> 20,
+        small >> 10,
+        large_size >> 20,
+        large >> 10
+    );
+    assert!(small_size > UPLOAD_SLICE, "the small file takes two slices");
+    assert!(
+        large_size > 4 * UPLOAD_SLICE,
+        "the large file takes more than four"
+    );
+    let bound = 2 * UPLOAD_CHUNK + 16 * KIB;
+    assert!(
+        small <= bound && large <= bound,
+        "an upload held {small} and {large} bytes, over the bound of {bound}"
+    );
+    assert!(
+        large <= small + 16 * KIB,
+        "an upload four times the size held {} bytes more",
+        large - small
     );
 }

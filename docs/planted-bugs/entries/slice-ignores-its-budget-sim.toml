@@ -1,0 +1,8 @@
+# The simulator's bound on what one upload tick hands the replica sees a slice that reads on past
+# the tick's bytes (crates/sim/src/resources.rs, "bytes one upload tick handed the replica").
+name = "slice-ignores-its-budget-sim"
+patch = "slice-ignores-its-budget"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["sliced::commits_between_slices_are_staged_and_checkpointed_while_the_file_goes_up"]
