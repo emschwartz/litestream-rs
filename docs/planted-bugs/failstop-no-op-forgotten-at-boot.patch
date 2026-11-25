@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index e1620cb..3aae9fa 100644
+index 4adb584ec..c00a43940 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -942,7 +942,8 @@ impl Actor {
-             Ok(seeded) => seeded,
-             Err(fault) => return self.boot_failed(fault, now),
-         };
+@@ -1220,7 +1220,8 @@ impl Actor {
+                 Ok(seeded) => seeded,
+                 Err(fault) => return self.boot_failed(fault, now),
+             };
 -        self.quiet_at_boot(quiet);
 +        let _ = quiet;
 +        self.quiet_at_boot(BTreeSet::new());

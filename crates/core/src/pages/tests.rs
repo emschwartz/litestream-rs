@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 
 use super::*;
-use crate::fault::role::Staging;
+use crate::fault::role::{Replica, Staging};
 use crate::store::ObjectStore;
 
 const PS: PageSize = PageSize::MIN;
@@ -334,4 +334,52 @@ fn a_pending_file_that_ends_where_the_replicas_newest_ended_in_the_wal_is_quiet(
         crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
     let quiet: Vec<u64> = seeded.quiet.iter().map(|txid| txid.get()).collect();
     assert_eq!(quiet, vec![3, 4]);
+}
+/// Puts `files` in `store`.
+fn put_all(store: &crate::MemStore, files: Vec<(FileKey, Vec<u8>)>) {
+    use crate::store::Upload;
+    for (key, bytes) in files {
+        crate::conformance::block_on(async {
+            let mut up = store
+                .begin_upload(
+                    &key,
+                    lsr_ltx::Timestamp::from_unix_millis(1),
+                    crate::store::WriteMode::Replace,
+                )
+                .await
+                .unwrap();
+            up.write(&bytes).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
+}
+
+/// The replica's newest file is no longer staged (it was pruned after its upload, or staging
+/// was lost), so nothing staged stands before the first pending file. A pending snapshot that
+/// ends where the replica's newest file ends in the WAL holds no commit the replica lacks, and
+/// a restart that forgot it would date it by its stamp and trip the age bound over a replica
+/// that holds everything. One that ends elsewhere may hold a commit and stays counted.
+#[test]
+fn a_first_pending_file_ending_where_the_replicas_newest_ended_is_quiet() {
+    let replica = crate::MemStore::new();
+    put_all(&replica, vec![file_from_wal(2, &[(1, 2)], 100, 200)]);
+    let at_the_end = crate::MemStore::new();
+    put_all(
+        &at_the_end,
+        vec![file_from_wal(3, &[(1, 2), (2, 1), (3, 1)], 32, 200)],
+    );
+    let past_it = crate::MemStore::new();
+    put_all(&past_it, vec![file_from_wal(3, &[(1, 3)], 200, 300)]);
+    let quiet = |staging: &crate::MemStore| {
+        let mut seeded =
+            crate::conformance::block_on(seeded(&Staging(staging), Txid::new(2), nz(3))).unwrap();
+        crate::conformance::block_on(seeded.place(&Replica(&replica), Txid::new(2))).unwrap();
+        seeded
+            .quiet
+            .iter()
+            .map(|txid| txid.get())
+            .collect::<Vec<u64>>()
+    };
+    assert_eq!(quiet(&at_the_end), vec![3]);
+    assert_eq!(quiet(&past_it), Vec::<u64>::new());
 }

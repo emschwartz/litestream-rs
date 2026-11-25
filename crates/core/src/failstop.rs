@@ -20,7 +20,10 @@
 //! or two. The dates, the oldest of which is the clock's start:
 //!
 //! - a pending staged file holding a commit: its stamp, which a restart does not reset, so a
-//!   crash loop cannot run the application forever in slices shorter than the bound;
+//!   crash loop cannot run the application forever in slices shorter than the bound. A pending
+//!   file that holds no commit is not one: a boot finds it by what the file changes against the
+//!   staged file before it, or, with none staged before it, by the file's WAL span ending where
+//!   the replica's newest file's ends (`crate::pages::Seeded::place`);
 //! - WAL frames past the synced position: when this process first saw the WAL end where it
 //!   did ([`WalMark`]). Once the synced position passes that mark, the date moves to the
 //!   files the frames went into and lasts until the replica holds them; frames that arrived

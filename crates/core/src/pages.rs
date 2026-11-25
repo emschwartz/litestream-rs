@@ -53,12 +53,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Event, PageChecksum, PageNo, PageSize, Txid};
+use lsr_ltx::{Event, Header, PageChecksum, PageNo, PageSize, Txid, TxidRange};
 
 use crate::fault::role::Role;
 use crate::fault::{Fault, SnapshotCause};
 use crate::layout::{FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
+use crate::recover::read_header;
 use crate::store::{ListAt, PageLimit, ReadLen};
 
 /// How much of a staged file one read asks for while seeding.
@@ -224,8 +225,10 @@ pub(crate) async fn seeded<L: Role>(
     let mut seeded = Seeded {
         table: PageChecksumTable::new(),
         quiet: BTreeSet::new(),
+        unplaced: None,
     };
     let mut prev: Option<SeedRead> = None;
+    let mut placed = false;
     let mut at = ListAt::first(Level::ZERO);
     loop {
         let page = staging
@@ -247,7 +250,15 @@ pub(crate) async fn seeded<L: Role>(
             };
             if pending && read.is_some_and(|read| !read.changes || nothing_new(read)) {
                 seeded.quiet.insert(info.key.range().max());
+            } else if pending
+                && !placed
+                && prev.is_none()
+                && from.is_some()
+                && let Some(end) = read.and_then(|read| read.wal_end)
+            {
+                seeded.unplaced = Some((info.key.range().max(), end));
             }
+            placed |= pending;
             prev = read;
         }
         match at
@@ -271,6 +282,46 @@ pub(crate) struct Seeded {
     pub(crate) table: PageChecksumTable,
     /// The pending files that change nothing, by transaction.
     pub(crate) quiet: BTreeSet<Txid>,
+    /// The first pending file when no staged file stands before it (the replica's newest file
+    /// was pruned from staging, or staging was lost): its transaction and where its WAL span
+    /// ends. Nothing local says what it follows, so [`Seeded::place`] asks the replica.
+    pub(crate) unplaced: Option<(Txid, WalEnd)>,
+}
+
+/// Where a file's WAL span ends: the salts and the byte offset.
+type WalEnd = ((u32, u32), u64);
+
+/// Where the WAL span in `header` ends, when it has one.
+fn wal_end(header: &Header) -> Option<WalEnd> {
+    let wal = header.fields().wal?;
+    Some((wal.salts(), wal.offset().checked_add(wal.size())?))
+}
+
+impl Seeded {
+    /// Marks the unplaced file quiet when its WAL span ends where the replica's newest file
+    /// `tip` ends: it reads no frame past what the replica holds, the same rule that marks a
+    /// file quiet after a staged one (a snapshot taken for a doubt on a quiet WAL, or after the
+    /// database was found equal to the replica). Without it a restart loses that knowledge
+    /// and dates the file from its stamp as a commit. A span that ends elsewhere, or a header
+    /// with none, leaves the file counted: it may hold a commit.
+    ///
+    /// # Errors
+    /// The replica's fault when the newest file's header cannot be read.
+    pub(crate) async fn place<R: Role>(
+        &mut self,
+        remote: &R,
+        tip: Option<Txid>,
+    ) -> Result<(), Fault> {
+        let (Some((txid, end)), Some(tip)) = (self.unplaced.take(), tip) else {
+            return Ok(());
+        };
+        let key = FileKey::new(Level::ZERO, TxidRange::single(tip));
+        let header = read_header(remote, &key, R::fault).await?;
+        if header.as_ref().and_then(wal_end) == Some(end) {
+            self.quiet.insert(txid);
+        }
+        Ok(())
+    }
 }
 
 /// One seeded file: its database size, and whether it may change the database.
@@ -278,8 +329,8 @@ pub(crate) struct Seeded {
 struct SeedRead {
     commit: u32,
     changes: bool,
-    /// Where in the WAL the file's frames end: the salts and the byte offset.
-    wal_end: Option<((u32, u32), u64)>,
+    /// Where in the WAL the file's frames end.
+    wal_end: Option<WalEnd>,
 }
 
 /// Records every page of one staged file. A file that does not decode and
@@ -305,10 +356,7 @@ async fn seed_file<L: Role>(
         Ok(verified) => {
             table.fit(verified.header().page_size());
             let commit = verified.header().fields().commit;
-            let wal_end = verified.header().fields().wal.and_then(|wal| {
-                let end = wal.offset().checked_add(wal.size())?;
-                Some((wal.salts(), end))
-            });
+            let wal_end = wal_end(verified.header());
             let changes = prev.map(|prev| prev.commit) != Some(commit)
                 || pages
                     .iter()

@@ -26,7 +26,9 @@
 //!   input from one of the two); a boot reads back the newest file of each level and
 //!   the replica's newest level-0 file, a header first then the file. So replica reads
 //!   are at most two per compaction input, plus [`READS_PER_BOOT`] per boot, plus one per
-//!   fault that failed a call (each such failure is retried), plus
+//!   fault that failed a call (each such failure is retried), plus the restore a boot with an
+//!   empty staging directory may make to compare the database with the replica
+//!   ([`Spent::restores`]), plus
 //!   [`READS_PER_DEGRADED_RETRY`] per retry of a degraded task (a retry of a persistent
 //!   cause such as a page size change compares the replica's newest file again; the
 //!   doubling wait bounds how often).
@@ -54,6 +56,9 @@ pub const READS_PER_BOOT: u64 = 24;
 /// the newest file it names.
 pub const READS_PER_DEGRADED_RETRY: u64 = 2;
 
+/// Reads of one replica file by a restore of the replica's state: a header and the body.
+pub const READS_PER_RESTORED_FILE: u64 = 2;
+
 /// What a run did besides its recorder's events.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spent {
@@ -65,6 +70,12 @@ pub struct Spent {
     pub fault_hits: u64,
     /// Ticks that reported a task degraded: each is one retry.
     pub degraded_retries: u64,
+    /// The replica files a restore of its whole state could read, summed over every tick that
+    /// began unbooted with nothing staged. Such a boot may compare the database with the replica
+    /// (`docs/decisions/D170.md`), which restores the replica's latest state: each file is read
+    /// at most [`READS_PER_RESTORED_FILE`] times, and a boot that fails or stops makes the
+    /// comparison again at its next start.
+    pub restores: u64,
 }
 
 /// Judges the run's replica costs.
@@ -104,7 +115,8 @@ pub fn check(
             spent
                 .degraded_retries
                 .saturating_mul(READS_PER_DEGRADED_RETRY),
-        );
+        )
+        .saturating_add(spent.restores.saturating_mul(READS_PER_RESTORED_FILE));
     within(Bound::ReadCalls, counts.reads, reads)?;
     let keys = u64::try_from(last.len()).unwrap_or(u64::MAX);
     let commits = keys
@@ -243,6 +255,24 @@ mod tests {
         let lost = BTreeSet::from([Txid::new(1).unwrap()]);
         let counts = RecorderCounts::default();
         assert_eq!(check(&events, counts, Spent::default(), &lost, &[]), Ok(()));
+    }
+
+    /// A boot with nothing staged may restore the replica's state to compare it with the database
+    /// (D170): reads within the files it could read pass, one more fails.
+    #[test]
+    fn restores_for_an_identity_check_are_charged_per_file() {
+        let spent = Spent {
+            restores: 130,
+            ..Spent::default()
+        };
+        let allowed = READS_PER_BOOT + 130 * READS_PER_RESTORED_FILE;
+        let lost = BTreeSet::new();
+        let at = |reads| RecorderCounts {
+            reads,
+            ..RecorderCounts::default()
+        };
+        assert_eq!(check(&[], at(allowed), spent, &lost, &[]), Ok(()));
+        assert!(check(&[], at(allowed + 1), spent, &lost, &[]).is_err());
     }
 
     /// Boots that fail one after another each read the replica. Reads within what they allow
