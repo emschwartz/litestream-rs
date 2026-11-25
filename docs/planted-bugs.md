@@ -54,6 +54,8 @@ An entry file's name is its `name` with `.toml` appended; the runner refuses one
   package  the cargo package whose tests are run
   tests    nextest name substrings (`test(~x)`); each must fail when planted, one run apiece
   test_bin optional: restrict the run to one integration-test binary (cargo `--test`)
+  features optional: cargo features to build the package with, for a test behind one that is
+           not a default (a list of names)
   patch    optional: the patch's name when it is not `name`, so one defect can be planted
            against the tests of a second package
   (an entry whose `fix` is "plant" is no fixed defect: it proves a checker catches a bug class

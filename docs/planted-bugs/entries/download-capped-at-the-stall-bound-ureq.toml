@@ -1,0 +1,7 @@
+# A response body is cut at the stall bound in all, so a ranged read that moves but needs longer fails on every retry.
+name = "download-capped-at-the-stall-bound-ureq"
+fix = "claude/part-deadline"
+package = "lsr-store-s3"
+tests = [
+    "ureq_transport::tests::a_download_that_keeps_moving_outlives_the_stall_bound",
+]

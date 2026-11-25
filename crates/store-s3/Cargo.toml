@@ -49,7 +49,7 @@ reqwest = { workspace = true, optional = true }
 # Root certificates from the system; for reqwest also its TLS config on ring,
 # and recognising a TLS failure inside reqwest's error chain.
 rustls = { workspace = true, optional = true, features = ["std"] }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time"] }
 native-tls = { workspace = true, optional = true }
 url.workspace = true
 zeroize.workspace = true
@@ -68,7 +68,7 @@ rustls-platform-verifier = { workspace = true, optional = true }
 
 [dev-dependencies]
 # An application runtime with worker threads, for the reqwest transport's tests.
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 # The TLS server under a private certificate authority in the trust tests.
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 lsr-core = { workspace = true, features = ["testing"] }

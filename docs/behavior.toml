@@ -2143,7 +2143,7 @@ in_review = "#96 would make the second PUT of a level-0 key fail outside the loc
 table = "Circumstances the code does not distinguish"
 id = "WORLD-2"
 circumstance = "The process is paused while it holds the write barrier (CKPT-1) or only its read transaction"
-response = "The barrier is an open write transaction. While paused, every application writer blocks and then gets `SQLITE_BUSY` at its `busy_timeout`; under the read transaction alone the WAL cannot be recycled and grows. On resume the wall clock has jumped forward (G3), every in-flight store request has passed its 60 s deadline (UP-2), and a multipart upload may have expired"
+response = "The barrier is an open write transaction. While paused, every application writer blocks and then gets `SQLITE_BUSY` at its `busy_timeout`; under the read transaction alone the WAL cannot be recycled and grows. On resume the wall clock has jumped forward (G3), every in-flight store request has passed its stall bound, 60 s (UP-2), and a multipart upload may have expired"
 signal = "None while paused: the process cannot report. `reported_at` in `Health` goes stale; `lsr_health_report_age_seconds` shows it only if something else scrapes"
 at_risk = "Application availability for the length of the pause. No replica damage expected. Guess"
 recovery = "Automatic on resume. Guess"
@@ -2496,7 +2496,7 @@ notes = "The Go handover rows cover Go. Nothing tests this port against its own 
 [[row]]
 table = "Circumstances the code does not distinguish"
 id = "WORLD-34"
-circumstance = "A slow store: no errors, uploads slower than the write rate, or bodies that trickle inside the 60 s deadline"
+circumstance = "A slow store: no errors, uploads slower than the write rate, or bodies that trickle, each stretch inside the 60 s stall bound"
 response = "Staging grows to the witness cap, then holds; the WAL grows instead (RUN-18)"
 signal = "none"
 at_risk = "Lag without bound. No restore point is given up"
