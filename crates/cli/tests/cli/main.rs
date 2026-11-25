@@ -14,6 +14,8 @@ mod crash_loop;
 #[cfg(test)]
 mod daemon;
 #[cfg(test)]
+mod older_copy;
+#[cfg(test)]
 mod provider;
 #[cfg(test)]
 mod s3;

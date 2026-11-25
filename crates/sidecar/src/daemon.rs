@@ -1,7 +1,9 @@
 //! One process, many databases: a replicator per database, a waiter for
 //! databases that do not exist yet, and one drain at the end.
 //!
-//! **Start.** In config order, per database: open its store; with
+//! **Start.** In config order, per database: open its store (credentials from a source that
+//! does not answer yet open a store that asks again with each request, logged and reported
+//! by health, as Go's SDK fetches them per request); with
 //! `-restore-if-db-not-exists` (or the key) and no file, restore the newest state,
 //! a replica with no files being Go's "no backup found, starting fresh"; then
 //! `Replicator::start_with_events`, which returns once the read transaction pins the
@@ -259,8 +261,20 @@ impl Daemon {
 
     fn open(&self, plan: DbPlan, restore: bool) -> Slot {
         let path = plan.path().to_owned();
-        let store = match lsr_config::open_store(plan.replica()) {
-            Ok(store) => Some(store),
+        let store = match lsr_config::open_store_noting(plan.replica()) {
+            Ok(opened) => {
+                if let Some(why) = &opened.deferred {
+                    // The store asks the chain again with each request, and health reports
+                    // the failure meanwhile; this line says why.
+                    let fields = [
+                        ("path", path.as_path().into()),
+                        ("error", why.to_string().into()),
+                    ];
+                    self.log
+                        .warn("credentials not available yet, retrying", &fields);
+                }
+                Some(opened.store)
+            }
             Err(why) => {
                 let fields = [
                     ("path", path.as_path().into()),

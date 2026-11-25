@@ -22,6 +22,7 @@ use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 mod after_delete;
 mod ahead;
 mod audit;
+mod older_copy;
 
 const PS: PageSize = PageSize::MIN;
 const T0: i64 = 1_000_000;
@@ -245,11 +246,12 @@ impl ObjectStore for Counting {
         self.inner.read_with_created_at(file, len)
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send {
         self.count();
         if let Some(wal) = self.moves_epoch.lock().unwrap().take() {
@@ -259,7 +261,7 @@ impl ObjectStore for Counting {
             wal.append_tx(&[(pg(1), vec![n; PS.bytes()])], nz(3));
         }
         let refused = self.refuse_uploads.load(Ordering::SeqCst);
-        let begun = self.inner.begin_upload(key, created_at, mode);
+        let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
         async move {
             if refused {
                 return Err(StoreError::Transient {
@@ -2275,19 +2277,23 @@ mod boot_truncated;
 mod checkpoint_failed;
 mod create_only;
 mod degraded;
+mod first_start;
 mod index_reset;
 mod lag;
+mod level_holes;
 mod listing;
 mod live;
 mod newest_replica_file;
 mod no_wal_yet;
 mod once;
 mod once_retention;
+mod own_checkpoint;
 mod pages;
 mod rejected_snapshot;
 mod requested_snapshot_after_restart;
 mod rewound;
 mod second_writer;
+mod sliced;
 mod stamp;
 mod tasks;
 mod vouch;

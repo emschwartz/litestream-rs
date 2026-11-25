@@ -143,6 +143,8 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
             crate::generate::Hold::SecondWriter => &[Forcing::RemoteEdited],
         },
         Op::OurReader { begin: false } => &[Forcing::ReadLockLapsed],
+        // The database goes back to an older image: nothing the engine staged vouches for it.
+        Op::PutBackDatabase { .. } => &[Forcing::StagingEdited],
         Op::RequestSnapshot => &[Forcing::SnapshotRequested],
         Op::LyingWalSync => &[Forcing::LyingDisk],
         Op::Commit { .. }
@@ -150,6 +152,8 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::OtherConnectionCommit { .. }
         | Op::AppInTick { .. }
         | Op::Spill
+        | Op::Structured { .. }
+        | Op::SaveDatabase
         | Op::Rollback
         | Op::Vacuum { .. }
         | Op::OtherProcessReader { .. }
@@ -208,6 +212,7 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         staging_fs: _,
         // The engine's own configuration.
         truncate_pages: _,
+        slice_bytes: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
         // The replica on S3: its provider faults are noted as they are drawn.

@@ -45,6 +45,7 @@ use lsr_ltx::Timestamp;
 
 use crate::classify::{classify, is_not_implemented};
 use crate::multipart::{Sent, completed_etag_fits};
+use crate::part_plan::{MAX_OBJECT, plan_part_size};
 use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag};
 use crate::store::Inner;
@@ -71,6 +72,9 @@ pub struct S3Upload<T> {
     key: FileKey,
     created_at: Timestamp,
     mode: WriteMode,
+    /// The part size this upload cuts its object into, planned from the object's
+    /// length when it was known at the start ([`plan_part_size`]).
+    part: usize,
     written: u64,
     state: UploadState,
 }
@@ -91,20 +95,37 @@ impl<T> std::fmt::Debug for S3Upload<T> {
 }
 
 impl<T> S3Upload<T> {
+    /// An upload of `key`; `len` is its exact length when the caller knows it.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectTooLarge`] when no part size can carry `len` bytes,
+    /// before any request is sent.
     pub(crate) fn new(
         inner: Arc<Inner<T>>,
         key: FileKey,
         created_at: Timestamp,
         mode: WriteMode,
-    ) -> Self {
-        Self {
+        len: Option<u64>,
+    ) -> Result<Self, StoreError> {
+        let planned = match len {
+            None => inner.part_size,
+            Some(len) => {
+                plan_part_size(inner.part_size, len).ok_or(StoreError::ObjectTooLarge {
+                    key,
+                    len,
+                    max: MAX_OBJECT,
+                })?
+            }
+        };
+        Ok(Self {
             inner,
             key,
             created_at,
             mode,
+            part: usize::try_from(planned.get()).unwrap_or(usize::MAX),
             written: 0,
             state: UploadState::Buffering(Vec::new()),
-        }
+        })
     }
 
     /// The capacity of every buffer held (parts waiting and the one
@@ -146,15 +167,18 @@ fn ended() -> StoreError {
     }
 }
 
+/// Buffer size past which an upload reserves a whole part.
+const GROW_TO_PART: usize = 256 * 1024;
+
 /// Appends `bytes` (which fit under `part`) growing the buffer geometrically
 /// but never past one part, so a part-sized buffer is the most memory held.
 fn append_bounded(buf: &mut Vec<u8>, bytes: &[u8], part: usize) {
     let need = buf.len().saturating_add(bytes.len());
     if need > buf.capacity() {
-        let target = need
-            .max(buf.capacity().saturating_mul(2))
-            .max(4096)
-            .min(part);
+        let grown = need.max(buf.capacity().saturating_mul(2)).max(4096);
+        // Past 256 KiB the object is on its way to being a part: take the whole part at once
+        // rather than reallocating (and copying) a part-sized buffer a dozen times.
+        let target = if grown > GROW_TO_PART { part } else { grown }.min(part);
         buf.reserve_exact(target.saturating_sub(buf.len()));
     }
     buf.extend_from_slice(bytes);
@@ -215,14 +239,10 @@ impl<T: Transport> Inner<T> {
 }
 
 impl<T: Transport> S3Upload<T> {
-    fn part_len(&self) -> usize {
-        usize::try_from(self.inner.part_size.get()).unwrap_or(usize::MAX)
-    }
-
     /// Fills the buffer from `chunk`, uploading each part as it fills.
     fn append(&mut self, mut chunk: &[u8]) -> Result<(), StoreError> {
         let start = self.inner.now();
-        let part = self.part_len();
+        let part = self.part;
         self.written = self
             .written
             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));

@@ -62,15 +62,26 @@ pub struct SyncLimits {
     /// A step stops after the first transaction that brings it to this many WAL bytes; `None`
     /// is no cap. A snapshot ignores it.
     pub wal_bytes_per_step: Option<NonZeroU64>,
-    /// Files uploaded per tick before the other tasks get a turn; `None` is all staged.
+    /// Files uploaded per tick before the other tasks get a turn; `None` is all staged, which
+    /// after a long outage is thousands of sequential puts with no WAL sync, checkpoint or
+    /// health update between them. The default is [`SyncLimits::FILES_PER_UPLOAD`].
     pub files_per_upload: Option<NonZeroU32>,
+}
+
+impl SyncLimits {
+    /// Go's `DefaultMaxSyncLTXFiles` (256, `replica.go:208-218`): files uploaded per tick by
+    /// default, for the library as for the binary.
+    pub const FILES_PER_UPLOAD: NonZeroU32 = match NonZeroU32::new(256) {
+        Some(n) => n,
+        None => NonZeroU32::MIN,
+    };
 }
 
 impl Default for SyncLimits {
     fn default() -> Self {
         Self {
             wal_bytes_per_step: SyncConfig::default().cap,
-            files_per_upload: UploadConfig::default().files_per_tick,
+            files_per_upload: Some(Self::FILES_PER_UPLOAD),
         }
     }
 }
@@ -174,6 +185,7 @@ impl Config {
             checkpoint,
             upload: UploadConfig {
                 files_per_tick: self.sync_limits.files_per_upload,
+                ..UploadConfig::default()
             },
             maintenance: self.maintenance.clone(),
             retry_interval: self.retry_interval.get(),
@@ -187,6 +199,33 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The library bounds a tick's uploads as the binary does: with no bound, the first tick
+    /// after an outage uploads the whole backlog before anything else runs.
+    #[test]
+    fn the_default_bounds_the_files_an_upload_tick_sends() {
+        let limits = SyncLimits::default();
+        assert_eq!(limits.files_per_upload, Some(SyncLimits::FILES_PER_UPLOAD));
+        assert_eq!(SyncLimits::FILES_PER_UPLOAD.get(), 256);
+        let engine = Config::default().actor();
+        assert_eq!(
+            engine.upload.files_per_tick,
+            Some(SyncLimits::FILES_PER_UPLOAD)
+        );
+    }
+
+    #[test]
+    fn the_default_bounds_the_wal_bytes_a_sync_step_reads() {
+        let limits = SyncLimits::default();
+        assert_eq!(
+            limits.wal_bytes_per_step.map(NonZeroU64::get),
+            Some(64 << 20)
+        );
+        assert_eq!(
+            Config::default().actor().sync.cap,
+            limits.wal_bytes_per_step
+        );
+    }
 
     #[test]
     fn zero_is_not_a_duration_here() {

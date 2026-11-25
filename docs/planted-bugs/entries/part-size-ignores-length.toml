@@ -1,0 +1,10 @@
+# The part size ignores the object's length, so an object over 10000 configured parts is sent whole and
+# refused at part 10001, again on every retry.
+name = "part-size-ignores-length"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "an_object_over_ten_thousand_configured_parts_fills_a_larger_part",
+    "one_byte_past_the_ceiling_grows_the_part_by_the_least",
+    "every_object_up_to_the_limit_fits_in_ten_thousand_legal_parts",
+]

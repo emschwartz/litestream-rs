@@ -1,6 +1,11 @@
 //! Each crate's integration tests are one binary (AGENTS.md, "Tests"): a new
 //! `tests/*.rs` file or `tests/<dir>/main.rs` would link a binary of its own and undo
 //! the merge silently, so this walks every crate and counts its test targets.
+//!
+//! Clippy reads only the nearest `clippy.toml`, so a crate with its own repeats the root
+//! file and adds to it. A copy that is not kept in step holds its crate to an older rule
+//! (two copies stayed at a 70-line function limit after the root went to 150), so the
+//! second test here reads every copy against the root.
 
 use std::fs;
 use std::path::Path;
@@ -49,5 +54,46 @@ fn every_crate_has_at_most_one_integration_test_binary() {
         offenders.is_empty(),
         "crates with more than one integration test binary (add a module to the crate's \
          tests/<name>/main.rs instead): {offenders:#?}"
+    );
+}
+
+/// The settings of a `clippy.toml`: its lines without comments, blanks and the brackets
+/// of a list, so a list's entries compare one by one.
+fn settings(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter(|line| !line.ends_with('[') && *line != "]")
+        .collect()
+}
+
+#[test]
+fn a_crate_s_own_clippy_settings_hold_every_root_setting() {
+    let root = fs::read_to_string(workspace_root().join("clippy.toml")).expect("root clippy.toml");
+    let crates = fs::read_dir(workspace_root().join("crates")).expect("read crates/");
+    let mut copies = 0;
+    let mut missing = Vec::new();
+    for entry in crates {
+        let path = entry
+            .expect("read a crates/ entry")
+            .path()
+            .join("clippy.toml");
+        if !path.exists() {
+            continue;
+        }
+        copies += 1;
+        let copy = fs::read_to_string(&path).expect("read a crate's clippy.toml");
+        let has = settings(&copy);
+        for setting in settings(&root) {
+            if !has.contains(&setting) {
+                missing.push(format!("{}: {setting}", path.display()));
+            }
+        }
+    }
+    // Two crates have a copy today; a walk that found none checked nothing.
+    assert!(copies >= 2, "only {copies} crates have a clippy.toml");
+    assert!(
+        missing.is_empty(),
+        "root clippy.toml settings a crate's own clippy.toml lacks: {missing:#?}"
     );
 }

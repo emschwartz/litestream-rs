@@ -169,11 +169,17 @@ struct Log {
     deletes: Vec<FileKey>,
     fail_delete: bool,
     begins: Vec<FileKey>,
+    /// The length each upload was begun with.
+    lens: Vec<Option<u64>>,
     aborts: u32,
+    /// Bytes every write was handed, summed.
+    written: u64,
     commit_before: VecDeque<StoreError>,
     commit_after: VecDeque<StoreError>,
     write_fail: VecDeque<StoreError>,
     lie_about_size: bool,
+    /// The key a commit names in its answer, in place of the one it wrote.
+    answer_as: Option<FileKey>,
     /// The modes uploads were begun with.
     modes: Vec<WriteMode>,
     /// A key whose whole reads from the start are let through this many
@@ -283,16 +289,18 @@ impl ObjectStore for Probe {
         self.inner.read_with_created_at(file, len)
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl Future<Output = Result<ProbeUpload, StoreError>> + Send {
         self.log().begins.push(*key);
+        self.log().lens.push(len);
         self.log().modes.push(mode);
         let log = Arc::clone(&self.log);
-        let begun = self.inner.begin_upload(key, created_at, mode);
+        let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
         async move {
             Ok(ProbeUpload {
                 inner: begun.await?,
@@ -319,12 +327,13 @@ impl ObjectStore for Probe {
 
 impl Upload for ProbeUpload {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
-        let early = self
-            .log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .write_fail
-            .pop_front();
+        let early = {
+            let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            log.written = log
+                .written
+                .saturating_add(u64::try_from(chunk.len()).unwrap());
+            log.write_fail.pop_front()
+        };
         let wrote = early.map_or_else(|| Ok(self.inner.write(chunk)), Err);
         async move {
             match wrote {
@@ -335,12 +344,13 @@ impl Upload for ProbeUpload {
     }
 
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
-        let (early, late, lie) = {
+        let (early, late, lie, answer_as) = {
             let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             (
                 log.commit_before.pop_front(),
                 log.commit_after.pop_front(),
                 log.lie_about_size,
+                log.answer_as,
             )
         };
         async move {
@@ -354,6 +364,9 @@ impl Upload for ProbeUpload {
             }
             if lie {
                 info.size = info.size.saturating_add(1);
+            }
+            if let Some(other) = answer_as {
+                info.key = other;
             }
             Ok(info)
         }
@@ -503,6 +516,18 @@ fn a_commit_that_failed_after_publishing_is_found_by_one_listing_and_not_uploade
     assert_eq!(remote.log().begins.len(), 1);
 }
 
+/// A store can plan an upload (a multipart part size, a refusal of an object it cannot hold)
+/// only if it hears the length before the first byte, and the length is the staged file's.
+#[test]
+fn an_upload_is_begun_with_the_staged_files_length() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    let put = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    assert_eq!(put.state, UploadState::At(Some(txid(1))));
+    let want = u64::try_from(bytes.len()).unwrap();
+    assert_eq!(remote.log().lens, vec![Some(want)]);
+}
+
 #[test]
 fn a_commit_that_failed_before_publishing_is_listed_once_then_uploaded_again() {
     let (staging, remote) = (MemStore::new(), Probe::default());
@@ -622,6 +647,18 @@ fn a_commit_that_answers_with_a_wrong_size_is_ambiguous_not_confirmed() {
     assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
 }
 
+/// A commit that answers for another key says nothing about the one that was sent: it is
+/// ambiguous, and a listing decides.
+#[test]
+fn a_commit_that_answers_for_another_key_is_ambiguous_not_confirmed() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    remote.log().answer_as = Some(key(2));
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadAmbiguous);
+    assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
+}
+
 /// The object such a commit left does not hold what was sent: it is deleted before the
 /// fault is reported, so no restore meets it while the retry waits.
 #[test]
@@ -708,11 +745,16 @@ fn a_staged_file_that_names_another_transaction_is_refused() {
 /// The level-0 file for transaction 1, of incompressible pages, so it spans
 /// several read chunks.
 fn big_file() -> Vec<u8> {
+    big_file_for(1, 0x9E37_79B9_7F4A_7C15)
+}
+
+/// [`big_file`] for transaction `n`, its pages drawn from `seed`.
+fn big_file_for(n: u64, seed: u64) -> Vec<u8> {
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size: ps(),
         commit: 200,
-        txids: TxidRange::single(txid(1)),
+        txids: TxidRange::single(txid(n)),
         timestamp: created_at(1),
         pre_apply: None,
         wal: None,
@@ -720,7 +762,7 @@ fn big_file() -> Vec<u8> {
     })
     .unwrap();
     let mut encoder = Encoder::new(Vec::new(), header).unwrap();
-    let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut x = seed;
     for pgno in 1..=200_u32 {
         let page: Vec<u8> = (0..ps().bytes())
             .map(|_| {
@@ -851,6 +893,7 @@ fn files_per_tick_is_honoured_and_asks_to_step_again() {
     }
     let config = UploadConfig {
         files_per_tick: NonZeroU32::new(2),
+        ..UploadConfig::default()
     };
     let mut state = UploadState::Unknown;
     let mut seen = Vec::new();
@@ -1211,7 +1254,10 @@ fn the_upload_reads_in_quarter_mebibyte_chunks() {
 #[test]
 fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(MemStore::new());
-    let got = block_on(drop_staged_from(&Staging(&staging), txid(1)));
+    let got = block_on(async {
+        let mut none = InFlight::default();
+        drop_staged_from(&Staging(&staging), txid(1), &none.stop().await).await
+    });
     assert_eq!(got, Err(Fault::LocalIo));
 }
 
@@ -1514,6 +1560,7 @@ fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twic
 }
 
 mod endless;
+mod slices;
 
 /// A rejected write deletes only an object it created. A create-only put
 /// creates its key or is refused, so its rejected object is its own; a put that

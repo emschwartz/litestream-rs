@@ -34,6 +34,8 @@ mod dropin_roles;
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]
+mod go_compacts_levels;
+#[cfg(test)]
 mod handover;
 #[cfg(test)]
 mod layout;
@@ -43,6 +45,8 @@ mod live_matches_sim;
 mod live_source;
 #[cfg(test)]
 mod matrix;
+#[cfg(test)]
+mod merged_snapshot;
 #[cfg(test)]
 mod pinned;
 #[cfg(test)]

@@ -8,9 +8,11 @@
 //! between the clock when it was taken and the latest the clock had read. A
 //! level-0 file is stamped when it is staged and a compacted file carries its
 //! newest input's time, so every file of levels 0 to 8 holds the stamp of a
-//! staged file that ended at the same transaction. A level-9 snapshot is
-//! stamped when it is written, so it holds a time from its own put
-//! ([`stamps`]). Together they pin the answer without copying the planner.
+//! staged file that ended at the same transaction. A level-9 snapshot read
+//! from the database is stamped when it is written, so it holds a time from its own put;
+//! one built from level 0 (the first, `docs/decisions/D205.md`) is a compaction and holds
+//! the stamp of a staged file that ended at its last transaction ([`stamps`]).
+//! Together they pin the answer without copying the planner.
 //!
 //! One property needs only the recorder: an `AsOf(t)` restore that reaches
 //! `r` used a file created before `t` whose newest transaction is `r`, and
@@ -83,12 +85,14 @@ pub fn stamps(
             continue;
         }
         let within = |(at, high): &(Timestamp, Timestamp)| *at <= created_at && created_at <= *high;
+        // A snapshot built from level 0 carries its newest input's time, as a compaction does.
+        let from_staged = staged
+            .get(&key.range().max())
+            .is_some_and(|times| times.iter().any(within));
         let fits = if key.level().is_snapshot() {
-            within(&(at, high))
+            within(&(at, high)) || from_staged
         } else {
-            staged
-                .get(&key.range().max())
-                .is_some_and(|times| times.iter().any(within))
+            from_staged
         };
         if !fits {
             return Err(Violation::WrongCreatedAt { key, created_at });

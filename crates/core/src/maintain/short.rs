@@ -8,7 +8,7 @@
 //! whole listings a pass asks the store only for what its decision reads ([`Plan`], [`Tail`]): level 0,
 //! the tail of a compaction level whose window is open and the level below it, level 1 after the
 //! cover cursor and level 9 when level-0 retention is due. A pass with nothing due lists nothing, and the
-//! passes after this engine's own jobs reuse a listing at most five seconds old ([`Carry`], which keeps the time it was really made and is never used by a pass that may delete).
+//! passes after this engine's own jobs reuse a listing at most five seconds old ([`Carry`], which keeps the time it was really made, gains every output this engine confirms meanwhile, and is never used by a pass that may delete).
 //! A level whose own output closed its window is quiet until the next window; level-0 retention is
 //! checked every [`Maintenance::retention_check_every`]. Nothing is written to disk and nothing survives a fault,
 //! a stop or a restart: [`Remembered::forget`] drops it all and the next pass is whole.
@@ -17,7 +17,7 @@
 //!
 //! [`Remembered::short_ok`] is false, and the pass lists everything and decides with [`super::due`]
 //! exactly as before, at boot and after any fault (the actor calls `forget`), after a refused or
-//! listed upload, a step back of the clock, a compaction that found an input gone, while a restore point is pinned, a rejected output is distrusted or the boot
+//! listed upload, a step back of the clock, a compaction that found an input gone, a level whose sources no longer follow its newest file or a compaction that closed such a hole (see "Holes" in [`super`]), while a restore point is pinned, a rejected output is distrusted or the boot
 //! read-back is owed, after a retention delete or a snapshot, when the last whole listing did not
 //! pass the retention gate ([`Gate::Held`]), when snapshot retention next has
 //! something to delete ([`Remembered::retention_wake`]), and at the latest [`FULL_LISTING_INTERVAL`]
@@ -27,7 +27,7 @@
 //!
 //! | Decision | Listing it reads | Why that is enough |
 //! |---|---|---|
-//! | Compaction into level `d` | level `d` after what is known, level `d-1` after the level's last transaction | The planner reads the destination's last file and the sources above its last transaction, nothing older. Level 0 and level 9 are listed whole. A remembered newest file can only be a file that was there: retention never deletes a level's last file, and a file another process removed is caught at the next whole listing. |
+//! | Compaction into level `d` | level `d` after what is known, level `d-1` after the level's last transaction | The planner reads the destination's last file and the sources above its last transaction, nothing older. Level 0 and level 9 are listed whole. A remembered newest file can only be a file that was there: retention never deletes a level's last file, and a file another process removed is caught at the next whole listing. A tail whose first source does not start right after the destination's newest file is not planned from: the next pass is whole. |
 //! | Snapshot | level 9 whole, the newest position over what was listed or known | The planner reads the newest snapshot start and the newest transaction. |
 //! | Level-0 retention | level 0 whole, level 9 whole, level 1 to 8 files after the cursor | [`super::retain::short_level_zero`]: its deletes are a subset of the whole rule's, because its anchor reads the newest known file of every level 1 to 8 as the whole anchor does (a remembered one for its age only). A covering file must be listed in this pass, never remembered. |
 //! | Snapshot retention (rule 1) | whole listing only | It deletes by age against every snapshot and the floor moves by it. |
@@ -76,7 +76,7 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use super::retain::short_level_zero;
 use super::{
-    Decided, DeleteJob, Due, Job, MaintainState, Maintenance, RetentionMode, Step, absorb,
+    Decided, DeleteJob, Due, Job, MaintainState, Maintenance, RetentionMode, Step, View, absorb,
     delete_first, plan_level, plan_snapshot, soonest, window_closed_by,
 };
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
@@ -137,13 +137,26 @@ pub(crate) struct Remembered {
 }
 
 /// A listing kept for the pass right after this engine's own job (see
-/// [`Remembered::starts`]), and what it covers.
+/// [`Remembered::starts`]), and what it covers. It stands in for a listing made now, so every
+/// output confirmed after it was made is added to it ([`Self::with`]): a pass that knew only
+/// the newest output of a level would plan the level above from that file alone.
 #[derive(Clone, Debug)]
 struct Carry {
     listed: Inventory,
     covers: Vec<ListAt>,
     confirmed: Option<Txid>,
     at: Timestamp,
+}
+
+impl Carry {
+    /// The listing with a file this engine has confirmed since it was made. `None` when the
+    /// listing shows another object under that key (the output replaced it): it no longer
+    /// stands in for the store, and the next pass lists.
+    fn with(mut self, info: FileInfo) -> Option<Self> {
+        let output = Inventory::from_files([info]).ok()?;
+        self.listed = self.listed.replacing_levels(&[], &output).ok()?;
+        Some(self)
+    }
 }
 
 /// What a short pass needs to decide, given what is known: the compaction levels whose window is
@@ -189,6 +202,14 @@ impl Remembered {
     pub(crate) fn newest_txid(&self, level: u8) -> Option<Txid> {
         let level = Level::new(level)?;
         self.newest.get(&level).map(|info| info.key.range().max())
+    }
+
+    /// Whether a file covering `range` at `level` starts at the transaction after the newest
+    /// file known there, or none is known. Every compaction a short pass plans does.
+    pub(crate) fn follows_newest(&self, level: Level, range: TxidRange) -> bool {
+        self.newest
+            .get(&level)
+            .is_none_or(|known| known.key.range().max().next() == Some(range.min()))
     }
 
     /// When snapshot retention next has something to delete, per the last whole decision.
@@ -255,10 +276,15 @@ impl Remembered {
             RetentionMode::Enforce => decided.gate,
         };
         // A delete above level 0 or a snapshot moves the floor: the next pass is whole too.
+        // So is the one after a compaction that closes a hole (its output is not the newest
+        // file of its level): only a whole listing shows the next hole and what can close it.
         self.full_owed = match &decided.due {
             Due::Run(Job::Snapshot(_)) => true,
             Due::Run(Job::Delete(job)) => job.keys().iter().any(|key| key.level() != Level::ZERO),
-            Due::Run(Job::Compact(_)) | Due::Wait { .. } => false,
+            Due::Run(Job::Compact(job)) => self
+                .newest_txid(job.level().get())
+                .is_some_and(|newest| job.inputs().range().max() < newest),
+            Due::Wait { .. } => false,
         };
     }
 
@@ -318,6 +344,9 @@ impl Remembered {
     pub(crate) fn note_output(&mut self, info: FileInfo, config: &Maintenance, now: Timestamp) {
         let level = info.key.level();
         self.note(info);
+        // The carried listing stands in for one made now, which would show this file: a pass
+        // that plans from it must see every output since, not only the newest of each level.
+        self.carry = self.carry.take().and_then(|carry| carry.with(info));
         self.own.insert(level);
         self.fresh.insert(level);
         if let Some(next) = config
@@ -537,7 +566,8 @@ mod tests;
 /// levels its plan reads.
 #[derive(Debug)]
 pub(crate) struct Tail {
-    /// Only what the store returned (or the pass right before returned, see [`Carry`]).
+    /// Only what the store returned, or the pass right before returned and this engine has
+    /// confirmed since (see [`Carry`]).
     listed: Inventory,
     /// The listed files and the remembered newest file of each level when the listing did not
     /// return it again: what compaction and snapshot planning read. Never used as a cover.
@@ -675,6 +705,9 @@ pub(crate) struct ShortDecided {
     pub(crate) snapshot_quiet: Option<Timestamp>,
     /// Level-0 retention was decided on this listing (no compaction or snapshot came first).
     pub(crate) retention_decided: bool,
+    /// Nothing was decided: a level's sources do not follow its newest file as far as this
+    /// listing shows, and the pass is made again on a whole one.
+    pub(crate) whole: bool,
 }
 
 /// The next job on a short listing, or when to ask again. Compaction and the snapshot as
@@ -711,12 +744,36 @@ fn decide(
         quiet,
         snapshot_quiet: None,
         retention_decided: false,
+        whole: false,
     };
     let mut until: Option<Timestamp> = None;
     for level in compaction_levels(config).filter(|level| tail.plan.active.contains(level)) {
-        let step = plan_level(&tail.planning, now, config, level, state, resolved)?;
-        if let Step::Wait(at) = step {
-            quiet.push((level, at));
+        let step = plan_level(
+            &tail.planning,
+            now,
+            config,
+            level,
+            state,
+            resolved,
+            View::Tail,
+        )?;
+        match step {
+            Step::Wait(at) => quiet.push((level, at)),
+            Step::Whole => {
+                return Ok(ShortDecided {
+                    due: Due::Wait {
+                        until: Some(now),
+                        held: None,
+                    },
+                    settled_min: None,
+                    until: Some(now),
+                    quiet,
+                    snapshot_quiet: None,
+                    retention_decided: false,
+                    whole: true,
+                });
+            }
+            Step::Run(_) | Step::Idle => {}
         }
         if let Some(job) = absorb(step, &mut until) {
             return Ok(run(job, quiet));
@@ -727,7 +784,7 @@ fn decide(
         let step = match (waits, state.distrusted_at(Level::SNAPSHOT)) {
             (Some(retry), _) => Step::Wait(retry),
             (None, Some(bad)) => delete_first(bad),
-            (None, None) => plan_snapshot(&tail.planning, now, config, published, resolved)?,
+            (None, None) => plan_snapshot(&tail.planning, now, config, published, state, resolved)?,
         };
         if let Step::Wait(at) = step {
             snapshot_quiet = Some(at);
@@ -743,6 +800,7 @@ fn decide(
         quiet,
         snapshot_quiet,
         retention_decided: false,
+        whole: false,
     };
     if config.retention() == RetentionMode::Off || !tail.plan.retention {
         return Ok(wait(until, quiet, snapshot_quiet));
@@ -768,6 +826,7 @@ fn decide(
             quiet,
             snapshot_quiet,
             retention_decided: true,
+            whole: false,
         },
         Err(_) => ShortDecided {
             settled_min,

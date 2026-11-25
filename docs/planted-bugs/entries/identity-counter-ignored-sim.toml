@@ -1,0 +1,9 @@
+# The replicator's counter is read and never compared (the same plant as
+# identity-counter-ignored): in the simulator's history of an older copy put on a new host, the
+# older database snapshots above the replica's newest state and the oracle finds it went back.
+name = "identity-counter-ignored-sim"
+fix = "plant"
+package = "lsr-sim"
+tests = [
+    "faults::older_copy_on_a_new_host",
+]

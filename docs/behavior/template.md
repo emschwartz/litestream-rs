@@ -210,7 +210,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Fault | Scope | What the engine does | Rig |
 |---|---|---|---|
 | The application's own automatic or manual checkpoints | In | Counted and reported as a notice; they cannot pass the engine's read mark (RUN-22) | sim `app_autocheckpoints`; sim `rules_match_sqlite` compares the model with real SQLite |
-| The application commits (growing the database or not), begins or ends a reader, checkpoints in any mode or deletes the WAL between two of the engine's calls into SQLite inside one tick | In | The read-lock proofs (RUN-7, CKPT-1): what lands before a committed read is in the step, what lands after waits for the next | sim `Op::AppInTick` in swarm mixes (`sim/src/sqlite/in_tick.rs`), at any call of the tick, reads included; `Op::CommitInTick` for the one commit before the checkpoint's barrier |
+| The application commits (growing the database or not), begins a write transaction it leaves open, begins or ends a reader, checkpoints in any mode or deletes the WAL between two of the engine's calls into SQLite inside one tick | In | The read-lock proofs (RUN-7, CKPT-1): what lands before a committed read is in the step, what lands after waits for the next. A write transaction left open holds the write lock at the engine's barrier or its sequence bump (CKPT-10, CKPT-11) | sim `Op::AppInTick` in swarm mixes (`sim/src/sqlite/in_tick.rs`), at any call of the tick, reads included; `Op::CommitInTick` for the one commit before the checkpoint's barrier |
 | Another process checkpoints while the engine is down | In | BOOT-7, BOOT-8 | sim `app_checkpoint_while_down`; sqlite `the_apps_last_close_while_the_replicator_is_down_deletes_the_wal` |
 | WAL deleted, truncated or its header torn | In | BOOT-7, RUN-5, RUN-6, RUN-9 | sim `wal_deleted_while_down`, `wal_header_torn`, `wal_truncated_externally_under_lock`, `wal_unlinked_mid_run` |
 | WAL rewritten with other bytes in the same generation | In | BOOT-9, BOOT-10 | sim `wal_regrown_same_salts_diff_bytes`, `wal_rewritten_same_length`; core `a_rewound_tail_rewritten_with_the_same_last_page_is_not_continued` |
@@ -321,7 +321,7 @@ Every policy written "retry" below also stalls: from the 8th failure in a row on
 | `RemoteObjectMissing` | retry | UP-12, MAINT-2 |
 | `UploadAmbiguous` | retry | UP-7 |
 | `UploadChecksumMismatch` | retry | UP-8 |
-| `StoreRefused` | persistent: `StoreRefused` | UP-5, UP-13 |
+| `StoreRefused` | persistent: `StoreRefused` | UP-5, UP-13, UP-21 |
 | `RemoteCorrupt` | persistent: `RemoteCorrupt` | BOOT-14, BOOT-17, MAINT-3, MAINT-4 |
 | `RemoteAheadOfLocal` | persistent: `OtherWriter` | UP-10, MAINT-10 |
 | `RemoteRegressed` | persistent: `RemoteRegressed` | UP-11 |
@@ -330,7 +330,7 @@ Every policy written "retry" below also stalls: from the 8th failure in a row on
 | `LocalIo` | retry | RUN-13, BOOT-12, CKPT-8 |
 | `LocalFsyncFailed` | retry | RUN-15 |
 | `WalSyncFailed` | persistent: `WalSyncFailed` | RUN-3 |
-| `SqliteBusy` | retry | RUN-13, CKPT-2 |
+| `SqliteBusy` | retry | RUN-13, CKPT-5 |
 | `ReadersHeld` | retry | CKPT-3 |
 | `WalMoved` | retry | RUN-13, RUN-8 |
 | `WalIndexInconsistent` | retry | RUN-13 |

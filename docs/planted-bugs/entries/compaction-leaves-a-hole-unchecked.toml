@@ -1,0 +1,6 @@
+# A short pass's compaction is written without the check that it starts right after its
+# level's newest file.
+name = "compaction-leaves-a-hole-unchecked"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = ["actor::tests::level_holes::a_short_pass_compaction_that_would_leave_a_hole_is_a_bug_and_writes_nothing"]

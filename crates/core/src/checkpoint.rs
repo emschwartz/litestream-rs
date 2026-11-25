@@ -17,15 +17,27 @@
 //!   and does not count it as a reason to checkpoint again, so an idle database stays idle (Go #896).
 //!   For the same reason a busy PASSIVE does not leave the trigger armed: the next write re-arms it.
 //! - A TRUNCATE that found the WAL unchanged takes no boundary snapshot (Go does).
+//! - Another connection holding the write lock is not a failure. Go's connection waits its
+//!   busy timeout inside SQLite for the barrier and, still refused, skips the checkpoint until
+//!   its next sync without a word (`db.go:1556-1561`). Ours never waits inside SQLite, so a
+//!   refused barrier is [`CheckpointOutcome::LockBusy`] and the caller asks again after
+//!   [`lock_busy_wait`]. A sequence bump refused the same way means that writer's commit
+//!   moves the WAL on in place of our frame: [`CheckpointOutcome::Overtaken`] for a PASSIVE,
+//!   and for a TRUNCATE that left nothing uncopied [`CheckpointOutcome::BoundaryOwed`].
+//!   Neither counts a failure, waits out a backoff or degrades the task.
 //!
 //! Protocol notes. A PASSIVE takes a write barrier, seals (syncs through the committed end),
 //! checkpoints, and releases the barrier on every path; a barrier that could not be released never
-//! replaces the fault that came first. The checkpoint releases and retakes the read transaction, so
-//! from the moment it is called the position is demoted to [`Continuity::Broken`] and is
-//! pinned again only by a step that proves `synced == committed` at the new epoch (or by step 6,
-//! which the barrier makes sound). Success and fault both return a [`Staged`]: the last position
+//! replaces the fault that came first. The checkpoint releases and retakes the read transaction.
+//! Under the PASSIVE's barrier no writer can commit between the seal's proof of
+//! `synced == committed` and that retake, so the position is pinned to the new hold as soon as
+//! the call returns, whatever SQLite reported and whatever fails afterwards: a WAL the next
+//! writer restarts is then followed, never snapshotted. Only a retake that was lost leaves the
+//! position [`Continuity::Broken`]. A TRUNCATE takes no barrier, so its position is `Broken`
+//! from the call until a step proves `synced == committed` at the new epoch. Success and fault
+//! both return a [`Staged`]: the last position
 //! that is true together with the files the completed steps staged, so a fault after the seal
-//! (a busy checkpoint, a failed bump or release) cannot strand the sealed file unuploaded. Its
+//! (a checkpoint that failed, a failed bump or release) cannot strand the sealed file unuploaded. Its
 //! proof is present only when the last step reached the committed end at the current epoch; a
 //! PASSIVE that restarted nothing ends pinned but behind our own bump frame. A step that
 //! finds the wal-index reset ahead of the WAL header proves nothing, so the protocol stops there
@@ -44,7 +56,9 @@ use crate::fault::{BugSite, Fault, Next, SnapshotCause};
 use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, Position, ReadLockHold, SyncedThrough};
-use crate::source::{CheckpointMode, CheckpointRun, Checkpointer, PageSource, WalSource};
+use crate::source::{
+    CheckpointMode, CheckpointRun, Checkpointer, PageSource, SourceError, WalSource,
+};
 use crate::store::ObjectStore;
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::witness::Witnessed;
@@ -246,14 +260,42 @@ pub(crate) fn after_sync(
 /// What a checkpoint did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointOutcome {
+    /// Another connection held the write lock when the PASSIVE asked for its barrier: SQLite
+    /// was not asked to checkpoint and nothing changed. The application is writing; the
+    /// decision is asked again after [`lock_busy_wait`].
+    LockBusy,
     /// SQLite could not finish and the WAL is the same generation.
     Busy,
     /// The checkpoint finished or stopped short without a restart.
     NotRestarted,
+    /// A PASSIVE ran, and another connection held the write lock when the sequence bump was
+    /// due: that writer's commit, not a frame of ours, moves the WAL on, in this generation
+    /// or a new one. The position is pinned as after any PASSIVE, so the next sync follows
+    /// either.
+    Overtaken,
     /// A PASSIVE that moved the WAL to a new generation.
     Restarted,
     /// A TRUNCATE; the boundary snapshot covers the new generation.
     Truncated,
+    /// A TRUNCATE left no frame of the WAL uncopied, and another connection held the write
+    /// lock when the sequence bump was due: that writer starts the new generation, which has
+    /// no header to snapshot under yet, so the boundary snapshot is owed to the next sync.
+    BoundaryOwed,
+}
+
+/// The first wait after a write lock that was busy ([`CheckpointOutcome::LockBusy`]).
+pub const LOCK_BUSY_WAIT: Duration = Duration::from_millis(10);
+
+/// How long to wait before asking for the write lock again after `skips` refusals in a row:
+/// [`LOCK_BUSY_WAIT`] doubled for each refusal after the first, at most `cap`.
+///
+/// SQLite's busy handler, which Go's connection relies on, asks again after a few
+/// milliseconds and then less often; this is the same shape outside SQLite. A writer between
+/// two short transactions is past within the first waits; one that holds the lock for long
+/// costs one attempt per `cap`, the cadence of an ordinary sync.
+#[must_use]
+pub fn lock_busy_wait(skips: NonZeroU32, cap: Duration) -> Duration {
+    crate::fault::retry_wait(skips, LOCK_BUSY_WAIT).min(cap)
 }
 
 /// The state and the wake after a checkpoint ran for `decision`.
@@ -266,8 +308,12 @@ pub enum CheckpointOutcome {
 ///   armed: Go ignores busy there (`db.go:1556-1561`, `1583-1586`) and so retries on its own
 ///   bump frame every tick. Here the minimum waits for the next write, and the
 ///   interval for one more interval.
+/// - A write lock that was busy at the barrier changes nothing and is asked again
+///   ([`CheckpointOutcome::LockBusy`]). A PASSIVE overtaken at its bump counts as one that
+///   did not restart the WAL at the truncate threshold, and otherwise as finished.
 /// - Every other finished checkpoint is `Idle`; it expects a bump frame unless the
-///   protocol already synced it (a restart or a truncate does).
+///   protocol already synced it (a restart or a truncate does) or wrote none (an overtaken
+///   bump).
 #[must_use]
 pub(crate) fn after_checkpoint(
     state: CheckpointState,
@@ -283,16 +329,28 @@ pub(crate) fn after_checkpoint(
     };
     let next = match (decision, outcome) {
         (Decision::Nothing, _) => state,
+        // Nothing ran: the state stands and the decision is asked again. The caller spaces
+        // the asking ([`lock_busy_wait`]).
+        (Decision::Passive(_) | Decision::Truncate, CheckpointOutcome::LockBusy) => {
+            return (state, Next::Now);
+        }
         (
             Decision::Passive(CheckpointTrigger::TruncateThreshold),
-            CheckpointOutcome::Busy | CheckpointOutcome::NotRestarted,
+            CheckpointOutcome::Busy
+            | CheckpointOutcome::NotRestarted
+            | CheckpointOutcome::Overtaken,
         ) => {
             return (
                 CheckpointState::PassiveFailedAtTruncate { last: now },
                 Next::Now,
             );
         }
-        (Decision::Truncate, CheckpointOutcome::Busy | CheckpointOutcome::NotRestarted) => {
+        (
+            Decision::Truncate,
+            CheckpointOutcome::Busy
+            | CheckpointOutcome::NotRestarted
+            | CheckpointOutcome::Overtaken,
+        ) => {
             let wake = cfg.interval.map_or(Next::OnWalChange, |interval| {
                 Next::At(now.saturating_add(interval))
             });
@@ -302,9 +360,17 @@ pub(crate) fn after_checkpoint(
         (Decision::Passive(CheckpointTrigger::Interval), CheckpointOutcome::Busy) => {
             CheckpointState::Pending { last: now }
         }
+        // No frame of ours is in the WAL to expect: a restart or a truncate synced it, and
+        // an overtaken PASSIVE wrote none (the writer that overtook it arms the triggers).
         (
             Decision::Passive(_) | Decision::Truncate,
-            CheckpointOutcome::Restarted | CheckpointOutcome::Truncated,
+            CheckpointOutcome::Restarted
+            | CheckpointOutcome::Truncated
+            | CheckpointOutcome::BoundaryOwed,
+        )
+        | (
+            Decision::Passive(CheckpointTrigger::MinPages | CheckpointTrigger::Interval),
+            CheckpointOutcome::Overtaken,
         ) => idle(false),
         (Decision::Passive(_), CheckpointOutcome::NotRestarted) => idle(true),
     };
@@ -479,7 +545,8 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
         self.good = Reached::Short(self.position().with_continuity(Continuity::Broken));
     }
 
-    /// Step 6: pinned again, but not through (our bump frame is past it).
+    /// Pinned again, but not through: the proof was consumed by the checkpoint, and our bump
+    /// frame may come after the position.
     fn take_read_lock(&mut self, epoch: ReadLockHold) {
         if self.wal.epoch() == epoch {
             self.good = Reached::Short(self.position().with_continuity(Continuity::Held(epoch)));
@@ -546,18 +613,32 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
         Ok(())
     }
 
+    /// The sequence bump; `false` when another connection holds the write lock, whose commit
+    /// moves the WAL on in place of our frame.
+    fn bump(&mut self) -> Result<bool, Fault> {
+        let bumped = self.ck.bump_seq();
+        if bumped == Err(SourceError::Busy) {
+            return Ok(false);
+        }
+        bumped.map_err(Fault::from_source)?;
+        Ok(true)
+    }
+
     async fn passive(&mut self) -> Result<CheckpointOutcome, Fault> {
         let before = self.header()?;
-        let barrier = self.ck.begin_barrier().map_err(Fault::from_source)?;
+        let barrier = self.ck.begin_barrier();
+        if barrier == Err(SourceError::Busy) {
+            return Ok(CheckpointOutcome::LockBusy);
+        }
+        let barrier = barrier.map_err(Fault::from_source)?;
         let sealed = self.seal_and_checkpoint().await;
         let released = self.ck.end_barrier(barrier);
         let run = sealed?;
         released.map_err(Fault::from_source)?;
-        self.ck.bump_seq().map_err(Fault::from_source)?;
+        if !self.bump()? {
+            return Ok(CheckpointOutcome::Overtaken);
+        }
         if self.header()? == before {
-            // Sound only because the barrier kept writers out until the read
-            // transaction was retaken.
-            self.take_read_lock(run.epoch);
             return Ok(if run.busy {
                 CheckpointOutcome::Busy
             } else {
@@ -568,10 +649,27 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
         Ok(CheckpointOutcome::Restarted)
     }
 
+    /// The seal and the PASSIVE, both under the barrier.
+    ///
+    /// The read transaction the checkpoint call retakes is the proof of continuity from here
+    /// on, and it is sound only because the barrier keeps writers out from the seal's
+    /// committed read until that retake: the hold begins at `synced == committed`. So the
+    /// position is pinned to it as the call returns, on every answer but a lost retake, and
+    /// stays pinned through whatever fails later (a busy bump, a release that failed, a step
+    /// over the new generation). A writer that restarts the WAL after the barrier is released
+    /// is then followed by the next sync; before, a fault in between left the position
+    /// unpinned and that restart cost a snapshot of the whole database.
     async fn seal_and_checkpoint(&mut self) -> Result<CheckpointRun, Fault> {
         self.step(Step::Incremental(self.position())).await?;
+        let sealed = matches!(self.good, Reached::Through(_));
         let run = self.ck.checkpoint(CheckpointMode::Passive);
         self.release_read_lock();
+        if sealed && run != Err(SourceError::ReadTxLost) {
+            // A call that failed otherwise still retook the read transaction (or never
+            // released it): the hold the WAL names now is the one to pin.
+            let epoch = run.map_or_else(|_err| self.wal.epoch(), |run| run.epoch);
+            self.take_read_lock(epoch);
+        }
         let run = run.map_err(Fault::from_source)?;
         self.run = Some(run);
         Ok(run)
@@ -583,7 +681,17 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
         self.release_read_lock();
         let run = run.map_err(Fault::from_source)?;
         self.run = Some(run);
-        self.ck.bump_seq().map_err(Fault::from_source)?;
+        if !self.bump()? {
+            // What SQLite reported decides: with every frame copied the writer that holds
+            // the lock starts a new generation (or already has), and the snapshot this
+            // checkpoint owes cannot be taken before its header exists; with frames left
+            // uncopied the WAL cannot restart, and the next sync continues in it.
+            return Ok(if run.checkpointed >= run.log {
+                CheckpointOutcome::BoundaryOwed
+            } else {
+                CheckpointOutcome::Busy
+            });
+        }
         let after = self.header()?;
         let shorter = self
             .wal

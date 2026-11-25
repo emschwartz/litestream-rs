@@ -1,0 +1,4 @@
+name = "first-snapshot-reads-the-database"
+fix = "plant"
+package = "lsr-core"
+tests = ["the_first_start_reads_each_page_once"]

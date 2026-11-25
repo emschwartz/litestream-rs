@@ -58,7 +58,7 @@ use crate::fault::role::{Replica, Role};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 use crate::publish::Writer;
-use crate::store::{ObjectStore, ReadLen, StoreError, WriteMode};
+use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
 
 #[cfg(test)]
 #[expect(
@@ -663,11 +663,11 @@ fn check_range(input: &Input) -> Result<(), CompactError> {
 
 /// Merges, encodes and uploads every page, then writes the tail. Returns the
 /// output trailer and page count; nothing is committed yet.
-async fn write_output<S: Role, D: ObjectStore>(
+async fn write_output<S: Role, U: Upload>(
     merge: &mut Merge<'_, S>,
     mut encoder: Encoder<Vec<u8>>,
     header: &Header,
-    upload: &mut Writer<'_, D>,
+    upload: &mut Writer<U>,
 ) -> Result<(Trailer, u32), CompactError> {
     let flush = merge.budget.flush;
     let mut pages = 0_u32;
@@ -761,7 +761,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
     let created_at = header.fields().timestamp;
     // A compacted file may be written again over itself (a retried
     // compaction, Go's output for the same range), as Go's are.
-    let mut upload = Writer::begin(dest, &key, created_at, WriteMode::Replace)
+    let mut upload = Writer::begin(dest, &key, created_at, WriteMode::Replace, None)
         .await
         .map_err(CompactError::Dest)?;
     let written = write_output(&mut merge, encoder, &header, &mut upload).await;
@@ -773,7 +773,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
         }
     };
     let info = upload
-        .commit()
+        .commit(dest)
         .await
         .map_err(|err| CompactError::Dest(err.into_error()))?
         .info();
@@ -789,7 +789,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
 
 /// An abort that fails leaves scratch the store cleans up; the error that made
 /// us abort is the one worth reporting.
-async fn abort_quietly<D: ObjectStore>(upload: Writer<'_, D>) {
+async fn abort_quietly<U: Upload>(upload: Writer<U>) {
     match upload.abort().await {
         Ok(()) | Err(_) => {}
     }

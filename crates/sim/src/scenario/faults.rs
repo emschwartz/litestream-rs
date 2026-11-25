@@ -18,7 +18,7 @@ use super::{
     CauseKind, EventMatch, Expect, SEED, SETTLE, Scenario, build, commit, ticks,
     vacuum_page_size_change, vacuum_page_size_change_and_back,
 };
-use crate::generate::{EnvFault, MetaOp, Op, RemoteOp, Target, WalOp};
+use crate::generate::{AppAt, AppOp, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp};
 use crate::run::{RunReport, Seen};
 use crate::seed::Seed;
 use crate::sqlite::OtherProcessMode;
@@ -291,6 +291,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::StoreRefused => &[store_refuses_upload],
         FaultKind::RemoteCorrupt => &[remote_bitrot_on_list_read],
         FaultKind::RemoteAheadOfLocal => &[
+            older_copy_on_a_new_host,
             second_writer_mid_run,
             second_writer_survives_restart,
             second_writer_between_whole_listings,
@@ -301,7 +302,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::LocalDiskFull => &[disk_full_on_staging],
         FaultKind::LocalIo => &[eio_on_wal_read],
         FaultKind::LocalFsyncFailed => &[fsync_fails_once],
-        FaultKind::SqliteBusy => &[busy_on_barrier, shm_header_mid_update],
+        FaultKind::SqliteBusy => &[shm_header_mid_update],
         FaultKind::ReadersHeld => &[readers_hold_the_wal],
         FaultKind::WritesHeld => &[writes_held_through_a_checkpoint],
         FaultKind::WalMoved => &[wal_header_torn_while_running],
@@ -1097,7 +1098,9 @@ pub fn bucket_rolled_back() -> Scenario {
 }
 
 /// The replica loses its newest file while the engine is idle, after its upload and before
-/// the maintenance listing that follows it: the listing ends below what the engine confirmed,
+/// the maintenance listing that follows it. The settling ticks first give the engine a whole
+/// listing, so the listing that follows is a short pass, whose own check reports it (a whole
+/// listing is checked separately, and would report it first on a fresh engine): the listing ends below what the engine confirmed,
 /// the regression is reported and, as configured, replication goes on. The staged copy is
 /// still there, so the engine sends it again, and a restore finds the replica whole.
 #[must_use]
@@ -1106,6 +1109,7 @@ pub fn bucket_rolled_back_while_idle() -> Scenario {
         "bucket_rolled_back_while_idle",
         vec![
             live(),
+            ticks(SETTLE),
             vec![
                 commit(2, false),
                 Op::Tick,
@@ -1265,17 +1269,100 @@ pub fn fsync_fails_once() -> Scenario {
     )
 }
 
-/// SQLite is busy when the checkpoint takes its barrier.
+/// Another connection holds the write lock when the checkpoint asks for its barrier: the
+/// checkpoint waits and asks again, and nothing fails.
 #[must_use]
 pub fn busy_on_barrier() -> Scenario {
-    injected(
+    let mut s = injected(
         "busy_on_barrier",
         vec![
             Op::EnvFault(EnvFault::Source(SourceOp::BeginBarrier, SourceError::Busy)),
             commit(9, true),
         ],
-        vec![retries(FaultKind::SqliteBusy)],
-    )
+        vec![Expect::Event(EventMatch::CheckpointDeferred)],
+    );
+    s.check = Some(nothing_failed_and_nothing_snapshotted);
+    s
+}
+
+/// No step failed and no snapshot was announced: what a write lock that another connection
+/// holds must cost a checkpoint.
+fn nothing_failed_and_nothing_snapshotted(report: &RunReport) -> Result<(), String> {
+    let bad = report.seen.iter().find(|seen| {
+        matches!(
+            seen,
+            Seen::Event(Event::Retrying { .. } | Event::Degraded { .. } | Event::Resnapshot(_))
+        )
+    });
+    bad.map_or(Ok(()), |seen| Err(format!("the run saw {seen:?}")))
+}
+
+/// A writer begins its transaction between the PASSIVE's barrier and the sequence bump, in a
+/// WAL the checkpoint copied whole, so it restarts the WAL and holds the write lock when the
+/// bump asks for it (nine frames make the checkpoint due; the commit after the tick ends the
+/// writer's transaction). No fault is injected: this is an application writing. The engine
+/// follows the restart with no retry and no snapshot, the needless-snapshot oracle judges
+/// the run with nothing to excuse one, and the restore holds every commit. That the restart
+/// happens is held by the planted bug `unpinned-after-own-checkpoint`, which this scenario
+/// must fail under.
+#[must_use]
+pub fn bump_overtaken_then_the_wal_restarts() -> Scenario {
+    let mut ops = vec![
+        commit(9, true),
+        Op::AppInTick {
+            at: AppAt::Before(SourceOp::BumpSeq),
+            op: AppOp::Spill { pages: 2 },
+        },
+        commit(2, false),
+    ];
+    ops.extend(ticks(SETTLE));
+    ops.push(Op::Restore);
+    let mut s = build(
+        "bump_overtaken_then_the_wal_restarts",
+        vec![live(), ops],
+        vec![
+            Expect::Event(EventMatch::Checkpointed(lsr_core::CheckpointMode::Passive)),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(overtaken_at_the_bump);
+    s
+}
+
+/// The writer began right before the bump, and nothing failed or snapshotted.
+fn overtaken_at_the_bump(report: &RunReport) -> Result<(), String> {
+    if report.reach.get("point.BumpSeq.Spill.ran") != 1 {
+        return Err("no write transaction began right before the sequence bump".to_owned());
+    }
+    nothing_failed_and_nothing_snapshotted(report)
+}
+
+/// A writer holds the write lock, with frames it has not committed, when the checkpoint comes
+/// due: no fault is injected. The tick defers the checkpoint and fails nothing; the writer
+/// commits, the wait (ten milliseconds) passes, the checkpoint runs, and the restore holds
+/// every commit.
+#[must_use]
+pub fn write_lock_held_at_the_barrier() -> Scenario {
+    let mut ops = vec![
+        commit(9, true),
+        Op::Spill,
+        Op::Tick,
+        commit(2, false),
+        Op::ClockJump(10),
+    ];
+    ops.extend(ticks(SETTLE));
+    ops.push(Op::Restore);
+    let mut s = build(
+        "write_lock_held_at_the_barrier",
+        vec![live(), ops],
+        vec![
+            Expect::Event(EventMatch::CheckpointDeferred),
+            Expect::Event(EventMatch::Checkpointed(lsr_core::CheckpointMode::Passive)),
+            Expect::Oracle,
+        ],
+    );
+    s.check = Some(nothing_failed_and_nothing_snapshotted);
+    s
 }
 
 /// The application's readers hold the WAL when a checkpoint is asked for: it is
@@ -2161,14 +2248,35 @@ pub fn sealed_then_checkpoint_io() -> Scenario {
     )
 }
 
-/// [`sealed_then`]: the sequence bump is busy.
+/// [`sealed_then`]: the sequence bump is busy. Another writer holds the lock, so the
+/// checkpoint is finished and nothing failed; the drain still uploads the sealed file.
 #[must_use]
 pub fn sealed_then_bump_busy() -> Scenario {
-    sealed_then(
+    let mut s = sealed_then(
         "sealed_then_bump_busy",
         SourceOp::BumpSeq,
         SourceError::Busy,
-    )
+    );
+    s.check = Some(sealed_then_overtaken);
+    s
+}
+
+/// The commit happened inside the tick, the checkpoint after it ran, and no step failed.
+fn sealed_then_overtaken(report: &RunReport) -> Result<(), String> {
+    if report.commits_in_tick != 1 {
+        return Err(format!(
+            "{} commits inside a tick, not one",
+            report.commits_in_tick
+        ));
+    }
+    let ran = report
+        .seen
+        .iter()
+        .any(|seen| matches!(seen, Seen::Event(Event::Checkpointed { .. })));
+    if !ran {
+        return Err("no checkpoint ran".to_owned());
+    }
+    nothing_failed_and_nothing_snapshotted(report)
 }
 
 /// [`sealed_then`]: the sequence bump fails with an I/O error.
@@ -2179,4 +2287,18 @@ pub fn sealed_then_bump_io() -> Scenario {
         SourceOp::BumpSeq,
         SourceError::Io(std::io::ErrorKind::Other),
     )
+}
+
+/// Host A replicates, a file backup of the database is taken, A commits more (the replicator's
+/// counter goes up with its checkpoints) and replicates, and A is lost: the backup goes in
+/// place of the database with no working folder, as a plain `cp` puts it on a new host. It
+/// holds most of the replica's pages and was written after the replica's newest file, but its
+/// counter is below the replica's: the boot stops instead of snapshotting the older database
+/// above the replica's newest state (`docs/decisions/D214.md`).
+#[must_use]
+pub fn older_copy_on_a_new_host() -> Scenario {
+    let mut s = super::older_copy_history("older_copy_on_a_new_host", 2, false);
+    s.expect = vec![Expect::Stopped(StopCause::OtherWriter), Expect::Oracle];
+    s.check = Some(quiet_after_stop);
+    s
 }
