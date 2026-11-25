@@ -1,0 +1,10 @@
+# Maintenance takes a listed file above what the uploader confirmed, at an id this engine staged
+# and has not put, as its own: another writer's file at the id of a file in flight is compacted,
+# and after the stop the boot takes that compaction as holding the commit.
+name = "maintenance-trusts-an-unjudged-file"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "a_whole_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight",
+    "a_short_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight",
+]

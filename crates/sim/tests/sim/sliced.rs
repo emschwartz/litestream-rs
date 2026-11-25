@@ -5,7 +5,7 @@
 
 use std::num::NonZeroU64;
 
-use lsr_core::{Did, Event, Fault, SnapshotCause, StoreError, StoreOp};
+use lsr_core::{Did, Event, Fault, MaintainedEvent, SnapshotCause, StopCause, StoreError, StoreOp};
 use lsr_sim::generate::MetaOp;
 use lsr_sim::run::{Seen, run_ops};
 use lsr_sim::sqlite::CrashKind;
@@ -16,8 +16,13 @@ use lsr_sim::{FaultShape, Op, Opts, RunReport, Seed, Target};
 const SLICE: u64 = 128;
 
 fn run(ops: &[Op]) -> RunReport {
+    run_sliced(ops, SLICE)
+}
+
+/// The run with `slice` bytes of staged files a tick.
+fn run_sliced(ops: &[Op], slice: u64) -> RunReport {
     let opts = Opts {
-        slice_bytes: NonZeroU64::new(SLICE),
+        slice_bytes: NonZeroU64::new(slice),
         record: true,
         ..Opts::default()
     };
@@ -227,4 +232,70 @@ fn a_staged_file_damaged_under_its_send_is_never_published() {
         );
         assert_eq!(report.reach.get("send.then_a_fault"), 1, "{damage:?}");
     }
+}
+
+/// Another writer takes the id of a file this engine has staged and not sent. Maintenance has
+/// its turn before the file is out and lists the replica with the other writer's file on it:
+/// not past what the engine staged, and not the engine's own. Nothing is compacted from that
+/// listing; the engine's put of the id is refused and it stops. The run's judges then restore
+/// every transaction once the other writer's file is gone. Compacted into level 1, the other
+/// writer's pages stood in for the commit, which the next boot dropped from staging: the
+/// replica restored a database no commit made (the nightly soak found it four times in 7,046
+/// seeds).
+#[test]
+fn another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted() {
+    let commit = Op::Commit {
+        pages: 1,
+        grow: false,
+    };
+    // Sixteen bytes a tick. The first file goes up, and maintenance settles after it.
+    let mut ops = in_flight();
+    ops.extend(ticks(400));
+    // A commit, and the checkpoint the idle time made due, whose own frame is a file too: the
+    // 54th tick publishes the second of them, and no maintenance pass follows that put.
+    ops.push(commit.clone());
+    ops.extend(ticks(54));
+    // The next commit is in the WAL, not yet staged, when the other writer takes its id.
+    ops.push(commit);
+    ops.push(Op::SecondWriter { ticks: 60 });
+    ops.extend(ticks(40));
+    ops.push(Op::Restore);
+    let report = run_sliced(&ops, 16);
+    assert_eq!(report.reach.get("remote.second_writer"), 1);
+    let seen: Vec<&Seen> = report
+        .seen
+        .iter()
+        .filter(|seen| !matches!(seen, Seen::Tick { .. }))
+        .collect();
+    let stopped = seen
+        .iter()
+        .position(|seen| **seen == Seen::Stop(StopCause::OtherWriter))
+        .expect("the engine never stopped for the other writer");
+    let staged = seen[..stopped]
+        .iter()
+        .rposition(|seen| matches!(seen, Seen::Event(Event::Synced { .. })))
+        .expect("the commit was never staged");
+    // From the sync that staged the file to the stop: the turn maintenance had, and slices.
+    let unsent = &seen[staged + 1..stopped];
+    let maintained: Vec<&MaintainedEvent> = unsent
+        .iter()
+        .filter_map(|seen| {
+            if let Seen::Event(Event::Maintained { event, .. }) = seen {
+                Some(event)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        maintained,
+        [&MaintainedEvent::Waiting { held: None }],
+        "{unsent:?}"
+    );
+    assert!(
+        unsent
+            .iter()
+            .any(|seen| matches!(seen, Seen::Event(Event::Sending { .. }))),
+        "{unsent:?}"
+    );
 }
