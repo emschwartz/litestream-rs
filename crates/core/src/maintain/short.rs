@@ -192,6 +192,12 @@ impl Remembered {
         self.full_owed = true;
     }
 
+    /// Whether the last whole listing found no snapshot and no level-1 file: the first
+    /// snapshot is owed, and it is the one job a maintenance pass has waiting.
+    pub(crate) const fn first_snapshot_owed(&self) -> bool {
+        self.first_snapshot_owed
+    }
+
     /// Whether a short listing may stand in for a whole one at `now`.
     pub(crate) fn short_ok(&self, now: Timestamp) -> bool {
         self.full_by.is_some()

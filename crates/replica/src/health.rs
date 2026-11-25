@@ -313,7 +313,7 @@ impl Health {
     /// The state before the thread has written anything, reported at `at`: what a replicator
     /// says before its first tick, and what a test outside this crate builds a health from.
     #[must_use]
-    pub const fn new(at: Timestamp) -> Self {
+    pub fn new(at: Timestamp) -> Self {
         Self {
             reported_at: at,
             phase: Phase::Booting,
@@ -327,49 +327,13 @@ impl Health {
             resnapshot: None,
             app_checkpoints_ran: 0,
             app_checkpoints: AppCheckpoints::NONE,
-            counters: Counters {
-                ticks: 0,
-                syncs: 0,
-                checkpoints: 0,
-                checkpoints_busy: 0,
-                uploads: 0,
-                retries: 0,
-                panics: 0,
-                sink_panics: 0,
-                read_lock_violations: 0,
-                scratch_sweeps_denied: 0,
-                store: StoreCounters {
-                    list: OpCounters::ZERO,
-                    read: OpCounters::ZERO,
-                    created_at: OpCounters::ZERO,
-                    begin_upload: OpCounters::ZERO,
-                    write: OpCounters::ZERO,
-                    commit: OpCounters::ZERO,
-                    abort: OpCounters::ZERO,
-                    delete: OpCounters::ZERO,
-                    bytes_uploaded: 0,
-                },
-                snapshots: SnapshotCounts::ZERO,
-                work: WorkCounts::ZERO,
-            },
+            counters: Counters::default(),
             held_by: FailStop {
                 trip: None,
                 gate: Gate::Pending,
             },
             writes: Writes::Allowed,
-            verification: Verification {
-                last_run: None,
-                last_good: None,
-                failing: None,
-                kept_restore_point: None,
-                worst_finding: None,
-                runs: VerifyRuns {
-                    passed: 0,
-                    failed: 0,
-                    merged: 0,
-                    incomplete: 0,
-                },
-            },
+            verification: Verification::default(),
             final_retention: FinalRetention::NotAsked,
             final_snapshot: FinalSnapshot::NotAsked,
         }
@@ -444,14 +408,6 @@ impl fmt::Display for AppNotice {
             ),
         }
     }
-}
-
-impl OpCounters {
-    const ZERO: Self = Self {
-        calls: 0,
-        errors: 0,
-        millis: 0,
-    };
 }
 
 #[cfg(test)]
