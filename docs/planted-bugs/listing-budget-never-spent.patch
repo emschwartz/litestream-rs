@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/retry.rs b/crates/core/src/retry.rs
+--- a/crates/core/src/retry.rs
++++ b/crates/core/src/retry.rs
+@@ -198,7 +198,7 @@
+         let started = self.started.load(Ordering::Relaxed);
+         let elapsed = self.clock.now().unix_millis().saturating_sub(started);
+         let elapsed = Duration::from_millis(u64::try_from(elapsed).unwrap_or(0));
+-        elapsed.saturating_add(wait) >= self.budget
++        elapsed.saturating_add(wait) >= self.budget && wait > Duration::MAX
+     }
+ 
+     /// Records why the listing stopped, keeping the first record.

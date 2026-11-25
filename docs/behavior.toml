@@ -1291,6 +1291,17 @@ recovery = "Operator: Go Litestream for a read replica"
 detected_by = "cli::`follow_mode_is_refused_as_not_built`"
 
 [[row]]
+table = "Restore"
+id = "REST-17"
+circumstance = "The replica's endpoint takes connections and never answers, or answers every listing with a failure, during a `restore` (or its `-dry-run`)"
+response = "Every listing of the restore together is held to 120 seconds from the first (`RESTORE_LISTING_BUDGET`): a failed listing is retried under the usual policy until the next retry would begin at or after that time, then the restore fails. A request already in flight is not cut short, so the bound is 120 seconds plus one request deadline (60 seconds by default). Before, each level was retried five times at the request deadline in turn, about 33 minutes with a silent endpoint. The retry rules of replication and of the restore's reads are unchanged. Go retries nothing here (D209)"
+signal = "exit 1, the error names the endpoint, the seconds, how many listing requests were made and what the last one failed with"
+at_risk = "A restore against a slow but live endpoint whose listing takes longer than the budget fails where it might have finished; run it again"
+recovery = "Operator: check the endpoint, run the restore again"
+detected_by = "core::`a_spent_listing_budget_stops_the_retries_and_says_what_was_tried`, core::`the_budget_ends_a_retry_that_would_begin_at_its_end`, core::`the_budget_starts_at_the_first_listing`, core::`a_spent_budget_leaves_later_listings_one_attempt_each`, core::`a_batch_listing_is_held_to_the_budget_too`, core::`reads_keep_the_policys_attempts_after_the_budget_is_spent`, core::`a_store_without_a_budget_retries_listings_by_the_policy_alone`, core::`a_budget_that_is_never_spent_reports_nothing`, cli::`a_restore_that_cannot_list_names_the_endpoint_and_what_was_tried`, cli::`a_restore_error_with_the_budget_unspent_is_not_renamed`, cli::`the_restore_listing_budget_is_two_minutes`; plant::`listing-budget-never-spent`, plant::`restore-timeout-not-named`"
+notes = "The daemon's restore-if-missing at start keeps the retry policy alone (it is not a person waiting, and its failure is a reported start state)."
+
+[[row]]
 table = "Verify"
 id = "VERIFY-1"
 circumstance = "`lsr verify`: every file is decoded, its checksums and name checked, every hole reported, then a real restore of the latest state runs into a sink that writes nothing (`verify.rs`)"
@@ -2624,4 +2635,5 @@ at_risk = "None (a checker)"
 recovery = "None"
 detected_by = "sim::`kill_after_fault::half_the_swarm_draws_the_law_and_the_default_mix_never`"
 notes = "The law showed the second-writer judge charging a stop to a process it had just killed (fixed: a crash ends the watch, as a boot does), and a lost acknowledged transaction on seed 0x1dc, under triage. The engine journal and its obligation ledger, which the law once proved, are gone (D173)"
+
 

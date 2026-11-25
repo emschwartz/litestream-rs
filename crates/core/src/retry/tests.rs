@@ -713,3 +713,144 @@ fn remove_scratch_is_forwarded() {
     assert_eq!(conformance::block_on(store.remove_scratch()), Ok(7));
     assert_eq!(mem.scratch(), 0);
 }
+// the listing budget
+
+/// A sleeper that moves a fake clock by what it was asked to wait, so time passes as it would.
+#[derive(Clone)]
+struct Ticking(Arc<crate::env::FakeClock>);
+
+impl Sleeper for Ticking {
+    async fn sleep(&self, wait: Duration) {
+        self.0.advance(wait);
+    }
+}
+
+type Budgeted = (
+    MemStore,
+    Arc<crate::env::FakeClock>,
+    Retrying<MemStore, Ticking, MaxEntropy>,
+);
+
+/// Waits of 100, 200, 400 ms after the first, second and third failure, with a listing budget.
+fn budgeted(budget: Duration) -> Budgeted {
+    let mem = MemStore::new();
+    let clock = Arc::new(crate::env::FakeClock::new(created_at()));
+    let shared = Arc::clone(&clock);
+    let as_clock: Arc<dyn Clock> = shared;
+    let store = Retrying::with_listing_budget(
+        mem.clone(),
+        Ticking(Arc::clone(&clock)),
+        MaxEntropy,
+        policy(5),
+        as_clock,
+        budget,
+    );
+    (mem, clock, store)
+}
+
+fn fail_lists(mem: &MemStore, times: usize) {
+    for _ in 0..times {
+        mem.inject_failure(StoreOp::List, transient(ErrorKind::TimedOut));
+    }
+}
+
+#[test]
+fn a_spent_listing_budget_stops_the_retries_and_says_what_was_tried() {
+    let (mem, _clock, store) = budgeted(ms(500));
+    fail_lists(&mem, 9);
+    let got = conformance::block_on(store.list(Level::ZERO, None, limit()));
+    assert_eq!(got, Err(transient(ErrorKind::TimedOut)));
+    assert_eq!(
+        store.listing_expired(),
+        Some(ListingExpired {
+            budget: ms(500),
+            listings: 3,
+            last: transient(ErrorKind::TimedOut),
+        })
+    );
+    assert_eq!(store.stats().calls, 3);
+}
+
+/// A retry that would begin exactly when the budget ends is not made; one millisecond sooner is.
+#[test]
+fn the_budget_ends_a_retry_that_would_begin_at_its_end() {
+    for (budget, listings) in [(300, 2), (301, 3)] {
+        let (mem, _clock, store) = budgeted(ms(budget));
+        fail_lists(&mem, 9);
+        conformance::block_on(store.list(Level::ZERO, None, limit())).unwrap_err();
+        let expired = store.listing_expired().unwrap();
+        assert_eq!(expired.listings, listings, "budget {budget} ms");
+    }
+}
+
+/// The budget runs from the first listing, not from when the store was made.
+#[test]
+fn the_budget_starts_at_the_first_listing() {
+    let (mem, clock, store) = budgeted(ms(500));
+    clock.advance(Duration::from_secs(3600));
+    fail_lists(&mem, 2);
+    conformance::block_on(store.list(Level::ZERO, None, limit())).unwrap();
+    assert_eq!(store.listing_expired(), None);
+    assert_eq!(store.stats().retries, 2);
+}
+
+/// One budget covers every listing: after it is spent, the next listing is tried once.
+#[test]
+fn a_spent_budget_leaves_later_listings_one_attempt_each() {
+    let (mem, clock, store) = budgeted(ms(500));
+    fail_lists(&mem, 9);
+    conformance::block_on(store.list(Level::ZERO, None, limit())).unwrap_err();
+    clock.advance(Duration::from_secs(1));
+    let before = store.stats().calls;
+    conformance::block_on(store.list(Level::ZERO, None, limit())).unwrap_err();
+    assert_eq!(store.stats().calls, before + 1);
+    assert_eq!(store.listing_expired().unwrap().listings, 3);
+}
+
+#[test]
+fn a_batch_listing_is_held_to_the_budget_too() {
+    let (mem, _clock, store) = budgeted(ms(500));
+    fail_lists(&mem, 9);
+    let at = ListAt {
+        level: Level::ZERO,
+        after: None,
+    };
+    let got = conformance::block_on(store.list_many(&[at, at], limit()));
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0], Err(transient(ErrorKind::TimedOut)));
+    let expired = store.listing_expired().unwrap();
+    assert_eq!(expired.listings, 2 + 2);
+}
+
+/// Only listings are bounded: reads keep the policy after the budget is spent.
+#[test]
+fn reads_keep_the_policys_attempts_after_the_budget_is_spent() {
+    let (mem, _clock, store) = budgeted(ms(500));
+    fail_lists(&mem, 9);
+    conformance::block_on(store.list(Level::ZERO, None, limit())).unwrap_err();
+    for _ in 0..4 {
+        mem.inject_failure(StoreOp::Read, transient(ErrorKind::TimedOut));
+    }
+    let before = store.stats().calls;
+    let got = conformance::block_on(store.read(&key(), 0, ReadLen::or_chunk(16)));
+    assert_eq!(got, Err(StoreError::NotFound { key: key() }));
+    assert_eq!(store.stats().calls, before + 5);
+}
+
+#[test]
+fn a_store_without_a_budget_retries_listings_by_the_policy_alone() {
+    let (mem, sleeper, store) = rig(MaxEntropy, policy(5));
+    fail_lists(&mem, 9);
+    conformance::block_on(store.list(Level::ZERO, None, limit())).unwrap_err();
+    assert_eq!(sleeper.waits().len(), 4);
+    assert_eq!(store.listing_expired(), None);
+}
+
+#[test]
+fn a_budget_that_is_never_spent_reports_nothing() {
+    let (mem, _clock, store) = budgeted(Duration::from_secs(3600));
+    fail_lists(&mem, 9);
+    conformance::block_on(store.list(Level::ZERO, None, limit())).unwrap_err();
+    assert_eq!(store.listing_expired(), None);
+    assert_eq!(store.stats().calls, 5);
+}
