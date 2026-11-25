@@ -1,0 +1,11 @@
+# The same plant under the simulator: staging fell behind the replica, the store was down across two
+# restarts, and reads of the replica lied when it came back. The oracle sees one transaction with
+# two contents.
+name = "local-course-files-unjudged-sim"
+patch = "local-course-files-unjudged"
+fix = "claude/boot-local"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::store_returns_unreadable_after_staging_fell_behind",
+]

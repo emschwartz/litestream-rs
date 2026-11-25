@@ -1,0 +1,15 @@
+diff --git a/crates/core/src/actor/parts.rs b/crates/core/src/actor/parts.rs
+index b059d2276..32857878c 100644
+--- a/crates/core/src/actor/parts.rs
++++ b/crates/core/src/actor/parts.rs
+@@ -353,8 +353,8 @@ pub(super) enum Course {
+ impl Course {
+     pub(super) const fn booted(&self) -> bool {
+         match self {
+-            Self::Unbooted | Self::Local(_) => false,
+-            Self::Snapshot { .. } | Self::At { .. } => true,
++            Self::Unbooted => false,
++            Self::Local(_) | Self::Snapshot { .. } | Self::At { .. } => true,
+         }
+     }
+ 
