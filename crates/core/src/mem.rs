@@ -52,7 +52,8 @@ struct State {
     /// Logical milliseconds, advanced by one at each commit.
     clock: i64,
     created_at_calls: u64,
-    /// Scratch files a killed writer left, as `remove_scratch` counts them.
+    /// Scratch files a killed writer left, as `remove_scratch` counts them: planted, or one
+    /// for each upload dropped with neither a commit nor an abort.
     scratch: u64,
     objects: BTreeMap<FileKey, Object>,
     unrecognized: BTreeMap<Level, BTreeSet<String>>,
@@ -318,6 +319,7 @@ impl ObjectStore for MemStore {
             created_at,
             mode,
             buf: Vec::new(),
+            ended: false,
         });
         std::future::ready(result)
     }
@@ -333,7 +335,8 @@ impl ObjectStore for MemStore {
     }
 }
 
-/// A [`MemStore`] upload: bytes held aside until commit.
+/// A [`MemStore`] upload: bytes held aside until commit. One dropped with neither a commit
+/// nor an abort leaves a scratch file, as a store on disk or an open multipart upload does.
 #[derive(Debug)]
 pub struct MemUpload {
     store: MemStore,
@@ -341,6 +344,17 @@ pub struct MemUpload {
     created_at: Timestamp,
     mode: WriteMode,
     buf: Vec<u8>,
+    /// Committed or aborted, whatever the outcome: nothing is left behind.
+    ended: bool,
+}
+
+impl Drop for MemUpload {
+    fn drop(&mut self) {
+        if !self.ended {
+            let mut state = self.store.lock();
+            state.scratch = state.scratch.saturating_add(1);
+        }
+    }
 }
 
 impl Upload for MemUpload {
@@ -351,7 +365,9 @@ impl Upload for MemUpload {
         std::future::ready(result)
     }
 
-    fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
+    fn commit(mut self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
+        self.ended = true;
+        let buf = std::mem::take(&mut self.buf);
         let mut state = self.store.lock();
         let taken = self.mode == WriteMode::New && state.objects.contains_key(&self.key);
         let unchecked = self.mode == WriteMode::New && state.no_create_only;
@@ -365,10 +381,10 @@ impl Upload for MemUpload {
             if taken {
                 return Err(StoreError::AlreadyExists { key: self.key });
             }
-            let size = u64::try_from(self.buf.len()).unwrap_or(u64::MAX);
+            let size = u64::try_from(buf.len()).unwrap_or(u64::MAX);
             state.clock = state.clock.saturating_add(1);
             let object = Object {
-                bytes: self.buf,
+                bytes: buf,
                 created_at: self.created_at,
                 last_modified: Timestamp::from_unix_millis(state.clock),
                 dropped: false,
@@ -388,7 +404,8 @@ impl Upload for MemUpload {
         std::future::ready(result)
     }
 
-    fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send {
+    fn abort(mut self) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.ended = true;
         std::future::ready(Ok(()))
     }
 }

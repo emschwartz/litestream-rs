@@ -1,0 +1,9 @@
+# A whole listing closes no hole: a level a lower level could make whole again stays as it
+# is, and Go's compaction of the level above keeps failing on it.
+name = "hole-on-the-replica-never-closed"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = [
+    "actor::tests::level_holes::holes_already_on_the_replica_are_closed_at_the_first_listing",
+    "maintain::tests::a_whole_listing_closes_a_hole_before_the_window_opens",
+]

@@ -208,6 +208,7 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         staging_fs: _,
         // The engine's own configuration.
         truncate_pages: _,
+        slice_bytes: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
         // The replica on S3: its provider faults are noted as they are drawn.
