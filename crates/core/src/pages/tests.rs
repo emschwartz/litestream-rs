@@ -383,3 +383,20 @@ fn a_first_pending_file_ending_where_the_replicas_newest_ended_is_quiet() {
     assert_eq!(quiet(&at_the_end), vec![3]);
     assert_eq!(quiet(&past_it), Vec::<u64>::new());
 }
+
+/// The engine believes the replica holds a newest file it does not (an upload whose answer was
+/// lost): placing the first pending file leaves it counted and does not fail the boot, which
+/// would read the same missing file again for as long as the belief lasts.
+#[test]
+fn a_replica_missing_the_believed_newest_file_leaves_the_first_pending_file_counted() {
+    let replica = crate::MemStore::new();
+    let staging = crate::MemStore::new();
+    put_all(
+        &staging,
+        vec![file_from_wal(3, &[(1, 2), (2, 1), (3, 1)], 32, 200)],
+    );
+    let mut seeded =
+        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
+    crate::conformance::block_on(seeded.place(&Replica(&replica), Txid::new(2))).unwrap();
+    assert!(seeded.quiet.is_empty());
+}

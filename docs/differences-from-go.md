@@ -3,7 +3,17 @@
 Compared with Go Litestream 0.5.x at upstream 041a8c3. This page describes v1 as decided in [decisions/D173.md](decisions/D173.md).
 "S3" here means any S3-compatible object storage: AWS S3, Cloudflare R2, Tigris, MinIO and the like.
 
-The replica is the same: the bucket layout and the LTX files. Either implementation restores what the other wrote (Go from v0.5.16 for files written here), and either takes over the other's bucket and local files with a plain restart.
+The replica is the same: the bucket layout and the LTX files. Either implementation restores what the other wrote (Go from v0.5.16 for files written here), and either takes over the other's bucket and local files with a restart, once the other has fully stopped.
+
+## The differences that matter most
+
+- **Never run both at once on one bucket path.** Taking turns with a restart is safe. Go and litestream-rs writing together can leave restores that are wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
+- **litestream-rs stops at start when the bucket holds files this database cannot account for** (`other_writer`). Go adopts the bucket and carries on. An operator chooses with `lsr trust-local` or `lsr restore`.
+- **It can hold the application's writes.** Under the default `if-replication-stops: hold-start`, writes fail with "database is locked" until the start is judged, and stay held if that first attempt stops or is refused. `report` is Go's behaviour.
+- **Restores are verified, and exact or refused.** A corrupt file or a missing one fails the restore with a named error, where Go can exit 0.
+- **The config is read strictly.** An unknown key or a feature that is not built is refused at load.
+- **No TRUNCATE checkpoint unless the config says the application holds no long readers.** Go truncates by default.
+- **Missing:** storage other than S3 and a local directory, the VFS read replica, the control socket and its commands, and encryption settings.
 
 ## Same as Go
 
@@ -11,14 +21,12 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 |---|---|
 | The replicator crashes, is killed or restarts | Resume from the local files and the WAL. Take a snapshot only when the WAL no longer matches |
 | The replicator restarts with files it had saved locally and not yet uploaded | Upload them as they are. litestream-rs checks every one first: its checksum, that it continues from the file before it, and that it matches the WAL where the WAL still holds those changes. Go checks only the newest. Three unlikely cases get past both, listed under [Files waiting to upload at a restart](#files-waiting-to-upload-at-a-restart) |
-| S3 errors, throttles or is down | Retry, waiting up to 5 minutes between tries, for as long as it takes |
+| S3 errors, throttles or is down | Retry, waiting up to 5 minutes between tries, for as long as it takes. Not the same in a long outage: litestream-rs stops staging once 4,096 files wait to upload, and from there the WAL holds the changes and grows. After a restart during the outage it stages and checkpoints nothing until S3 answers, where Go's local copy and checkpoints carry on |
 | SQLite changes the WAL: a checkpoint from outside, a WAL restart, `VACUUM`, a deleted WAL | Continue, or take a snapshot |
 | S3's list of files is out of date | Trust the list. Object storage that lists behind its writes is unsupported |
 | The replicator restarts while replication is failing | Not covered: the failure is forgotten. The count of failed tries and the degraded report start again from zero, so a replicator that keeps restarting can stay quiet. litestream-rs carries one number across the restart, the age of the oldest change that was staged and not yet in S3 (`lsr_unreplicated_age_seconds`) |
 | A replica at the top of a bucket, with no folder inside it: `s3://bucket/` with the slash at the end, or `type: s3` with a `bucket` and no `path` | Works. Every object's name in the bucket starts with a slash, for example `/0000/<file>.ltx` ([decisions/D181.md](decisions/D181.md)) |
 | `replicate` and `restore` fail | Exit 1 |
-| A database with a long history is written to | Not the same cost. litestream-rs keeps the newest file of each level in memory and each pass lists only what its decision reads (nothing, when nothing is due), with a whole listing every 15 minutes and after any fault ([decisions/D193.md](decisions/D193.md)). About 680 requests an hour at 20,000 level-1 files. A file another writer puts at a compaction level below the newest known, a foreign snapshot, or a file above the configured top is noticed at the next whole listing, at most 15 minutes later |
-| `l0-retention-check-interval` is not set | Not the same default. Go checks level 0 every 15 s; litestream-rs checks every 120 s (up to 240 s while a compaction job is waiting, so the job goes first), because each check lists level 0, a level-1 tail and level 9 fresh (about 3 requests, 5 with paging), which at 15 s is about 700 to 1,200 requests an hour on top of the 679 the whole hour costs at 120 s (D193). A level-0 file lives up to 4 minutes longer. A set value is honoured exactly, as in Go |
 
 ### Files waiting to upload at a restart
 
@@ -40,6 +48,7 @@ The replicator saves each batch of changes in its working folder (the folder whe
 | Two databases share one working folder or one bucket path | Starts | Refuses at load | Each overwrites the other's files |
 | A replica written `s3://bucket`, with no slash after the bucket name | Stores the replica in a folder literally named `.`, so every object's name starts with `./`. Whether Go means to is asked in [benbjohnson/litestream#1651](https://github.com/benbjohnson/litestream/issues/1651) | Refuses at load, with an error that says what to write. For the top of the bucket, write `s3://bucket/`. A replica Go already wrote under `./` cannot be read here: move its objects or start a new replica | The URL library litestream-rs sends its requests through removes a `.` from a path, as a browser does, so a request for an object under `./` would reach a different object ([decisions/D181.md](decisions/D181.md), [decisions/D186.md](decisions/D186.md)) |
 | Used as a library: the application runs SQLite at `synchronous = OFF`, or links a SQLite build outside the verified list (SQLite 3.51.3 to 3.54.1 as `libsqlite3-sys` 0.37 to 0.40 bundle it) | Does not apply | Refuses the connection, or refuses to start | OFF syncs nothing; a build nobody verified may lay out the files the engine reads differently |
+| A listing page repeats a key, a later page lists a file at or before one already passed, or the continuation token comes back | Takes the pages as they come (it does not look at order) | Refuses the listing as a retryable fault, so a cursor that went back cannot hide a file or count one twice. Keys within a page may come in any order (Cloudflare R2 lists a name after the longer names that extend it) and are accepted |
 
 ## Different: litestream-rs carries on as Go does, and checks or says more
 
@@ -51,10 +60,10 @@ The replicator saves each batch of changes in its working folder (the folder whe
 | The WAL is damaged below the last commit | Reads it as the end of the WAL | Reports `wal_corrupt` and replicates nothing past the damage |
 | A writer stopped mid-commit left frames in the WAL | Releases through v0.5.18 can replicate them | Never reads past the last commit |
 | A failure that persists | A log line | A named degraded state in `health()`, `/healthz` and `/metrics` |
-| Two replicators start on one working folder (an overlapping deploy on one disk) | Runs both, which can corrupt the local files | The second waits for the first to exit |
+| Two replicators start on one working folder (an overlapping deploy on one disk) | Runs both, which can corrupt the local files | The second `lsr replicate` waits for the first to exit. Used as a library, the second start is refused |
 | The working folder is lost and the database is kept | Adopts the bucket's newest file and snapshots on top | Compares the database with the bucket and continues when they are equal. When the database was written after the bucket's newest file, holds at least half of its pages and does not carry a replicator counter below the bucket's, it takes a snapshot on top and warns (`ahead_of_replica`): the lost folder held changes the bucket never got. Otherwise it stops, as in the first row above, which includes a database that is an older copy of the bucket's ([decisions/D194.md](decisions/D194.md), [decisions/D205.md](decisions/D205.md)) |
 | The S3 provider has no conditional writes | Does not use them | Runs as Go does, and reports `conditional_writes_unsupported` |
-| `restore` over an existing database | Deletes the old file first | Keeps the old file until the new one is complete and checked |
+| `restore` over an existing database | Deletes the old file first | Keeps the old file until the new one is complete and checked. One open exception: after a restore that was killed at its last step, `-force` rewrites the database in place |
 | `restore` by URL to a time after the newest file | Refuses | Restores the newest state |
 | `replicate -once -enforce-retention` on an idle database | Keeps 1 snapshot | Keeps 2 |
 | A TRUNCATE checkpoint, once the WAL passes `truncate-page-n` | On by default. After it Go copies the whole database while it holds SQLite's write lock, so the application cannot write until the copy ends (minutes, for a large database) | Off unless the config says `litestream-rs: {app-readers: none}`. Then each TRUNCATE that empties the WAL is followed by a copy of the whole database, read from disk and uploaded as a snapshot: disk reads and bucket bytes in proportion to the database's size. The application keeps writing during the copy. Writes wait only while SQLite's own TRUNCATE copies the WAL into the database file, which depends on the WAL's size, not the database's ([decisions/D190.md](decisions/D190.md)) |
@@ -63,7 +72,9 @@ The replicator saves each batch of changes in its working folder (the folder whe
 
 - Storage other than S3 and a local directory.
 - The VFS read replica (Go's VFS reads a replica written here).
-- The control socket and the commands that use it (`status`, `sync`, `list`, `info`), `reset`, `ltx`, `wal`, and the Windows service commands (issue #177).
+- The control socket and the commands that use it (`status`, `sync`, `list`, `info`), `reset`, `restore -f` (follow mode), and the Windows service commands ([#177](https://github.com/emschwartz/litestream-rs/issues/177)). `databases`, `ltx` and `wal` are built.
+- Settings for features that are not built, each refused at load: server-side encryption, storage classes, age encryption, heartbeats, `watch` on a directory, `auto-recover` and the MCP server ([config-keys.md](config-keys.md)).
+- S3 credentials from an assumed role, IAM Identity Center or a login session ([#176](https://github.com/emschwartz/litestream-rs/issues/176)).
 - `/debug/pprof`, and the `/metrics` series the engine cannot count.
 - The v0.3 `generations/` layout.
 
@@ -74,4 +85,4 @@ The replicator saves each batch of changes in its working folder (the folder whe
   - `hold-start`, the default: the application is not started if the replicator stops at startup or S3 refuses it there, for example over wrong credentials. Once the application is running, a problem is only reported.
   - `stop-app`: as `hold-start` at startup. A running application is also held back when replication stops, or when changes have waited longer than `max-unreplicated-age` (10 minutes by default) to reach S3.
 
-  What "held back" means: litestream-rs holds the database's write lock, so every write, from any process, fails with SQLite's "database is locked" (and the log says `writes blocked`). Under `-exec` the application is also not started, or is stopped. Writes are held the same way at startup until the replicator has checked the replica, except under `report` ([decisions/D192.md](decisions/D192.md)).
+  What "held back" means: litestream-rs holds the database's write lock, so every write, from any process, fails with SQLite's "database is locked" (and the log says `writes blocked`). Under `-exec` the application is also not started, or is stopped. Writes are held the same way at startup until the replicator has checked the replica and decided how to start, except under `report` ([decisions/D192.md](decisions/D192.md)). Go never holds writes at startup. The hold does not cover the first snapshot, which is taken while the application writes; a problem only that snapshot finds is handled like any later one ([decisions/D201.md](decisions/D201.md)). A start with a brand-new working folder holds writes while it compares the database with the bucket, about as long as a restore (`held_by=checking_identity`).

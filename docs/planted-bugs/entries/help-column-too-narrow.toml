@@ -1,0 +1,6 @@
+# The help's flag column was 20 wide, so `--clear-journal-files` ran into its text.
+name = "help-column-too-narrow"
+fix = "claude/cli-truth"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["help_columns_leave_a_gap_after_every_flag"]

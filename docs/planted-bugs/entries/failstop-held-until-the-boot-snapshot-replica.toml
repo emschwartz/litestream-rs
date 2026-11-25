@@ -1,0 +1,8 @@
+# failstop-held-until-the-boot-snapshot against the library: a second connection's commit right
+# after the boot decides gets "database is locked".
+name = "failstop-held-until-the-boot-snapshot-replica"
+patch = "failstop-held-until-the-boot-snapshot"
+fix = "plant"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["failstop::writes_go_through_before_the_boot_snapshot_is_staged"]

@@ -1,0 +1,8 @@
+# failstop-held-until-the-boot-snapshot in the simulator: a commit after the booting tick, before
+# the tick that takes the first snapshot, is refused.
+name = "failstop-held-until-the-boot-snapshot-sim"
+patch = "failstop-held-until-the-boot-snapshot"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["faults::writes_allowed_before_the_boot_snapshot"]

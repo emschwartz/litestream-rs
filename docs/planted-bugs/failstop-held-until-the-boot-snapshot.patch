@@ -1,0 +1,15 @@
+diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+--- a/crates/core/src/actor/lag.rs
++++ b/crates/core/src/actor/lag.rs
+@@ -287,8 +287,9 @@ impl Actor {
+     /// failed for anything but the store refusing access (a store that times out at boot does
+     /// not hold the application).
+     #[must_use]
+-    pub const fn boot_judged(&self) -> bool {
+-        self.kept.listed || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
++    pub fn boot_judged(&self) -> bool {
++        (self.kept.listed && self.pending().is_none())
++            || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
+     }
+ 
+     /// Whether an engine of this process has listed the replica.

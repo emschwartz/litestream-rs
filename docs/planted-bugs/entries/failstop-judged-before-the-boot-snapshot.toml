@@ -1,4 +1,0 @@
-name = "failstop-judged-before-the-boot-snapshot"
-fix = "c5881f5"
-package = "lsr-core"
-tests = ["lag::a_boot_is_judged_once_its_snapshot_is_tried"]
