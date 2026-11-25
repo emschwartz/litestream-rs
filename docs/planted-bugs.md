@@ -25,6 +25,7 @@ that caught it must fail.
   process it left exits; a new run never applies its patches under an old run's cargo or tests.
   Each build and test command runs in a session of its own, emptied when it ends or times out, so
   a test's child that a planted bug never stopped does not outlive it (Linux, through `/proc`).
+- `just planted-bugs --shard K/N` runs every N-th entry from the K-th, plus the canaries; the nightly runs eight shards.
 - `just planted-bugs-unaided [seeds]` asks a different question: with no named test run, how many
   swarm seeds does the simulator need to fail on each plant? It prints a table (seeds to first
   failure, or `none`); a plant no seed finds is a listed generator gap, not a failure.
