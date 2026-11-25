@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/pages.rs b/crates/core/src/pages.rs
-index b83f4aef3..3062746a0 100644
+index fb1c44f84..e11526ba3 100644
 --- a/crates/core/src/pages.rs
 +++ b/crates/core/src/pages.rs
-@@ -341,7 +341,7 @@ impl Seeded {
+@@ -325,7 +325,7 @@ impl Seeded {
              // from that, and the file stays counted, as with any span that ends elsewhere.
              // Failing the boot instead would retry the same read for as long as the belief
              // lasts.
@@ -10,4 +10,4 @@ index b83f4aef3..3062746a0 100644
 +            Err(Fault::RemoteObjectMissing) => return Err(Fault::RemoteObjectMissing),
              Err(fault) => return Err(fault),
          };
-         let quiet = match wal_end(&header) {
+         if header.as_ref().and_then(wal_end) == Some(end) {
