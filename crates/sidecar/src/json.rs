@@ -4,7 +4,7 @@
 /// A JSON string literal: quotes, backslash and control characters escaped, everything else
 /// as is.
 #[must_use]
-pub fn string(text: &str) -> String {
+pub(crate) fn string(text: &str) -> String {
     let mut out = String::with_capacity(text.len().saturating_add(2));
     out.push('"');
     for c in text.chars() {

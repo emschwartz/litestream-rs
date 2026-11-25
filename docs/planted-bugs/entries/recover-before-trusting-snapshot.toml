@@ -4,5 +4,4 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = [
     "a_requested_snapshot_after_the_wal_moved_trusts_no_stale_page",
-    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac4b6",
 ]

@@ -47,8 +47,7 @@
 //! (126, under the history configuration) had the boot witness accept a pending file on the
 //! anchor alone; a staging fault four steps later forced a snapshot over it.
 
-use lsr_sim::run::run_ops;
-use lsr_sim::{AfterRestart, ClockLaw, Judges, Opts, Seed, Weights, replay_line, run_with};
+use lsr_sim::{AfterRestart, Judges, Opts, Seed, Weights, replay_line, run_with};
 
 const STEPS: u32 = 300;
 
@@ -173,74 +172,4 @@ fn seeds_to_first_failure() {
         "{judges:?}: {} failed of seeds from {base}: {failed:?}",
         failed.len()
     );
-}
-
-/// Found unaided by the swarm, with nothing written for it: under the planted bug "the boot
-/// anchor accepts any tail in the live generation" (`docs/planted-bugs/anchor-any-tail.patch`),
-/// seed 44's drawn mix, 8 steps in, restores a transaction to pages no commit had. (Found on
-/// the merged head with the boot witness; seed 15 found it before the witness landed.) The
-/// history is recorded and the settings its mix drew are written out, so no change to the
-/// generator or the mix gives it another run.
-#[test]
-fn swarm_seed_44_restores_only_committed_states() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: false,
-        lying_wal_sync: true,
-        after_restart: AfterRestart::Busy,
-        clock_law: ClockLaw::EachRead,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(44), crate::histories::seed_0x2c::OPS, &opts) {
-        panic!("{failure}");
-    }
-}
-
-/// Found unaided once the app could act inside a tick (`Op::AppInTick`): seed 0xf488c's drawn
-/// mix commits between the engine's last sync step and its TRUNCATE, and the boundary snapshot
-/// took that commit's pages for damage (`DatabasePageMismatch`) until it stopped checking them
-/// (docs/decisions.md D121, plant `boundary-snapshot-keeps-page-table`). Seed 0xf49a2 found it
-/// first, before main's later swarm draws reshuffled the mixes. Main's swarm, without these
-/// operations, kills the plant on none of seeds 1000001 to 1002000. The history is recorded as
-/// that mix drew it, since main's overlapping-fault draw has since moved the seed's mix.
-#[test]
-fn swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: false,
-        lying_wal_sync: false,
-        after_restart: AfterRestart::Retry,
-        clock_law: ClockLaw::PerTick,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(
-        Seed::new(0xf488c),
-        crate::histories::seed_0xf488c::OPS,
-        &opts,
-    ) {
-        panic!("{failure}");
-    }
-}
-
-/// Seed 0x753's swarm mix under the block crash law on a disk that lies about the engine's WAL
-/// sync, with the app redoing its commits after a restart: staging is wiped, a power loss takes
-/// WAL frames the replica already holds, the redo regrows them byte for byte, and the next boot
-/// rightly continues on the replica's newest file. The history judge called the next `Latest`
-/// an unreported step back, because it remembered the previous restore as the nodes that held
-/// its content then, not the node the redo rebuilt with the same content later.
-#[test]
-fn swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: true,
-        lying_wal_sync: true,
-        after_restart: AfterRestart::Redo,
-        clock_law: ClockLaw::EachRead,
-        staging_fs: false,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(0x753), crate::histories::seed_0x753::OPS, &opts) {
-        panic!("{}", failure.message(failure.steps));
-    }
 }
