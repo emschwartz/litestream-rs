@@ -322,13 +322,7 @@ impl Start {
             })
         };
         match step {
-            Step::Incremental(position) => {
-                let cursor = seeded(position.cursor(), from_start);
-                Ok(Self {
-                    begin: position.cursor().next().get(),
-                    ..held(position, cursor)?
-                })
-            }
+            Step::Incremental(position) => held(position, seeded(position.cursor(), from_start)),
             Step::NewGeneration(position) => held(position, from_start),
             Step::Snapshot {
                 after,
