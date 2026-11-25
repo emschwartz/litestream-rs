@@ -2253,6 +2253,7 @@ mod boot_truncated;
 mod checkpoint_failed;
 mod create_only;
 mod degraded;
+mod first_start;
 mod index_reset;
 mod lag;
 mod listing;
