@@ -253,7 +253,7 @@ fn a_crash_loop_with_writes_and_wal_restarts_stays_bounded() {
         snapshots.len()
     );
     let mut daemon = replicate(&world.config);
-    daemon.wait_for(&["msg=\"compaction complete\""]);
+    // No compaction line: the boot snapshots first, and level 1 starts above the snapshot.
     daemon.wait_for(&["msg=maintenance", "Deleted("]);
     daemon.signal("TERM");
     let (status, lines) = daemon.finish();

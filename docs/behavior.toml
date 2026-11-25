@@ -1030,12 +1030,12 @@ notes = "Before, only the binary set the bound: the library's default was none, 
 [[row]]
 table = "Maintenance and retention"
 id = "MAINT-1"
-circumstance = "A level's window opened (30 s, 5 min, 1 h by default): merge at most 32 contiguous files from the level below, starting at the transaction after the level's newest file (`compact.rs`). Inputs are never deleted by the merge. A hole in the source ends the run (MAINT-15)"
+circumstance = "A level's window opened (30 s, 5 min, 1 h by default): merge at most 32 contiguous files from the level below, starting at the transaction after the level's newest file (`compact.rs`). Inputs are never deleted by the merge. A hole in the source ends the run (MAINT-15). A level with no file starts above the newest snapshot, so a first start does not carry the database through levels 1 to 3 (D224)"
 response = "continue"
 signal = "Event `Compacted`"
 at_risk = "None. A crash leaves the inputs, and the output either visible or absent"
 recovery = "n/a"
-detected_by = "core::`inputs_are_capped_at_the_fan_in`, core::`a_hole_in_the_source_is_the_same_hole_in_the_destination`, core::`restoring_the_snapshot_and_the_chain_equals_restoring_the_compacted_file`, sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages`"
+detected_by = "core::`inputs_are_capped_at_the_fan_in`, core::`level_one_starts_above_the_snapshot_and_stays_contiguous`, core::`a_level_with_files_takes_what_the_snapshot_holds_too`, core::`the_first_start_uploads_the_database_twice_and_downloads_none`, compat::`levels_start_above_the_first_snapshot`, compat::`go_compacts_over_levels_that_start_above_the_snapshot`, core::`a_hole_in_the_source_is_the_same_hole_in_the_destination`, core::`restoring_the_snapshot_and_the_chain_equals_restoring_the_compacted_file`, sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages`; plant::`level-takes-the-snapshots-range`"
 recovered_by = "sim::`a_level_built_after_the_engine_replaced_the_file_holds_its_pages`"
 
 [[row]]
@@ -1085,11 +1085,11 @@ detected_by = "core::`a_commit_that_fails_after_publish_is_failed_and_the_next_p
 table = "Maintenance and retention"
 id = "MAINT-6"
 circumstance = "The snapshot interval passed (24 h by default)"
-response = "A level-9 snapshot of every page, under a fresh sync proof. The first one, when level 0 holds every file from transaction 1 to the newest (at most 32), is a merge of those files and reads no database page (D205); one that fails is read from the database next"
+response = "A level-9 snapshot of every page, under a fresh sync proof. The first one, when level 0 holds every file from transaction 1 to the newest (at most 32), is a merge of those files and reads no database page (D205); one that fails is read from the database next. It is planned before any level while level 1 is empty (D224), and staged files it covers are pruned without waiting for level 1"
 signal = "Event `Snapshot`"
 at_risk = "None"
 recovery = "n/a"
-detected_by = "core::`snapshot_job_writes_level_9`, core::`the_first_start_reads_each_page_once`, core::`the_snapshot_of_a_first_start_restores_the_database`, core::`a_failed_first_snapshot_from_level_zero_is_read_from_the_database_next`, sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`; plant::`first-snapshot-reads-the-database`, plant::`failed-first-snapshot-not-refused`"
+detected_by = "core::`snapshot_job_writes_level_9`, core::`the_first_start_reads_each_page_once`, core::`the_snapshot_of_a_first_start_restores_the_database`, core::`the_first_snapshot_goes_before_level_one`, core::`prune_keeps_exactly_the_uncompacted_and_the_newest_staged_file`, core::`a_failed_first_snapshot_from_level_zero_is_read_from_the_database_next`, sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`; plant::`first-snapshot-reads-the-database`, plant::`failed-first-snapshot-not-refused`, plant::`prune-waits-for-level-one-over-a-snapshot`, plant::`levels-before-the-first-snapshot`"
 recovered_by = "sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`"
 
 [[row]]

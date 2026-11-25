@@ -13,7 +13,20 @@ use lsr_sim::{Op, Opts, Seed};
 #[test]
 fn verify_reports_a_live_transaction_a_rollback_took() {
     use lsr_sim::generate::{Hold, RemoteOp, WalOp};
+    // A second transaction above the first snapshot (D224: the snapshot goes before any level),
+    // so the rollback leaves the snapshot and takes only the newest file.
     let ops = [
+        // Boot, sync, upload and snapshot the first transaction.
+        Op::Tick,
+        Op::Tick,
+        Op::Tick,
+        Op::Tick,
+        Op::Commit {
+            pages: 2,
+            grow: false,
+        },
+        Op::Tick,
+        Op::Tick,
         Op::Shutdown,
         Op::Tick,
         Op::Remote(RemoteOp::RollBack),

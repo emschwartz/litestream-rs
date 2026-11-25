@@ -1,0 +1,4 @@
+name = "level-takes-the-snapshots-range"
+fix = "plant"
+package = "lsr-core"
+tests = ["level_one_starts_above_the_snapshot_and_stays_contiguous", "the_first_start_uploads_the_database_twice_and_downloads_none"]

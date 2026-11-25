@@ -71,6 +71,8 @@ fn replica() -> Rig {
     for n in 2..=3 {
         commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
     }
+    // Level 1 starts above the first snapshot, and takes the two commits in the next window.
+    rig.settle(&mut actor, T0 + 60_000);
     assert!(!Rig::files(&rig.remote, Level::new(1).unwrap()).is_empty());
     assert!(!Rig::files(&rig.remote, Level::SNAPSHOT).is_empty());
     rig

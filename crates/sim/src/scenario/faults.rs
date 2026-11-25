@@ -2011,15 +2011,32 @@ fn rebuilt_at_two(report: &RunReport) -> Result<(), String> {
     rebuilt_at(report, 2)
 }
 
+/// Ticks after the clock jump before level 1's compaction publishes: the checkpoint, the upload
+/// of what it staged and the listing that plans the job.
+const L1_PRE_TICKS: usize = 3;
+/// The same for level 2, which goes after level 1's compaction and one more tick.
+const L2_PRE_TICKS: usize = 5;
+
+/// The operations that end just before the next compaction at `level` publishes: the first
+/// snapshot (the levels start above it), a second commit that reaches the replica, then a
+/// clock jump past the level windows.
+fn level_window(pre_ticks: usize) -> Vec<Op> {
+    let mut ops = live();
+    ops.push(commit(2, false));
+    ops.extend(ticks(3));
+    ops.push(Op::ClockJump(60_000));
+    ops.extend(ticks(pre_ticks));
+    ops
+}
+
 /// The level 1 compaction's output rots in the window: the first compaction
-/// of the run, right after the first upload.
+/// above the first snapshot.
 #[must_use]
 pub fn corrupt_l1_publish_then_power_loss() -> Scenario {
     let scenario = build(
         "corrupt_l1_publish_then_power_loss",
         vec![
-            vec![commit(3, false)],
-            ticks(3),
+            level_window(L1_PRE_TICKS),
             corrupt_publish(),
             vec![Op::Tick, Op::PowerLoss],
             ticks(SETTLE),
@@ -2034,7 +2051,17 @@ pub fn corrupt_l1_publish_then_power_loss() -> Scenario {
 /// interval after [`live`], so the next upload to the replica is level 2's.
 #[must_use]
 pub fn corrupt_l2_publish_then_power_loss() -> Scenario {
-    let scenario = corrupt_publish_then_power_loss("corrupt_l2_publish_then_power_loss", None);
+    let scenario = build(
+        "corrupt_l2_publish_then_power_loss",
+        vec![
+            level_window(L2_PRE_TICKS),
+            corrupt_publish(),
+            vec![Op::Tick, Op::PowerLoss],
+            ticks(SETTLE),
+            vec![Op::Restore],
+        ],
+        Vec::new(),
+    );
     repaired(scenario, 2, rebuilt_at_two)
 }
 
@@ -2044,8 +2071,8 @@ pub fn corrupt_l9_publish_then_power_loss() -> Scenario {
     snapshot_window("corrupt_l9_publish_then_power_loss")
 }
 
-/// The first snapshot rots in the window. Six ticks boot, sync, upload and
-/// compact levels 1 to 3, so the next upload to the replica is level 9's.
+/// The first snapshot rots in the window. Three ticks boot, sync and upload, so the next
+/// upload to the replica is level 9's (the first snapshot goes before any level).
 /// The snapshot job deletes what the store rejected; that delete fails, and
 /// power is lost before the retry.
 fn snapshot_window(name: &'static str) -> Scenario {
@@ -2053,7 +2080,7 @@ fn snapshot_window(name: &'static str) -> Scenario {
         name,
         vec![
             vec![commit(3, false)],
-            ticks(6),
+            ticks(3),
             vec![
                 remote_fault(StoreOp::Upload, 0, FaultShape::CorruptPublish),
                 remote_fault(
