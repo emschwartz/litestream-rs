@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor/local.rs b/crates/core/src/actor/local.rs
-index e62c8f72e..67a1cec79 100644
+index 3022a4830..d005f3233 100644
 --- a/crates/core/src/actor/local.rs
 +++ b/crates/core/src/actor/local.rs
-@@ -339,7 +339,7 @@ impl Actor {
+@@ -337,7 +337,7 @@ impl Actor {
              .await
              .map_err(|err| inventory_fault::<R>(&err))?
              .newest();
 -        if held > base {
 +        if false && held > base {
-             drop_staged_from(&Apart::over(staging, None), Txid::MIN).await?;
+             drop_staged_from(&Apart::over(staging, None), Txid::MIN, unsent).await?;
              if matches!(self.engine.course, Course::Local(_)) {
                  self.leave_local();
