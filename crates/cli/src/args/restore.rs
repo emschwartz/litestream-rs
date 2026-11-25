@@ -14,7 +14,7 @@ use lsr_ltx::{Timestamp, Txid};
 use lsr_replica::local::IntegrityCheck;
 use lsr_sidecar::goflag::{self, Def, FlagError, Scan, Set};
 
-use super::{Replica, UsageError, replica_of};
+use super::{FlagRow, Replica, UsageError, replica_of};
 
 /// Where a restore reads from.
 #[derive(Debug, PartialEq, Eq)]
@@ -29,6 +29,10 @@ pub enum RestoreFrom {
         path: String,
         /// `-config`, when given.
         config: Option<String>,
+        /// `-no-expand-env`: read the config without expanding variables. Only a config is
+        /// read, so only this source carries it; a URL needs no expansion, and Go takes the
+        /// flag there and does nothing with it.
+        no_expand_env: bool,
     },
 }
 
@@ -39,8 +43,6 @@ pub struct RestoreArgs {
     pub from: RestoreFrom,
     /// `-o` (or `--output`); Go's default is the database's own path.
     pub output: Option<PathBuf>,
-    /// `-no-expand-env`.
-    pub no_expand_env: bool,
     /// The state to rebuild.
     pub target: RestoreTarget,
     /// What to do when `--timestamp` falls inside a compacted file.
@@ -102,7 +104,7 @@ fn go_duration(text: &str) -> bool {
 }
 
 /// The flags `restore` defines: Go's, then `lsr`'s.
-const DEFINED: [Def; 21] = [
+pub(super) const DEFINED: [Def; 21] = [
     goflag::value("config"),
     goflag::boolean("no-expand-env"),
     goflag::value("o"),
@@ -130,6 +132,115 @@ const DEFINED: [Def; 21] = [
     goflag::boolean("force-path-style"),
     goflag::boolean("allow-earlier"),
     goflag::boolean("clear-journal-files"),
+];
+
+/// Every flag `restore` accepts, for the help text; a test holds it to [`DEFINED`], both ways.
+pub(super) const HELP: &[FlagRow] = &[
+    FlagRow {
+        name: "--replica",
+        value: Some("<dir>"),
+        help: "the replica: a directory that holds ltx/, or s3://<bucket>/<prefix>",
+    },
+    FlagRow {
+        name: "--endpoint",
+        value: Some("<url>"),
+        help: "s3 only: the service endpoint (http or https), for anything but AWS",
+    },
+    FlagRow {
+        name: "--region",
+        value: Some("<name>"),
+        help: "s3 only: the signing region (default us-east-1)",
+    },
+    FlagRow {
+        name: "--force-path-style",
+        value: None,
+        help: "s3 only: address the bucket as endpoint/bucket instead of bucket.endpoint",
+    },
+    FlagRow {
+        name: "--output",
+        value: Some("<path>"),
+        help: "the database to create, as Go's -o; with a DB_PATH the default is DB_PATH itself; an existing empty file is replaced, any other refused without -force",
+    },
+    FlagRow {
+        name: "--txid",
+        value: Some("<16 hex digits>"),
+        help: "restore the state right after this transaction (not with --timestamp)",
+    },
+    FlagRow {
+        name: "--timestamp",
+        value: Some("<rfc3339>"),
+        help: "restore the newest state created before this instant (not with --txid)",
+    },
+    FlagRow {
+        name: "--allow-earlier",
+        value: None,
+        help: "With --timestamp, restore the newest state provably before the instant when the instant falls inside a compacted file, instead of refusing.",
+    },
+    FlagRow {
+        name: "--clear-journal-files",
+        value: None,
+        help: "first remove a stale -wal, -shm or -journal beside the output",
+    },
+    FlagRow {
+        name: "--integrity-check",
+        value: Some("none|quick|full"),
+        help: "run SQLite's quick_check or integrity_check on the result before publishing it; a failure publishes nothing (default none)",
+    },
+    FlagRow {
+        name: "--if-db-not-exists",
+        value: None,
+        help: "exit 0 without restoring when something already exists at the output",
+    },
+    FlagRow {
+        name: "--if-replica-exists",
+        value: None,
+        help: "exit 0 without restoring when the replica holds no LTX file (a directory with no ltx/ included, as in Go); a target a replica with files cannot meet is still refused; --dry-run ignores it, as Go's does",
+    },
+    FlagRow {
+        name: "--dry-run",
+        value: None,
+        help: "check the output and print the files a restore would apply, writing and removing nothing",
+    },
+    FlagRow {
+        name: "-o",
+        value: Some("<path>"),
+        help: "Go's spelling of --output",
+    },
+    FlagRow {
+        name: "-config",
+        value: Some("<file>"),
+        help: "with a DB_PATH, the config that names it (default $LITESTREAM_CONFIG, else /etc/litestream.yml; - reads standard input); not with a REPLICA_URL",
+    },
+    FlagRow {
+        name: "-no-expand-env",
+        value: None,
+        help: "read the config without expanding environment variables",
+    },
+    FlagRow {
+        name: "-force",
+        value: None,
+        help: "replace an existing output and remove its -wal, -shm and -journal; the old file stays until the restored one is complete and checked, then is replaced in one rename",
+    },
+    FlagRow {
+        name: "-parallelism",
+        value: Some("<n>"),
+        help: "accepted with a warning and no effect, as Go",
+    },
+    FlagRow {
+        name: "-f",
+        value: None,
+        help: "Go's follow mode, which is not built yet (#177): refused",
+    },
+    FlagRow {
+        name: "-follow-interval",
+        value: Some("<duration>"),
+        help: "accepted for Go's -f, which is not built yet (#177); -f itself is refused",
+    },
+    FlagRow {
+        name: "--json",
+        value: None,
+        help: "print one JSON object instead of text",
+    },
 ];
 
 /// Go's `litestream.IsURL`: `^\w+://`.
@@ -183,6 +294,10 @@ pub fn parse(args: &[String]) -> Result<Restore, UsageError> {
             return Err(UsageError::AllowEarlierWithoutTimestamp);
         }
     };
+    // `-o` and `--output` are one flag; two of them cannot both be honoured.
+    if set.value("o").is_some() && set.value("output").is_some() {
+        return Err(UsageError::DuplicateFlag { flag: "--output" });
+    }
     let output = set
         .value("o")
         .or_else(|| set.value("output"))
@@ -191,7 +306,6 @@ pub fn parse(args: &[String]) -> Result<Restore, UsageError> {
     Ok(Restore::Run(Box::new(RestoreArgs {
         from,
         output,
-        no_expand_env: boolean("no-expand-env")?,
         target,
         as_of_inside,
         clear_journal_files: boolean("clear-journal-files")?,
@@ -217,6 +331,14 @@ fn from(set: &Set) -> Result<RestoreFrom, UsageError> {
         ([_, _, ..], _) => Err(UsageError::GoTooManyArguments),
         ([_], Some(_)) => Err(UsageError::ReplicaAndPositional),
         ([], Some(replica)) => {
+            if config.is_some() {
+                return Err(UsageError::ConfigFlagWithReplica { flag: "-config" });
+            }
+            if set.boolean("no-expand-env").map_err(UsageError::GoFlag)? {
+                return Err(UsageError::ConfigFlagWithReplica {
+                    flag: "-no-expand-env",
+                });
+            }
             let over = |name: &str| set.value(name).filter(|v| !v.is_empty());
             let style = set
                 .boolean("force-path-style")
@@ -227,13 +349,37 @@ fn from(set: &Set) -> Result<RestoreFrom, UsageError> {
             if config.is_some() {
                 return Err(UsageError::GoUrlAndConfig);
             }
+            if let Some(flag) = s3_flag_given(set)? {
+                return Err(UsageError::S3FlagWithUrl { flag });
+            }
             Ok(RestoreFrom::Url(url.clone()))
         }
-        ([path], None) => Ok(RestoreFrom::Database {
-            path: path.clone(),
-            config,
-        }),
+        ([path], None) => {
+            if let Some(flag) = s3_flag_given(set)? {
+                return Err(UsageError::S3FlagWithDatabase { flag });
+            }
+            Ok(RestoreFrom::Database {
+                path: path.clone(),
+                config,
+                no_expand_env: set.boolean("no-expand-env").map_err(UsageError::GoFlag)?,
+            })
+        }
     }
+}
+
+/// The first of `lsr`'s S3 flags that was given with a value. Only `--replica` can honour
+/// them: a URL carries its endpoint, region and path style in its query (Go's form), and a
+/// config carries them in its replica, so beside either they would change nothing.
+pub(super) fn s3_flag_given(set: &Set) -> Result<Option<&'static str>, UsageError> {
+    for (name, flag) in [("endpoint", "--endpoint"), ("region", "--region")] {
+        if set.value(name).is_some_and(|v| !v.is_empty()) {
+            return Ok(Some(flag));
+        }
+    }
+    let style = set
+        .boolean("force-path-style")
+        .map_err(UsageError::GoFlag)?;
+    Ok(style.then_some("--force-path-style"))
 }
 
 /// `-txid` and `-timestamp`. Go's zero txid means the latest; with both, the txid is kept

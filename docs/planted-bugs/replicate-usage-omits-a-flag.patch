@@ -1,0 +1,15 @@
+diff --git a/crates/sidecar/src/flags.rs b/crates/sidecar/src/flags.rs
+index 0a594151c..d1ebefaf9 100644
+--- a/crates/sidecar/src/flags.rs
++++ b/crates/sidecar/src/flags.rs
+@@ -266,10 +266,6 @@ Arguments:
+ \t-once
+ \t    Replicate once and exit: sync and upload every database, then stop.
+ 
+-\t-force-snapshot
+-\t    Force a snapshot to be taken for all databases: each drain ends with one level-9
+-\t    file of the whole database. Requires -once.
+-
+ \t-enforce-retention
+ \t    Enforce retention policies for old snapshots: each drain ends with a retention
+ \t    pass, which removes what the configured retention no longer keeps. Requires -once.
