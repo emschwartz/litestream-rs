@@ -27,7 +27,7 @@ use crate::forcing::Forcing;
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
-use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_put, within};
+use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_level_put, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, SendTurns, TickStats, delta, memory,
@@ -764,13 +764,18 @@ impl Runner {
         }
     }
 
-    /// Judges every level-0 put the replica took since the last call ([`judge_put`]).
+    /// Judges every put the replica took since the last call: a level-0 file is bytes an
+    /// engine staged ([`judge_put`]), and a file at a level above leaves no hole the level
+    /// below could have closed ([`judge_level_put`]).
     fn judge_puts(&mut self) -> Result<(), Violation> {
         let remote = self.w.remote_recorder.events();
         let staging = self.w.staging_recorder.events();
+        let held = (remote.len() > self.puts_judged).then(|| self.w.remote_raw.stored());
         for put in remote.iter().skip(self.puts_judged) {
             let judged = judge_put(&staging, &self.w.remote_raw, put)?;
             self.report.reach.bump(format!("witness.{judged:?}"));
+            let level = judge_level_put(&remote, held.as_deref().unwrap_or_default(), put)?;
+            self.report.reach.bump(format!("levels.{level:?}"));
         }
         self.puts_judged = remote.len();
         Ok(())

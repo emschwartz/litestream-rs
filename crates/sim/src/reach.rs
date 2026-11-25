@@ -64,6 +64,9 @@ pub const REQUIRED: &[&str] = &[
     "put.level.3",
     "put.level.9",
     "delete.calls",
+    // A compaction with more than one file to take, where one that takes only the newest
+    // leaves a hole (LevelHole; ledger: level-jumps-to-the-newest-input).
+    "levels.Joins",
     // Retried faults the ledger's fixes handle: a staged file read again before it is
     // deleted (delete-on-one-failed-read-boot), an upload whose outcome is unknown
     // (relist-after-failed-drop, relist-acknowledged-mark), the WAL moving under a read
@@ -123,6 +126,10 @@ pub const UNREQUIRED: &[(&str, &str)] = &[
     (
         "snapshot.LocalRewound",
         "the WAL is synced before staging, so only a disk that lies about that sync rewinds below it",
+    ),
+    (
+        "levels.LostOutside",
+        "a level's file taken from the replica from outside, then the level extended past it: only a bucket rollback takes one, and the mixes never draw it",
     ),
     (
         "staged.Dropped",

@@ -300,3 +300,108 @@ fn the_judges_list_the_replica_without_the_engines_listing() {
     ));
     assert!(listed.is_err(), "the engine's fault was spent by a judge");
 }
+
+/// What the level judge says of the last file the replica took.
+fn judged(recorder: &crate::store::RecorderLog, raw: &MemStore) -> Result<LevelPut, Violation> {
+    let events = recorder.events();
+    let files = replica_files(&crate::remote::Bucket::Mem(raw.clone()));
+    judge_level_put(&events, &files, events.last().unwrap())
+}
+
+/// A store whose level 1 holds transactions 1 to 2, 3 to 4 and 5 to 6, and level 2 the first.
+fn three_level_one_files() -> (Recorder<MemStore>, MemStore) {
+    let raw = MemStore::new();
+    let store = Recorder::new(raw.clone());
+    for (min, max) in [(1, 2), (3, 4), (5, 6)] {
+        put(&store, 1, min, max, &ltx(min, max, 1, 7, None));
+    }
+    put(&store, 2, 1, 2, &ltx(1, 2, 1, 7, None));
+    (store, raw)
+}
+
+/// The checker can fail: a level-2 file that starts two files past its level's newest
+/// jumped over the level-1 file between them.
+#[test]
+fn a_file_that_jumps_over_a_file_of_the_level_below_is_a_level_hole() {
+    let (store, raw) = three_level_one_files();
+    put(&store, 2, 5, 6, &ltx(5, 6, 1, 7, None));
+    assert_eq!(
+        judged(&store.log(), &raw),
+        Err(Violation::LevelHole {
+            key: "2 5-6".to_owned(),
+            skipped: "1 3-4".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn a_file_that_follows_its_level_is_judged_by_how_many_files_it_took() {
+    let (store, raw) = three_level_one_files();
+    assert_eq!(
+        judged(&store.log(), &raw),
+        Ok(LevelPut::Follows),
+        "the first"
+    );
+    put(&store, 2, 3, 6, &ltx(3, 6, 1, 7, None));
+    assert_eq!(judged(&store.log(), &raw), Ok(LevelPut::Joins));
+    put(&store, 1, 7, 7, &ltx(7, 7, 1, 7, None));
+    put(&store, 2, 7, 7, &ltx(7, 7, 1, 7, None));
+    assert_eq!(judged(&store.log(), &raw), Ok(LevelPut::Follows));
+    put(&store, 0, 8, 8, &ltx(8, 8, 1, 7, None));
+    assert_eq!(judged(&store.log(), &raw), Ok(LevelPut::Skipped), "level 0");
+    put(&store, 9, 1, 8, &ltx(1, 8, 1, 7, None));
+    assert_eq!(
+        judged(&store.log(), &raw),
+        Ok(LevelPut::Skipped),
+        "a snapshot"
+    );
+}
+
+/// A file that closes a hole from its first transaction follows: it starts right after the
+/// files before it, whatever comes after.
+#[test]
+fn a_file_that_closes_a_hole_from_its_start_follows() {
+    let (store, raw) = three_level_one_files();
+    put(&store, 2, 5, 6, &ltx(5, 6, 1, 7, None));
+    put(&store, 2, 3, 4, &ltx(3, 4, 1, 7, None));
+    assert_eq!(judged(&store.log(), &raw), Ok(LevelPut::Follows));
+}
+
+/// A range the level below no longer holds whole is not one the compaction jumped over.
+#[test]
+fn a_gap_with_no_file_of_the_level_below_inside_it_skipped_nothing() {
+    let (store, raw) = three_level_one_files();
+    block_on(raw.delete(&[fkey(1, 3, 4)])).unwrap();
+    put(&store, 2, 5, 6, &ltx(5, 6, 1, 7, None));
+    assert_eq!(judged(&store.log(), &raw), Ok(LevelPut::NothingSkipped));
+}
+
+/// The level's own file over the gap was taken from the store from outside: the engine
+/// extended the level from the newest file it knew. The same gap after the engine's own
+/// delete is not excused.
+#[test]
+fn only_a_file_lost_from_outside_excuses_a_gap() {
+    let (store, raw) = three_level_one_files();
+    put(&store, 2, 3, 4, &ltx(3, 4, 1, 7, None));
+    block_on(raw.delete(&[fkey(2, 3, 4)])).unwrap();
+    put(&store, 2, 5, 6, &ltx(5, 6, 1, 7, None));
+    assert_eq!(judged(&store.log(), &raw), Ok(LevelPut::LostOutside));
+
+    let (store, raw) = three_level_one_files();
+    put(&store, 2, 3, 4, &ltx(3, 4, 1, 7, None));
+    block_on(store.delete(&[fkey(2, 3, 4)])).unwrap();
+    put(&store, 2, 5, 6, &ltx(5, 6, 1, 7, None));
+    assert!(matches!(
+        judged(&store.log(), &raw),
+        Err(Violation::LevelHole { .. })
+    ));
+}
+
+/// A file the replica no longer holds is not judged: a later tick's delete took it.
+#[test]
+fn a_put_the_replica_no_longer_holds_is_skipped() {
+    let (store, raw) = three_level_one_files();
+    put(&store, 2, 5, 6, &ltx(5, 6, 1, 7, None));
+    block_on(raw.delete(&[fkey(2, 5, 6)])).unwrap();
+    assert_eq!(judged(&store.log(), &raw), Ok(LevelPut::Skipped));
+}

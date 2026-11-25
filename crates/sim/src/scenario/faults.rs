@@ -1097,7 +1097,9 @@ pub fn bucket_rolled_back() -> Scenario {
 }
 
 /// The replica loses its newest file while the engine is idle, after its upload and before
-/// the maintenance listing that follows it: the listing ends below what the engine confirmed,
+/// the maintenance listing that follows it. The settling ticks first give the engine a whole
+/// listing, so the listing that follows is a short pass, whose own check reports it (a whole
+/// listing is checked separately, and would report it first on a fresh engine): the listing ends below what the engine confirmed,
 /// the regression is reported and, as configured, replication goes on. The staged copy is
 /// still there, so the engine sends it again, and a restore finds the replica whole.
 #[must_use]
@@ -1106,6 +1108,7 @@ pub fn bucket_rolled_back_while_idle() -> Scenario {
         "bucket_rolled_back_while_idle",
         vec![
             live(),
+            ticks(SETTLE),
             vec![
                 commit(2, false),
                 Op::Tick,
