@@ -8,6 +8,13 @@ index 0000000..0000000 100644
      pub fn boot_judged(&self) -> bool {
 -        let settled = self.pending().is_none() || self.kept.sync_failed_after_listing;
 +        let settled = true;
-         (self.kept.listed && settled)
-             || self.kept.boot_overdue
+         (self.kept.listed && settled) || self.kept.boot_overdue
      }
+ 
+@@ -324,4 +324,4 @@ impl Actor {
+     pub const fn listed(&self) -> bool {
+         self.kept.listed
+     }
+-}
++}
+\ No newline at end of file
