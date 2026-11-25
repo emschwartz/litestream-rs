@@ -88,6 +88,7 @@ Logs go to standard error in Go's `slog` text format, `time=... level=... msg=..
 | Line | Meaning |
 |---|---|
 | `writes blocked` with `held_by=booting` | Normal at start: writes are held until the start is judged |
+| `comparing the database with the replica before starting`, then `writes blocked` with `held_by=checking_identity` | The working folder is missing, so the database is compared with the replica page by page. Writes wait for it; on a large database that takes a while |
 | `writes allowed` | The hold is over |
 | `replica position recovered` | Continuing from the WAL, with no snapshot |
 | `replica position recovered; snapshot required` with `cause=` | A snapshot follows. `FirstSync` is a new replica; other causes say what broke continuity |

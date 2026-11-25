@@ -88,7 +88,7 @@ Separately, `if-replication-stops` decides what a stopped or stuck replicator do
 
 "Held" means the replicator keeps SQLite's write lock, so every write, from any process, fails with "database is locked". Reads go on. Under `lsr replicate -exec` the application is also not started, or is stopped. A store that is merely slow or briefly down never holds writes at start: only a refusal does.
 
-Today the hold at start lasts until the first snapshot is staged, which on a large database is long ([#351](https://github.com/emschwartz/litestream-rs/issues/351)).
+The hold at start ends once the replica is listed and the start is decided. A first snapshot, when one is needed, is taken after that, with writes allowed. The one long hold is a start with no working folder, which compares the database with the replica before it lets writes through.
 
 ## The working folder
 

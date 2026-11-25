@@ -114,7 +114,7 @@ The full list is [docs/differences-from-go.md](docs/differences-from-go.md).
 - Nobody runs it in production, and no long soak has run at the current code.
 - Go Litestream and `lsr` writing one bucket path at the same time can leave restores that are wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
 - A disk that loses writes it acknowledged, followed by an application that redoes the same last write, can leave a replica whose history differs from the database's, with no report ([#12](https://github.com/emschwartz/litestream-rs/issues/12)).
-- The first start on a database reads and uploads it twice ([#340](https://github.com/emschwartz/litestream-rs/issues/340)), and writes are held while the first snapshot is prepared ([#351](https://github.com/emschwartz/litestream-rs/issues/351)).
+- The first start on a database reads and uploads it twice ([#340](https://github.com/emschwartz/litestream-rs/issues/340)).
 - Two memory terms still grow with the database: the page checksum table ([#64](https://github.com/emschwartz/litestream-rs/issues/64)) and the replica listing ([#68](https://github.com/emschwartz/litestream-rs/issues/68)). A snapshot's read load on the application's disk is not limited ([#315](https://github.com/emschwartz/litestream-rs/issues/315)).
 - A filesystem where SQLite's locks or shared memory do not work (NFS, some container file sharing) is not refused ([#332](https://github.com/emschwartz/litestream-rs/issues/332)).
 - It is built and tested on Linux and macOS only. Assumed-role and SSO credentials are not built ([#176](https://github.com/emschwartz/litestream-rs/issues/176)).
