@@ -599,7 +599,14 @@ fault-rig-plant name cycles="200" *args: minio-up toxiproxy-up
     ./scripts/build-go-litestream.sh 041a8c3
     eval "$(./scripts/minio.sh env)"
     eval "$(./scripts/toxiproxy.sh env)"
-    uv run scripts/fault_rig.py run --cycles {{cycles}} --stop-on-anomaly --lsr "target/fault-rig-plants/{{name}}/release/lsr" --work "target/fault-rig-plant-{{name}}" {{args}}
+    # Linux: LazyFS is built when missing, and a menu nemesis that
+    # cannot run fails the step: "not found" with power loss never run says nothing.
+    require=""
+    if [ "$(uname)" = Linux ]; then
+        test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
+        require="--require-all-nemeses"
+    fi
+    uv run scripts/fault_rig.py run --cycles {{cycles}} --stop-on-anomaly $require --lsr "target/fault-rig-plants/{{name}}/release/lsr" --work "target/fault-rig-plant-{{name}}" {{args}}
 
 # A plant is scripts/lazyfs-plants/<name>.patch or docs/planted-bugs/<name>.patch, applied to a
 # scratch worktree of HEAD and built into target/lazyfs-plants/<name>.

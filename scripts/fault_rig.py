@@ -420,7 +420,21 @@ class Rig:
 
     # -- one segment's world
 
+    def unmount_lazy(self) -> bool:
+        """Unmounts the previous LazyFS and confirms it. False after a RIG anomaly naming the
+        mount when it will not go: nothing may then be removed through it."""
+        if self.lazy is None:
+            return True
+        try:
+            self.lazy.unmount()
+        except RuntimeError as err:
+            self.anomaly("RIG", str(err))
+            return False
+        return True
+
     def fresh(self) -> None:
+        if not self.unmount_lazy():
+            return  # the run stops on the RIG anomaly; the old tree stays untouched
         self.seg += 1
         self.work = self.root / "segment"
         if self.work.exists():
@@ -997,8 +1011,13 @@ class Rig:
         assert self.lazy is not None
         self.kill_all()
         self.lazy.clear_cache()
-        self.lazy.unmount()
-        self.lazy.mount("clear")
+        if not self.unmount_lazy():
+            return
+        try:
+            self.lazy.mount("clear")
+        except RuntimeError as err:
+            self.anomaly("RIG", f"power-loss: {err}")
+            return
         self.engine_killed = True
         self.ensure_running()
 
@@ -1087,6 +1106,8 @@ class Rig:
         try:
             while n < self.args.cycles and not self.stopping() and not self.out_of_time():
                 self.fresh_with_listen(listen)
+                if self.stopping():
+                    break
                 for k in range(self.args.segment):
                     if n >= self.args.cycles or self.stopping() or self.out_of_time():
                         break
@@ -1100,8 +1121,7 @@ class Rig:
                 self.last_prefix_done()
         finally:
             self.kill_all()
-            if self.lazy is not None:
-                self.lazy.unmount()
+            self.unmount_lazy()
             self.toxi.delete()
         return self.report(n)
 

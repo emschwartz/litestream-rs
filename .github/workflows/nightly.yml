@@ -213,6 +213,8 @@ jobs:
           tool: just
       - uses: ./.github/actions/go-compat
       - run: sudo apt-get install -y cmake g++ libfuse3-dev fuse3 libfaketime
+      # LazyFS before any step that draws power loss, so no step runs without it.
+      - run: uv run scripts/lazyfs.py build
       # The rig's own canary first: planted damage in the replica must be reported, and the
       # known-issue exemption must not hide an anomaly in an untainted segment.
       - run: just fault-rig-canary
