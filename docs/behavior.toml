@@ -1039,11 +1039,11 @@ detected_by = "core::`a_commit_that_fails_after_publish_is_failed_and_the_next_p
 table = "Maintenance and retention"
 id = "MAINT-6"
 circumstance = "The snapshot interval passed (24 h by default)"
-response = "A level-9 snapshot of every page, under a fresh sync proof"
+response = "A level-9 snapshot of every page, under a fresh sync proof. The first one, when level 0 holds every file from transaction 1 to the newest (at most 32), is a merge of those files and reads no database page (D205); one that fails is read from the database next"
 signal = "Event `Snapshot`"
 at_risk = "None"
 recovery = "n/a"
-detected_by = "core::`snapshot_job_writes_level_9`, sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`"
+detected_by = "core::`snapshot_job_writes_level_9`, core::`the_first_start_reads_each_page_once`, core::`the_snapshot_of_a_first_start_restores_the_database`, core::`a_failed_first_snapshot_from_level_zero_is_read_from_the_database_next`, sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`; plant::`first-snapshot-reads-the-database`, plant::`failed-first-snapshot-not-refused`"
 recovered_by = "sim::`with_retention_off_a_long_run_deletes_nothing_and_still_compacts_and_snapshots`"
 
 [[row]]

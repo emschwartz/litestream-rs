@@ -20,7 +20,7 @@ const fn expected(fault: HttpFault) -> Option<Denied> {
 }
 use lsr_store_s3::{Fault, Shape};
 
-use lsr_core::{Denied, Event, PersistentCause, StopCause, Task, Tick};
+use lsr_core::{Degraded, Denied, Event, PersistentCause, StopCause, Task, Tick};
 
 use crate::failstop::{Fired, fired};
 use crate::generate::HttpFault;
@@ -114,6 +114,10 @@ impl Runner {
     /// Where the refusal judge starts counting, taken just before a tick so that a refusal met
     /// by the simulator's own reads between ticks is not charged to the engine.
     pub(super) fn denials_baseline(&mut self) {
+        self.degraded_before = Task::ALL
+            .iter()
+            .filter_map(|task| self.actor.degraded(*task).map(|degraded| (*task, degraded)))
+            .collect();
         if let Some(wire) = self.w.remote_raw.wire() {
             let (fired_now, refused, others) = self.denial_counts(wire);
             self.denials_seen = (fired_now.len(), refused, others);
@@ -145,9 +149,14 @@ impl Runner {
         // A task standing degraded on the WAL or the database says nothing of a request the
         // store refused in this tick: a read-ahead HEAD (maintenance's created-at reads) the
         // engine drops by design is not a failure the engine owed a report of.
-        let failed = reported
-            .iter()
-            .any(|cause| !says_nothing_of_requests(*cause))
+        //
+        // A degradation that stood unchanged since before the tick (the same cause, the same
+        // count of failures) is no failure of this tick's requests: a later tick that only reads
+        // ahead must still be allowed to drop its refused HEAD while an earlier, unrelated
+        // refusal keeps a task degraded.
+        let failed = fresh_causes(&self.degraded_before, |task| self.actor.degraded(task))
+            .into_iter()
+            .any(|cause| !says_nothing_of_requests(cause))
             || matches!(
                 ended,
                 TickEnd::Done(Tick::Ran {
@@ -228,6 +237,25 @@ impl Runner {
     }
 }
 
+/// The causes tasks stand degraded with now that were not already standing, unchanged, when the
+/// tick began: a task that failed again (another cause, another failure count) or began failing
+/// in the tick counts, one that kept the state it had does not.
+fn fresh_causes(
+    before: &[(Task, Degraded)],
+    now: impl Fn(Task) -> Option<Degraded>,
+) -> Vec<PersistentCause> {
+    Task::ALL
+        .iter()
+        .filter_map(|task| {
+            let degraded = now(*task)?;
+            let stood = before
+                .iter()
+                .any(|(was, state)| was == task && *state == degraded);
+            (!stood).then_some(degraded.cause)
+        })
+        .collect()
+}
+
 /// Whether a degraded cause cannot come from a refused request, so that a task standing on it is
 /// no failure of one: the local WAL or database, and a store with no conditional writes (a 501 on
 /// a create-only write, which stands for the rest of the process whatever else the store later
@@ -274,5 +302,39 @@ mod tests {
             Denied::Permission
         )));
         assert!(!says_nothing_of_requests(PersistentCause::StoreRefused));
+    }
+
+    fn degraded(cause: PersistentCause, retries: u32) -> Degraded {
+        Degraded {
+            cause,
+            since: lsr_ltx::Timestamp::from_unix_millis(1_700_000_057_000),
+            retries,
+        }
+    }
+
+    /// A maintenance step that failed on a refused upload stands degraded through the next
+    /// ticks. A tick that only reads ahead and meets a refused HEAD owes no report of it, and
+    /// the standing state is no failure of that tick; a task that failed again in the tick is.
+    #[test]
+    fn a_standing_degradation_is_no_failure_of_a_later_tick() {
+        let standing = degraded(PersistentCause::StoreDenied(Denied::BucketMissing), 1);
+        let before = [(Task::Maintenance, standing)];
+        let unchanged = |task| (task == Task::Maintenance).then_some(standing);
+        assert!(fresh_causes(&before, unchanged).is_empty());
+
+        let again = degraded(PersistentCause::StoreDenied(Denied::BucketMissing), 2);
+        assert_eq!(
+            fresh_causes(&before, |task| (task == Task::Maintenance).then_some(again)),
+            [PersistentCause::StoreDenied(Denied::BucketMissing)]
+        );
+        let other = degraded(PersistentCause::StoreDenied(Denied::Permission), 1);
+        assert_eq!(
+            fresh_causes(&before, |task| match task {
+                Task::Maintenance => Some(standing),
+                Task::Upload => Some(other),
+                Task::Sync | Task::Checkpoint | Task::Prune => None,
+            }),
+            [PersistentCause::StoreDenied(Denied::Permission)]
+        );
     }
 }

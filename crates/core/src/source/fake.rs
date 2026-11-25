@@ -748,6 +748,7 @@ pub struct FakeDb {
     count: u32,
     injections: Injections,
     wal: Option<FakeWal>,
+    reads: u64,
 }
 
 impl FakeDb {
@@ -760,7 +761,15 @@ impl FakeDb {
             count: 0,
             injections: Injections(Vec::new()),
             wal: None,
+            reads: 0,
         }
+    }
+
+    /// How many pages [`PageSource::read_page`] has been asked for, failed asks included: the
+    /// load the engine puts on the file the application is using.
+    #[must_use]
+    pub const fn reads(&self) -> u64 {
+        self.reads
     }
 
     /// Makes `wal`'s checkpoints write into this file, as SQLite's write into the database.
@@ -812,6 +821,7 @@ impl PageSource for FakeDb {
     }
 
     fn read_page(&mut self, pgno: PageNo, buf: &mut [u8]) -> Result<(), SourceError> {
+        self.reads = self.reads.saturating_add(1);
         self.injections.take(SourceOp::ReadPage)?;
         if pgno.get() > self.count() || buf.len() != self.page_size.bytes() {
             return Err(SourceError::Short { pgno });
