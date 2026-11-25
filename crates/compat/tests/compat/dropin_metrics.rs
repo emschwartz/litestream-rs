@@ -1,6 +1,7 @@
 //! `/metrics` against Go: the pinned `litestream replicate` and `lsr replicate`, each on its
 //! own database and file replica with `addr:` set and a checkpoint due after every write,
-//! scraped once both have synced and checkpointed.
+//! scraped once both have synced and checkpointed; then again with a replica no store call can
+//! reach (its parent is a regular file), scraped once both count a failed sync.
 //!
 //! Every `litestream_*` family Go serves must be served by `lsr` with the same type, help
 //! text and label names, but for the families `lsr` does not build (docs/decisions.md D163);
@@ -25,13 +26,12 @@ const NOT_BUILT: &[&str] = &[
     "litestream_replica_operation_errors_total",
     // Go's per-level retention, verification and validation passes.
     "litestream_l0_retention_files_total",
-    "litestream_compaction_verify_error_count",
     "litestream_validation_checks_total",
     "litestream_last_validation_success",
     "litestream_last_validation_success_timestamp_seconds",
 ];
 
-/// `lsr`'s families Go serves only for what this run does not produce: Go's file replica
+/// `lsr`'s families Go serves only for what the healthy run does not produce: Go's file replica
 /// client reports no replica operations, and Go creates its checkpoint error counter at the
 /// first error, where `lsr` serves zeros from the start.
 const GO_SILENT_HERE: &[&str] = &[
@@ -39,6 +39,18 @@ const GO_SILENT_HERE: &[&str] = &[
     "litestream_replica_operation_bytes",
     "litestream_replica_operation_duration_seconds",
     "litestream_checkpoint_error_count",
+];
+
+/// What Go serves no sample of before its first checkpoint (it creates each at first use), and
+/// before any replica operation: `lsr` serves these from the start, so the faulted run, where
+/// nothing syncs, allows them as well.
+const GO_SILENT_FAULTED: &[&str] = &[
+    "litestream_checkpoint_count",
+    "litestream_checkpoint_error_count",
+    "litestream_checkpoint_seconds",
+    "litestream_replica_operation_total",
+    "litestream_replica_operation_bytes",
+    "litestream_replica_operation_duration_seconds",
 ];
 
 /// One family: its type, help text, and every label-name set its samples carry.
@@ -123,17 +135,35 @@ impl Drop for Side {
     }
 }
 
-fn start(binary: &Path) -> Side {
+/// Where the replica is.
+#[derive(Clone, Copy)]
+enum Store {
+    /// A directory that exists.
+    Reachable,
+    /// A path under a regular file: every call on it fails (ENOTDIR), as a store that refuses
+    /// the credentials or cannot be reached fails every call.
+    Failing,
+}
+
+fn start(binary: &Path, store: Store) -> Side {
     let dir = tempfile::tempdir().unwrap();
     let db: PathBuf = dir.path().join("app.db");
     let app = rusqlite::Connection::open(&db).unwrap();
     app.pragma_update(None, "journal_mode", "wal").unwrap();
     app.execute_batch("CREATE TABLE t (x BLOB);").unwrap();
     let port = free_port();
+    let replica = match store {
+        Store::Reachable => dir.path().join("replica"),
+        Store::Failing => {
+            let blocker = dir.path().join("blocker");
+            std::fs::write(&blocker, b"not a directory").unwrap();
+            blocker.join("replica")
+        }
+    };
     let config = format!(
         "addr: 127.0.0.1:{port}\ndbs:\n  - path: {}\n    checkpoint-interval: 1s\n    min-checkpoint-page-count: 1\n    replica:\n      url: file://{}\n",
         db.display(),
-        dir.path().join("replica").display(),
+        replica.display(),
     );
     let config_path = dir.path().join("litestream.yml");
     std::fs::write(&config_path, config).unwrap();
@@ -198,29 +228,56 @@ fn scraped_once_settled(side: &Side) -> String {
     last
 }
 
-/// The differential.
-#[test]
-#[ignore = "runs the pinned Go binaries; just compat"]
-fn go_and_lsr_serve_the_same_metric_families() {
-    let go = must(Resource::GoBuilds, || {
-        go_binary(GoVersion::Head).map_err(|e| e.to_string())
+/// The sum of `name`'s samples (every database, every mode), or None when it is not served.
+fn total(text: &str, name: &str) -> Option<f64> {
+    let mut sum = None;
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix(name) else {
+            continue;
+        };
+        if !(rest.starts_with('{') || rest.starts_with(' ')) {
+            continue;
+        }
+        if let Some(value) = line
+            .rsplit_once(' ')
+            .and_then(|(_, v)| v.parse::<f64>().ok())
+        {
+            *sum.get_or_insert(0.0) += value;
+        }
+    }
+    sum
+}
+
+/// A scrape once both counters say a sync failed: the store fails every call, so nothing
+/// else can have happened.
+fn scraped_once_failing(side: &Side) -> String {
+    let mut last = String::new();
+    wait_until("a failed sync", Duration::from_secs(30), || {
+        last = scrape(side.port).unwrap_or_default();
+        Ok(total(&last, "litestream_sync_error_count").is_some_and(|n| n > 0.0))
+    })
+    .unwrap_or_else(|e| {
+        let log = std::fs::read_to_string(&side.log).unwrap_or_default();
+        let from = log.len().saturating_sub(4000);
+        let tail = log.get(from..).unwrap_or(&log);
+        panic!("{e}\nlast scrape:\n{last}\ndaemon log tail:\n{tail}")
     });
-    let lsr = lsr_binary().unwrap();
-    let go_text = scraped_once_settled(&start(&go));
-    let lsr_text = scraped_once_settled(&start(&lsr));
-    let ours = |name: &String| name.starts_with("litestream_");
-    let go_families: BTreeMap<_, _> = families(&go_text)
+    last
+}
+
+/// Every `litestream_*` family of `text`.
+fn ours(text: &str) -> BTreeMap<String, Family> {
+    families(text)
         .into_iter()
-        .filter(|(n, _)| ours(n))
-        .collect();
-    let lsr_families: BTreeMap<_, _> = families(&lsr_text)
-        .into_iter()
-        .filter(|(n, _)| ours(n))
-        .collect();
-    assert!(
-        go_families.contains_key("litestream_checkpoint_count"),
-        "Go checkpointed: {go_text}"
-    );
+        .filter(|(n, _)| n.starts_with("litestream_"))
+        .collect()
+}
+
+/// `lsr` serves every family Go does but the ones not built, with Go's type, help text and
+/// label names, and serves only families Go served or one of `go_silent`.
+fn assert_same_families(go_text: &str, lsr_text: &str, go_silent: &[&str]) {
+    let go_families = ours(go_text);
+    let lsr_families = ours(lsr_text);
     for (name, go_family) in &go_families {
         if NOT_BUILT.contains(&name.as_str()) {
             assert!(
@@ -246,8 +303,58 @@ fn go_and_lsr_serve_the_same_metric_families() {
     }
     for name in lsr_families.keys() {
         assert!(
-            go_families.contains_key(name) || GO_SILENT_HERE.contains(&name.as_str()),
+            go_families.contains_key(name) || go_silent.contains(&name.as_str()),
             "lsr serves {name}, which Go did not:\n{go_text}"
         );
+    }
+}
+
+/// The differential.
+#[test]
+#[ignore = "runs the pinned Go binaries; just compat"]
+fn go_and_lsr_serve_the_same_metric_families() {
+    let go = must(Resource::GoBuilds, || {
+        go_binary(GoVersion::Head).map_err(|e| e.to_string())
+    });
+    let lsr = lsr_binary().unwrap();
+    let go_text = scraped_once_settled(&start(&go, Store::Reachable));
+    let lsr_text = scraped_once_settled(&start(&lsr, Store::Reachable));
+    assert!(
+        ours(&go_text).contains_key("litestream_checkpoint_count"),
+        "Go checkpointed: {go_text}"
+    );
+    assert_same_families(&go_text, &lsr_text, GO_SILENT_HERE);
+}
+
+/// The differential under a store that fails every call, series by series: each daemon counts
+/// the failed sync (what an application alerting on `litestream_sync_error_count` watches),
+/// and every series that depends on a sync that never happened reads Go's value, zero.
+#[test]
+#[ignore = "runs the pinned Go binaries; just compat"]
+fn go_and_lsr_agree_on_every_series_under_a_failing_store() {
+    let go = must(Resource::GoBuilds, || {
+        go_binary(GoVersion::Head).map_err(|e| e.to_string())
+    });
+    let lsr = lsr_binary().unwrap();
+    let go_text = scraped_once_failing(&start(&go, Store::Failing));
+    let lsr_text = scraped_once_failing(&start(&lsr, Store::Failing));
+    assert_same_families(&go_text, &lsr_text, GO_SILENT_FAULTED);
+    for (who, text) in [("Go", &go_text), ("lsr", &lsr_text)] {
+        let calls = total(text, "litestream_sync_count").unwrap();
+        let errors = total(text, "litestream_sync_error_count").unwrap();
+        assert!(
+            errors > 0.0 && calls >= errors,
+            "{who}: {calls} syncs, {errors} failed:\n{text}"
+        );
+        for name in [
+            "litestream_db_size",
+            "litestream_txid",
+            "litestream_wal_size",
+            "litestream_total_wal_bytes",
+            "litestream_disk_full",
+            "litestream_compaction_verify_error_count",
+        ] {
+            assert_eq!(total(text, name), Some(0.0), "{who}: {name}:\n{text}");
+        }
     }
 }

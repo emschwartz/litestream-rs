@@ -11,7 +11,9 @@
 //! - `litestream_total_wal_bytes{db}`, counter: WAL bytes the sync steps staged (`db.go:2256`).
 //! - `litestream_sync_count{db}`, `litestream_sync_error_count{db}` and
 //!   `litestream_sync_seconds{db}`, counters: sync steps, the ones that failed, and their time
-//!   (`db.go:1365-1376`). The engine steps when the WAL moved or a checkpoint wants proof;
+//!   (`db.go:1365-1376`). A boot attempt the store fails is a step that failed, as Go's failed
+//!   `init` is (`db.go:1210`): the series where a store that refuses the credentials or cannot be
+//!   reached shows; Go counts no later upload failure there. The engine steps when the WAL moved or a checkpoint wants proof;
 //!   Go syncs on every one-second poll, so Go's rate is higher on an idle database (D163).
 //! - `litestream_disk_full{db}`, gauge: 1 while the last sync step failed for a full disk.
 //! - `litestream_checkpoint_count{db,mode}`, `litestream_checkpoint_error_count{db,mode}` and
@@ -26,12 +28,13 @@
 //!   operation, not a distribution, so `_sum / _count` is right and Go's buckets are absent.
 //!   Go's file client reports none of these; this daemon reports them for both types.
 //! - `litestream_replica_operation_bytes{replica_type,operation="PUT"}`, counter.
+//! - `litestream_compaction_verify_error_count{db}`, counter: always 0, as Go's with its
+//!   default, since the verification it counts is a setting this daemon refuses.
 //!
 //! **Go's series not built, and why** (D163). `litestream_replica_operation_errors_total`
 //! counts per-object failures of an S3 batch delete by the response's error code, which the
 //! store does not report (`lsr_replica_operation_errors_total` counts failed calls).
-//! `litestream_l0_retention_files_total` has no per-pass counts, and
-//! `litestream_compaction_verify_error_count` no verification pass. The `litestream_validation_*`
+//! `litestream_l0_retention_files_total` has no per-pass counts. The `litestream_validation_*`
 //! series are per compaction level, and the scheduled verify that replaces Go's validation
 //! checks the replica as a whole (`lsr_verify_*` below).
 //!
@@ -166,7 +169,8 @@ fn go_db_series(out: &mut Out, dbs: &[(String, &Health)]) {
             "gauge",
             "The current size of the real DB",
         ),
-        |h| h.db_bytes.to_string(),
+        // Go sets it after a sync (`db.go:1434`): 0 until one has staged.
+        |h| h.synced.map_or(0, |_| h.db_bytes).to_string(),
     );
     per_db(
         out,
@@ -196,6 +200,19 @@ fn go_db_series(out: &mut Out, dbs: &[(String, &Health)]) {
     );
     go_sync_series(out, dbs);
     go_checkpoint_series(out, dbs);
+    // Go's post-compaction verification is off by default, and `verify-compaction: true` is
+    // refused here (docs/config-keys.md), so its failure count is zero on both sides: served
+    // so an alert written against the series finds it (`db.go:406`, `db.go:3582`).
+    per_db(
+        out,
+        dbs,
+        (
+            "litestream_compaction_verify_error_count",
+            "counter",
+            "Number of post-compaction verification failures",
+        ),
+        |_| "0".to_owned(),
+    );
 }
 
 fn go_sync_series(out: &mut Out, dbs: &[(String, &Health)]) {

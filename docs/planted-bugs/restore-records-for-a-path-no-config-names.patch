@@ -1,0 +1,19 @@
+diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
+index d3f18195c..af6d597ee 100644
+--- a/crates/cli/src/run.rs
++++ b/crates/cli/src/run.rs
+@@ -761,6 +761,9 @@ fn resolve_from(
+ /// standard input or does not load names nothing, and a database no config names is a copy that
+ /// nothing replicates, so Go's restore leaves it alone and so does this.
+ fn configured_meta(output: &Path) -> Option<PathBuf> {
++    if true {
++        return meta_dir_of(output).ok();
++    }
+     if std::env::var("LITESTREAM_CONFIG").is_ok_and(|path| path == "-") {
+         return None;
+     }
+@@ -1253,3 +1256,4 @@ async fn files_on_s3<T: lsr_store_s3::Transport>(
+ 
+ #[cfg(test)]
+ mod tests;
++

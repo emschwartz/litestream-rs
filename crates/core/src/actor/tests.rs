@@ -19,6 +19,7 @@ use crate::source::{CheckpointCall, FakeCheckpointer, FakeDb, FakeWal, SourceErr
 use crate::store::WriteMode;
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
+mod after_delete;
 mod ahead;
 mod audit;
 
@@ -2295,6 +2296,7 @@ mod wal_barrier;
 mod wal_truncated_mid_step;
 mod witness;
 mod work;
+mod writes_held;
 
 /// Ticks at `now` onto a staged file that fails verification for the first
 /// time: one failed read deletes nothing and the task retries. Returns when

@@ -115,7 +115,7 @@ impl GoConfig {
             Expand::Off => text.to_owned(),
             Expand::Env => {
                 let expanded = expand::expand_env(text, env);
-                for name in expanded.unset {
+                for name in read_by_a_value(text, env, expanded.unset) {
                     walk.warn(KeyPath::root(), None, WarningKind::UnsetVariable { name });
                 }
                 expanded.text
@@ -163,6 +163,31 @@ impl GoConfig {
         );
         Self::parse(&text, Expand::Off, env)
     }
+}
+
+/// The names of `unset` that some key or value reads. Go expands the whole file and warns of
+/// nothing, so a reference in a comment, which changes nothing, is not worth a warning: each
+/// unset name is expanded to a marker of its own and the marker looked for in the parsed tree.
+/// A file that does not parse with the markers is refused later anyway; its names all stay.
+fn read_by_a_value(text: &str, env: &dyn Env, unset: Vec<String>) -> Vec<String> {
+    if unset.is_empty() {
+        return unset;
+    }
+    let mut seen = String::new();
+    match yaml::parse(&expand::expand_probe(text, env)) {
+        Ok((root, _)) => {
+            if let Some(root) = root {
+                root.push_text(&mut seen);
+            }
+        }
+        Err(_) => return unset,
+    }
+    unset
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| seen.contains(&expand::probe_sentinel(*index)))
+        .map(|(_, name)| name)
+        .collect()
 }
 
 /// A YAML double-quoted scalar holding `text` exactly.

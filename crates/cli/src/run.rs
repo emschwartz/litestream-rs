@@ -203,6 +203,9 @@ pub enum Finished {
         integrity_check: IntegrityCheck,
         /// Wall time of the clearing and the restore, for Go's `duration_ms`.
         elapsed: Duration,
+        /// Whether a takeover record was left for a replicator started on the database: only
+        /// for a database a config names.
+        takeover_recorded: bool,
     },
     /// `--dry-run`: the files a restore would apply; nothing was written.
     Planned {
@@ -297,6 +300,11 @@ pub enum Done {
     Help,
     /// The version.
     Version,
+    /// Go's `version` command.
+    VersionLine {
+        /// `-verbose`.
+        verbose: bool,
+    },
 }
 
 /// Why a command failed.
@@ -487,7 +495,8 @@ pub fn exit_for_done(done: &Done) -> Exit {
         | Done::Files { .. }
         | Done::DaemonHelp(_)
         | Done::Help
-        | Done::Version => Exit::Success,
+        | Done::Version
+        | Done::VersionLine { .. } => Exit::Success,
     }
 }
 
@@ -590,6 +599,9 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
         Command::ConfigCheck(path) => Ok(Done::ConfigChecked(Box::new(lsr_sidecar::check(&path)))),
         Command::Help => Ok(Done::Help),
         Command::Version => Ok(Done::Version),
+        Command::VersionLine(args) => Ok(Done::VersionLine {
+            verbose: args.verbose,
+        }),
     }
 }
 
@@ -724,11 +736,12 @@ fn resolve_from(
                 command: "restore",
                 flag: "--output",
             })?;
+            let meta = configured_meta(&output);
             Ok(Resolution::Open(
                 Opening {
                     replica,
                     keys: None,
-                    meta: None,
+                    meta,
                 },
                 output,
             ))
@@ -739,7 +752,8 @@ fn resolve_from(
                 let source = Source::of_url(&url);
                 return Ok(Resolution::OutputExists(output, source));
             }
-            let opening = url_replica(&output.to_string_lossy(), &url)?;
+            let mut opening = url_replica(&output.to_string_lossy(), &url)?;
+            opening.meta = configured_meta(&output);
             Ok(Resolution::Open(opening, output))
         }
         RestoreFrom::Database {
@@ -757,6 +771,22 @@ fn resolve_from(
             Ok(Resolution::Open(opening, output.unwrap_or(db)))
         }
     }
+}
+
+/// The meta directory of the database a config names at `output`: where a replicator started on
+/// the restored database looks for the takeover record. The config is the one `replicate` reads
+/// by default (`LITESTREAM_CONFIG`, else `/etc/litestream.yml`); one that is missing, reads
+/// standard input or does not load names nothing, and a database no config names is a copy that
+/// nothing replicates, so Go's restore leaves it alone and so does this.
+fn configured_meta(output: &Path) -> Option<PathBuf> {
+    if std::env::var("LITESTREAM_CONFIG").is_ok_and(|path| path == "-") {
+        return None;
+    }
+    let loaded = lsr_sidecar::load_config(None, Expand::Env).ok()?;
+    let want = expand_path(&output.to_string_lossy(), &ProcessEnv).ok()?;
+    let narrowed = loaded.config.only_database(&want)?;
+    let plan = lsr_config::plan(&narrowed, &ProcessEnv).ok()?;
+    Some(plan.dbs().first()?.meta_dir().to_path_buf())
 }
 
 /// Go's `NewReplicaFromConfig(&ReplicaConfig{URL: url})`: the replica a URL names, read as a
@@ -983,7 +1013,8 @@ fn output_exists(output: &Path, existing: Existing) -> Result<bool, CliError> {
 
 /// How a restore runs, apart from where from and where to.
 struct How {
-    /// Where the takeover record goes; the output's default meta directory when `None`.
+    /// Where the takeover record goes, for a database a config names; `None` for any other, which
+    /// gets no record and no folder beside it.
     meta: Option<PathBuf>,
     target: RestoreTarget,
     as_of_inside: AsOfInside,
@@ -1029,26 +1060,24 @@ async fn restore_on<S: ObjectStore>(
         Vec::new()
     };
     let created = create_parents(output).map_err(CliError::Parent)?;
+    let takeover_recorded = meta.is_some();
     let attempt = async {
         // A replicator started on the restored database builds on the replica it came from,
-        // through the takeover record: an output with no meta directory is refused before
-        // anything is written, never restored without one.
-        let meta = match meta {
-            Some(meta) => meta,
-            None => meta_dir_of(output)?,
-        };
+        // through the takeover record, which the database's config says where to put.
         let sink = FileSink::create_over(output, existing)?.with_integrity_check(integrity_check);
         if txid_and_timestamp {
             return Err(UsageError::GoTxidAndTimestamp.into());
         }
         let options = RestoreOptions { as_of_inside };
         let restored = restore_with(store, target, options, sink).await?;
-        lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
-            CliError::Takeover {
-                meta,
-                kind: err.kind(),
-            }
-        })?;
+        if let Some(meta) = meta {
+            lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
+                CliError::Takeover {
+                    meta,
+                    kind: err.kind(),
+                }
+            })?;
+        }
         Ok::<_, CliError>(restored)
     }
     .await;
@@ -1061,6 +1090,7 @@ async fn restore_on<S: ObjectStore>(
             cleared,
             integrity_check,
             elapsed: start.elapsed(),
+            takeover_recorded,
         }),
         Err(CliError::NoPlan(PlanOutcome::EmptyReplica)) if if_replica_exists => {
             Ok(Finished::Skipped {
