@@ -1,0 +1,18 @@
+diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
+index 8eae1ab1b..7a46db62e 100644
+--- a/crates/core/src/compact.rs
++++ b/crates/core/src/compact.rs
+@@ -699,11 +699,8 @@ async fn write_output<S: Role, D: ObjectStore>(
+         pages = pages.saturating_add(1);
+         merge.observe(encoder.writer_mut().len());
+         if encoder.writer_mut().len() >= flush {
+-            upload
+-                .write(encoder.writer_mut())
+-                .await
+-                .map_err(CompactError::Dest)?;
+-            encoder.writer_mut().clear();
++            let out = std::mem::take(encoder.writer_mut());
++            upload.write(&out).await.map_err(CompactError::Dest)?;
+         }
+     }
+     merge.check_unheld(unchecked_from, header.commit().saturating_add(1))?;

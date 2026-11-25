@@ -25,7 +25,17 @@ done <docs/mutants-escapes.txt
 status=0
 # Four jobs, a 10-minute ceiling per mutant, and a hard stop for the whole run (the CI job
 # also has timeout-minutes); `timeout` ends the run with 124, which fails the job.
-timeout "${MUTANTS_DIFF_BUDGET:-2400}" cargo mutants \
+# Two guards keep that stop real on a machine short of memory. `--kill-after` follows the
+# TERM with a KILL (a thrashing run ignored the TERM and held the job to its limit). The
+# `ulimit -v` caps every process's address space, so a mutant that allocates without bound
+# fails its test with an allocation error, a caught mutant, instead of taking the machine down;
+# the default (6 GiB) is eight times the largest honest test (about 750 MiB resident), and macOS
+# does not honor it (the cap is skipped there).
+vmem_kb="${MUTANTS_VMEM_KB:-6291456}"
+if ! ulimit -v "$vmem_kb" 2>/dev/null; then
+    echo "mutants-diff: no address-space cap on this OS"
+fi
+timeout --kill-after=60 "${MUTANTS_DIFF_BUDGET:-2400}" cargo mutants \
     --in-diff "$out/changes.diff" -p lsr-core -p lsr-ltx \
     --test-tool nextest --jobs "${MUTANTS_JOBS:-2}" --copy-vcs true \
     --minimum-test-timeout 60 --output "$out" \

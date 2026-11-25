@@ -582,20 +582,20 @@ pub fn snapshot_run(pages: u32) -> SnapshotRun {
 }
 
 /// Bytes a snapshot holds for each page of the database, in the page checksum table
-/// and the page plan together. The table is a `BTreeMap` entry a page (a 4-byte page
-/// number, an 8-byte digest, the map's nodes) and the plan one `PageFrom` a page, so
-/// the law is linear in the database's pages. Issue #64 asks whether to bound it; until
-/// then this ceiling holds the line. Measured: 91 to 96 bytes a page, which is the table,
-/// the plan, and the encoder's index entry for the page; the ceiling is that plus about
-/// 15%, so holding page contents, which is 4096 bytes a page, breaks it at once.
-pub const SNAPSHOT_BYTES_PER_PAGE: usize = 112;
+/// and the encoder's page index. The table is one 8-byte slot a page and the index about
+/// nine varint bytes, so the law is linear in the database's pages and its floor is 17
+/// bytes a page (74 MiB measured at 16 GiB of 4 KiB pages: 18). The plan holds nothing a page costs: it
+/// is walked, never listed (it was 32 bytes a page, 48 while sorted); the table was a map
+/// (about 20), and the index was copied twice at the end of the file. Measured: 16 to 18
+/// bytes a page, from 86; the ceiling is that plus about 15%, so any of those again, or holding
+/// page contents, which is 4096 bytes a page, breaks it.
+pub const SNAPSHOT_BYTES_PER_PAGE: usize = 20;
 
-/// The most one `Upload::write` may carry, apart from the last: a snapshot streams in
-/// chunks of about 1 MiB, so no write is a file.
-pub const SNAPSHOT_WRITE_CEILING: u64 = 2 * 1024 * 1024;
-
-/// The last write is the file's index and trailer, about 10 bytes a page; this allows 16.
-pub const SNAPSHOT_INDEX_BYTES_PER_PAGE: u64 = 16;
+/// The most one `Upload::write` may carry, the last included: a snapshot streams its pages
+/// and then its index in pieces of about 256 KiB (measured: 271 KiB), so no write is a file
+/// or an index. The index is about nine bytes a page, so one that went out whole would pass
+/// this at 60,000 pages.
+pub const SNAPSHOT_WRITE_CEILING: u64 = 512 * 1024;
 
 /// What a snapshot holds that does not grow with the pages: its buffers and
 /// bookkeeping, and the parts an upload buffers, which are the store's to bound (and which
@@ -627,7 +627,7 @@ pub fn assert_snapshot_law(small: u32) {
     );
     assert!(few.bytes >= u64::from(small) * 4096 && many.bytes >= u64::from(small * 4) * 4096);
     for (run, pages) in [(&few, small), (&many, small * 4)] {
-        let ceiling = SNAPSHOT_WRITE_CEILING + SNAPSHOT_INDEX_BYTES_PER_PAGE * u64::from(pages);
+        let ceiling = SNAPSHOT_WRITE_CEILING;
         assert!(
             run.largest_write <= ceiling,
             "one write carried {} bytes for {pages} pages, ceiling {ceiling}",
@@ -638,7 +638,7 @@ pub fn assert_snapshot_law(small: u32) {
 
 #[test]
 fn snapshot_peak_heap_is_linear_in_pages_with_a_pinned_coefficient() {
-    assert_snapshot_law(8 * 1024);
+    assert_snapshot_law(16 * 1024);
 }
 
 /// The inventory of a replica in the writer's shape: level-0 singletons, a level-1 file

@@ -166,6 +166,7 @@ impl<L: Role> Role for Apart<'_, L> {
     }
 
     const COMPACT_WINDOW: ReadLen = L::COMPACT_WINDOW;
+    const COMPACT_BUDGET: u64 = L::COMPACT_BUDGET;
 }
 
 /// Moves every file in the course's slot up to level 0, oldest first. `unsent` is the upload

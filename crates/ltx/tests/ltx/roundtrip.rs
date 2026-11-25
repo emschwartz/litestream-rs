@@ -137,3 +137,68 @@ proptest! {
         drop(decode_chunked(&file, &chunks));
     }
 }
+/// An index of several chunks (16 KiB each, about 1,800 pages), written out piece by piece
+/// after the last page, is the same file as one finish writes, and no page fits after it.
+#[test]
+fn an_index_written_in_pieces_is_the_file_finish_alone_writes() {
+    let page_size = PageSize::new(512).unwrap();
+    let commit = 12_000_u32;
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size,
+        commit,
+        txids: TxidRange::new(Txid::new(1).unwrap(), Txid::new(1).unwrap()).unwrap(),
+        timestamp: Timestamp::from_unix_millis(7),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let page = |n: u32| {
+        let seed = u8::try_from(n % 251).unwrap();
+        (0..512_usize)
+            .map(|i| seed.wrapping_add(u8::try_from(i % 97).unwrap()))
+            .collect::<Vec<u8>>()
+    };
+    let fill = |encoder: &mut Encoder<Vec<u8>>| {
+        for n in 1..=commit {
+            encoder
+                .write_page(PageNo::new(n, page_size).unwrap(), &page(n))
+                .unwrap();
+        }
+    };
+    let mut whole = Encoder::new(Vec::new(), header).unwrap();
+    fill(&mut whole);
+    let one_shot = whole.finish(None).unwrap().0;
+
+    let mut pieces = Encoder::new(Vec::new(), header).unwrap();
+    fill(&mut pieces);
+    // Each call hands over one chunk of 16 KiB, whole but for the last (the first also carries
+    // the end-of-pages marker): the sizes are spelled out so a changed chunk size is seen.
+    let mut sizes = Vec::new();
+    loop {
+        let before = pieces.writer_mut().len();
+        let more = pieces.write_index_chunk().unwrap();
+        sizes.push(pieces.writer_mut().len() - before);
+        if !more {
+            break;
+        }
+    }
+    assert!(sizes.len() >= 3, "{sizes:?}");
+    for size in sizes.iter().take(sizes.len() - 1).skip(1) {
+        assert!((16 * 1024 - 30..=16 * 1024).contains(size), "{sizes:?}");
+    }
+    assert!(
+        sizes.iter().all(|size| *size <= 16 * 1024 + 64),
+        "{sizes:?}"
+    );
+    assert!(
+        pieces
+            .write_page(PageNo::new(1, page_size).unwrap(), &page(1))
+            .is_err(),
+        "a page after the index began"
+    );
+    let piecewise = pieces.finish(None).unwrap().0;
+    assert_eq!(piecewise, one_shot);
+    assert_eq!(decode(&piecewise).unwrap().pages.len(), 12_000);
+}
