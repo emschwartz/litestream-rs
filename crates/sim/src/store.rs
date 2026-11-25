@@ -28,8 +28,8 @@ use std::task::{Context, Poll};
 use lsr_core::WriteMode;
 use lsr_core::{
     BatchKind, BoxFuture, ByteTally, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt,
-    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, Reread, SeededEntropy, StoreError, StoreOp,
-    Upload,
+    Listing, ObjectStore, Opened, PageLimit, ReadAt, ReadLen, Reread, SeededEntropy, StoreError,
+    StoreOp, Upload,
 };
 use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_ltx::{HEADER_LEN, Header, Timestamp, TxidRange, WalOrigin};
@@ -479,6 +479,32 @@ const fn width_slot(kind: BatchKind) -> usize {
 
 /// Flips the byte at object offset `at` when `bytes`, read from `offset`,
 /// holds it; whether it did.
+/// An object held open behind [`Faults`]: each read is judged as a read by range is.
+#[derive(Debug)]
+struct FaultsOpened {
+    inner: Box<dyn Opened>,
+    state: Arc<Mutex<FaultState>>,
+    key: FileKey,
+}
+
+impl Opened for FaultsOpened {
+    fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let verdict = lock(&self.state).decide(Call::Read);
+            if let Verdict::Fail(err) = &verdict {
+                return Err(err.clone());
+            }
+            let mut bytes = self.inner.read(offset, len).await?;
+            if let Verdict::Flip(at) = verdict
+                && flip(&mut bytes, offset, at)
+            {
+                lock(&self.state).flipped.push(self.key);
+            }
+            Ok(bytes)
+        })
+    }
+}
+
 fn flip(bytes: &mut [u8], offset: u64, at: u64) -> bool {
     let index = at.checked_sub(offset).and_then(|i| usize::try_from(i).ok());
     match index.and_then(|i| bytes.get_mut(i)) {
@@ -518,6 +544,20 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
             lock(&self.state).flipped.push(*key);
         }
         Ok(bytes)
+    }
+
+    /// The open itself is no call of the schedule's: each read through what it gives is one,
+    /// so a fault lands on the same read whether the store holds the file open or not.
+    async fn open(&self, key: &FileKey) -> Result<Option<Box<dyn Opened>>, StoreError> {
+        let held = self.inner.open(key).await?.map(|inner| {
+            let held: Box<dyn Opened> = Box::new(FaultsOpened {
+                inner,
+                state: Arc::clone(&self.state),
+                key: *key,
+            });
+            held
+        });
+        Ok(held)
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -869,6 +909,19 @@ impl<S> YieldEachCall<S> {
     }
 }
 
+/// An object held open behind [`YieldEachCall`].
+#[derive(Debug)]
+struct YieldOpened(Box<dyn Opened>);
+
+impl Opened for YieldOpened {
+    fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            YieldNow(false).await;
+            self.0.read(offset, len).await
+        })
+    }
+}
+
 impl<S: ObjectStore> ObjectStore for YieldEachCall<S> {
     type Upload = YieldUpload<S::Upload>;
 
@@ -885,6 +938,15 @@ impl<S: ObjectStore> ObjectStore for YieldEachCall<S> {
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         YieldNow(false).await;
         self.inner.read(key, offset, len).await
+    }
+
+    /// No yield for the open: each read through what it gives yields, as a read by range does.
+    async fn open(&self, key: &FileKey) -> Result<Option<Box<dyn Opened>>, StoreError> {
+        let held = self.inner.open(key).await?.map(|inner| {
+            let held: Box<dyn Opened> = Box::new(YieldOpened(inner));
+            held
+        });
+        Ok(held)
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -1178,6 +1240,20 @@ impl<S> Recorder<S> {
     }
 }
 
+/// An object held open behind [`Recorder`]: each read counts as a read by range does.
+#[derive(Debug)]
+struct RecorderOpened {
+    inner: Box<dyn Opened>,
+    log: RecorderLog,
+}
+
+impl Opened for RecorderOpened {
+    fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        self.log.with(|s| bump(&mut s.counts.reads));
+        self.inner.read(offset, len)
+    }
+}
+
 impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
     type Upload = TapUpload<S>;
 
@@ -1194,6 +1270,17 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.log.with(|s| bump(&mut s.counts.reads));
         self.inner.read(key, offset, len).await
+    }
+
+    async fn open(&self, key: &FileKey) -> Result<Option<Box<dyn Opened>>, StoreError> {
+        let held = self.inner.open(key).await?.map(|inner| {
+            let held: Box<dyn Opened> = Box::new(RecorderOpened {
+                inner,
+                log: self.log.clone(),
+            });
+            held
+        });
+        Ok(held)
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -1705,6 +1792,10 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.inner.read(key, offset, len).await
+    }
+
+    async fn open(&self, key: &FileKey) -> Result<Option<Box<dyn Opened>>, StoreError> {
+        self.inner.open(key).await
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
