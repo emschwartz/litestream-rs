@@ -134,7 +134,7 @@ Alert on `lsr_unreplicated_age_seconds`, not on `/healthz` alone: a store that i
 
 ## When it stops
 
-A replicator that finds files in the bucket this database cannot account for stops with `other_writer` and, under `hold-start`, holds the application. The cause is one of three: another replicator writing to the same path, an empty or wrong database on this host, or a disk put back from an older copy. Choose one:
+A replicator that finds files in the bucket this database cannot account for stops with `other_writer` and, under `hold-start`, holds the application. The cause is one of three: another replicator writing to the same path, an empty or wrong database on this host, or a disk put back from an older copy (told apart by the replicator's counter, with one short exception in [limitations](limitations.md)). Choose one:
 
 ```sh
 lsr trust-local /data/app.db --replica s3://my-bucket/app

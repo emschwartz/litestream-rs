@@ -238,6 +238,26 @@ pub enum Op {
     Meta(MetaOp),
     /// Damage to the WAL file that SQLite would not do itself.
     Wal(WalOp),
+    /// The application commits the pages of a database laid out as SQLite lays one out for the
+    /// replicator's counter (page 1 the schema naming page 2, page 2 the counter table holding
+    /// `seq`), with page 3 filled with `data`, growing the database to six pages. Scenarios
+    /// only: the generated commits write opaque pages.
+    Structured {
+        /// The counter's value.
+        seq: u32,
+        /// The byte page 3 is filled with.
+        data: u8,
+    },
+    /// A file backup of the database is taken, as it reads now. Scenarios only.
+    SaveDatabase,
+    /// The engine is down and the backup replaces the database file, with no WAL, as an
+    /// operator's plain copy does (a modified time of now). Scenarios only.
+    PutBackDatabase {
+        /// The model takes the older database as the application's new truth, as it does after
+        /// a loss the engine reported; without it the model still holds the commits the copy
+        /// lacks, and the oracle judges the replica against them.
+        adopt: bool,
+    },
     /// Our own read transaction ends or begins, as at a checkpoint's lapse.
     /// Scenarios only.
     OurReader {

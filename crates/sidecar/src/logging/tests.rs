@@ -167,7 +167,7 @@ fn a_boot_ahead_of_the_replica_warns_and_names_its_newest_transaction() {
     assert_eq!(
         msg,
         format!(
-            "the meta directory has no record of the replica's newest transaction {tip}, but this database was written after it and holds most of its pages: replicating it as the same database with commits that never reached the replica, starting with a snapshot above {tip}. If another replicator writes to this prefix, stop it."
+            "the meta directory has no record of the replica's newest transaction {tip}. This database was written after it, holds most of its pages and shows no sign of being older, so it is replicated as that state plus commits that never reached the replica, starting with a snapshot above {tip}. If it is an older copy of the database, the commits the replica holds after it leave the newest state and stay reachable by transaction id until retention removes them. If another replicator writes to this prefix, stop it."
         )
     );
     assert!(

@@ -199,14 +199,19 @@ mod other_copies {
     /// A start with an empty working folder, after the WAL restarted, checks the database
     /// against the replica and then starts a chain above it: the check reads every page of the
     /// file (page 1 included: the WAL has none), and the snapshot that follows reads them
-    /// again.
+    /// again. The check also looks for the replicator's counter before it compares: one more
+    /// read of page 1, the schema's root, which here holds no b-tree, so the walk ends there. A
+    /// schema with more pages costs one read of each, never of the data pages. Only a start
+    /// that runs the check (a fresh working folder over a replica it cannot account for) pays
+    /// it; a start that continues from its own staging reads nothing extra.
     #[test]
-    fn a_start_with_an_empty_working_folder_reads_each_page_twice() {
+    fn a_start_with_an_empty_working_folder_reads_each_page_twice_and_the_schema_once() {
         let mut rig = redeployed_with_a_new_meta_directory();
         let mut actor = Actor::new(go_like());
         let reads = reads_after(&mut rig, |rig| {
             rig.settle(&mut actor, T0 + 2);
         });
-        assert_eq!(reads, 6);
+        let (pages, schema_reads) = (3, 1);
+        assert_eq!(reads, 2 * pages + schema_reads);
     }
 }

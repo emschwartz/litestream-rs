@@ -280,6 +280,16 @@ fn remote_bitrot_on_list_read() {
 }
 
 #[test]
+fn older_copy_on_a_new_host() {
+    run(scenario::older_copy_on_a_new_host);
+}
+
+#[test]
+fn older_copy_taken_after_the_last_counter_bump() {
+    run(scenario::older_copy_taken_after_the_last_counter_bump);
+}
+
+#[test]
 fn second_writer_mid_run() {
     run(scenario::second_writer_mid_run);
 }

@@ -388,6 +388,9 @@ impl SqliteSide for RealSide {
     fn flip_db_page(&self, _pgno: u32) -> bool {
         false
     }
+    fn put_back_database(&self, _image: &[u8]) -> bool {
+        false
+    }
     fn heal_injections(&self) {
         self.with(|real| real.injected.clear());
     }
