@@ -3,7 +3,7 @@ index 4241cbee..d66ae3f6 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
 @@ -57,8 +57,7 @@ use thiserror::Error;
- use crate::fault::role::{Replica, Role};
+ use crate::fault::role::{Replica, Role, STAGING_WINDOW};
  use crate::layout::{FileInfo, FileKey, Level};
  use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 -use crate::publish::Writer;

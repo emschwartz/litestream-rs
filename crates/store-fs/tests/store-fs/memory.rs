@@ -174,9 +174,10 @@ fn a_level_one_compaction_holds_a_staging_window_per_input() {
 }
 
 /// Blocks of 256 KiB or more a level-1 compaction of `MAX_INPUTS` staged files may allocate: the
-/// output buffer once and the page index's growth. Before the buffer was kept for the file,
-/// every flush took a fresh one that grew by doubling from empty, three such blocks each.
-const LARGE_BLOCKS: usize = 6;
+/// output buffer, once (the output is the 300 pages every input holds, about five flushes).
+/// With a fresh buffer at every flush, each growing from empty by doubling, it is one block per
+/// flush.
+const LARGE_BLOCKS: usize = 2;
 
 #[test]
 fn a_compaction_allocates_few_large_blocks() {
