@@ -482,3 +482,22 @@ fn a_partial_backfill_leaves_database_writes_a_power_loss_can_tear() {
         "all-or-nothing keeps none of the backfill's writes"
     );
 }
+
+/// The engine's sync of the WAL asks for FULL, which the unix VFS turns into a drive cache flush on
+/// macOS; the fault VFS passes NORMAL on instead, and leaves every other bit of the flags alone.
+#[test]
+fn a_full_sync_reaches_the_file_as_a_normal_one() {
+    assert_eq!(
+        without_drive_flush(ffi::SQLITE_SYNC_FULL),
+        ffi::SQLITE_SYNC_NORMAL
+    );
+    let data_only = ffi::SQLITE_SYNC_DATAONLY;
+    assert_eq!(
+        without_drive_flush(ffi::SQLITE_SYNC_FULL | data_only),
+        ffi::SQLITE_SYNC_NORMAL | data_only
+    );
+    assert_eq!(
+        without_drive_flush(ffi::SQLITE_SYNC_NORMAL),
+        ffi::SQLITE_SYNC_NORMAL
+    );
+}
