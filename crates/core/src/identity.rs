@@ -381,11 +381,12 @@ mod tests {
             .into_iter()
             .map(|(n, fill)| (n, PageChecksum::of(pg(n), &page(fill))))
             .collect();
-        let local: Local<'_, '_, Cursor<Vec<u8>>, FakeDb> = Local {
+        let mut local: Local<'_, Cursor<Vec<u8>>, FakeDb> = Local {
             reader: None,
             db: &mut db,
+            size: 2,
         };
-        let found = local.compare(&image, 2, 2, size).unwrap();
+        let found = local.compare(&image, 2, size).unwrap();
         assert_eq!(
             found,
             Compared {
