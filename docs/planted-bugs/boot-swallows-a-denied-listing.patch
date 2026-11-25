@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 5db24739c..f2cb298f0 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2849,6 +2849,9 @@ async fn boot_listing<L: Role, R: Role>(
+             did: Did::Diverged { from, .. },
+         }) => (state, Some(from)),
+         Ok(listed) => (listed.state, None),
++        Err(failed) if failed.fault == Fault::StoreDenied(Denied::Permission) => {
++            (UploadState::ListFirst { confirmed: None }, None)
++        }
+         Err(failed) => return Err(failed.fault.into()),
+     };
+     let tip = upload.confirmed();

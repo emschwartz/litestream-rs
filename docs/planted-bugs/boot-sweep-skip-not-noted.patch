@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 5db24739c..67e8ec93d 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2792,7 +2792,7 @@ async fn remove_scratch<L: Role, R: Role>(
+             why: Denied::Permission,
+             ..
+         }) => {
+-            *denied = true;
++            *denied = false;
+             Ok(())
+         }
+         Err(err) => Err(R::fault(&err)),

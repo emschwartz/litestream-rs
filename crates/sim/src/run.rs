@@ -323,6 +323,9 @@ struct Runner {
     // The S3 replica's refusals judged so far: provider faults fired, delete keys refused, and
     // every other store fault fired (one may mask a refusal in the same tick).
     denials_seen: (usize, u64, u64),
+    /// Whether the engine had not booted when the refusal judge last took its baseline:
+    /// the phase in which the start-up sweep of open uploads runs.
+    denials_unbooted: bool,
     // What each task stood degraded with when the refusal judge's tick began: a standing
     // degradation says nothing of a request refused after it.
     degraded_before: Vec<(lsr_core::Task, lsr_core::Degraded)>,
@@ -518,6 +521,7 @@ impl Runner {
             actor: Actor::new(actor_config()),
             rng: SeededEntropy::new(seed.stream(11)),
             denials_seen: (0, 0, 0),
+            denials_unbooted: true,
             degraded_before: Vec::new(),
             reads_lying: false,
             sites: SeededEntropy::new(seed.stream(19)),
