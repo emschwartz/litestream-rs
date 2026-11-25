@@ -57,10 +57,14 @@ use lsr_ltx::{Event, Header, PageChecksum, PageNo, PageSize, Txid, TxidRange};
 
 use crate::fault::role::Role;
 use crate::fault::{Fault, SnapshotCause};
+use crate::identity::{CheckError, restore_fault};
 use crate::layout::{FileKey, Level};
 use crate::ltx_read::{LtxRead, ReadFault};
+use crate::plan::RestoreTarget;
 use crate::recover::read_header;
+use crate::restore::{RestoreOptions, restore_once};
 use crate::store::{ListAt, PageLimit, ReadLen};
+use crate::verify::DigestSink;
 
 /// How much of a staged file one read asks for while seeding.
 const SEED_READ: ReadLen = ReadLen::CHUNK;
@@ -256,7 +260,7 @@ pub(crate) async fn seeded<L: Role>(
                 && from.is_some()
                 && let Some(end) = read.and_then(|read| read.wal_end)
             {
-                seeded.unplaced = Some((info.key.range().max(), end));
+                seeded.unplaced = Some((info.key, end));
             }
             placed |= pending;
             prev = read;
@@ -283,9 +287,8 @@ pub(crate) struct Seeded {
     /// The pending files that change nothing, by transaction.
     pub(crate) quiet: BTreeSet<Txid>,
     /// The first pending file when no staged file stands before it (the replica's newest file
-    /// was pruned from staging, or staging was lost): its transaction and where its WAL span
-    /// ends. Nothing local says what it follows, so [`Seeded::place`] asks the replica.
-    pub(crate) unplaced: Option<(Txid, WalEnd)>,
+    /// was pruned from staging, or staging was lost): the file and where its WAL span ends. Nothing local says what it follows, so [`Seeded::place`] asks the replica.
+    pub(crate) unplaced: Option<(FileKey, WalEnd)>,
 }
 
 /// Where a file's WAL span ends: the salts and the byte offset.
@@ -298,28 +301,41 @@ fn wal_end(header: &Header) -> Option<WalEnd> {
 }
 
 impl Seeded {
-    /// Marks the unplaced file quiet when its WAL span ends where the replica's newest file
-    /// `tip` ends: it reads no frame past what the replica holds, the same rule that marks a
-    /// file quiet after a staged one (a snapshot taken for a doubt on a quiet WAL, or after the
-    /// database was found equal to the replica). Without it a restart loses that knowledge
-    /// and dates the file from its stamp as a commit. A span that ends elsewhere, or a header
-    /// with none, or a newest file the replica does not hold, leaves the file counted: it may
-    /// hold a commit.
+    /// Marks the unplaced file quiet when it holds no commit the replica lacks, judged against
+    /// the replica's newest file `tip`, the same rule that marks a file quiet after a staged
+    /// one (a snapshot taken for a doubt on a quiet WAL, or after the database was found equal
+    /// to the replica). Without it a restart loses that knowledge and dates the file from its
+    /// stamp as a commit. Two proofs, cheapest first:
+    ///
+    /// - its WAL span ends where `tip`'s ends: it reads no frame past what the replica holds;
+    /// - it follows a WAL generation other than `tip`'s (a restarted or deleted WAL: the span
+    ///   says nothing about what came before) and the replica's state at `tip`, restored into
+    ///   page checksums, is what the file would leave: the same size, every page it holds equal.
+    ///   Costs a restore of the replica, only on a boot with such a file pending and no staged
+    ///   file before it.
+    ///
+    /// A span in the same generation that ends elsewhere holds frames the replica lacks (or is
+    /// older than it), a header with no span or a file that does not verify proves nothing,
+    /// and a newest file the replica does not hold leaves the file counted: it may hold a
+    /// commit.
     ///
     /// # Errors
     /// The replica's fault when the newest file's header cannot be read, other than that it is
-    /// missing.
-    pub(crate) async fn place<R: Role>(
+    /// missing, or its state cannot be restored; the staging store's when the file cannot be
+    /// read.
+    pub(crate) async fn place<L: Role, R: Role>(
         &mut self,
+        staging: &L,
         remote: &R,
         tip: Option<Txid>,
     ) -> Result<(), Fault> {
-        let (Some((txid, end)), Some(tip)) = (self.unplaced.take(), tip) else {
+        let (Some((file, end)), Some(tip)) = (self.unplaced.take(), tip) else {
             return Ok(());
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(tip));
         let header = match read_header(remote, &key, R::fault).await {
-            Ok(header) => header,
+            Ok(Some(header)) => header,
+            Ok(None) => return Ok(()),
             // The tip the engine believes the replica holds is not there (an upload whose
             // answer was lost, a bucket rolled back): the boot lists the replica and decides
             // from that, and the file stays counted, as with any span that ends elsewhere.
@@ -328,11 +344,57 @@ impl Seeded {
             Err(Fault::RemoteObjectMissing) => return Ok(()),
             Err(fault) => return Err(fault),
         };
-        if header.as_ref().and_then(wal_end) == Some(end) {
-            self.quiet.insert(txid);
+        let quiet = match wal_end(&header) {
+            Some(tip_end) if tip_end == end => true,
+            Some((salts, _)) if salts == end.0 => false,
+            Some(_) | None => leaves_replica_state(staging, remote, &file, tip).await?,
+        };
+        if quiet {
+            self.quiet.insert(file.range().max());
         }
         Ok(())
     }
+}
+
+/// Whether staged `file`, applied over the replica's state at `tip`, changes nothing: the
+/// same size and every page it holds the same. A replica state that cannot be restored, or a
+/// file that does not verify, proves nothing.
+async fn leaves_replica_state<L: Role, R: Role>(
+    staging: &L,
+    remote: &R,
+    file: &FileKey,
+    tip: Txid,
+) -> Result<bool, Fault> {
+    let mut image = BTreeMap::new();
+    let sink = DigestSink { pages: &mut image };
+    let restored = restore_once(
+        remote,
+        RestoreTarget::Txid(tip),
+        RestoreOptions::default(),
+        sink,
+    )
+    .await
+    .map_err(|err| restore_fault::<R>(&err));
+    let restored = match restored {
+        Ok(restored) => restored,
+        Err(CheckError::Unrestorable) => return Ok(false),
+        Err(CheckError::Fault(fault)) => return Err(fault),
+    };
+    let mut table = PageChecksumTable::new();
+    table.fit(restored.page_size());
+    for (pgno, digest) in image {
+        // A page number the restore wrote is in range for its page size.
+        if let Some(pgno) = PageNo::new(pgno, restored.page_size()) {
+            table.record(pgno, digest);
+        }
+    }
+    let state = SeedRead {
+        commit: restored.commit().get(),
+        changes: false,
+        wal_end: None,
+    };
+    let read = seed_file(staging, file, &mut table, Some(state)).await?;
+    Ok(read.is_some_and(|read| !read.changes))
 }
 
 /// One seeded file: its database size, and whether it may change the database.

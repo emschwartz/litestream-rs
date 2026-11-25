@@ -2924,7 +2924,7 @@ async fn boot_seed<L: Role, R: Role>(
             ..
         } => {
             let mut seeded = seeded(staging, confirmed, position.commit()).await?;
-            seeded.place(remote, confirmed).await?;
+            seeded.place(staging, remote, confirmed).await?;
             Ok((seeded.table, seeded.quiet))
         }
         Course::At {
@@ -2932,7 +2932,7 @@ async fn boot_seed<L: Role, R: Role>(
         }
         | Course::Snapshot { .. } => {
             let mut seeded = seeded(staging, confirmed, NonZeroU32::MIN).await?;
-            seeded.place(remote, confirmed).await?;
+            seeded.place(staging, remote, confirmed).await?;
             Ok((PageChecksumTable::new(), seeded.quiet))
         }
         Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),

@@ -410,6 +410,29 @@ fn two_no_commit_snapshots_and_a_second_writer_never_trip_the_age_bound() {
     run_with(&ops, &no_conditional_writes());
 }
 
+/// Seven operations of #366: the replica never gets a second file, the WAL is deleted and the
+/// staging directory lost, so the boot stages a snapshot over a new WAL generation that holds no
+/// commit, and a restart before the day-long step leaves it as the first pending file with
+/// nothing staged before it. The file's WAL span ends elsewhere than the replica's newest
+/// file's, so only what it holds says it changes nothing: the replica holds every commit, and
+/// fail-stop must not trip for age.
+#[test]
+fn a_snapshot_over_a_new_wal_generation_that_holds_no_commit_never_trips_the_age_bound() {
+    let ops = [
+        Op::OtherProcessCheckpoint(lsr_sim::OtherProcessMode::Restart),
+        Op::Shutdown,
+        Op::Meta(MetaOp::DeleteAll),
+        Op::Spill,
+        Op::AppInTick {
+            at: lsr_sim::AppAt::Call(19),
+            op: lsr_sim::AppOp::DeleteWal,
+        },
+        Op::SecondWriter { ticks: 2 },
+        Op::ClockJump(93_600_000),
+    ];
+    run_with(&ops, &no_conditional_writes());
+}
+
 /// A power loss inside a tick drops a staged file whose upload had landed. The staging check
 /// looks between ticks and never saw the file, so the boot's refusal of the replica's files
 /// is not a refusal without cause: the operator trusts the local database and starts again.

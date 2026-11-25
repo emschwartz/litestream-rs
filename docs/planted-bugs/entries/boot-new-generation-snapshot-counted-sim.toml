@@ -1,0 +1,7 @@
+# The same plant, seen by the simulator: a snapshot over a new WAL generation that holds no commit trips the age bound after a restart and a day-long step.
+name = "boot-new-generation-snapshot-counted-sim"
+fix = "claude/quiet-boot-snapshot"
+package = "lsr-sim"
+test_bin = "sim"
+patch = "boot-new-generation-snapshot-counted"
+tests = ["failstop::a_snapshot_over_a_new_wal_generation_that_holds_no_commit_never_trips_the_age_bound"]

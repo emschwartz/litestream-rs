@@ -1,0 +1,7 @@
+# A boot dates a pending snapshot over a restarted or deleted WAL from its stamp as a commit, though it holds exactly what the replica's newest file leaves: a day-long clock step then trips fail-stop with nothing unreplicated.
+name = "boot-new-generation-snapshot-counted"
+fix = "claude/quiet-boot-snapshot"
+package = "lsr-core"
+tests = [
+    "pages::tests::a_first_pending_file_over_a_new_wal_generation_is_quiet_when_it_changes_nothing",
+]

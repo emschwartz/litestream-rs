@@ -277,16 +277,28 @@ fn seeding_finds_the_pending_files_that_change_nothing() {
 /// An untracked file of `pages` (page, fill) whose frames came from the WAL of salts `(1, 1)`
 /// between `offset` and `end`.
 fn file_from_wal(n: u64, pages: &[(u32, u8)], offset: u64, end: u64) -> (FileKey, Vec<u8>) {
+    file_in_wal(n, pages, 3, (1, 1), offset, end)
+}
+
+/// [`file_from_wal`] from the WAL of `salts`.
+fn file_in_wal(
+    n: u64,
+    pages: &[(u32, u8)],
+    commit: u32,
+    salts: (u32, u32),
+    offset: u64,
+    end: u64,
+) -> (FileKey, Vec<u8>) {
     use lsr_ltx::{Encoder, Header, HeaderFields, Timestamp, TxidRange, WalOrigin};
     let txid = Txid::new(n).unwrap();
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size: PageSize::MIN,
-        commit: 3,
+        commit,
         txids: TxidRange::single(txid),
         timestamp: Timestamp::from_unix_millis(1),
         pre_apply: None,
-        wal: WalOrigin::new(offset, end.saturating_sub(offset), 1, 1),
+        wal: WalOrigin::new(offset, end.saturating_sub(offset), salts.0, salts.1),
         node_id: 0,
     })
     .unwrap();
@@ -373,7 +385,12 @@ fn a_first_pending_file_ending_where_the_replicas_newest_ended_is_quiet() {
     let quiet = |staging: &crate::MemStore| {
         let mut seeded =
             crate::conformance::block_on(seeded(&Staging(staging), Txid::new(2), nz(3))).unwrap();
-        crate::conformance::block_on(seeded.place(&Replica(&replica), Txid::new(2))).unwrap();
+        crate::conformance::block_on(seeded.place(
+            &Staging(staging),
+            &Replica(&replica),
+            Txid::new(2),
+        ))
+        .unwrap();
         seeded
             .quiet
             .iter()
@@ -397,7 +414,12 @@ fn a_replica_missing_the_believed_newest_file_leaves_the_first_pending_file_coun
     );
     let mut seeded =
         crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
-    crate::conformance::block_on(seeded.place(&Replica(&replica), Txid::new(2))).unwrap();
+    crate::conformance::block_on(seeded.place(
+        &Staging(&staging),
+        &Replica(&replica),
+        Txid::new(2),
+    ))
+    .unwrap();
     assert!(seeded.quiet.is_empty());
 }
 
@@ -418,4 +440,107 @@ fn a_later_pending_file_is_not_the_first_when_an_earlier_one_did_not_decode() {
     let seeded =
         crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
     assert_eq!(seeded.unplaced, None);
+}
+
+/// A snapshot taken after the WAL was deleted or restarted ends in a generation the replica's
+/// newest file never saw, so its span proves nothing. What it holds is judged against the
+/// replica's state: every page equal and the same size is no commit, a different page or size
+/// is one. A restart that forgot this dated the file by its stamp and tripped the age bound
+/// over a replica that held everything.
+#[test]
+fn a_first_pending_file_over_a_new_wal_generation_is_quiet_when_it_changes_nothing() {
+    let replica = crate::MemStore::new();
+    put_all(
+        &replica,
+        vec![file_in_wal(
+            1,
+            &[(1, 2), (2, 1), (3, 1)],
+            3,
+            (1, 1),
+            32,
+            200,
+        )],
+    );
+    let quiet = |file: (FileKey, Vec<u8>)| {
+        let staging = crate::MemStore::new();
+        put_all(&staging, vec![file]);
+        let mut seeded =
+            crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(1), nz(3))).unwrap();
+        crate::conformance::block_on(seeded.place(
+            &Staging(&staging),
+            &Replica(&replica),
+            Txid::new(1),
+        ))
+        .unwrap();
+        seeded
+            .quiet
+            .into_iter()
+            .map(|txid| txid.get())
+            .collect::<Vec<u64>>()
+    };
+    let same = [(1, 2), (2, 1), (3, 1)];
+    assert_eq!(quiet(file_in_wal(2, &same, 3, (2, 2), 32, 32)), vec![2]);
+    // Fewer pages, all equal: nothing the replica lacks.
+    assert_eq!(quiet(file_in_wal(2, &[(2, 1)], 3, (2, 2), 32, 32)), vec![2]);
+    // One page other than the replica's.
+    let other = [(1, 2), (2, 9), (3, 1)];
+    assert_eq!(
+        quiet(file_in_wal(2, &other, 3, (2, 2), 32, 32)),
+        Vec::<u64>::new()
+    );
+}
+
+/// The size is part of the state: a file whose database is another size than the replica's
+/// changes it even when every page it holds is the replica's.
+#[test]
+fn a_first_pending_file_over_a_new_wal_generation_of_another_size_is_counted() {
+    let replica = crate::MemStore::new();
+    put_all(
+        &replica,
+        vec![file_in_wal(
+            1,
+            &[(1, 2), (2, 1), (3, 1)],
+            3,
+            (1, 1),
+            32,
+            200,
+        )],
+    );
+    let staging = crate::MemStore::new();
+    put_all(
+        &staging,
+        vec![file_in_wal(2, &[(1, 2), (2, 1)], 2, (2, 2), 32, 32)],
+    );
+    let mut seeded =
+        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(1), nz(3))).unwrap();
+    crate::conformance::block_on(seeded.place(
+        &Staging(&staging),
+        &Replica(&replica),
+        Txid::new(1),
+    ))
+    .unwrap();
+    assert!(seeded.quiet.is_empty());
+}
+
+/// A replica whose state at its newest file cannot be restored (its history does not plan)
+/// proves nothing equal, and the file stays counted without failing the boot.
+#[test]
+fn a_replica_that_cannot_restore_leaves_a_file_over_a_new_wal_generation_counted() {
+    let replica = crate::MemStore::new();
+    // Its newest file is transaction 2 but nothing holds transaction 1.
+    put_all(
+        &replica,
+        vec![file_in_wal(2, &[(1, 2)], 3, (1, 1), 32, 200)],
+    );
+    let staging = crate::MemStore::new();
+    put_all(&staging, vec![file_in_wal(3, &[(1, 2)], 3, (2, 2), 32, 32)]);
+    let mut seeded =
+        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
+    crate::conformance::block_on(seeded.place(
+        &Staging(&staging),
+        &Replica(&replica),
+        Txid::new(2),
+    ))
+    .unwrap();
+    assert!(seeded.quiet.is_empty());
 }

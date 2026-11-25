@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/pages.rs b/crates/core/src/pages.rs
+index b83f4aef3..531ece1e8 100644
+--- a/crates/core/src/pages.rs
++++ b/crates/core/src/pages.rs
+@@ -347,7 +347,7 @@ impl Seeded {
+         let quiet = match wal_end(&header) {
+             Some(tip_end) if tip_end == end => true,
+             Some((salts, _)) if salts == end.0 => false,
+-            Some(_) | None => leaves_replica_state(staging, remote, &file, tip).await?,
++            Some(_) | None => false,
+         };
+         if quiet {
+             self.quiet.insert(file.range().max());
