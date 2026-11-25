@@ -393,7 +393,8 @@ fn an_hour_with_a_level_zero_file_that_stays_lists_a_bounded_number_of_requests(
     an_hour_stays_within_the_bounds(&Hour {
         stuck_level_zero: true,
         requests: 640,
-        entries: 200_000,
+        // 159,000 with the cursor kept across whole listings, 199,000 with it reset each time.
+        entries: 180_000,
         ..STEADY
     });
 }
