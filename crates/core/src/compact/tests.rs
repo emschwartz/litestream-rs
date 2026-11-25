@@ -1358,7 +1358,7 @@ fn an_output_acknowledged_short_is_reported_and_left_to_the_caller() {
 }
 
 /// The output reaches the upload in writes of the flush size, the pages and the index alike:
-/// every write but the last is at least `FLUSH_BYTES`, and the file is several of them. A
+/// every write but the last is about 256 KiB (spelled out, so a changed constant is seen), and the file is several of them. A
 /// flush size gone wrong, or an index that went out in pieces of its own size, shows here.
 #[test]
 fn the_output_reaches_the_upload_in_writes_of_the_flush_size() {
@@ -1384,7 +1384,7 @@ fn the_output_reaches_the_upload_in_writes_of_the_flush_size() {
     assert!(*last > 0);
     for len in rest {
         assert!(
-            (FLUSH_BYTES..FLUSH_BYTES + 32 * 1024).contains(len),
+            (256 * 1024..288 * 1024).contains(len),
             "a write of {len} bytes in {lens:?}"
         );
     }

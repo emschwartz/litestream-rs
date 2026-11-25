@@ -927,7 +927,7 @@ fn a_large_file_reaches_the_upload_in_writes_of_the_flush_size() {
     assert!(!last.is_empty());
     for chunk in rest {
         assert!(
-            (FLUSH_AT..FLUSH_AT + 4 * PS.bytes()).contains(&chunk.len()),
+            (256 * 1024..256 * 1024 + 4 * PS.bytes()).contains(&chunk.len()),
             "a write of {} bytes",
             chunk.len()
         );
