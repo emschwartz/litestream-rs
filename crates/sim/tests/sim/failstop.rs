@@ -609,3 +609,33 @@ fn seed_0x734_uploads_the_files_a_rollback_left_and_never_trips() {
     };
     assert_eq!(age_trips(&report), 0, "{:?}", report.trips);
 }
+
+/// A restart while every read of the replica lies leaves the engine dating a pending staged file
+/// from its stamp (the listing hid the replica's copy). The engine trips for it on the first tick
+/// after the lie ends, before an honest read could show it the replica holds everything: that is
+/// the lie's doing, not a trip the judge may call false (seed 0x6b065d24, reduced).
+#[test]
+fn a_trip_dated_by_lying_reads_stands_on_the_first_honest_tick() {
+    use lsr_sim::generate::Hold;
+    let ops = [
+        Op::Shutdown,
+        Op::ClockJump(93_600_000),
+        Op::Hold {
+            hold: Hold::LyingReads,
+            ticks: 2,
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: lsr_sim::AfterRestart::Redo,
+        clock_law: lsr_sim::ClockLaw::EachRead,
+        truncate_pages: std::num::NonZeroU32::new(6),
+        no_create_only: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = lsr_sim::run::run_ops(lsr_sim::Seed::new(0x6b06_5d24), &ops, &opts) {
+        panic!("{failure}");
+    }
+}
