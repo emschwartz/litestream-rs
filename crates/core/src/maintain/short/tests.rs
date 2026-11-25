@@ -371,6 +371,7 @@ fn nothing_decided() -> ShortDecided {
         quiet: Vec::new(),
         snapshot_quiet: None,
         retention_decided: false,
+        whole: false,
     }
 }
 
@@ -807,4 +808,163 @@ fn a_retention_decision_that_deletes_nothing_still_reports_that_it_ran() {
     assert!(matches!(got.due, Due::Wait { .. }), "{got:?}");
     assert!(got.retention_decided);
     assert_eq!(got.settled_min, Some(txid(30)));
+}
+
+/// Every output this engine confirmed since a carried listing was made is in the plan the
+/// next pass reads, not only the newest of its level. With only the newest, a level-1 window
+/// that produced two files (the second from a commit that landed while the first was built)
+/// showed level 2 the second alone: level 2 took it and never the first, and Go's compaction
+/// refuses to read across the hole that left.
+#[test]
+fn a_carried_listing_gains_every_output_confirmed_since_it_was_made() {
+    let cfg = defaults();
+    let store = store_of(&[file(0, 1, 1, T0), file(1, 1, 1, T0), file(2, 1, 1, T0)]);
+    let mut known = Remembered::default();
+    let pass = |known: &Remembered, active: Vec<Level>, millis: i64| {
+        let plan = Plan {
+            active,
+            snapshot: false,
+            retention: false,
+        };
+        block_on(Tail::load(&store, known, &cfg, plan, at(T0 + millis), None)).unwrap()
+    };
+    let first = pass(&known, vec![level(1), level(2)], 1_000);
+    known.learn_short(&first, &cfg, &nothing_decided(), at(T0 + 1_000), None);
+    // Two level-1 outputs, with the pass that planned the second between them.
+    known.note_output(file(1, 2, 9, T0 + 1_100), &cfg, at(T0 + 1_100));
+    let second = pass(&known, vec![level(1), level(2)], 1_200);
+    assert!(second.made_at == at(T0 + 1_000), "carried");
+    known.learn_short(&second, &cfg, &nothing_decided(), at(T0 + 1_200), None);
+    known.note_output(file(1, 10, 10, T0 + 1_300), &cfg, at(T0 + 1_300));
+    let third = pass(&known, vec![level(2)], 1_400);
+    assert!(third.made_at == at(T0 + 1_000), "carried");
+    let planned: Vec<FileKey> = third
+        .planning
+        .level(level(1))
+        .iter()
+        .map(|f| f.key)
+        .collect();
+    assert_eq!(planned, vec![key(1, 1, 1), key(1, 2, 9), key(1, 10, 10)]);
+}
+
+/// An output written over an object the carried listing showed under the same key makes the
+/// listing wrong about that key: it is dropped and the next pass lists.
+#[test]
+fn an_output_that_replaces_a_listed_object_ends_the_carried_listing() {
+    let cfg = defaults();
+    let store = store_of(&some_level_zero_and_one());
+    let mut known = Remembered::default();
+    let browse = Plan {
+        active: vec![level(1)],
+        snapshot: false,
+        retention: false,
+    };
+    let pass = |known: &Remembered, millis: i64| {
+        block_on(Tail::load(
+            &store,
+            known,
+            &cfg,
+            browse.clone(),
+            at(T0 + millis),
+            None,
+        ))
+        .unwrap()
+    };
+    let first = pass(&known, 1_000);
+    known.learn_short(&first, &cfg, &nothing_decided(), at(T0 + 1_000), None);
+    // The same key as a listed file, with another created-at time.
+    known.note_output(file(1, 2, 2, T0 + 1_500), &cfg, at(T0 + 1_500));
+    assert!(
+        pass(&known, 2_000).made_at == at(T0 + 2_000),
+        "a real listing"
+    );
+}
+
+#[test]
+fn a_file_follows_its_level_when_it_starts_right_after_the_newest_known_there() {
+    let mut known = Remembered::default();
+    // Nothing known: the level is empty as far as this engine knows.
+    assert!(known.follows_newest(level(2), range(7, 9)));
+    known.note(file(2, 1, 10, T0));
+    assert!(known.follows_newest(level(2), range(11, 20)));
+    assert!(!known.follows_newest(level(2), range(12, 20)), "a hole");
+    assert!(!known.follows_newest(level(2), range(10, 20)), "an overlap");
+    // Another level's newest file says nothing.
+    assert!(known.follows_newest(level(3), range(12, 20)));
+}
+
+/// A compaction that closes a hole is followed by a whole listing, which shows the next hole
+/// and the files that can close it; one that extends its level is not.
+#[test]
+fn a_compaction_below_its_levels_newest_file_owes_a_whole_listing() {
+    let inventory =
+        Inventory::from_files([file(0, 1, 1, T0), file(1, 1, 1, T0), file(1, 3, 3, T0)]).unwrap();
+    let compacting = |n: u64| {
+        let inputs = crate::compact::CompactionInputs::new(vec![file(0, n, n, T0)]).unwrap();
+        Decided {
+            due: Due::Run(Job::Compact(
+                crate::maintain::CompactJob::new(inputs, level(1)).unwrap(),
+            )),
+            gate: Gate::Clear,
+            retention_wake: None,
+        }
+    };
+    let mut known = Remembered::default();
+    known.learn_full(&inventory, at(T0), &defaults(), &compacting(2));
+    assert!(!known.short_ok(at(T0 + 1)), "a fill");
+    known.learn_full(&inventory, at(T0), &defaults(), &compacting(3));
+    assert!(known.short_ok(at(T0 + 1)), "the newest transaction again");
+    known.learn_full(&inventory, at(T0), &defaults(), &compacting(4));
+    assert!(known.short_ok(at(T0 + 1)), "an extension");
+}
+
+/// A short pass that finds a level's sources not following its newest file decides nothing:
+/// no job, no wait learned, and a whole listing asked for at once.
+#[test]
+fn a_short_pass_that_meets_a_hole_decides_nothing_and_asks_for_a_whole_listing() {
+    let cfg = defaults();
+    let old = T0 - 100_000;
+    let store = store_of(&[
+        file(0, 30, 30, old),
+        file(1, 21, 30, old),
+        file(2, 1, 10, old),
+    ]);
+    let plan = Plan {
+        active: vec![level(2)],
+        snapshot: false,
+        retention: false,
+    };
+    let known = Remembered::default();
+    let tail = block_on(Tail::load(&store, &known, &cfg, plan, at(T0), None)).unwrap();
+    let state = MaintainState::default();
+    let got = block_on(crate::created_at::resolve(
+        &store,
+        &mut |resolved: &ResolvedCreatedAt| due_short(&tail, at(T0), &cfg, None, &state, resolved),
+    ))
+    .unwrap()
+    .value;
+    assert!(got.whole);
+    assert_eq!(
+        got.due,
+        Due::Wait {
+            until: Some(at(T0)),
+            held: None
+        }
+    );
+    // The same listing with the missing file is a job, and no whole listing.
+    put(&store, &file(1, 11, 20, old));
+    let plan = Plan {
+        active: vec![level(2)],
+        snapshot: false,
+        retention: false,
+    };
+    let tail = block_on(Tail::load(&store, &known, &cfg, plan, at(T0), None)).unwrap();
+    let got = block_on(crate::created_at::resolve(
+        &store,
+        &mut |resolved: &ResolvedCreatedAt| due_short(&tail, at(T0), &cfg, None, &state, resolved),
+    ))
+    .unwrap()
+    .value;
+    assert!(!got.whole);
+    assert!(matches!(got.due, Due::Run(Job::Compact(_))));
 }

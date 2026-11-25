@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
 use lsr_core::Task;
-use lsr_core::{Clock, Event as EngineEvent, MaintainedEvent, SnapshotCause};
+use lsr_core::{AppCheckpoint, Clock, Event as EngineEvent, MaintainedEvent, SnapshotCause};
 use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
 use crate::failstop;
@@ -344,7 +344,7 @@ impl EventSink for DbEvents {
             },
             Event::AppCheckpoint { seen, total } => (
                 LogLevel::Warn,
-                "the application checkpointed the database",
+                app_checkpoint_message(*seen),
                 vec![("seen", debug(seen)), ("total", (*total).into())],
             ),
             Event::ScratchSweepDenied => (
@@ -500,6 +500,20 @@ fn store_line(event: &MaintainedEvent) -> Option<(&'static str, Vec<(&'static st
     })
 }
 
+/// What an observation of the application's checkpoints says happened. A stall is the one
+/// where nothing was checkpointed, by the application or anyone: the line says what was read
+/// (a WAL past the threshold, nothing new copied) and not that a checkpoint ran.
+const fn app_checkpoint_message(seen: AppCheckpoint) -> &'static str {
+    match seen {
+        AppCheckpoint::Backfilled { .. } | AppCheckpoint::Restarted => {
+            "the application checkpointed the database"
+        }
+        AppCheckpoint::Stalled { .. } => {
+            "the WAL grew past the application's automatic checkpoint threshold with nothing new checkpointed"
+        }
+    }
+}
+
 fn engine_line(event: &EngineEvent) -> Option<Line> {
     Some(match event {
         EngineEvent::Idle => return None,
@@ -540,6 +554,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
                 ("error", debug(fault)),
                 ("retry_at", until.to_string().into()),
             ],
+        ),
+        EngineEvent::CheckpointDeferred { until } => (
+            LogLevel::Debug,
+            "checkpoint skipped: the database's write lock is busy",
+            vec![("retry_at", until.to_string().into())],
         ),
         EngineEvent::WritesHeld { until } => (
             LogLevel::Debug,

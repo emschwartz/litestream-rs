@@ -27,7 +27,7 @@ use crate::forcing::Forcing;
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
-use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_put, within};
+use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_level_put, judge_put, within};
 use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, SendTurns, TickStats, delta, memory,
@@ -764,13 +764,18 @@ impl Runner {
         }
     }
 
-    /// Judges every level-0 put the replica took since the last call ([`judge_put`]).
+    /// Judges every put the replica took since the last call: a level-0 file is bytes an
+    /// engine staged ([`judge_put`]), and a file at a level above leaves no hole the level
+    /// below could have closed ([`judge_level_put`]).
     fn judge_puts(&mut self) -> Result<(), Violation> {
         let remote = self.w.remote_recorder.events();
         let staging = self.w.staging_recorder.events();
+        let held = (remote.len() > self.puts_judged).then(|| self.w.remote_raw.stored());
         for put in remote.iter().skip(self.puts_judged) {
             let judged = judge_put(&staging, &self.w.remote_raw, put)?;
             self.report.reach.bump(format!("witness.{judged:?}"));
+            let level = judge_level_put(&remote, held.as_deref().unwrap_or_default(), put)?;
+            self.report.reach.bump(format!("levels.{level:?}"));
         }
         self.puts_judged = remote.len();
         Ok(())
@@ -1120,6 +1125,7 @@ impl Runner {
             Event::Booted { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -1153,6 +1159,14 @@ impl Runner {
         let (cause, at_boot) = match event {
             Event::Booted { cause: Some(cause) } => (cause, true),
             Event::Resnapshot(cause) => (cause, false),
+            // A busy answer from SQLite is no excuse for a later snapshot: a sync step it
+            // fails moves nothing, and a PASSIVE keeps its position pinned through one
+            // (`docs/decisions/D225.md`). Before, every retry excused the snapshots that
+            // followed it, and a busy sequence bump followed by a restart passed unseen.
+            Event::Retrying {
+                fault: Fault::SqliteBusy,
+                ..
+            } => return Ok(()),
             Event::Degraded { .. } | Event::Retrying { .. } => {
                 self.forcings.note_in_tick(Forcing::PositionUnproven);
                 return Ok(());
@@ -1160,6 +1174,7 @@ impl Runner {
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -1207,6 +1222,7 @@ impl Runner {
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Sending { .. }
             | Event::Maintained { .. }
@@ -2241,12 +2257,7 @@ impl Runner {
                 done
             }
             MetaOp::DeleteNewest => w.delete_newest_staged().map_err(StagedEditError::from),
-            MetaOp::FlipNewestByte => w.edit_newest_staged(|bytes| {
-                let middle = bytes.len() / 2;
-                if let Some(byte) = bytes.get_mut(middle) {
-                    *byte ^= 0xff;
-                }
-            }),
+            MetaOp::FlipNewestByte => w.flip_newest_staged(),
             MetaOp::StripNewestOrigin => w.strip_newest_origin(),
             MetaOp::DeleteAll => {
                 self.takeover = None;
@@ -2758,7 +2769,9 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
             until,
             fault: Fault::StoreThrottled { retry_after },
         } => (*until, *retry_after),
-        Event::Retrying { until, .. } | Event::WritesHeld { until } => (*until, None),
+        Event::Retrying { until, .. }
+        | Event::WritesHeld { until }
+        | Event::CheckpointDeferred { until } => (*until, None),
         Event::Booted { .. }
         | Event::Synced { .. }
         | Event::Checkpointed { .. }

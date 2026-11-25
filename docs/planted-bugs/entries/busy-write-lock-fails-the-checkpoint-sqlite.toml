@@ -1,0 +1,7 @@
+# The same plant on real SQLite, with a connection that holds the write lock at every barrier.
+name = "busy-write-lock-fails-the-checkpoint-sqlite"
+fix = "claude/own-checkpoint"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+patch = "busy-write-lock-fails-the-checkpoint"
+tests = ["own_checkpoint::a_write_lock_held_at_every_barrier_defers_the_checkpoint_and_fails_nothing"]

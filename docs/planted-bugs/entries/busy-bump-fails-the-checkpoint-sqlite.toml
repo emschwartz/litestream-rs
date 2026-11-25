@@ -1,0 +1,7 @@
+# The same plant on real SQLite: a TRUNCATE empties the WAL and a writer holds the lock at the bump.
+name = "busy-bump-fails-the-checkpoint-sqlite"
+fix = "claude/own-checkpoint"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+patch = "busy-bump-fails-the-checkpoint"
+tests = ["own_checkpoint::a_truncate_overtaken_at_its_bump_takes_its_boundary_snapshot_on_the_next_sync"]

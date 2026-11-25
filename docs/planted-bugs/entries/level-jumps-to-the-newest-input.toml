@@ -1,0 +1,8 @@
+# A level's compaction takes only the newest file of the level below when that level gained
+# two files in one window: the pass after the engine's own jobs plans from a listing made
+# before either existed, knows only the newest, and nothing stops the job. The files before
+# it are left behind a hole, which Go's compaction refuses to read across (docs/decisions/D228.md).
+name = "level-jumps-to-the-newest-input"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = ["actor::tests::level_holes::two_level_one_files_in_one_window_leave_no_hole_in_the_levels_above"]

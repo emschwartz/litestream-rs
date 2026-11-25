@@ -195,6 +195,9 @@ pub enum BugSite {
     DecoderStalled,
     /// Compaction was planned with inputs it cannot take.
     CompactionInputs,
+    /// A short maintenance pass planned a compaction whose output would not start at the
+    /// transaction after the newest file of its level: the level would gain a hole.
+    CompactionLeavesAHole,
     /// A file's created-at time was asked for twice in one resolve.
     CreatedAtRepeated,
     /// The WAL reader was resumed from a cursor its own scan did not give.

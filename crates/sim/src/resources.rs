@@ -154,6 +154,7 @@ const fn lists_allowed(event: &Event) -> bool {
         Event::Synced { .. }
         | Event::Sending { .. }
         | Event::Checkpointed { .. }
+        | Event::CheckpointDeferred { .. }
         | Event::Idle
         | Event::Resnapshot(_)
         | Event::Clamped(_)
@@ -293,6 +294,7 @@ impl SendTurns {
             Some(
                 Event::Retrying { until, .. }
                 | Event::Degraded { until, .. }
+                | Event::CheckpointDeferred { until }
                 | Event::WritesHeld { until },
             ) => {
                 self.waits_until = self.waits_until.max(Some(*until));
