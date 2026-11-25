@@ -75,6 +75,7 @@ impl Run {
     }
 
     /// The memory the tallies hold.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn held(&self) -> usize {
         self.cells
             .capacity()
@@ -124,6 +125,7 @@ impl Sealed {
     }
 
     /// The memory the tallies hold.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn held(&self) -> usize {
         self.cells
             .capacity()
