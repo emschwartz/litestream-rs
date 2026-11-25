@@ -1,6 +1,6 @@
-# The encoder joins its index into one buffer at the end of a file, so a snapshot holds the index twice.
+# A snapshot does not hand its index onward in pieces, so the whole index lands in the output buffer at the end of the file and the buffer doubles over it.
 name = "snapshot-index-copied"
-fix = "316429884"
+fix = "acde8a8a6"
 package = "lsr-core"
 test_bin = "core"
 tests = [
