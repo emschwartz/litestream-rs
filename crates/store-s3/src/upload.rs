@@ -34,8 +34,10 @@
 //! of every 256 KiB (`again.rs`), and when `concurrency` parts are ready it sends them with
 //! bodies read again through the caller's [`Reread`], which gives a second read's bytes
 //! only when they tally as the first did. An object below one part is sent the same way by
-//! [`Upload::commit_from`]. So the upload of a staged file holds `concurrency` reads of
-//! 256 KiB while a batch is out and a few kilobytes between batches, whatever the part size
+//! [`Upload::commit_from`]. So the upload of a staged file holds one read of 256 KiB and
+//! the HTTP client's buffers for each of the `concurrency` requests of a batch while it is
+//! out (768 KiB a request by the gate in `tests/store-s3/memory.rs`), and a few kilobytes
+//! between batches, whatever the part size
 //! (`docs/decisions/D222.md`). The requests, their order and what each answer must prove
 //! are the same. A second read that gives nothing fails the upload with the source's own
 //! error before anything is published. Such an upload is written and committed through the
