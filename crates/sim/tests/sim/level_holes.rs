@@ -26,10 +26,13 @@ fn ticks(n: usize) -> impl Iterator<Item = Op> {
 #[test]
 fn level_one_files_that_share_a_window_all_reach_level_two() {
     let mut ops = vec![commit()];
-    // The first sync, the first files of every level, and the wait for the next commit.
-    ops.extend(ticks(12));
+    // The first sync, the first files of every level, and then an idle five minutes (60 ticks of
+    // five seconds): the first window of level 2 opens and closes, so what follows is the
+    // engine's steady state, whose maintenance passes list only what each one decides from
+    // and plan from a listing carried over from the pass before.
+    ops.extend(ticks(72));
     // The run starts 100 seconds before a five-minute boundary (Go's default level 2) and
-    // the idle engine has reached second 60: the next commit's ticks end at second 100,
+    // the idle engine has reached second 360: the next commit's ticks end at second 400,
     // where the windows of levels 1 and 2 both open.
     ops.push(Op::ClockJump(30_000));
     ops.push(commit());
@@ -74,19 +77,22 @@ fn level_one_files_that_share_a_window_all_reach_level_two() {
         })
         .collect();
     // The scenario is the one described. The first files of both levels (they start above the
-    // first snapshot, at 2) and those of the first boundary; the level-1 file of second 375;
-    // then, at second 400, two full level-1 files and the rest, and one level-2 file over
-    // everything level 1 holds above it (what follows is the run's end, a later window).
+    // first snapshot, at 2), those of the boundary after the idle five minutes, and the level-1
+    // file of second 375; then, at second 400, two full level-1 files and the rest (and one
+    // more, a level-1 file written after the last compaction), and one level-2 file over
+    // everything level 1 holds above it.
     let expected = [
         (1, 2, 2),
         (2, 2, 2),
-        (1, 3, 4),
-        (2, 3, 4),
-        (1, 5, 8),
+        (1, 3, 5),
+        (2, 3, 5),
+        (1, 6, 8),
+        (2, 6, 8),
         (1, 9, 40),
         (1, 41, 72),
         (1, 73, 81),
-        (2, 5, 81),
+        (1, 82, 82),
+        (2, 9, 82),
     ];
     assert!(puts.starts_with(&expected), "{puts:?}");
     assert!(report.reach.get("levels.Joins") > 0, "{:?}", report.reach);
