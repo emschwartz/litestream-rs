@@ -110,7 +110,14 @@ fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
     let retry = Duration::from_secs(60);
     let replicator =
         Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
-    let held = moved_until(&replicator, &clock, (POLL, 240), caught_up).replicated;
+    let first = moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    // The engine syncs new commits once per poll interval, so the replica holds a file of its
+    // own beyond the first sync only after a commit and the interval it waits for.
+    site.commit(1);
+    let held = moved_until(&replicator, &clock, (POLL, 240), |h| {
+        caught_up(h) && h.synced > first.synced
+    })
+    .replicated;
     faulty.fail_uploads.store(true, Ordering::SeqCst);
     site.commit(1);
     let failing = moved_until(&replicator, &clock, (POLL, 240), |h| {
