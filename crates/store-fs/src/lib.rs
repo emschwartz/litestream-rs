@@ -50,6 +50,13 @@
 //! name that claims to be history and cannot be read is never skipped.
 //! `read` checks the type before it opens, so a FIFO cannot block it.
 //!
+//! A read by range is a stat of the path, an open, a stat of the file, the read and a close.
+//! A caller that reads one file in many reads, one after another (the engine's send of a
+//! staged file, 256 KiB a read), asks [`ObjectStore::open`] for the file held open instead:
+//! the same type check once, then one descriptor for every read, so the kernel sees one
+//! reader going forward. What it holds is the file, not the name: a file renamed over the
+//! key afterwards is not what it reads (`docs/decisions/D234.md`).
+//!
 //! A commit that returns an error may still have published the object (the
 //! rename can land before a directory fsync fails): see the `ObjectStore`
 //! contract; list again.
@@ -76,10 +83,34 @@ pub use filesystem::{DirEntryInfo, Fs, FsFile, Meta, RealFs};
 use lsr_core::WriteMode;
 
 use lsr_core::{
-    CorruptCause, CreatedAt, FileInfo, FileKey, Level, ListedTime, Listing, ObjectStore, PageLimit,
-    ReadLen, StoreError, StoreOp, Upload, build_listing, parse_file_name,
+    BoxFuture, CorruptCause, CreatedAt, FileInfo, FileKey, Level, ListedTime, Listing, ObjectStore,
+    Opened, PageLimit, ReadLen, StoreError, StoreOp, Upload, build_listing, parse_file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
+
+/// A stored file held open for a run of reads ([`ObjectStore::open`]): one descriptor for the
+/// whole file where a read by range opens it again for every chunk, so the kernel sees one
+/// reader going forward and reads ahead of it. It follows the file it opened, not the name.
+#[derive(Debug)]
+struct Held<T> {
+    file: T,
+    key: FileKey,
+}
+
+impl<T: FsFile> Opened for Held<T> {
+    fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        // Past the end is empty at every offset, and no file reaches this one; a seek that
+        // far fails.
+        let read = match i64::try_from(offset) {
+            Ok(_) => self
+                .file
+                .read_at(offset, len.get())
+                .map_err(|err| StoreError::from_io(StoreOp::Read, Some(self.key), &err)),
+            Err(_) => Ok(Vec::new()),
+        };
+        Box::pin(ready(read))
+    }
+}
 
 /// Where Go's file replica keeps LTX files, under the replica path.
 const LTX_DIR: &str = "ltx";
@@ -260,22 +291,29 @@ impl<F: Fs> FsStore<F> {
         len: ReadLen,
     ) -> Result<(Vec<u8>, Meta), StoreError> {
         let fail = |err: io::Error| StoreError::from_io(StoreOp::Read, Some(*key), &err);
-        let path = self.file_path(key);
-        // Before the open: opening a FIFO blocks until a writer appears.
-        if !self.fs.metadata(&path).map_err(fail)?.is_file() {
-            return Err(not_a_regular_file(*key));
-        }
-        let mut file = self.fs.open(&path).map_err(fail)?;
-        let meta = file.metadata().map_err(fail)?;
-        if !meta.is_file() {
-            return Err(not_a_regular_file(*key));
-        }
+        let (mut file, meta) = self.open_file(key)?;
         // Past the end is empty at every offset; seeking beyond i64::MAX fails.
         if offset >= meta.len() {
             return Ok((Vec::new(), meta));
         }
         let bytes = file.read_at(offset, len.get()).map_err(fail)?;
         Ok((bytes, meta))
+    }
+
+    /// The regular file under `key`, open, and its metadata.
+    fn open_file(&self, key: &FileKey) -> Result<(F::File, Meta), StoreError> {
+        let fail = |err: io::Error| StoreError::from_io(StoreOp::Read, Some(*key), &err);
+        let path = self.file_path(key);
+        // Before the open: opening a FIFO blocks until a writer appears.
+        if !self.fs.metadata(&path).map_err(fail)?.is_file() {
+            return Err(not_a_regular_file(*key));
+        }
+        let file = self.fs.open(&path).map_err(fail)?;
+        let meta = file.metadata().map_err(fail)?;
+        if !meta.is_file() {
+            return Err(not_a_regular_file(*key));
+        }
+        Ok((file, meta))
     }
 
     fn created_at_now(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -522,6 +560,17 @@ impl<F: Fs> ObjectStore for FsStore<F> {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
         ready(self.read_now(key, offset, len))
+    }
+
+    fn open(
+        &self,
+        key: &FileKey,
+    ) -> impl Future<Output = Result<Option<Box<dyn Opened>>, StoreError>> + Send {
+        let held = self.open_file(key).map(|(file, _meta)| {
+            let held: Box<dyn Opened> = Box::new(Held { file, key: *key });
+            Some(held)
+        });
+        ready(held)
     }
 
     fn created_at(

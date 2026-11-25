@@ -71,7 +71,7 @@ const STAGED_WINDOW: usize = 128 * KIB;
 const PAGE: usize = 4 * KIB;
 const FLUSH: usize = 256 * KIB;
 
-fn txid(n: u64) -> Txid {
+pub(crate) fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
 }
 
@@ -233,7 +233,7 @@ impl PageSource for GeneratedDb {
 
 /// A database of `pages` pages staged in a directory by the sync step, as the engine stages
 /// its first file, with the token the uploader needs for it.
-fn staged_database(pages: u32) -> (tempfile::TempDir, FsStore, Witnesses, u64) {
+pub(crate) fn staged_database(pages: u32) -> (tempfile::TempDir, FsStore, Witnesses, u64) {
     let size = PageSize::new(4096).unwrap();
     let wal = FakeWal::new(
         size,
