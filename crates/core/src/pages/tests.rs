@@ -544,3 +544,44 @@ fn a_replica_that_cannot_restore_leaves_a_file_over_a_new_wal_generation_counted
     .unwrap();
     assert!(seeded.quiet.is_empty());
 }
+
+/// A file in the replica's own WAL generation that ends past the replica's newest file's end
+/// holds frames the replica lacks, even when every page it holds equals the replica's: the
+/// restore is for another generation only, so a commit that rewrites a page with its own bytes
+/// stays counted, as it was before the restore existed.
+#[test]
+fn a_first_pending_file_in_the_replicas_generation_past_its_end_is_counted_whatever_it_holds() {
+    let replica = crate::MemStore::new();
+    put_all(
+        &replica,
+        vec![file_in_wal(
+            1,
+            &[(1, 2), (2, 1), (3, 1)],
+            3,
+            (1, 1),
+            32,
+            200,
+        )],
+    );
+    let staging = crate::MemStore::new();
+    put_all(
+        &staging,
+        vec![file_in_wal(
+            2,
+            &[(1, 2), (2, 1), (3, 1)],
+            3,
+            (1, 1),
+            200,
+            300,
+        )],
+    );
+    let mut seeded =
+        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(1), nz(3))).unwrap();
+    crate::conformance::block_on(seeded.place(
+        &Staging(&staging),
+        &Replica(&replica),
+        Txid::new(1),
+    ))
+    .unwrap();
+    assert!(seeded.quiet.is_empty());
+}
