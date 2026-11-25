@@ -851,6 +851,14 @@ fn l0(n: u64) -> FileKey {
     FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()))
 }
 
+/// The key of transaction `n`'s file in the course's slot.
+fn slot(n: u64) -> FileKey {
+    FileKey::new(
+        Level::LOCAL_COURSE,
+        TxidRange::single(Txid::new(n).unwrap()),
+    )
+}
+
 /// The replica holds transactions 1 to 3 and staging only 2: its newest file was deleted
 /// and an older one put back, as an operator restoring an old copy of the directory leaves
 /// it. The WAL still holds everything from the end of 2.
@@ -1132,16 +1140,47 @@ fn a_course_goes_on_over_the_files_a_boot_moved_up() {
     assert_eq!(commits_restorable(&rig), (1..=5).collect::<Vec<u8>>());
 }
 
+/// Another build ran between the course and this boot (an older `lsr`, or Go, neither of
+/// which reads the slot) and staged its own files at level 0 from where the course began.
+/// Level 0 now ends past the slot's oldest file, which no step of a course or of a boot
+/// leaves: the slot is deleted whole, and the other build's files stand as it wrote them.
+#[test]
+fn a_slot_that_level_zero_has_passed_is_deleted_and_level_zero_kept() {
+    let rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    for (n, theirs) in [(1, &b"one"[..]), (2, b"their two"), (3, b"their three")] {
+        super::second_writer::put_whole(&rig.staging.inner, &l0(n), theirs);
+    }
+    for (n, ours) in [(2, &b"our two"[..]), (3, b"our three"), (4, b"our four")] {
+        super::second_writer::put_whole(&rig.staging.inner, &slot(n), ours);
+    }
+    assert_eq!(settled(&rig, &mut actor), Ok(()));
+    assert_eq!((staged(&rig), apart(&rig)), (vec![1, 2, 3], vec![]));
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    assert_eq!(
+        block_on(rig.staging.inner.read(&l0(2), 0, all)).unwrap(),
+        b"their two"
+    );
+}
+
+/// A boot died after it copied the slot's oldest file up and before it deleted it from the
+/// slot: level 0 ends at that file, not past it, and the next boot finishes the move.
+#[test]
+fn a_move_that_stopped_between_copy_and_delete_is_finished() {
+    let rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    super::second_writer::put_whole(&rig.staging.inner, &l0(1), b"one");
+    super::second_writer::put_whole(&rig.staging.inner, &l0(2), b"two");
+    super::second_writer::put_whole(&rig.staging.inner, &slot(2), b"two");
+    super::second_writer::put_whole(&rig.staging.inner, &slot(3), b"three");
+    assert_eq!(settled(&rig, &mut actor), Ok(()));
+    assert_eq!((staged(&rig), apart(&rig)), (vec![1, 2, 3], vec![]));
+}
+
 /// Level 0 was emptied under a course: its files are above no level-0 file. A replica that
 /// holds anything is past them, and they are deleted; over an empty replica they move up.
 #[test]
 fn slot_files_over_an_empty_level_zero_are_settled_against_the_replica() {
-    let slot = |n: u64| {
-        FileKey::new(
-            Level::LOCAL_COURSE,
-            TxidRange::single(Txid::new(n).unwrap()),
-        )
-    };
     for replica_holds in [false, true] {
         let rig = Rig::new();
         let mut actor = Actor::new(cfg());

@@ -42,7 +42,10 @@
 //! replica's newest transaction at or below the newest level-0 file, every file in the slot is
 //! above the replica, and is moved up to level 0 to be judged as any pending file is; with
 //! the replica past it, the slot's files are deleted, and the boot decides as if no course
-//! had run.
+//! had run. On disk the slot is the directory `ltx/8` in the meta directory, beside the
+//! `ltx/0` Go and every build of this engine stage in. Neither Go nor an older build reads
+//! it, so one that runs after a course stages over the same transactions at level 0; the
+//! settling boot sees level 0 past the slot's oldest file and deletes the slot.
 
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
@@ -307,29 +310,36 @@ impl Actor {
     {
         let denied = &mut self.kept.scratch_sweep_denied;
         let listed = boot_listing(env.staging, env.remote, denied, takeover).await?;
-        let slot = env
-            .staging
-            .list(Level::LOCAL_COURSE, None, PageLimit::ONE)
-            .await
-            .map_err(|err| L::fault(&err))?;
-        if !slot.files.is_empty() {
-            self.settle_course(env.staging, env.remote, unsent).await?;
-        }
+        self.settle_course(env.staging, env.remote, unsent).await?;
         Ok(listed)
     }
 
-    /// Settles the files in the course's slot against the replica as listed now. The
-    /// replica's newest transaction, at any level, at or below the newest level-0 staged
-    /// file: every file in the slot is above the replica, as a file staged after a boot is,
-    /// and moves up to level 0. Past it: the slot's files number transactions the replica
-    /// holds, so they are deleted and a course in progress ends. Called once the boot's own listing answered, so a boot that cannot reach the
-    /// replica leaves staging as it found it.
+    /// Settles the files in the course's slot, if it holds any, against the replica as
+    /// listed now. The replica's newest transaction, at any level, at or below the newest
+    /// level-0 staged file: every file in the slot is above the replica, as a file staged
+    /// after a boot is, and moves up to level 0. Past it: the slot's files number
+    /// transactions the replica holds, so they are deleted and a course in progress ends.
+    ///
+    /// They are deleted too when level 0 ends past the slot's oldest file. A course writes
+    /// above level 0 and a move copies the oldest first, so neither leaves that: a build that
+    /// does not know the slot (an older one, or Go) staged from where the course began, and
+    /// moving the slot up would put the course's files over its files.
+    ///
+    /// Called once the boot's own listing answered, so a boot that cannot reach the replica
+    /// leaves staging as it found it.
     pub(super) async fn settle_course<L: Role, R: Role>(
         &mut self,
         staging: &L,
         remote: &R,
         unsent: &Unsent<'_>,
     ) -> Result<(), Fault> {
+        let slot = staging
+            .list(Level::LOCAL_COURSE, None, PageLimit::ONE)
+            .await
+            .map_err(|err| L::fault(&err))?;
+        let Some(oldest) = slot.files.first().map(|info| info.key.range().max()) else {
+            return Ok(());
+        };
         let base = newest_level_zero(staging)
             .await?
             .map(|info| info.key.range().max());
@@ -337,7 +347,7 @@ impl Actor {
             .await
             .map_err(|err| inventory_fault::<R>(&err))?
             .newest();
-        if held > base {
+        if held > base || base > Some(oldest) {
             drop_staged_from(&Apart::over(staging, None), Txid::MIN, unsent).await?;
             if matches!(self.engine.course, Course::Local(_)) {
                 self.leave_local();
