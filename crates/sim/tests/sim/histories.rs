@@ -1,262 +1,23 @@
-//! Recorded regression histories: each file is one seed's operations, written by
-//! `lsr_sim::record` when the history was pinned, so no change to the generator reshapes them.
+//! The one recorded history left: its operations were written by `lsr_sim::record`, so no
+//! change to the generator reshapes them. Every other recorded history was shrunk into an explicit
+//! scenario or deleted (`docs/decisions/D165.md`).
 //!
-//! A recorded history can still stop reaching its bug when the runner or the engine around it
-//! changes, and then it passes for nothing. So every history names, in [`GUARDS`], the planted
-//! bug in `docs/planted-bugs/entries/` its test must fail under (`just planted-bugs` runs each one
-//! with its patch applied and fails when the test survives), or says why it has none.
-//! [`every_recorded_history_names_its_planted_bug`] holds the table to the files and the ledger.
+//! The history stays because it checks a judge exemption, which no engine plant can make
+//! fail: the judge would have to excuse a trip it would otherwise call false. Replacing it needs
+//! a scenario of its own that reaches the same exemption.
 
-pub mod seed_0x126d68ed250e;
-pub mod seed_0x126d68ef1c07;
-pub mod seed_0x126d68ef545f;
-pub mod seed_0x126d68fac4b6;
-pub mod seed_0x126d68fac789;
-pub mod seed_0x126d68facf74;
-pub mod seed_0x126d68fae16b;
-pub mod seed_0x1919f;
-pub mod seed_0x25;
-pub mod seed_0x2a8;
-pub mod seed_0x2c;
-pub mod seed_0x2d;
-pub mod seed_0x2e7;
-pub mod seed_0x330;
-pub mod seed_0x46;
-pub mod seed_0x4c;
-pub mod seed_0x68f;
 pub mod seed_0x734;
-pub mod seed_0x753;
-pub mod seed_0x8ef;
-pub mod seed_0x9f9;
-pub mod seed_0xa4d;
-pub mod seed_0xb6b;
-pub mod seed_0xf488c;
 
-/// What guards a recorded history against passing for nothing.
-#[derive(Clone, Copy, Debug)]
-pub enum Guard {
-    /// The planted bug of the defect the test was written for: its ledger entry lists the test,
-    /// so the planted-bug runner requires the test to fail with it planted.
-    Own(&'static str),
-    /// No plant of the test's own defect exists (its fix predates the ledger, or was in a
-    /// checker), so a plant on the path the history takes stands in: it shows the history still
-    /// runs that path, not that it still reaches its own defect.
-    OnPath(&'static str),
-    /// No planted bug kills it, for the reason given.
-    Unguarded(&'static str),
-}
-
-/// Every recorded history: its module, the test that runs it, and its guard.
-pub const GUARDS: &[(&str, &str, Guard)] = &[
-    (
-        "seed_0x25",
-        "a_torn_staged_file_is_dropped_seed_0x25",
-        Guard::OnPath("always-snapshot-at-boot"),
-    ),
-    (
-        "seed_0x2d",
-        "a_torn_staged_file_is_dropped_seed_0x2d",
-        Guard::OnPath("always-snapshot-at-boot"),
-    ),
-    (
-        "seed_0x46",
-        "a_torn_staged_file_is_dropped_seed_0x46",
-        Guard::OnPath("always-snapshot-at-boot"),
-    ),
-    (
-        "seed_0x4c",
-        "a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c",
-        Guard::Own("sim-short-object-damage"),
-    ),
-    (
-        "seed_0x126d68ef1c07",
-        "page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07",
-        Guard::Unguarded(
-            "the defect's regression is the direct test of the ledger entry wal-barrier; this \
-             recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x126d68ed250e",
-        "page_size_vacuum_and_staging_wipe_seed_0x126d68ed250e",
-        Guard::Unguarded(
-            "its defect was the oracle pairing an id with its first note (issue #39), which has \
-             no plant, and no plant in the ledger kills the history",
-        ),
-    ),
-    (
-        "seed_0x126d68ef545f",
-        "page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f",
-        Guard::OnPath("always-snapshot-at-boot"),
-    ),
-    (
-        "seed_0x1919f",
-        "a_restored_staging_backup_is_not_uploaded_seed_0x1919f",
-        Guard::Unguarded(
-            "the defect's regression is the direct test of the ledger entry inside-file-sole-base; this \
-             recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x126d68fac4b6",
-        "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac4b6",
-        Guard::OnPath("recover-before-trusting-snapshot"),
-    ),
-    (
-        "seed_0x126d68fac789",
-        "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789",
-        Guard::Unguarded(
-            "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
-             converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x126d68fae16b",
-        "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fae16b",
-        Guard::OnPath("always-snapshot-at-boot"),
-    ),
-    (
-        "seed_0x126d68facf74",
-        "another_writer_s_files_fit_the_level_bytes_budget_seed_0x126d68facf74",
-        Guard::Unguarded(
-            "the ledger entry maintenance-another-writer is caught by direct lsr-core tests now; this recording is \
-             converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x2c",
-        "swarm_seed_44_restores_only_committed_states",
-        Guard::Unguarded(
-            "the ledger entry anchor-any-tail is caught by direct lsr-core tests now; this recording is \
-             converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x2a8",
-        "a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8",
-        Guard::Unguarded(
-            "the ledger entry success-keeps-a-stall is caught by direct lsr-core tests now; this recording is \
-             converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x2e7",
-        "a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7",
-        Guard::Unguarded(
-            "the defect's regression is the direct test of the ledger entry takeover-before-drop-skipped; this \
-             recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0xb6b",
-        "an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b",
-        Guard::Unguarded(
-            "conditional level-0 writes (#96) fixed it, and no plant in the ledger lists it yet: \
-             their plants are judged by core tests",
-        ),
-    ),
-    (
-        "seed_0x753",
-        "swarm_seed_0x753_a_redo_that_rebuilds_the_restored_state_is_not_a_loss",
-        Guard::Unguarded(
-            "the defect's regression is the direct test of the ledger entry latest-judged-against-old-nodes; this \
-             recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0xf488c",
-        "swarm_seed_0xf488c_takes_no_commit_before_a_truncate_for_damage",
-        Guard::Unguarded(
-            "the defect's regression is the direct test of the ledger entry boundary-snapshot-keeps-page-table; this \
-             recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x68f",
-        "compaction_takes_a_staging_denial_as_staging_seed_0x68f",
-        Guard::Unguarded(
-            "the defect's regression is the direct test of the ledger entry compact-local-read-as-remote; this \
-             recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x734",
-        "seed_0x734_uploads_the_files_a_rollback_left_and_never_trips",
-        Guard::Unguarded(
-            "the history checks a judge exemption, not an engine fix: no engine plant can make \
-             the judge excuse a trip it would otherwise call false",
-        ),
-    ),
-    (
-        "seed_0x9f9",
-        "seed_0x9f9_does_not_trip",
-        Guard::Unguarded(
-            "the runner changes merged with #188 stopped this history from reaching the false trip \
-             even on the engine before the fail-stop fix, so no plant can be judged by it; \
-             seed_0x330 pins the same cause",
-        ),
-    ),
-    (
-        "seed_0x330",
-        "seed_0x330_does_not_trip",
-        Guard::Unguarded(
-            "the defect's regression is the direct test of the ledger entry failstop-dates-the-run; this \
-             recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-    (
-        "seed_0x8ef",
-        "seed_0x8ef_does_not_trip",
-        Guard::Own("failstop-checkpoint-quiet-forgotten"),
-    ),
-    (
-        "seed_0xa4d",
-        "seed_0xa4d_does_not_trip",
-        Guard::Unguarded(
-            "the defect's regression is the direct test of the ledger entry failstop-trip-held-to-zero-age; this \
-             recording is converted to an explicit scenario under docs/decisions/D165.md",
-        ),
-    ),
-];
-
-/// The ledger's entries, by name, with the test-name substrings each lists.
-fn ledger() -> Vec<(String, Vec<String>)> {
-    let dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/planted-bugs/entries");
-    let entries: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
-        .map(|entry| {
-            let quoted = |line: &str| -> Vec<String> {
-                line.split('"')
-                    .skip(1)
-                    .step_by(2)
-                    .map(str::to_owned)
-                    .collect()
-            };
-            let name = entry
-                .lines()
-                .find(|line| line.starts_with("name = "))
-                .map(|line| quoted(line).concat())
-                .unwrap_or_default();
-            let tests = entry
-                .split_once("tests = [")
-                .and_then(|(_, rest)| rest.split_once(']'))
-                .map(|(list, _)| quoted(list))
-                .unwrap_or_default();
-            (name, tests)
-        })
-        .collect();
-    assert!(
-        !entries.is_empty(),
-        "no ledger entries under {}",
-        dir.display()
-    );
-    entries
-}
+/// Every recorded history: its module, the test that runs it, and why no planted bug kills it.
+pub const GUARDS: &[(&str, &str, &str)] = &[(
+    "seed_0x734",
+    "seed_0x734_uploads_the_files_a_rollback_left_and_never_trips",
+    "the history checks a judge exemption, not an engine fix: no engine plant can make the judge \
+     excuse a trip it would otherwise call false",
+)];
 
 #[test]
-fn every_recorded_history_names_its_planted_bug() {
+fn every_recorded_history_is_listed() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sim/histories");
     let mut files: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -280,22 +41,7 @@ fn every_recorded_history_names_its_planted_bug() {
         files, listed,
         "every history file has exactly one row in GUARDS"
     );
-    let ledger = ledger();
-    for (module, test, guard) in GUARDS {
-        match guard {
-            Guard::Own(plant) | Guard::OnPath(plant) => {
-                let entry = ledger.iter().find(|(name, _)| name == plant);
-                let Some((_, tests)) = entry else {
-                    panic!("{module}: no ledger entry named {plant}");
-                };
-                assert!(
-                    tests
-                        .iter()
-                        .any(|listed| listed.ends_with(test) || test.contains(listed.as_str())),
-                    "{module}: ledger entry {plant} does not list {test}"
-                );
-            }
-            Guard::Unguarded(why) => assert!(!why.is_empty(), "{module}: say why it is unguarded"),
-        }
+    for (module, _, why) in GUARDS {
+        assert!(!why.is_empty(), "{module}: say why it is unguarded");
     }
 }
