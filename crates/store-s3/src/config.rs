@@ -325,7 +325,7 @@ pub const CREATION_TIME_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating
 /// Ranged reads (a restore reading ahead) and listing pages (the levels of an
 /// inventory) in flight at once. Go does neither side by side, so there is no
 /// Go value; not configurable. Memory is this many read lengths for reads.
-pub const READ_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(7);
+pub const READ_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(15);
 
 /// A count as bytes, for the memory bounds below; a `usize` fits a `u64` on every target
 /// (`lsr-ltx` refuses to build elsewhere).
@@ -337,14 +337,9 @@ const fn widen(n: usize) -> u64 {
     n as u64
 }
 
-/// A length as bytes, for the same bounds.
-#[expect(
-    clippy::as_conversions,
-    reason = "const context has no From for u32; the conversion is lossless"
-)]
-const fn widen_len(n: u32) -> u64 {
-    n as u64
-}
+/// Bytes of one restore read, restated from `lsr-core` (which keeps it private) for the bound
+/// below; the gate in `tests/store-s3/memory.rs` fails when the two disagree.
+const RESTORE_READ: u64 = 1 << 20;
 
 // What a multipart upload and its batches may hold, stated where the constants are.
 // S3 refuses a part under 5 MiB (EntityTooSmall) except the last.
@@ -356,12 +351,10 @@ const _: () = assert!(R2_CONCURRENCY.get() <= DEFAULT_CONCURRENCY.get());
 const _: () = assert!(CREATION_TIME_CONCURRENCY.get() <= lsr_core::MAX_AHEAD);
 // Memory in the worst case with the defaults: an upload buffers at most `concurrency`
 // parts (5 x 16 MiB on Tigris, 80 MiB), and a restore holds at most `READ_CONCURRENCY`
-// reads of the largest length (8 x 16 MiB, 128 MiB). Both stay under 128 MiB. What each
-// really holds, parts and bodies copied nowhere, is pinned through the real client by
-// `tests/store-s3/memory.rs`.
+// reads of the 1 MiB the engine asks for (16 MiB). What each really holds, parts and bodies
+// copied nowhere, is pinned through the real client by `tests/store-s3/memory.rs`.
 const _: () = assert!(widen(DEFAULT_CONCURRENCY.get()) * PartSize::TIGRIS.get() <= 128 << 20);
-const _: () =
-    assert!(widen(READ_CONCURRENCY.get()) * widen_len(lsr_core::ReadLen::MAX_RAW) <= 128 << 20);
+const _: () = assert!(widen(READ_CONCURRENCY.get()) * RESTORE_READ <= 16 << 20);
 
 impl S3Config {
     /// A configuration with the defaults the endpoint's provider gets:
@@ -618,6 +611,6 @@ mod tests {
     #[test]
     fn other_kinds_have_fixed_limits() {
         assert_eq!(CREATION_TIME_CONCURRENCY.get(), 16);
-        assert_eq!(READ_CONCURRENCY.get(), 8);
+        assert_eq!(READ_CONCURRENCY.get(), 16);
     }
 }

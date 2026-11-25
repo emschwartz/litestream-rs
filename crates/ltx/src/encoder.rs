@@ -9,9 +9,9 @@
 //! and a tracked snapshot whose post-apply checksum is not its pages'. The
 //! index is kept in memory as varint bytes, at most 30 bytes a page.
 
-use std::io::Write;
+use std::io::{self, Write};
 
-use lz4_flex::block::compress;
+use lz4_flex::block::{compress_into, get_maximum_output_size};
 
 use crate::checksum::Crc64;
 use crate::conv::u64_from;
@@ -30,6 +30,8 @@ pub struct Encoder<W> {
     file: Crc64,
     offset: u64,
     index: Vec<u8>,
+    /// The compressed block of the page being written, kept between pages.
+    scratch: Vec<u8>,
     /// The database checksum so far, for tracked snapshots only.
     db: Option<DbChecksum>,
     failed: bool,
@@ -61,6 +63,7 @@ impl<W: Write> Encoder<W> {
             file,
             offset: u64_from(HEADER_LEN),
             index: Vec::new(),
+            scratch: Vec::new(),
             db: (header.tracked() && header.is_snapshot()).then_some(DbChecksum::EMPTY),
             failed: false,
         })
@@ -85,19 +88,27 @@ impl<W: Write> Encoder<W> {
         }
         let mut seq = self.seq;
         let pgno = seq.push(pgno.nonzero())?;
-        let block = compress(data);
-        let len = u32::try_from(block.len()).unwrap_or(u32::MAX);
+        // One scratch buffer for the encoder's life: a block per page was an allocation per page.
+        self.scratch.resize(get_maximum_output_size(data.len()), 0);
+        let used = compress_into(data, &mut self.scratch).map_err(|_err| {
+            self.failed = true;
+            EncodeError::Io(io::Error::other("lz4 compression failed"))
+        })?;
+        let len = u32::try_from(used).unwrap_or(u32::MAX);
         let mut head = [0_u8; PAGE_HEADER_LEN + 4];
         head[0..4].copy_from_slice(&pgno.get().to_be_bytes());
         head[4..6].copy_from_slice(&1_u16.to_be_bytes());
         head[6..10].copy_from_slice(&len.to_be_bytes());
         self.write(&head)?;
-        self.write(&block)?;
+        let block = std::mem::take(&mut self.scratch);
+        let written = self.write(block.get(..used).unwrap_or_default());
+        self.scratch = block;
+        written?;
         self.seq = seq;
         self.file.update(&head);
         self.file.update(data);
         self.db = self.db.map(|db| db.toggle(PageChecksum::of(pgno, data)));
-        let size = u64_from(head.len()).saturating_add(u64_from(block.len()));
+        let size = u64_from(head.len()).saturating_add(u64_from(used));
         put_uvarint(&mut self.index, u64::from(pgno.get()));
         put_uvarint(&mut self.index, self.offset);
         put_uvarint(&mut self.index, size);

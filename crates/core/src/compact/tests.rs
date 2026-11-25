@@ -951,12 +951,20 @@ fn thirty_two_inputs_of_two_thousand_pages_stay_under_the_stated_bound() {
     assert!(total > 30_000_000, "inputs total {total} bytes");
     let page = ps.bytes();
 
-    // The public entry point: 1 MiB chunks, 1 MiB output buffer.
+    // The public entry point: the replica budget shared out, the standard output buffer.
     let dest = MemStore::new();
     let done = compact_infos(&source, &dest, &infos, 9).unwrap();
-    let chunk = usize::try_from(CHUNK_BYTES).unwrap();
-    let bound = MAX_INPUTS * (chunk + page) + chunk + 2 * page;
+    // Thirty-two inputs share the replica's budget: each reads in its share.
+    let window =
+        usize::try_from(<Replica<'_, MemStore> as Role>::COMPACT_BUDGET).unwrap() / MAX_INPUTS;
+    assert!(window < usize::try_from(CHUNK_BYTES).unwrap());
+    let bound = MAX_INPUTS * (window + page) + FLUSH_BYTES + 2 * page;
     assert!(done.peak_buffered() <= bound, "{}", done.peak_buffered());
+    assert!(
+        done.peak_buffered() >= MAX_INPUTS * window / 2,
+        "every input holds a window at once: {}",
+        done.peak_buffered()
+    );
     assert_eq!(done.pages(), 2000);
     assert_eq!(done.bytes_read(), total);
 
@@ -1235,6 +1243,25 @@ fn the_chunk_is_one_mebibyte() {
     );
 }
 
+/// A merge of few inputs reads each in the role's largest window, a merge of many in its share
+/// of the budget, never below the staging window: the memory is the budget, the requests are
+/// what the share leaves.
+#[test]
+fn the_replica_window_is_the_budget_shared_out() {
+    let window = |inputs: usize| Budget::reading::<Replica<'_, MemStore>>(inputs).chunk.get();
+    let mib = 1024 * 1024;
+    assert_eq!(<Replica<'_, MemStore> as Role>::COMPACT_BUDGET, 16 * mib);
+    assert_eq!(window(1), mib);
+    assert_eq!(window(16), mib);
+    assert_eq!(window(32), mib / 2);
+    // More inputs than the cap allows never read below the staging window.
+    assert_eq!(window(4096), STAGING_WINDOW.get());
+    // A staged input is never read above the staging window.
+    let staged = |inputs: usize| Budget::reading::<Staging<'_, MemStore>>(inputs).chunk.get();
+    assert_eq!(staged(1), STAGING_WINDOW.get());
+    assert_eq!(staged(32), STAGING_WINDOW.get());
+}
+
 /// A level-1 compaction reads the staged files in the staging window, so its inputs hold
 /// a few hundred KiB where the replica's window would hold tens of MiB. The same files
 /// read as a replica's are the control: they do hold a window each.
@@ -1263,8 +1290,7 @@ fn staged_inputs_are_read_in_the_staging_window() {
         level(1),
     ))
     .unwrap();
-    let flush = usize::try_from(CHUNK_BYTES).unwrap();
-    let bound = MAX_INPUTS * (window + page) + flush + 2 * page;
+    let bound = MAX_INPUTS * (window + page) + FLUSH_BYTES + 2 * page;
     assert!(done.peak_buffered() <= bound, "{}", done.peak_buffered());
     assert!(
         done.peak_buffered() >= MAX_INPUTS * window / 2,
@@ -1276,7 +1302,7 @@ fn staged_inputs_are_read_in_the_staging_window() {
     let dest = MemStore::new();
     let control = compact_infos(&source, &dest, &infos, 1).unwrap();
     assert!(
-        control.peak_buffered() > 4 * bound,
+        control.peak_buffered() > 3 * bound,
         "{}",
         control.peak_buffered()
     );

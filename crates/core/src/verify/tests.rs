@@ -235,17 +235,13 @@ fn big_snapshot() -> Vec<u8> {
     encoder.finish(None).unwrap().0
 }
 
-/// A file longer than one read is read whole, four mebibytes at a time: a
+/// A file longer than one read is read whole, a mebibyte at a time: a
 /// full chunk is not the end of the object.
 #[test]
-fn a_file_longer_than_one_chunk_is_read_whole_in_four_mebibyte_reads() {
+fn a_file_longer_than_one_chunk_is_read_whole_in_one_mebibyte_reads() {
     let bytes = big_snapshot();
-    let chunk = 4 * 1024 * 1024;
-    assert!(
-        bytes.len() > chunk && bytes.len() < 2 * chunk,
-        "{}",
-        bytes.len()
-    );
+    let chunk = usize::try_from(CHUNK_BYTES).unwrap();
+    assert!(bytes.len() > 2 * chunk, "{}", bytes.len());
     let inner = MemStore::new();
     put(&inner, 9, 1, 1, &bytes);
     let store = Wrapped::new(inner);
@@ -254,8 +250,11 @@ fn a_file_longer_than_one_chunk_is_read_whole_in_four_mebibyte_reads() {
     assert_eq!(report.files_read(), 2);
     let read = u64::try_from(bytes.len()).unwrap();
     assert_eq!(report.bytes_read(), 2 * read);
-    // Two reads in the walk and two in the dry run.
-    assert_eq!(store.reads.load(Ordering::Relaxed), 4);
+    // The same reads in the walk and in the dry run.
+    assert_eq!(
+        store.reads.load(Ordering::Relaxed),
+        2 * bytes.len().div_ceil(chunk)
+    );
 }
 
 /// A level-0 file from transaction 1 can be a base but is no restore point:

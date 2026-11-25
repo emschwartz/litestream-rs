@@ -9,7 +9,8 @@
 //! inputs are merged in ascending page order and the newest input holding a
 //! page wins. A page above the output's commit is dropped, and the lock page
 //! never appears because [PageNo] cannot hold it. Memory is one read window
-//! ([`Role::COMPACT_WINDOW`]: 128 KiB from staging, 1 MiB from the replica) and one
+//! ([`Role::COMPACT_WINDOW`]: 128 KiB from staging, at most 1 MiB from the replica, within the
+//! role's [`Role::COMPACT_BUDGET`]) and one
 //! page per input plus the encoder's output buffer, whatever the database size: the output page index (at most 30 bytes a page) is the only thing that
 //! grows with it. Go's fan-in is unbounded (upstream #1467); a level with more
 //! files than [MAX_INPUTS] is compacted into several files by the caller.
@@ -46,7 +47,6 @@
 //! ([InputsError::LevelNotAbove]), checked before any store call.
 
 use std::convert::Infallible;
-use std::mem;
 
 use lsr_ltx::{
     DbChecksum, DbPages, DecodeError, EncodeError, Encoder, Event, Header, HeaderFields, PageNo,
@@ -54,7 +54,7 @@ use lsr_ltx::{
 };
 use thiserror::Error;
 
-use crate::fault::role::{Replica, Role};
+use crate::fault::role::{Replica, Role, STAGING_WINDOW};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 use crate::publish::Writer;
@@ -70,9 +70,13 @@ mod tests;
 /// Most input files one compaction takes.
 pub const MAX_INPUTS: usize = 32;
 
-/// The size at which buffered output is handed to the upload, and the bytes asked of a
-/// replica per read of an input ([`Role::COMPACT_WINDOW`] says what a staged one gets).
+/// The most bytes asked of a replica per read of an input ([`Role::COMPACT_WINDOW`] says what
+/// a staged one gets; [`Role::COMPACT_BUDGET`] shares the total out).
 const CHUNK_BYTES: u32 = 1024 * 1024;
+
+/// The size at which buffered output is handed to the upload. The buffer is kept for the
+/// whole file (emptied, never replaced), so a small one is all the output ever holds.
+const FLUSH_BYTES: usize = 256 * 1024;
 
 // `ReadLen::or_chunk` falls back to 1 MiB for a size it refuses, which would
 // silently change the memory per file this constant states.
@@ -331,11 +335,20 @@ struct Budget {
 }
 
 impl Budget {
-    /// The window the `source`'s role reads its inputs in, and the standard flush.
-    fn reading<S: Role>() -> Self {
+    /// The window the `source`'s role reads each of `inputs` inputs in, and the standard
+    /// flush: the role's budget shared out, within the role's bounds.
+    fn reading<S: Role>(inputs: usize) -> Self {
+        let most = S::COMPACT_WINDOW.get();
+        let share = S::COMPACT_BUDGET
+            .checked_div(u64::try_from(inputs).unwrap_or(u64::MAX))
+            .unwrap_or(most);
+        let window = share.clamp(STAGING_WINDOW.get().min(most), most);
         Self {
-            chunk: S::COMPACT_WINDOW,
-            flush: usize::try_from(CHUNK_BYTES).unwrap_or(usize::MAX),
+            chunk: u32::try_from(window)
+                .ok()
+                .and_then(ReadLen::new)
+                .unwrap_or(S::COMPACT_WINDOW),
+            flush: FLUSH_BYTES,
         }
     }
 }
@@ -686,8 +699,11 @@ async fn write_output<S: Role, D: ObjectStore>(
         pages = pages.saturating_add(1);
         merge.observe(encoder.writer_mut().len());
         if encoder.writer_mut().len() >= flush {
-            let out = mem::take(encoder.writer_mut());
-            upload.write(&out).await.map_err(CompactError::Dest)?;
+            upload
+                .write(encoder.writer_mut())
+                .await
+                .map_err(CompactError::Dest)?;
+            encoder.writer_mut().clear();
         }
     }
     merge.check_unheld(unchecked_from, header.commit().saturating_add(1))?;
@@ -737,7 +753,14 @@ pub(crate) async fn compact_in<S: Role, D: ObjectStore>(
     inputs: &CompactionInputs,
     level: Level,
 ) -> Result<Compacted, CompactError> {
-    compact_with(source, dest, inputs, level, Budget::reading::<S>()).await
+    compact_with(
+        source,
+        dest,
+        inputs,
+        level,
+        Budget::reading::<S>(inputs.files.len()),
+    )
+    .await
 }
 
 async fn compact_with<S: Role, D: ObjectStore>(
@@ -756,7 +779,13 @@ async fn compact_with<S: Role, D: ObjectStore>(
     }
     let mut merge = Merge::open(source, inputs, budget).await?;
     let header = merge.output_header(level, inputs.range())?;
-    let encoder = Encoder::new(Vec::new(), header).map_err(CompactError::Encode)?;
+    // Room for the flush size and the page that crosses it, so the buffer never grows.
+    let out = Vec::with_capacity(
+        budget
+            .flush
+            .saturating_add(header.page_size().bytes().saturating_mul(2)),
+    );
+    let encoder = Encoder::new(out, header).map_err(CompactError::Encode)?;
     let key = FileKey::new(level, inputs.range());
     let created_at = header.fields().timestamp;
     // A compacted file may be written again over itself (a retried

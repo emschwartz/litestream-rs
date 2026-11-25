@@ -32,12 +32,18 @@ pub(crate) trait Role: ObjectStore {
     /// Compaction's error for a failed read of an input from this store.
     fn compact_input(err: StoreError) -> CompactError;
 
-    /// Bytes a compaction asks of this store per read of an input. A merge holds one
-    /// such read for every input at once, so this times the fan-in is its memory. The
-    /// staging directory answers a read from the page cache for the price of a system
-    /// call, so a small window costs it nothing; a replica answers each read with a
-    /// request, so its window stays large.
+    /// The most bytes a compaction asks of this store per read of an input. A merge holds
+    /// one such read for every input at once, so this times the fan-in is its memory
+    /// unless [`Self::COMPACT_BUDGET`] cuts it. The staging directory answers a read from
+    /// the page cache for the price of a system call, so a small window costs it nothing;
+    /// a replica answers each read with a request.
     const COMPACT_WINDOW: ReadLen;
+
+    /// Bytes the reads of all inputs may hold at once. Each input's window is its share of
+    /// this, at most [`Self::COMPACT_WINDOW`] and at least [`STAGING_WINDOW`]: a merge of
+    /// a few inputs reads in big windows (few requests), a merge of 32 in small ones
+    /// (`docs/decisions/D202.md`).
+    const COMPACT_BUDGET: u64;
 }
 
 /// What a compaction reads of each staged file at a time: twice the largest page.
@@ -77,6 +83,7 @@ impl<S: ObjectStore> Role for Staging<'_, S> {
     }
 
     const COMPACT_WINDOW: ReadLen = STAGING_WINDOW;
+    const COMPACT_BUDGET: u64 = 4 * 1024 * 1024;
 }
 
 impl<S: ObjectStore> Role for Replica<'_, S> {
@@ -89,6 +96,7 @@ impl<S: ObjectStore> Role for Replica<'_, S> {
     }
 
     const COMPACT_WINDOW: ReadLen = ReadLen::CHUNK;
+    const COMPACT_BUDGET: u64 = 16 * 1024 * 1024;
 }
 
 /// Passes every call of a store through to the wrapped one.

@@ -47,7 +47,7 @@ use crate::witness::{ByteTally, Witnessed};
 const DEFAULT_CAP: u64 = 64 << 20;
 
 /// How many encoded bytes are held before they go to the store.
-const FLUSH_AT: usize = 1 << 20;
+const FLUSH_AT: usize = 256 * 1024;
 
 /// What a step may do beyond the WAL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -470,7 +470,17 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<Filled, Fault> {
-    let mut encoder = Encoder::new(Vec::new(), header).map_err(|_err| BugSite::Encode.hit())?;
+    // Room for the file or, past the flush size, for it and the page that crosses it: the
+    // buffer is emptied, never replaced, and a small file allocates only what it holds.
+    let page = header.page_size().bytes();
+    let room = FLUSH_AT.saturating_add(page.saturating_mul(2));
+    let out = Vec::with_capacity(
+        plan.len()
+            .saturating_mul(page)
+            .saturating_add(page)
+            .min(room),
+    );
+    let mut encoder = Encoder::new(out, header).map_err(|_err| BugSite::Encode.hit())?;
     let mut buf = vec![0_u8; header.page_size().bytes()];
     let mut last = None;
     let mut bytes = ByteTally::new();
@@ -498,9 +508,12 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
             ));
         }
         if encoder.writer_mut().len() >= FLUSH_AT {
-            let chunk = std::mem::take(encoder.writer_mut());
-            upload.write(&chunk).await.map_err(|err| map_store(&err))?;
-            bytes.add(&chunk);
+            upload
+                .write(encoder.writer_mut())
+                .await
+                .map_err(|err| map_store(&err))?;
+            bytes.add(encoder.writer_mut());
+            encoder.writer_mut().clear();
         }
     }
     let (rest, trailer) = encoder.finish(None).map_err(|_err| BugSite::Encode.hit())?;

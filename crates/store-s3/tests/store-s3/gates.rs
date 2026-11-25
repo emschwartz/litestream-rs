@@ -43,12 +43,12 @@ const LEVELS: usize = 10;
 
 /// Bytes of one restore read: core's `restore::CHUNK_BYTES`, restated so a
 /// change of either shows as a failing count here.
-const RESTORE_CHUNK: u64 = 4 * 1024 * 1024;
+const RESTORE_CHUNK: u64 = 1024 * 1024;
 
 /// Ranged reads and listing pages in flight at once, as designed. Restated, not
 /// read from the store's constants, so shrinking a constant cannot shrink the bound
 /// with it; the first test pins the two together.
-const READ_WIDTH: usize = 8;
+const READ_WIDTH: usize = 16;
 
 /// Created-at HEADs in flight at once, as designed.
 const HEAD_WIDTH: usize = 16;

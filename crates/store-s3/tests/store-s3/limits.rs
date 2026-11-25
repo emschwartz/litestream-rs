@@ -1,6 +1,6 @@
 //! Each kind of request has its own limit on requests in flight: multipart
 //! parts by `concurrency` (5; R2 2 unless set), creation-time HEADs 16,
-//! ranged reads and listing pages 8. A transport that
+//! ranged reads and listing pages 16. A transport that
 //! records the limit each batch is handed shows what the store asks for.
 
 use std::num::NonZeroUsize;
@@ -126,7 +126,7 @@ fn concurrency_governs_only_parts() {
         listed: ListedTime::LastModified(now()),
     }];
     block_on(store.created_at_many(&files));
-    assert_eq!(seen(&limits), [8, 16]);
+    assert_eq!(seen(&limits), [16]);
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn creation_time_heads_go_sixteen_at_a_time() {
 }
 
 #[test]
-fn range_reads_and_listings_go_eight_at_a_time() {
+fn range_reads_and_listings_go_sixteen_at_a_time() {
     let (store, limits) = store_for(config());
     let k = key(0, 1, 1);
     block_on(async {
@@ -170,10 +170,10 @@ fn range_reads_and_listings_go_eight_at_a_time() {
         len,
     });
     assert_eq!(block_on(store.read_many(&reads)).len(), 2);
-    assert_eq!(seen(&limits), [8]);
+    assert_eq!(seen(&limits), [16]);
     let pages = [Level::ZERO].map(|level| ListAt { level, after: None });
     assert_eq!(block_on(store.list_many(&pages, limit(10))).len(), 1);
-    assert_eq!(seen(&limits), [8]);
-    assert_eq!(store.batch_width(BatchKind::Reads).get(), 8);
-    assert_eq!(store.batch_width(BatchKind::Lists).get(), 8);
+    assert_eq!(seen(&limits), [16]);
+    assert_eq!(store.batch_width(BatchKind::Reads).get(), 16);
+    assert_eq!(store.batch_width(BatchKind::Lists).get(), 16);
 }
