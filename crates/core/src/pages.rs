@@ -90,6 +90,8 @@ pub struct PageChecksumTable {
     page_size: Option<PageSize>,
     chunks: Vec<Vec<u64>>,
     held: usize,
+    /// One past the highest slot ever filled and not cut: nothing at or above it is held.
+    top: usize,
     /// Pages found different from the table, with the digest found: reported,
     /// and accepted as the file's bytes until a frame records the page again.
     mismatched: BTreeMap<PageNo, PageChecksum>,
@@ -112,6 +114,7 @@ impl PageChecksumTable {
             page_size: None,
             chunks: Vec::new(),
             held: 0,
+            top: 0,
             mismatched: BTreeMap::new(),
         }
     }
@@ -135,6 +138,12 @@ impl PageChecksumTable {
                 self.held = self.held.saturating_add(1);
             }
             *held = digest.get();
+            self.top = self.top.max(
+                chunk
+                    .saturating_mul(CHUNK)
+                    .saturating_add(place)
+                    .saturating_add(1),
+            );
         }
     }
 
@@ -170,19 +179,23 @@ impl PageChecksumTable {
     /// Forgets every page above `commit`, the database's size in pages.
     pub fn truncate(&mut self, commit: NonZeroU32) {
         let keep = usize::try_from(commit.get()).unwrap_or(usize::MAX);
-        let (whole, part) = (keep / CHUNK, keep % CHUNK);
-        let mut dropped = 0_usize;
-        for chunk in self.chunks.iter().skip(whole.saturating_add(1)) {
-            dropped = dropped.saturating_add(chunk.iter().filter(|slot| **slot != 0).count());
-        }
-        self.chunks.truncate(whole.saturating_add(1));
-        if let Some(last) = self.chunks.get_mut(whole) {
-            for slot in last.iter_mut().skip(part).filter(|slot| **slot != 0) {
-                *slot = 0;
-                dropped = dropped.saturating_add(1);
+        // Called after every staged file, usually with nothing above `commit`: no scan then.
+        if keep < self.top {
+            let (whole, part) = (keep / CHUNK, keep % CHUNK);
+            let mut dropped = 0_usize;
+            for chunk in self.chunks.iter().skip(whole.saturating_add(1)) {
+                dropped = dropped.saturating_add(chunk.iter().filter(|slot| **slot != 0).count());
             }
+            self.chunks.truncate(whole.saturating_add(1));
+            if let Some(last) = self.chunks.get_mut(whole) {
+                for slot in last.iter_mut().skip(part).filter(|slot| **slot != 0) {
+                    *slot = 0;
+                    dropped = dropped.saturating_add(1);
+                }
+            }
+            self.held = self.held.saturating_sub(dropped);
+            self.top = keep;
         }
-        self.held = self.held.saturating_sub(dropped);
         self.mismatched.retain(|pgno, _| pgno.get() <= commit.get());
     }
 
@@ -190,6 +203,7 @@ impl PageChecksumTable {
     pub fn clear(&mut self) {
         self.chunks = Vec::new();
         self.held = 0;
+        self.top = 0;
         self.mismatched.clear();
     }
 
