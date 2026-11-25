@@ -1,0 +1,13 @@
+diff --git a/crates/replica/src/local.rs b/crates/replica/src/local.rs
+index 0000000..0000000 100644
+--- a/crates/replica/src/local.rs
++++ b/crates/replica/src/local.rs
+@@ -534,7 +534,7 @@ impl FileSink {
+         if !names_what_it_holds(&scratch, &file) {
+             return Err(CreateError::RestoreInProgress(scratch));
+         }
+-        if aliases_the_target(&file, target).map_err(scratch_fault)? {
++        if false && aliases_the_target(&file, target).map_err(scratch_fault)? {
+             // A restore killed between the link and the unlink of the scratch's name left the
+             // target and the scratch as one file. Truncating it is truncating the live
+             // database, and a restore that then fails leaves it damaged. Drop the name, which

@@ -266,3 +266,69 @@ impl<F: Read + Seek, P: PageSource> Local<'_, '_, F, P> {
         self.db.read_page(pgno, buf).map_err(Fault::from_source)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use lsr_ltx::PageSize;
+
+    use super::*;
+    use crate::source::FakeDb;
+
+    fn pg(n: u32) -> PageNo {
+        PageNo::new(n, PageSize::MIN).unwrap()
+    }
+
+    fn compared(local: u32, replica: u32, nonzero: u32, shared: u32) -> Compared {
+        Compared {
+            equal: false,
+            local,
+            replica,
+            nonzero,
+            shared,
+        }
+    }
+
+    /// The bar for reading a database as the replica plus more: three pages on each side, some
+    /// page of the replica that is not zeros, and at least half of those held unchanged.
+    #[test]
+    fn the_ahead_bar_asks_three_pages_a_side_and_half_the_nonzero_pages_shared() {
+        assert!(compared(3, 3, 2, 1).ahead_bar(), "exactly half");
+        assert!(compared(9, 3, 4, 2).ahead_bar(), "a longer database");
+        assert!(!compared(3, 3, 3, 1).ahead_bar(), "under half");
+        assert!(!compared(2, 3, 2, 2).ahead_bar(), "two local pages");
+        assert!(!compared(3, 2, 2, 2).ahead_bar(), "two replica pages");
+        assert!(!compared(3, 3, 0, 0).ahead_bar(), "a replica of only zeros");
+    }
+
+    /// The replica's non-zero pages are counted up to its own end: an image page past it (a
+    /// restore that grew and shrank) is not one the local database could share.
+    #[test]
+    fn the_nonzero_count_stops_at_the_replicas_end() {
+        let size = PageSize::MIN;
+        let page = |fill: u8| vec![fill; size.bytes()];
+        let mut db = FakeDb::new(size);
+        db.write_page(pg(1), &page(1));
+        db.write_page(pg(2), &page(2));
+        let image: BTreeMap<u32, PageChecksum> = [(1, 1), (2, 2), (5, 5)]
+            .into_iter()
+            .map(|(n, fill)| (n, PageChecksum::of(pg(n), &page(fill))))
+            .collect();
+        let local: Local<'_, '_, Cursor<Vec<u8>>, FakeDb> = Local {
+            reader: None,
+            db: &mut db,
+        };
+        let found = local.compare(&image, 2, 2, size).unwrap();
+        assert_eq!(
+            found,
+            Compared {
+                equal: true,
+                local: 2,
+                replica: 2,
+                nonzero: 2,
+                shared: 2,
+            }
+        );
+    }
+}

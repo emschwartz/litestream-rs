@@ -1,0 +1,7 @@
+# A compaction is logged under a message of this daemon's own, so a script grepping Go's finds nothing.
+name = "maintenance-lines-not-go-s"
+fix = "claude/dropin-gaps"
+package = "lsr-sidecar"
+tests = [
+    "a_compaction_and_a_snapshot_are_logged_as_go_logs_them",
+]

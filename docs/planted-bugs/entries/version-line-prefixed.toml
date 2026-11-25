@@ -1,0 +1,8 @@
+# lsr version prints a prefix, not Go's bare version line.
+name = "version-line-prefixed"
+fix = "claude/dropin-gaps"
+package = "lsr-cli"
+test_bin = "cli"
+tests = [
+    "the_version_command_prints_go_s_bare_line",
+]
