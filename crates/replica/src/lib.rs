@@ -59,7 +59,7 @@
 //!   (`crates/store-s3/tests/store-s3/memory.rs`, `an_upload_through_the_real_client_holds_five_parts`
 //!   and `the_bound_follows_part_size_and_concurrency`). A part is the one unit a request
 //!   must hold whole (its `Content-MD5` is signed before the body goes out), so this term
-//!   grows with the part size the operator sets; see `docs/decisions/D202.md`.
+//!   grows with the part size the operator sets; see `docs/decisions/D203.md`.
 //! - **Compaction:** the inputs' windows plus a 256 KiB output buffer that is kept for the
 //!   file. A level-1 compaction reads each staged file in a 128 KiB window: 5 MiB at `F` = 32
 //!   (`crates/store-fs/tests/store-fs/memory.rs`, `a_level_one_compaction_holds_a_staging_window_per_input`).

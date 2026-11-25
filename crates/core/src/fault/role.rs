@@ -42,7 +42,7 @@ pub(crate) trait Role: ObjectStore {
     /// Bytes the reads of all inputs may hold at once. Each input's window is its share of
     /// this, at most [`Self::COMPACT_WINDOW`] and at least [`STAGING_WINDOW`]: a merge of
     /// a few inputs reads in big windows (few requests), a merge of 32 in small ones
-    /// (`docs/decisions/D202.md`).
+    /// (`docs/decisions/D203.md`).
     const COMPACT_BUDGET: u64;
 }
 

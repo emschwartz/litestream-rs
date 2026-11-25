@@ -4,6 +4,7 @@
 //! parsers read what a success holds. A response that is 2xx but unreadable is a
 //! [`ResponseError`], which converts to a retryable or corrupt [`StoreError`].
 
+use std::collections::BTreeSet;
 use std::io;
 
 use lsr_core::{
@@ -33,9 +34,10 @@ pub enum ResponseError {
     /// A listed key is not under the level's prefix.
     #[error("listed key is outside the requested prefix")]
     KeyOutsidePrefix,
-    /// Listed keys are not strictly ascending.
-    #[error("listing is out of order")]
-    NotAscending,
+    /// A key is listed twice, or a later page lists a file at or before one already passed:
+    /// a cursor that went back, so what the pages hold cannot be trusted whole.
+    #[error("listing repeats a key or goes back")]
+    RepeatedKey,
     /// The created-at time header is present and does not parse.
     #[error("litestream-timelitestream-timestamp header does not parse")]
     BadCreatedAt,
@@ -51,12 +53,10 @@ impl ResponseError {
                 key,
                 cause: CorruptCause::BadCreatedAt,
             },
-            Self::Malformed | Self::KeyOutsidePrefix | Self::NotAscending => {
-                StoreError::Transient {
-                    op,
-                    kind: io::ErrorKind::InvalidData,
-                }
-            }
+            Self::Malformed | Self::KeyOutsidePrefix | Self::RepeatedKey => StoreError::Transient {
+                op,
+                kind: io::ErrorKind::InvalidData,
+            },
         }
     }
 }
@@ -72,22 +72,36 @@ pub struct ListedFile {
     pub last_modified: Timestamp,
 }
 
+/// A name under a level that is not an LTX key, and where the provider listed it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Unrecognized {
+    /// The name, without the level's prefix.
+    pub name: String,
+    /// How many of the page's files the provider listed before it. A provider that lists a
+    /// name ahead of the names it extends (R2) puts such a stray after those files, and the
+    /// next listing, which starts after a file, finds it there.
+    pub files_before: usize,
+}
+
 /// One page of a level, split into LTX files and unrecognized names.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ListPage {
-    /// LTX files, ascending.
+    /// LTX files, ascending whatever order the provider listed them in.
     pub files: Vec<ListedFile>,
-    /// Names under the level that are not LTX keys (scratch names excluded).
-    pub unrecognized: Vec<String>,
+    /// Names under the level that are not LTX keys (scratch names excluded), in the order
+    /// listed.
+    pub unrecognized: Vec<Unrecognized>,
     /// The token for the next page when the listing is truncated.
     pub next_token: Option<String>,
 }
 
-/// Parses a ListObjectsV2 response for `level`.
+/// Parses a ListObjectsV2 response for `level`. The keys may come in any order (R2 lists a name
+/// after the longer names that extend it): the files are returned ascending, and each
+/// unrecognized name says how many files the provider listed before it.
 ///
 /// # Errors
 /// [`ResponseError`] for bad XML, a truncated page without a token, a key
-/// outside the level's prefix or keys not in ascending order.
+/// outside the level's prefix or a key listed twice.
 pub fn parse_list(
     r: &HttpResponse,
     prefix: &Prefix,
@@ -101,16 +115,15 @@ pub fn parse_list(
         unrecognized: Vec::new(),
         next_token: parsed.next_continuation_token,
     };
-    let mut previous: Option<&str> = None;
+    let mut seen = BTreeSet::new();
     for entry in &parsed.contents {
         let name = entry
             .key
             .strip_prefix(lead.as_str())
             .ok_or(ResponseError::KeyOutsidePrefix)?;
-        if previous.is_some_and(|last| last >= entry.key.as_str()) {
-            return Err(ResponseError::NotAscending);
+        if !seen.insert(name) {
+            return Err(ResponseError::RepeatedKey);
         }
-        previous = Some(entry.key.as_str());
         if is_scratch_name(name) {
             continue;
         }
@@ -124,9 +137,16 @@ pub fn parse_list(
                     .and_then(|text| Timestamp::parse_rfc3339(text).ok())
                     .ok_or(ResponseError::Malformed)?,
             }),
-            Err(_unrecognized) => page.unrecognized.push(name.to_owned()),
+            Err(_unrecognized) => page.unrecognized.push(Unrecognized {
+                name: name.to_owned(),
+                files_before: page.files.len(),
+            }),
         }
     }
+    // Fixed-width names never extend one another, so a provider that reorders only names that
+    // extend others lists the files ascending already; sorting costs nothing there and makes
+    // the page correct for one that does not.
+    page.files.sort_by_key(|file| file.key);
     Ok(page)
 }
 
@@ -329,7 +349,13 @@ mod tests {
                 .as_deref(),
             Some("2026-11-20T13:49:45.000Z")
         );
-        assert_eq!(page.unrecognized, vec!["zzz".to_owned()]);
+        assert_eq!(
+            page.unrecognized,
+            vec![Unrecognized {
+                name: "zzz".to_owned(),
+                files_before: 2
+            }]
+        );
         assert_eq!(page.next_token, None);
     }
 
@@ -358,18 +384,14 @@ mod tests {
 
     #[test]
     fn list_refuses_bad_pages() {
-        let (a, b) = (name(1), name(2));
+        let a = name(1);
         assert_eq!(
             parse_list(&listing(&["q/0000/x"], ""), &prefix(), Level::ZERO),
             Err(ResponseError::KeyOutsidePrefix)
         );
         assert_eq!(
-            parse_list(&listing(&[&b, &a], ""), &prefix(), Level::ZERO),
-            Err(ResponseError::NotAscending)
-        );
-        assert_eq!(
             parse_list(&listing(&[&a, &a], ""), &prefix(), Level::ZERO),
-            Err(ResponseError::NotAscending)
+            Err(ResponseError::RepeatedKey)
         );
         assert_eq!(
             parse_list(&ok("not xml"), &prefix(), Level::ZERO),

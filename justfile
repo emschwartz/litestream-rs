@@ -64,11 +64,14 @@ commit-check base="":
 # The S3 store's HTTP clients: each builds
 # alone, which `clippy` over all features cannot show. Their tests run in `test`, which has ureq,
 # reqwest and native-tls on at once. Then lsr-sqlite and lsr-replica without `bundled` and without
-# `rusqlite`, as an application linking its own SQLite builds them.
+# `rusqlite`, as an application linking its own SQLite builds them. Last, every crate's tests build
+# with that crate alone selected: a test that leans on a feature only another crate turns on
+# compiles under `--workspace` and fails in a recipe that names one package (`test-s3` did).
 features:
     cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
     cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
     cargo clippy -p lsr-sqlite -p lsr-replica --no-default-features --lib --locked -- -D warnings
+    for dir in crates/*/; do cargo check -p "lsr-$(basename "$dir")" --tests --locked || exit 1; done
 
 # nextest does not run doctests, and the compile-fail proofs (a proof token is not Clone) live there.
 doctest:
@@ -468,16 +471,12 @@ upstream:
 
 # Every counterpart the upstream test map (docs/upstream-test-map.toml) names is a Rust test that exists,
 # so a renamed or deleted counterpart fails the gate. The Rust test list is generated here into
-# target/ and never committed, so a branch that adds a test touches no shared list. Some tests
-# are Linux-only and the test map names some of them, so on another OS the step is skipped; CI, on
-# Linux, still enforces it.
+# target/ and never committed, so a branch that adds a test touches no shared list. It runs on
+# every system: the test excuses the few Linux-only counterparts it names (`LINUX_ONLY`) where
+# the listing cannot hold them, and nothing else.
 upstream-test-map-fresh:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ "$(uname)" != Linux ]; then
-        echo "upstream-test-map-fresh: skipped: the test map names Linux-only tests"
-        exit 0
-    fi
     # Absolute, since nextest runs the test in the package's directory.
     mkdir -p "${CARGO_TARGET_DIR:-target}/upstream-test-map"
     list="$(cd "${CARGO_TARGET_DIR:-target}/upstream-test-map" && pwd)/rust-tests.txt"
