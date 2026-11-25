@@ -4,14 +4,18 @@
 //! whatever the status. Only a failure to get a response at all is an error,
 //! and [`TransportError`] carries kinds only, never a URL, a header or a body.
 //!
-//! [`Transport::send_many`] sends a batch with at most `limit` requests in
-//! flight and returns one result per request, in order. Its default sends them
-//! one after another, so the in-memory and fault-injecting transports stay
-//! deterministic; the socket clients override it. A blocking client gets
-//! concurrency from [`send_on_threads`]: up to `limit` scoped threads for the
-//! batch, all joined before it returns, so no thread outlives the call and no
-//! pool idles between batches. Each request keeps its own deadline, and what
-//! a status means is still judged per request by the layers above.
+//! [`Transport::send_many`] sends a batch of reads, listings or HEADs with at most
+//! `limit` requests in flight and returns one result per request, in order. Its
+//! default sends them one after another, so the in-memory and fault-injecting
+//! transports stay deterministic; the socket clients override it. A blocking client
+//! gets concurrency from [`send_on_threads`]: up to `limit` scoped threads for the
+//! batch, all joined before it returns, so no thread outlives the call. Each request
+//! keeps its own deadline, and what a status means is still judged per request by
+//! the layers above.
+//!
+//! The parts of an upload are not a batch: each is sent when it is whole, on the
+//! lanes [`Transport::lanes`] gives the store (`lanes.rs`), while the upload builds
+//! the next.
 
 use std::fmt;
 use std::io;
@@ -19,7 +23,7 @@ use std::io;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 #[cfg(any(feature = "ureq", feature = "reqwest"))]
 use std::time::Duration;
 
@@ -34,6 +38,7 @@ use std::thread;
 
 use thiserror::Error;
 
+use crate::lanes::{Inline, Lanes};
 use crate::request::HttpRequest;
 
 /// A write whose body is read while it is sent: a part, or a small object, that the upload
@@ -320,37 +325,24 @@ pub trait Transport: Send + Sync + 'static {
             .collect()
     }
 
-    /// [`Self::send_many`] for requests whose bodies are read while they are sent. The
-    /// default reads every body whole and hands the batch to [`Self::send_many`], so a
-    /// transport that does not override it sends what it always sent and holds what it always
-    /// held, one body for each request of the batch. A request whose body fails is not sent,
-    /// and its result is that failure.
-    fn send_streamed(
-        &self,
-        requests: Vec<StreamedRequest<'_>>,
-        limit: NonZeroUsize,
-    ) -> Vec<Result<HttpResponse, TransportError>> {
-        let mut whole = Vec::with_capacity(requests.len());
-        let mut failed = Vec::with_capacity(requests.len());
-        for request in requests {
-            match request.into_buffered() {
-                Ok(request) => {
-                    whole.push(request);
-                    failed.push(None);
-                }
-                Err(err) => failed.push(Some(err)),
-            }
-        }
-        let mut sent = self.send_many(whole, limit).into_iter();
-        failed
-            .into_iter()
-            .map(|failed| match failed {
-                Some(err) => Err(err),
-                None => sent
-                    .next()
-                    .unwrap_or(Err(TransportError::Io(io::ErrorKind::Other))),
-            })
-            .collect()
+    /// [`Self::send`] for a request whose body is read while it is sent. The default reads
+    /// the body whole and sends it as any request, so a transport that does not override it
+    /// sends what it always sent and holds one body for it.
+    ///
+    /// # Errors
+    /// [`TransportError`] when no response arrived, or the body's own failure: the request is
+    /// then not sent, or ends short of the length it declared.
+    fn send_streamed(&self, request: StreamedRequest<'_>) -> Result<HttpResponse, TransportError> {
+        self.send(request.into_buffered()?)
+    }
+
+    /// The lanes the parts of this store's uploads are sent on, at most `most` at once
+    /// (`lanes.rs`). The default has no thread: a part is sent by the call that started it,
+    /// so the in-memory and fault-injecting transports stay deterministic. The socket clients
+    /// give a [`Sender`](crate::Sender).
+    fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {
+        let _ = most;
+        Arc::new(Inline)
     }
 }
 
@@ -398,15 +390,7 @@ pub fn send_on_threads<T: Transport + ?Sized>(
     requests: Vec<HttpRequest>,
     limit: NonZeroUsize,
 ) -> Vec<Result<HttpResponse, TransportError>> {
-    on_threads(requests, limit, |request| transport.send(request))
-}
-
-/// [`send_on_threads`] for any kind of request: `send` is what one thread does with one.
-pub(crate) fn on_threads<R: Send>(
-    requests: Vec<R>,
-    limit: NonZeroUsize,
-    send: impl Fn(R) -> Result<HttpResponse, TransportError> + Sync,
-) -> Vec<Result<HttpResponse, TransportError>> {
+    let send = |request| transport.send(request);
     let count = requests.len();
     let helpers = limit.get().min(count).saturating_sub(1);
     if helpers == 0 {

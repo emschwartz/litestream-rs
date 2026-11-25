@@ -1,0 +1,12 @@
+diff --git a/crates/store-s3/src/orphans.rs b/crates/store-s3/src/orphans.rs
+index 694f4fbf9..869a3636f 100644
+--- a/crates/store-s3/src/orphans.rs
++++ b/crates/store-s3/src/orphans.rs
+@@ -91,7 +91,6 @@ impl<T: Transport> Inner<T> {
+         let op = StoreOp::Upload;
+         // An engine rebuilt over this store may have dropped an upload a moment ago: its
+         // parts end first, so no upload listed below has a part of this process on the wire.
+-        self.parts_ended();
+         let start = self.now();
+         let dropped = self.abort_orphans()?;
+         let mut removed = u64::try_from(dropped).unwrap_or(u64::MAX);
