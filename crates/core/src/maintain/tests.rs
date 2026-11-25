@@ -846,11 +846,14 @@ impl Checker {
                 Some(pair[1].key.range().min())
             );
         }
+        // Level 0 has no hole in these histories, so no level gains one: every output
+        // starts at the transaction after its level's newest file.
         let dst = before.level(c.level());
         if let Some(last) = dst.last() {
-            assert!(
-                c.inputs().range().min() > last.key.range().max(),
-                "overlaps {last:?}"
+            assert_eq!(
+                Some(c.inputs().range().min()),
+                last.key.range().max().next(),
+                "does not follow {last:?}"
             );
         }
         let interval = cfg.interval(c.level()).unwrap();
@@ -976,6 +979,328 @@ proptest! {
             );
         }
     }
+}
+
+// Holes: a level never gains a file that leaves a hole a lower level could have closed.
+
+/// `plan_level` into `dst` at `now` under the defaults, on stored created-at times.
+fn level_step(inventory: &Inventory, now: i64, dst: u8, state: &MaintainState, view: View) -> Step {
+    match plan_level(
+        inventory,
+        at(now),
+        &defaults(),
+        level(dst),
+        state,
+        &ResolvedCreatedAt::default(),
+        view,
+    ) {
+        Ok(step) => step,
+        Err(_) => panic!("a stored listing asked for a created-at time"),
+    }
+}
+
+fn compaction(step: Step) -> CompactJob {
+    match step {
+        Step::Run(Job::Compact(job)) => job,
+        other @ (Step::Run(Job::Snapshot(_) | Job::Delete(_))
+        | Step::Wait(_)
+        | Step::Idle
+        | Step::Whole) => panic!("not a compaction: {other:?}"),
+    }
+}
+
+fn level_one(ranges: &[(u64, u64)]) -> Vec<FileInfo> {
+    ranges
+        .iter()
+        .map(|(min, max)| file(1, *min, *max, T0 - 100_000))
+        .collect()
+}
+
+#[test]
+fn the_first_hole_is_before_the_first_source_or_between_two_neighbours() {
+    let hole = |after: Option<u64>, files: &[(u64, u64)]| {
+        first_hole(after.map(txid), level_one(files).iter())
+    };
+    // Before the first file, one transaction wide and wider.
+    assert_eq!(hole(Some(10), &[(12, 15)]), Some(range(11, 11)));
+    assert_eq!(hole(Some(10), &[(13, 15)]), Some(range(11, 12)));
+    // Between two neighbours.
+    assert_eq!(hole(Some(10), &[(11, 12), (15, 16)]), Some(range(13, 14)));
+    // The first one, when there are two.
+    assert_eq!(
+        hole(Some(10), &[(11, 12), (14, 14), (17, 18)]),
+        Some(range(13, 13))
+    );
+    // None: each file starts right after the one before.
+    assert_eq!(hole(Some(10), &[(11, 12), (13, 14)]), None);
+    assert_eq!(hole(Some(10), &[]), None);
+    // A destination with no file may start anywhere, and a hole after its first source counts.
+    assert_eq!(hole(None, &[(5, 6), (7, 8)]), None);
+    assert_eq!(hole(None, &[(5, 6), (9, 9)]), Some(range(7, 8)));
+    // Files that overlap leave no hole, and a short file inside a longer one hides none.
+    assert_eq!(hole(Some(10), &[(11, 14), (13, 16), (17, 17)]), None);
+    assert_eq!(hole(Some(10), &[(11, 14), (12, 13), (15, 15)]), None);
+    assert_eq!(
+        hole(Some(10), &[(11, 14), (12, 13), (16, 16)]),
+        Some(range(15, 15))
+    );
+}
+
+/// `super::fill` with no rejected output anywhere.
+fn fill(inventory: &Inventory, level: Level, hole: TxidRange) -> Option<CompactJob> {
+    super::fill(inventory, &MaintainState::default(), level, hole)
+}
+
+#[test]
+fn a_hole_is_closed_from_the_files_the_level_below_holds_inside_it() {
+    let files = level_one(&[(1, 10), (11, 12), (13, 14), (15, 16)]);
+    let job = fill(&inv(files), level(2), range(11, 14)).unwrap();
+    assert_eq!(job.level(), level(2));
+    assert_eq!(input_keys(&job), vec![key(1, 11, 12), key(1, 13, 14)]);
+}
+
+/// A fill never claims a transaction outside the hole: a file that ends past it is left out,
+/// and the fill is the first part of the hole.
+#[test]
+fn a_fill_stops_before_a_file_that_ends_past_the_hole() {
+    let files = level_one(&[(11, 12), (13, 16)]);
+    let job = fill(&inv(files), level(2), range(11, 14)).unwrap();
+    assert_eq!(input_keys(&job), vec![key(1, 11, 12)]);
+    // A file ending exactly at the hole's last transaction is taken.
+    let files = level_one(&[(11, 12), (13, 14)]);
+    let job = fill(&inv(files), level(2), range(11, 14)).unwrap();
+    assert_eq!(input_keys(&job), vec![key(1, 11, 12), key(1, 13, 14)]);
+}
+
+#[test]
+fn a_hole_whose_first_transaction_no_file_starts_at_is_not_filled() {
+    // The file at the hole's start is larger than the hole.
+    assert_eq!(
+        fill(&inv(level_one(&[(11, 16)])), level(2), range(11, 14)),
+        None
+    );
+    // The level below holds the hole's first transaction in a file that starts before it.
+    let straddling = level_one(&[(9, 12), (13, 14)]);
+    assert_eq!(fill(&inv(straddling), level(2), range(11, 14)), None);
+    // Nothing below holds it: the range is lost.
+    assert_eq!(
+        fill(
+            &inv(level_one(&[(1, 10), (15, 16)])),
+            level(2),
+            range(11, 14)
+        ),
+        None
+    );
+    assert_eq!(fill(&inv([]), level(2), range(11, 14)), None);
+    // Level 0 has nothing below it.
+    assert_eq!(
+        fill(&inv(l0_run(11, 14, T0)), Level::ZERO, range(11, 14)),
+        None
+    );
+}
+
+/// Level 1 is filled from level 0 while level 0 still holds the files.
+#[test]
+fn a_hole_in_level_one_is_closed_from_level_zero() {
+    let job = fill(&inv(l0_run(9, 16, T0)), level(1), range(11, 14)).unwrap();
+    assert_eq!(job.level(), level(1));
+    assert_eq!(
+        input_keys(&job),
+        (11..=14).map(|n| key(0, n, n)).collect::<Vec<_>>()
+    );
+}
+
+/// When the level below lacks the hole's start too, its own hole is closed first, from the
+/// level below it, and no wider than either hole.
+#[test]
+fn a_hole_the_level_below_shares_is_closed_there_first() {
+    // Level 2 has nothing from 11 to 20; level 1 holds all of it.
+    let mut files = level_one(&[(11, 12), (13, 20), (21, 22)]);
+    files.extend([file(2, 1, 10, T0), file(2, 21, 30, T0)]);
+    let job = fill(&inv(files), level(3), range(11, 20)).unwrap();
+    assert_eq!(job.level(), level(2));
+    assert_eq!(input_keys(&job), vec![key(1, 11, 12), key(1, 13, 20)]);
+    // Level 2 resumes inside the hole, at 16: its own hole is 11 to 15.
+    let mut files = level_one(&[(11, 12), (13, 15), (16, 18)]);
+    files.push(file(2, 16, 20, T0));
+    let job = fill(&inv(files), level(3), range(11, 20)).unwrap();
+    assert_eq!(job.level(), level(2));
+    assert_eq!(input_keys(&job), vec![key(1, 11, 12), key(1, 13, 15)]);
+    // Level 2 holds nothing at all past the hole's start.
+    let job = fill(
+        &inv(level_one(&[(11, 12), (13, 20)])),
+        level(3),
+        range(11, 20),
+    )
+    .unwrap();
+    assert_eq!(job.level(), level(2));
+    assert_eq!(input_keys(&job), vec![key(1, 11, 12), key(1, 13, 20)]);
+}
+
+/// The replica the trial drill left: level 1 whole, level 2 without 11 to 20, level 3 behind.
+fn level_two_with_a_hole(level_three_created: i64) -> Vec<FileInfo> {
+    let mut files = level_one(&[(1, 10), (11, 20), (21, 30)]);
+    files.extend([
+        file(2, 1, 10, T0 - 100_000),
+        file(2, 21, 30, T0 - 100_000),
+        file(3, 1, 10, level_three_created),
+        snap(30, T0 - 100_000),
+    ]);
+    files
+}
+
+/// The fill comes before the compaction it makes possible, whatever the destination's window:
+/// Go's compaction into level 3 fails at every tick while level 2 has the hole.
+#[test]
+fn a_whole_listing_closes_a_hole_before_the_window_opens() {
+    for created in [T0 - 100_000, T0 + 1] {
+        let files = level_two_with_a_hole(created);
+        let job = run_job(due_at(&inv(files.clone()), T0 + 2));
+        assert_eq!(compact_job(&job).output_key(), key(2, 11, 20), "{created}");
+        assert_eq!(input_keys(compact_job(&job)), vec![key(1, 11, 20)]);
+    }
+    // With the hole closed, level 3 takes the whole run in one file once its window is open.
+    let mut files = level_two_with_a_hole(T0 - 100_000);
+    files.push(file(2, 11, 20, T0 - 100_000));
+    let job = run_job(due_at(&inv(files), T0 + 2));
+    assert_eq!(
+        input_keys(compact_job(&job)),
+        vec![key(2, 11, 20), key(2, 21, 30)]
+    );
+}
+
+/// A hole goes before every other job, at whatever level: a lower level's compaction would
+/// be followed by passes that list only tails, where the hole no longer shows.
+#[test]
+fn a_hole_is_closed_before_a_lower_level_compacts() {
+    let mut files = level_two_with_a_hole(T0 - 100_000);
+    files.extend(l0_run(31, 33, T0 - 100_000));
+    let job = run_job(due_at(&inv(files.clone()), T0 + 2));
+    assert_eq!(compact_job(&job).output_key(), key(2, 11, 20));
+    // Closed, the lower level has its turn.
+    files.push(file(2, 11, 20, T0 - 100_000));
+    let job = run_job(due_at(&inv(files), T0 + 2));
+    assert_eq!(compact_job(&job).output_key(), key(1, 31, 33));
+}
+
+/// A fill whose level is backing off holds nothing else back.
+#[test]
+fn a_fill_that_waits_leaves_the_other_levels_to_compact() {
+    let mut files = level_two_with_a_hole(T0 - 100_000);
+    files.extend(l0_run(31, 33, T0 - 100_000));
+    let files = inv(files);
+    let mut state = MaintainState::default();
+    let fill = compaction(level_step(&files, T0, 3, &state, View::Whole));
+    let failed = Outcome::Failed(MaintainError::Compact(CompactError::Dest(delete_fails())));
+    state.record(at(T0), &Job::Compact(fill), &failed);
+    let job = run_job(due_state(&files, at(T0 + 2), &defaults(), None, &mut state));
+    assert_eq!(compact_job(&job).output_key(), key(1, 31, 33));
+}
+
+/// A rejected output is never an input, of a fill as of any compaction: while the level a
+/// fill would read holds one, the hole waits for its delete.
+#[test]
+fn a_fill_never_reads_a_level_that_holds_a_rejected_output() {
+    let files = inv(level_two_with_a_hole(T0 - 100_000));
+    let mut state = MaintainState::default();
+    assert!(super::fill(&files, &state, level(2), range(11, 20)).is_some());
+    let rejected =
+        CompactJob::new(CompactionInputs::new(l0_run(31, 33, T0)).unwrap(), level(1)).unwrap();
+    let failed = Outcome::Failed(MaintainError::OutputDistrusted {
+        key: rejected.output_key(),
+        source: CompactError::Dest(delete_fails()),
+    });
+    state.record(at(T0), &Job::Compact(rejected), &failed);
+    assert_eq!(super::fill(&files, &state, level(2), range(11, 20)), None);
+}
+
+/// A fill that keeps failing waits out its own level's backoff: it is neither planned again at
+/// once nor given up for a compaction past the hole.
+#[test]
+fn a_failing_fill_waits_for_its_level_and_the_hole_is_not_crossed() {
+    let files = inv(level_two_with_a_hole(T0 - 100_000));
+    let mut state = MaintainState::default();
+    let fill = compaction(level_step(&files, T0, 3, &state, View::Whole));
+    assert_eq!(fill.level(), level(2));
+    let failed = Outcome::Failed(MaintainError::Compact(CompactError::Dest(delete_fails())));
+    state.record(at(T0), &Job::Compact(fill), &failed);
+    let retry = state.backing_off_until(level(2), at(T0)).unwrap();
+    assert_eq!(
+        level_step(&files, T0, 3, &state, View::Whole),
+        Step::Wait(retry)
+    );
+}
+
+/// A range no lower level holds is lost, and the level goes on past it as before: the same
+/// hole one level up, and no file that claims the transactions.
+#[test]
+fn a_whole_listing_goes_past_a_range_no_level_holds() {
+    let mut files = level_one(&[(1, 10), (21, 30)]);
+    files.push(file(2, 1, 10, T0 - 100_000));
+    let job = compaction(level_step(
+        &inv(files),
+        T0,
+        2,
+        &MaintainState::default(),
+        View::Whole,
+    ));
+    assert_eq!(input_keys(&job), vec![key(1, 21, 30)]);
+}
+
+/// A short pass sees only tails, so it cannot tell a lost range from one a lower level still
+/// holds: it plans nothing past a hole and asks for the whole listing, once the window is open.
+#[test]
+fn a_tail_whose_sources_do_not_follow_the_destination_asks_for_a_whole_listing() {
+    let state = MaintainState::default();
+    let mut files = level_one(&[(21, 30)]);
+    files.push(file(2, 1, 10, T0 - 100_000));
+    assert_eq!(
+        level_step(&inv(files.clone()), T0, 2, &state, View::Tail),
+        Step::Whole
+    );
+    // One transaction is enough.
+    let mut one = level_one(&[(12, 30)]);
+    one.push(file(2, 1, 10, T0 - 100_000));
+    assert_eq!(
+        level_step(&inv(one), T0, 2, &state, View::Tail),
+        Step::Whole
+    );
+    // A closed window is a wait, with no whole listing for it.
+    let mut closed = level_one(&[(21, 30)]);
+    closed.push(file(2, 1, 10, T0 + 1));
+    assert_eq!(
+        level_step(&inv(closed), T0 + 2, 2, &state, View::Tail),
+        Step::Wait(at(T0 + 300_000))
+    );
+}
+
+/// A tail plans the run that follows the destination's newest file, and never a fill: the
+/// files that would close a hole further on are below what it listed.
+#[test]
+fn a_tail_plans_the_run_that_follows_and_leaves_a_later_hole_to_a_whole_listing() {
+    let mut files = l0_run(15, 16, T0 - 100_000);
+    files.extend(level_one(&[(11, 14), (17, 20)]));
+    files.push(file(2, 1, 10, T0 - 100_000));
+    let tail = level_step(
+        &inv(files.clone()),
+        T0,
+        2,
+        &MaintainState::default(),
+        View::Tail,
+    );
+    assert_eq!(input_keys(&compaction(tail)), vec![key(1, 11, 14)]);
+    // The whole listing closes the hole first.
+    let whole = level_step(&inv(files), T0, 2, &MaintainState::default(), View::Whole);
+    assert_eq!(compaction(whole).output_key(), key(1, 15, 16));
+    // A destination with no file follows from wherever its sources start.
+    let empty = level_step(
+        &inv(level_one(&[(21, 30)])),
+        T0,
+        2,
+        &MaintainState::default(),
+        View::Tail,
+    );
+    assert_eq!(input_keys(&compaction(empty)), vec![key(1, 21, 30)]);
 }
 
 // When an upload makes the next listing due.

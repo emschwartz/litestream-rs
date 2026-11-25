@@ -108,6 +108,17 @@ impl Actor {
             }
         };
         let maintain = &mut self.engine.maintain;
+        if decided.value.whole {
+            // Nothing was planned from this listing and nothing is learned from it: the
+            // next tick lists the whole replica and decides there.
+            maintain.remembered.owe_full();
+            maintain.stale = true;
+            return Ok(ShortPass {
+                due: decided.value.due,
+                after_delete: None,
+                created_at_read: decided.created_at_read,
+            });
+        }
         maintain.remembered.learn_short(
             &tail,
             &self.kept.cfg.maintenance,
@@ -177,11 +188,32 @@ impl Actor {
                 if matches!(job, Job::Snapshot(_)) {
                     self.engine.maintain.remembered.owe_full();
                 }
+                if after_delete.is_some()
+                    && let Err(bug) = self.follows_its_level(&job)
+                {
+                    return self.fault(Task::Maintenance, bug, now);
+                }
                 let tick = self.run_job(env, &job, now, created_at_read).await;
                 self.after_job(&job, &tick, after_delete, now);
                 tick
             }
         }
+    }
+
+    /// Checked before a short pass's compaction writes anything: its output starts at the
+    /// transaction after the newest file the engine knows at that level. A short pass that
+    /// sees otherwise asks for a whole listing and plans nothing, so a job that fails this
+    /// was planned from a listing that lost a file, which is how levels 2 and 3 gained holes
+    /// that Go's compaction then refused (docs/decisions/D228.md).
+    pub(super) fn follows_its_level(&self, job: &Job) -> Result<(), Fault> {
+        if let Job::Compact(compact) = job {
+            let (level, range) = (compact.level(), compact.inputs().range());
+            crate::invariant!(
+                self.engine.maintain.remembered.follows_newest(level, range),
+                crate::BugSite::CompactionLeavesAHole
+            );
+        }
+        Ok(())
     }
 
     /// What a finished job teaches the remembered files: a compaction's output is the newest

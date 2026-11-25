@@ -1,0 +1,37 @@
+--- a/crates/core/src/maintain/short.rs
++++ b/crates/core/src/maintain/short.rs
+@@ -346,7 +346,6 @@
+         self.note(info);
+         // The carried listing stands in for one made now, which would show this file: a pass
+         // that plans from it must see every output since, not only the newest of each level.
+-        self.carry = self.carry.take().and_then(|carry| carry.with(info));
+         self.own.insert(level);
+         self.fresh.insert(level);
+         if let Some(next) = config
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -744,10 +744,6 @@
+     // The rule every compaction keeps: its inputs are the contiguous run that starts at the
+     // first source file above the destination's newest, and that file starts at the
+     // transaction after it. A tail that shows otherwise is not planned from.
+-    let follows = dst_max.is_none_or(|max| max.next() == Some(first.key.range().min()));
+-    if !follows && view == View::Tail {
+-        return Ok(Step::Whole);
+-    }
+     let run = contiguous_run(above);
+     Ok(
+         match CompactionInputs::new(run)
+--- a/crates/core/src/actor/short.rs
++++ b/crates/core/src/actor/short.rs
+@@ -188,11 +188,6 @@
+                 if matches!(job, Job::Snapshot(_)) {
+                     self.engine.maintain.remembered.owe_full();
+                 }
+-                if after_delete.is_some()
+-                    && let Err(bug) = self.follows_its_level(&job)
+-                {
+-                    return self.fault(Task::Maintenance, bug, now);
+-                }
+                 let tick = self.run_job(env, &job, now, created_at_read).await;
+                 self.after_job(&job, &tick, after_delete, now);
+                 tick

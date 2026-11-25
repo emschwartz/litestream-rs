@@ -1,0 +1,12 @@
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -822,9 +822,6 @@
+     let (mut level, mut hole) = (level, hole);
+     loop {
+         let below = Level::new(level.get().checked_sub(1)?)?;
+-        if state.distrusted_at(below).is_some() {
+-            return None;
+-        }
+         let mut from = inventory
+             .level(below)
+             .iter()
