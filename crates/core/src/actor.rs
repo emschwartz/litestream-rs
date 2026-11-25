@@ -2343,6 +2343,9 @@ impl Actor {
         if !self.maintain_ready(now) {
             return None;
         }
+        if let Some(job) = self.engine.maintain.snapshot_retry.take() {
+            return Some(self.snapshot_job(env, &job, now, 0).await);
+        }
         if self.short_pass_ok(now) {
             return Some(match self.maintain_short(env, now).await {
                 Ok(pass) => {
@@ -2681,7 +2684,10 @@ impl Actor {
                     now,
                 );
             }
-            Ok((files, _)) => return self.ran(Event::Synced { files }, now),
+            Ok((files, _)) => {
+                self.engine.maintain.snapshot_retry = Some(job.clone());
+                return self.ran(Event::Synced { files }, now);
+            }
             // A failed step waits on the sync task, and the listing with it:
             // the next is due when the step may run again, not at once.
             Err(Tick::Ran { event, .. }) => {

@@ -407,3 +407,81 @@ fn a_steady_writer_pays_the_bill_and_no_more() {
         assert!(known || (*request == Request::List && *n <= 1), "{bill:?}");
     }
 }
+
+/// The short-interval scenario the head-to-head against Go used: levels of 10, 30 and 60
+/// seconds, level 0 kept 20 seconds and checked every 5, a snapshot every 2 minutes kept 3.
+fn short_intervals() -> ActorConfig {
+    let maintenance = Maintenance::new(
+        vec![
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+        ],
+        Duration::from_secs(120),
+        Duration::from_secs(180),
+        crate::L0Retention::After(Duration::from_secs(20)),
+    )
+    .unwrap()
+    .with_l0_check_interval(crate::maintain::Interval::new(Duration::from_secs(5)).unwrap());
+    ActorConfig {
+        maintenance,
+        ..paced()
+    }
+}
+
+/// The bill of 330 seconds of a steady writer under [`short_intervals`], after four minutes.
+fn short_bill() -> BTreeMap<(Request, u8), usize> {
+    let mut rig = s3_like();
+    let mut actor = Actor::new(short_intervals());
+    let start = 600_000_000;
+    let now = drive(&mut rig, &mut actor, start, start + 240_000);
+    let mark = rig.remote.requests_made();
+    drive(&mut rig, &mut actor, now, now + 330_000);
+    bill(&rig, mark)
+}
+
+/// The gate on the short-interval scenario of the head-to-head against Go (levels of 10, 30 and
+/// 60 seconds, level 0 kept 20 seconds and checked every 5, a snapshot every 2 minutes kept 3;
+/// 330 seconds at 20 commits a second, after four minutes). Each bound is this engine's count
+/// with Go's from the owner's measurement beside it (Go, then this engine before these
+/// changes at the same scenario: 939 requests and 6,366):
+///
+/// | request | Go | before | here (count) |
+/// |---|---|---|---|
+/// | level-0 PUT | 336 | 1,356 | 345 |
+/// | level-1 PUT | 33 | 52 | 33 |
+/// | level-2 PUT | 18 | 12 | 11 |
+/// | level-3 PUT | 7 | 6 | 6 |
+/// | level-1 GET | 32 | 105 | 33 |
+/// | level-2 GET | 11 | 44 | 12 |
+/// | level-0 GET | 0 | 1,359 | 0 |
+/// | any HEAD | 0 | 2,319 | 0 |
+/// | DELETE batches | 103 | 64 | 66 |
+/// | LIST, all levels | 284 | 998 | 338 |
+///
+/// The one type above Go's is LIST: about one level-0, level-1 and level-9 listing per
+/// 5 second retention check (retention reads the level above to know what a restore needs,
+/// `maintain/retain.rs`), and a whole listing, one request per level, for each snapshot
+/// (level 5 is only ever listed by a whole listing) and at start. A snapshot that finds
+/// commits since its last sync takes its proof after their upload from the same decision, not
+/// from another whole listing (`docs/decisions/D241.md`). The level-9 listing of each
+/// retention check is not guarded by a Go defect and is left for the owner to rule on.
+/// Level 1 and level 2 GET one more than Go in this run (inputs read, as Go's; the bounds
+/// allow it, and the difference is not explained further).
+#[test]
+fn a_steady_writer_with_short_intervals_pays_the_bill_and_no_more() {
+    let bill = short_bill();
+    let at = |request: Request, level: u8| bill.get(&(request, level)).copied().unwrap_or(0);
+    assert!((335..=350).contains(&at(Request::Put, 0)), "{bill:?}");
+    assert!((32..=34).contains(&at(Request::Put, 1)), "{bill:?}");
+    assert!(at(Request::Put, 2) <= 18, "{bill:?}");
+    assert!(at(Request::Put, 3) <= 7, "{bill:?}");
+    assert!(at(Request::Get, 1) <= 34, "{bill:?}");
+    assert!(at(Request::Get, 2) <= 12, "{bill:?}");
+    assert_eq!(at(Request::Get, 0), 0, "{bill:?}");
+    assert_eq!(count(&bill, Request::Head), 0, "{bill:?}");
+    assert!(count(&bill, Request::Delete) <= 103, "{bill:?}");
+    // One whole listing per snapshot and one at start: level 5 is listed by no other kind.
+    assert!(at(Request::List, 5) <= 6, "{bill:?}");
+    assert!(count(&bill, Request::List) <= 345, "{bill:?}");
+}
