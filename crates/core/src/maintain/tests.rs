@@ -1915,46 +1915,22 @@ fn a_local_source_read_error_is_failed_and_publishes_nothing() {
     assert!(listed(&replica, 1).is_empty());
 }
 
+/// A compaction reads nothing of its output key before it writes: the listing it was planned
+/// from shows every file this engine wrote, so the key holds nothing (Go reads nothing either).
+/// Run twice by hand, the second run writes the same file again over the first.
 #[test]
-fn running_a_job_twice_leaves_one_file_at_the_key() {
+fn a_compaction_writes_its_output_without_reading_the_key_first() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
     let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    // The second run finds the output there and writes nothing over it.
     let again = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
-    assert!(
-        matches!(again, Outcome::Replan { key } if key == job.output_key()),
-        "{again:?}"
-    );
+    assert!(matches!(again, Outcome::Compacted { .. }), "{again:?}");
     assert_eq!(listed(&replica, 1), vec![job.output_key()]);
     let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
     assert_eq!(first, after);
-}
-
-/// A compaction whose output key already holds an object (an earlier run's
-/// output a listing did not show) writes nothing over it, so a rejected commit
-/// can never delete it: the delete after a failed write takes only what that
-/// write created.
-#[test]
-fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
-    let (local, replica, _, job) = rejected_setup();
-    let first = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
-    assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
-    let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    replica.inject_failure_after_publish(StoreError::Corrupt {
-        key: None,
-        cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
-    });
-    let again = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
-    assert!(
-        matches!(again, Outcome::Replan { key } if key == job.output_key()),
-        "{again:?}"
-    );
-    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    assert_eq!(after, held, "the output that was there is untouched");
 }
 
 #[test]

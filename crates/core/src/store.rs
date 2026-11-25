@@ -845,7 +845,7 @@ impl Upload for Box<dyn DynUpload> {
 }
 
 /// Whether the store holds an object under `key`, by a one-byte read. Used where one key is
-/// named without a listing: a compaction's output key, a torn tail's key.
+/// named without a listing: a boot's refused staged file.
 ///
 /// # Errors
 /// The store's error for a read that fails other than as not found.

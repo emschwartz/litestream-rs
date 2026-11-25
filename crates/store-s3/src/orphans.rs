@@ -85,6 +85,12 @@ impl<T: Transport> Inner<T> {
     /// runs anyway, its upload's Complete finds no upload and fails, and is retried. At most
     /// [`SWEEP_PAGES`] listing pages per call, so a boot's work is bounded; the rest go at
     /// the next.
+    ///
+    /// The listing (one `GET ?uploads` per boot, and an abort per upload it finds) is a
+    /// request Go does not make. Go hands multipart uploads to the SDK's uploader
+    /// (`s3/replica_client.go:513`, `manager.NewUploader`), which aborts only an upload that
+    /// fails inside the process, and nothing in Go lists open uploads, so the parts of an
+    /// upload a killed process left stay billed until a bucket lifecycle rule removes them.
     pub(crate) fn remove_scratch(&self) -> Result<u64, StoreError> {
         let op = StoreOp::Upload;
         let start = self.now();
