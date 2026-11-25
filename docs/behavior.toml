@@ -298,6 +298,18 @@ recovered_by = "sim::`a_running_drop_of_an_unconfirmed_upload_keeps_a_takeover_t
 notes = "A write that fails hands nothing back: the next ask fails `LocalIo` and waits its backoff, and nothing is deleted unrecorded. Pending files above every replica key vouch for nothing there, so one put back from a backup never raises the record"
 
 [[row]]
+table = "Boot"
+id = "BOOT-31"
+circumstance = "At boot the replica refuses the sweep of leftover scratch files and open multipart uploads for want of permission (an S3 policy without `s3:ListBucketMultipartUploads` or `s3:AbortMultipartUpload`, as the policy Go's S3 guide publishes; `remove_scratch` in `actor.rs`)"
+response = "the sweep is skipped, for the rest of the process; the boot goes on to the listing. Any other failure of the sweep (a timeout, a refusal of the credentials, the clock or the bucket) fails the boot attempt as before"
+signal = "log `the replica refused the sweep of leftover uploads at start` once; `Event::ScratchSweepDenied`; `lsr_scratch_sweeps_denied_total` 1; `Counters::scratch_sweeps_denied`"
+at_risk = "Storage only: an upload a killed process left open stays open and billed until a bucket lifecycle rule or an operator removes it"
+recovery = "Grant the two actions or add an `AbortIncompleteMultipartUpload` lifecycle rule (docs/s3-permissions.md)"
+detected_by = "core::`a_refused_scratch_sweep_does_not_hold_the_boot`, core::`a_refused_scratch_sweep_is_not_asked_again`, core::`only_a_permission_refusal_of_the_scratch_sweep_is_skipped`, sim::`a_refused_scratch_sweep_never_holds_the_boot`, compat::`s3::over_s3_lsr_runs_on_the_policy_litestreams_guide_publishes`, plant::`scratch-sweep-refusal-stops-boot`"
+recovered_by = "sim::`a_refused_scratch_sweep_never_holds_the_boot`"
+notes = "Go sweeps nothing, so a drop-in replacement must start under Go's policy. Found by a review of what a first start under that policy does; a refusal here said nothing about the replica's contents, yet it held the application's writes under `hold-start`"
+
+[[row]]
 table = "Running"
 id = "RUN-1"
 circumstance = "New commits. Every poll (1 s) the engine reads the wal-index's committed end, fsyncs the WAL, scans the new frames checking the checksum chain, and stages one level-0 file of at most 64 MiB of WAL (`actor.rs`, `sync.rs`)"
@@ -1256,6 +1268,17 @@ signal = "exit 1"
 at_risk = "Nothing runs"
 recovery = "Operator: Go Litestream for a read replica"
 detected_by = "cli::`follow_mode_is_refused_as_not_built`"
+
+[[row]]
+table = "Restore"
+id = "REST-17"
+circumstance = "`restore -force` after a restore killed between the hard link of the scratch to the target and the unlink of the scratch's name: `<target>.restore` and the target are one file (or the scratch has any other name)"
+response = "the scratch's name is dropped and a fresh file made; the existing target is never written. A restore that fails leaves the target as it was; one that succeeds replaces it by rename, so another name of the old file still holds the old bytes. Before, the open truncated the scratch, which was the target, and pages of the new file were written into it before the file's checksum was checked"
+signal = "none"
+at_risk = "None"
+recovery = "Run again"
+detected_by = "replica::`a_failed_forced_restore_leaves_a_target_that_shares_the_scratch_inode_as_it_was`, replica::`a_forced_restore_over_a_target_that_shares_the_scratch_inode_replaces_it_whole`, plant::`restore-scratch-written-through-the-target`"
+notes = "The kill's on-disk state is made by hand with a hard link in the tests. Pages reach the scratch before the file's trailer checksum is checked, so the sentence in the docs that every checksum is checked before any page is applied holds only for the target, which is untouched until publish"
 
 [[row]]
 table = "Verify"
@@ -2511,7 +2534,7 @@ notes = "Found by the false-trip judge over random histories; the checkpoint's f
 [[row]]
 table = "Fail-stop"
 id = "FS-6"
-circumstance = "Before this process has listed the replica once, the store refuses it (`credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls`)"
+circumstance = "Before this process has listed the replica once, the store refuses it (`credentials`, `permission_denied`, `clock_skew`, `bucket_missing`, `tls`). A refusal of the start's sweep of open uploads for want of permission is not one (BOOT-31)"
 response = "trip `RefusedAtStart`; holds under `hold-start` and `stop-app` until the first listing, then releases with no operator action (decision D16)"
 signal = "`/healthz` 503, `held_by` = `refused_at_start`; log `writes blocked`; every write fails with \"database is locked\" (`SQLITE_BUSY`)"
 at_risk = "None from the hold; commits made meanwhile are local. While writes are held the replicator keeps the database's write lock, so every writer in any process gets \"database is locked\"; one transaction already writing when the hold comes may still commit, and a stopped replicator holds nothing (decision D192)"
@@ -2527,7 +2550,7 @@ response = "no trip"
 signal = "health and metrics as each fault's own row"
 at_risk = "As each fault's row"
 recovery = "n/a"
-detected_by = "sim::`a_short_outage_never_trips`, sim::`throttling_inside_the_bound_never_trips`, sim::`a_store_down_at_boot_does_not_trip`, sim::`a_refusal_after_the_first_listing_inside_the_bound_never_trips`, sim::`clock_steps_never_trip`, sim::`restarts_never_trip`, core::`a_heal_inside_the_backoff_is_found_by_the_probe_and_never_trips`, core::`a_failure_before_the_bound_never_trips`, core::`a_maintenance_fault_never_trips`, core::`a_timeout_at_boot_is_no_refusal`, oracle::`FalseTrip`, plant::`failstop-trip-on-first-failure`, plant::`failstop-trip-on-degraded`, plant::`failstop-boot-timeout-holds`, plant::`failstop-holds-on-an-unreachable-store`"
+detected_by = "sim::`a_short_outage_never_trips`, sim::`throttling_inside_the_bound_never_trips`, sim::`a_store_down_at_boot_does_not_trip`, sim::`a_refusal_after_the_first_listing_inside_the_bound_never_trips`, sim::`clock_steps_never_trip`, sim::`restarts_never_trip`, core::`a_heal_inside_the_backoff_is_found_by_the_probe_and_never_trips`, core::`a_failure_before_the_bound_never_trips`, core::`a_maintenance_fault_never_trips`, core::`a_timeout_at_boot_is_no_refusal`, core::`a_store_down_for_the_bound_judges_the_boot`, oracle::`FalseTrip`, plant::`failstop-trip-on-first-failure`, plant::`failstop-trip-on-degraded`, plant::`failstop-boot-timeout-holds`, plant::`failstop-holds-on-an-unreachable-store`"
 notes = "The false-trip judge checks every simulator run (`sim/src/failstop.rs`); its age is an upper bound, so it can be lenient, never strict. Two exemptions, each counted: committed WAL frames the engine never read, with no staged file waiting; and an age trip after a boot that broke continuity (`StagedUnverified`, `LocalRewound`), before the engine's first upload since (decision D81)"
 
 [[row]]
@@ -2580,6 +2603,17 @@ signal = "log `comparing the database with the replica before starting` (INFO, f
 at_risk = "None: writes wait"
 recovery = "Automatic once the check decides"
 detected_by = "core::`a_new_meta_directory_over_the_replicas_own_state_snapshots_above_it`, sim::`writes_held_while_the_boot_checks_identity`, plant::`failstop-identity-check-unnamed`"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-14"
+circumstance = "Before the replica was listed, boot attempts fail: a store that is down or slow, a DNS error, a local fault, or the boot's own deliberate retry (`StagedLost`, `Swept::Suspect`, `WalMoved`)"
+response = "one failed attempt, of any kind, never judges the boot: the next attempt may list the replica and find another writer. A run of failed attempts, none by a refusal, that has lasted 15 s (`BOOT_UNDECIDED_BOUND`, counted from the run's first failure) judges it: writes are released and an `-exec` child starts, as Go would have started it. A refusal ends the run and holds until healed (FS-6); a hang holds for the request deadline plus the bound (decision D207)"
+signal = "`writes blocked` with `held_by=booting` until `writes allowed`; `Health::writes`"
+at_risk = "After a release without a decision, commits are unreplicated until the boot succeeds; if that boot then stops for another writer, the application has already started. Fail-stop's age bound does not run before the first boot (D80)"
+recovery = "Automatic once the store answers"
+detected_by = "core::`a_local_failure_before_the_listing_does_not_release_a_start_another_writer_stops`, core::`a_timeout_at_boot_is_no_refusal`, core::`a_store_down_for_the_bound_judges_the_boot`, core::`a_failing_boot_wakes_at_the_bound`, core::`a_refusal_restarts_the_bound`, sim::`a_store_down_at_boot_does_not_trip`, plant::`boot-judged-by-one-failed-attempt`"
+notes = "Found by a review of what a start does when one attempt fails before the listing. **untested** end to end: no replica or CLI test shows the child starting after the bound"
 
 [[row]]
 table = "Fail-stop"

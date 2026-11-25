@@ -1886,7 +1886,10 @@ impl Runner {
         {
             self.expect(StopCause::RemoteCorrupt);
         }
-        if matches!(shape, crate::FaultShape::Rate { .. }) {
+        if matches!(
+            shape,
+            crate::FaultShape::Rate { .. } | crate::FaultShape::Scratch(_)
+        ) {
             self.rate_active = true;
         }
         if let Some(stop) =
@@ -2992,7 +2995,9 @@ pub(crate) const fn shape_error(shape: &crate::FaultShape) -> Option<&lsr_core::
         crate::FaultShape::Error(err)
         | crate::FaultShape::ErrorAfterPublish(err)
         | crate::FaultShape::Rate { err, .. } => Some(err),
-        crate::FaultShape::SizeMismatch
+        // The sweep is best effort: no stop follows, whatever its error.
+        crate::FaultShape::Scratch(_)
+        | crate::FaultShape::SizeMismatch
         | crate::FaultShape::ChecksumMismatch
         | crate::FaultShape::CorruptPublish
         | crate::FaultShape::FlipByteOnRead { .. } => None,

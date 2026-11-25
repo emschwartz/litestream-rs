@@ -26,6 +26,8 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 | S3's list of files is out of date | Trust the list. Object storage that lists behind its writes is unsupported |
 | The replicator restarts while replication is failing | Not covered: the failure is forgotten. The count of failed tries and the degraded report start again from zero, so a replicator that keeps restarting can stay quiet. litestream-rs carries one number across the restart, the age of the oldest change that was staged and not yet in S3 (`lsr_unreplicated_age_seconds`) |
 | A replica at the top of a bucket, with no folder inside it: `s3://bucket/` with the slash at the end, or `type: s3` with a `bucket` and no `path` | Works. Every object's name in the bucket starts with a slash, for example `/0000/<file>.ltx` ([decisions/D181.md](decisions/D181.md)) |
+| The S3 permissions Litestream's guide publishes | Work. litestream-rs also tries to list and abort open multipart uploads at start, and skips that sweep, with a warning, when the policy refuses it ([s3-permissions.md](s3-permissions.md)) |
+| The store is down at start, with `hold-start` (litestream-rs only; Go never holds writes) | Starts the application at once | Holds writes while boot attempts fail, up to 15 seconds from the first failure, then releases them and starts the `-exec` child. One failed attempt does not release, because the next may find another writer ([decisions/D207.md](decisions/D207.md)) |
 | `replicate` and `restore` fail | Exit 1 |
 
 ### Files waiting to upload at a restart
