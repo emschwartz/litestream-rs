@@ -33,6 +33,8 @@ mod histories;
 #[cfg(test)]
 mod kill_after_fault;
 #[cfg(test)]
+mod level_holes;
+#[cfg(test)]
 mod marks;
 #[cfg(test)]
 mod needless_snapshot;
@@ -46,6 +48,8 @@ mod restored_staging;
 mod retention;
 #[cfg(test)]
 mod short_write;
+#[cfg(test)]
+mod sliced;
 #[cfg(test)]
 mod snapshot_causes;
 #[cfg(test)]

@@ -1,0 +1,6 @@
+# A source file that starts at or below the destination's newest file and ends above it is
+# not counted, so a fill is written over transactions that file already holds.
+name = "fill-under-a-straddling-source"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = ["maintain::tests::a_source_that_straddles_the_destinations_newest_file_is_not_filled_under"]

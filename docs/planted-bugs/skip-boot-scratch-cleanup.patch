@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 0000000..0000000 100644
+index 38b4ead2f..e1077ce39 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2744,7 +2744,7 @@ async fn boot_listing<L: Role, R: Role>(
-     denied: &mut bool,
+@@ -2829,7 +2829,7 @@ async fn boot_listing<L: Role, R: Role>(
      takeover: Takeover,
+     unsent: &Unsent<'_>,
  ) -> Result<Listed, BootStep> {
 -    remove_scratch(staging, remote, denied).await?;
 +

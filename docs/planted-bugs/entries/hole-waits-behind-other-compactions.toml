@@ -1,0 +1,6 @@
+# A hole is closed only when the planner reaches its level, after any lower level's job:
+# that job is followed by passes that list tails, where the hole no longer shows.
+name = "hole-waits-behind-other-compactions"
+fix = "claude/level-holes"
+package = "lsr-core"
+tests = ["maintain::tests::a_hole_is_closed_before_a_lower_level_compacts"]

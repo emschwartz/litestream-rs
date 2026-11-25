@@ -31,6 +31,7 @@ impl Runner {
                 | Event::Synced { .. }
                 | Event::Checkpointed { .. }
                 | Event::Uploaded(_)
+                | Event::Sending { .. }
                 | Event::Maintained { .. }
                 | Event::Idle
                 | Event::Resnapshot(_)
