@@ -1,7 +1,7 @@
 //! An older copy of the database put on a new host over the replica of the newer one, through
 //! the built `lsr`: host A replicates, a file backup is taken, A commits more and replicates,
 //! A is lost, and the backup is copied to host B, which starts `lsr` on the same replica with
-//! a working folder of its own (`docs/decisions/D205.md`). The replica's newest state must not
+//! a working folder of its own (`docs/decisions/D214.md`). The replica's newest state must not
 //! go back to the backup's: the start stops and asks. The ordinary history of
 //! `ahead_of_replica.rs` (the working folder lost while the database is newer) still carries on.
 

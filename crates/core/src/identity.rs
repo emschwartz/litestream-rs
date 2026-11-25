@@ -36,7 +36,7 @@
 //! ours raises and nothing lowers. A counter below the replica's is an ancestor, so it is
 //! [`Identity::Other`] and the boot stops. The local walk finds the counter's page before the
 //! restore, the restore keeps that page's bytes, and both are read after it
-//! (`docs/decisions/D205.md`). A counter that cannot be read on either side is no evidence.
+//! (`docs/decisions/D214.md`). A counter that cannot be read on either side is no evidence.
 
 pub(crate) mod counter;
 
