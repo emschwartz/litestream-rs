@@ -1215,6 +1215,16 @@ recovered_by = "core::`a_whole_listing_between_slices_plans_nothing_over_another
 notes = "Before: the other writer's file was compacted into level 1, and after the stop the boot took that file as holding the commit and dropped its own staged copy, so the replica restored a database no commit made. R only after the other writer's file was removed"
 
 [[row]]
+table = "Maintenance and retention"
+id = "MAINT-17"
+circumstance = "A level-1 compaction's inputs are level-0 files still in staging (the steady case: staged files stay until level 1 covers them)"
+response = "continue. The inputs are read from staging and nothing is read back from the replica for a file this process put there itself: the engine keeps the token each put was checked against (in memory, at most 4,096, let go when the staged file is pruned) and compares the staged file's checksum and the listed size with it. A staged file that no longer matches, or a replica object of another length, sends the compaction to the replica's copies. A file with no token (staged and sent before a restart, or confirmed by a listing) is compared by a 17-byte read of the replica's object (`docs/decisions/D236.md`)"
+signal = "none"
+at_risk = "An object replaced on the replica, after this process's put was acknowledged, by one of the same length: level 1 holds what this process sent and level 0 the other object, as under Go, which compares nothing"
+recovery = "n/a"
+detected_by = "core::`a_steady_writer_reads_no_level_zero_file_back`, core::`a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replica`, core::`a_staged_copy_that_changed_since_it_was_sent_is_not_compacted_from`, core::`a_replica_object_of_another_size_than_was_sent_is_read_from_the_replica`, core::`after_a_restart_only_the_files_left_staged_are_read_back`, core::`sent_tokens_are_let_go_when_their_staged_files_are_pruned`, core::`level_one_is_built_from_the_replica_when_the_local_copy_differs`; plant::`compaction-reads-back-what-it-sent`, plant::`sent-token-not-compared`, plant::`sent-tokens-never-let-go`, plant::`level-one-from-unlike-staged`"
+notes = "Before: one ranged GET per level-0 file, 154 in two minutes of 20 commits a second on the counting test, where Go makes none. After a restart the files left staged cost one such GET each, once (13 on the test)"
+[[row]]
 table = "Restore"
 id = "REST-1"
 circumstance = "A chain from a file that begins at transaction 1 reaches the target exactly (`plan.rs`)"

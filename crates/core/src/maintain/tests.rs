@@ -18,6 +18,7 @@ use crate::mem::MemStore;
 use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::store::WriteMode;
 use crate::store::{PageLimit, StoreOp, Upload};
+use crate::witness::{Sent, Witnessed};
 
 /// A day-aligned instant (2023-11-15), so every default window starts on it.
 pub(super) const T0: i64 = 1_700_006_400_000;
@@ -109,7 +110,7 @@ pub(super) async fn run_compact<L: Role, R: Role>(
     local: &L,
     replica: &R,
 ) -> Outcome {
-    run_compaction(job.inputs(), job.level(), local, replica).await
+    run_compaction(job.inputs(), job.level(), local, replica, &Sent::default()).await
 }
 
 /// `due` for a replica whose first snapshot is backing off, so the levels are planned as they
@@ -1696,6 +1697,30 @@ fn ltx_filled(min: u64, max: u64, created: i64, fill: u8) -> Vec<u8> {
     encoder.finish(None).unwrap().0
 }
 
+/// Transaction `n` as a file of `pages` pages: a longer file than [`ltx`] makes.
+fn ltx_pages(n: u64, created: i64, pages: u32) -> Vec<u8> {
+    let page_size = PageSize::new(PAGE).unwrap();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size,
+        commit: pages,
+        txids: range(n, n),
+        timestamp: at(created),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for page in 1..=pages {
+        let data = vec![u8::try_from(page % 251).unwrap(); page_size.bytes()];
+        encoder
+            .write_page(PageNo::new(page, page_size).unwrap(), &data)
+            .unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
 fn put(store: &MemStore, l: u8, n: u64, created: i64) {
     block_on(async {
         let k = key(l, n, n);
@@ -1840,6 +1865,145 @@ fn level_one_is_built_from_the_replica_when_the_local_copy_differs() {
         whole(&replica, &job.output_key()),
         whole(&want, &job.output_key())
     );
+}
+
+/// Tokens for the level-0 files `store` holds under `ids`: what the uploader would hold
+/// after it put those very bytes on the replica.
+fn sent_of(store: &MemStore, ids: &[u64]) -> Sent {
+    let mut sent = Sent::default();
+    for n in ids {
+        let k = key(0, *n, *n);
+        sent.put(Witnessed::of_bytes(k, &whole(store, &k)).unwrap());
+    }
+    sent
+}
+
+/// What level 1 holds when it is built from the files [`three_l0`] makes.
+fn level_one_of_three() -> Vec<u8> {
+    let want = MemStore::new();
+    three_l0(&MemStore::new(), &want);
+    let job = l1_job(&want);
+    let built = block_on(run_compact(
+        &job,
+        &Staging(&MemStore::new()),
+        &Replica(&want),
+    ));
+    assert!(matches!(built, Outcome::Compacted { .. }), "{built:?}");
+    whole(&want, &job.output_key())
+}
+
+/// A level-0 file this process put on the replica itself is compacted from staging with no
+/// read of the replica's copy: the token the put was checked against says what the replica
+/// holds. The replica's objects here are other files of the same size, which a read of
+/// their trailers would have told apart, and level 1 holds the staged content all the same.
+#[test]
+fn a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replica() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &MemStore::new());
+    for n in 1..=3 {
+        let created = T0 - 100_000 + i64::try_from(n).unwrap();
+        block_on(async {
+            let mut up = replica
+                .begin_upload(&key(0, n, n), at(created), WriteMode::Replace)
+                .await
+                .unwrap();
+            up.write(&ltx_filled(n, n, created, 0xee)).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
+    let job = l1_job(&replica);
+    let sent = sent_of(&local, &[1, 2, 3]);
+    let out = block_on(run_compaction(
+        job.inputs(),
+        job.level(),
+        &Staging(&local),
+        &Replica(&replica),
+        &sent,
+    ));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_eq!(whole(&replica, &job.output_key()), level_one_of_three());
+    // One file with no token is enough for the replica to be asked: the trailers differ,
+    // and level 1 is built from what the replica holds.
+    let fresh = MemStore::new();
+    three_l0(&MemStore::new(), &fresh);
+    block_on(async {
+        let created = T0 - 100_000 + 3;
+        let mut up = fresh
+            .begin_upload(&key(0, 3, 3), at(created), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&ltx_filled(3, 3, created, 0xee)).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let out = block_on(run_compaction(
+        job.inputs(),
+        job.level(),
+        &Staging(&local),
+        &Replica(&fresh),
+        &sent_of(&local, &[1, 2]),
+    ));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_ne!(whole(&fresh, &job.output_key()), level_one_of_three());
+}
+
+/// A staged file that changed after it was sent (a staging backup put back under a running
+/// engine) no longer ends as its token says: level 1 is built from the replica's copies.
+#[test]
+fn a_staged_copy_that_changed_since_it_was_sent_is_not_compacted_from() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let sent = sent_of(&local, &[1, 2, 3]);
+    let created = T0 - 100_000 + 3;
+    block_on(async {
+        let mut up = local
+            .begin_upload(&key(0, 3, 3), at(created), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&ltx_filled(3, 3, created, 0xee)).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let job = l1_job(&replica);
+    let out = block_on(run_compaction(
+        job.inputs(),
+        job.level(),
+        &Staging(&local),
+        &Replica(&replica),
+        &sent,
+    ));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_eq!(whole(&replica, &job.output_key()), level_one_of_three());
+}
+
+/// A replica object of another length than the file this process sent is not that file
+/// (another hand wrote the key since): the listing shows it, and level 1 is built from
+/// what the replica holds, not from the staged copy.
+#[test]
+fn a_replica_object_of_another_size_than_was_sent_is_read_from_the_replica() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let sent = sent_of(&local, &[1, 2, 3]);
+    // Transaction 3 on the replica now spans two pages: a longer file than was sent.
+    let created = T0 - 100_000 + 3;
+    let longer = ltx_pages(3, created, 2);
+    assert_ne!(longer.len(), whole(&local, &key(0, 3, 3)).len());
+    block_on(async {
+        let mut up = replica
+            .begin_upload(&key(0, 3, 3), at(created), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&longer).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let job = l1_job(&replica);
+    let out = block_on(run_compaction(
+        job.inputs(),
+        job.level(),
+        &Staging(&local),
+        &Replica(&replica),
+        &sent,
+    ));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_ne!(whole(&replica, &job.output_key()), level_one_of_three());
 }
 
 #[test]

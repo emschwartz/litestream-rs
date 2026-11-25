@@ -107,6 +107,7 @@ use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
 use crate::store::{CorruptCause, ObjectStore, ReadLen, StoreError};
+use crate::witness::Sent;
 use retain::{Retention, retention};
 
 pub use config::{
@@ -1042,7 +1043,8 @@ pub enum Outcome {
 
 /// Runs one merge of `inputs` into `level`: a compaction, or the first snapshot (D205). A merge
 /// of level-0 files reads `local` when every input's local copy is the replica's object
-/// ([`local_is_replica`]), and the replica otherwise or once when an input is missing or does not
+/// ([`local_is_replica`], which asks the replica nothing about a file `sent` holds a token
+/// for), and the replica otherwise or once when an input is missing or does not
 /// decode locally (the local copy may be gone after a restart, or rotten); every other level
 /// reads the replica. The output always goes to the replica. Inputs are never
 /// deleted.
@@ -1058,6 +1060,7 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
     level: Level,
     local: &L,
     replica: &R,
+    sent: &Sent,
 ) -> Outcome {
     let output = FileKey::new(level, inputs.range());
     match crate::store::exists(replica, &output).await {
@@ -1070,7 +1073,7 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
         .iter()
         .all(|info| info.key.level() == Level::ZERO)
     {
-        compact_from_level_zero(inputs, level, local, replica).await
+        compact_from_level_zero(inputs, level, local, replica, sent).await
     } else {
         compact_in(replica, replica, inputs, level).await
     };
@@ -1102,8 +1105,9 @@ async fn compact_from_level_zero<L: Role, R: Role>(
     level: Level,
     local: &L,
     replica: &R,
+    sent: &Sent,
 ) -> Result<Compacted, CompactError> {
-    if !local_is_replica(local, replica, inputs).await? {
+    if !local_is_replica(local, replica, inputs, sent).await? {
         return compact_in(replica, replica, inputs, level).await;
     }
     // The source is staging here, so a failed read is staging's error
@@ -1127,13 +1131,20 @@ const _: () = assert!(matches!(TRAILER_LEN.checked_add(1), Some(17)));
 /// differ (a staging backup put back, a file staged again after the replica
 /// took the first): building level 1 from it would leave the replica with two
 /// contents for one transaction, since restores read level 0 from the
-/// replica. One read of 17 bytes per input from each store; a local copy that
-/// is gone or differs answers false, and a replica object that is gone is
-/// [`CompactError::InputVanished`].
+/// replica. One read of 17 bytes per input from staging; a local copy that
+/// is gone or differs answers false.
+///
+/// What the replica holds under a key is not read back when this process put it there
+/// itself: `sent` holds the token the put was checked against, on the read that produced
+/// the bytes, and the store acknowledged the put (`docs/decisions/D236.md`). Go reads its
+/// local copies and compares nothing. A file with no token (a process before this one
+/// staged and sent it, or the put's answer was lost) costs one read of 17 bytes from the
+/// replica, where an object that is gone is [`CompactError::InputVanished`].
 async fn local_is_replica<L: Role, R: Role>(
     local: &L,
     replica: &R,
     inputs: &CompactionInputs,
+    sent: &Sent,
 ) -> Result<bool, CompactError> {
     let trailer = u64::try_from(TRAILER_LEN).unwrap_or(u64::MAX);
     for info in inputs.files() {
@@ -1146,6 +1157,14 @@ async fn local_is_replica<L: Role, R: Role>(
             Err(err) => return Err(L::compact_input(err)),
         };
         if ours.len() != TRAILER_LEN {
+            return Ok(false);
+        }
+        if let Some(token) = sent.get(&info.key) {
+            // The listed size is the replica's: an object another hand replaced with one of
+            // another length is read from the replica, as is a staged copy that changed.
+            if token.ends_as(info.size, &ours) {
+                continue;
+            }
             return Ok(false);
         }
         let theirs = match replica.read(&info.key, at, TAIL).await {

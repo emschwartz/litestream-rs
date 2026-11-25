@@ -1,0 +1,16 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1162,10 +1162,8 @@
+         if let Some(token) = sent.get(&info.key) {
+             // The listed size is the replica's: an object another hand replaced with one of
+             // another length is read from the replica, as is a staged copy that changed.
+-            if token.ends_as(info.size, &ours) {
+-                continue;
+-            }
+-            return Ok(false);
++            let _ = token;
++            continue;
+         }
+         let theirs = match replica.read(&info.key, at, TAIL).await {
+             Ok(bytes) => bytes,

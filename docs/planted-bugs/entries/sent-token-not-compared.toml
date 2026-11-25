@@ -1,0 +1,9 @@
+# A staged file with a token is compacted from staging without comparing its end and the
+# listed size with the token, so a staged copy that changed since it was sent goes into level 1.
+name = "sent-token-not-compared"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "maintain::tests::a_staged_copy_that_changed_since_it_was_sent_is_not_compacted_from",
+    "maintain::tests::a_replica_object_of_another_size_than_was_sent_is_read_from_the_replica",
+]

@@ -37,7 +37,7 @@ use crate::position::Position;
 use crate::store::Denied;
 use crate::takeover::TakeoverRecord;
 use crate::upload::{InFlight, UploadState};
-use crate::witness::Witnesses;
+use crate::witness::{Sent, Witnesses};
 
 /// Whether the actor was asked to stop, which no rebuild forgets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,6 +446,9 @@ pub(super) struct Engine {
     /// The uploader's tokens for the pending staged files (`crate::witness`):
     /// held in memory only, so a new engine witnesses again at boot.
     pub(super) witnesses: Witnesses,
+    /// The tokens of the staged files this engine put on the replica and has not pruned:
+    /// what a level-1 compaction knows of the replica's copies without reading them.
+    pub(super) sent: Sent,
     /// The newest level-0 transaction this engine sent a put for. Past what a listing or a
     /// commit confirmed, only its own puts whose answer was lost can be on the replica: a
     /// boot's listing showed everything earlier processes put. So a takeover record before
@@ -479,6 +482,7 @@ impl Engine {
             pruned: None,
             dropped_through: None,
             witnesses: Witnesses::new(),
+            sent: Sent::default(),
             attempted: None,
             syncs_ahead: 0,
             slices_ahead: 0,

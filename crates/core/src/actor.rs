@@ -2025,6 +2025,12 @@ impl Actor {
                     if let Did::Diverged { from, .. } = uploaded.did {
                         return Some(self.diverged(env, uploaded.state, from, now).await);
                     }
+                    // Before the confirmed position lets the token go.
+                    if let Did::Put(info) = &uploaded.did
+                        && let Some(token) = self.engine.witnesses.get(&info.key)
+                    {
+                        self.engine.sent.put(*token);
+                    }
                     self.set_upload(uploaded.state);
                     last = uploaded.did;
                 }
@@ -2227,6 +2233,7 @@ impl Actor {
         }
         self.kept.tasks.get_mut(Task::Prune).succeed();
         self.engine.pruned = Some(through);
+        self.engine.sent.pruned_through(through);
         if keys.is_empty() {
             return None;
         }
@@ -2390,7 +2397,7 @@ impl Actor {
     ) -> Tick {
         // One call site for every merge, so the tick's future holds one compaction.
         let outcome = if let Some((inputs, level)) = job.merge() {
-            run_compaction(inputs, level, env.staging, env.remote).await
+            run_compaction(inputs, level, env.staging, env.remote, &self.engine.sent).await
         } else if let Job::Delete(delete) = job {
             run_delete(delete, env.remote).await
         } else {
