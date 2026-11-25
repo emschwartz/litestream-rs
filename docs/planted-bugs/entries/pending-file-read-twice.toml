@@ -1,0 +1,8 @@
+# Recovery reads the newest staged file again instead of judging it from the read the boot's pass made: a pending file is read twice.
+name = "pending-file-read-twice"
+fix = "claude/boot-local"
+package = "lsr-core"
+tests = [
+    "a_boot_reads_each_pending_staged_file_once",
+    "a_boot_after_a_confirmed_upload_reads_each_pending_staged_file_once",
+]

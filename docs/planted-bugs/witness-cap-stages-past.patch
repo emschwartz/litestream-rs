@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 61e29ab6..3656709f 100644
+index 143825550..4771337f6 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1536,7 +1536,7 @@ impl Actor {
+@@ -1636,7 +1636,7 @@ impl Actor {
          env: &mut Env<'_, W, P, C, L, R>,
          now: Timestamp,
      ) -> Result<Stepped, Fault> {
@@ -11,11 +11,11 @@ index 61e29ab6..3656709f 100644
              // Marked as a step cut short, so the sync runs again when room
              // frees up: no new WAL change may come to wake it.
              self.engine.course.set_tail(Tail::More);
-@@ -2434,7 +2434,6 @@ impl Actor {
-             return self.kept.tasks.ready(Task::Sync, now);
-         }
+@@ -2547,7 +2547,6 @@ impl Actor {
+     /// change it does not know of is the caller's to wake on.
+     fn ready_work(&self, now: Timestamp) -> bool {
          let sync = self.kept.tasks.ready(Task::Sync, now)
 -            && self.staging_has_room()
              && (self.pending().is_some()
                  || self.more_wal()
-                 || (self.running() && self.checkpoint_decision(now).is_some()));
+                 || (self.checkpoints() && self.checkpoint_decision(now).is_some()));

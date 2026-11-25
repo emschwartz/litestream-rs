@@ -107,7 +107,8 @@ fn plan_reference_only_in_oracles() {
 /// the instant for something else: stores write and report it, the CLI
 /// prints it, retention and the snapshot interval age files by it (write
 /// time, as Go does with `LastModified`; neither needs it to date a commit),
-/// verify measures skew, and the oracles restate the contract on their own.
+/// verify measures skew, a local course's file moves up to level 0 under the time it was
+/// staged with (`actor/apart.rs`), and the oracles restate the contract on their own.
 #[test]
 fn bare_created_at_instants_only_in_allowed_sites() {
     let found = offenders(
@@ -119,6 +120,7 @@ fn bare_created_at_instants_only_in_allowed_sites() {
             "crates/core/src/maintain/retain.rs",
             "crates/core/src/maintain.rs",
             "crates/core/src/verify.rs",
+            "crates/core/src/actor/apart.rs",
             "crates/core/src/spec_view.rs",
             "crates/sim/",
             "crates/fuzzing/",

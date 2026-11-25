@@ -694,7 +694,8 @@ impl Runner {
         in_tick: Option<(crate::CommitId, usize)>,
         at: usize,
     ) {
-        let events = self.w.staging_recorder.events();
+        let raw = self.w.staging_recorder.events();
+        let (events, _) = crate::slot::as_staged(&raw, self.staging_seen);
         for (index, event) in events.iter().enumerate().skip(self.staging_seen) {
             let newest_commit = match in_tick {
                 Some((commit, from)) if index >= from => Some(commit),
@@ -791,11 +792,23 @@ impl Runner {
         Ok(())
     }
 
-    /// Every level-0 file this tick staged from the WAL holds frames that are durable: the
+    /// Every file this tick staged from the WAL holds frames that are durable: the
     /// engine's sync before staging, which a disk only fails to honour when it lies (that
-    /// scenario says so) or after an earlier failed sync of the same generation.
-    fn judge_staged_durable(&self) -> Result<(), Violation> {
-        let events = self.w.staging_recorder.events();
+    /// scenario says so) or after an earlier failed sync of the same generation. A file is
+    /// staged where it is first written, at level 0 or in a local course's slot; its move up
+    /// from the slot stages nothing ([`crate::slot`]).
+    fn judge_staged_durable(&mut self) -> Result<(), Violation> {
+        let raw = self.w.staging_recorder.events();
+        let (events, slot) = crate::slot::as_staged(&raw, self.staging_seen);
+        for (key, n) in [
+            ("staged.apart", slot.staged),
+            ("staged.moved_up", slot.moved_up),
+            ("staged.apart_given_up", slot.given_up),
+        ] {
+            if n > 0 {
+                self.report.reach.add(key, n);
+            }
+        }
         for event in events.iter().skip(self.staging_seen) {
             if let crate::RecorderEvent::Put {
                 key,
@@ -848,6 +861,10 @@ impl Runner {
         if self.actor.booted() {
             self.booted = true;
             return;
+        }
+        if self.actor.staged().is_some() {
+            // A position before any boot: the local course of a store outage.
+            self.report.reach.bump("boot.local_course");
         }
         let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
         let lists = self.w.remote_recorder.counts().lists;
@@ -1287,7 +1304,8 @@ impl Runner {
         if !now {
             return Ok(());
         }
-        let staging = self.w.staging_recorder.events();
+        let raw = self.w.staging_recorder.events();
+        let (staging, _) = crate::slot::as_staged(&raw, raw.len());
         let remote = self.w.remote_recorder.events();
         let world = crate::forcing::WithEngine {
             world: &self.w,
