@@ -245,11 +245,12 @@ impl ObjectStore for Counting {
         self.inner.read_with_created_at(file, len)
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send {
         self.count();
         if let Some(wal) = self.moves_epoch.lock().unwrap().take() {
@@ -259,7 +260,7 @@ impl ObjectStore for Counting {
             wal.append_tx(&[(pg(1), vec![n; PS.bytes()])], nz(3));
         }
         let refused = self.refuse_uploads.load(Ordering::SeqCst);
-        let begun = self.inner.begin_upload(key, created_at, mode);
+        let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
         async move {
             if refused {
                 return Err(StoreError::Transient {

@@ -94,17 +94,20 @@ impl ObjectStore for Flawed {
         Ok((self.shown(bytes), created_at))
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<crate::MemUpload, StoreError> {
         let mode = match self.flaw {
             Flaw::IgnoresWriteMode => WriteMode::Replace,
             Flaw::ReadsEmpty | Flaw::ListsAnotherCreatedAt => mode,
         };
-        self.inner.begin_upload(key, created_at, mode).await
+        self.inner
+            .begin_sized_upload(key, created_at, mode, len)
+            .await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

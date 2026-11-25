@@ -2011,13 +2011,14 @@ impl ObjectStore for FailsWholeReads {
         }
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl std::future::Future<Output = Result<Self::Upload, StoreError>> + Send {
-        self.inner.begin_upload(key, created_at, mode)
+        self.inner.begin_sized_upload(key, created_at, mode, len)
     }
 
     fn delete(

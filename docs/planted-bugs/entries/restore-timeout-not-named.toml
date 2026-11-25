@@ -1,0 +1,7 @@
+# A restore whose listing budget ran out reports the bare last store error, naming neither the endpoint
+# nor what was tried.
+name = "restore-timeout-not-named"
+fix = "plant"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["a_restore_that_cannot_list_names_the_endpoint_and_what_was_tried"]

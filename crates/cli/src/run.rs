@@ -33,7 +33,8 @@ use lsr_config::{
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
     MAX_ATTEMPTS, ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions,
-    RestoreTarget, Restored, Severity, VerifyError, plan, resolve, restore_with, verify,
+    RestoreTarget, Restored, Retrying, Severity, StoreError, VerifyError, plan, resolve,
+    restore_with, verify,
 };
 use lsr_replica::local::{
     ClearError, CreateError, Existing, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
@@ -411,6 +412,23 @@ pub enum CliError {
     /// `CalcRestoreTarget`, which `-if-replica-exists` does not excuse).
     #[error("no backups found")]
     NoBackupsFound,
+    /// A restore's listing of the replica stopped retrying because its time budget ran out:
+    /// the endpoint did not answer, or answered only with failures. Nothing was written.
+    #[error(
+        "the restore could not list {endpoint} within {} seconds: {listings} listing requests \
+         were made, each failed one retried with backoff, and the last failed with: {last}",
+        .budget.as_secs()
+    )]
+    ListingTimedOut {
+        /// The endpoint asked.
+        endpoint: String,
+        /// The budget that was spent.
+        budget: Duration,
+        /// Listing requests made, the retries included.
+        listings: u64,
+        /// What the last one failed with.
+        last: StoreError,
+    },
     /// The output's parent directory could not be created.
     #[error("create parent directory: {0}")]
     Parent(#[source] io::Error),
@@ -532,7 +550,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::NoDatabase
         | CliError::DatabasePath(_)
         | CliError::NotInConfig { .. } => Exit::Refused,
-        CliError::Parent(_) => Exit::Environment,
+        CliError::Parent(_) | CliError::ListingTimedOut { .. } => Exit::Environment,
         CliError::NoBackupsFound => Exit::Refused,
         CliError::Restore(err) => match err {
             RestoreError::NoPlan(_)
@@ -880,7 +898,7 @@ async fn restore_or_plan(
             (Opened::Dir(FsStore::new(path)), bare)
         }
         Replica::S3(config) => (
-            Opened::S3(replica::open_s3_with(
+            Opened::S3(replica::open_s3_for_restore(
                 (**config).clone(),
                 opening.keys.clone(),
             )?),
@@ -890,8 +908,14 @@ async fn restore_or_plan(
     let finished = match (opened, dry_run) {
         (Opened::Dir(store), false) => restore_on(&store, output, how).await,
         (Opened::Dir(store), true) => plan_on(&store, output, how).await,
-        (Opened::S3(store), false) => restore_on(&store, output, how).await,
-        (Opened::S3(store), true) => plan_on(&store, output, how).await,
+        (Opened::S3(store), false) => {
+            let done = restore_on(&store, output, how).await;
+            name_listing_timeout(done, &store, &opening.replica)
+        }
+        (Opened::S3(store), true) => {
+            let done = plan_on(&store, output, how).await;
+            name_listing_timeout(done, &store, &opening.replica)
+        }
     };
     let Some(path) = bare else {
         return finished;
@@ -909,6 +933,34 @@ async fn restore_or_plan(
     }
 }
 
+/// A failed restore whose listing ran out of its budget, as the error that names the endpoint
+/// and what was tried; any other outcome unchanged. The store's last error is what the restore
+/// reported, so this only adds the endpoint, the budget and the count.
+fn name_listing_timeout<T, S, P, E>(
+    done: Result<T, CliError>,
+    store: &Retrying<S, P, E>,
+    replica: &Replica,
+) -> Result<T, CliError> {
+    let (Err(error), Some(expired), Replica::S3(config)) =
+        (&done, store.listing_expired(), replica)
+    else {
+        return done;
+    };
+    let named = CliError::ListingTimedOut {
+        endpoint: config.endpoint().url().as_str().to_owned(),
+        budget: expired.budget,
+        listings: expired.listings,
+        last: expired.last,
+    };
+    if let CliError::AfterClearing { cleared, .. } = error {
+        return Err(CliError::AfterClearing {
+            cleared: cleared.clone(),
+            source: Box::new(named),
+        });
+    }
+    Err(named)
+}
+
 /// An empty-replica refusal from a directory without `ltx/`, named as that.
 fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
     match error {
@@ -920,6 +972,7 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
         other @ (CliError::NoPlan(_)
         | CliError::Parent(_)
         | CliError::NoBackupsFound
+        | CliError::ListingTimedOut { .. }
         | CliError::Config(_)
         | CliError::Plan(_)
         | CliError::NoDatabase

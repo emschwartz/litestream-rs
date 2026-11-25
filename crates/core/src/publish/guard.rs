@@ -38,7 +38,7 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
 ];
 
-const CALLS: &[&str] = &[".begin_upload(", ".delete("];
+const CALLS: &[&str] = &[".begin_upload(", ".begin_sized_upload(", ".delete("];
 
 /// The two ways to turn a store error into a fault, which only `fault` (and
 /// its `role` module) may name: everywhere else an error is classified by its

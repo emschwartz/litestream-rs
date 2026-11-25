@@ -436,6 +436,8 @@ pub enum StoreClass {
     CreateOnlyUnsupported,
     /// [`StoreError::Refused`].
     Refused,
+    /// [`StoreError::ObjectTooLarge`].
+    ObjectTooLarge,
 }
 
 /// Every store operation, in declaration order ([`store_ordinal`] checks it).
@@ -447,7 +449,7 @@ pub const STORE_OPS: [StoreOp; 4] = [
 ];
 
 /// Every store error class, every denial kind among them ([`store_class`] checks it).
-pub const STORE_CLASSES: [StoreClass; 13] = [
+pub const STORE_CLASSES: [StoreClass; 14] = [
     StoreClass::Transient,
     StoreClass::Throttled,
     StoreClass::Denied(Denied::Credentials),
@@ -461,6 +463,7 @@ pub const STORE_CLASSES: [StoreClass; 13] = [
     StoreClass::Corrupt,
     StoreClass::CreateOnlyUnsupported,
     StoreClass::Refused,
+    StoreClass::ObjectTooLarge,
 ];
 
 /// Both stores.
@@ -496,6 +499,7 @@ pub const fn store_class(err: &StoreError) -> StoreClass {
         StoreError::Corrupt { .. } => StoreClass::Corrupt,
         StoreError::CreateOnlyUnsupported { .. } => StoreClass::CreateOnlyUnsupported,
         StoreError::Refused { .. } => StoreClass::Refused,
+        StoreError::ObjectTooLarge { .. } => StoreClass::ObjectTooLarge,
     }
 }
 
@@ -511,6 +515,8 @@ const TAKEN_IS_WORLD: &str = "a taken key is a fact about the store: a create-on
 const NO_CREATE_ONLY_IS_WORLD: &str = "a store without create-only writes is a fact about the \
                                        store for the whole run: drawn as the world's \
                                        Weights::no_create_only, every create-only commit refused";
+const TOO_LARGE_IS_SIZE: &str = "an object over the store's limit is a fact about its size: only store-s3 \
+                             refuses one, at five terabytes, and no simulated file is that big";
 const NOT_FOUND_NEVER: &str = "neither store reports NotFound here: a listing of nothing is empty, a delete of nothing succeeds";
 
 /// The cell of `op` and `class` on `target`: the staging store against `store-fs`, the replica
@@ -557,6 +563,7 @@ pub const fn store_cell(target: Target, op: StoreOp, class: StoreClass) -> Cell 
             Target::Remote => Cell::Drawn,
             Target::Staging => Cell::Impossible("store-fs has no status codes and refuses nothing"),
         },
+        StoreClass::ObjectTooLarge => Cell::Impossible(TOO_LARGE_IS_SIZE),
     }
 }
 
@@ -616,6 +623,7 @@ fn store_error(
         | StoreClass::AlreadyExists
         | StoreClass::ScratchExhausted
         | StoreClass::Corrupt
+        | StoreClass::ObjectTooLarge
         | StoreClass::CreateOnlyUnsupported => {
             // NotFound, AlreadyExists and Corrupt are never drawn. A scratch exhaustion names a key the
             // engine only reports, never acts on.
@@ -644,6 +652,7 @@ fn placeholder_error(op: StoreOp, class: StoreClass) -> StoreError {
         | StoreClass::NotFound
         | StoreClass::AlreadyExists
         | StoreClass::CreateOnlyUnsupported
+        | StoreClass::ObjectTooLarge
         | StoreClass::Refused => transient,
     }
 }
@@ -669,6 +678,7 @@ pub const fn refused_before_acting(err: &StoreError) -> bool {
     match store_class(err) {
         StoreClass::Denied(_)
         | StoreClass::Refused
+        | StoreClass::ObjectTooLarge
         | StoreClass::ScratchExhausted
         | StoreClass::CreateOnlyUnsupported => true,
         StoreClass::Transient
@@ -696,6 +706,7 @@ pub const fn store_stop(target: Target, err: &StoreError) -> Option<StopCause> {
             | StoreClass::Throttled
             | StoreClass::NotFound
             | StoreClass::AlreadyExists
+            | StoreClass::ObjectTooLarge
             | StoreClass::ScratchExhausted,
         )
         | (Target::Staging, _) => None,

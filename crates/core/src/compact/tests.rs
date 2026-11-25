@@ -319,22 +319,25 @@ impl ObjectStore for Spy {
         self.inner.read_with_created_at(file, len)
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         at: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl Future<Output = Result<SpyUpload, StoreError>> + Send {
         let mut script = self.script();
         let result = match script.fail_begin.take() {
             Some(err) => Err(err),
-            None => block_on(self.inner.begin_upload(at, created_at, mode)).map(|inner| {
-                script.begins += 1;
-                SpyUpload {
-                    inner,
-                    script: Arc::clone(&self.script),
-                }
-            }),
+            None => {
+                block_on(self.inner.begin_sized_upload(at, created_at, mode, len)).map(|inner| {
+                    script.begins += 1;
+                    SpyUpload {
+                        inner,
+                        script: Arc::clone(&self.script),
+                    }
+                })
+            }
         };
         std::future::ready(result)
     }
