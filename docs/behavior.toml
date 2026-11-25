@@ -2093,6 +2093,17 @@ no_test = "Go's warning: code only"
 notes = "Go's side was checked by hand against the pinned build (it warned and replicated); nothing in this repository exercises it. Documented in docs/config-keys.md and docs/running.md"
 
 [[row]]
+table = "Config and startup"
+id = "CFG-53"
+circumstance = "`replicate -once`: the engine's ordinary maintenance schedule. Go switches every background monitor off before it opens the store (`replicate.go:374-383`), so its one-off run only syncs, uploads, then snapshots and enforces retention when asked"
+response = "as Go: the engine of a `-once` run plans no compaction, no interval snapshot and no retention pass of its own, in the ticks before the drain as in it; only what the drain is asked to end with runs (CFG-45, CFG-47). A run that started the ordinary schedule compacted an idle replica's empty level 1 at once, and the retention pass then measured the replica's age from that fresh file (D221)"
+signal = "none"
+at_risk = "None"
+recovery = "n/a"
+detected_by = "core::`one_off::the_daemon_s_engine_compacts_an_idle_replica`, core::`one_off::a_one_off_engine_plans_nothing_however_late_it_ticks`, core::`one_off::a_one_off_drain_still_ends_with_the_retention_pass`, compat::`on_an_idle_replica_lsr_keeps_a_snapshot_go_deletes`; plant::`once-engine-runs-maintenance`"
+notes = "The race was one run in fifty to a hundred of `dropin_retention` (#376)"
+
+[[row]]
 table = "Circumstances the code does not distinguish"
 id = "WORLD-1"
 circumstance = "Two processes replicate one database through one staging directory (an overlapping rolling deploy; `lsr replicate` run by hand beside the daemon; two databases configured with one `meta_dir`)"
