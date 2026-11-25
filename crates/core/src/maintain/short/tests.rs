@@ -241,7 +241,7 @@ fn a_compaction_output_is_the_newest_file_of_its_level_and_an_older_one_is_not()
 #[test]
 fn forgetting_makes_the_next_pass_whole() {
     let mut known = Remembered::default();
-    let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let inventory = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
     let decided = Decided {
         due: Due::Wait {
             until: None,
@@ -316,7 +316,7 @@ fn a_whole_listing_that_finds_a_level_empty_forgets_its_record() {
     let before = Inventory::from_files([file(0, 1, 1, T0), file(1, 1, 5, T0)]).unwrap();
     known.learn_full(&before, at(T0), &defaults(), &waiting());
     assert_eq!(known.newest_txid(1), Some(txid(5)));
-    let after = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let after = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
     known.learn_full(&after, at(T0 + 1), &defaults(), &waiting());
     assert_eq!(known.newest_txid(1), None);
     assert_eq!(
@@ -347,7 +347,7 @@ fn the_newest_file_of_every_level_to_eight_is_remembered_for_the_anchor() {
 #[test]
 fn a_compaction_first_does_not_lose_the_retention_wake() {
     let mut known = Remembered::default();
-    let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let inventory = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
     let waking = Decided {
         retention_wake: Some(at(T0 + 5_000)),
         ..waiting()
@@ -524,7 +524,7 @@ fn a_configured_retention_check_interval_is_the_interval_the_check_runs_at() {
     assert_eq!(defaults().retention_check_every().millis(), 120_000);
     for (cfg, every) in [(set, 60_000), (defaults(), 120_000)] {
         let mut known = Remembered::default();
-        let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+        let inventory = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
         known.learn_full(&inventory, at(T0), &cfg, &waiting());
         for l in compaction_levels(&cfg) {
             known.quiet.insert(l, at(T0 + 10_000_000));
@@ -544,7 +544,7 @@ fn a_configured_retention_check_interval_holds_while_compaction_is_due() {
         defaults().with_l0_check_interval(crate::maintain::Interval::new(one_minute).unwrap());
     for (cfg, every, behind_a_job) in [(set, 60_000, 60_000), (defaults(), 120_000, 240_000)] {
         let mut known = Remembered::default();
-        let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+        let inventory = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
         known.learn_full(&inventory, at(T0), &cfg, &waiting());
         let due = known.plan(&cfg, at(T0 + every), None);
         assert!(
@@ -560,7 +560,7 @@ fn a_configured_retention_check_interval_holds_while_compaction_is_due() {
 #[test]
 fn the_retention_wake_is_remembered_until_it_has_come() {
     let mut known = Remembered::default();
-    let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let inventory = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
     let waking = Decided {
         retention_wake: Some(at(T0 + 5_000)),
         ..waiting()
@@ -579,7 +579,7 @@ fn the_retention_wake_is_remembered_until_it_has_come() {
 #[test]
 fn only_a_delete_above_level_zero_owes_a_whole_listing() {
     let mut known = Remembered::default();
-    let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let inventory = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
     known.learn_full(&inventory, at(T0), &defaults(), &deleting(key(0, 1, 1)));
     assert!(known.short_ok(at(T0 + 1)));
     known.learn_full(&inventory, at(T0), &defaults(), &deleting(key(1, 1, 1)));
@@ -630,7 +630,7 @@ fn a_level_above_one_is_compared_with_the_level_below_not_with_what_was_uploaded
 fn the_next_wake_is_strictly_after_now() {
     let cfg = defaults();
     let mut known = Remembered::default();
-    let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let inventory = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
     known.learn_full(&inventory, at(T0), &cfg, &waiting());
     known.quiet.insert(level(1), at(T0 + 1_000));
     assert_eq!(
@@ -967,4 +967,25 @@ fn a_short_pass_that_meets_a_hole_decides_nothing_and_asks_for_a_whole_listing()
     .value;
     assert!(!got.whole);
     assert!(matches!(got.due, Due::Run(Job::Compact(_))));
+}
+
+/// With no snapshot and no level-1 file, the first snapshot is planned before any level and
+/// only a whole listing plans it: no short pass until one of them exists (D231).
+#[test]
+fn a_replica_with_no_snapshot_and_no_level_one_file_is_listed_whole() {
+    let waiting_for_the_first_snapshot = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let mut known = Remembered::default();
+    known.learn_full(
+        &waiting_for_the_first_snapshot,
+        at(T0),
+        &defaults(),
+        &waiting(),
+    );
+    assert!(!known.short_ok(at(T0 + 1)));
+    // The snapshot, or a level-1 file (a snapshot that failed let the levels run), ends it.
+    for held in [file(9, 1, 1, T0), file(1, 1, 1, T0)] {
+        let inventory = Inventory::from_files([file(0, 1, 1, T0), held]).unwrap();
+        known.learn_full(&inventory, at(T0), &defaults(), &waiting());
+        assert!(known.short_ok(at(T0 + 1)), "{held:?}");
+    }
 }

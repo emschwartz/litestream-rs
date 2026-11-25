@@ -1,4 +1,4 @@
 name = "short-pass-before-the-first-snapshot"
 fix = "plant"
 package = "lsr-core"
-tests = ["a_first_file_sent_in_slices_does_not_let_the_levels_run"]
+tests = ["a_first_file_sent_in_slices_does_not_let_the_levels_run", "a_replica_with_no_snapshot_and_no_level_one_file_is_listed_whole"]
