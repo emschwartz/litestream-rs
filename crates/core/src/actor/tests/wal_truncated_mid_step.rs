@@ -150,6 +150,7 @@ fn a_wal_shrinking_between_the_length_and_the_frames_is_retried() {
         ck: &mut rig.ck,
         staging: &rig.staging,
         remote: &rig.remote,
+        notice: &mut |_| {},
         clock: &FakeClock::new(ts(T0 + 2)),
     };
     let tick = block_on(actor.tick(env, ts(T0 + 2)));
