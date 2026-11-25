@@ -118,6 +118,7 @@ impl Runner {
             .iter()
             .filter_map(|task| self.actor.degraded(*task).map(|degraded| (*task, degraded)))
             .collect();
+        self.denials_unbooted = !self.actor.booted();
         if let Some(wire) = self.w.remote_raw.wire() {
             let (fired_now, refused, others) = self.denial_counts(wire);
             self.denials_seen = (fired_now.len(), refused, others);
@@ -133,6 +134,21 @@ impl Runner {
 
     pub(super) fn judge_denials(&mut self, ended: &TickEnd<Tick>) -> Result<(), Violation> {
         let Some(owed) = self.owed_denials() else {
+            return Ok(());
+        };
+        if owed.sweep > 0 {
+            // The one exemption, as narrow as docs/decisions/D206.md: a permission refusal of
+            // the boot's sweep of open uploads is skipped, so the engine reports no refusal for
+            // it, but it must have noted the skip, which it reports once per process.
+            self.report.reach.bump("http_fault.sweep_denied");
+            if owed.sweep > 1 || !self.actor.scratch_sweep_denied() {
+                return Err(Violation::SweepDenialMishandled {
+                    refusals: owed.sweep,
+                    noted: self.actor.scratch_sweep_denied(),
+                });
+            }
+        }
+        let Some(first) = owed.first else {
             return Ok(());
         };
         if owed.masked || matches!(ended, TickEnd::Crashed { .. }) {
@@ -185,7 +201,7 @@ impl Runner {
             return Ok(());
         }
         Err(Violation::DenialMisreported {
-            expected: owed.first,
+            expected: first,
             got: format!("{reported:?}"),
         })
     }
@@ -196,9 +212,25 @@ impl Runner {
         let (fired_now, refused, others) = self.denial_counts(wire);
         let new = fired_now.get(self.denials_seen.0..).unwrap_or_default();
         let deletes_refused = refused > self.denials_seen.1;
+        // The start-up sweep of open uploads is the only sender of ListMultipartUploads, and of
+        // the aborts in the boot's phase: a permission refusal of either is D206's skip. Any
+        // other refusal, of another operation, in another phase or of another kind, is owed.
+        let sweeping = self.denials_unbooted;
+        let sweep = |fault: &Fault| {
+            sweeping
+                && matches!(
+                    fault,
+                    Fault::Status {
+                        on: Shape::ListUploads | Shape::Abort,
+                        ..
+                    }
+                )
+                && crate::remote::denial_of(fault) == Some(Denied::Permission)
+        };
+        let swept = new.iter().filter(|fault| sweep(fault)).count();
         let denials: Vec<&Fault> = new
             .iter()
-            .filter(|fault| crate::remote::denial_of(fault).is_some())
+            .filter(|fault| !sweep(fault) && crate::remote::denial_of(fault).is_some())
             .collect();
         let mut kinds: Vec<Denied> = denials
             .iter()
@@ -221,10 +253,15 @@ impl Runner {
             });
         // Another fault met in the same tick may be the one the engine reports: it reports the
         // first failure a step meets, and which request fails first is not the judge's to pin.
-        let masked = others > self.denials_seen.2 || new.len() > denials.len();
+        let masked =
+            others > self.denials_seen.2 || new.len() > denials.len().saturating_add(swept);
         self.denials_seen = (fired_now.len(), refused, others);
+        if kinds.is_empty() && swept == 0 {
+            return None;
+        }
         Some(Owed {
-            first: kinds.first().copied()?,
+            first: kinds.first().copied(),
+            sweep: swept,
             kinds,
             may_drop,
             masked,
@@ -281,7 +318,9 @@ const fn says_nothing_of_requests(cause: PersistentCause) -> bool {
 
 /// The refusals one tick met, as [`Runner::judge_denials`] weighs them.
 struct Owed {
-    first: Denied,
+    first: Option<Denied>,
+    /// Permission refusals of the boot's sweep of open uploads.
+    sweep: usize,
     kinds: Vec<Denied>,
     may_drop: bool,
     masked: bool,
