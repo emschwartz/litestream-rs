@@ -30,13 +30,11 @@
 //! ([`Transport::send_many`]); each part is judged alone, exactly as when
 //! parts went one at a time, and the ETags are kept in part order.
 
-use std::io;
-
 use lsr_core::{CorruptCause, FileKey, PartNumber, Reread, StoreError, StoreOp, WriteMode};
 use lsr_ltx::Timestamp;
 
 use crate::again::Sealed;
-use crate::classify::{S3Code, classify, error_in_ok_body, is_not_implemented};
+use crate::classify::{S3Code, classify, error_in_ok_body, invalid_data, is_not_implemented};
 use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag, parse_complete, parse_create, parse_head};
 use crate::store::Inner;
@@ -248,10 +246,7 @@ impl<T: Transport> Inner<T> {
     /// for the caller to list and read back.
     fn settle_spent_upload(&self, key: &FileKey, sent: Sent) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
-        let ambiguous = StoreError::Transient {
-            op,
-            kind: io::ErrorKind::InvalidData,
-        };
+        let ambiguous = invalid_data(op);
         let request = self.request(op, |b, now| b.head(now, key))?;
         let response = self.send(op, request)?;
         if !(200..300).contains(&response.status()) {

@@ -60,6 +60,7 @@ mod yaml;
 use std::io::Read as _;
 use std::path::Path;
 
+pub use build::is_url;
 pub use config::{
     AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
     OtherWriterSetting, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings,

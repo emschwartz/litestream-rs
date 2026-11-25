@@ -904,8 +904,6 @@ fn files_text(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> Strin
     out
 }
 
-/// The time a listing gave for a file, and whether it is the exact created-at time or
-/// only the bucket's `LastModified`.
 /// Go's `time.RFC3339`: to the second, UTC as `Z`.
 fn go_rfc3339(at: Timestamp) -> String {
     let full = at.to_string();
@@ -985,6 +983,8 @@ fn ltx_json(files: &[FileInfo]) -> String {
     )
 }
 
+/// The time a listing gave for a file, and whether it is the exact created-at time or
+/// only the bucket's `LastModified`.
 fn listed_time(info: &FileInfo) -> (Timestamp, bool) {
     match info.listed {
         ListedTime::Created(created_at) => (created_at.at(), true),

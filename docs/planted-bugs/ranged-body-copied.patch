@@ -1,7 +1,7 @@
 diff --git a/crates/store-s3/src/store.rs b/crates/store-s3/src/store.rs
 --- a/crates/store-s3/src/store.rs
 +++ b/crates/store-s3/src/store.rs
-@@ -707,7 +707,7 @@
+@@ -701,7 +701,7 @@
          let Some(partial) = Self::range_head(key, offset, &response)? else {
              return Ok(Vec::new());
          };
@@ -10,10 +10,3 @@ diff --git a/crates/store-s3/src/store.rs b/crates/store-s3/src/store.rs
          if !partial {
              // A server that ignored the Range header sent the whole object.
              let from = usize::try_from(offset).unwrap_or(usize::MAX);
-@@ -805,4 +805,4 @@
-             "a batch ending at 10001 is refused"
-         );
-     }
--}
-+}
-\ No newline at end of file

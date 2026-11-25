@@ -28,7 +28,10 @@ use lsr_core::{
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::classify::{classify, classify_delete_failures, classify_transport, is_range_past_end};
+use crate::classify::{
+    classify, classify_delete_failures, classify_transport, invalid_data, is_range_past_end,
+    transient_other,
+};
 use crate::config::{
     CREATION_TIME_CONCURRENCY, ConfigError, PartSize, Prefix, READ_CONCURRENCY, S3Config,
 };
@@ -377,10 +380,7 @@ fn created_at_from_head(
     last_modified: Timestamp,
 ) -> Result<CreatedAt, StoreError> {
     if head.size != size {
-        return Err(StoreError::Transient {
-            op,
-            kind: io::ErrorKind::InvalidData,
-        });
+        return Err(invalid_data(op));
     }
     Ok(match head.created_at {
         Some(created_at) => CreatedAt::metadata(created_at),
@@ -569,10 +569,7 @@ impl<T: Transport> Inner<T> {
             .into_iter()
             .map(|context| {
                 let context = context?;
-                let response = sent.next().unwrap_or(Err(StoreError::Transient {
-                    op,
-                    kind: io::ErrorKind::Other,
-                }))?;
+                let response = sent.next().unwrap_or(Err(transient_other(op)))?;
                 judge(context, response)
             })
             .collect()
@@ -688,10 +685,7 @@ impl<T: Transport> Inner<T> {
                 .and_then(content_range_start)
                 != Some(offset)
         {
-            return Err(StoreError::Transient {
-                op,
-                kind: io::ErrorKind::InvalidData,
-            });
+            return Err(invalid_data(op));
         }
         Ok(Some(partial))
     }

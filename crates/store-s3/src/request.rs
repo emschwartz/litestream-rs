@@ -53,7 +53,7 @@ const _: () = assert!(MAX_DELETE_KEYS <= 1000);
 const _: () = assert!(MAX_DELETE_KEYS >= lsr_core::MAX_DELETE);
 
 /// The object metadata key Go stores a file's timestamp under.
-const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
+pub(crate) const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
 
 const USER_AGENT: &str = concat!("litestream-rs/", env!("CARGO_PKG_VERSION"));
 
@@ -623,6 +623,7 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn put_object(
         &self,
         now: Timestamp,
@@ -746,6 +747,7 @@ impl RequestBuilder {
     /// # Errors
     /// [`RequestError::BadBatch`] for no parts or more than 10000;
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn complete_multipart(
         &self,
         now: Timestamp,
