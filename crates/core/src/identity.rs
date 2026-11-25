@@ -29,6 +29,16 @@
 //! image put back with its old modified time, and a live second writer whose files keep landing
 //! after this database's last write all fail one of the two and still stop. So the pass over the
 //! local pages runs to the end instead of stopping at the first page that differs.
+//!
+//! One more fact settles the history those two cannot, an older copy of the database (a file
+//! backup put back after the replica went on without it): the replicator's own counter,
+//! `_litestream_seq` (the [`counter`] module), which each checkpoint of Go's replicator and of
+//! ours raises and nothing lowers. A counter below the replica's is an ancestor, so it is
+//! [`Identity::Other`] and the boot stops. The local walk finds the counter's page before the
+//! restore, the restore keeps that page's bytes, and both are read after it
+//! (`docs/decisions/D204.md`). A counter that cannot be read on either side is no evidence.
+
+pub(crate) mod counter;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
@@ -102,7 +112,8 @@ pub(crate) enum Identity {
 const AHEAD_MIN_PAGES: u32 = 3;
 
 /// What the local committed state, read under `committed` (the boot's wal-index read) with
-/// `reader` on the live WAL, is against the replica's state at `tip`.
+/// `reader` on the live WAL, is against the replica's state at `tip`, whose page size is
+/// `page_size`.
 ///
 /// # Errors
 /// The [`Fault`] a read met: the replica could not give its state at `tip`, a local page or
@@ -114,9 +125,23 @@ pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
     db: &mut P,
     remote: &R,
     tip: Txid,
+    page_size: lsr_ltx::PageSize,
 ) -> Result<Identity, Fault> {
+    // The local side first, so the restore can keep the page the local counter lives on.
+    let mut local = match reader {
+        Some(reader) if reader.header().page_size() != page_size => None,
+        reader => Some(Local::open(reader, committed, db)?),
+    };
+    let counter = match local.as_mut() {
+        Some(local) => local.counter(page_size)?,
+        None => None,
+    };
     let mut image = BTreeMap::new();
-    let sink = DigestSink { pages: &mut image };
+    let mut kept = None;
+    let sink = DigestSink {
+        pages: &mut image,
+        keep: counter.as_ref().map(|(root, _)| (root.get(), &mut kept)),
+    };
     let restored = restore_once(
         remote,
         RestoreTarget::Txid(tip),
@@ -131,28 +156,14 @@ pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
         Err(CheckError::Unrestorable) => return Ok(Identity::Other),
         Err(CheckError::Fault(fault)) => return Err(fault),
     };
-    let page_size = restored.page_size();
     let replica = restored.commit().get();
-    let compared = match reader {
-        Some(reader) if reader.header().page_size() != page_size => None,
-        Some(reader) if committed.end().offset().frame_index() > 0 => {
-            let covered = scan_whole(reader, committed)?;
-            let size = match covered.commit() {
-                Some(size) => size.get(),
-                None => db.page_count().map_err(Fault::from_source)?.get(),
-            };
-            let local = Local {
-                reader: Some((reader, &covered)),
-                db,
-            };
-            Some(local.compare(&image, size, replica, page_size)?)
+    let compared = match local.as_mut() {
+        Some(local) if restored.page_size() == page_size => {
+            Some(local.compare(&image, replica, page_size)?)
         }
-        Some(_) | None => {
-            let size = db.page_count().map_err(Fault::from_source)?.get();
-            let local: Local<'_, '_, W::Wal, P> = Local { reader: None, db };
-            Some(local.compare(&image, size, replica, page_size)?)
-        }
+        Some(_) | None => None,
     };
+    drop(local);
     let after = wal.committed().map_err(Fault::from_source)?;
     if after.epoch() != committed.epoch() || after.end() != committed.end() {
         return Err(Fault::WalMoved);
@@ -169,10 +180,16 @@ pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
     // The replica's newest file's own header time, against the database's modified time: no
     // slack, and a time that cannot be read is no evidence.
     let written = wal.modified().map_err(Fault::from_source)?;
-    Ok(match written {
-        Some(written) if written > restored.written() => Identity::Ahead,
-        Some(_) | None => Identity::Other,
-    })
+    if !written.is_some_and(|written| written > restored.written()) {
+        return Ok(Identity::Other);
+    }
+    // An older copy of this database passes everything above; its counter is below the
+    // replica's. A counter either side cannot read says nothing.
+    let older = match (counter, kept.as_deref().and_then(counter::value)) {
+        (Some((_, mine)), Some(theirs)) => mine < theirs,
+        (Some(_) | None, Some(_) | None) => false,
+    };
+    Ok(if older { Identity::Other } else { Identity::Ahead })
 }
 
 /// What one pass over the local pages found against the replica's state.
@@ -207,21 +224,66 @@ impl Compared {
 
 /// The local committed state's pages: a WAL frame up to the committed end where one holds the
 /// page, the database file otherwise.
-struct Local<'a, 'm, F, P> {
-    reader: Option<(&'a mut WalReader<F>, &'m lsr_wal::PageMap)>,
+struct Local<'a, F, P> {
+    reader: Option<(&'a mut WalReader<F>, lsr_wal::PageMap)>,
     db: &'a mut P,
+    /// The committed page count: the last commit's, or the file's length with no frame.
+    size: u32,
 }
 
-impl<F: Read + Seek, P: PageSource> Local<'_, '_, F, P> {
-    /// Pages 1 to the shorter of `local` and `replica` against `image`, a page it lacks reading
-    /// as zeros.
+impl<'a, F: Read + Seek, P: PageSource> Local<'a, F, P> {
+    /// The local state under `committed`.
+    fn open(
+        reader: Option<&'a mut WalReader<F>>,
+        committed: CommittedRead,
+        db: &'a mut P,
+    ) -> Result<Self, Fault> {
+        match reader {
+            Some(reader) if committed.end().offset().frame_index() > 0 => {
+                let covered = scan_whole(reader, committed)?;
+                let size = match covered.commit() {
+                    Some(size) => size.get(),
+                    None => db.page_count().map_err(Fault::from_source)?.get(),
+                };
+                Ok(Self {
+                    reader: Some((reader, covered)),
+                    db,
+                    size,
+                })
+            }
+            Some(_) | None => {
+                let size = db.page_count().map_err(Fault::from_source)?.get();
+                Ok(Self {
+                    reader: None,
+                    db,
+                    size,
+                })
+            }
+        }
+    }
+
+    /// The replicator's counter table in the local database: its root page and the value
+    /// there, or `None` when the schema or the page does not show one.
+    fn counter(&mut self, page_size: lsr_ltx::PageSize) -> Result<Option<(PageNo, u64)>, Fault> {
+        let pages = self.size;
+        let Some(root) = counter::locate(page_size, pages, &mut |pgno, buf| self.read(pgno, buf))?
+        else {
+            return Ok(None);
+        };
+        let mut buf = vec![0_u8; page_size.bytes()];
+        self.read(root, &mut buf)?;
+        Ok(counter::value(&buf).map(|value| (root, value)))
+    }
+
+    /// Pages 1 to the shorter of the local size and `replica` against `image`, a page it lacks
+    /// reading as zeros.
     fn compare(
-        mut self,
+        &mut self,
         image: &BTreeMap<u32, PageChecksum>,
-        local: u32,
         replica: u32,
         page_size: lsr_ltx::PageSize,
     ) -> Result<Compared, Fault> {
+        let local = self.size;
         let zero = vec![0_u8; page_size.bytes()];
         let mut buf = vec![0_u8; page_size.bytes()];
         let mut equal = local == replica;

@@ -1120,3 +1120,44 @@ fn a_hole_every_listing_shows_is_reported() {
         }
     ));
 }
+
+/// The digest sink keeps the bytes of the one page it is asked to, the latest write of it, and
+/// lets go of them when the restore starts over or shrinks past that page.
+#[test]
+fn the_digest_sink_keeps_the_latest_bytes_of_its_watched_page() {
+    use crate::restore::DatabaseSink;
+    use lsr_ltx::{DbPages, PageNo, PageRef, PageSize};
+    let size = PageSize::MIN;
+    let page = |n: u32, fill: u8| (PageNo::new(n, size).unwrap(), vec![fill; size.bytes()]);
+    let mut pages = BTreeMap::new();
+    let mut kept = None;
+    let mut sink = DigestSink {
+        pages: &mut pages,
+        keep: Some((2, &mut kept)),
+    };
+    let (one, ones) = page(1, 1);
+    sink.write_page(PageRef::new(one, size, &ones).unwrap()).unwrap();
+    let (two, twos) = page(2, 2);
+    sink.write_page(PageRef::new(two, size, &twos).unwrap()).unwrap();
+    let (_, threes) = page(2, 3);
+    sink.write_page(PageRef::new(two, size, &threes).unwrap())
+        .unwrap();
+    sink.truncate(DbPages::new(2), size).unwrap();
+    drop(sink);
+    assert_eq!(kept, Some(threes.clone()), "the last write of page 2, kept through a truncate to 2");
+    let mut sink = DigestSink {
+        pages: &mut pages,
+        keep: Some((2, &mut kept)),
+    };
+    sink.truncate(DbPages::new(1), size).unwrap();
+    drop(sink);
+    assert_eq!(kept, None, "a truncate below the page drops it");
+    kept = Some(threes);
+    let mut sink = DigestSink {
+        pages: &mut pages,
+        keep: Some((2, &mut kept)),
+    };
+    sink.reset().unwrap();
+    drop(sink);
+    assert_eq!(kept, None, "a reset drops it");
+}

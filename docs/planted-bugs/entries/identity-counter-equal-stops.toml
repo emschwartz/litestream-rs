@@ -1,0 +1,9 @@
+# An equal counter counts as older: a database the application wrote on after the replica's last
+# upload, with no checkpoint since, stops where Go would carry on.
+name = "identity-counter-equal-stops"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "older_copy::a_database_with_a_counter_at_or_above_the_replicas_carries_on",
+    "older_copy::an_older_copy_taken_after_the_last_bump_carries_on",
+]

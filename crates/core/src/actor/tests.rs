@@ -20,6 +20,7 @@ use crate::store::WriteMode;
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 mod ahead;
+mod older_copy;
 mod audit;
 
 const PS: PageSize = PageSize::MIN;

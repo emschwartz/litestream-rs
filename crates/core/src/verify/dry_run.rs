@@ -20,22 +20,37 @@ use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError, WriteMo
 pub(crate) struct DigestSink<'a> {
     /// Page number to checksum.
     pub(crate) pages: &'a mut BTreeMap<u32, PageChecksum>,
+    /// One page whose bytes are kept as well: its number, and where its latest write lands.
+    pub(crate) keep: Option<(u32, &'a mut Option<Vec<u8>>)>,
 }
 
 impl DatabaseSink for DigestSink<'_> {
     fn write_page(&mut self, page: PageRef<'_>) -> io::Result<()> {
         self.pages.insert(page.pgno().get(), page.checksum());
+        if let Some((n, kept)) = self.keep.as_mut()
+            && *n == page.pgno().get()
+        {
+            **kept = Some(page.data().to_vec());
+        }
         Ok(())
     }
 
     fn truncate(&mut self, pages: DbPages, _page_size: PageSize) -> io::Result<()> {
         let pages = pages.get();
         drop(self.pages.split_off(&pages.saturating_add(1)));
+        if let Some((n, kept)) = self.keep.as_mut()
+            && *n > pages
+        {
+            **kept = None;
+        }
         Ok(())
     }
 
     fn reset(&mut self) -> io::Result<()> {
         self.pages.clear();
+        if let Some((_, kept)) = self.keep.as_mut() {
+            **kept = None;
+        }
         Ok(())
     }
 
@@ -178,7 +193,7 @@ pub(super) async fn digest_restore<S: ObjectStore>(
         Some(listed),
         target,
         RestoreOptions::default(),
-        DigestSink { pages },
+        DigestSink { pages, keep: None },
     )
     .await;
     (

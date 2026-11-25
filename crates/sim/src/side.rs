@@ -350,6 +350,8 @@ side! {
     fn empty_database_once(&self);
     /// One byte of a database page flips.
     fn flip_db_page(&self, pgno: u32) -> bool;
+    /// A plain copy of an older database file replaces the database, the WAL gone; false while a connection is open or from a backend that cannot.
+    fn put_back_database(&self, image: &[u8]) -> bool;
     /// Every queued injected source error is dropped.
     fn heal_injections(&self);
     /// The next TRUNCATE fails to truncate the file.

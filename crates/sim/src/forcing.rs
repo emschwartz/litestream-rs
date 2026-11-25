@@ -143,6 +143,8 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
             crate::generate::Hold::SecondWriter => &[Forcing::RemoteEdited],
         },
         Op::OurReader { begin: false } => &[Forcing::ReadLockLapsed],
+        // The database goes back to an older image: nothing the engine staged vouches for it.
+        Op::PutBackDatabase { .. } => &[Forcing::StagingEdited],
         Op::RequestSnapshot => &[Forcing::SnapshotRequested],
         Op::LyingWalSync => &[Forcing::LyingDisk],
         Op::Commit { .. }
@@ -150,6 +152,8 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::OtherConnectionCommit { .. }
         | Op::AppInTick { .. }
         | Op::Spill
+        | Op::Structured { .. }
+        | Op::SaveDatabase
         | Op::Rollback
         | Op::Vacuum { .. }
         | Op::OtherProcessReader { .. }

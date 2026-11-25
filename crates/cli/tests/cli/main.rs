@@ -5,6 +5,7 @@
 // allow-*-in-tests cover them as they cover #[test] fns.
 #[cfg(test)]
 mod ahead_of_replica;
+mod older_copy;
 #[cfg(test)]
 mod cli;
 #[cfg(test)]
