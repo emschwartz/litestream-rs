@@ -1167,7 +1167,14 @@ impl Actor {
                 self.engine.maintain.remembered.owe_full();
             }
             Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
-                let at = listing_after_upload(now, &self.kept.cfg.maintenance);
+                // While the first snapshot is owed, the file just confirmed is what it waits
+                // for (Go's snapshot monitor starts it as soon as the database is ready): no
+                // window of any level has to open first.
+                let at = if self.engine.maintain.remembered.first_snapshot_owed() {
+                    now
+                } else {
+                    listing_after_upload(now, &self.kept.cfg.maintenance)
+                };
                 self.engine.maintain.list_by(at);
                 self.spend_takeover(key.range().max());
             }
