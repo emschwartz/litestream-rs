@@ -55,12 +55,12 @@ notes = "The boot does not compare a pending file with the WAL (recovery compare
 [[row]]
 table = "Boot"
 id = "BOOT-5"
-circumstance = "A staged file the replica may still need fails verification. First failed read: nothing is deleted, the boot fails with `StagedLost` and runs again. Same file fails on the next try: it and every staged file after it are deleted (`upload.rs`, `actor.rs`). Recovery's own read of the newest staged file is held to the same rule: one that makes it look unreadable fails the boot with `StagedLost` first (D168)"
+circumstance = "A staged file the replica may still need fails verification. First failed read: nothing is deleted, the boot fails with `StagedLost` and runs again. Same file fails on the next try: it and every staged file after it are deleted (the boot's one pass, `witness.rs`, `actor.rs`). Recovery judges the newest staged file from that same read and is held to the same rule: a read that makes it look unreadable fails the boot with `StagedLost` first (D168)"
 response = "retry once, then: if recovery continues from the newest file left, continue, and the WAL stages the deleted range again; otherwise snapshot, `NewestStagedFileUnreadable` Before deleting, the engine has the driver keep a takeover record through what the deleted files vouched for (`Event::TakeoverWanted`, BOOT-30), so a crash before the snapshot does not make the next boot refuse them. While running, the same drop leaves its record's ids to the uploader's next listing, never to another-writer judgement (UP-10)."
 signal = "\"retrying\", then none or `newest_staged_file_unreadable`"
 at_risk = "When a snapshot follows: the restore points of the deleted, unpublished files. Their end state is in the snapshot. No committed data is lost"
 recovery = "Automatic"
-detected_by = "core::`one_bad_read_of_a_staged_file_at_boot_drops_nothing`, core::`witness::one_lying_read_of_the_newest_staged_header_retries_the_boot`, core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`, core::`a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot`, core::`a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`; plant::`delete-on-one-failed-read-boot`, plant::`boot-snapshot-after-unreadable`"
+detected_by = "core::`one_bad_read_of_a_staged_file_at_boot_drops_nothing`, core::`a_torn_pending_file_is_not_uploaded_and_is_staged_again`, core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`, core::`a_torn_staged_file_whose_frames_the_wal_lost_costs_a_snapshot`, core::`a_torn_staged_file_the_replica_holds_is_dropped_and_the_snapshot_takes_the_next`, core::`vouch::a_listing_after_a_running_drop_takes_the_vouched_upload_as_its_own`; plant::`delete-on-one-failed-read-boot`, plant::`boot-snapshot-after-unreadable`"
 recovered_by = "core::`a_torn_staged_file_the_replica_lacks_is_dropped_and_staged_again_from_the_wal`"
 notes = "A deleted file the replica already holds leaves staging behind the replica, which recovery answers with `BehindRemote`, so continuing never stages new content under a transaction the replica shows. Before, the snapshot was taken even when the WAL could regenerate the files (D14)"
 
@@ -114,7 +114,7 @@ in_review = "#89 keeps the staged snapshot if the process dies before uploading 
 table = "Boot"
 id = "BOOT-10"
 circumstance = "Same salts and length, but the frame before the staged end is not a commit frame, or its page differs from the staged file's"
-response = "snapshot, `PrevFrameMismatch` or `LastPageMismatch`. A `LastPageMismatch` that nothing the sweep or the witness passes proved explains rests on one read of the newest staged file: the first boot fails with `StagedLost` and only the next boot that reads the same snapshots (D168)"
+response = "snapshot, `PrevFrameMismatch` or `LastPageMismatch`. A `LastPageMismatch` that nothing the boot's pass proved explains rests on one read of the newest staged file: the first boot fails with `StagedLost` and only the next boot that reads the same snapshots (D168)"
 signal = "`prev_frame_mismatch`, `last_page_mismatch`"
 at_risk = "As BOOT-7"
 recovery = "Automatic"
@@ -124,25 +124,25 @@ recovered_by = "sim::`wal_rewritten_same_length`, sim::`wal_regrown_same_salts_d
 [[row]]
 table = "Boot"
 id = "BOOT-11"
-circumstance = "A pending staged file does not read whole, does not start where the file before it ended in the WAL (or at a generation's first frame), or names no WAL range, or the pending files pass the token cap. Two passes must agree before anything is deleted (`actor.rs`)"
+circumstance = "A pending staged file does not start where the file before it ended in the WAL (or at a generation's first frame), names no WAL range or leaves a gap in the transactions, or the pending files pass the token cap. A second pass must agree before anything is deleted (`actor.rs`). A file that does not read whole is BOOT-5's"
 response = "The file and all after it are deleted unpublished. If the position still continues, the WAL stages them again: continue. Otherwise snapshot, `StagedUnverified { from }` Before deleting, the engine has the driver keep a takeover record through what the deleted files vouched for (`Event::TakeoverWanted`, BOOT-30), so a crash before the snapshot does not make the next boot refuse them."
 signal = "none, or `staged_unverified`"
 at_risk = "When a snapshot follows: the restore points of the deleted files. No committed data"
 recovery = "Automatic"
-detected_by = "sim::`pending_file_that_does_not_chain`, core::`a_pending_file_that_skips_a_range_is_refused`, core::`a_full_file_that_neither_follows_nor_starts_the_generation_is_refused`, core::`a_torn_pending_file_is_not_uploaded_and_is_staged_again`, core::`pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal`; plant::`pending-chain-unchecked`, plant::`witness-cap-boot`"
+detected_by = "sim::`pending_file_that_does_not_chain`, core::`a_pending_file_that_skips_a_range_is_refused`, core::`a_full_file_that_neither_follows_nor_starts_the_generation_is_refused`, core::`pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal`; plant::`pending-chain-unchecked`, plant::`witness-cap-boot`"
 recovered_by = "sim::`pending_file_that_does_not_chain`"
 notes = "Not a refusal: a pending file from a WAL generation that is gone, which is uploaded as staged and followed by the boot's snapshot (core `pending_files_from_a_gone_generation_are_uploaded_before_the_snapshot`), or one the WAL moved on from after a plain crash"
 
 [[row]]
 table = "Boot"
 id = "BOOT-12"
-circumstance = "The two passes over the pending staged files disagree"
+circumstance = "The boot's pass refuses a pending staged file for its place in the chain, and a second pass does not refuse the same file"
 response = "retry (`LocalIo`): the boot runs again, and deletes nothing"
 signal = "\"retrying\""
 at_risk = "None"
 recovery = "Automatic"
 detected_by = "core::`witness_passes_that_disagree_retry_the_boot`"
-notes = "One read of a pending file that answers with torn bytes (a lying read) makes the passes disagree"
+notes = "One read of a pending file that answers with another whole file, one that does not follow the file before it (a lying read), makes the passes disagree. A read that answers with torn bytes is BOOT-5's first failed read"
 
 [[row]]
 table = "Boot"
@@ -272,7 +272,7 @@ signal = "by fault"
 at_risk = "Lag grows until the boot succeeds. `wait_booted` reports `Degraded` or `TimedOut`"
 recovery = "Automatic when the fault clears"
 detected_by = "core::`a_failed_boot_waits_without_spinning`"
-notes = "The test fails one local staging listing for one tick and asserts the retry time. A store unreachable through a whole boot is **untested**"
+notes = "The test fails one local staging listing for one tick and asserts the retry time. A store unreachable through a whole boot, from the start of the process, is BOOT-25 to BOOT-29"
 
 [[row]]
 table = "Boot"
@@ -284,6 +284,61 @@ at_risk = "None"
 recovery = "Automatic"
 detected_by = "sim::`store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law`, sim::`store::tests::a_commit_after_an_unlink_makes_it_durable`; plant::`unlink-durable-at-once`"
 notes = "Under the block crash law the simulator undoes each unsynced unlink by coin on power loss, as `crash_law.rs` does for directory entries. With the store's sync after each delete on (the default), the swarm resurrects none; with it off, it brings such files back and judges every restore after them (unaided campaign, `crates/sim/tests/sim/unaided.rs`); no seed is pinned as a named test"
+
+[[row]]
+table = "Boot"
+id = "BOOT-25"
+circumstance = "The store is unreachable from the start of the process: boot attempts have failed for 15 seconds with the replica's listing never answering, and every staged file reads whole, each continues the one before it, and the WAL continues the newest"
+response = "The local course: sync steps stage files and checkpoints run on their proofs from local state, as Go's do through an outage. Nothing is uploaded, pruned or compacted. The one snapshot a course stages is the boundary snapshot of its own TRUNCATE checkpoint, as a booted engine's TRUNCATE and Go's local sync stage theirs: a file in the slot like the course's others. A step that would need any other snapshot ends the course (BOOT-29). Boot attempts go on by the fault's policy, paced by the upload task, and take their turn behind the course's steps. The course writes its files in a slot of their own in the staging directory (its level-8 directory), which no boot, upload or prune reads"
+signal = "The boot failure's own: `Retrying`, then `Degraded` on the upload task with the store's cause. The engine reports neither booted nor listed. No event of its own"
+at_risk = "Lag grows until the boot succeeds; the WAL does not. Writes held at the start are released at the same 15 seconds (docs/decisions/D207.md)"
+recovery = "Automatic when the store answers (BOOT-27, BOOT-28)"
+detected_by = "core::`a_restart_during_an_outage_stages_and_checkpoints_from_local_state`, core::`the_course_begins_at_the_bound_and_not_before`, core::`nothing_is_uploaded_before_a_boot_lists_the_replica`, core::`boot_attempts_wait_on_the_upload_task_while_the_course_runs`, core::`a_due_boot_attempt_waits_its_turn_behind_the_courses_steps`, core::`a_later_process_goes_on_from_the_course_of_the_first`, core::`level_zero_is_the_base_and_below_then_the_slot_above_it`, core::`a_courses_truncate_stages_its_boundary_snapshot_in_the_slot`, sim::`store_down_across_a_restart`, sim::`store_returns_refusing`, sim::`store_down_and_the_course_truncates`; plant::`no-local-course`, plant::`local-course-uploads`"
+notes = "The scenario holds every call on the replica down across a restart and 40 commits after it, and asserts the WAL never holds more than 32 frames (the claim was written down before the run; with the course planted out it holds 77). docs/decisions/D220.md"
+
+[[row]]
+table = "Boot"
+id = "BOOT-26"
+circumstance = "The same outage, but staging is empty, a staged file does not read whole or does not continue the one before it, the WAL does not continue the newest staged file, or a drain is on"
+response = "No course: the engine stays unbooted, and stages and checkpoints nothing until the replica's listing answers. The judgment is made once per process (it reads every staged file); a read that failed judges nothing, and the next failed attempt asks again"
+signal = "As BOOT-23"
+at_risk = "The WAL grows for as long as the outage lasts, as it did before. Go takes a local snapshot here and carries on"
+recovery = "Automatic when the store answers"
+detected_by = "core::`staging_that_does_not_read_whole_begins_no_course`, core::`staged_files_that_do_not_chain_begin_no_course`, core::`a_wal_that_does_not_continue_staging_begins_no_course`, core::`empty_staging_begins_no_course`, core::`a_failed_read_during_the_try_leaves_it_open`, core::`a_drain_begins_no_course`; plant::`local-course-without-agreement`"
+notes = "Only a boot numbers a snapshot (it must know the replica's newest transaction), so a course never takes one"
+
+[[row]]
+table = "Boot"
+id = "BOOT-27"
+circumstance = "The replica's listing answers after a local course, this process's or an earlier one's, and the replica's newest transaction, at any level, is at or below the newest level-0 staged file"
+response = "Every file in the course's slot is above the replica, as a file staged after a boot is. Each is copied up to level 0, compared on a second read of both copies, and only then deleted from the slot; the boot then judges them as any pending files. It continues from the newest with no snapshot and uploads them"
+signal = "`Booted` with no cause"
+at_risk = "None. The boot reads each of the course's files twice more than a pending file (the copy and the compare)"
+recovery = "Automatic. A move that stopped part way (a crash, a failed call, a copy that differs) is run over again by the next attempt"
+detected_by = "core::`a_course_begun_at_the_replicas_newest_file_keeps_its_files`, core::`a_course_over_an_empty_replica_keeps_its_files`, core::`a_course_goes_on_over_the_files_a_boot_moved_up`, core::`the_slots_files_move_up_with_their_bytes_and_times`, core::`a_copy_left_behind_is_compared_before_the_slots_file_goes`, core::`a_move_that_stopped_between_copy_and_delete_is_finished`, core::`a_failed_move_leaves_the_slots_file`, sim::`store_down_across_a_restart`, sim::`store_returns_rolled_back`, sim::`store_returns_after_the_wal_was_regrown`, sim::`store_returns_after_the_wal_lost_its_header`"
+notes = "A replica rolled back within what staging still holds is refilled from the staged files, and one rolled back past it gets a snapshot, as at any boot (BOOT-19)"
+
+[[row]]
+table = "Boot"
+id = "BOOT-28"
+circumstance = "The replica's listing answers after a local course, and the replica holds a transaction past the newest level-0 staged file: staging was behind the replica as the course began (its newest files deleted, an old copy of the directory put back), or another writer wrote meanwhile. Or level 0 ends past the slot's oldest file: a build that does not read the slot (an older `lsr`, or Go) ran after the course and staged from where it began"
+response = "The slot's files number transactions the replica already holds, so they are deleted, a course in progress ends, and the boot decides as if no course had run (BOOT-22): the live WAL vouches for the replica's files, a takeover record covers them, or the engine stops. No file of a course reaches the replica. That holds too while the replica's newest file does not read: the boot fails with the replica's fault and the slot is left alone"
+signal = "By the boot's decision: `Booted` with its cause, or a stop for `other_writer`"
+at_risk = "The single restore points of the commits the course staged; the database keeps every commit. When the course's checkpoints removed the WAL frames that would have vouched for the replica's files, the engine stops for another writer where it would have gone on without the course"
+recovery = "As BOOT-22"
+detected_by = "core::`a_course_begun_behind_the_replica_is_dropped_when_the_replica_is_listed`, core::`a_courses_file_is_never_written_over_an_unreadable_replica_file`, core::`the_files_of_a_course_that_ended_early_are_still_judged`, core::`a_failed_delete_of_the_courses_files_is_tried_again`, core::`slot_files_over_an_empty_level_zero_are_settled_against_the_replica`, core::`a_slot_that_level_zero_has_passed_is_deleted_and_level_zero_kept`, core::`the_boot_after_the_course_stops_for_another_writer`, sim::`store_returns_unreadable_after_staging_fell_behind`, sim::`store_returns_with_another_writers_file`; plant::`local-course-files-unjudged`, plant::`local-course-stages-at-level-zero`, plant::`local-course-slot-over-newer-files`"
+notes = "The simulator's fixed seeds found this before the slot existed: with the course's files at level 0, a boot wrote one over the replica's unreadable newest file, one transaction with two contents. The scenario states that history explicitly; no seed is pinned"
+
+[[row]]
+table = "Boot"
+id = "BOOT-29"
+circumstance = "During a local course: a sync step finds the WAL no longer continues staging (the next file would be a snapshot), the engine is rebuilt after a reported bug, or a failed boot attempt left the course's newest file gone"
+response = "The course ends and the engine is unbooted again. Its files stay in the slot for the boot to settle (BOOT-27, BOOT-28), and this process does not try a course again. A step of the course that merely fails is the sync task's failure and no boot failure. A requested snapshot waits for the boot, and a draining course syncs without checkpointing"
+signal = "None of its own"
+at_risk = "The WAL grows until the store answers"
+recovery = "Automatic when the store answers"
+detected_by = "core::`a_step_that_needs_a_snapshot_ends_the_course`, core::`a_rebuild_ends_the_course`, core::`a_failed_attempt_that_left_the_newest_staged_file_gone_ends_the_course`, core::`a_failed_local_step_is_no_boot_failure`, core::`a_requested_snapshot_waits_for_the_boot`, core::`a_draining_course_syncs_without_checkpointing`, core::`the_course_wakes_for_its_checkpoint_schedule`, core::`a_refusal_during_the_course_holds_the_start_and_keeps_the_course`"
+notes = "A store that refuses (credentials, permissions) during a course stops or degrades the engine by the configured response, and the course goes on underneath"
 
 [[row]]
 table = "Boot"
@@ -515,7 +570,7 @@ signal = "none of its own; the upload task's fault, and lag (`lsr_unreplicated_a
 at_risk = "None. The WAL grows while staging is held, as it does while any sync waits"
 recovery = "Automatic"
 detected_by = "core::`a_replica_outage_past_the_witness_cap_holds_the_position_and_costs_no_snapshot`, core::`room_runs_out_at_the_cap`; plant::`witness-cap-stages-past`"
-notes = "The core test drains an outage of 4096 + 6 commits and asserts no snapshot and the newest commit restored; a core test earns no R. Before, the 4097th file got no token and cost a snapshot (D13). Boot, its sweep and a drop read staging a listing page at a time and the boot's check of pending files lists no more than the cap's worth, so a staging directory of any size (Go's has no cap) is never held in memory whole (core `the_sweep_judges_the_first_staged_file_without_listing_them_all`, `the_witness_pass_refuses_from_the_first_pending_file_without_listing_them_all`, `a_drop_across_pages_deletes_newest_first`)"
+notes = "The core test drains an outage of 4096 + 6 commits and asserts no snapshot and the newest commit restored; a core test earns no R. Before, the 4097th file got no token and cost a snapshot (D13). The boot's pass and a drop read staging a listing page at a time and the pass reads no pending file past the cap, so a staging directory of any size (Go's has no cap) is never held in memory whole (core `the_boot_pass_judges_the_first_staged_file_without_listing_them_all`, `a_drop_across_pages_deletes_newest_first`)"
 
 [[row]]
 table = "Running"
@@ -2155,7 +2210,7 @@ in_review = "#96 would make the second PUT of a level-0 key fail outside the loc
 table = "Circumstances the code does not distinguish"
 id = "WORLD-2"
 circumstance = "The process is paused while it holds the write barrier (CKPT-1) or only its read transaction"
-response = "The barrier is an open write transaction. While paused, every application writer blocks and then gets `SQLITE_BUSY` at its `busy_timeout`; under the read transaction alone the WAL cannot be recycled and grows. On resume the wall clock has jumped forward (G3), every in-flight store request has passed its 60 s deadline (UP-2), and a multipart upload may have expired"
+response = "The barrier is an open write transaction. While paused, every application writer blocks and then gets `SQLITE_BUSY` at its `busy_timeout`; under the read transaction alone the WAL cannot be recycled and grows. On resume the wall clock has jumped forward (G3), every in-flight store request has passed its stall bound, 60 s (UP-2), and a multipart upload may have expired"
 signal = "None while paused: the process cannot report. `reported_at` in `Health` goes stale; `lsr_health_report_age_seconds` shows it only if something else scrapes"
 at_risk = "Application availability for the length of the pause. No replica damage expected. Guess"
 recovery = "Automatic on resume. Guess"
@@ -2508,7 +2563,7 @@ notes = "The Go handover rows cover Go. Nothing tests this port against its own 
 [[row]]
 table = "Circumstances the code does not distinguish"
 id = "WORLD-34"
-circumstance = "A slow store: no errors, uploads slower than the write rate, or bodies that trickle inside the 60 s deadline"
+circumstance = "A slow store: no errors, uploads slower than the write rate, or bodies that trickle, each stretch inside the 60 s stall bound"
 response = "Staging grows to the witness cap, then holds; the WAL grows instead (RUN-18)"
 signal = "none"
 at_risk = "Lag without bound. No restore point is given up"
@@ -2810,7 +2865,7 @@ detected_by = "core::`a_new_meta_directory_over_the_replicas_own_state_snapshots
 [[row]]
 table = "Fail-stop"
 id = "FS-14"
-circumstance = "Before the replica was listed, boot attempts fail: a store that is down or slow, a DNS error, a local fault, or the boot's own deliberate retry (`StagedLost`, `Swept::Suspect`, `WalMoved`)"
+circumstance = "Before the replica was listed, boot attempts fail: a store that is down or slow, a DNS error, a local fault, or the boot's own deliberate retry (`StagedLost`, `WalMoved`)"
 response = "one failed attempt, of any kind, never judges the boot: the next attempt may list the replica and find another writer. A run of failed attempts, none by a refusal, that has lasted 15 s (`BOOT_UNDECIDED_BOUND`, counted from the run's first failure) judges it: writes are released and an `-exec` child starts, as Go would have started it. A refusal ends the run and holds until healed (FS-6); a hang holds for the request deadline plus the bound (decision D207)"
 signal = "`writes blocked` with `held_by=booting` until `writes allowed`; `Health::writes`"
 at_risk = "After a release without a decision, commits are unreplicated until the boot succeeds; if that boot then stops for another writer, the application has already started. Fail-stop's age bound does not run before the first boot (D80)"

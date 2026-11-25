@@ -1,0 +1,7 @@
+# A server that stops reading a body holds the write until the cap, which grows with the body.
+name = "ureq-write-stall-unbounded"
+fix = "claude/part-deadline"
+package = "lsr-store-s3"
+tests = [
+    "ureq_transport::tests::a_body_the_server_never_reads_times_out_at_the_stall_bound",
+]
