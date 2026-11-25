@@ -272,7 +272,7 @@ signal = "by fault"
 at_risk = "Lag grows until the boot succeeds. `wait_booted` reports `Degraded` or `TimedOut`"
 recovery = "Automatic when the fault clears"
 detected_by = "core::`a_failed_boot_waits_without_spinning`"
-notes = "The test fails one local staging listing for one tick and asserts the retry time. A store unreachable through a whole boot is **untested**"
+notes = "The test fails one local staging listing for one tick and asserts the retry time. A store unreachable through a whole boot, from the start of the process, is BOOT-25 to BOOT-29"
 
 [[row]]
 table = "Boot"
@@ -284,6 +284,61 @@ at_risk = "None"
 recovery = "Automatic"
 detected_by = "sim::`store::tests::an_unsynced_unlink_comes_back_or_stays_done_under_the_block_law`, sim::`store::tests::a_commit_after_an_unlink_makes_it_durable`; plant::`unlink-durable-at-once`"
 notes = "Under the block crash law the simulator undoes each unsynced unlink by coin on power loss, as `crash_law.rs` does for directory entries. With the store's sync after each delete on (the default), the swarm resurrects none; with it off, it brings such files back and judges every restore after them (unaided campaign, `crates/sim/tests/sim/unaided.rs`); no seed is pinned as a named test"
+
+[[row]]
+table = "Boot"
+id = "BOOT-25"
+circumstance = "The store is unreachable from the start of the process: boot attempts have failed for 15 seconds with the replica's listing never answering, and every staged file reads whole, each continues the one before it, and the WAL continues the newest"
+response = "The local course: sync steps stage files and checkpoints run on their proofs from local state, as Go's do through an outage. Nothing is uploaded, pruned or compacted, and no snapshot is taken. Boot attempts go on by the fault's policy, paced by the upload task, and take their turn behind the course's steps. The course writes its files in a slot of their own in the staging directory (its level-8 directory), which no boot, upload or prune reads"
+signal = "The boot failure's own: `Retrying`, then `Degraded` on the upload task with the store's cause. The engine reports neither booted nor listed. No event of its own"
+at_risk = "Lag grows until the boot succeeds; the WAL does not. Writes held at the start are released at the same 15 seconds (docs/decisions/D207.md)"
+recovery = "Automatic when the store answers (BOOT-27, BOOT-28)"
+detected_by = "core::`a_restart_during_an_outage_stages_and_checkpoints_from_local_state`, core::`the_course_begins_at_the_bound_and_not_before`, core::`nothing_is_uploaded_before_a_boot_lists_the_replica`, core::`boot_attempts_wait_on_the_upload_task_while_the_course_runs`, core::`a_due_boot_attempt_waits_its_turn_behind_the_courses_steps`, core::`a_later_process_goes_on_from_the_course_of_the_first`, core::`level_zero_is_the_base_and_below_then_the_slot_above_it`, sim::`store_down_across_a_restart`, sim::`store_returns_refusing`; plant::`no-local-course`, plant::`local-course-uploads`"
+notes = "The scenario holds every call on the replica down across a restart and 40 commits after it, and asserts the WAL never holds more than 32 frames (the claim was written down before the run; with the course planted out it holds 77). docs/decisions/D220.md"
+
+[[row]]
+table = "Boot"
+id = "BOOT-26"
+circumstance = "The same outage, but staging is empty, a staged file does not read whole or does not continue the one before it, the WAL does not continue the newest staged file, or a drain is on"
+response = "No course: the engine stays unbooted, and stages and checkpoints nothing until the replica's listing answers. The judgment is made once per process (it reads every staged file); a read that failed judges nothing, and the next failed attempt asks again"
+signal = "As BOOT-23"
+at_risk = "The WAL grows for as long as the outage lasts, as it did before. Go takes a local snapshot here and carries on"
+recovery = "Automatic when the store answers"
+detected_by = "core::`staging_that_does_not_read_whole_begins_no_course`, core::`staged_files_that_do_not_chain_begin_no_course`, core::`a_wal_that_does_not_continue_staging_begins_no_course`, core::`empty_staging_begins_no_course`, core::`a_failed_read_during_the_try_leaves_it_open`, core::`a_drain_begins_no_course`; plant::`local-course-without-agreement`"
+notes = "Only a boot numbers a snapshot (it must know the replica's newest transaction), so a course never takes one"
+
+[[row]]
+table = "Boot"
+id = "BOOT-27"
+circumstance = "The replica's listing answers after a local course, this process's or an earlier one's, and the replica's newest transaction, at any level, is at or below the newest level-0 staged file"
+response = "Every file in the course's slot is above the replica, as a file staged after a boot is. Each is copied up to level 0, compared on a second read of both copies, and only then deleted from the slot; the listing is made again and the boot judges them as any pending files. It continues from the newest with no snapshot and uploads them"
+signal = "`Booted` with no cause"
+at_risk = "None. The boot reads each of the course's files twice more than a pending file (the copy and the compare)"
+recovery = "Automatic. A move that stopped part way (a crash, a failed call, a copy that differs) is run over again by the next attempt"
+detected_by = "core::`a_course_begun_at_the_replicas_newest_file_keeps_its_files`, core::`a_course_over_an_empty_replica_keeps_its_files`, core::`a_course_goes_on_over_the_files_a_boot_moved_up`, core::`the_slots_files_move_up_with_their_bytes_and_times`, core::`a_copy_left_behind_is_compared_before_the_slots_file_goes`, core::`a_failed_move_leaves_the_slots_file`, sim::`store_down_across_a_restart`, sim::`store_returns_rolled_back`"
+notes = "A replica rolled back within what staging still holds is refilled from the staged files, and one rolled back past it gets a snapshot, as at any boot (BOOT-19)"
+
+[[row]]
+table = "Boot"
+id = "BOOT-28"
+circumstance = "The replica's listing answers after a local course, and the replica holds a transaction past the newest level-0 staged file: staging was behind the replica as the course began (its newest files deleted, an old copy of the directory put back), or another writer wrote meanwhile"
+response = "The slot's files number transactions the replica already holds, so they are deleted, a course in progress ends, and the boot decides as if no course had run (BOOT-22): the live WAL vouches for the replica's files, a takeover record covers them, or the engine stops. No file of a course reaches the replica. That holds too while the replica's newest file does not read: the boot fails with the replica's fault and the slot is left alone"
+signal = "By the boot's decision: `Booted` with its cause, or a stop for `other_writer`"
+at_risk = "The single restore points of the commits the course staged; the database keeps every commit. When the course's checkpoints removed the WAL frames that would have vouched for the replica's files, the engine stops for another writer where it would have gone on without the course"
+recovery = "As BOOT-22"
+detected_by = "core::`a_course_begun_behind_the_replica_is_dropped_when_the_replica_is_listed`, core::`a_courses_file_is_never_written_over_an_unreadable_replica_file`, core::`the_files_of_a_course_that_ended_early_are_still_judged`, core::`a_failed_delete_of_the_courses_files_is_tried_again`, core::`slot_files_over_an_empty_level_zero_are_settled_against_the_replica`, core::`the_boot_after_the_course_stops_for_another_writer`, sim::`store_returns_unreadable_after_staging_fell_behind`, sim::`store_returns_with_another_writers_file`; plant::`local-course-files-unjudged`, plant::`local-course-stages-at-level-zero`"
+notes = "The simulator's fixed seeds found this before the slot existed: with the course's files at level 0, a boot wrote one over the replica's unreadable newest file, one transaction with two contents. The scenario states that history explicitly; no seed is pinned"
+
+[[row]]
+table = "Boot"
+id = "BOOT-29"
+circumstance = "During a local course: a sync step finds the WAL no longer continues staging (the next file would be a snapshot), the engine is rebuilt after a reported bug, or a failed boot attempt left the course's newest file gone"
+response = "The course ends and the engine is unbooted again. Its files stay in the slot for the boot to settle (BOOT-27, BOOT-28), and this process does not try a course again. A step of the course that merely fails is the sync task's failure and no boot failure. A requested snapshot waits for the boot, and a draining course syncs without checkpointing"
+signal = "None of its own"
+at_risk = "The WAL grows until the store answers"
+recovery = "Automatic when the store answers"
+detected_by = "core::`a_step_that_needs_a_snapshot_ends_the_course`, core::`a_rebuild_ends_the_course`, core::`a_failed_attempt_that_left_the_newest_staged_file_gone_ends_the_course`, core::`a_failed_local_step_is_no_boot_failure`, core::`a_requested_snapshot_waits_for_the_boot`, core::`a_draining_course_syncs_without_checkpointing`, core::`the_course_wakes_for_its_checkpoint_schedule`, core::`a_refusal_during_the_course_holds_the_start_and_keeps_the_course`"
+notes = "A store that refuses (credentials, permissions) during a course stops or degrades the engine by the configured response, and the course goes on underneath"
 
 [[row]]
 table = "Boot"

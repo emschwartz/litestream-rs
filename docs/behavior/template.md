@@ -202,6 +202,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | A disk that reports fsync success and keeps nothing | Out for prevention (no software can make it durable), in for detection | BOOT-9: detected only while the regrown WAL differs from what was staged | sim `power_loss_wal_rewind` (`Op::LyingWalSync`); plant `wal-barrier`; sim `a_power_loss_on_a_lying_disk_leaves_the_replica_restorable_while_it_lies` (a power loss inside a lying-disk hold, restores judged while the disk still lies) | No software can make such a disk durable. The replica is then ahead of the database (G2) |
 | Bit rot in the database file | Partly | RUN-12 for a page the engine has seen, except in the snapshot after a TRUNCATE (CKPT-4). A page never seen is replicated as found | sim `db_page_flipped_under_sync` | A scrubber is not built |
 | Bit rot in a staged file | In | BOOT-5, RUN-16 | sim `staged_byte_flip_before_upload`, `newest_staged_file_byte_flip` | |
+| A local course's slot damaged, or the staging directory copied aside while a course runs | Not modelled | By reasoning: slot files that do not read whole or do not chain begin and continue no course (BOOT-26, BOOT-29), and a boot moves them up and judges them as any pending file (BOOT-27) | None: the simulator's staging damage and its saved copy touch level 0 only | **untested** |
 | Torn write inside a block (old 512e disks) | Out. Reason: 4Kn and 512e-with-atomic-sector drives are the norm; SQLite's own WAL checksums catch a torn frame | n/a | n/a | The block law has no sub-block tear, so this is asserted, not shown |
 | Filesystems where locks or shared mmap do not work (NFS, virtiofs, some container bind mounts) | **Gap.** SQLite itself is unsafe there, but users do it and the engine does not refuse | Not detected | None | **unknown**. A startup self-test or a documented refusal is missing (A2) |
 
@@ -259,6 +260,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Fault | Scope | What the engine does | Rig |
 |---|---|---|---|
 | Errors, 5xx, connection reset, timeout (60 s per request, `store-s3/src/config.rs`) | In | UP-2 | sim `store_flaky_5pct`; store-s3 `the_deadline_bounds_a_silent_server` |
+| Unreachable from the start of a process: an outage across a restart. Go's database sync never asks the store (`db.go`), so Go stages and checkpoints through it | In, when staging and the WAL agree (BOOT-26 when they do not) | BOOT-25 to BOOT-29 | sim `store_down_across_a_restart`, `store_returns_with_another_writers_file`, `store_returns_rolled_back`, `store_returns_refusing`, `store_returns_unreadable_after_staging_fell_behind`; the fixed seeds reach it (`boot.local_course`) |
 | Throttling (429, `SlowDown`) | In | UP-3 | sim `store_429_retry_after` |
 | A response body cut short | In | Treated as transient (`store-s3/src/classify.rs`) | store-s3 `a_truncated_body_is_never_a_whole_response`. No proxy rig drives a real client through it |
 | A commit that fails after the object became visible | In | UP-6 | sim `commit_fails_after_publish` |
