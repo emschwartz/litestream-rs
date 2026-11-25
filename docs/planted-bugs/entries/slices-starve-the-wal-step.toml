@@ -1,0 +1,9 @@
+# With a file in flight every tick is a slice: the WAL step gets no turn, so nothing is staged
+# and no checkpoint runs until the file is whole, however long that takes.
+name = "slices-starve-the-wal-step"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced::a_file_in_flight_and_an_application_that_commits_every_tick_take_turns",
+    "actor::tests::sliced::checkpoints_run_while_a_file_is_in_flight",
+]

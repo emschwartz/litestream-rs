@@ -1,27 +1,25 @@
 diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
-index 4241cbee..d66ae3f6 100644
+index d1978bbba..02c15105e 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
-@@ -57,8 +57,7 @@ use thiserror::Error;
+@@ -57,7 +57,6 @@ use thiserror::Error;
  use crate::fault::role::{Replica, Role};
  use crate::layout::{FileInfo, FileKey, Level};
  use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 -use crate::publish::Writer;
--use crate::store::{ObjectStore, ReadLen, StoreError, WriteMode};
-+use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
+ use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
  
  #[cfg(test)]
- #[expect(
-@@ -666,7 +665,7 @@ async fn write_output<S: Role, D: ObjectStore>(
+@@ -667,7 +666,7 @@ async fn write_output<S: Role, U: Upload>(
      merge: &mut Merge<'_, S>,
      mut encoder: Encoder<Vec<u8>>,
      header: &Header,
--    upload: &mut Writer<'_, D>,
-+    upload: &mut D::Upload,
+-    upload: &mut Writer<U>,
++    upload: &mut U,
  ) -> Result<(Trailer, u32), CompactError> {
      let flush = merge.budget.flush;
      let mut pages = 0_u32;
-@@ -744,22 +743,19 @@ async fn compact_with<S: Role, D: ObjectStore>(
+@@ -761,7 +760,8 @@ async fn compact_with<S: Role, D: ObjectStore>(
      let created_at = header.fields().timestamp;
      // A compacted file may be written again over itself (a retried
      // compaction, Go's output for the same range), as Go's are.
@@ -30,18 +28,13 @@ index 4241cbee..d66ae3f6 100644
 +        .begin_upload(&key, created_at, WriteMode::Replace)
          .await
          .map_err(CompactError::Dest)?;
--    let written = write_output(&mut merge, encoder, &header, &mut upload).await;
-+    let written = write_output::<S, D>(&mut merge, encoder, &header, &mut upload).await;
-     let (trailer, pages) = match written {
-         Ok(done) => done,
-         Err(err) => {
--            abort_quietly(upload).await;
-+            abort_quietly::<D>(upload).await;
+     let written = write_output(&mut merge, encoder, &header, &mut upload).await;
+@@ -772,11 +772,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
              return Err(err);
          }
      };
 -    let info = upload
--        .commit()
+-        .commit(dest)
 -        .await
 -        .map_err(|err| CompactError::Dest(err.into_error()))?
 -        .info();
@@ -49,12 +42,15 @@ index 4241cbee..d66ae3f6 100644
      Ok(Compacted {
          info,
          header,
-@@ -772,7 +768,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
+@@ -789,8 +785,8 @@ async fn compact_with<S: Role, D: ObjectStore>(
  
  /// An abort that fails leaves scratch the store cleans up; the error that made
  /// us abort is the one worth reporting.
--async fn abort_quietly<D: ObjectStore>(upload: Writer<'_, D>) {
-+async fn abort_quietly<D: ObjectStore>(upload: D::Upload) {
+-async fn abort_quietly<U: Upload>(upload: Writer<U>) {
++async fn abort_quietly<U: Upload>(upload: U) {
      match upload.abort().await {
          Ok(()) | Err(_) => {}
      }
+-}
++}
+\ No newline at end of file

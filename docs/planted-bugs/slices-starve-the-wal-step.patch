@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 791ddb66f..fe1aa22cc 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2540,7 +2540,7 @@ impl Actor {
+         now: Timestamp,
+     ) -> Option<Tick> {
+         let share = match self.engine.in_flight.sent() {
+-            Some(_) => 1,
++            Some(_) => 0,
+             None => state::FAIR_SHARE,
+         };
+         if self.engine.syncs_ahead < share {

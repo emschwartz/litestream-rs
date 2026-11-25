@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 581d4fbd2..a866612db 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -829,7 +829,7 @@ async fn put_step<L: Role, S: Role>(
+         }
+         Ok(Reached::End) => sending.commit(remote).await,
+         Err(err) => {
+-            abort(sending.open.take()).await;
++            in_flight.0 = Some(sending);
+             Err(err)
+         }
+     };
