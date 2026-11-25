@@ -745,6 +745,7 @@ impl<B: Backend> Rig<B> {
             staging: &self.staging,
             remote: &self.remote,
             clock: &self.clock,
+            notice: &mut |_| {},
         };
         let tick = block_on(self.actor.tick(env, now));
         self.vfs.set_window(self.everywhere);
@@ -782,6 +783,7 @@ impl<B: Backend> Rig<B> {
             | Event::Idle
             | Event::Resnapshot(_)
             | Event::Clamped(_)
+            | Event::CheckingIdentity { .. }
             // The rig runs no write gate.
             | Event::WritesHeld { .. } => {}
         }

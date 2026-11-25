@@ -1,0 +1,8 @@
+# The boot fails with RemoteCorrupt when the replica's newest level-0 file reads badly, though a
+# staged file stands in for it and the boot can go on without the WAL's word on that file.
+name = "boot-corrupt-replica-file-fails-with-staged"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::newest_replica_file::with_a_staged_file_a_replica_newest_staged_file_that_reads_badly_at_boot_does_not_fail_the_boot",
+]

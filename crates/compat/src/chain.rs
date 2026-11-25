@@ -424,6 +424,7 @@ impl Chain {
             staging: &self.staging,
             remote: &self.remote,
             clock: &clock,
+            notice: &mut |_| {},
         };
         block_on(self.actor.tick(env, now))
     }
