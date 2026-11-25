@@ -71,20 +71,12 @@ impl Signer {
 
 /// A failed fetch, once the credentials in hand have expired.
 fn fetch_error(op: StoreOp, err: &CredentialError) -> StoreError {
-    match err {
-        CredentialError::Source(source) if source.transient() => StoreError::Transient {
+    match err.fetch_failure() {
+        Some(source) if source.transient() => StoreError::Transient {
             op,
             kind: io::ErrorKind::NotConnected,
         },
-        CredentialError::Source(_)
-        | CredentialError::Missing(_)
-        | CredentialError::ProfileNotFound(_)
-        | CredentialError::PartialProfile { .. }
-        | CredentialError::MalformedLine { .. }
-        | CredentialError::ReadFailed { .. }
-        | CredentialError::FileTooLarge { .. }
-        | CredentialError::NotBuilt { .. }
-        | CredentialError::ProfileInvalid { .. } => StoreError::Denied {
+        Some(_) | None => StoreError::Denied {
             op,
             why: Denied::Credentials,
         },

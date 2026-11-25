@@ -564,11 +564,12 @@ mod tests {
             ready(Err(StoreError::NotFound { key: file.key }))
         }
 
-        fn begin_upload(
+        fn begin_sized_upload(
             &self,
             key: &FileKey,
             _created_at: Timestamp,
             _mode: WriteMode,
+            _len: Option<u64>,
         ) -> impl Future<Output = Result<MemUpload, StoreError>> + Send {
             ready(Err(StoreError::NotFound { key: *key }))
         }
