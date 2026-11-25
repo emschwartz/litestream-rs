@@ -277,7 +277,8 @@ struct Rig {
     /// actor asked for ([`Actor::takeover_wanted`]), handed back at once.
     takeover: Option<crate::TakeoverRecord>,
     /// Boots that said they compare the database with the replica before deciding
-    /// ([`Event::CheckingIdentity`]), each with the replica transaction it named.
+    /// ([`Event::CheckingIdentity`], told through [`Env::notice`]), each with the replica
+    /// transaction it named.
     announced: Vec<Txid>,
 }
 
@@ -315,6 +316,7 @@ impl Rig {
     }
 
     fn tick(&mut self, actor: &mut Actor, now: i64) -> Tick {
+        let announced = &mut self.announced;
         let env = Env {
             wal: &mut self.wal,
             db: &mut self.db,
@@ -322,6 +324,11 @@ impl Rig {
             staging: &self.staging,
             remote: &self.remote,
             clock: &FakeClock::new(ts(now)),
+            notice: &mut |event| {
+                if let Event::CheckingIdentity { tip } = event {
+                    announced.push(*tip);
+                }
+            },
         };
         let tick = block_on(actor.tick(env, ts(now)));
         // The rig is the driver: it keeps the takeover the actor asked for
@@ -335,21 +342,6 @@ impl Rig {
             let held = self.takeover.filter(|held| held.txid() > wanted.txid());
             self.takeover = Some(held.unwrap_or(wanted));
             actor.remember_takeover(wanted);
-            return self.tick(actor, now);
-        }
-        // A boot that announces the identity check runs it on the next tick; the rig ticks on,
-        // as the replicator thread does, once it has seen the announcement.
-        if let Tick::Ran {
-            event: Event::CheckingIdentity { tip },
-            ..
-        } = tick
-        {
-            assert!(
-                actor.checking_identity(),
-                "announced, so the boot checks next"
-            );
-            assert!(!actor.boot_judged(), "the start is held through the check");
-            self.announced.push(tip);
             return self.tick(actor, now);
         }
         tick
@@ -2463,6 +2455,7 @@ fn an_env_prints_its_parts() {
         staging: &rig.staging,
         remote: &rig.remote,
         clock: &clock,
+        notice: &mut |_| {},
     };
     let text = format!("{env:?}");
     assert!(text.starts_with("Env { wal: "), "{text}");

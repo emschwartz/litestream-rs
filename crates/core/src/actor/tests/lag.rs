@@ -441,7 +441,6 @@ fn a_boot_is_judged_once_it_decides_not_once_its_snapshot_is_staged() {
     assert!(actor.listed());
     assert_eq!(actor.pending_snapshot(), Some(SnapshotCause::FirstSync));
     assert!(actor.boot_judged(), "judged with its snapshot still owed");
-    assert!(!actor.checking_identity());
 }
 
 /// A boot that timed out once, then listed, still waits for its snapshot; a snapshot step

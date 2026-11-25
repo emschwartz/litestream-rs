@@ -266,6 +266,7 @@ fn a_takeover_the_driver_cannot_write_keeps_the_staged_files_and_waits() {
             staging: &rig.staging,
             remote: &rig.remote,
             clock: &FakeClock::new(ts(now)),
+            notice: &mut |_| {},
         };
         // No driver: nothing is handed back.
         let tick = block_on(actor.tick(env, ts(now)));
@@ -497,10 +498,10 @@ fn a_new_meta_directory_over_the_replicas_own_state_snapshots_above_it() {
     let mut rig = redeployed_with_a_new_meta_directory();
     let mut actor = go_like_actor();
     let boot = rig.tick(&mut actor, T0 + 2);
-    // The boot said it checks first, and the start was held through the check (the rig's
-    // `tick` asserts both), then it decided.
+    // The boot said it checks first, in the one tick that ran the check and decided: a tick of
+    // its own for the announcement would list the replica twice for one decision.
     assert_eq!(rig.announced, [tx(3)]);
-    assert!(actor.boot_judged() && !actor.checking_identity());
+    assert!(actor.boot_judged());
     assert_eq!(
         booted(&boot),
         Some(Some(SnapshotCause::GenerationChanged)),

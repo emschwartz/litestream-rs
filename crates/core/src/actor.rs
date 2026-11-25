@@ -157,6 +157,10 @@ pub struct Env<'a, W, P, C, L, R> {
     /// So a stamp is read here, after the committed read that bounds the
     /// file: every transaction the file carries committed before it.
     pub clock: &'a dyn Clock,
+    /// Told of long work inside the tick before it starts, so the driver can say what holds the
+    /// start while the tick runs ([`Event::CheckingIdentity`]); the tick goes on whatever it
+    /// does. A notice changes nothing the engine decides or reads.
+    pub notice: &'a mut dyn FnMut(&Event),
 }
 
 impl<
@@ -300,8 +304,10 @@ pub enum Event {
     TakeoverWanted(TakeoverRecord),
     /// A boot with a brand-new meta directory found replica files through `tip` that nothing
     /// local vouches for: before it decides, it restores the replica's state at `tip` and
-    /// compares it with the database, page by page (`crate::identity`). The next tick runs
-    /// that check; the start is held through it. Nothing else ran.
+    /// compares it with the database, page by page (`crate::identity`), which takes about a
+    /// restore's time. Never a tick's event: the boot hands it to [`Env::notice`] as the check
+    /// starts, in the tick that runs it, and the start is held through it
+    /// (`docs/decisions/D201.md`).
     CheckingIdentity {
         /// The replica's newest transaction, the state compared.
         tip: Txid,
@@ -750,6 +756,7 @@ impl Actor {
             staging: &staging,
             remote: &remote,
             clock: env.clock,
+            notice: &mut *env.notice,
         };
         // Boxed: the tick's state machine is the largest future the replicator thread polls,
         // and on the heap it is not part of every poll frame below `block_on`, which in a
@@ -1059,13 +1066,6 @@ impl Actor {
                 self.kept.refused_through = Some(through);
                 self.verdict(Task::Sync, StopCause::OtherWriter, now)
             }
-            BootStep::CheckIdentity(tip) => {
-                self.kept.identity_announced = true;
-                Tick::Ran {
-                    event: Event::CheckingIdentity { tip },
-                    next: Next::Now,
-                }
-            }
         }
     }
 
@@ -1216,7 +1216,7 @@ impl Actor {
                     page_size,
                     refused_through,
                 },
-        } = match boot_judge(env, upload, gate, self.kept.identity_announced).await {
+        } = match boot_judge(env, upload, gate).await {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, now),
         };
@@ -1257,7 +1257,6 @@ impl Actor {
             ..Engine::fresh()
         };
         self.kept.tasks.get_mut(Task::Sync).succeed();
-        self.kept.identity_announced = false;
         self.ran(Event::Booted { cause }, now)
     }
 
@@ -2587,9 +2586,6 @@ enum BootStep {
     /// The replica holds another writer's file through this transaction:
     /// the boot stops with `OtherWriter`.
     Refused(Txid),
-    /// The boot must compare the database with the replica's state at this transaction
-    /// before it decides, and has not said so yet: it says so, and the next boot runs it.
-    CheckIdentity(Txid),
 }
 
 impl From<Fault> for BootStep {
@@ -2888,7 +2884,6 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     upload: UploadState,
     gate: BootGate,
-    may_check: bool,
 ) -> Result<Judged, BootStep> {
     // The length first: a file that shrinks after it shows in the header or the wal-index read
     // after it (a missing WAL, a new generation), never as a short file.
@@ -2902,7 +2897,6 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
         (len, committed),
         upload.confirmed(),
         gate,
-        may_check,
     )
     .await?;
     Ok(Judged {
@@ -2932,7 +2926,6 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     (len, committed): (Option<WalFileLen>, CommittedRead),
     confirmed: Option<Txid>,
     gate: BootGate,
-    may_check: bool,
 ) -> Result<Booted, BootStep> {
     let (staging, remote) = (env.staging, env.remote);
     let end = committed.end();
@@ -2974,9 +2967,9 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let resized = page_size.zip(now).filter(|(was, now)| was != now);
     let (refused_through, ahead) = match refused {
         Some(tip) if resized.is_none() && gate.fresh() => {
-            if !may_check {
-                return Err(BootStep::CheckIdentity(tip));
-            }
+            // Said before the check, in its own tick: a separate tick to announce it would
+            // list the replica again, and a crash between the two would leave the check unrun.
+            (env.notice)(&Event::CheckingIdentity { tip });
             let local =
                 identity::local_against_replica(env.wal, reader, committed, env.db, remote, tip)
                     .await?;

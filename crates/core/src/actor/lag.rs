@@ -291,14 +291,6 @@ impl Actor {
         self.kept.listed || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
     }
 
-    /// Whether the pending boot is comparing the database with the replica's newest state
-    /// before it decides (`crate::identity`), which reads the whole replica state and every
-    /// local page: the reason writes are held, for health.
-    #[must_use]
-    pub fn checking_identity(&self) -> bool {
-        self.kept.identity_announced && !self.booted()
-    }
-
     /// Whether an engine of this process has listed the replica.
     #[must_use]
     pub const fn listed(&self) -> bool {
