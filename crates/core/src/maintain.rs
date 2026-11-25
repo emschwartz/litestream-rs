@@ -58,6 +58,10 @@
 //!   compaction, into the hole's level, of the files the level below holds inside the hole.
 //!   When that level lacks the range too, its own hole is closed first. Each fill is followed
 //!   by another whole listing, so holes close one after the other, lowest level first.
+//!   A fill that fails waits out the backoff of the level it writes, and the level above the
+//!   hole waits with it (a tail that does not follow asks for no whole listing meanwhile):
+//!   a hole a lower level can close is never planned past. Nor is it closed or passed while
+//!   a level the fill could read or write holds a rejected output, whose delete goes first.
 //! - A range no lower level holds in files that line up is lost. The run ends at it and the
 //!   next job starts after it, so the hole is the same hole one level up and no file claims
 //!   transactions nothing holds (Go does the same when the hole is right above its
@@ -746,7 +750,14 @@ fn plan_level(
     // transaction after it. A tail that shows otherwise is not planned from.
     let follows = dst_max.is_none_or(|max| max.next() == Some(first.key.range().min()));
     if !follows && view == View::Tail {
-        return Ok(Step::Whole);
+        // One whole listing for each attempt: while a level a fill would write waits out a
+        // failure, another listing would find the same wait.
+        let retry = Level::ALL
+            .iter()
+            .filter(|level| **level <= src_level)
+            .filter_map(|level| state.backing_off_until(*level, now))
+            .min();
+        return Ok(retry.map_or(Step::Whole, Step::Wait));
     }
     let run = contiguous_run(above);
     Ok(
@@ -775,19 +786,29 @@ fn plan_fill(
         .level(dst)
         .last()
         .map(|info| info.key.range().max());
+    // A source that starts at or below the destination's newest and ends above it holds the
+    // transactions between: it counts, or a fill would be written under it.
     let above = inventory
         .level(src_level)
         .iter()
-        .filter(|info| dst_max.is_none_or(|max| info.key.range().min() > max));
-    let job = fill(inventory, state, src_level, first_hole(dst_max, above)?)?;
-    Some(match state.backing_off_until(src_level, now) {
+        .filter(|info| dst_max.is_none_or(|max| info.key.range().max() > max));
+    let hole = first_hole(dst_max, above)?;
+    // A rejected output is never an input, and its level gains nothing before its delete.
+    // A fill may read or write any level up to the hole's, so the hole waits for the delete.
+    let rejected = |level: &Level| *level <= src_level && state.distrusted_at(*level).is_some();
+    if Level::ALL.iter().any(rejected) {
+        return Some(Step::Idle);
+    }
+    let job = fill(inventory, src_level, hole)?;
+    // The fill may start at a lower level than the hole's: it waits out the level it writes.
+    Some(match state.backing_off_until(job.level(), now) {
         Some(retry) => Step::Wait(retry),
         None => Step::Run(Job::Compact(job)),
     })
 }
 
 /// The first transactions above `after` (the destination's newest) that `files` (the sources
-/// above it, ascending) do not hold: before the first file or between two neighbours. A
+/// that reach above it, ascending) do not hold: before the first file or between two neighbours. A
 /// destination with no file has no hole before the first source. Files that overlap leave none.
 fn first_hole<'a>(
     after: Option<Txid>,
@@ -811,20 +832,11 @@ fn first_hole<'a>(
 /// inside it. When the level below lacks that transaction too, its own hole is closed first
 /// (from the level below it, and so on down), and a later pass closes this one from the
 /// result. `None` when no level holds a file that starts there (the range is lost, or files
-/// that do not line up hold it), and while the level to read holds a rejected output, which
-/// is never an input.
-fn fill(
-    inventory: &Inventory,
-    state: &MaintainState,
-    level: Level,
-    hole: TxidRange,
-) -> Option<CompactJob> {
+/// that do not line up hold it).
+fn fill(inventory: &Inventory, level: Level, hole: TxidRange) -> Option<CompactJob> {
     let (mut level, mut hole) = (level, hole);
     loop {
         let below = Level::new(level.get().checked_sub(1)?)?;
-        if state.distrusted_at(below).is_some() {
-            return None;
-        }
         let mut from = inventory
             .level(below)
             .iter()

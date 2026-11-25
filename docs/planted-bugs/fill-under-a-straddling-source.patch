@@ -1,0 +1,11 @@
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -791,7 +791,7 @@
+     let above = inventory
+         .level(src_level)
+         .iter()
+-        .filter(|info| dst_max.is_none_or(|max| info.key.range().max() > max));
++        .filter(|info| dst_max.is_none_or(|max| info.key.range().min() > max));
+     let hole = first_hole(dst_max, above)?;
+     // A rejected output is never an input, and its level gains nothing before its delete.
+     // A fill may read or write any level up to the hole's, so the hole waits for the delete.

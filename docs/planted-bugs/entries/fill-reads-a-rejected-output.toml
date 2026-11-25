@@ -1,5 +1,6 @@
-# The compaction that closes a hole reads a level that holds an output the store rejected.
+# A hole is closed while the level the fill reads or writes holds an output the store
+# rejected, which is never an input and goes before anything else at its level.
 name = "fill-reads-a-rejected-output"
 fix = "claude/level-holes"
 package = "lsr-core"
-tests = ["maintain::tests::a_fill_never_reads_a_level_that_holds_a_rejected_output"]
+tests = ["maintain::tests::a_fill_waits_for_the_delete_of_a_rejected_output_at_or_below_its_level"]

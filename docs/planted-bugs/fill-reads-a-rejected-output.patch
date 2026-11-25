@@ -1,12 +1,11 @@
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -822,9 +822,6 @@
-     let (mut level, mut hole) = (level, hole);
-     loop {
-         let below = Level::new(level.get().checked_sub(1)?)?;
--        if state.distrusted_at(below).is_some() {
--            return None;
--        }
-         let mut from = inventory
-             .level(below)
-             .iter()
+@@ -796,7 +796,7 @@
+     // A rejected output is never an input, and its level gains nothing before its delete.
+     // A fill may read or write any level up to the hole's, so the hole waits for the delete.
+     let rejected = |level: &Level| *level <= src_level && state.distrusted_at(*level).is_some();
+-    if Level::ALL.iter().any(rejected) {
++    if Level::ALL.iter().any(rejected) && dst_max.is_none() && dst_max.is_some() {
+         return Some(Step::Idle);
+     }
+     let job = fill(inventory, src_level, hole)?;

@@ -10,17 +10,15 @@
          if let Some(next) = config
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -744,10 +744,6 @@
-     // The rule every compaction keeps: its inputs are the contiguous run that starts at the
+@@ -749,7 +749,7 @@
      // first source file above the destination's newest, and that file starts at the
      // transaction after it. A tail that shows otherwise is not planned from.
--    let follows = dst_max.is_none_or(|max| max.next() == Some(first.key.range().min()));
+     let follows = dst_max.is_none_or(|max| max.next() == Some(first.key.range().min()));
 -    if !follows && view == View::Tail {
--        return Ok(Step::Whole);
--    }
-     let run = contiguous_run(above);
-     Ok(
-         match CompactionInputs::new(run)
++    if !follows && view == View::Tail && dst_max.is_none() {
+         // One whole listing for each attempt: while a level a fill would write waits out a
+         // failure, another listing would find the same wait.
+         let retry = Level::ALL
 --- a/crates/core/src/actor/short.rs
 +++ b/crates/core/src/actor/short.rs
 @@ -188,11 +188,6 @@

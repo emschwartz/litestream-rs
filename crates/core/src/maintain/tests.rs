@@ -1046,11 +1046,6 @@ fn the_first_hole_is_before_the_first_source_or_between_two_neighbours() {
     );
 }
 
-/// `super::fill` with no rejected output anywhere.
-fn fill(inventory: &Inventory, level: Level, hole: TxidRange) -> Option<CompactJob> {
-    super::fill(inventory, &MaintainState::default(), level, hole)
-}
-
 #[test]
 fn a_hole_is_closed_from_the_files_the_level_below_holds_inside_it() {
     let files = level_one(&[(1, 10), (11, 12), (13, 14), (15, 16)]);
@@ -1197,21 +1192,38 @@ fn a_fill_that_waits_leaves_the_other_levels_to_compact() {
     assert_eq!(compact_job(&job).output_key(), key(1, 31, 33));
 }
 
-/// A rejected output is never an input, of a fill as of any compaction: while the level a
-/// fill would read holds one, the hole waits for its delete.
+/// A rejected output is never an input, of a fill as of any compaction, and a level that holds
+/// one gains nothing before its delete: while the fill's level or one below holds one, the
+/// hole is neither closed nor planned past.
 #[test]
-fn a_fill_never_reads_a_level_that_holds_a_rejected_output() {
+fn a_fill_waits_for_the_delete_of_a_rejected_output_at_or_below_its_level() {
     let files = inv(level_two_with_a_hole(T0 - 100_000));
-    let mut state = MaintainState::default();
-    assert!(super::fill(&files, &state, level(2), range(11, 20)).is_some());
-    let rejected =
-        CompactJob::new(CompactionInputs::new(l0_run(31, 33, T0)).unwrap(), level(1)).unwrap();
-    let failed = Outcome::Failed(MaintainError::OutputDistrusted {
-        key: rejected.output_key(),
-        source: CompactError::Dest(delete_fails()),
-    });
-    state.record(at(T0), &Job::Compact(rejected), &failed);
-    assert_eq!(super::fill(&files, &state, level(2), range(11, 20)), None);
+    let reject = |dst: u8, inputs: Vec<FileInfo>| {
+        let job = CompactJob::new(CompactionInputs::new(inputs).unwrap(), level(dst)).unwrap();
+        let mut state = MaintainState::default();
+        let failed = Outcome::Failed(MaintainError::OutputDistrusted {
+            key: job.output_key(),
+            source: CompactError::Dest(delete_fails()),
+        });
+        state.record(at(T0), &Job::Compact(job), &failed);
+        state
+    };
+    let fill = plan_fill(&files, at(T0), level(3), &MaintainState::default());
+    assert_eq!(compaction(fill.unwrap()).output_key(), key(2, 11, 20));
+    // In the level the fill reads.
+    let below = reject(1, l0_run(31, 33, T0));
+    assert_eq!(
+        plan_fill(&files, at(T0), level(3), &below),
+        Some(Step::Idle)
+    );
+    assert_eq!(level_step(&files, T0, 3, &below, View::Whole), Step::Idle);
+    // In the level the fill writes: the delete goes first.
+    let own = reject(2, level_one(&[(31, 40)]));
+    assert_eq!(plan_fill(&files, at(T0), level(3), &own), Some(Step::Idle));
+    // In the level above, which the fill neither reads nor writes.
+    let above = reject(3, vec![file(2, 31, 40, T0)]);
+    let fill = plan_fill(&files, at(T0), level(3), &above);
+    assert_eq!(compaction(fill.unwrap()).output_key(), key(2, 11, 20));
 }
 
 /// A fill that keeps failing waits out its own level's backoff: it is neither planned again at
@@ -1229,6 +1241,78 @@ fn a_failing_fill_waits_for_its_level_and_the_hole_is_not_crossed() {
         level_step(&files, T0, 3, &state, View::Whole),
         Step::Wait(retry)
     );
+}
+
+/// A job that failed at `level` at `T0`, recorded in `state`: the level is backing off.
+fn fail_a_compaction_at(state: &mut MaintainState, dst: u8, inputs: Vec<FileInfo>) -> Timestamp {
+    let job = CompactJob::new(CompactionInputs::new(inputs).unwrap(), level(dst)).unwrap();
+    let failed = Outcome::Failed(MaintainError::Compact(CompactError::Dest(delete_fails())));
+    state.record(at(T0), &Job::Compact(job), &failed);
+    state.backing_off_until(level(dst), at(T0)).unwrap()
+}
+
+/// A fill that starts two levels down writes the lower level, and it is that level's backoff
+/// it waits out: a fill that keeps failing is not planned again at every pass.
+#[test]
+fn a_fill_that_starts_two_levels_down_waits_for_the_level_it_writes() {
+    let mut files = l0_run(11, 20, T0 - 100_000);
+    files.extend(level_one(&[(1, 10)]));
+    files.extend([
+        file(2, 1, 10, T0 - 100_000),
+        file(2, 21, 30, T0 - 100_000),
+        file(3, 1, 10, T0 - 100_000),
+    ]);
+    let files = inv(files);
+    let mut state = MaintainState::default();
+    let fill = compaction(level_step(&files, T0, 3, &state, View::Whole));
+    assert_eq!(fill.output_key(), key(1, 11, 20));
+    let failed = Outcome::Failed(MaintainError::Compact(CompactError::Dest(delete_fails())));
+    state.record(at(T0), &Job::Compact(fill), &failed);
+    let retry = state.backing_off_until(level(1), at(T0)).unwrap();
+    assert_eq!(state.backing_off_until(level(2), at(T0)), None);
+    assert_eq!(
+        level_step(&files, T0, 3, &state, View::Whole),
+        Step::Wait(retry)
+    );
+}
+
+/// While a level a fill would write waits out a failure, a tail whose sources do not follow
+/// waits with it: one whole listing per attempt, not one per pass.
+#[test]
+fn a_tail_waits_out_a_failed_fill_instead_of_listing_whole_again() {
+    // The source level itself.
+    let mut files = level_one(&[(21, 30)]);
+    files.push(file(2, 1, 10, T0 - 100_000));
+    let mut state = MaintainState::default();
+    let retry = fail_a_compaction_at(&mut state, 1, l0_run(11, 20, T0));
+    assert_eq!(
+        level_step(&inv(files.clone()), T0, 2, &state, View::Tail),
+        Step::Wait(retry)
+    );
+    // A level further down, where a fill that starts there would write.
+    let two = vec![file(2, 21, 30, T0 - 100_000), file(3, 1, 10, T0 - 100_000)];
+    assert_eq!(
+        level_step(&inv(two), T0, 3, &state, View::Tail),
+        Step::Wait(retry)
+    );
+    // A level above the sources is no part of a fill.
+    let mut above = MaintainState::default();
+    fail_a_compaction_at(&mut above, 3, vec![file(2, 1, 10, T0)]);
+    assert_eq!(
+        level_step(&inv(files), T0, 2, &above, View::Tail),
+        Step::Whole
+    );
+}
+
+/// A source file that starts at or below the destination's newest and ends above it holds
+/// those transactions: nothing is written under it.
+#[test]
+fn a_source_that_straddles_the_destinations_newest_file_is_not_filled_under() {
+    let mut files = l0_run(11, 15, T0 - 100_000);
+    files.extend(level_one(&[(8, 15), (16, 20)]));
+    files.push(file(2, 1, 10, T0 - 100_000));
+    let step = level_step(&inv(files), T0, 2, &MaintainState::default(), View::Whole);
+    assert_eq!(compaction(step).output_key(), key(2, 16, 20));
 }
 
 /// A range no lower level holds is lost, and the level goes on past it as before: the same

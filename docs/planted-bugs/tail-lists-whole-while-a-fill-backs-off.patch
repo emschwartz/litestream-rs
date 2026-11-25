@@ -1,0 +1,12 @@
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -756,7 +756,8 @@
+             .iter()
+             .filter(|level| **level <= src_level)
+             .filter_map(|level| state.backing_off_until(*level, now))
+-            .min();
++            .min()
++            .filter(|_| false);
+         return Ok(retry.map_or(Step::Whole, Step::Wait));
+     }
+     let run = contiguous_run(above);
