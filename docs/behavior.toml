@@ -1270,6 +1270,17 @@ recovery = "Operator: Go Litestream for a read replica"
 detected_by = "cli::`follow_mode_is_refused_as_not_built`"
 
 [[row]]
+table = "Restore"
+id = "REST-17"
+circumstance = "`restore -force` after a restore killed between the hard link of the scratch to the target and the unlink of the scratch's name: `<target>.restore` and the target are one file (or the scratch has any other name)"
+response = "the scratch's name is dropped and a fresh file made; the existing target is never written. A restore that fails leaves the target as it was; one that succeeds replaces it by rename, so another name of the old file still holds the old bytes. Before, the open truncated the scratch, which was the target, and pages of the new file were written into it before the file's checksum was checked"
+signal = "none"
+at_risk = "None"
+recovery = "Run again"
+detected_by = "replica::`a_failed_forced_restore_leaves_a_target_that_shares_the_scratch_inode_as_it_was`, replica::`a_forced_restore_over_a_target_that_shares_the_scratch_inode_replaces_it_whole`, plant::`restore-scratch-written-through-the-target`"
+notes = "The kill's on-disk state is made by hand with a hard link in the tests. Pages reach the scratch before the file's trailer checksum is checked, so the sentence in the docs that every checksum is checked before any page is applied holds only for the target, which is untouched until publish"
+
+[[row]]
 table = "Verify"
 id = "VERIFY-1"
 circumstance = "`lsr verify`: every file is decoded, its checksums and name checked, every hole reported, then a real restore of the latest state runs into a sink that writes nothing (`verify.rs`)"

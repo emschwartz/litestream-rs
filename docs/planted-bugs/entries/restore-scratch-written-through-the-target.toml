@@ -1,0 +1,8 @@
+# A forced restore opens a scratch that is the target (or has another name) and truncates it: the live database is rewritten in place.
+name = "restore-scratch-written-through-the-target"
+fix = "pending"
+package = "lsr-replica"
+tests = [
+    "a_failed_forced_restore_leaves_a_target_that_shares_the_scratch_inode_as_it_was",
+    "a_forced_restore_over_a_target_that_shares_the_scratch_inode_replaces_it_whole",
+]
