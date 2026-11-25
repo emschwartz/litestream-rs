@@ -165,6 +165,8 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         | Op::Crash(_)
         | Op::StoreFault { .. }
         | Op::ClockJump(_)
+        // When a part lands is the store's own traffic: it forces nothing.
+        | Op::Parts(_)
         | Op::Tick
         | Op::Shutdown
         | Op::ShutdownWithSnapshot
@@ -219,8 +221,9 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         slice_bytes: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
-        // The replica on S3: its provider faults are noted as they are drawn.
+        // The replica on S3, in parts or not: its provider faults are noted as they are drawn.
         remote_s3: _,
+        remote_parts: _,
         // Which SQLite the engine runs against: each backend's faults are drawn and noted
         // as the model's are.
         sqlite: _,

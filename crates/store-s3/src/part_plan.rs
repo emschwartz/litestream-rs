@@ -16,16 +16,36 @@
 //! [`StoreError::ObjectTooLarge`].
 //!
 //! Memory: an upload that buffers its parts (one with no file behind it, `upload.rs`) holds
-//! up to `concurrency` of them, so its bound is
-//! `concurrency * max(configured part, ceil(length / 10000))`. That exceeds
-//! the configured part only for an object over `10000 * configured part`
-//! (about 977 GiB at 100 MB), and at 5 TiB with a concurrency of 10 it is about
-//! 5.5 GB.
+//! the parts it has in flight and one more. How many are in flight is [`held_width`]: the
+//! `concurrency` setting, cut so that what is held fits [`HELD_BUDGET`]. At the default
+//! 5 MiB part and a concurrency of 5 that is six parts, 30 MiB; at a 100 MiB part it is two
+//! parts whatever the concurrency. A part larger than half the budget is still sent, one in
+//! flight and one filling: the bound is then `2 * part`, which is 1 GiB for the 524 MB parts
+//! of a 5 TiB object.
 //!
 //! [`ObjectStore::begin_sized_upload`]: lsr_core::ObjectStore::begin_sized_upload
 //! [`StoreError::ObjectTooLarge`]: lsr_core::StoreError::ObjectTooLarge
 
+use std::num::NonZeroUsize;
+
 use crate::config::PartSize;
+
+/// The bytes one upload may hold in parts that are buffers: the ones in flight and the one
+/// more that fills or waits (`upload.rs`, `docs/decisions/D232.md`).
+pub(crate) const HELD_BUDGET: u64 = 256 * 1024 * 1024;
+
+/// How many parts of `part` bytes that hold their bytes one upload has in flight at once:
+/// `concurrency`, or as many as leave room in [`HELD_BUDGET`] for one more part that fills
+/// or waits, and never fewer than one. With one in flight the upload holds two parts, which
+/// passes the budget only for a part larger than half of it.
+pub(crate) fn held_width(concurrency: NonZeroUsize, part: u64) -> NonZeroUsize {
+    let fit = HELD_BUDGET
+        .checked_div(part)
+        .unwrap_or(u64::MAX)
+        .saturating_sub(1);
+    let fit = NonZeroUsize::new(usize::try_from(fit).unwrap_or(usize::MAX));
+    fit.map_or(NonZeroUsize::MIN, |fit| fit.min(concurrency))
+}
 
 /// The most parts S3 takes in one multipart upload.
 pub(crate) const MAX_PARTS: u64 = 10_000;

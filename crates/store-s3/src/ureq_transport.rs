@@ -9,8 +9,9 @@
 //! with `SSL_CERT_FILE` and `SSL_CERT_DIR` on Linux; see the `trust` module);
 //! ureq speaks HTTP/1.1 only.
 //!
-//! A batch runs on scoped threads ([`send_on_threads`]) over the one agent, so
-//! its requests share the connection pool and each keeps the deadline.
+//! A batch runs on scoped threads ([`send_on_threads`]) and the parts of uploads on the
+//! store's sender threads ([`Sender`]), all over the one agent, so their requests share the
+//! connection pool and each keeps the deadline.
 //!
 //! Response bodies are read whole but bounded: a body over `MAX_BODY` is an
 //! error, so a server that ignores a Range header cannot make a read allocate
@@ -18,21 +19,19 @@
 
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
-use std::time::Duration;
-
-#[cfg(all(unix, not(target_vendor = "apple")))]
 use std::sync::Arc;
+use std::time::Duration;
 
 use ureq::http;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 use ureq::tls::Certificate;
 use ureq::tls::RootCerts;
 
+use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
 use crate::transport::{
-    HttpResponse, MAX_BODY, Transport, TransportError, map_io, send_on_threads,
+    HttpResponse, MAX_BODY, StreamedRequest, Transport, TransportError, map_io, send_on_threads,
 };
-use crate::transport::{StreamedRequest, on_threads};
 use crate::trust::{self, Roots};
 
 /// Idle connections the pool keeps: the widest batch the store sends at once.
@@ -156,26 +155,6 @@ fn read_body(
 }
 
 impl UreqTransport {
-    /// Sends `request`, its body read from the request's reader as it goes: the parts of an
-    /// upload that kept no buffer. The `Content-Length` that was signed frames it, so a body
-    /// that fails part-way leaves the server short of a whole one.
-    fn send_one_streamed(
-        &self,
-        mut streamed: StreamedRequest<'_>,
-    ) -> Result<HttpResponse, TransportError> {
-        let mut builder = http::Request::builder()
-            .method(method_name(streamed.request().method()))
-            .uri(streamed.request().url().as_str());
-        for (name, value) in streamed.request().headers() {
-            builder = builder.header(*name, value.as_str());
-        }
-        let body: &mut dyn io::Read = streamed.body();
-        let request = builder
-            .body(ureq::SendBody::from_reader(body))
-            .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))?;
-        self.exchange(request, false)
-    }
-
     /// One request and its whole answer.
     fn exchange(
         &self,
@@ -214,12 +193,28 @@ impl Transport for UreqTransport {
         self.exchange(Self::build(&request)?, head_only)
     }
 
+    /// The body is read from the request's reader as it goes: the parts of an upload that
+    /// kept no buffer. The `Content-Length` that was signed frames it, so a body that fails
+    /// part-way leaves the server short of a whole one.
     fn send_streamed(
         &self,
-        requests: Vec<StreamedRequest<'_>>,
-        limit: NonZeroUsize,
-    ) -> Vec<Result<HttpResponse, TransportError>> {
-        on_threads(requests, limit, |request| self.send_one_streamed(request))
+        mut streamed: StreamedRequest<'_>,
+    ) -> Result<HttpResponse, TransportError> {
+        let mut builder = http::Request::builder()
+            .method(method_name(streamed.request().method()))
+            .uri(streamed.request().url().as_str());
+        for (name, value) in streamed.request().headers() {
+            builder = builder.header(*name, value.as_str());
+        }
+        let body: &mut dyn io::Read = streamed.body();
+        let request = builder
+            .body(ureq::SendBody::from_reader(body))
+            .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))?;
+        self.exchange(request, false)
+    }
+
+    fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {
+        Arc::new(Sender::new(most))
     }
 
     fn send_many(
@@ -459,10 +454,7 @@ mod tests {
             then_fails: false,
         };
         let streamed = StreamedRequest::new(put(&url, whole.len()), 300_000, &mut body);
-        let sent = transport.send_streamed(vec![streamed], NonZeroUsize::MIN);
-        let [Ok(response)] = sent.as_slice() else {
-            panic!("{sent:?}");
-        };
+        let response = transport.send_streamed(streamed).expect("sent");
         assert_eq!(response.body(), b"ok");
         let got = served.join().expect("server");
         let head = got
@@ -488,8 +480,8 @@ mod tests {
             then_fails: true,
         };
         let streamed = StreamedRequest::new(put(&url, 300_000), 300_000, &mut body);
-        let sent = transport.send_streamed(vec![streamed], NonZeroUsize::MIN);
-        assert!(matches!(sent.as_slice(), [Err(_)]), "{sent:?}");
+        let sent = transport.send_streamed(streamed);
+        assert!(sent.is_err(), "{sent:?}");
         let got = served.join().expect("server");
         let head = got
             .windows(4)

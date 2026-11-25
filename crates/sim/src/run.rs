@@ -49,6 +49,9 @@ const SETTLE_TICKS: u32 = 200;
 /// time: the driver's loop is not free, and the retry waits it spins through
 /// last seconds (a retry wait answers `Idle` with `Next::Now`).
 const SPIN_STEP: Duration = Duration::from_millis(50);
+/// What a tick that found its upload waiting for a part costs in virtual time: about what a
+/// part's request takes, and far below every wait the engine keeps.
+const PART_STEP: Duration = Duration::from_millis(1);
 /// Idle ticks the idle property watches.
 const IDLE_TICKS: u32 = 100;
 /// The WAL bytes a sync step stops at: small, so a step often splits a backlog.
@@ -245,6 +248,9 @@ pub struct Opts {
     /// The replica is the S3 store over its in-memory bucket ([`Weights::remote_s3`]).
     /// [`run_with`] sets it.
     pub remote_s3: bool,
+    /// With `remote_s3`, the store sends in parts ([`Weights::remote_parts`]). [`run_with`]
+    /// sets it.
+    pub remote_parts: Option<crate::remote::Parts>,
     /// The replica's store has no conditional writes ([`Weights::no_create_only`]).
     /// [`run_with`] sets it.
     pub no_create_only: bool,
@@ -326,6 +332,8 @@ struct Runner {
     // The S3 replica's refusals judged so far: provider faults fired, delete keys refused, and
     // every other store fault fired (one may mask a refusal in the same tick).
     denials_seen: (usize, u64, u64),
+    /// The replica's second reads of staged files that a tick has been judged for.
+    rereads_judged: SecondReads,
     /// Whether the engine had not booted when the refusal judge last took its baseline:
     /// the phase in which the start-up sweep of open uploads runs.
     denials_unbooted: bool,
@@ -529,6 +537,7 @@ impl Runner {
             actor: Actor::new(actor_config()),
             rng: SeededEntropy::new(seed.stream(11)),
             denials_seen: (0, 0, 0),
+            rereads_judged: SecondReads::default(),
             denials_unbooted: true,
             degraded_before: Vec::new(),
             reads_lying: false,
@@ -606,6 +615,11 @@ impl Runner {
         self.w.start_driver();
         let base = actor_config();
         self.app_before = self.app_seen();
+        // The old process's parts land or are lost while it still holds its uploads; what it
+        // remembered of uploads to abort goes with it (`crate::remote`).
+        if let Some(s3) = &self.w.remote_s3 {
+            s3.process_ending();
+        }
         self.actor = Actor::new(ActorConfig {
             responses: self.responses,
             max_unreplicated_age: lsr_core::MaxUnreplicatedAge::DEFAULT,
@@ -620,6 +634,9 @@ impl Runner {
             },
             ..base
         });
+        if let Some(s3) = &self.w.remote_s3 {
+            s3.process_ended();
+        }
         self.actor.set_app_autocheckpoint(self.app_autocheckpoint);
         if let Some(record) = self.takeover {
             self.actor.remember_takeover(record);
@@ -934,12 +951,10 @@ impl Runner {
         per_tick(&stats, self.limits())?;
         let replica_fired = self.remote_fired().all > fired0.0.all;
         let reach = &mut self.report.reach;
-        judge_rereads(
-            SecondReads::of(&stats.remote),
-            stats.event.as_ref(),
-            replica_fired,
-            reach,
-        )?;
+        // Every second read since the last tick was judged, the ones between ticks with it.
+        let rereads = SecondReads::of(&self.w.remote_recorder.counts());
+        let since = rereads.since(std::mem::replace(&mut self.rereads_judged, rereads));
+        judge_rereads(since, stats.event.as_ref(), replica_fired, reach)?;
         self.turns.tick(stats.event.as_ref(), began, reach)?;
         // A commit that landed inside the tick waits for the WAL step unless the tick staged a
         // file after it (a checkpoint's seal stages the commit that lands before its barrier).
@@ -1093,6 +1108,7 @@ impl Runner {
     fn judge_stores(&mut self) -> Result<(), Violation> {
         self.judge_staging_kept()?;
         self.judge_puts()?;
+        self.judge_parts()?;
         self.judge_staged_durable()
     }
 
@@ -1130,8 +1146,16 @@ impl Runner {
             self.report.spins = self.report.spins.saturating_add(1);
             self.w.clock.advance(SPIN_STEP);
         }
-        self.quiet = matches!(next, Next::OnWalChange);
-        if self.unwatched && !matches!(next, Next::Now) {
+        // A send that waits for its parts has work the engine's wake says nothing of: the
+        // store wakes a real driver when a part ends. Here the parts land at the engine's
+        // next question (`crate::remote`), so the next tick comes a part's time later, not
+        // at the wake.
+        let awaits_parts = self.actor.awaits_parts();
+        self.quiet = matches!(next, Next::OnWalChange) && !awaits_parts;
+        if awaits_parts && !matches!(next, Next::Now) {
+            self.report.reach.bump("parts.tick_waited");
+            self.w.clock.advance(PART_STEP);
+        } else if self.unwatched && !matches!(next, Next::Now) {
             self.unwatched = false;
         } else {
             self.follow(next);
@@ -2504,6 +2528,7 @@ impl Runner {
             Op::Wal(op) => self.wal_damage(*op)?,
             Op::Remote(op) => self.remote(*op)?,
             Op::HttpFault(fault) => self.http_fault(*fault)?,
+            Op::Parts(op) => self.parts(*op)?,
             Op::AppAutocheckpoint(frames) => {
                 self.w.sqlite.set_app_autocheckpoint(*frames);
                 self.app_autocheckpoint = frames.and_then(NonZeroU32::new);
@@ -2895,6 +2920,7 @@ pub fn run_with(
         slice_bytes: weights.slice_bytes,
         kill_after_fault: weights.kill_after_fault,
         remote_s3: weights.remote_s3,
+        remote_parts: weights.remote_parts,
         no_create_only: weights.no_create_only,
         ..opts.clone()
     };
@@ -2958,6 +2984,7 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
         trace: std::mem::take(&mut runner.report.trace),
     })?;
     runner.tally_stores();
+    runner.tally_parts();
     runner.w.history.tally(&mut runner.report.reach);
     runner.report.app_checkpoints = runner.app_seen();
     runner.report.app_autocheckpoints = runner.w.sqlite.app_autocheckpoints();

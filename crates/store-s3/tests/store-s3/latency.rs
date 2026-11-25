@@ -22,7 +22,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use lsr_store_s3::{HttpRequest, HttpResponse, Shape, Transport, TransportError};
+use lsr_store_s3::{HttpRequest, HttpResponse, Lanes, Shape, Task, Transport, TransportError};
 
 /// One round trip with no payload: a plausible bucket far from its client.
 pub const ROUND_TRIP: Duration = Duration::from_millis(40);
@@ -91,6 +91,10 @@ impl<T> Clone for Link<T> {
 struct Shared<T> {
     inner: T,
     tally: Mutex<Tally>,
+    /// Parts of uploads started and not landed.
+    started: Mutex<Vec<Task>>,
+    /// While a wave of parts lands: how many it holds and its largest payload.
+    wave: Mutex<Option<(usize, usize)>>,
 }
 
 impl<T: Transport> Link<T> {
@@ -98,6 +102,8 @@ impl<T: Transport> Link<T> {
         Self(Arc::new(Shared {
             inner,
             tally: Mutex::new(Tally::default()),
+            started: Mutex::new(Vec::new()),
+            wave: Mutex::new(None),
         }))
     }
 
@@ -141,10 +147,22 @@ impl<T: Transport> Transport for Link<T> {
         let answer = self.0.inner.send(request);
         let mut tally = self.lock();
         tally.add(&sent);
+        let mut wave = self.0.wave.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((members, bytes)) = wave.as_mut() {
+            // One of a wave of parts: the wave is the round trip.
+            *members += 1;
+            *bytes = (*bytes).max(payload(&sent, &answer));
+            return answer;
+        }
         tally.rounds += 1;
         tally.widest = tally.widest.max(1);
         tally.elapsed += ROUND_TRIP + transfer(payload(&sent, &answer));
         answer
+    }
+
+    /// The link's own lanes: parts stay in flight until the upload waits for one.
+    fn lanes(&self, _most: NonZeroUsize) -> Arc<dyn Lanes> {
+        Arc::new(self.clone())
     }
 
     fn send_many(
@@ -187,5 +205,48 @@ impl<T: Transport> Transport for Link<T> {
         total.widest = total.widest.max(tally.widest);
         total.elapsed += tally.elapsed;
         answers
+    }
+}
+
+/// The parts of uploads on the model link: every part started is in flight until a caller
+/// has to wait for one, and then all of them land as one wave, as long as its slowest
+/// member. The upload bounds how many it starts, so a wave is never wider than that.
+impl<T: Transport> Lanes for Link<T> {
+    fn start(&self, task: Task) {
+        self.0
+            .started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(task);
+    }
+
+    fn help(&self) -> bool {
+        let tasks = std::mem::take(
+            &mut *self
+                .0
+                .started
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        if tasks.is_empty() {
+            return false;
+        }
+        *self.0.wave.lock().unwrap_or_else(PoisonError::into_inner) = Some((0, 0));
+        for task in tasks {
+            task();
+        }
+        let wave = self
+            .0
+            .wave
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((members, bytes)) = wave {
+            let mut tally = self.lock();
+            tally.rounds += 1;
+            tally.widest = tally.widest.max(members);
+            tally.elapsed += ROUND_TRIP + transfer(bytes);
+        }
+        true
     }
 }

@@ -6,6 +6,7 @@
 //! writes are a [`MemStore`]'s. Like the S3 store it refuses an upload written one way and
 //! then the other.
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -15,10 +16,9 @@ use lsr_ltx::{Timestamp, TxidRange};
 use super::{MemStore, MemUpload};
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::store::{
-    BoxFuture, Listing, ObjectStore, PageLimit, ReadLen, Reread, StoreError, StoreOp, Upload,
-    WriteMode,
+    Again, BoxFuture, Flight, Listing, ObjectStore, PageLimit, ReadLen, Reread, Rest, Seen,
+    StoreError, StoreOp, Upload, WriteMode,
 };
-use crate::witness::ByteTally;
 
 /// When an upload of [`Rereads`] reads back what it was handed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,6 +28,8 @@ pub(crate) enum When {
     Commit,
     /// Inside the write that handed the bytes over: a batch of parts that filled.
     Write,
+    /// When it is next asked about its parts: a part sent while the caller did other work.
+    Flight,
 }
 
 /// What a test asks of the store.
@@ -37,6 +39,11 @@ pub(crate) struct Asked {
     /// The store's own failure of the next commit, reported in place of a second read's:
     /// an earlier part's request failed first.
     pub(crate) own: Option<StoreError>,
+    /// What the next questions about an upload's parts are answered, in order; with none
+    /// left, that no part is in flight.
+    pub(crate) flights: VecDeque<Result<Flight, StoreError>>,
+    /// Every question asked so far.
+    pub(crate) rests: Vec<Rest>,
 }
 
 /// The store.
@@ -69,17 +76,21 @@ pub(crate) const fn mixed() -> StoreError {
 pub(crate) struct RereadsUpload {
     inner: MemUpload,
     asked: Arc<Mutex<Asked>>,
-    /// Where each chunk let go of starts, and its tally.
-    kept: Vec<(u64, ByteTally)>,
+    /// Where each chunk let go of starts, and what was seen of it.
+    kept: Vec<(u64, Seen)>,
     end: u64,
-    sourced: bool,
+    /// The source's reader, taken at the first write from a source.
+    reader: Option<Box<dyn Again>>,
 }
 
 impl RereadsUpload {
     /// Reads back and writes through every chunk let go of.
-    async fn read_back(&mut self, again: &dyn Reread) -> Result<(), StoreError> {
+    async fn read_back(&mut self) -> Result<(), StoreError> {
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(());
+        };
         for (offset, was) in std::mem::take(&mut self.kept) {
-            let bytes = again.read(offset, &was).await?;
+            let bytes = reader.read(offset, &was).await?;
             self.inner.write(&bytes).await?;
         }
         Ok(())
@@ -88,7 +99,7 @@ impl RereadsUpload {
 
 impl Upload for RereadsUpload {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        if self.sourced {
+        if self.reader.is_some() {
             return Err(mixed());
         }
         self.end = self.end.saturating_add(u64::try_from(chunk.len()).unwrap());
@@ -96,34 +107,38 @@ impl Upload for RereadsUpload {
     }
 
     async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
-        if !self.sourced && self.end > 0 {
-            return Err(mixed());
+        if self.reader.is_none() {
+            if self.end > 0 {
+                return Err(mixed());
+            }
+            self.reader = Some(again.open().await?);
         }
-        self.sourced = true;
-        // One read's worth to a tally, as the source gives back.
+        // One read's worth at a time, as the source gives back.
         for cell in chunk.chunks(256 * 1024) {
-            let mut was = ByteTally::new();
-            was.add(cell);
-            self.kept.push((self.end, was));
+            self.kept.push((self.end, Seen::of(cell)));
             self.end = self.end.saturating_add(u64::try_from(cell.len()).unwrap());
         }
         let when = self.asked.lock().unwrap().when;
         match when {
-            When::Write => self.read_back(again).await,
-            When::Commit => Ok(()),
+            When::Write => self.read_back().await,
+            When::Commit | When::Flight => Ok(()),
         }
     }
 
-    async fn commit(self) -> Result<FileInfo, StoreError> {
-        if self.sourced {
-            self.inner.abort().await?;
-            return Err(mixed());
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        let (when, scripted) = {
+            let mut asked = self.asked.lock().unwrap();
+            asked.rests.push(rest);
+            (asked.when, asked.flights.pop_front())
+        };
+        if when == When::Flight {
+            self.read_back().await?;
         }
-        self.inner.commit().await
+        scripted.unwrap_or(Ok(Flight::Idle))
     }
 
-    async fn commit_from(mut self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        let read = self.read_back(again).await;
+    async fn commit(mut self) -> Result<FileInfo, StoreError> {
+        let read = self.read_back().await;
         let own = self.asked.lock().unwrap().own.take();
         if let Some(err) = own.or_else(|| read.err()) {
             self.inner.abort().await?;
@@ -185,7 +200,7 @@ impl ObjectStore for Rereads {
             asked: Arc::clone(&self.asked),
             kept: Vec::new(),
             end: 0,
-            sourced: false,
+            reader: None,
         })
     }
 
@@ -195,18 +210,19 @@ impl ObjectStore for Rereads {
 }
 
 /// The bytes a test handed an upload, as the source it reads them back from, counting the
-/// reads.
-#[derive(Debug, Default)]
+/// reads and the readers opened.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Handed {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) reads: AtomicU32,
+    pub(crate) bytes: Arc<Vec<u8>>,
+    pub(crate) reads: Arc<AtomicU32>,
+    pub(crate) opens: Arc<AtomicU32>,
 }
 
 impl Handed {
     pub(crate) fn of(bytes: &[u8]) -> Self {
         Self {
-            bytes: bytes.to_vec(),
-            reads: AtomicU32::new(0),
+            bytes: Arc::new(bytes.to_vec()),
+            ..Self::default()
         }
     }
 
@@ -224,20 +240,30 @@ pub(crate) const fn lost() -> StoreError {
 }
 
 impl Reread for Handed {
+    fn open(&self) -> BoxFuture<'_, Result<Box<dyn Again>, StoreError>> {
+        self.opens.fetch_add(1, Ordering::Relaxed);
+        let reader: Box<dyn Again> = Box::new(self.clone());
+        Box::pin(async move { Ok(reader) })
+    }
+}
+
+impl Again for Handed {
     fn read<'a>(
-        &'a self,
+        &'a mut self,
         offset: u64,
-        was: &'a ByteTally,
+        was: &'a Seen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         let start = usize::try_from(offset).unwrap();
-        let end = start.saturating_add(usize::try_from(was.size()).unwrap());
+        let end = start.saturating_add(usize::try_from(was.len()).unwrap());
         let bytes = self.bytes.get(start..end).map(<[u8]>::to_vec);
         Box::pin(async move {
             let bytes = bytes.ok_or_else(lost)?;
-            let mut now = ByteTally::new();
-            now.add(&bytes);
-            if now == *was { Ok(bytes) } else { Err(lost()) }
+            if Seen::of(&bytes) == *was {
+                Ok(bytes)
+            } else {
+                Err(lost())
+            }
         })
     }
 }

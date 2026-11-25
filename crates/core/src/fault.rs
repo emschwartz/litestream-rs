@@ -1195,7 +1195,8 @@ impl Fault {
     }
 }
 
-/// What the actor does after a step.
+/// What the actor does after a step. A store may wake the step's waker sooner than this
+/// says, when a part of the upload in flight ends: the driver steps then too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Next {
     /// Step again immediately.

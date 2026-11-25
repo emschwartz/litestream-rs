@@ -1,15 +1,53 @@
 //! `S3Upload`: one object being written, as a single PUT or a multipart upload.
 //!
-//! Writes accumulate in one buffer of at most one part (the memory bound). An
-//! object that ends below the part size is sent as one PUT, as Go does (rc.go:814).
-//! The write that fills the buffer starts a multipart upload (the created-at time rides on
-//! CreateMultipartUpload), and each full buffer becomes the next part. Full
-//! parts wait until the `concurrency` setting's worth of them is ready (the buffer
-//! filling counts as one), then go out as one batch, so memory is at most
-//! that many parts. With a concurrency of one each part is sent by the write
-//! that filled it, as before. A failed part fails the upload (at the write or
-//! commit that sent its batch) and the caller restarts it; nothing is retried
-//! here.
+//! Writes fill one part at a time. An object that ends below the part size is sent as one
+//! PUT, as Go does (rc.go:814). The write that fills the first part starts a multipart upload
+//! (the created-at time rides on CreateMultipartUpload).
+//!
+//! **Parts in flight.** A part is sent the moment it is whole: the upload hands it to the
+//! store's lanes (`lanes.rs`) and goes on filling the next one, as Go's uploader feeds its
+//! workers. The thread that sends a part computes its MD5. The upload and the parts it
+//! started share one small state under one lock: each part started leaves exactly one answer
+//! there, whether its request was answered, failed, was never sent or its work panicked, and
+//! a part that ends wakes whoever waits (a thread on the condition variable, or the task whose
+//! waker [`Upload::flight`] left). Answers are judged on the upload's own thread when it
+//! collects them, and each ETag is put by its part number, so the order parts end in is no
+//! part of the result.
+//!
+//! Two bounds hold, whatever the lanes do:
+//! - **Count.** At most `width` parts of one upload are started and not yet collected: the
+//!   `concurrency` setting, or fewer for parts that hold their bytes (below).
+//! - **One part waits.** A whole part that finds every lane taken waits in the upload, one at
+//!   most. A write that would make a second waits for a part to end, on this thread, helping
+//!   the lanes when they have no thread of their own.
+//!
+//! **Parts that hold their bytes.** A part written with [`Upload::write`] is a buffer, so
+//! the upload holds `width` parts in flight and one more, filling or waiting: no byte goes
+//! into a new buffer while a whole part still waits. `width` is cut so that this fits a fixed
+//! budget (`part_plan.rs`, `docs/decisions/D232.md`).
+//!
+//! **Parts written from a source.** An upload whose first write is [`Upload::write_from`]
+//! keeps no part buffer: of each part it keeps what was seen of every 256 KiB and a reader of
+//! the caller's source (`again.rs`). The thread that sends the part reads it again for the
+//! MD5 and once more as the body, using a cell's bytes only when they are what was first
+//! seen. So a part in flight holds one read of 256 KiB, the HTTP client's buffers (768 KiB a
+//! request by the gate in `tests/store-s3/memory.rs`) and one open file, whatever the part
+//! size. The engine's staged send asks [`Upload::flight`] before each read and stops when the
+//! answer is [`Flight::Full`], so its tick never waits for a part
+//! (`docs/decisions/D233.md`). Such an upload is written through the source only: a plain
+//! `write` of it is refused, since the store no longer holds what it would send.
+//!
+//! **Failure.** The first part that fails is the upload's failure, returned by the call that
+//! collects it; nothing is retried here. Parts not yet on the wire are then not sent, and the
+//! caller restarts the upload. A failed upload sends no AbortMultipartUpload itself: its id
+//! goes on the orphan list (`orphans.rs`).
+//!
+//! **Leaving.** `commit` and `abort` return only when every part started has ended, so
+//! neither CompleteMultipartUpload nor AbortMultipartUpload is ever sent beside a part of the
+//! same upload. Dropping an upload does no I/O and waits for nothing: parts not yet on the
+//! wire are not sent, and the id goes on the orphan list when the last part started lets go
+//! of the shared state, so an id is never aborted from that list with a part of it still on
+//! the wire. The boot sweep waits for the same thing store-wide (`orphans.rs`).
 //!
 //! A single PUT is judged by the status, and then by the `ETag`: for a PUT
 //! without server-side encryption the ETag is the object's MD5, so a different
@@ -28,68 +66,193 @@
 //! sends create-only writes without the condition, as Go's are, and counts
 //! them in [`crate::WriteStats`]. A provider that ignores the header
 //! silently cannot be told apart here.
-//!
-//! **Written from a source.** An upload whose first write is
-//! [`Upload::write_from`] keeps no part buffer: of each part it keeps the MD5 and a tally
-//! of every 256 KiB (`again.rs`), and when `concurrency` parts are ready it sends them with
-//! bodies read again through the caller's [`Reread`], which gives a second read's bytes
-//! only when they tally as the first did. An object below one part is sent the same way by
-//! [`Upload::commit_from`]. So the upload of a staged file holds one read of 256 KiB and
-//! the HTTP client's buffers for each of the `concurrency` requests of a batch while it is
-//! out (768 KiB a request by the gate in `tests/store-s3/memory.rs`), and a few kilobytes
-//! between batches, whatever the part size
-//! (`docs/decisions/D222.md`). The requests, their order and what each answer must prove
-//! are the same. A second read that gives nothing fails the upload with the source's own
-//! error before anything is published. Such an upload is written and committed through the
-//! source only: a plain `write` or `commit` of it is refused, since the store no longer
-//! holds what it would send.
-//!
-//! Dropping a multipart upload does no I/O: parts not yet sent are dropped
-//! and its id goes on the orphan list (`orphans.rs`). A batch has finished
-//! (every request answered or timed out) before its call returns, so no part
-//! is ever in flight when an id is orphaned or aborted.
 
+use std::future::poll_fn;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Poll, Waker};
 
 use lsr_core::{
-    CorruptCause, CreatedAt, FileInfo, FileKey, ListedTime, PartNumber, Reread, StoreError,
-    StoreOp, Upload, WriteMode,
+    CorruptCause, CreatedAt, FileInfo, FileKey, Flight, ListedTime, PartNumber, Reread, Rest,
+    StoreError, StoreOp, Upload, WriteMode,
 };
 use lsr_ltx::Timestamp;
 
 use crate::again::{Run, Sealed};
 use crate::classify::{classify, is_not_implemented};
-use crate::multipart::{Sent, completed_etag_fits};
-use crate::part_plan::{MAX_OBJECT, plan_part_size};
+use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
+use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part};
+use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
 use crate::request::{Precondition, UploadId};
 use crate::response::{EtagCheck, check_etag};
 use crate::store::Inner;
 use crate::transport::{HttpResponse, StreamedRequest, Transport};
 
-/// Where an upload is. `Done` is after a commit, an abort or a failure: the
-/// upload id, if there was one, is already with the caller or on the orphan list.
-enum UploadState {
-    Buffering(Vec<u8>),
-    Multipart {
-        id: UploadId,
-        /// The ETag of part n is the (n - 1)th entry.
-        etags: Vec<String>,
-        buf: Vec<u8>,
-        /// Full parts not yet sent; they follow `etags` in order.
-        ready: Vec<Vec<u8>>,
-    },
-    /// Written from a source: tallies in place of bytes (the module docs).
-    Sourced {
-        /// The multipart upload and its parts' ETags so far, once the first part was full.
-        multipart: Option<(UploadId, Vec<String>)>,
-        /// The part being handed over, boxed so an upload that holds bytes is no larger for
-        /// it.
-        run: Box<Run>,
-        /// Full parts not yet sent; they follow the ETags in order.
-        ready: Vec<Sealed>,
-    },
-    Done,
+/// A part's bytes: a buffer, or what is needed to read them again.
+pub(crate) enum Bytes {
+    Held(Vec<u8>),
+    Again(Sealed),
+}
+
+impl Bytes {
+    /// The memory the part holds while it waits or is sent.
+    fn held(&self) -> usize {
+        match self {
+            Self::Held(buf) => buf.capacity(),
+            Self::Again(part) => part.held(),
+        }
+    }
+}
+
+/// The part being filled.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one per upload, moved only when a part is sealed; the size is the checksum state \
+              of the cell being filled"
+)]
+enum Filling {
+    Held(Vec<u8>),
+    /// `None` until the part's first byte arrives: its reader is asked for then.
+    Again(Option<Run>),
+}
+
+impl Filling {
+    fn len(&self) -> u64 {
+        match self {
+            Self::Held(buf) => u64::try_from(buf.len()).unwrap_or(u64::MAX),
+            Self::Again(run) => run.as_ref().map_or(0, Run::len),
+        }
+    }
+
+    const fn sourced(&self) -> bool {
+        matches!(self, Self::Again(_))
+    }
+
+    #[cfg(feature = "testing")]
+    fn held(&self) -> usize {
+        match self {
+            Self::Held(buf) => buf.capacity(),
+            Self::Again(run) => run.as_ref().map_or(0, Run::held),
+        }
+    }
+}
+
+/// How one part started ended: its answer and the MD5 it was sent with, or why there is none.
+pub(crate) struct Done {
+    number: PartNumber,
+    /// The memory the part held, let go of before this was left.
+    held: usize,
+    sent: Result<(HttpResponse, [u8; 16]), StoreError>,
+}
+
+/// The answers not yet collected, and whom a part that ends wakes.
+#[derive(Default)]
+struct Ends {
+    done: Vec<Done>,
+    wake: Option<Waker>,
+}
+
+/// What a multipart upload and the parts it started share.
+pub(crate) struct Shared<T> {
+    pub(crate) inner: Arc<Inner<T>>,
+    pub(crate) key: FileKey,
+    pub(crate) id: UploadId,
+    ends: Mutex<Ends>,
+    ended: Condvar,
+    /// The upload failed, was aborted or was dropped: a part not yet on the wire is not sent.
+    pub(crate) stop: AtomicBool,
+    /// CompleteMultipartUpload or AbortMultipartUpload succeeded: the id is spent.
+    spent: AtomicBool,
+}
+
+impl<T> Shared<T> {
+    fn ends(&self) -> MutexGuard<'_, Ends> {
+        lock(&self.ends)
+    }
+}
+
+/// The last holder lets go, the upload or the last part it started: an id neither completed
+/// nor aborted goes on the orphan list now, when no part of it can still be on the wire.
+impl<T> Drop for Shared<T> {
+    fn drop(&mut self) {
+        if !*self.spent.get_mut() {
+            self.inner.orphans.push(self.key, self.id.clone());
+        }
+    }
+}
+
+/// One part started: leaves exactly one [`Done`] when it is dropped, however that comes
+/// about (the part was sent, was not, its work panicked, or it was never run).
+struct Report<T> {
+    shared: Arc<Shared<T>>,
+    number: PartNumber,
+    held: usize,
+    bytes: Option<Bytes>,
+    sent: Option<Result<(HttpResponse, [u8; 16]), StoreError>>,
+}
+
+impl<T> Drop for Report<T> {
+    fn drop(&mut self) {
+        // The part's buffer, or its open file, goes before anyone hears the part ended.
+        drop(self.bytes.take());
+        let sent = self.sent.take().unwrap_or(Err(StoreError::Transient {
+            op: StoreOp::Upload,
+            kind: io::ErrorKind::Other,
+        }));
+        let wake = {
+            let mut ends = self.shared.ends();
+            ends.done.push(Done {
+                number: self.number,
+                held: self.held,
+                sent,
+            });
+            ends.wake.clone()
+        };
+        self.shared.ended.notify_all();
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+        self.shared.inner.part_ended();
+    }
+}
+
+impl<T: Transport> Inner<T> {
+    /// Starts one part on the store's lanes. Its answer is left with `shared`.
+    fn start_part(&self, shared: Arc<Shared<T>>, number: PartNumber, bytes: Bytes) {
+        self.part_started();
+        let report = Report {
+            shared,
+            number,
+            held: bytes.held(),
+            bytes: Some(bytes),
+            sent: None,
+        };
+        self.lanes.start(Box::new(move || report.run()));
+    }
+}
+
+impl<T: Transport> Report<T> {
+    /// The part's work; what it came to is left when this is dropped.
+    fn run(mut self) {
+        if let Some(bytes) = self.bytes.take() {
+            self.sent = Some(self.shared.send_part(self.number, bytes));
+        }
+    }
+}
+
+/// A multipart upload under way.
+struct Multi<T> {
+    shared: Arc<Shared<T>>,
+    /// The ETag of part n is the (n - 1)th entry, once its answer was collected.
+    etags: Vec<Option<String>>,
+    /// A whole part waiting for a lane.
+    ready: Option<Bytes>,
+    /// Parts started whose answers are not collected, and the memory they hold.
+    flying: usize,
+    flying_held: usize,
+    /// The object's last part was sealed: nothing more may be written.
+    tail: bool,
 }
 
 /// One object being written. Dropping it does no I/O.
@@ -102,21 +265,21 @@ pub struct S3Upload<T> {
     /// length when it was known at the start ([`plan_part_size`]).
     part: usize,
     written: u64,
-    state: UploadState,
+    /// Where the part being filled starts in the object.
+    sealed: u64,
+    filling: Filling,
+    /// The multipart upload, once the first part was whole.
+    multi: Option<Multi<T>>,
+    /// After a commit, an abort or a failure.
+    over: bool,
 }
 
 impl<T> std::fmt::Debug for S3Upload<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (multipart, buffered) = match &self.state {
-            UploadState::Buffering(buf) => (false, buf.len()),
-            UploadState::Multipart { buf, .. } => (true, buf.len()),
-            UploadState::Sourced { multipart, .. } => (multipart.is_some(), 0),
-            UploadState::Done => (false, 0),
-        };
         f.debug_struct("S3Upload")
             .field("key", &self.key)
-            .field("multipart", &multipart)
-            .field("buffered", &buffered)
+            .field("multipart", &self.multi.is_some())
+            .field("filling", &self.filling.len())
             .finish_non_exhaustive()
     }
 }
@@ -151,61 +314,66 @@ impl<T> S3Upload<T> {
             mode,
             part: usize::try_from(planned.get()).unwrap_or(usize::MAX),
             written: 0,
-            state: UploadState::Buffering(Vec::new()),
+            sealed: 0,
+            filling: Filling::Held(Vec::new()),
+            multi: None,
+            over: false,
         })
     }
 
-    /// The capacity of every buffer held (parts waiting and the one
-    /// filling), so a test can prove the memory bound.
+    /// The memory every part of this upload holds: the one filling, the one waiting and the
+    /// ones in flight, so a test can prove the bound.
     #[cfg(feature = "testing")]
     #[must_use]
     pub fn buffer_capacity(&self) -> usize {
-        match &self.state {
-            UploadState::Buffering(buf) => buf.capacity(),
-            UploadState::Multipart { buf, ready, .. } => ready
-                .iter()
-                .map(Vec::capacity)
-                .fold(buf.capacity(), usize::saturating_add),
-            UploadState::Sourced { run, ready, .. } => ready
-                .iter()
-                .map(Sealed::held)
-                .fold(run.held(), usize::saturating_add),
-            UploadState::Done => 0,
+        let multi = self.multi.as_ref().map_or(0, |multi| {
+            multi
+                .ready
+                .as_ref()
+                .map_or(0, Bytes::held)
+                .saturating_add(multi.flying_held)
+        });
+        self.filling.held().saturating_add(multi)
+    }
+
+    /// How many parts are started and not yet collected.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.multi.as_ref().map_or(0, |multi| multi.flying)
+    }
+
+    /// The part size as an object offset.
+    fn part_len(&self) -> u64 {
+        u64::try_from(self.part).unwrap_or(u64::MAX)
+    }
+
+    /// The most parts of this upload in flight at once.
+    fn width(&self) -> usize {
+        let most = self.inner.concurrency;
+        if self.filling.sourced() {
+            most.get()
+        } else {
+            held_width(most, self.part_len()).get()
         }
     }
 
-    /// Moves a live multipart id to the orphan list and ends the upload.
-    fn orphan(&mut self) {
-        match std::mem::replace(&mut self.state, UploadState::Done) {
-            UploadState::Multipart { id, .. }
-            | UploadState::Sourced {
-                multipart: Some((id, _)),
-                ..
-            } => self.inner.orphans.push(self.key, id),
-            UploadState::Buffering(_)
-            | UploadState::Sourced {
-                multipart: None, ..
-            }
-            | UploadState::Done => {}
+    /// Ends the upload on a failure of its own making; parts not yet on the wire are not sent.
+    fn fail(&mut self, err: StoreError) -> StoreError {
+        self.over = true;
+        if let Some(multi) = &self.multi {
+            multi.shared.stop.store(true, Ordering::Relaxed);
         }
-    }
-
-    /// Whether this upload keeps tallies in place of bytes.
-    const fn sourced(&self) -> bool {
-        matches!(self.state, UploadState::Sourced { .. })
-    }
-
-    /// Ends an upload written one way and then used the other: the store does not hold
-    /// what the call would send.
-    fn mixed(&mut self) -> StoreError {
-        self.orphan();
-        ended()
+        err
     }
 }
 
+/// Parts not yet on the wire are not sent. The id is orphaned when the last of them lets go.
 impl<T> Drop for S3Upload<T> {
     fn drop(&mut self) {
-        self.orphan();
+        if let Some(multi) = &self.multi {
+            multi.shared.stop.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -254,37 +422,31 @@ impl<T: Transport> Inner<T> {
         self.judge_put(key, created_at, (wrote, sent), precondition, &response)
     }
 
-    /// [`Self::put`] of an object the upload let go of: the same request with the length and
-    /// MD5 taken when the bytes were first handed over, its body read again through `again`
-    /// while it is sent. A second read that gives nothing is the result, with the source's
-    /// own error: the body ended short, so the store holds no new object.
-    pub(crate) fn put_from(
+    /// [`Self::put`] of an object the upload let go of: the same request, its MD5 taken over
+    /// a second read and its body a third (`again.rs`), on the calling thread. A read that
+    /// gives nothing is the result, with the source's own error: no request was made, or the
+    /// body ended short, so the store holds no new object.
+    fn put_from(
         &self,
         key: &FileKey,
         created_at: Timestamp,
-        whole: &Sealed,
+        mut whole: Sealed,
         mode: WriteMode,
-        again: &dyn Reread,
     ) -> Result<FileInfo, StoreError> {
         let op = StoreOp::Upload;
-        let sized = (whole.len(), whole.md5());
+        let go = AtomicBool::new(false);
+        let sized = (whole.len(), whole.md5(&go)?);
         let precondition = self.precondition(mode);
         let request = self.request(op, |b, now| {
             b.put_object_streamed_if(now, key, sized, created_at, precondition)
         })?;
-        let mut body = whole.body(again);
-        let streamed = StreamedRequest::new(request.into_request(), whole.len(), &mut body);
-        let sent = self
-            .send_streamed(op, std::num::NonZeroUsize::MIN, vec![streamed])
-            .pop();
+        let mut body = whole.body(&go);
+        let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
+        let sent = self.send_streamed(op, streamed);
         if let Some(unread) = body.failed() {
             return Err(unread);
         }
-        let response = sent.unwrap_or(Err(StoreError::Transient {
-            op,
-            kind: io::ErrorKind::Other,
-        }))?;
-        self.judge_put(key, created_at, sized, precondition, &response)
+        self.judge_put(key, created_at, sized, precondition, &sent?)
     }
 
     /// What a PUT's answer must prove, for a body of `wrote` bytes whose MD5 is `sent`.
@@ -334,116 +496,276 @@ impl<T: Transport> Inner<T> {
     }
 }
 
+impl<T: Transport> Shared<T> {
+    /// One part's work, on the thread that sends it: the MD5, the request, the answer.
+    fn send_part(
+        &self,
+        number: PartNumber,
+        bytes: Bytes,
+    ) -> Result<(HttpResponse, [u8; 16]), StoreError> {
+        let op = StoreOp::Upload;
+        let (inner, key, id) = (&self.inner, &self.key, &self.id);
+        if self.stop.load(Ordering::Relaxed) {
+            return Err(StoreError::Transient {
+                op,
+                kind: io::ErrorKind::Interrupted,
+            });
+        }
+        match bytes {
+            Bytes::Held(body) => {
+                let request =
+                    inner.request(op, |b, now| b.upload_part(now, key, id, number, body))?;
+                let md5 = request.md5();
+                Ok((inner.send(op, request.into_request())?, md5))
+            }
+            Bytes::Again(mut part) => {
+                let sized = (part.len(), part.md5(&self.stop)?);
+                let request = inner.request(op, |b, now| {
+                    b.upload_part_streamed(now, key, id, number, sized)
+                })?;
+                let mut body = part.body(&self.stop);
+                let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
+                let sent = inner.send_streamed(op, streamed);
+                // A read that gave nothing is the part's result, whatever the request came to.
+                if let Some(unread) = body.failed() {
+                    return Err(unread);
+                }
+                Ok((sent?, sized.1))
+            }
+        }
+    }
+}
+
 impl<T: Transport> S3Upload<T> {
-    /// Fills the buffer from `chunk`, uploading each part as it fills.
-    fn append(&mut self, mut chunk: &[u8]) -> Result<(), StoreError> {
-        let start = self.inner.now();
-        let part = self.part;
+    /// Takes the answers of the parts that ended, judging each as a part is judged
+    /// (`multipart.rs`) and putting its ETag by its number. The first failure, lowest part
+    /// number first among those collected together, ends the upload and is returned.
+    fn collect(&mut self) -> Result<(), StoreError> {
+        let Some(multi) = &mut self.multi else {
+            return Ok(());
+        };
+        let mut done = std::mem::take(&mut multi.shared.ends().done);
+        done.sort_by_key(|part| part.number.get());
+        let mut failed = None;
+        for part in done {
+            multi.flying = multi.flying.saturating_sub(1);
+            multi.flying_held = multi.flying_held.saturating_sub(part.held);
+            let judged = part
+                .sent
+                .and_then(|(response, md5)| judge_part(&self.key, part.number, md5, &response));
+            let slot = usize::from(part.number.get()).checked_sub(1);
+            match (judged, slot.and_then(|at| multi.etags.get_mut(at))) {
+                (Ok(etag), Some(slot)) => *slot = Some(etag),
+                (Ok(_), None) => failed = failed.or_else(|| Some(ended())),
+                (Err(err), _) => failed = failed.or(Some(err)),
+            }
+        }
+        match failed {
+            Some(err) => Err(self.fail(err)),
+            None => Ok(()),
+        }
+    }
+
+    /// Starts the part that waits when a lane is free; whether it did.
+    fn start_ready(&mut self) -> Result<bool, StoreError> {
+        let width = self.width();
+        let Some(multi) = &mut self.multi else {
+            return Ok(false);
+        };
+        if multi.flying >= width {
+            return Ok(false);
+        }
+        let Some(bytes) = multi.ready.take() else {
+            return Ok(false);
+        };
+        let next = u16::try_from(multi.etags.len().saturating_add(1)).unwrap_or(0);
+        let Some(number) = PartNumber::new(next) else {
+            // Past the part cap: nothing is sent for it.
+            return Err(self.fail(StoreError::Refused {
+                op: StoreOp::Upload,
+                status: PAYLOAD_TOO_LARGE,
+            }));
+        };
+        multi.etags.push(None);
+        multi.flying = multi.flying.saturating_add(1);
+        multi.flying_held = multi.flying_held.saturating_add(bytes.held());
+        self.inner
+            .start_part(Arc::clone(&multi.shared), number, bytes);
+        Ok(true)
+    }
+
+    /// Collects what ended and starts what fits, without waiting.
+    fn pump(&mut self) -> Result<(), StoreError> {
+        loop {
+            self.collect()?;
+            if !self.start_ready()? {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Waits until a part of this upload has an answer to collect. Lanes with no thread run
+    /// a part on this one; otherwise the thread sleeps until a part ends.
+    fn wait_one(&self) {
+        let Some(multi) = &self.multi else {
+            return;
+        };
+        if multi.flying == 0 {
+            return;
+        }
+        loop {
+            if !multi.shared.ends().done.is_empty() {
+                return;
+            }
+            if self.inner.lanes.help() {
+                continue;
+            }
+            let ends = multi.shared.ends();
+            if ends.done.is_empty() {
+                drop(
+                    multi
+                        .shared
+                        .ended
+                        .wait(ends)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+            }
+        }
+    }
+
+    /// Waits until no whole part waits for a lane.
+    fn until_none_waits(&mut self) -> Result<(), StoreError> {
+        loop {
+            self.pump()?;
+            if self
+                .multi
+                .as_ref()
+                .is_none_or(|multi| multi.ready.is_none())
+            {
+                return Ok(());
+            }
+            self.wait_one();
+        }
+    }
+
+    /// Moves the part being filled to the place of the one that waits, which must be free.
+    fn seal_now(&mut self) {
+        let Some(multi) = &mut self.multi else {
+            return;
+        };
+        let len = self.filling.len();
+        let bytes = match &mut self.filling {
+            Filling::Held(buf) => Bytes::Held(std::mem::take(buf)),
+            Filling::Again(run) => match run.take() {
+                Some(run) => Bytes::Again(run.seal()),
+                None => return,
+            },
+        };
+        self.sealed = self.sealed.saturating_add(len);
+        multi.ready = Some(bytes);
+    }
+
+    /// The part being filled is whole: it waits for a lane, or starts at once. The first one
+    /// turns the upload into a multipart one.
+    fn seal(&mut self) -> Result<(), StoreError> {
+        if self.multi.is_none() {
+            let id = match self.inner.create_upload(&self.key, self.created_at) {
+                Ok(id) => id,
+                Err(err) => return Err(self.fail(err)),
+            };
+            self.multi = Some(Multi {
+                shared: Arc::new(Shared {
+                    inner: Arc::clone(&self.inner),
+                    key: self.key,
+                    id,
+                    ends: Mutex::new(Ends::default()),
+                    ended: Condvar::new(),
+                    stop: AtomicBool::new(false),
+                    spent: AtomicBool::new(false),
+                }),
+                etags: Vec::new(),
+                ready: None,
+                flying: 0,
+                flying_held: 0,
+                tail: false,
+            });
+        }
+        self.until_none_waits()?;
+        self.seal_now();
+        self.pump()
+    }
+
+    /// Takes `chunk` into the part being filled, sealing each part as it fills. Written from
+    /// a source (`again`), a part keeps what was seen of the bytes and none of them.
+    async fn take(
+        &mut self,
+        mut chunk: &[u8],
+        again: Option<&dyn Reread>,
+    ) -> Result<(), StoreError> {
+        // Over, or its last part sealed, or written from a source and now without one: the
+        // store does not hold what the write would send.
+        if self.over
+            || self.multi.as_ref().is_some_and(|multi| multi.tail)
+            || (again.is_none() && self.filling.sourced())
+        {
+            return Err(self.fail(ended()));
+        }
+        let part = self.part_len();
         self.written = self
             .written
             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
         while !chunk.is_empty() {
-            let (UploadState::Buffering(buf) | UploadState::Multipart { buf, .. }) =
-                &mut self.state
-            else {
+            // No byte goes into a new buffer while a whole one still waits (the module docs).
+            if !self.filling.sourced() && self.filling.len() == 0 {
+                self.until_none_waits()?;
+            }
+            let room = usize::try_from(part.saturating_sub(self.filling.len()));
+            let (head, rest) = chunk.split_at(room.unwrap_or(usize::MAX).min(chunk.len()));
+            match (&mut self.filling, again) {
+                (Filling::Held(buf), _) => append_bounded(buf, head, self.part),
+                (Filling::Again(Some(run)), _) => run.add(head),
+                (Filling::Again(run @ None), Some(again)) => match again.open().await {
+                    Ok(reader) => run.insert(Run::at(self.sealed, part, reader)).add(head),
+                    Err(err) => return Err(self.fail(err)),
+                },
+                (Filling::Again(None), None) => return Err(self.fail(ended())),
+            }
+            chunk = rest;
+            if self.filling.len() >= part {
+                self.seal()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The last part (when anything is left), every part's answer, then
+    /// CompleteMultipartUpload and the ETag check on the finished object.
+    fn finish(&mut self) -> Result<FileInfo, StoreError> {
+        let start = self.inner.now();
+        if self.filling.len() > 0 {
+            self.until_none_waits()?;
+            self.seal_now();
+        }
+        loop {
+            self.pump()?;
+            let Some(multi) = &self.multi else {
                 return Err(ended());
             };
-            let (head, rest) = chunk.split_at(part.saturating_sub(buf.len()).min(chunk.len()));
-            append_bounded(buf, head, part);
-            chunk = rest;
-            if buf.len() >= part {
-                self.start_multipart()?;
-                self.queue_part(start)?;
+            if multi.flying == 0 && multi.ready.is_none() {
+                break;
             }
+            self.wait_one();
         }
-        Ok(())
-    }
-
-    /// The first full buffer turns a buffered upload into a multipart one.
-    fn start_multipart(&mut self) -> Result<(), StoreError> {
-        if !matches!(self.state, UploadState::Buffering(_)) {
-            return Ok(());
-        }
-        let UploadState::Buffering(buf) = std::mem::replace(&mut self.state, UploadState::Done)
-        else {
-            return Err(ended());
-        };
-        let id = self.inner.create_upload(&self.key, self.created_at)?;
-        self.state = UploadState::Multipart {
-            id,
-            etags: Vec::new(),
-            buf,
-            ready: Vec::new(),
-        };
-        Ok(())
-    }
-
-    /// Moves the full buffer to the parts waiting, and sends them once the
-    /// store's concurrency of them is ready.
-    fn queue_part(&mut self, start: Timestamp) -> Result<(), StoreError> {
-        let width = self.inner.concurrency.get();
-        let UploadState::Multipart { buf, ready, .. } = &mut self.state else {
-            return Ok(());
-        };
-        ready.push(std::mem::take(buf));
-        if ready.len() >= width {
-            return self.send_parts(start);
-        }
-        Ok(())
-    }
-
-    /// Uploads every waiting part as one batch. Any failure ends the upload
-    /// and hands its id to the orphan list.
-    fn send_parts(&mut self, start: Timestamp) -> Result<(), StoreError> {
-        let UploadState::Multipart {
-            id, etags, ready, ..
-        } = &mut self.state
-        else {
-            return Ok(());
-        };
-        if ready.is_empty() {
-            return Ok(());
-        }
-        let bodies = std::mem::take(ready);
-        let first = etags.len().saturating_add(1);
-        let outcome = self
-            .inner
-            .within_budget(StoreOp::Upload, start)
-            .and_then(|()| self.inner.put_parts(&self.key, id, first, bodies));
-        match outcome {
-            Ok(sent) => {
-                etags.extend(sent);
-                Ok(())
-            }
-            Err(err) => {
-                self.orphan();
-                Err(err)
-            }
-        }
-    }
-
-    /// The last part (when anything is left), then CompleteMultipartUpload and
-    /// the ETag check on the finished object.
-    fn finish_multipart(&mut self) -> Result<FileInfo, StoreError> {
-        let start = self.inner.now();
-        if let UploadState::Multipart { buf, ready, .. } = &mut self.state
-            && !buf.is_empty()
-        {
-            ready.push(std::mem::take(buf));
-        }
-        self.send_parts(start)?;
         self.complete(start)
     }
 
     /// CompleteMultipartUpload for the parts sent, and the ETag check on the finished
     /// object.
     fn complete(&mut self, start: Timestamp) -> Result<FileInfo, StoreError> {
-        let (UploadState::Multipart { id, etags, .. }
-        | UploadState::Sourced {
-            multipart: Some((id, etags)),
-            ..
-        }) = &self.state
-        else {
+        let Some(multi) = &self.multi else {
+            return Err(ended());
+        };
+        let Some(etags) = multi.etags.iter().cloned().collect::<Option<Vec<String>>>() else {
             return Err(ended());
         };
         let parts = etags.len();
@@ -452,22 +774,16 @@ impl<T: Transport> S3Upload<T> {
             created_at: self.created_at,
             parts,
         };
-        let completed = self
+        let id = &multi.shared.id;
+        let etag = self
             .inner
             .within_budget(StoreOp::Upload, start)
             .and_then(|()| {
                 self.inner
-                    .complete_upload(&self.key, id, etags, self.mode, sent)
-            });
-        let etag = match completed {
-            Ok(etag) => etag,
-            Err(err) => {
-                self.orphan();
-                return Err(err);
-            }
-        };
+                    .complete_upload(&self.key, id, &etags, self.mode, sent)
+            })?;
         // Completed: the id is spent, so nothing is left to orphan.
-        self.state = UploadState::Done;
+        multi.shared.spent.store(true, Ordering::Relaxed);
         if !completed_etag_fits(&etag, parts) {
             return Err(self.inner.delete_bad_object(&self.key, None));
         }
@@ -478,188 +794,175 @@ impl<T: Transport> S3Upload<T> {
         })
     }
 
-    /// The part size as an object offset.
-    fn part_len(&self) -> u64 {
-        u64::try_from(self.part).unwrap_or(u64::MAX)
-    }
-
-    /// Takes `chunk` into the part being handed over, keeping its digest and tallies and
-    /// none of its bytes, and sends the waiting parts once the store's concurrency of them
-    /// is ready.
-    fn append_from(&mut self, mut chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
-        let start = self.inner.now();
-        let part = self.part_len();
-        let width = self.inner.concurrency.get();
-        self.written = self
-            .written
-            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        while !chunk.is_empty() {
-            let UploadState::Sourced {
-                multipart,
-                run,
-                ready,
-            } = &mut self.state
-            else {
-                return Err(ended());
+    /// Stops what is not yet on the wire and waits until every part started has ended. Their
+    /// answers are dropped: the upload is over.
+    fn settle(&mut self) {
+        loop {
+            let Some(multi) = &mut self.multi else {
+                return;
             };
-            let room = usize::try_from(part.saturating_sub(run.len())).unwrap_or(usize::MAX);
-            let (head, rest) = chunk.split_at(room.min(chunk.len()));
-            run.add(head);
-            chunk = rest;
-            if run.len() < part {
-                continue;
+            multi.shared.stop.store(true, Ordering::Relaxed);
+            multi.ready = None;
+            let ended = std::mem::take(&mut multi.shared.ends().done).len();
+            multi.flying = multi.flying.saturating_sub(ended);
+            if multi.flying == 0 {
+                multi.flying_held = 0;
+                return;
             }
-            if multipart.is_none() {
-                match self.inner.create_upload(&self.key, self.created_at) {
-                    Ok(id) => *multipart = Some((id, Vec::new())),
-                    Err(err) => {
-                        self.state = UploadState::Done;
-                        return Err(err);
-                    }
-                }
-            }
-            let next = Run::at(run.end(), part);
-            ready.push(std::mem::replace(&mut **run, next).seal());
-            if ready.len() >= width {
-                self.send_parts_from(start, again)?;
-            }
+            self.wait_one();
         }
-        Ok(())
-    }
-
-    /// Uploads every waiting part as one batch, each body read again through `again`. Any
-    /// failure ends the upload and hands its id to the orphan list.
-    fn send_parts_from(&mut self, start: Timestamp, again: &dyn Reread) -> Result<(), StoreError> {
-        let UploadState::Sourced {
-            multipart: Some((id, etags)),
-            ready,
-            ..
-        } = &mut self.state
-        else {
-            return Ok(());
-        };
-        if ready.is_empty() {
-            return Ok(());
-        }
-        let parts = std::mem::take(ready);
-        let first = etags.len().saturating_add(1);
-        let outcome = self
-            .inner
-            .within_budget(StoreOp::Upload, start)
-            .and_then(|()| {
-                self.inner
-                    .put_parts_from(&self.key, id, first, &parts, again)
-            });
-        match outcome {
-            Ok(sent) => {
-                etags.extend(sent);
-                Ok(())
-            }
-            Err(err) => {
-                self.orphan();
-                Err(err)
-            }
-        }
-    }
-
-    /// Commits an upload written from a source: one PUT when it never filled a part, else
-    /// the parts still waiting, the last one, and CompleteMultipartUpload.
-    fn finish_from(&mut self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        let start = self.inner.now();
-        match &mut self.state {
-            UploadState::Sourced {
-                multipart: None,
-                run,
-                ..
-            } => {
-                let whole = std::mem::replace(&mut **run, Run::at(0, 0)).seal();
-                self.state = UploadState::Done;
-                return self
-                    .inner
-                    .put_from(&self.key, self.created_at, &whole, self.mode, again);
-            }
-            UploadState::Sourced {
-                multipart: Some(_),
-                run,
-                ready,
-            } => {
-                if run.len() > 0 {
-                    let next = Run::at(run.end(), 0);
-                    ready.push(std::mem::replace(&mut **run, next).seal());
-                }
-            }
-            UploadState::Buffering(_) | UploadState::Multipart { .. } | UploadState::Done => {
-                return Err(ended());
-            }
-        }
-        self.send_parts_from(start, again)?;
-        self.complete(start)
     }
 }
 
 impl<T: Transport> Upload for S3Upload<T> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
-        if self.sourced() {
-            return Err(self.mixed());
-        }
-        self.append(chunk)
+        self.take(chunk, None).await
     }
 
     async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
         // The first write decides: an upload that already holds bytes goes on holding them.
-        if self.written == 0 && matches!(&self.state, UploadState::Buffering(buf) if buf.is_empty())
+        if self.written == 0 && !self.over {
+            self.filling = Filling::Again(None);
+        }
+        self.take(chunk, Some(again)).await
+    }
+
+    /// Never waits for a part (the module docs). The task that asks is woken when a part of
+    /// this upload ends.
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        if self.over {
+            return Err(ended());
+        }
+        let waker = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+        let Some(multi) = &self.multi else {
+            // Below one part: the commit sends it.
+            return Ok(Flight::Idle);
+        };
+        multi.shared.ends().wake = Some(waker);
+        self.pump()?;
+        if rest == Rest::None
+            && self.filling.len() > 0
+            && let Some(multi) = &mut self.multi
+            && multi.ready.is_none()
         {
-            self.state = UploadState::Sourced {
-                multipart: None,
-                run: Box::new(Run::at(0, self.part_len())),
-                ready: Vec::new(),
-            };
+            // The object's last part, short or whole.
+            multi.tail = true;
+            self.seal_now();
+            self.pump()?;
         }
-        if self.sourced() {
-            self.append_from(chunk, again)
-        } else {
-            self.append(chunk)
-        }
+        Ok(match &self.multi {
+            Some(multi) if multi.ready.is_some() => Flight::Full,
+            Some(multi) if multi.flying > 0 => Flight::Room,
+            Some(_) | None => Flight::Idle,
+        })
     }
 
     async fn commit(mut self) -> Result<FileInfo, StoreError> {
-        if self.sourced() {
-            return Err(self.mixed());
+        if self.over {
+            return Err(ended());
         }
-        if let UploadState::Buffering(buf) = &mut self.state {
-            let body = std::mem::take(buf);
-            self.state = UploadState::Done;
-            return self.inner.put(&self.key, self.created_at, body, self.mode);
+        self.over = true;
+        if self.multi.is_none() {
+            let whole = std::mem::replace(&mut self.filling, Filling::Held(Vec::new()));
+            let (key, created_at) = (&self.key, self.created_at);
+            return match whole {
+                Filling::Held(body) => self.inner.put(key, created_at, body, self.mode),
+                Filling::Again(None) => self.inner.put(key, created_at, Vec::new(), self.mode),
+                Filling::Again(Some(run)) => {
+                    self.inner.put_from(key, created_at, run.seal(), self.mode)
+                }
+            };
         }
-        self.finish_multipart()
-    }
-
-    async fn commit_from(mut self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        if self.sourced() {
-            self.finish_from(again)
-        } else {
-            self.commit().await
+        let finished = self.finish();
+        if finished.is_err() {
+            // No part of a failed upload is on the wire when the caller hears of it.
+            self.settle();
         }
+        finished
     }
 
     async fn abort(mut self) -> Result<(), StoreError> {
-        match std::mem::replace(&mut self.state, UploadState::Done) {
-            UploadState::Multipart { id, .. }
-            | UploadState::Sourced {
-                multipart: Some((id, _)),
-                ..
-            } => {
-                let aborted = self.inner.abort_upload(&self.key, &id);
-                if aborted.is_err() {
-                    self.inner.orphans.push(self.key, id);
-                }
-                aborted
-            }
-            UploadState::Buffering(_)
-            | UploadState::Sourced {
-                multipart: None, ..
-            }
-            | UploadState::Done => Ok(()),
+        let failed = std::mem::replace(&mut self.over, true);
+        self.settle();
+        let Some(multi) = &self.multi else {
+            return Ok(());
+        };
+        if failed {
+            // As a failed upload always was: its id waits on the orphan list.
+            return Ok(());
         }
+        let aborted = self.inner.abort_upload(&self.key, &multi.shared.id);
+        if aborted.is_ok() {
+            multi.shared.spent.store(true, Ordering::Relaxed);
+        }
+        aborted
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "testing")]
+mod part_cap_tests {
+    use lsr_core::{FakeClock, Level};
+
+    use super::*;
+    use crate::config::{BucketName, Endpoint, Prefix, S3Config};
+    use crate::credentials::{S3Credentials, SecretString};
+    use crate::fake::FakeS3;
+    use crate::store::S3Store;
+
+    fn store() -> S3Store<FakeS3> {
+        let config = S3Config::new(
+            Endpoint::new("http://localhost:9000").unwrap(),
+            BucketName::new("bucket").unwrap(),
+            Prefix::new("db").unwrap(),
+        );
+        let credentials = S3Credentials::new(
+            "AKIAIOSFODNN7EXAMPLE".to_owned(),
+            SecretString::new("secret".to_owned()),
+        );
+        let at = Timestamp::from_unix_millis(1_369_353_600_000);
+        let fake = FakeS3::new(&config, FakeClock::new(at));
+        S3Store::with_transport(config, credentials, fake, FakeClock::new(at)).unwrap()
+    }
+
+    /// A part number past 10000 is refused before any request is sent for it; 10000 is
+    /// sent.
+    #[test]
+    fn part_numbers_stop_at_the_cap() {
+        let key = FileKey::new(
+            Level::ZERO,
+            lsr_ltx::TxidRange::new(
+                lsr_ltx::Txid::new(1).unwrap(),
+                lsr_ltx::Txid::new(1).unwrap(),
+            )
+            .unwrap(),
+        );
+        let at = Timestamp::from_unix_millis(1_369_353_600_000);
+        let store = store();
+        let mut upload =
+            S3Upload::new(Arc::clone(&store.inner), key, at, WriteMode::New, None).unwrap();
+        // Part 1, and then as if 9998 more had been sent.
+        upload.seal().unwrap();
+        let multi = upload.multi.as_mut().unwrap();
+        assert_eq!(multi.etags.len(), 1);
+        multi.etags.resize(9_999, Some("\"etag\"".to_owned()));
+        multi.ready = Some(Bytes::Held(Vec::new()));
+        upload.pump().unwrap();
+        let multi = upload.multi.as_mut().unwrap();
+        assert_eq!(multi.etags.len(), 10_000, "part 10000 is sent");
+        assert!(multi.etags.last().unwrap().is_some());
+
+        multi.ready = Some(Bytes::Held(Vec::new()));
+        assert_eq!(
+            upload.pump(),
+            Err(StoreError::Refused {
+                op: StoreOp::Upload,
+                status: PAYLOAD_TOO_LARGE,
+            }),
+            "part 10001 is refused"
+        );
+        let multi = upload.multi.as_ref().unwrap();
+        assert_eq!((multi.etags.len(), multi.flying), (10_000, 0));
+        assert!(upload.over);
     }
 }

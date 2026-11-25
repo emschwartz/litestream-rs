@@ -39,11 +39,13 @@
 
 use std::io;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::task::JoinSet;
 
+use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
 use crate::transport::{HttpResponse, Transport, TransportError};
 use crate::transport::{MAX_BODY, map_io};
@@ -207,6 +209,12 @@ impl Transport for ReqwestTransport {
         let head_only = request.method() == Method::Head;
         let exchange = exchange(self.build(&request), head_only);
         self.drive(exchange, Err(TransportError::Io(io::ErrorKind::Other)))
+    }
+
+    /// Each sender thread drives its own request with `block_on`, as the replicator thread
+    /// does. A part's body is read whole before it is sent (the trait's default).
+    fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {
+        Arc::new(Sender::new(most))
     }
 
     fn send_many(

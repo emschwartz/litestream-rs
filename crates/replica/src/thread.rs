@@ -59,7 +59,7 @@ use lsr_store_fs::FsStore;
 
 use crate::config::Config;
 use crate::events::{Event, EventSink, TakeoverUnusable};
-use crate::exec::block_on;
+use crate::exec::{block_on, block_on_tick};
 use crate::health::{Counters, FailStop, Gone, Phase, Stopped, Writes};
 use crate::meta::{MetaLock, remove_takeover, write_takeover};
 use crate::readers::Guarded;
@@ -540,7 +540,7 @@ impl Worker {
             clock: self.runtime.clock.as_ref(),
             notice: &mut notice,
         };
-        Ok(block_on(self.actor.tick(env, now)))
+        Ok(block_on_tick(self.actor.tick(env, now), &self.runtime.park))
     }
 
     fn after(&mut self, tick: Tick, now: Timestamp) -> Turn {

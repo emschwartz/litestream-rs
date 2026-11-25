@@ -47,7 +47,6 @@ use lsr_ltx::{Timestamp, TxidRange};
 use thiserror::Error;
 
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, cmp_range, file_name, is_scratch_name};
-use crate::witness::ByteTally;
 
 /// How many entries one listing page may hold: 1 to 1000, S3's own cap, so
 /// every backend can return exactly the page asked for.
@@ -673,25 +672,147 @@ pub trait Opened: Send + fmt::Debug {
     fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>>;
 }
 
-/// The object an upload is being handed, read again: what lets a store with parts keep a
-/// digest of the bytes it was given instead of the bytes, and read each part back when it
-/// sends it (`docs/decisions/D222.md`).
+/// How many bytes a store was handed and their CRC-64: what it keeps of bytes it lets go
+/// of, and what a second read of them must equal before a byte of it is used
+/// ([`Again::read`]). The CRC is the LTX format's polynomial on carry-less multiply
+/// (`docs/decisions/D223.md`), so taking it costs the engine's first read next to nothing,
+/// and two different runs of bytes of one length share it once in 2^64 by accident and
+/// never when they differ in a burst of 64 bits or fewer (`docs/decisions/D233.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Seen {
+    len: u64,
+    crc: u64,
+}
+
+impl Seen {
+    /// Of `bytes`.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Self {
+        let mut seeing = Seeing::new();
+        seeing.add(bytes);
+        seeing.seen()
+    }
+
+    /// How many bytes it is of.
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether it is of no bytes.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// A [`Seen`] being taken over bytes as they pass.
+#[derive(Clone, Copy, Debug)]
+pub struct Seeing {
+    len: u64,
+    crc: crc_fast::Digest,
+}
+
+impl Default for Seeing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Seeing {
+    /// No bytes yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            len: 0,
+            crc: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc64GoIso),
+        }
+    }
+
+    /// Takes in the next bytes.
+    pub fn add(&mut self, bytes: &[u8]) {
+        self.len = self
+            .len
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        self.crc.update(bytes);
+    }
+
+    /// How many bytes were taken in.
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether no byte was taken in.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// What was taken in so far.
+    #[must_use]
+    pub fn seen(&self) -> Seen {
+        Seen {
+            len: self.len,
+            crc: self.crc.finalize(),
+        }
+    }
+}
+
+/// The object an upload is being handed, to read again: what lets a store with parts keep
+/// a [`Seen`] of the bytes it was given instead of the bytes, and read each part back on
+/// the thread that sends it (`docs/decisions/D222.md`, `docs/decisions/D233.md`).
+///
+/// The source is borrowed for one call; what it opens is owned, so a part started in one
+/// tick can be read in the ticks after it.
+pub trait Reread: Send + Sync {
+    /// A reader of the object that outlives this call: a store asks for one when a part's
+    /// first byte arrives and moves it to the thread that sends the part.
+    ///
+    /// # Errors
+    /// The source's own error when it has no reader to give. The upload it was for cannot
+    /// go on: its caller fails it.
+    fn open(&self) -> BoxFuture<'_, Result<Box<dyn Again>, StoreError>>;
+}
+
+/// One reader of an object being uploaded ([`Reread::open`]). It borrows nothing.
 ///
 /// A read answers with bytes only when they are the bytes `was` was taken over, so nothing
-/// read a second time reaches a store unverified. Offsets are offsets in the object. The
+/// read a second time is hashed or sent unverified. Offsets are offsets in the object. The
 /// future completes on any executor, as a store's do.
-pub trait Reread: Send + Sync {
-    /// The bytes of the object from `offset` that `was` tallied when they were first handed
-    /// over: as many as it counted, at most one read's worth ([`ReadLen::MAX_RAW`]).
+pub trait Again: Send {
+    /// The bytes of the object from `offset` that `was` was taken over when they were first
+    /// handed over: as many as it counted, at most one read's worth ([`ReadLen::MAX_RAW`]).
     ///
     /// # Errors
     /// The read's own error when it fails, and an error when the bytes read are fewer or
     /// other than `was` holds. The upload they were for cannot go on: its caller fails it.
     fn read<'a>(
-        &'a self,
+        &'a mut self,
         offset: u64,
-        was: &'a ByteTally,
+        was: &'a Seen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>>;
+}
+
+/// Where the parts an upload has started are ([`Upload::flight`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Flight {
+    /// No part is in flight and none waits to start.
+    Idle,
+    /// Parts are in flight, and a write of one read's worth will not wait for one.
+    Room,
+    /// A whole part waits for a part in flight to end: a write now would wait with it.
+    Full,
+}
+
+/// Whether an upload will be handed more bytes ([`Upload::flight`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Rest {
+    /// More may follow.
+    More,
+    /// Every byte was handed over, and the caller has verified the object whole: the
+    /// upload may start its last part.
+    None,
 }
 
 /// One object being written. See the module docs for visibility.
@@ -699,14 +820,13 @@ pub trait Upload: Send {
     /// Appends a chunk.
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// [`Self::write`] for a caller that can produce the object's bytes again: `again` reads
-    /// any of them already handed over, `chunk` included. A store that cuts an object into
-    /// parts may then keep a [`ByteTally`] of what it was given in place of the bytes and
-    /// read them back through `again` when it sends them. The default keeps the bytes, as
-    /// [`Self::write`] does, and a store with no parts needs no other.
+    /// [`Self::write`] for a caller that can produce the object's bytes again: `again` opens
+    /// readers of them. A store that cuts an object into parts may then keep a [`Seen`] of
+    /// what it was given in place of the bytes and read them back through a reader of its
+    /// own when it sends them. The default keeps the bytes, as [`Self::write`] does, and a
+    /// store with no parts needs no other.
     ///
-    /// An upload is written through this method and [`Self::commit_from`] or through
-    /// [`Self::write`] and [`Self::commit`], never both. A wrapper forwards both pairs.
+    /// An upload is written through this method or through [`Self::write`], never both.
     fn write_from(
         &mut self,
         chunk: &[u8],
@@ -722,18 +842,19 @@ pub trait Upload: Send {
     /// or may not be visible (see the module docs): list again.
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send;
 
-    /// [`Self::commit`] of an upload written with [`Self::write_from`]: what the store let
-    /// go of and has not sent yet is read back through `again` first. An error from
-    /// `again` fails the commit before anything is published.
-    fn commit_from(
-        self,
-        again: &dyn Reread,
-    ) -> impl Future<Output = Result<FileInfo, StoreError>> + Send
-    where
-        Self: Sized,
-    {
-        let _ = again;
-        self.commit()
+    /// Where the parts this upload has started are, for a caller that must not wait for
+    /// one: it collects those that ended, starts one that waited, and returns at once. With
+    /// [`Rest::None`] the caller says no byte follows, so a store with parts starts the
+    /// last one and [`Self::commit`] has only to complete the object once this answers
+    /// [`Flight::Idle`]. The task that asks is woken when a part ends. The default is a
+    /// store that sends nothing beside its caller: always idle.
+    ///
+    /// # Errors
+    /// The failure of a part that ended: the same error the next write would return. The
+    /// upload cannot go on.
+    fn flight(&mut self, rest: Rest) -> impl Future<Output = Result<Flight, StoreError>> + Send {
+        let _ = rest;
+        async { Ok(Flight::Idle) }
     }
 
     /// Discards the written bytes; a prior object under the key is untouched.
@@ -757,11 +878,8 @@ pub trait DynUpload: Send {
     ) -> BoxFuture<'a, Result<(), StoreError>>;
     /// [`Upload::commit`].
     fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<FileInfo, StoreError>>;
-    /// [`Upload::commit_from`].
-    fn commit_from_boxed<'a>(
-        self: Box<Self>,
-        again: &'a dyn Reread,
-    ) -> BoxFuture<'a, Result<FileInfo, StoreError>>;
+    /// [`Upload::flight`].
+    fn flight_boxed(&mut self, rest: Rest) -> BoxFuture<'_, Result<Flight, StoreError>>;
     /// [`Upload::abort`].
     fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>>;
 }
@@ -783,11 +901,8 @@ impl<U: Upload + 'static> DynUpload for U {
         Box::pin((*self).commit())
     }
 
-    fn commit_from_boxed<'a>(
-        self: Box<Self>,
-        again: &'a dyn Reread,
-    ) -> BoxFuture<'a, Result<FileInfo, StoreError>> {
-        Box::pin((*self).commit_from(again))
+    fn flight_boxed(&mut self, rest: Rest) -> BoxFuture<'_, Result<Flight, StoreError>> {
+        Box::pin(self.flight(rest))
     }
 
     fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>> {
@@ -814,9 +929,9 @@ impl Upload for Box<dyn DynUpload> {
         DynUpload::commit_boxed(upload).await
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        let upload: Box<dyn DynUpload> = self;
-        DynUpload::commit_from_boxed(upload, again).await
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        let upload: &mut dyn DynUpload = &mut **self;
+        upload.flight_boxed(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

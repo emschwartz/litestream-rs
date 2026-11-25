@@ -280,6 +280,15 @@ impl PartSize {
         }
     }
 
+    /// A size below S3's minimum, for a simulator whose files are a few hundred bytes and
+    /// whose bucket takes parts of any size (`FakeS3::accept_small_parts`): at 5 MiB nothing
+    /// there is ever sent in parts.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub const fn below_the_minimum(bytes: std::num::NonZeroU64) -> Self {
+        Self(bytes.get())
+    }
+
     /// The size in bytes.
     #[must_use]
     pub const fn get(self) -> u64 {
@@ -360,12 +369,12 @@ const _: () = assert!(PartSize::TIGRIS.get() >= PartSize::MIN.get());
 const _: () = assert!(R2_CONCURRENCY.get() <= DEFAULT_CONCURRENCY.get());
 // One batch of read-ahead HEADs never asks for more than a decision names ahead.
 const _: () = assert!(CREATION_TIME_CONCURRENCY.get() <= lsr_core::MAX_AHEAD);
-// Memory in the worst case with the defaults: an upload buffers at most `concurrency`
-// parts (5 x 16 MiB on Tigris, 80 MiB), and a restore holds at most `READ_CONCURRENCY`
-// reads of the largest length (8 x 16 MiB, 128 MiB). Both stay under 128 MiB. What each
-// really holds, parts and bodies copied nowhere, is pinned through the real client by
-// `tests/store-s3/memory.rs`.
-const _: () = assert!(widen(DEFAULT_CONCURRENCY.get()) * PartSize::TIGRIS.get() <= 128 << 20);
+// Memory in the worst case with the defaults: an upload that buffers its parts holds
+// `concurrency` of them in flight and one more (6 x 16 MiB on Tigris, 96 MiB), and a restore
+// holds at most `READ_CONCURRENCY` reads of the largest length (8 x 16 MiB, 128 MiB). Both
+// stay under 128 MiB. What each really holds, parts and bodies copied nowhere, is pinned
+// through the real client by `tests/store-s3/memory.rs`.
+const _: () = assert!(widen(DEFAULT_CONCURRENCY.get() + 1) * PartSize::TIGRIS.get() <= 128 << 20);
 const _: () =
     assert!(widen(READ_CONCURRENCY.get()) * widen_len(lsr_core::ReadLen::MAX_RAW) <= 128 << 20);
 

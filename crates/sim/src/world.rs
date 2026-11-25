@@ -26,7 +26,7 @@ use crate::exec::{Polls, RunEnd, run_until};
 use crate::history::History;
 use crate::model::{CommitId, Model, PageImage, Recovery};
 use crate::oracle::{Acked, Checked, Ground, Violation, Windows, check_with};
-use crate::remote::{Bucket, RemoteBackend};
+use crate::remote::{Bucket, Parts, RemoteBackend, S3Remote};
 use crate::seed::Seed;
 use crate::side::{SideMaker, SqliteSide};
 use crate::sqlite::{AppCommit, CrashKind, InTickSite, OtherProcessMode};
@@ -263,6 +263,9 @@ pub struct World {
     pub staging_raw: StagingRaw,
     /// The replica with nothing in front of it: what the oracle restores from.
     pub remote_raw: Bucket,
+    /// The S3 store under the wrappers, when the replica is on S3: what a process's end does
+    /// to its parts and to what it remembered ([`S3Remote::process_ended`]).
+    pub remote_s3: Option<Arc<S3Remote>>,
     /// What the staging store really did.
     pub staging_recorder: RecorderLog,
     /// What the replica really did.
@@ -451,6 +454,7 @@ impl World {
             remote,
             staging_raw,
             remote_raw,
+            remote_s3: None,
             staging_recorder: staging_recorder_log,
             remote_recorder: remote_recorder_log,
             volatile: volatile_handle,
@@ -485,12 +489,17 @@ impl World {
     }
 
     /// Puts the replica on the S3 store over a fresh in-memory bucket behind its fault layer
-    /// (`crate::remote`), with the same wrappers in front of it as before. Call before the first
-    /// boot: the replica starts empty, and its fault schedule and batch widths start over.
-    pub fn use_s3_remote(&mut self) {
-        let Some((backend, bucket)) = crate::remote::s3(&self.clock) else {
+    /// (`crate::remote`), with the same wrappers in front of it as before; with `parts`, the
+    /// store sends in parts whose landings the seed draws. Call before the first boot: the
+    /// replica starts empty, and its fault schedule and batch widths start over.
+    pub fn use_s3_remote(&mut self, parts: Option<Parts>) {
+        let parts = parts.map(|parts| (parts, self.seed.stream(26)));
+        let Some((backend, bucket)) = crate::remote::s3(&self.clock, parts) else {
             return;
         };
+        if let RemoteBackend::S3(remote) = &backend {
+            self.remote_s3 = Some(Arc::clone(remote));
+        }
         let (remote, log) = remote_stack(
             backend,
             &bucket,

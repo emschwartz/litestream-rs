@@ -34,6 +34,7 @@ use crate::config::{
     CREATION_TIME_CONCURRENCY, ConfigError, PartSize, Prefix, READ_CONCURRENCY, S3Config,
 };
 use crate::credentials::S3Credentials;
+use crate::lanes::{self, Lanes};
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, Precondition, RequestBuilder, RequestError};
 use crate::response::{Head, parse_created_at_header, parse_delete_failure_codes, parse_head};
@@ -68,13 +69,13 @@ pub struct WriteStats {
 /// A replica on an S3-compatible bucket.
 #[cfg(feature = "ureq")]
 pub struct S3Store<T: Transport = UreqTransport> {
-    inner: Arc<Inner<T>>,
+    pub(crate) inner: Arc<Inner<T>>,
 }
 
 /// A replica on an S3-compatible bucket.
 #[cfg(not(feature = "ureq"))]
 pub struct S3Store<T: Transport> {
-    inner: Arc<Inner<T>>,
+    pub(crate) inner: Arc<Inner<T>>,
 }
 
 impl<T: Transport> std::fmt::Debug for S3Store<T> {
@@ -95,6 +96,12 @@ pub(crate) struct Inner<T> {
     stats: Mutex<ListStats>,
     writes: Mutex<WriteStats>,
     pub(crate) orphans: Orphans,
+    /// Where uploads send their parts (`lanes.rs`).
+    pub(crate) lanes: Arc<dyn Lanes>,
+    /// Parts started by any upload of this store that have not ended, and what wakes the
+    /// boot sweep when one does (`orphans.rs`).
+    parts: lanes::Mutex<usize>,
+    part_ended: lanes::Condvar,
 }
 
 /// The wall clock, for a store that talks to a real bucket (signatures expire
@@ -237,10 +244,14 @@ impl<T: Transport> S3Store<T> {
         clock: impl Clock + 'static,
     ) -> Result<Self, ConfigError> {
         let signer = Signer::new(&config, current, source)?;
+        let lanes = transport.lanes(config.concurrency());
         Ok(Self {
             inner: Arc::new(Inner {
                 signer,
                 transport,
+                lanes,
+                parts: lanes::Mutex::new(0),
+                part_ended: lanes::Condvar::new(),
                 clock: Arc::new(clock),
                 part_size: config.part_size(),
                 concurrency: config.concurrency(),
@@ -267,6 +278,13 @@ impl<T: Transport> S3Store<T> {
     #[must_use]
     pub fn pending_orphans(&self) -> usize {
         self.inner.orphans.len()
+    }
+
+    /// Forgets the abandoned uploads that await an abort, as a process that died has: the
+    /// next boot's sweep then has only the bucket's listing to find them by. How many.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn forget_orphans(&self) -> usize {
+        self.inner.orphans.take().len()
     }
 
     /// What create-only writes met since the store was made.
@@ -405,6 +423,23 @@ fn content_range_start(value: &str) -> Option<u64> {
         .ok()
 }
 
+impl<T> Inner<T> {
+    /// Counts a part handed to the lanes.
+    pub(crate) fn part_started(&self) {
+        let mut parts = lanes::lock(&self.parts);
+        *parts = parts.saturating_add(1);
+    }
+
+    /// Counts a part that ended, however it did.
+    pub(crate) fn part_ended(&self) {
+        {
+            let mut parts = lanes::lock(&self.parts);
+            *parts = parts.saturating_sub(1);
+        }
+        self.part_ended.notify_all();
+    }
+}
+
 impl<T: Transport> Inner<T> {
     pub(crate) fn prefix(&self) -> &Prefix {
         &self.prefix
@@ -479,18 +514,37 @@ impl<T: Transport> Inner<T> {
             .collect()
     }
 
-    /// [`Self::send_many`] for requests whose bodies are read while they are sent.
+    /// [`Self::send`] for a request whose body is read while it is sent.
     pub(crate) fn send_streamed(
         &self,
         op: StoreOp,
-        limit: NonZeroUsize,
-        requests: Vec<StreamedRequest<'_>>,
-    ) -> Vec<Result<HttpResponse, StoreError>> {
+        request: StreamedRequest<'_>,
+    ) -> Result<HttpResponse, StoreError> {
         self.transport
-            .send_streamed(requests, limit)
-            .into_iter()
-            .map(|sent| sent.map_err(|err| classify_transport(op, &err)))
-            .collect()
+            .send_streamed(request)
+            .map_err(|err| classify_transport(op, &err))
+    }
+
+    /// Waits until no part of any upload of this store is started and not ended: after it,
+    /// with no upload alive, nothing of this store's is on the wire. Lanes with no thread
+    /// run the parts on this one.
+    pub(crate) fn parts_ended(&self) {
+        loop {
+            if *lanes::lock(&self.parts) == 0 {
+                return;
+            }
+            if self.lanes.help() {
+                continue;
+            }
+            let parts = lanes::lock(&self.parts);
+            if *parts > 0 {
+                drop(
+                    self.part_ended
+                        .wait(parts)
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
+            }
+        }
     }
 
     /// Sends, and turns a failure status into its [`StoreError`].
@@ -738,71 +792,5 @@ impl<T: Transport> Inner<T> {
             classify_delete_failures(op, &failed)?;
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-#[cfg(feature = "testing")]
-mod part_cap_tests {
-    use lsr_core::FakeClock;
-
-    use super::*;
-    use crate::config::{BucketName, Endpoint, Prefix};
-    use crate::credentials::SecretString;
-    use crate::fake::FakeS3;
-    use crate::multipart::PAYLOAD_TOO_LARGE;
-    use crate::request::UploadId;
-
-    fn store() -> S3Store<FakeS3> {
-        let config = S3Config::new(
-            Endpoint::new("http://localhost:9000").unwrap(),
-            BucketName::new("bucket").unwrap(),
-            Prefix::new("db").unwrap(),
-        );
-        let credentials = S3Credentials::new(
-            "AKIAIOSFODNN7EXAMPLE".to_owned(),
-            SecretString::new("secret".to_owned()),
-        );
-        let at = Timestamp::from_unix_millis(1_369_353_600_000);
-        let fake = FakeS3::new(&config, FakeClock::new(at));
-        S3Store::with_transport(config, credentials, fake, FakeClock::new(at)).unwrap()
-    }
-
-    fn refused_as_too_large(first: usize, parts: usize) -> bool {
-        let key = FileKey::new(
-            Level::ZERO,
-            lsr_ltx::TxidRange::new(
-                lsr_ltx::Txid::new(1).unwrap(),
-                lsr_ltx::Txid::new(1).unwrap(),
-            )
-            .unwrap(),
-        );
-        let id = UploadId::new("no-such-upload".to_owned());
-        let result = store()
-            .inner
-            .put_parts(&key, &id, first, vec![Vec::new(); parts]);
-        matches!(
-            result,
-            Err(StoreError::Refused {
-                status: PAYLOAD_TOO_LARGE,
-                ..
-            })
-        )
-    }
-
-    /// A part number past 10000 is refused before any request is sent; 10000 is
-    /// sent (and then fails here only because the upload id does not exist).
-    #[test]
-    fn part_numbers_stop_at_the_cap() {
-        assert!(!refused_as_too_large(10_000, 1), "part 10000 is allowed");
-        assert!(refused_as_too_large(10_001, 1), "part 10001 is refused");
-        assert!(
-            !refused_as_too_large(9_999, 2),
-            "parts up to 10000 are allowed"
-        );
-        assert!(
-            refused_as_too_large(10_000, 2),
-            "a batch ending at 10001 is refused"
-        );
     }
 }
