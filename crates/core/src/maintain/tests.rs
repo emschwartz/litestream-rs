@@ -1959,3 +1959,61 @@ fn a_local_read_error_while_compacting_is_a_staging_fault() {
         assert!(listed(&replica, 1).is_empty());
     }
 }
+
+// What a whole decision reports to the short listings that follow it.
+
+/// The gate of the decision on a listing that holds a single level-0 file, when the caller has
+/// published up to `published`.
+fn gate_of(config: &Maintenance, published: Option<Txid>) -> Gate {
+    let inventory = inv([file(0, 1, 1, T0)]);
+    match due_full(
+        &inventory,
+        at(T0 + 1_000),
+        config,
+        published,
+        &mut MaintainState::default(),
+        &ResolvedCreatedAt::default(),
+    ) {
+        Resolve::Done(decided) => decided.gate,
+        Resolve::Need(file) => panic!("a stored listing asked for a created-at time: {file:?}"),
+    }
+}
+
+/// A listing behind what was published fails the retention gate, unless retention is off, when
+/// there is nothing to gate: the short listings that follow rely on the answer.
+#[test]
+fn a_whole_decision_reports_whether_its_listing_passed_the_retention_gate() {
+    let enforcing = defaults();
+    assert_eq!(gate_of(&enforcing, None), Gate::Clear);
+    assert_eq!(gate_of(&enforcing, Some(txid(1))), Gate::Clear);
+    assert_eq!(gate_of(&enforcing, Some(txid(2))), Gate::Held);
+    let off = defaults().with_retention(RetentionMode::Off);
+    assert_eq!(gate_of(&off, Some(txid(2))), Gate::Clear);
+}
+
+#[test]
+fn an_output_that_could_not_be_deleted_is_reported_as_distrusted_until_it_is_forgotten() {
+    let mut state = MaintainState::default();
+    assert!(!state.has_distrusted());
+    state.distrust_snapshot(key(9, 1, 5));
+    assert!(state.has_distrusted());
+    state.forget_unlisted(|_| false);
+    assert!(!state.has_distrusted());
+}
+
+/// The next window opens after an output created inside the current one, and not after one
+/// created before the window began (nor at the very instant it began).
+#[test]
+fn an_output_closes_the_window_only_when_created_after_its_start() {
+    let interval = iv(30);
+    let now = at(T0 + 10_000);
+    let before = file(1, 1, 1, T0 - 1);
+    let on_the_start = file(1, 1, 1, T0);
+    let inside = file(1, 1, 1, T0 + 1);
+    assert_eq!(window_closed_by(&before, now, interval), None);
+    assert_eq!(window_closed_by(&on_the_start, now, interval), None);
+    assert_eq!(
+        window_closed_by(&inside, now, interval),
+        Some(at(T0 + 30_000))
+    );
+}

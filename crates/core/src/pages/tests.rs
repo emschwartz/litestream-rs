@@ -400,3 +400,22 @@ fn a_replica_missing_the_believed_newest_file_leaves_the_first_pending_file_coun
     crate::conformance::block_on(seeded.place(&Replica(&replica), Txid::new(2))).unwrap();
     assert!(seeded.quiet.is_empty());
 }
+
+/// Only a first pending file that decodes can be the one nothing staged stands before: a first
+/// file that does not decode still places the pending files after it, so a later file is no
+/// "first pending file" the replica must be asked about.
+#[test]
+fn a_later_pending_file_is_not_the_first_when_an_earlier_one_did_not_decode() {
+    let staging = crate::MemStore::new();
+    let (unreadable, _) = file_from_wal(3, &[(1, 2)], 32, 200);
+    put_all(
+        &staging,
+        vec![
+            (unreadable, vec![0xff; 64]),
+            file_from_wal(4, &[(1, 3)], 200, 300),
+        ],
+    );
+    let seeded =
+        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
+    assert_eq!(seeded.unplaced, None);
+}
