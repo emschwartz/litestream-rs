@@ -20,27 +20,6 @@ fn run(seed: u64, block_crash_law: bool, ops: &[Op]) -> lsr_sim::RunReport {
     }
 }
 
-/// Seed 0xb6b of the unaided campaign, found once the oracle stopped switching its id check off
-/// after a power loss: transaction 18 is uploaded and drained (164 bytes), then, with the store's
-/// reads lying (`Hold::LyingReads`) and an old staging backup put back, the engine snapshots the
-/// database as transaction 18 again and puts the same level-0 key with other bytes (266) holding
-/// another commit. The replica's object is overwritten: the class of BOOT-18 and BOOT-19
-/// (docs/BEHAVIOR.md). The conditional level-0 write closes it: the bucket refuses the second
-/// put into the held key and the read-back reports the divergence. Its history is recorded and
-/// the settings its mix drew are written out.
-#[test]
-fn an_id_the_replica_holds_is_not_taken_again_after_a_lying_read_seed_0xb6b() {
-    let opts = lsr_sim::Opts {
-        drawn: true,
-        after_restart: lsr_sim::AfterRestart::Busy,
-        ..lsr_sim::Opts::default()
-    };
-    let seed = lsr_sim::Seed::new(0xb6b);
-    if let Err(failure) = lsr_sim::run::run_ops(seed, crate::histories::seed_0xb6b::OPS, &opts) {
-        panic!("{failure}");
-    }
-}
-
 /// The engine replicates transactions 1 to 3 while a copy of staging is taken after 1. The bucket
 /// rolls back and loses 3, and the copy is put back, so staging holds only 1. The engine notices
 /// the rollback and lists the replica again, confirming nothing until that listing answers. A

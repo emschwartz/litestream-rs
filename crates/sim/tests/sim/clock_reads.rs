@@ -28,7 +28,7 @@ fn each_read(seed: u64, ops: &[Op]) {
 /// committed end; the file that carries the commit must not be stamped before it, or `AsOf`
 /// one millisecond after the stamp restores a commit made after that instant.
 #[test]
-fn a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681() {
+fn a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it() {
     let ops = [
         Op::CommitInTick { pages: 2 },
         Op::Rollback,
@@ -46,7 +46,7 @@ fn a_commit_after_the_tick_read_its_clock_is_not_stamped_before_it_seed_0x681() 
 /// (`docs/planted-bugs/seal-stamped-at-checkpoint-start.patch`): 2 of seeds 1 to 3000 fail, this
 /// one first; recorded as its operations, with its mix's block crash law.
 #[test]
-fn a_commit_before_the_barrier_is_not_stamped_before_it_seed_0x552() {
+fn a_commit_before_the_barrier_is_not_stamped_before_it() {
     use lsr_core::{SourceError, SourceOp};
     use lsr_sim::generate::MetaOp;
     use lsr_sim::{EnvFault, OtherProcessMode};

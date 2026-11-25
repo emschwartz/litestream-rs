@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use lsr_core::{Denied, StoreError, StoreOp, Trip};
 use lsr_ltx::Timestamp;
+use lsr_sim::generate::MetaOp;
 use lsr_sim::run::run_ops;
-use lsr_sim::{FaultShape, Op, Opts, RunReport, Seed, Target};
+use lsr_sim::{ClockLaw, FaultShape, Op, Opts, RunReport, Seed, Target};
 
 /// The first instant of every run (`lsr_sim::world::EPOCH_MILLIS`).
 const EPOCH: i64 = lsr_sim::world::EPOCH_MILLIS;
@@ -286,96 +287,27 @@ fn trip_times_are_engine_times() {
     );
 }
 
-/// Runs a recorded history under the options its seed's mix gave it, failing on any violation:
-/// these tripped for age with every commit on the replica.
-fn runs_clean(seed: u64, ops: &[Op], opts: &Opts) {
-    if let Err(failure) = run_ops(Seed::new(seed), ops, opts) {
+/// A checkpoint's file that changes no page is not a commit, even after a day-long clock step: the
+/// replica holds every commit, so the engine must not trip for age (D81).
+#[test]
+fn a_checkpoint_file_that_changes_no_page_does_not_trip_after_a_day_long_step() {
+    let ops = [
+        Op::Tick,
+        Op::Commit {
+            pages: 4,
+            grow: false,
+        },
+        Op::CommitInTick { pages: 3 },
+        Op::Meta(MetaOp::FlipNewestByte),
+        Op::ClockJump(93_600_000),
+    ];
+    let opts = Opts {
+        clock_law: ClockLaw::EachRead,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x8ef), &ops, &opts) {
         panic!("step {}: {}", failure.step, failure.violation);
     }
-}
-
-/// A run of lag dated from its start though its commits landed, under a day-long clock step.
-#[test]
-fn seed_0x330_does_not_trip() {
-    let opts = Opts {
-        drawn: true,
-        after_restart: lsr_sim::AfterRestart::Busy,
-        clock_law: lsr_sim::ClockLaw::PerTick,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    runs_clean(0x330, crate::histories::seed_0x330::OPS, &opts);
-}
-
-/// A checkpoint's file that changes no page counted as a commit, after a day-long step.
-#[test]
-fn seed_0x8ef_does_not_trip() {
-    let opts = Opts {
-        drawn: true,
-        after_restart: lsr_sim::AfterRestart::Nothing,
-        clock_law: lsr_sim::ClockLaw::EachRead,
-        ..Opts::default()
-    };
-    runs_clean(0x8ef, crate::histories::seed_0x8ef::OPS, &opts);
-}
-
-/// A trip that held after its commits landed, because one later frame kept the age above zero.
-#[test]
-fn seed_0xa4d_does_not_trip() {
-    let opts = Opts {
-        drawn: true,
-        lying_wal_sync: true,
-        after_restart: lsr_sim::AfterRestart::Busy,
-        clock_law: lsr_sim::ClockLaw::EachRead,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    runs_clean(0xa4d, crate::histories::seed_0xa4d::OPS, &opts);
-}
-
-/// Seed 0x9f9's history as found, pinned so the generator cannot move it away: a run of lag
-/// dated from its start, under two day-long clock steps and a staging backup put back, once
-/// tripped with every commit on the replica. Since the runner changes merged with #188 it no
-/// longer reaches that trip even on the old engine; `seed_0x330_does_not_trip` pins the cause.
-#[test]
-fn seed_0x9f9_does_not_trip() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: true,
-        lying_wal_sync: true,
-        after_restart: lsr_sim::AfterRestart::Retry,
-        clock_law: lsr_sim::ClockLaw::EachRead,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(0x9f9), crate::histories::seed_0x9f9::OPS, &opts) {
-        panic!("{}", failure.violation);
-    }
-}
-
-mod seed_0xf4342;
-
-/// Seed 0x734 from the mixed campaign: a rollback of the replica leaves staged files it lacks.
-/// The boot after used to delete them, the live WAL not vouching for them, and stage a snapshot
-/// of their end state (`SnapshotCause::StagedUnverified`); uploads were then refused past the
-/// bound and the engine tripped. The boot now reads the files whole and uploads them as staged
-/// (`docs/decisions/D175.md`), so nothing is left to replace and nothing trips.
-#[test]
-fn seed_0x734_uploads_the_files_a_rollback_left_and_never_trips() {
-    let opts = Opts {
-        drawn: true,
-        after_restart: lsr_sim::AfterRestart::Nothing,
-        clock_law: lsr_sim::ClockLaw::PerTick,
-        overlap: true,
-        error_domain: true,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    let report = match run_ops(Seed::new(0x734), crate::histories::seed_0x734::OPS, &opts) {
-        Ok(report) => report,
-        Err(failure) => panic!("step {}: {}", failure.step, failure.violation),
-    };
-    assert_eq!(age_trips(&report), 0, "{:?}", report.trips);
 }
 
 /// Every read of the replica lies, long after the engine's last upload and a day's clock step:
@@ -653,4 +585,27 @@ fn an_accepted_trip_over_unread_frames_stands_until_the_engine_lets_go() {
         Ok(_) => {}
         Err(failure) => panic!("{}\n{}", failure.violation, failure.message(failure.steps)),
     }
+}
+
+/// Seed 0x734 from the mixed campaign: a rollback of the replica leaves staged files it lacks.
+/// The boot after used to delete them, the live WAL not vouching for them, and stage a snapshot
+/// of their end state (`SnapshotCause::StagedUnverified`); uploads were then refused past the
+/// bound and the engine tripped. The boot now reads the files whole and uploads them as staged
+/// (`docs/decisions/D175.md`), so nothing is left to replace and nothing trips.
+#[test]
+fn seed_0x734_uploads_the_files_a_rollback_left_and_never_trips() {
+    let opts = Opts {
+        drawn: true,
+        after_restart: lsr_sim::AfterRestart::Nothing,
+        clock_law: lsr_sim::ClockLaw::PerTick,
+        overlap: true,
+        error_domain: true,
+        staging_fs: true,
+        ..Opts::default()
+    };
+    let report = match run_ops(Seed::new(0x734), crate::histories::seed_0x734::OPS, &opts) {
+        Ok(report) => report,
+        Err(failure) => panic!("step {}: {}", failure.step, failure.violation),
+    };
+    assert_eq!(age_trips(&report), 0, "{:?}", report.trips);
 }

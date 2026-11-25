@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use lsr_core::conformance::block_on;
-use lsr_core::{MemSink, RecordingSleeper, RestoreTarget, RetryPolicy, Retrying, SeededEntropy, restore};
+use lsr_core::{
+    MemSink, RecordingSleeper, RestoreTarget, RetryPolicy, Retrying, SeededEntropy, restore,
+};
 
 use crate::waves::{RESTORE_CHUNK, WIDTH, Waves, snapshot_store};
 

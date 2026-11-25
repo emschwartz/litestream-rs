@@ -513,7 +513,10 @@ pub(crate) struct UploadPage {
 ///
 /// # Errors
 /// [`ResponseError::Malformed`] for a body that is not the listing.
-pub(crate) fn parse_uploads(r: &HttpResponse, prefix: &Prefix) -> Result<UploadPage, ResponseError> {
+pub(crate) fn parse_uploads(
+    r: &HttpResponse,
+    prefix: &Prefix,
+) -> Result<UploadPage, ResponseError> {
     let xml = std::str::from_utf8(r.body()).map_err(|_bytes| ResponseError::Malformed)?;
     if !xml.contains("<ListMultipartUploadsResult") {
         return Err(ResponseError::Malformed);

@@ -3,5 +3,5 @@ fix = "87cd10d"
 package = "lsr-sim"
 test_bin = "sim"
 tests = [
-    "failstop::seed_0x8ef_does_not_trip",
+    "failstop::a_checkpoint_file_that_changes_no_page_does_not_trip_after_a_day_long_step",
 ]

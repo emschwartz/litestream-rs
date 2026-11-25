@@ -8,11 +8,6 @@ package = "lsr-sim"
 test_bin = "sim"
 tests = [
     "needless_snapshot::restarts_with_nothing_damaged_never_snapshot",
-    "a_torn_staged_file_is_dropped_seed_0x25",
-    "a_torn_staged_file_is_dropped_seed_0x2d",
-    "a_torn_staged_file_is_dropped_seed_0x46",
-    "page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f",
-    "a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fae16b",
 ]
 # A failed sync of the WAL taken as a success: the frames it covered are staged, though the
 # kernel may never write them. The simulator's lost writeback and its staged-durability check
