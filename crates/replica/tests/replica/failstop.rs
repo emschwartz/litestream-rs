@@ -13,7 +13,7 @@
 use std::future::Future;
 use std::pin::pin;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -73,7 +73,7 @@ fn raw(site: &Site, replicator: &Replicator) -> Connection {
 
 /// The write-gate events a replicator emitted, in order.
 #[derive(Clone, Default)]
-struct Gates(Arc<Mutex<Vec<Event>>>);
+struct Gates(Arc<(Mutex<Vec<Event>>, Condvar)>);
 
 impl EventSink for Gates {
     fn event(&mut self, event: &Event) {
@@ -82,18 +82,21 @@ impl EventSink for Gates {
             Event::WritesBlocked { .. }
                 | Event::WritesAllowed
                 | Event::Engine(
-                    lsr_core::Event::WritesHeld { .. } | lsr_core::Event::Checkpointed { .. }
+                    lsr_core::Event::WritesHeld { .. }
+                        | lsr_core::Event::Checkpointed { .. }
+                        | lsr_core::Event::CheckingIdentity { .. }
                 )
         );
         if keep {
-            self.0.lock().unwrap().push(event.clone());
+            self.0.0.lock().unwrap().push(event.clone());
+            self.0.1.notify_all();
         }
     }
 }
 
 impl Gates {
     fn changes(&self) -> Vec<Event> {
-        let events = self.0.lock().unwrap();
+        let events = self.0.0.lock().unwrap();
         events
             .iter()
             .filter(|e| matches!(e, Event::WritesBlocked { .. } | Event::WritesAllowed))
@@ -102,7 +105,25 @@ impl Gates {
     }
 
     fn any(&self, want: impl Fn(&Event) -> bool) -> bool {
-        self.0.lock().unwrap().iter().any(want)
+        self.0.0.lock().unwrap().iter().any(want)
+    }
+
+    /// Every event kept so far.
+    fn events(&self) -> Vec<Event> {
+        self.0.0.lock().unwrap().clone()
+    }
+
+    /// Waits until `want` holds of the events kept. Health is published before the event that
+    /// reports the same change is sent, so a test that waited on health may not yet see the
+    /// event; it waits on the event instead.
+    fn wait_for(&self, want: impl Fn(&[Event]) -> bool) {
+        let events = self.0.0.lock().unwrap();
+        let (events, timeout) = self
+            .0
+            .1
+            .wait_timeout_while(events, PATIENCE, |events| !want(events))
+            .unwrap();
+        assert!(!timeout.timed_out(), "the events never came: {events:?}");
     }
 }
 
@@ -207,6 +228,277 @@ fn writes_are_held_while_the_boot_is_pending() {
             Event::WritesAllowed,
         ]
     );
+}
+
+/// Holds the replicator's thread in the event sink on the engine's `Booted` event, the moment
+/// between the boot's decision and the step that stages its snapshot, until the test lets go.
+#[derive(Clone, Default)]
+struct HoldAtBoot(Arc<(Mutex<(bool, bool)>, Condvar)>);
+
+impl EventSink for HoldAtBoot {
+    fn event(&mut self, event: &Event) {
+        if !matches!(event, Event::Engine(lsr_core::Event::Booted { .. })) {
+            return;
+        }
+        let (state, signal) = &*self.0;
+        let mut state = state.lock().unwrap();
+        state.0 = true;
+        signal.notify_all();
+        while !state.1 {
+            state = signal.wait(state).unwrap();
+        }
+    }
+}
+
+impl HoldAtBoot {
+    /// Returns once the thread is held.
+    fn reached(&self) {
+        let (state, signal) = &*self.0;
+        let mut state = state.lock().unwrap();
+        while !state.0 {
+            state = signal.wait(state).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        let (state, signal) = &*self.0;
+        state.lock().unwrap().1 = true;
+        signal.notify_all();
+    }
+}
+
+/// The hold ends once the start is decided, not once its snapshot is staged
+/// (`docs/decisions/D201.md`): while the thread is held right after the boot's decision, before
+/// the step that reads the database for the snapshot, the start is judged, writes go through and
+/// a second connection commits. The snapshot and the files after it restore every commit.
+#[test]
+fn writes_go_through_before_the_boot_snapshot_is_staged() {
+    let site = Site::new();
+    site.commit(3);
+    let (runtime, _clock) = fake();
+    let hold = HoldAtBoot::default();
+    let replicator = Replicator::start_with_events(
+        &site.db,
+        site.store(),
+        config(),
+        runtime,
+        Box::new(hold.clone()),
+    )
+    .unwrap();
+    hold.reached();
+    let health = replicator.health();
+    assert_eq!(health.writes, Writes::Allowed);
+    assert!(
+        health.resnapshot.is_some(),
+        "the snapshot is still owed: {health:?}"
+    );
+    assert_eq!(replicator.wait_booted(Duration::ZERO), Booted::Booted);
+    let probe = probe(&site);
+    insert(&probe).unwrap();
+    hold.release();
+    // The wait `Replicator::ready`'s docs give for the first snapshot on the replica.
+    let on_replica = replicator.wait_until(PATIENCE, |h| {
+        h.resnapshot.is_none() && h.unreplicated_since.is_none() && h.replicated.is_some()
+    });
+    assert!(on_replica.is_some(), "{:?}", replicator.health());
+    site.assert_restores(site.store().as_ref());
+    site.commit(2);
+    let stopped = replicator.stop(PATIENCE).wait();
+    assert!(
+        matches!(stopped, lsr_replica::Stopped::Drained { .. }),
+        "{stopped:?}"
+    );
+    assert_eq!(rows(&site), 6);
+    site.assert_restores(site.store().as_ref());
+}
+
+/// A start over a brand-new meta directory compares the database with the replica before it
+/// decides, as long as a restore takes, inside one engine tick: the thread names that hold while
+/// the tick runs, in health and as an event right after the engine's own notice, and lets writes
+/// go once the check has decided (`docs/decisions/D201.md`).
+#[test]
+fn a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds() {
+    let site = Site::new();
+    site.commit(2);
+    let (runtime, _clock) = fake();
+    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let stopped = first.stop(PATIENCE).wait();
+    assert!(
+        matches!(stopped, lsr_replica::Stopped::Drained { .. }),
+        "{stopped:?}"
+    );
+    drop(first);
+    // No frame left to vouch for the replica's files, and no meta directory to vouch for them.
+    site.app
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    std::fs::remove_dir_all(site.dir.path().join(".app.db-litestream")).unwrap();
+    let (runtime, _clock) = fake();
+    let gates = Gates::default();
+    let replicator = Replicator::start_with_events(
+        &site.db,
+        site.store(),
+        config(),
+        runtime,
+        Box::new(gates.clone()),
+    )
+    .unwrap();
+    assert_eq!(block_on(replicator.ready(PATIENCE)), Booted::Booted);
+    gates.wait_for(|events| events.contains(&Event::WritesAllowed));
+    let seen: Vec<Event> = gates.events();
+    let checking = WhyBlocked::CheckingIdentity;
+    let at = seen
+        .iter()
+        .position(|e| matches!(e, Event::Engine(lsr_core::Event::CheckingIdentity { .. })))
+        .unwrap_or_else(|| panic!("no identity check: {seen:?}"));
+    assert_eq!(
+        seen.get(at.saturating_add(1)),
+        Some(&Event::WritesBlocked { why: checking }),
+        "{seen:?}"
+    );
+    assert_eq!(
+        gates.changes(),
+        vec![
+            Event::WritesBlocked {
+                why: WhyBlocked::Booting
+            },
+            Event::WritesBlocked { why: checking },
+            Event::WritesAllowed,
+        ]
+    );
+    drop(replicator);
+}
+
+/// Replicates `site` at 4096-byte pages and stops, then rewrites the database at 8192. With
+/// `keep_wal` a commit leaves a WAL at the new size, which the next boot reads before it decides;
+/// without, the WAL has no header, the boot decides on a snapshot, and only the snapshot's step
+/// meets the new size.
+fn resize(site: &Site, keep_wal: bool) {
+    let (runtime, _clock) = fake();
+    site.commit(2);
+    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let stopped = first.stop(PATIENCE).wait();
+    assert!(
+        matches!(stopped, lsr_replica::Stopped::Drained { .. }),
+        "{stopped:?}"
+    );
+    drop(first);
+    site.app
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE; PRAGMA page_size = 8192; VACUUM; PRAGMA journal_mode = WAL;",
+        )
+        .unwrap();
+    if keep_wal {
+        site.commit(1);
+    }
+}
+
+fn resize_stops(mode: IfReplicationStops) -> Config {
+    Config {
+        responses: Responses {
+            page_size_changed: Response::Stop,
+            ..Responses::GO_LIKE
+        },
+        if_replication_stops: mode,
+        ..config()
+    }
+}
+
+/// A stop the boot finds before it decides (here a WAL at a page size the replica does not
+/// hold) still holds the start: the boot answers the stop, and writes are never let through.
+#[test]
+fn a_stop_found_before_the_decision_still_holds_the_start() {
+    let site = Site::new();
+    resize(&site, true);
+    let (runtime, _clock) = fake();
+    let gates = Gates::default();
+    let replicator = Replicator::start_with_events(
+        &site.db,
+        site.store(),
+        resize_stops(IfReplicationStops::HoldStart),
+        runtime,
+        Box::new(gates.clone()),
+    )
+    .unwrap();
+    let trip = Trip::Stopped(StopCause::PageSizeChanged {
+        was: lsr_ltx::PageSize::new(4096).unwrap(),
+        now: lsr_ltx::PageSize::new(8192).unwrap(),
+    });
+    assert_eq!(
+        block_on(replicator.ready(PATIENCE)),
+        Booted::Stopped(StopCause::PageSizeChanged {
+            was: lsr_ltx::PageSize::new(4096).unwrap(),
+            now: lsr_ltx::PageSize::new(8192).unwrap(),
+        })
+    );
+    wait(&replicator, |h| {
+        h.writes == Writes::Blocked(WhyBlocked::Tripped(trip))
+    });
+    gates.wait_for(|events| {
+        events.contains(&Event::WritesBlocked {
+            why: WhyBlocked::Tripped(trip),
+        })
+    });
+    assert!(
+        !gates.any(|e| matches!(e, Event::WritesAllowed)),
+        "{:?}",
+        gates.changes()
+    );
+    let err = insert(&probe(&site)).unwrap_err();
+    assert!(locked(&err), "{err}");
+}
+
+/// A stop only the boot snapshot can find comes after the release, and is handled as any later
+/// stop: health says the replicator stopped and why, and under `stop-app` writes are blocked
+/// again, with the stop's own reason.
+#[test]
+fn a_stop_the_boot_snapshot_finds_blocks_writes_again_under_stop_app() {
+    let site = Site::new();
+    resize(&site, false);
+    let (runtime, _clock) = fake();
+    let gates = Gates::default();
+    let replicator = Replicator::start_with_events(
+        &site.db,
+        site.store(),
+        resize_stops(IfReplicationStops::StopApp),
+        runtime,
+        Box::new(gates.clone()),
+    )
+    .unwrap();
+    assert_eq!(block_on(replicator.ready(PATIENCE)), Booted::Booted);
+    let trip = Trip::Stopped(StopCause::PageSizeChanged {
+        was: lsr_ltx::PageSize::new(4096).unwrap(),
+        now: lsr_ltx::PageSize::new(8192).unwrap(),
+    });
+    let health = wait(&replicator, |h| {
+        h.writes == Writes::Blocked(WhyBlocked::Tripped(trip))
+    });
+    assert!(
+        matches!(
+            health.phase,
+            Phase::Stopped(StopCause::PageSizeChanged { .. })
+        ),
+        "{health:?}"
+    );
+    gates.wait_for(|events| {
+        events.contains(&Event::WritesBlocked {
+            why: WhyBlocked::Tripped(trip),
+        })
+    });
+    assert_eq!(
+        gates.changes(),
+        vec![
+            Event::WritesBlocked {
+                why: WhyBlocked::Booting
+            },
+            Event::WritesAllowed,
+            Event::WritesBlocked {
+                why: WhyBlocked::Tripped(trip)
+            },
+        ]
+    );
+    let err = insert(&probe(&site)).unwrap_err();
+    assert!(locked(&err), "{err}");
 }
 
 /// Under `report` writes are never held, not even while the boot is pending, though health

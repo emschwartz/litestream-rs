@@ -2,19 +2,12 @@ diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
 index 0000000..0000000 100644
 --- a/crates/core/src/actor/lag.rs
 +++ b/crates/core/src/actor/lag.rs
-@@ -316,7 +316,7 @@ impl Actor {
+@@ -313,7 +313,7 @@ impl Actor {
+     /// transient error judges nothing.
      #[must_use]
-     pub fn boot_judged(&self) -> bool {
-         let settled = self.pending().is_none() || self.kept.sync_failed_after_listing;
--        (self.kept.listed && settled) || self.kept.boot_overdue
-+        (self.kept.listed && settled) || false
+     pub const fn boot_judged(&self) -> bool {
+-        self.kept.listed || self.kept.boot_overdue
++        self.kept.listed || false
      }
  
      /// Whether an engine of this process has listed the replica.
-@@ -324,4 +324,4 @@ impl Actor {
-     pub const fn listed(&self) -> bool {
-         self.kept.listed
-     }
--}
-+}
-\ No newline at end of file

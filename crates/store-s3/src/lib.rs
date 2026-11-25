@@ -68,9 +68,9 @@ pub use request::{OpenUpload, abandon_upload, abort_upload, open_uploads};
 #[cfg(feature = "reqwest")]
 pub use reqwest_transport::{ReqwestSetupError, ReqwestTransport};
 pub use response::{
-    EtagCheck, Head, ListPage, ListedFile, ResponseError, check_etag, hex, parse_complete,
-    parse_create, parse_delete_failure_codes, parse_delete_failures, parse_head, parse_list,
-    quoted_md5,
+    EtagCheck, Head, ListPage, ListedFile, ResponseError, Unrecognized, check_etag, hex,
+    parse_complete, parse_create, parse_delete_failure_codes, parse_delete_failures, parse_head,
+    parse_list, quoted_md5,
 };
 pub use source::{CredentialSource, Expiring, REFRESH_BEFORE};
 pub use store::{ListStats, S3Store, SystemClock, WriteStats};

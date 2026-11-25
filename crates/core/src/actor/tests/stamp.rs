@@ -137,6 +137,7 @@ fn a_commit_after_the_tick_began_is_not_stamped_before_it_landed() {
         staging: &rig.staging,
         remote: &rig.remote,
         clock: late.clock.as_ref(),
+        notice: &mut |_| {},
     };
     let tick = block_on(actor.tick(env, ts(T0 + 1)));
     assert_eq!(event(&tick), Some(&Event::Synced { files: 1 }), "{tick:?}");
@@ -175,6 +176,7 @@ fn a_commit_before_the_checkpoint_barrier_is_not_stamped_before_it_landed() {
         staging: &rig.staging,
         remote: &rig.remote,
         clock: late.clock.as_ref(),
+        notice: &mut |_| {},
     };
     let tick = block_on(actor.tick(env, ts(T0 + 1)));
     assert!(

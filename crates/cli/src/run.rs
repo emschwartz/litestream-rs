@@ -593,7 +593,6 @@ async fn restore_command(args: Box<RestoreArgs>) -> Result<Done, CliError> {
     let RestoreArgs {
         from,
         output,
-        no_expand_env,
         target,
         as_of_inside,
         clear_journal_files,
@@ -623,7 +622,7 @@ async fn restore_command(args: Box<RestoreArgs>) -> Result<Done, CliError> {
         txid_and_timestamp,
         url_timestamp,
     };
-    let (opening, output) = match resolve_from(from, output, no_expand_env, if_db_not_exists)? {
+    let (opening, output) = match resolve_from(from, output, if_db_not_exists)? {
         Resolution::Open(opening, output) => (opening, output),
         Resolution::OutputExists(output, source) => {
             return Ok(Done::Restore(Box::new(RestoreDone {
@@ -699,14 +698,8 @@ enum Resolution {
 fn resolve_from(
     from: RestoreFrom,
     output: Option<PathBuf>,
-    no_expand_env: bool,
     if_db_not_exists: bool,
 ) -> Result<Resolution, CliError> {
-    let expand = if no_expand_env {
-        Expand::Off
-    } else {
-        Expand::Env
-    };
     match from {
         RestoreFrom::Replica(replica) => {
             let output = output.ok_or(UsageError::MissingFlag {
@@ -731,8 +724,13 @@ fn resolve_from(
             let opening = url_replica(&output.to_string_lossy(), &url)?;
             Ok(Resolution::Open(opening, output))
         }
-        RestoreFrom::Database { path, config } => {
-            let (mut opening, db) = config_replica(&path, config.as_deref(), expand)?;
+        RestoreFrom::Database {
+            path,
+            config,
+            no_expand_env,
+        } => {
+            let (mut opening, db) =
+                config_replica(&path, config.as_deref(), expand_of(no_expand_env))?;
             // Only the configured database itself has the configured meta directory; a copy
             // restored elsewhere is a new database, with the default one beside it.
             if output.as_ref().is_some_and(|out| *out != db) {
@@ -810,9 +808,11 @@ fn databases_command(args: &DatabasesArgs) -> Result<Done, CliError> {
 async fn ltx_command(args: LtxArgs) -> Result<Done, CliError> {
     let opening = match args.from {
         LtxFrom::Url(url) => url_replica("ltx.db", &url)?,
-        LtxFrom::Database { path, config } => {
-            config_replica(&path, config.as_deref(), expand_of(args.no_expand_env))?.0
-        }
+        LtxFrom::Database {
+            path,
+            config,
+            no_expand_env,
+        } => config_replica(&path, config.as_deref(), expand_of(no_expand_env))?.0,
     };
     let inventory = match &opening.replica {
         Replica::Dir(path) => Inventory::load(&FsStore::new(path)).await?,

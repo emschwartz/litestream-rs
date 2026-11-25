@@ -4,30 +4,37 @@
 //!
 //! The cursor is sent as `start-after`, later pages as `continuation-token`.
 //! Pages are gathered until `limit` files and one more key, which proves the
-//! listing goes on, are in hand; the paging and unrecognized-name rules then belong
-//! to [`build_listing`](lsr_core::build_listing), which this module feeds and
-//! does not second-guess. Every fault is an error: a page that does not parse,
-//! a truncated page without a token, keys out of order or outside the prefix,
-//! a repeated token, or an entry with no readable `LastModified`. Never a
-//! shorter listing.
+//! listing goes on, are in hand; the paging rules then belong to
+//! [`build_listing`](lsr_core::build_listing), which this module feeds.
+//!
+//! Order. A page's keys may come in any order: Cloudflare R2 lists a name after the longer
+//! names that extend it (`X.ltx.tmp`, `X.ltx`, `X`), and Go does not look at order at all. An
+//! LTX file name has a fixed width and never extends another, so files list ascending on every
+//! provider; the store sorts each page's files anyway, and requires each page's files to lie
+//! above every file of the pages before it. A stray name is counted on the page whose last
+//! file the provider listed it before, by where it was listed, so the next listing (which
+//! starts after that file, in the provider's own order) finds the ones left. Every fault is
+//! still an error: a page that does not parse, a truncated page without a token, keys outside
+//! the prefix, a key listed twice, a file at or before one already passed, a repeated token,
+//! or an entry with no readable `LastModified`. Never a shorter listing.
 //!
 //! A listed file carries its `LastModified`, which is not a created-at time. The stored
 //! created-at time comes from [`Inner::created_at`](crate::store), one HEAD for the file a
 //! reader's decision turns on, and the HEAD's rules (size check, fallback,
 //! `BadCreatedAt`) live there with it.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 
 use lsr_core::{
-    BatchKind, FileInfo, Level, ListAt, ListedTime, Listing, PageLimit, StoreError, StoreOp,
-    build_listing, file_name,
+    BatchKind, FileInfo, FileKey, Level, ListAt, ListedTime, Listing, PageLimit, StoreError,
+    StoreOp, build_listing,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::classify::classify;
 use crate::request::HttpRequest;
-use crate::response::{ListPage, ListedFile, parse_list};
+use crate::response::{ListedFile, parse_list};
 use crate::store::Inner;
 use crate::transport::{HttpResponse, Transport};
 
@@ -40,19 +47,6 @@ fn invalid_data() -> StoreError {
     }
 }
 
-/// The lowest and highest name a page holds, files and unrecognized names together.
-fn name_bounds(page: &ListPage) -> Option<(String, String)> {
-    let names: Vec<String> = page
-        .files
-        .iter()
-        .map(|file| file_name(file.key.range()))
-        .chain(page.unrecognized.iter().cloned())
-        .collect();
-    let low = names.iter().min()?.clone();
-    let high = names.iter().max()?.clone();
-    Some((low, high))
-}
-
 /// One listing's state.
 struct Run<'a, T> {
     inner: &'a Inner<T>,
@@ -61,11 +55,14 @@ struct Run<'a, T> {
     want: usize,
     page_size: PageLimit,
     pending: VecDeque<ListedFile>,
-    unrecognized: Vec<String>,
+    /// Each unrecognized name with how many files the provider listed before it, over the
+    /// whole listing. A name seen twice is refused, so each counts once.
+    unrecognized: BTreeMap<String, usize>,
+    files_seen: usize,
+    last_file: Option<FileKey>,
     token: Option<String>,
     first_page_done: bool,
     exhausted: bool,
-    last_name: Option<String>,
 }
 
 impl<'a, T: Transport> Run<'a, T> {
@@ -82,11 +79,12 @@ impl<'a, T: Transport> Run<'a, T> {
             want,
             page_size,
             pending: VecDeque::new(),
-            unrecognized: Vec::new(),
+            unrecognized: BTreeMap::new(),
+            files_seen: 0,
+            last_file: None,
             token: None,
             first_page_done: false,
             exhausted: false,
-            last_name: None,
         }
     }
 
@@ -112,11 +110,15 @@ impl<'a, T: Transport> Run<'a, T> {
         classify(OP, None, None, response)?;
         let page = parse_list(response, self.inner.prefix(), self.level)
             .map_err(|err| err.into_store(OP, None))?;
-        if let Some((low, high)) = name_bounds(&page) {
-            if self.last_name.as_ref().is_some_and(|last| *last >= low) {
-                return Err(invalid_data());
-            }
-            self.last_name = Some(high);
+        // The files of one level have fixed-width names, so they list ascending on every
+        // provider and a page that starts at or before a file already passed has gone back (or
+        // repeated): the pages cannot be trusted whole. Other names may come in any order.
+        let first = page.files.first().map(|file| file.key);
+        if first
+            .zip(self.last_file)
+            .is_some_and(|(first, last)| first <= last)
+        {
+            return Err(invalid_data());
         }
         if page.next_token.is_some() && page.next_token == self.token {
             return Err(invalid_data());
@@ -124,14 +126,21 @@ impl<'a, T: Transport> Run<'a, T> {
         self.first_page_done = true;
         self.exhausted = page.next_token.is_none();
         self.token = page.next_token;
+        for stray in page.unrecognized {
+            let at = self.files_seen.saturating_add(stray.files_before);
+            if self.unrecognized.insert(stray.name, at).is_some() {
+                return Err(invalid_data());
+            }
+        }
+        self.files_seen = self.files_seen.saturating_add(page.files.len());
+        self.last_file = page.files.last().map(|file| file.key).or(self.last_file);
         self.pending.extend(page.files);
-        self.unrecognized.extend(page.unrecognized);
         Ok(())
     }
 
     /// The page: `want` files, plus one after them when the listing goes on.
     fn finish(self, after: Option<TxidRange>, limit: PageLimit) -> Listing {
-        let files = self
+        let files: Vec<FileInfo> = self
             .pending
             .into_iter()
             .take(self.want.saturating_add(1))
@@ -141,7 +150,20 @@ impl<'a, T: Transport> Run<'a, T> {
                 listed: ListedTime::LastModified(listed.last_modified),
             })
             .collect();
-        build_listing(files, &self.unrecognized, after, limit)
+        // A name belongs to this page when the provider listed it before the page's last file
+        // (or the listing ended); one listed after it is found by the listing that starts after
+        // that file. Counting by where the provider listed a name, never by comparing bytes, is
+        // what keeps a stray that R2 lists late from falling between two pages.
+        let more = files.len() > self.want;
+        let skipped = self
+            .unrecognized
+            .values()
+            .filter(|&&listed_after| !more || listed_after < self.want)
+            .count();
+        Listing {
+            skipped,
+            ..build_listing(files, &[], after, limit)
+        }
     }
 }
 
@@ -227,53 +249,5 @@ impl<T: Transport> Inner<T> {
             }
         }
         true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use lsr_core::{FileKey, Level};
-    use lsr_ltx::{Timestamp, Txid, TxidRange};
-
-    use super::*;
-
-    fn listed(min: u64, max: u64) -> ListedFile {
-        let range = TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap();
-        ListedFile {
-            key: FileKey::new(Level::ZERO, range),
-            size: 1,
-            last_modified: Timestamp::from_unix_millis(0),
-        }
-    }
-
-    /// A page's bounds span its files and its unrecognized names together: the next page must
-    /// start above the highest of either, or the listing went backwards.
-    #[test]
-    fn a_page_s_bounds_span_its_files_and_unrecognized_names() {
-        let page = ListPage {
-            files: vec![listed(2, 2), listed(3, 4)],
-            unrecognized: vec!["0000000000000001-zz.ltx".to_owned(), "zzz".to_owned()],
-            next_token: None,
-        };
-        let low = "0000000000000001-zz.ltx".to_owned();
-        assert_eq!(name_bounds(&page), Some((low, "zzz".to_owned())));
-        let files_only = ListPage {
-            files: vec![listed(2, 2), listed(3, 4)],
-            unrecognized: vec![],
-            next_token: None,
-        };
-        assert_eq!(
-            name_bounds(&files_only),
-            Some((
-                file_name(listed(2, 2).key.range()),
-                file_name(listed(3, 4).key.range())
-            ))
-        );
-        let empty = ListPage {
-            files: vec![],
-            unrecognized: vec![],
-            next_token: None,
-        };
-        assert_eq!(name_bounds(&empty), None);
     }
 }

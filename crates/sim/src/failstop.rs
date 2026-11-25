@@ -97,6 +97,10 @@ pub struct FailStopJudge {
     /// it cannot do while it still dates them, whatever the replica holds (the engine cannot
     /// tell a vacuum that rewrote identical pages from a lost commit).
     engine_since: Option<Timestamp>,
+    /// Whether the tick before the last one ran while every read of the replica lied.
+    lied_before: bool,
+    /// Whether the last tick ran while every read of the replica lied.
+    lied_last: bool,
     /// An upload's answer could not be believed and no clean upload has landed since: the
     /// replica may hold what the engine cannot know it holds, so a restore that finds
     /// everything there does not count as caught up.
@@ -222,6 +226,8 @@ impl FailStopJudge {
 
     /// Takes in what a tick showed.
     pub fn saw(&mut self, tick: TickSeen) {
+        self.lied_before = self.lied_last;
+        self.lied_last = tick.reads_lying;
         self.cleared = self.cleared.map(|ticks| ticks.saturating_add(1));
         if tick.fault_fired || tick.reported_failure {
             self.failed = Some((tick.at, tick.true_at));
@@ -296,7 +302,7 @@ impl FailStopJudge {
                     self.excused.unread_wal = self.excused.unread_wal.saturating_add(1);
                     Ok(())
                 }
-                Err(_) if age_trip && tick.reads_lying => {
+                Err(_) if age_trip && (tick.reads_lying || self.dated_by_lying_reads()) => {
                     self.excused.lying_reads = self.excused.lying_reads.saturating_add(1);
                     Ok(())
                 }
@@ -313,6 +319,15 @@ impl FailStopJudge {
             _ => None,
         };
         judged
+    }
+
+    /// Whether the engine's clock was armed by what lying reads told it: the tick before ran with
+    /// every read lying, and the engine's clock starts earlier than the judge's own (the engine
+    /// dates a pending staged file from its stamp, which a restart keeps, when a listing hid the
+    /// replica's copy). The engine has had no honest read since to learn better.
+    fn dated_by_lying_reads(&self) -> bool {
+        self.lied_before
+            && matches!((self.engine_since, self.since), (Some(engine), Some((judge, _))) if engine < judge)
     }
 
     /// Whether `trip` is the age trip the judge accepted on the last tick, still over commits

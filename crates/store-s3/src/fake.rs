@@ -73,6 +73,8 @@ struct State {
     refused_deletes: u64,
     /// Answers a conditional write with 501, as a provider without them.
     no_conditional_writes: bool,
+    /// Lists in Cloudflare R2's order: a name that is the start of others after all of them.
+    r2_order: bool,
 }
 
 /// An in-memory bucket behind the [`Transport`] trait.
@@ -195,6 +197,13 @@ impl FakeS3 {
     /// provider without conditional writes does.
     pub fn refuse_conditional_writes(&self) {
         self.state().no_conditional_writes = true;
+    }
+
+    /// Lists as Cloudflare R2 does: where one name extends another the longer lists first
+    /// (`X.ltx.tmp`, `X.ltx`, `X`), as if a name ended in a byte above every other. Pages, the
+    /// continuation token and `start-after` all follow that order.
+    pub fn list_like_r2(&self) {
+        self.state().r2_order = true;
     }
 
     /// Lifts every [`FakeS3::deny_delete`].
@@ -357,12 +366,25 @@ impl FakeS3 {
             None => query(request, "start-after"),
         };
         let from = after.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
-        let mut hits = state
-            .objects
-            .range::<str, _>((from, Bound::Unbounded))
-            .filter(|(key, _)| key.starts_with(&prefix));
-        let page: Vec<_> = hits.by_ref().take(max).collect();
-        let more = hits.next().is_some();
+        let mut hits: Vec<_> = if state.r2_order {
+            let mut all: Vec<_> = state
+                .objects
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .filter(|(key, _)| after.as_deref().is_none_or(|a| r2_key(key) > r2_key(a)))
+                .collect();
+            all.sort_by_key(|(key, _)| r2_key(key));
+            all
+        } else {
+            state
+                .objects
+                .range::<str, _>((from, Bound::Unbounded))
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .collect()
+        };
+        let more = hits.len() > max;
+        hits.truncate(max);
+        let page = hits;
         let mut xml = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult xmlns=\"{NS}\"><Name>{}</Name><KeyCount>{}</KeyCount><MaxKeys>{max}</MaxKeys><EncodingType>url</EncodingType><IsTruncated>{more}</IsTruncated>",
             xml_escape(&self.bucket),
@@ -703,6 +725,13 @@ fn delete_objects(state: &mut State, request: &HttpRequest) -> HttpResponse {
     }
     xml.push_str("</DeleteResult>");
     reply(200, Vec::new(), xml.into_bytes())
+}
+
+/// A key's place in R2's listing order: the name with a byte after it that no key holds.
+fn r2_key(key: &str) -> Vec<u8> {
+    let mut bytes = key.as_bytes().to_vec();
+    bytes.push(0xFF);
+    bytes
 }
 
 fn decode_token(token: &str) -> Option<String> {

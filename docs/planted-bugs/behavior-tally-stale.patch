@@ -1,0 +1,13 @@
+diff --git a/docs/BEHAVIOR.md b/docs/BEHAVIOR.md
+index 0000000..0000000 100644
+--- a/docs/BEHAVIOR.md
++++ b/docs/BEHAVIOR.md
+@@ -31,7 +31,7 @@ Rows that earn none of the three carry one of these instead:
+ 
+ Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs/` and re-planted nightly.
+ 
+-The count of rows by mark is not kept here, since a count in a committed file goes stale when two branches each add a row: `just behavior-tally` prints it from `docs/behavior.toml`.
++**Tally of the 176 rows in section 3**, typed by hand. The count of rows by mark is not kept here, since a count in a committed file goes stale when two branches each add a row: `just behavior-tally` prints it from `docs/behavior.toml`.
+ 
+ **Changes in review.** None. Main is described as it is. Four pull requests were once listed here: #96 (`claude/listing-trust`) and #89 (`claude/rewound-snapshot`) were closed unmerged, and #86 and #97 merged. A row whose In review cell still names one of them has a stale tag and is read again when it is next touched.
+ 

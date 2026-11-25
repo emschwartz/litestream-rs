@@ -489,6 +489,10 @@ upstream-test-map-fresh:
 behavior-doc:
     LSR_BEHAVIOR_WRITE=1 cargo nextest run -p lsr-compat --test compat --locked -E 'test(=behavior::the_behavior_doc_is_rendered_from_its_rows)'
 
+# The count of rows in docs/behavior.toml by mark, which no committed file holds.
+behavior-tally:
+    @cargo nextest run -p lsr-compat --test compat --locked --run-ignored only --no-capture -E 'test(=behavior::print_the_tally_of_rows_by_mark)' 2>&1 | sed -n '/^\*\*Tally/,/^ *PASS/p' | grep -v PASS
+
 # Every test docs/behavior.toml cites is a test or a simulator scenario, and every planted bug a
 # row cites is backed by a cited test that is not ignored, since `planted-bugs` runs no ignored
 # test (crates/compat/tests/compat/behavior.rs).

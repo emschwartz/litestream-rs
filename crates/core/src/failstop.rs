@@ -156,9 +156,16 @@ pub enum Gate {
 /// Why the application's writes are held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WhyBlocked {
-    /// The boot is still being judged ([`Gate::Pending`]); bounded, since a boot attempt that
-    /// fails judges the boot.
+    /// The boot is still being judged ([`Gate::Pending`]): listing the replica and deciding how
+    /// this start proceeds. Bounded, since a boot attempt that fails judges the boot.
     Booting,
+    /// The boot is still being judged, and is comparing the database with the replica's
+    /// newest state before it decides (a brand-new meta directory, `crate::identity`): it
+    /// restores that state and reads every local page, so it lasts as long as a restore of
+    /// the database does. The host names it while the tick runs, from the engine's
+    /// [`crate::Event::CheckingIdentity`] notice ([`crate::Env::notice`]); [`blocks_writes`]
+    /// says [`WhyBlocked::Booting`].
+    CheckingIdentity,
     /// Fail-stop tripped and holds the application ([`Gate::Held`]).
     Tripped(Trip),
 }

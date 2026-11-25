@@ -1,0 +1,6 @@
+# The boot's read of the replica's newest file's header fails the boot when the file is missing, so
+# every retry reads the same file and the engine never boots (a drain never ends in the simulator).
+name = "boot-fails-on-a-missing-newest-file"
+fix = "c755dfbcf"
+package = "lsr-core"
+tests = ["pages::tests::a_replica_missing_the_believed_newest_file_leaves_the_first_pending_file_counted"]

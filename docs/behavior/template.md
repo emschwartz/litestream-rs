@@ -31,20 +31,7 @@ Rows that earn none of the three carry one of these instead:
 
 Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs/` and re-planted nightly.
 
-**Tally of the 176 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
-
-| Mark | Rows |
-|---|---|
-| D R | 56 |
-| D | 71 |
-| D S | 6 |
-| D S R | 5 |
-| S | 1 |
-| untested | 14 |
-| code only | 8 |
-| unknown | 9 |
-| known wrong | 4 |
-| accepted, undetected | 2 |
+The count of rows by mark is not kept here, since a count in a committed file goes stale when two branches each add a row: `just behavior-tally` prints it from `docs/behavior.toml`.
 
 **Changes in review.** None. Main is described as it is. Four pull requests were once listed here: #96 (`claude/listing-trust`) and #89 (`claude/rewound-snapshot`) were closed unmerged, and #86 and #97 merged. A row whose In review cell still names one of them has a stale tag and is read again when it is next touched.
 
@@ -287,7 +274,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Object lock, or a policy that denies delete | **Gap** | Retention deletes fail for good, reported as `permission_denied` on the maintenance task (WORLD-23) | store-s3 `a_delete_refused_for_one_key_is_a_permission_denial` (the class only). **untested** in the engine |
 | Objects moved to an archive tier, or under a disabled KMS key | **Gap** | An archived object is `store_refused`; a KMS failure goes by status (WORLD-22) | store-s3 `classify_denials_by_what_to_fix` (the archive class only). **untested** in the engine |
 | AWS S3 | **Partly.** S3 is what the product is for | The S3 client is exercised against MinIO in CI, Tigris by hand (one 12-hour soak), and AWS S3 by `just test-provider aws` (2026-11-24): the conformance suite, create-only writes and their races, consistency, error classification, abandoned uploads and one `lsr` replicate and restore all pass. No soak, no versioned bucket, no lifecycle rule | store-s3 `provider::` tests (by hand, never CI) |
-| Cloudflare R2 | **Partly** | A default concurrency of 2 is set for it. `just test-provider r2` (2026-11-24) passes the create-only writes and races, consistency, classification, abandoned uploads and one `lsr` replicate and restore. R2 lists names that extend one another out of bytewise order (`X.ltx.tmp`, then `X.ltx`, then `X`), so a listing of a level that holds such a stray name fails as a retryable `InvalidData` on every attempt (conformance case `unrecognized_names_are_skipped_and_counted` fails on R2); the engine's own fixed-width names list in order. R2 answered one plain 500 to a PUT in one of four runs of about 5,500 requests. No soak | store-s3 `provider::` tests (by hand, never CI). **Open**: the stray-name failure |
+| Cloudflare R2 | **Partly** | A default concurrency of 2 is set for it. `just test-provider r2` passes the create-only writes and races, consistency, classification, abandoned uploads and one `lsr` replicate and restore. R2 lists names that extend one another out of bytewise order (`X.ltx.tmp`, then `X.ltx`, then `X`); the store accepts any order inside a page (WORLD-42), so a stray name in a level folder no longer stops a listing. R2 answered one plain 500 to a PUT in one of four runs of about 5,500 requests. No soak | store-s3 `provider::` tests (by hand, never CI) |
 | A middlebox that returns a well-formed wrong body (captive portal, caching proxy) | **Gap** | A wrong body fails LTX decode, so a read is treated as a rotten object. MAINT-4 deletes a covered object after two failed reads; two reads through one bad proxy are not independent (WORLD-25) | None. **untested** |
 | The endpoint resolves to a different, empty store; DNS failure | **Gap** | DNS failure is a transient error (UP-2). An empty store at boot looks like a new replica with staging kept (WORLD-11) | None. **untested** |
 | Host clock skewed against the store | In, for one refusal | `RequestTimeTooSkewed` is `clock_skew` (WORLD-15) | sim `clock_skewed_against_the_store_mid_run` |
@@ -519,7 +506,7 @@ Three other ways replication ends that are not a `StopCause`:
 | D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Accepted as a documented limit (`docs/decisions/D173.md`) | BOOT-19, G1 | None open. Issue #99 |
 | D4 | **Closed by #98.** A restore as of an instant could return a state committed up to one tick's read after the instant | G3 | Merged |
 | D5 | **Closed by scope.** A boot or relist listing that lags the bucket is trusted; a store that lags is unsupported (D173) | BOOT-18, MAINT-12 | `docs/decisions/D173.md` |
-| D6 | **Closed.** Level-0 writes are create-only, so a second writer or a reused id is refused, and UP-17 stops the refused writer (core `failover_with_the_old_host_alive_never_publishes_one_id_twice`, run in the gate). Open: a Go process's puts are unconditional (GO-9) | UP-14, GO-9, WORLD-5 | Merged |
+| D6 | **Closed.** Level-0 writes are create-only, so a second writer or a reused id is refused, and UP-17 stops the refused writer (core `failover_with_the_old_host_alive_never_publishes_one_id_twice`, run in the gate). Open: a Go process's puts are unconditional (GO-9) | UP-14, GO-9, WORLD-5 | Merged. GO-9: issue #346 |
 | D7 | A retried multipart Complete that already succeeded is reported as `store_refused` | UP-13 | #96 |
 | D9 | **Accepted limit** (`docs/decisions/D174.md`). Retry counts, waits and degraded states reset on restart, as Go's do. The one stop the engine makes by default, `OtherWriter`, holds across a restart because every boot refuses the other writer's files again (BOOT-13, BOOT-22), whether it saw them before or was down when they appeared | BOOT-21, BOOT-22; a halt across restarts goes unreported, reached by the simulator's overlapping holds (CHK-9), which count it and do not judge it | `claude/second-writer` for the stop; `docs/decisions/D174.md` for the rest, left out of v1 |
 | D10 | A commit is dated by when it was staged. After an outage, a restore as of an instant inside the outage leaves out commits made before that instant. The contract "what the replica held at t" is not stated anywhere a user reads | G3 | None. None |
@@ -646,7 +633,7 @@ The index tables for `Fault`, `PersistentCause`, `SnapshotCause` and `StopCause`
 7. **Known wrong is an expected failure.** A known-wrong row names a test that fails on main, or carries "(no failing test)", which the gate counts and prints. Today one row has such a test (RUN-3's restart half) and six rows or half-rows do not.
 8. **Every citation can fail (nightly).** Each cited test is linked to a planted bug that it kills. The plant must change the function the row's detection names, or the response path; a patch elsewhere that happens to fail the test does not count.
 9. **The cited test reaches the detecting branch (nightly).** Region coverage of the branch, not the function: every test reaches `policy` and `Actor::tick`.
-10. **Sections 1 and 6 are generated.** The table at the top of section 1 and the tally below come from the data, so a sentence like "three of four have an open violation" cannot go stale by itself.
+10. **Sections 1 and 6 are generated.** The table at the top of section 1 comes from the data, so a sentence like "three of four have an open violation" cannot go stale by itself. No count over rows is committed: `just behavior-tally` prints one.
 11. **A generic harness**, where a row has a simulator injector: run the injector, and assert the observed response, signal and restore outcome equal the row's.
 
 ### 7.4 What this still does not do

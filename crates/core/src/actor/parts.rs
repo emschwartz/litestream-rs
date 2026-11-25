@@ -163,8 +163,6 @@ pub(super) struct Kept {
     /// The run above has outlasted the bound and the last failure was not a refusal, as of
     /// the last tick: the boot is judged without having decided.
     pub(super) boot_overdue: bool,
-    /// A sync step failed after the first listing: a snapshot the boot asked for was tried.
-    pub(super) sync_failed_after_listing: bool,
     /// Pending staged files that hold no commit of the application's: a file that changes no
     /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
     /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
@@ -208,7 +206,6 @@ impl Kept {
             refused_at_boot: None,
             boot_failing_since: None,
             boot_overdue: false,
-            sync_failed_after_listing: false,
             quiet: BTreeSet::new(),
             doubt_baseline: None,
             read_lock_violations: 0,
@@ -246,7 +243,6 @@ impl Kept {
             refused_at_boot,
             boot_failing_since,
             boot_overdue,
-            sync_failed_after_listing,
             quiet: _,
             doubt_baseline: _,
             read_lock_violations,
@@ -280,7 +276,6 @@ impl Kept {
             refused_at_boot: *refused_at_boot,
             boot_failing_since: *boot_failing_since,
             boot_overdue: *boot_overdue,
-            sync_failed_after_listing: *sync_failed_after_listing,
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),
             doubt_baseline: None,
