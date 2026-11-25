@@ -299,3 +299,33 @@ fn another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted() {
         "{unsent:?}"
     );
 }
+
+/// A first file sent over many ticks, with the clock passing the levels' windows meanwhile: the
+/// levels wait for the first snapshot, which is built from the file once it is published, so
+/// no level 1, 2 or 3 file is put before the snapshot is.
+#[test]
+fn a_first_file_in_flight_does_not_let_the_levels_run_before_the_snapshot() {
+    let mut ops = in_flight();
+    // A maintenance turn between the slices lists an empty replica, and the clock then passes
+    // every level's window before the file is whole.
+    ops.push(Op::ClockJump(40_000));
+    ops.extend(ticks(12));
+    ops.push(Op::ClockJump(40_000));
+    ops.extend(ticks(40));
+    let report = run(&ops);
+    let puts: Vec<u8> = report
+        .remote_events
+        .iter()
+        .filter_map(|event| match event {
+            lsr_sim::RecorderEvent::Put { key, .. } => Some(key.level().get()),
+            lsr_sim::RecorderEvent::Delete { .. } => None,
+        })
+        .collect();
+    let snapshot = puts.iter().position(|level| *level == 9);
+    let first_level = puts.iter().position(|level| (1..=3).contains(level));
+    assert!(snapshot.is_some(), "no snapshot: {puts:?}");
+    assert!(
+        first_level.is_none_or(|level| snapshot < Some(level)),
+        "a level was written before the first snapshot: {puts:?}"
+    );
+}

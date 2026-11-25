@@ -20,6 +20,12 @@ fn page_bytes(page: u32, commit: u8) -> Vec<u8> {
 
 /// A quiet database of [`PAGES`] pages with one committed transaction in its WAL.
 fn quiet() -> Rig {
+    quiet_of(PAGES, page_bytes)
+}
+
+/// A quiet database of `pages` pages, page `n` holding `fill(n, commit)`, with one committed
+/// transaction in its WAL that rewrites page 1.
+fn quiet_of(pages: u32, fill: impl Fn(u32, u8) -> Vec<u8>) -> Rig {
     let wal = FakeWal::new(
         PS,
         Salts {
@@ -28,9 +34,9 @@ fn quiet() -> Rig {
         },
     );
     let mut db = FakeDb::new(PS);
-    db.set_page_count(PAGES);
-    for n in 1..=PAGES {
-        db.write_page(pg(n), &page_bytes(n, 0));
+    db.set_page_count(pages);
+    for n in 1..=pages {
+        db.write_page(pg(n), &fill(n, 0));
     }
     db.link(&wal);
     let ck = FakeCheckpointer::new(wal.clone());
@@ -43,7 +49,7 @@ fn quiet() -> Rig {
         takeover: None,
         announced: Vec::new(),
     };
-    rig.wal.append_tx(&[(pg(1), page_bytes(1, 1))], nz(PAGES));
+    rig.wal.append_tx(&[(pg(1), fill(1, 1))], nz(pages));
     rig
 }
 
@@ -121,6 +127,67 @@ fn the_first_start_uploads_the_database_twice_and_downloads_none() {
         reads.iter().all(|key| key.level().is_snapshot()),
         "downloaded {reads:?}"
     );
+}
+
+/// A database whose first file takes several slices to send: pages no codec shrinks.
+const BIG_PAGES: u32 = 24_000;
+
+/// What a slice takes to send, as the clock sees it: a real replica is slower than a
+/// memory store by this much, and the levels' windows open meanwhile.
+const SLICE_MILLIS: i64 = 4_000;
+
+fn noisy(page: u32) -> Vec<u8> {
+    let mut state = u64::from(page).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..PS.bytes())
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect()
+}
+
+/// A database too big for one slice, with one committed transaction in its WAL.
+fn big() -> Rig {
+    quiet_of(BIG_PAGES, |n, _| noisy(n))
+}
+
+/// While the first snapshot is planned, pending or in flight, no level gains a file: the
+/// database is carried to level 9 once, not through levels 1 to 3 on the way. A first file
+/// that takes several slices to send keeps the snapshot waiting for the uploads, and the
+/// levels wait with it.
+#[test]
+fn a_first_file_sent_in_slices_does_not_let_the_levels_run() {
+    let mut rig = big();
+    let mut actor = Actor::new(ActorConfig {
+        upload: UploadConfig {
+            bytes_per_tick: std::num::NonZeroU64::new(256 * 1024).unwrap(),
+            ..UploadConfig::default()
+        },
+        ..cfg()
+    });
+    let mut now = T0;
+    for _ in 0..400 {
+        let tick = rig.tick(&mut actor, now);
+        for level in [1, 2, 3] {
+            let files = Rig::files(&rig.remote, Level::new(level).unwrap());
+            assert!(
+                files.is_empty(),
+                "level {level} holds {files:?} after {tick:?}"
+            );
+        }
+        match tick {
+            Tick::Ran {
+                next: Next::Now, ..
+            } => now += SLICE_MILLIS,
+            Tick::Ran {
+                next: Next::At(at), ..
+            } => now = (now + SLICE_MILLIS).max(at.unix_millis()),
+            _ => break,
+        }
+    }
+    assert!(!Rig::files(&rig.remote, Level::SNAPSHOT).is_empty());
 }
 
 /// The pages the file holds, by its own trailer.
