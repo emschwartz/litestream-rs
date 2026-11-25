@@ -1,0 +1,4 @@
+name = "prune-waits-for-level-one-over-a-snapshot"
+fix = "plant"
+package = "lsr-core"
+tests = ["prune_keeps_exactly_the_uncompacted_and_the_newest_staged_file"]

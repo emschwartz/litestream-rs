@@ -226,9 +226,13 @@ fn a_short_pass_compaction_that_would_leave_a_hole_is_a_bug_and_writes_nothing()
     let mut rig = Rig::new();
     let mut actor = Actor::new(slow_level_three());
     rig.settle(&mut actor, T0);
-    for n in 1..=3 {
+    // A level-1 file above the first snapshot, then three files in the window after it.
+    rig.commit(1);
+    rig.settle(&mut actor, T0 + 1000);
+    rig.settle(&mut actor, T0 + 11_000);
+    for n in 2..=4 {
         rig.commit(n);
-        rig.settle(&mut actor, T0 + 1000 * i64::from(n));
+        rig.settle(&mut actor, T0 + 11_000 + 1000 * i64::from(n));
     }
     let one = ranges_at(&rig, 1);
     let newest = one.last().unwrap().1;
@@ -264,7 +268,8 @@ fn a_short_pass_compaction_that_follows_its_level_runs() {
     rig.settle(&mut actor, T0);
     rig.commit(1);
     rig.settle(&mut actor, T0 + 1000);
-    let newest = ranges_at(&rig, 1).last().unwrap().1;
+    // Level 1 holds nothing: it starts above the first snapshot, which ends at 1.
+    let newest = ranges_at(&rig, 1).last().map_or(1, |range| range.1);
     let zero: Vec<FileInfo> = Rig::files(&rig.remote, Level::ZERO)
         .into_iter()
         .filter(|f| f.key.range().min().get() > newest)

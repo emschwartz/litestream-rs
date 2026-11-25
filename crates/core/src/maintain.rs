@@ -611,6 +611,16 @@ fn decide(
         Gate::Held
     };
     let mut until: Option<Timestamp> = None;
+    // With no snapshot and no level 1 file yet, the first snapshot goes before any level, so
+    // the levels start above it (D224) and the database is not carried through levels 1 to 3.
+    let first = (snapshot_end(inventory).is_none()
+        && Level::new(1).is_some_and(|one| inventory.level(one).is_empty()))
+    .then(|| snapshot_step(inventory, now, config, published, state, resolved))
+    .transpose()?;
+    let first_planned = first.is_some();
+    if let Some(job) = first.and_then(|step| absorb(step, &mut until)) {
+        return Ok(Decided::job(job, gate));
+    }
     let levels = Level::ALL
         .iter()
         .skip(1)
@@ -629,15 +639,11 @@ fn decide(
             return Ok(Decided::job(job, gate));
         }
     }
-    let waits = state.backing_off_until(Level::SNAPSHOT, now);
-    let step = match (waits, state.distrusted_at(Level::SNAPSHOT)) {
-        (Some(retry), _) => Step::Wait(retry),
-        // A rejected snapshot goes before the next one is written.
-        (None, Some(bad)) => delete_first(bad),
-        (None, None) => plan_snapshot(inventory, now, config, published, state, resolved)?,
-    };
-    if let Some(job) = absorb(step, &mut until) {
-        return Ok(Decided::job(job, gate));
+    if !first_planned {
+        let step = snapshot_step(inventory, now, config, published, state, resolved)?;
+        if let Some(job) = absorb(step, &mut until) {
+            return Ok(Decided::job(job, gate));
+        }
     }
     let retained = match config.retention() {
         RetentionMode::Off => {
@@ -677,6 +683,36 @@ fn decide(
             retention_wake: None,
         },
     })
+}
+
+/// The last transaction of the newest snapshot a restore can start from.
+pub(crate) fn snapshot_end(inventory: &Inventory) -> Option<Txid> {
+    inventory
+        .level(Level::SNAPSHOT)
+        .iter()
+        .rev()
+        .find(|info| is_snapshot_start(info))
+        .map(|info| info.key.range().max())
+}
+
+/// The snapshot's step: its backoff, the delete of a rejected one, or the plan.
+fn snapshot_step(
+    inventory: &Inventory,
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &MaintainState,
+    resolved: &ResolvedCreatedAt,
+) -> Result<Step, Need> {
+    match (
+        state.backing_off_until(Level::SNAPSHOT, now),
+        state.distrusted_at(Level::SNAPSHOT),
+    ) {
+        (Some(retry), _) => Ok(Step::Wait(retry)),
+        // A rejected snapshot goes before the next one is written.
+        (None, Some(bad)) => Ok(delete_first(bad)),
+        (None, None) => plan_snapshot(inventory, now, config, published, state, resolved),
+    }
 }
 
 /// The job a step wants, or folds its wake time into `until`.
@@ -726,7 +762,11 @@ fn plan_level(
     }
     let dst_files = inventory.level(dst);
     let dst_last = dst_files.last();
-    let dst_max = dst_last.map(|info| info.key.range().max());
+    // An empty level starts above the newest snapshot: what the snapshot holds is not carried
+    // into it (D224). Each level stays contiguous from its first file.
+    let dst_max = dst_last
+        .map(|info| info.key.range().max())
+        .or_else(|| snapshot_end(inventory));
     let mut above = inventory
         .level(src_level)
         .iter()
@@ -750,7 +790,9 @@ fn plan_level(
     // The rule every compaction keeps: its inputs are the contiguous run that starts at the
     // first source file above the destination's newest, and that file starts at the
     // transaction after it. A tail that shows otherwise is not planned from.
-    let follows = dst_max.is_none_or(|max| max.next() == Some(first.key.range().min()));
+    // An empty level may start anywhere, so the snapshot's end is not its newest file.
+    let follows =
+        dst_last.is_none_or(|last| last.key.range().max().next() == Some(first.key.range().min()));
     if !follows && view == View::Tail {
         // One whole listing for each attempt: while a level a fill would write waits out a
         // failure, another listing would find the same wait.

@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+index 508e140f6..3c1009a70 100644
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -703,8 +703,7 @@ fn plan_level(
+     // An empty level starts above the newest snapshot: what the snapshot holds is not carried
+     // into it (D224). Each level stays contiguous from its first file.
+     let dst_max = dst_last
+-        .map(|info| info.key.range().max())
+-        .or_else(|| snapshot_end(inventory));
++        .map(|info| info.key.range().max());
+     let mut above = inventory
+         .level(src_level)
+         .iter()

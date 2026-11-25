@@ -93,6 +93,36 @@ fn the_first_start_reads_each_page_once() {
     assert_eq!(Rig::files(&rig.remote, Level::ZERO).len(), 1);
 }
 
+/// A first start moves the database twice, to level 0 and to level 9: the levels between hold
+/// nothing (they start above the snapshot), and the only download is the snapshot's own check.
+/// Before, the level-0 file was carried into levels 1, 2 and 3 (five uploads, two downloads).
+#[test]
+fn the_first_start_uploads_the_database_twice_and_downloads_none() {
+    let mut rig = quiet();
+    let mut actor = Actor::new(cfg());
+    rig.settle(&mut actor, T0);
+    for level in [1, 2, 3] {
+        let files = Rig::files(&rig.remote, Level::new(level).unwrap());
+        assert!(files.is_empty(), "level {level} holds {files:?}");
+    }
+    let held: u64 = (0..=9)
+        .filter_map(Level::new)
+        .flat_map(|level| Rig::files(&rig.remote, level))
+        .map(|f| f.size)
+        .sum();
+    assert_eq!(
+        held,
+        bytes_at(&rig, Level::ZERO) + bytes_at(&rig, Level::SNAPSHOT),
+        "every uploaded byte is at level 0 or 9"
+    );
+    // The one read is the snapshot's check after it was written.
+    let reads = rig.remote.reads.lock().unwrap().clone();
+    assert!(
+        reads.iter().all(|key| key.level().is_snapshot()),
+        "downloaded {reads:?}"
+    );
+}
+
 /// The pages the file holds, by its own trailer.
 fn page_count(rig: &Rig, info: &FileInfo) -> u32 {
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
@@ -146,8 +176,8 @@ fn the_snapshot_of_a_first_start_restores_the_database() {
     // The snapshot alone: a replica holding nothing else restores the first state.
     let others: Vec<FileKey> = Level::ALL
         .iter()
-        .filter(|level| !level.is_snapshot())
         .flat_map(|level| Rig::files(&rig.remote, *level))
+        .filter(|f| !f.key.level().is_snapshot() || f.key.range().max().get() > 1)
         .map(|f| f.key)
         .collect();
     block_on(store.delete(&others)).unwrap();

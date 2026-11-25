@@ -48,8 +48,9 @@ fn with_staging_gone_boot_continues_from_the_replicas_newest_staged_file() {
 #[test]
 fn with_staging_gone_and_level_zero_retained_away_boot_is_a_first_sync() {
     let (mut rig, _) = caught_up();
-    // Level 1 holds transaction 1; the replica's level-0 copy is gone.
-    assert_eq!(level_one_max(&rig), Some(1));
+    // The snapshot holds transaction 1 (level 1 starts above it); the replica's level-0 copy
+    // is gone.
+    assert_eq!(level_one_max(&rig), None);
     let newest_staged = FileKey::new(Level::ZERO, TxidRange::single(Txid::MIN));
     block_on(rig.remote.inner.delete(&[newest_staged])).unwrap();
     rig.staging = Counting::default();
