@@ -713,7 +713,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplicaClient_WALSegmentsV3/SkipsInvalidFilenames" = { reason = "@v03-layout" }
 "TestReplicaClient_WALSegmentsV3/WALPathIsFile" = { reason = "@v03-layout" }
 "TestReplicaClient_WriteLTXFile_ErrorCleanup" = { counterpart = "lsr-store-fs::tests::a_crash_between_scratch_write_and_rename_is_invisible" }
-"TestReplicaClient_WriteLTXFile_ErrorCleanup/DiskFull" = { counterpart = "lsr-store-fs::review::review::a_dropped_upload_leaves_no_unrecognized_name" }
+"TestReplicaClient_WriteLTXFile_ErrorCleanup/DiskFull" = { counterpart = "lsr-store-fs::store-fs::review::a_dropped_upload_leaves_no_unrecognized_name" }
 "TestReplicaClient_WriteLTXFile_ErrorCleanup/MultipleErrors" = { counterpart = "lsr-store-fs::tests::an_upload_skips_scratch_names_a_crash_left_and_gives_up_when_all_are_taken" }
 "TestReplicaClient_WriteLTXFile_ErrorCleanup/SuccessNoLeaks" = { counterpart = "lsr-store-fs::tests::conformance_cases::pending_and_dropped_uploads_are_invisible" }
 "TestReplica_Sync" = { counterpart = "lsr-compat::compat::live_source::live_sync_chain_restores" }
