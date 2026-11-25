@@ -169,6 +169,8 @@ struct Log {
     deletes: Vec<FileKey>,
     fail_delete: bool,
     begins: Vec<FileKey>,
+    /// The length each upload was begun with.
+    lens: Vec<Option<u64>>,
     aborts: u32,
     /// Bytes every write was handed, summed.
     written: u64,
@@ -285,16 +287,18 @@ impl ObjectStore for Probe {
         self.inner.read_with_created_at(file, len)
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl Future<Output = Result<ProbeUpload, StoreError>> + Send {
         self.log().begins.push(*key);
+        self.log().lens.push(len);
         self.log().modes.push(mode);
         let log = Arc::clone(&self.log);
-        let begun = self.inner.begin_upload(key, created_at, mode);
+        let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
         async move {
             Ok(ProbeUpload {
                 inner: begun.await?,
@@ -504,6 +508,18 @@ fn a_commit_that_failed_after_publishing_is_found_by_one_listing_and_not_uploade
     let idle = next(listed.state, &staging, &remote, 1).unwrap();
     assert_eq!(idle.did, Did::Nothing);
     assert_eq!(remote.log().begins.len(), 1);
+}
+
+/// A store can plan an upload (a multipart part size, a refusal of an object it cannot hold)
+/// only if it hears the length before the first byte, and the length is the staged file's.
+#[test]
+fn an_upload_is_begun_with_the_staged_files_length() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    let put = next(UploadState::At(None), &staging, &remote, 1).unwrap();
+    assert_eq!(put.state, UploadState::At(Some(txid(1))));
+    let want = u64::try_from(bytes.len()).unwrap();
+    assert_eq!(remote.log().lens, vec![Some(want)]);
 }
 
 #[test]

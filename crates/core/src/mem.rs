@@ -306,11 +306,12 @@ impl ObjectStore for MemStore {
         std::future::ready(self.read_with_created_at_now(file, len))
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        _len: Option<u64>,
     ) -> impl Future<Output = Result<MemUpload, StoreError>> + Send {
         let result = self.lock().take_fault(StoreOp::Upload).map(|()| MemUpload {
             store: self.clone(),

@@ -20,15 +20,17 @@
 //!   deletes that object (through the retry policy) before it reports the
 //!   error, so a listing never shows a file the wrapper called corrupt.
 
+use std::fmt;
 use std::future::Future;
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::env::{Entropy, Sleeper};
+use crate::env::{Clock, Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
@@ -64,6 +66,7 @@ pub fn classify(err: &StoreError) -> Class {
         | StoreError::AlreadyExists { .. }
         | StoreError::CreateOnlyUnsupported { .. }
         | StoreError::ScratchExhausted { .. }
+        | StoreError::ObjectTooLarge { .. }
         | StoreError::Corrupt { .. }
         | StoreError::Refused { .. } => Class::Permanent,
     }
@@ -151,6 +154,71 @@ struct Core<S, P, E> {
     entropy: E,
     policy: RetryPolicy,
     counters: Counters,
+    listing: Option<ListingBudget>,
+}
+
+/// A time budget for all the listing a store does, for a caller that waits on it (a restore run
+/// by a person): once it is spent, a failed listing is returned as it came instead of retried.
+/// It bounds the retries, not a request in flight: the longest a listing phase can take is the
+/// budget plus the transport's deadline for one request.
+struct ListingBudget {
+    clock: Arc<dyn Clock>,
+    budget: Duration,
+    /// Unix milliseconds of the first listing call, or [`Self::NOT_STARTED`].
+    started: AtomicI64,
+    calls: AtomicU64,
+    expired: Mutex<Option<ListingExpired>>,
+}
+
+impl fmt::Debug for ListingBudget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ListingBudget")
+            .field("budget", &self.budget)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ListingBudget {
+    const NOT_STARTED: i64 = i64::MIN;
+
+    /// Counts `n` listing calls, starting the clock at the first.
+    fn calls(&self, n: u64) {
+        let now = self.clock.now().unix_millis();
+        // The first call wins; a later one finds the start already set.
+        self.started
+            .compare_exchange(Self::NOT_STARTED, now, Ordering::Relaxed, Ordering::Relaxed)
+            .unwrap_or_else(|already| already);
+        self.calls.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Whether a retry begun after `wait` would begin at or past the budget's end.
+    fn spent_after(&self, wait: Duration) -> bool {
+        let started = self.started.load(Ordering::Relaxed);
+        let elapsed = self.clock.now().unix_millis().saturating_sub(started);
+        let elapsed = Duration::from_millis(u64::try_from(elapsed).unwrap_or(0));
+        elapsed.saturating_add(wait) >= self.budget
+    }
+
+    /// Records why the listing stopped, keeping the first record.
+    fn expire(&self, last: &StoreError) {
+        let mut slot = self.expired.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.get_or_insert_with(|| ListingExpired {
+            budget: self.budget,
+            listings: self.calls.load(Ordering::Relaxed),
+            last: last.clone(),
+        });
+    }
+}
+
+/// A listing that stopped retrying because its [`Retrying::with_listing_budget`] ran out.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ListingExpired {
+    /// The budget that was spent.
+    pub budget: Duration,
+    /// Listing calls made, the retries included.
+    pub listings: u64,
+    /// The error the last call failed with, which is also what the caller was given.
+    pub last: StoreError,
 }
 
 /// An [`ObjectStore`] that retries the inner store's transient failures.
@@ -163,6 +231,39 @@ impl<S, P, E> Retrying<S, P, E> {
     /// Wraps `inner`.
     #[must_use]
     pub fn new(inner: S, sleeper: P, entropy: E, policy: RetryPolicy) -> Self {
+        Self::build(inner, sleeper, entropy, policy, None)
+    }
+
+    /// [`Self::new`], with every listing together held to `budget` from the first one: once it
+    /// is spent a failed listing is returned, not retried, and [`Self::listing_expired`] says
+    /// so. Retries of other operations keep the policy alone. A restore uses it so an endpoint
+    /// that never answers fails in about the budget, not in the policy's attempts for every level.
+    #[must_use]
+    pub fn with_listing_budget(
+        inner: S,
+        sleeper: P,
+        entropy: E,
+        policy: RetryPolicy,
+        clock: Arc<dyn Clock>,
+        budget: Duration,
+    ) -> Self {
+        let listing = ListingBudget {
+            clock,
+            budget,
+            started: AtomicI64::new(ListingBudget::NOT_STARTED),
+            calls: AtomicU64::new(0),
+            expired: Mutex::new(None),
+        };
+        Self::build(inner, sleeper, entropy, policy, Some(listing))
+    }
+
+    fn build(
+        inner: S,
+        sleeper: P,
+        entropy: E,
+        policy: RetryPolicy,
+        listing: Option<ListingBudget>,
+    ) -> Self {
         Self {
             core: Arc::new(Core {
                 inner,
@@ -170,8 +271,20 @@ impl<S, P, E> Retrying<S, P, E> {
                 entropy,
                 policy,
                 counters: Counters::default(),
+                listing,
             }),
         }
+    }
+
+    /// Why a listing stopped retrying, when the listing budget ran out.
+    #[must_use]
+    pub fn listing_expired(&self) -> Option<ListingExpired> {
+        let budget = self.core.listing.as_ref()?;
+        budget
+            .expired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The wrapped store.
@@ -227,7 +340,21 @@ impl<S, P: Sleeper, E: Entropy> Core<S, P, E> {
     {
         Counters::bump(&self.counters.calls);
         let first = op().await;
-        self.settle(first, op).await
+        self.settle(first, op, false).await
+    }
+
+    /// [`Self::run`] for a listing, which the listing budget bounds.
+    async fn run_listing<T, F, Fut>(&self, mut op: F) -> Result<T, StoreError>
+    where
+        F: FnMut() -> Fut + Send,
+        Fut: Future<Output = Result<T, StoreError>> + Send,
+    {
+        Counters::bump(&self.counters.calls);
+        if let Some(budget) = &self.listing {
+            budget.calls(1);
+        }
+        let first = op().await;
+        self.settle(first, op, true).await
     }
 
     /// Carries on an operation whose first attempt (already counted as a
@@ -237,11 +364,13 @@ impl<S, P: Sleeper, E: Entropy> Core<S, P, E> {
         &self,
         first: Result<T, StoreError>,
         mut op: F,
+        listing: bool,
     ) -> Result<T, StoreError>
     where
         F: FnMut() -> Fut + Send,
         Fut: Future<Output = Result<T, StoreError>> + Send,
     {
+        let budget = self.listing.as_ref().filter(|_| listing);
         let mut failures = 0_u32;
         let mut outcome = first;
         loop {
@@ -253,6 +382,13 @@ impl<S, P: Sleeper, E: Entropy> Core<S, P, E> {
             let Some(wait) = self.wait_after(failures, &err) else {
                 return Err(err);
             };
+            if let Some(budget) = budget {
+                if budget.spent_after(wait) {
+                    budget.expire(&err);
+                    return Err(err);
+                }
+                budget.calls(1);
+            }
             self.counters.add_wait(wait);
             Counters::bump(&self.counters.retries);
             self.sleeper.sleep(wait).await;
@@ -274,7 +410,8 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         limit: PageLimit,
     ) -> Result<Listing, StoreError> {
         let core = &*self.core;
-        core.run(|| core.inner.list(level, after, limit)).await
+        core.run_listing(|| core.inner.list(level, after, limit))
+            .await
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
@@ -297,15 +434,16 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
             .await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
         let core = &*self.core;
         let inner = core
-            .run(|| core.inner.begin_upload(key, created_at, mode))
+            .run(|| core.inner.begin_sized_upload(key, created_at, mode, len))
             .await?;
         Ok(RetryingUpload {
             inner,
@@ -338,7 +476,10 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         let mut out = Vec::with_capacity(firsts.len());
         for (file, first) in files.iter().zip(firsts) {
             Counters::bump(&core.counters.calls);
-            out.push(core.settle(first, || core.inner.created_at(file)).await);
+            out.push(
+                core.settle(first, || core.inner.created_at(file), false)
+                    .await,
+            );
         }
         out
     }
@@ -351,12 +492,15 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         limit: PageLimit,
     ) -> Vec<Result<Listing, StoreError>> {
         let core = &*self.core;
+        if let Some(budget) = &core.listing {
+            budget.calls(u64::try_from(pages.len()).unwrap_or(u64::MAX));
+        }
         let firsts = core.inner.list_many(pages, limit).await;
         let mut out = Vec::with_capacity(firsts.len());
         for (at, first) in pages.iter().zip(firsts) {
             Counters::bump(&core.counters.calls);
             let settled = core
-                .settle(first, || core.inner.list(at.level, at.after, limit))
+                .settle(first, || core.inner.list(at.level, at.after, limit), true)
                 .await;
             out.push(settled);
         }
@@ -372,7 +516,7 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         for (at, first) in reads.iter().zip(firsts) {
             Counters::bump(&core.counters.calls);
             let settled = core
-                .settle(first, || core.inner.read(&at.key, at.offset, at.len))
+                .settle(first, || core.inner.read(&at.key, at.offset, at.len), false)
                 .await;
             out.push(settled);
         }

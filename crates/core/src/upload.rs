@@ -995,9 +995,11 @@ impl Sending {
                         return Err(PutError::Before(Fault::StagedLost));
                     }
                     // Stored before the first write so a failed write still aborts it.
-                    let begun = Writer::begin(remote, key, header.fields().timestamp, self.mode)
-                        .await
-                        .map_err(|err| PutError::Before(S::fault(&err)))?;
+                    let len = Some(self.token.len());
+                    let begun =
+                        Writer::begin(remote, key, header.fields().timestamp, self.mode, len)
+                            .await
+                            .map_err(|err| PutError::Before(S::fault(&err)))?;
                     let open = self.open.insert(begun.boxed());
                     self.held.extend_from_slice(&chunk);
                     write_chunk::<S>(open, &std::mem::take(&mut self.held)).await?;

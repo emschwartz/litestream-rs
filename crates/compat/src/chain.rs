@@ -409,21 +409,37 @@ impl Chain {
     /// [`CompatError::Fixture`] when the actor retries, resnapshots into a stop or does not
     /// settle: a healthy run on a local disk does none of these.
     pub fn settle(&mut self) -> Result<(), CompatError> {
+        self.settle_with(|_, _| Ok(()))
+    }
+
+    /// One actor tick at the virtual time now.
+    fn tick_once(&mut self) -> Tick {
+        let (mut wal, mut db, mut ck) = (self.live.clone(), self.live.clone(), self.live.clone());
+        let now = Timestamp::from_unix_millis(self.clock);
+        let clock = lsr_core::FakeClock::new(now);
+        let env = Env {
+            wal: &mut wal,
+            db: &mut db,
+            ck: &mut ck,
+            staging: &self.staging,
+            remote: &self.remote,
+            clock: &clock,
+            notice: &mut |_| {},
+        };
+        block_on(self.actor.tick(env, now))
+    }
+
+    /// `Chain::settle`, handing each event the actor reports (before it is recorded) to
+    /// `each`, which may act on the chain between ticks: commit, or move the clock.
+    ///
+    /// # Errors
+    /// As `Chain::settle`, and whatever `each` returns.
+    pub fn settle_with(
+        &mut self,
+        mut each: impl FnMut(&mut Self, &Event) -> Result<(), CompatError>,
+    ) -> Result<(), CompatError> {
         for _ in 0..MAX_TICKS {
-            let (mut wal, mut db, mut ck) =
-                (self.live.clone(), self.live.clone(), self.live.clone());
-            let now = Timestamp::from_unix_millis(self.clock);
-            let clock = lsr_core::FakeClock::new(now);
-            let env = Env {
-                wal: &mut wal,
-                db: &mut db,
-                ck: &mut ck,
-                staging: &self.staging,
-                remote: &self.remote,
-                clock: &clock,
-                notice: &mut |_| {},
-            };
-            match block_on(self.actor.tick(env, now)) {
+            match self.tick_once() {
                 Tick::Ran {
                     event: Event::Idle, ..
                 } => return Ok(()),
@@ -441,7 +457,10 @@ impl Chain {
                     event: Event::TakeoverWanted(record),
                     ..
                 } => self.actor.remember_takeover(record),
-                Tick::Ran { event, .. } => self.events.push(event),
+                Tick::Ran { event, .. } => {
+                    each(self, &event)?;
+                    self.events.push(event);
+                }
                 Tick::Stopped(cause) => {
                     return Err(CompatError::Fixture(format!(
                         "the actor stopped: {cause:?}"
@@ -453,6 +472,32 @@ impl Chain {
             }
         }
         Err(CompatError::Timeout("the actor to go idle".to_owned()))
+    }
+
+    /// A first start that meets writes: `commits` one-row commits land between the ticks that
+    /// stage and upload the first level-0 files, so those files run from transaction 1 past
+    /// one file when the first snapshot is planned. The clock moves `gap_ms` after each
+    /// upload, so a snapshot written from the database would carry a later time than the
+    /// newest level-0 file, and one merged from the files would carry that file's.
+    ///
+    /// # Errors
+    /// `CompatError` from SQLite, the actor or the copy.
+    pub fn first_start_while_writing(
+        &mut self,
+        commits: u32,
+        gap_ms: i64,
+    ) -> Result<(), CompatError> {
+        let mut left = commits;
+        self.settle_with(|chain, event| {
+            if matches!(event, Event::Synced { .. }) && left > 0 {
+                left = left.saturating_sub(1);
+                chain.fixture.commit(Shape::Insert { bytes: 64 })?;
+            } else if matches!(event, Event::Uploaded(_)) {
+                chain.clock = chain.clock.saturating_add(gap_ms);
+            }
+            Ok(())
+        })?;
+        self.archive_new()
     }
 
     /// The newest staged transaction.
@@ -612,20 +657,7 @@ impl Chain {
             .shutdown_deadline(Timestamp::from_unix_millis(self.clock));
         self.actor.begin_shutdown(deadline);
         for _ in 0..MAX_TICKS {
-            let (mut wal, mut db, mut ck) =
-                (self.live.clone(), self.live.clone(), self.live.clone());
-            let now = Timestamp::from_unix_millis(self.clock);
-            let clock = lsr_core::FakeClock::new(now);
-            let env = Env {
-                wal: &mut wal,
-                db: &mut db,
-                ck: &mut ck,
-                staging: &self.staging,
-                remote: &self.remote,
-                clock: &clock,
-                notice: &mut |_| {},
-            };
-            match block_on(self.actor.tick(env, now)) {
+            match self.tick_once() {
                 Tick::Drained { .. } => {
                     self.archive_new()?;
                     let Self {

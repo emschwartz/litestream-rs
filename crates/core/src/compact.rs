@@ -761,7 +761,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
     let created_at = header.fields().timestamp;
     // A compacted file may be written again over itself (a retried
     // compaction, Go's output for the same range), as Go's are.
-    let mut upload = Writer::begin(dest, &key, created_at, WriteMode::Replace)
+    let mut upload = Writer::begin(dest, &key, created_at, WriteMode::Replace, None)
         .await
         .map_err(CompactError::Dest)?;
     let written = write_output(&mut merge, encoder, &header, &mut upload).await;

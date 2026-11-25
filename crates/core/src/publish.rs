@@ -139,8 +139,9 @@ impl<U: Upload> Writer<U> {
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self, StoreError> {
-        let upload = store.begin_upload(key, created_at, mode).await?;
+        let upload = store.begin_sized_upload(key, created_at, mode, len).await?;
         Ok(Self {
             key: *key,
             upload,

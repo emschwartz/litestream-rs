@@ -1,0 +1,12 @@
+diff --git a/crates/replica/src/config.rs b/crates/replica/src/config.rs
+--- a/crates/replica/src/config.rs
++++ b/crates/replica/src/config.rs
+@@ -81,7 +81,7 @@
+     fn default() -> Self {
+         Self {
+             wal_bytes_per_step: SyncConfig::default().cap,
+-            files_per_upload: Some(Self::FILES_PER_UPLOAD),
++            files_per_upload: None,
+         }
+     }
+ }

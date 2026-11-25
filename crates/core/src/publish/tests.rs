@@ -20,7 +20,8 @@ fn write<S: ObjectStore>(
     mode: WriteMode,
 ) -> Result<Result<Published, Unpublished>, StoreError> {
     block_on(async {
-        let mut up = Writer::begin(store, &key(), Timestamp::from_unix_millis(1), mode).await?;
+        let mut up =
+            Writer::begin(store, &key(), Timestamp::from_unix_millis(1), mode, None).await?;
         up.write(&bytes[..2]).await?;
         up.write(&bytes[2..]).await?;
         Ok(up.commit(store).await)

@@ -932,6 +932,7 @@ name = "lsr-config"
 version = "0.0.0"
 dependencies = [
  "lsr-core",
+ "lsr-ltx",
  "lsr-replica",
  "lsr-store-fs",
  "lsr-store-s3",

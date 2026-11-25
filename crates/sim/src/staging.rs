@@ -258,20 +258,21 @@ impl ObjectStore for StagingRaw {
         }
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<StagingUpload, StoreError> {
         match self {
             Self::Mem(s) => s
-                .begin_upload(key, created_at, mode)
+                .begin_sized_upload(key, created_at, mode, len)
                 .await
                 .map(StagingUpload::Mem),
             Self::Fs(s) => s
                 .store
-                .begin_upload(key, created_at, mode)
+                .begin_sized_upload(key, created_at, mode, len)
                 .await
                 .map(StagingUpload::Fs),
         }

@@ -207,6 +207,12 @@ impl Witnessed {
         self.stamp
     }
 
+    /// The staged file's length in bytes, as it was when witnessed.
+    #[must_use]
+    pub(crate) const fn len(&self) -> u64 {
+        self.bytes.size
+    }
+
     /// The staged file it vouches for.
     #[must_use]
     pub const fn key(&self) -> FileKey {

@@ -544,16 +544,20 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
         Ok((bytes, created_at))
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
         if let Verdict::Fail(err) = self.verdict(Call::Begin) {
             return Err(err);
         }
-        let inner = self.inner.begin_upload(key, created_at, mode).await?;
+        let inner = self
+            .inner
+            .begin_sized_upload(key, created_at, mode, len)
+            .await?;
         Ok(FaultsUpload {
             inner,
             key: *key,
@@ -857,14 +861,18 @@ impl<S: ObjectStore> ObjectStore for YieldEachCall<S> {
         self.inner.read_with_created_at(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
         YieldNow(false).await;
-        let inner = self.inner.begin_upload(key, created_at, mode).await?;
+        let inner = self
+            .inner
+            .begin_sized_upload(key, created_at, mode, len)
+            .await?;
         Ok(YieldUpload { inner })
     }
 
@@ -1143,15 +1151,19 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
         self.inner.read_with_created_at(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
         self.log.with(|s| bump(&mut s.counts.begins));
 
-        let inner = self.inner.begin_upload(key, created_at, mode).await?;
+        let inner = self
+            .inner
+            .begin_sized_upload(key, created_at, mode, len)
+            .await?;
         Ok(TapUpload {
             inner,
             key: *key,
@@ -1563,13 +1575,17 @@ impl<S: ObjectStore> ObjectStore for Volatile<S> {
         self.inner.read_with_created_at(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
-        let inner = self.inner.begin_upload(key, created_at, mode).await?;
+        let inner = self
+            .inner
+            .begin_sized_upload(key, created_at, mode, len)
+            .await?;
         lock(&self.handle.state).resolved.insert(*key, created_at);
         Ok(StageUpload {
             inner,

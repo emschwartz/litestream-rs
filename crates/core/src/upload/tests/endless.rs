@@ -89,11 +89,12 @@ impl ObjectStore for Endless {
         async move { Err(StoreError::NotFound { key }) }
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         _key: &FileKey,
         _created_at: Timestamp,
         _mode: crate::store::WriteMode,
+        _len: Option<u64>,
     ) -> Result<MemUpload, StoreError> {
         Err(transient())
     }

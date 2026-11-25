@@ -1,8 +1,10 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+index 77105041e..5ec5c0501 100644
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -728,7 +728,7 @@
+@@ -849,7 +849,7 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
  ) -> Outcome {
-     let output = job.output_key();
+     let output = FileKey::new(level, inputs.range());
      match crate::store::exists(replica, &output).await {
 -        Ok(true) => return Outcome::Replan { key: output },
 +        Ok(true) => {}
