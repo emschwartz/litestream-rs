@@ -1,0 +1,6 @@
+# `files --created-at` beside a directory replica was read and changed nothing.
+name = "created-at-dropped-beside-a-directory"
+fix = "claude/cli-truth"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["files_takes_replica_and_json"]

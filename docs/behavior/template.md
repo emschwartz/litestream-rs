@@ -31,20 +31,7 @@ Rows that earn none of the three carry one of these instead:
 
 Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs/` and re-planted nightly.
 
-**Tally of the 176 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
-
-| Mark | Rows |
-|---|---|
-| D R | 56 |
-| D | 71 |
-| D S | 6 |
-| D S R | 5 |
-| S | 1 |
-| untested | 14 |
-| code only | 8 |
-| unknown | 9 |
-| known wrong | 4 |
-| accepted, undetected | 2 |
+<!-- tally -->
 
 **Changes in review.** None. Main is described as it is. Four pull requests were once listed here: #96 (`claude/listing-trust`) and #89 (`claude/rewound-snapshot`) were closed unmerged, and #86 and #97 merged. A row whose In review cell still names one of them has a stale tag and is read again when it is next touched.
 
@@ -518,7 +505,7 @@ Three other ways replication ends that are not a `StopCause`:
 | D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Accepted as a documented limit (`docs/decisions/D173.md`) | BOOT-19, G1 | None open. Issue #99 |
 | D4 | **Closed by #98.** A restore as of an instant could return a state committed up to one tick's read after the instant | G3 | Merged |
 | D5 | **Closed by scope.** A boot or relist listing that lags the bucket is trusted; a store that lags is unsupported (D173) | BOOT-18, MAINT-12 | `docs/decisions/D173.md` |
-| D6 | **Closed.** Level-0 writes are create-only, so a second writer or a reused id is refused, and UP-17 stops the refused writer (core `failover_with_the_old_host_alive_never_publishes_one_id_twice`, run in the gate). Open: a Go process's puts are unconditional (GO-9) | UP-14, GO-9, WORLD-5 | Merged |
+| D6 | **Closed.** Level-0 writes are create-only, so a second writer or a reused id is refused, and UP-17 stops the refused writer (core `failover_with_the_old_host_alive_never_publishes_one_id_twice`, run in the gate). Open: a Go process's puts are unconditional (GO-9) | UP-14, GO-9, WORLD-5 | Merged. GO-9: issue #346 |
 | D7 | A retried multipart Complete that already succeeded is reported as `store_refused` | UP-13 | #96 |
 | D9 | **Accepted limit** (`docs/decisions/D174.md`). Retry counts, waits and degraded states reset on restart, as Go's do. The one stop the engine makes by default, `OtherWriter`, holds across a restart because every boot refuses the other writer's files again (BOOT-13, BOOT-22), whether it saw them before or was down when they appeared | BOOT-21, BOOT-22; a halt across restarts goes unreported, reached by the simulator's overlapping holds (CHK-9), which count it and do not judge it | `claude/second-writer` for the stop; `docs/decisions/D174.md` for the rest, left out of v1 |
 | D10 | A commit is dated by when it was staged. After an outage, a restore as of an instant inside the outage leaves out commits made before that instant. The contract "what the replica held at t" is not stated anywhere a user reads | G3 | None. None |

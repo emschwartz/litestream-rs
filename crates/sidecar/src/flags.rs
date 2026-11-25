@@ -267,10 +267,12 @@ Arguments:
 \t    Replicate once and exit: sync and upload every database, then stop.
 
 \t-force-snapshot
-\t    Not in this build: refused. Requires -once.
+\t    Force a snapshot to be taken for all databases: each drain ends with one level-9
+\t    file of the whole database. Requires -once.
 
 \t-enforce-retention
-\t    Not in this build: refused. Requires -once.
+\t    Enforce retention policies for old snapshots: each drain ends with a retention
+\t    pass, which removes what the configured retention no longer keeps. Requires -once.
 
 \t-log-level LEVEL
 \t    Sets the log level. Overrides the config file and LOG_LEVEL.

@@ -19,9 +19,7 @@ use lsr_core::{
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 
-use crate::args::{
-    CONFIG_CHECK_SUMMARY, CONFIG_CHECK_USAGE, CommandName, DAEMON_SUMMARY, DAEMON_USAGE, help_flags,
-};
+use crate::args::{CommandName, help_flags};
 use crate::run::{CliError, Done, Exit, Finished, RestoreDone, Skip, Source};
 use lsr_core::ListedTime;
 use lsr_replica::local::IntegrityCheck;
@@ -110,11 +108,15 @@ pub fn help() -> String {
         "lsr: replicate SQLite databases to a Litestream replica, and restore, verify and list one\n",
     );
     for command in CommandName::ALL {
-        let mut usage = format!("\nlsr {}", command.word());
+        let flags = help_flags(command);
+        let mut usage = match command.usage_line() {
+            Some(line) => format!("\n{line}"),
+            None => format!("\nlsr {}", command.word()),
+        };
         if let Some(positional) = command.positional() {
             put!(usage, " {positional}");
         }
-        for spec in help_flags(command) {
+        for spec in &flags {
             let value = spec
                 .value
                 .as_ref()
@@ -131,12 +133,16 @@ pub fn help() -> String {
             );
         }
         putln!(out, "{usage}\n  {}", command.summary());
-        for spec in help_flags(command) {
-            putln!(out, "  {:<20}{}", spec.name, spec.help);
+        // One column wide enough for the longest flag, so a long name never runs into its text.
+        let width = flags
+            .iter()
+            .map(|spec| spec.name.len().saturating_add(2))
+            .max()
+            .unwrap_or(0);
+        for spec in &flags {
+            putln!(out, "  {:<width$}{}", spec.name, spec.help);
         }
     }
-    putln!(out, "\n{DAEMON_USAGE}\n  {DAEMON_SUMMARY}");
-    putln!(out, "\n{CONFIG_CHECK_USAGE}\n  {CONFIG_CHECK_SUMMARY}");
     out.push_str(
         "\nlsr --help, lsr -h: this text; lsr --version, lsr -V: the version\n\nexit codes:\n",
     );
