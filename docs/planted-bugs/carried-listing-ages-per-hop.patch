@@ -1,5 +1,5 @@
---- a/crates/core/src/maintain/short.rs	2026-11-24 18:57:04
-+++ b/crates/core/src/maintain/short.rs	2026-11-24 18:57:04
+--- a/crates/core/src/maintain/short.rs	2026-11-24 19:00:44
++++ b/crates/core/src/maintain/short.rs	2026-11-24 19:00:44
 @@ -303,7 +303,7 @@
              listed: tail.listed.clone(),
              covers: tail.covers.clone(),

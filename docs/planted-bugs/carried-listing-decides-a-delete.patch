@@ -1,6 +1,6 @@
---- a/crates/core/src/maintain/short.rs	2026-11-24 18:57:05
-+++ b/crates/core/src/maintain/short.rs	2026-11-24 18:57:05
-@@ -586,7 +586,6 @@
+--- a/crates/core/src/maintain/short.rs	2026-11-24 19:00:45
++++ b/crates/core/src/maintain/short.rs	2026-11-24 19:00:45
+@@ -584,7 +584,6 @@
          // its age past [`CARRY_MAX_AGE_MILLIS`].
          let carried = remembered.carry.as_ref().filter(|carry| {
              !remembered.fresh.is_empty()

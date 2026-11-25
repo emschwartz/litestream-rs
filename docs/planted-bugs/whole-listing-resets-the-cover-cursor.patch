@@ -1,5 +1,5 @@
---- a/crates/core/src/maintain/short.rs	2026-11-24 18:57:07
-+++ b/crates/core/src/maintain/short.rs	2026-11-24 18:57:07
+--- a/crates/core/src/maintain/short.rs	2026-11-24 19:00:45
++++ b/crates/core/src/maintain/short.rs	2026-11-24 19:00:45
 @@ -227,7 +227,7 @@
          // further cursor a short pass reached while that file is still the first.
          self.cover = match (self.cover, cover) {
