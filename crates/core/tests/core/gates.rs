@@ -7,19 +7,15 @@
 //! virtual clock sits under the retry layer, and the restore's waves are held to
 //! `ceil(chunks / width)`. A serial restore is one wave per chunk (11 here).
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
-use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    BatchKind, CreatedAt, FileInfo, FileKey, Level, Listing, MemSink, MemStore, ObjectStore,
-    PageLimit, ReadAt, ReadLen, RecordingSleeper, RestoreTarget, RetryPolicy, Retrying,
-    SeededEntropy, StoreError, Upload, restore,
+    MemSink, RecordingSleeper, RestoreTarget, RetryPolicy, Retrying, SeededEntropy, restore,
 };
-use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
 
+<<<<<<< HEAD
 /// A store that models a link on a virtual clock: a lone read is one round trip, and a
 /// batch of `n` reads at the store's width is `ceil(n / width)` waves. It answers from
 /// memory, so the run is deterministic and nothing sleeps.
@@ -161,6 +157,9 @@ fn snapshot_store() -> (MemStore, usize) {
     });
     (store, bytes.len())
 }
+=======
+use crate::waves::{RESTORE_CHUNK, WIDTH, Waves, snapshot_store};
+>>>>>>> origin/main
 
 #[test]
 fn restore_through_the_retry_layer_reads_side_by_side() {

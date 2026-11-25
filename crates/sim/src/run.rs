@@ -624,6 +624,7 @@ impl Runner {
         self.w.high.note(now);
         self.marks.ticked();
         let actor = &mut self.actor;
+        let checking = std::cell::Cell::new(false);
         let fut = async {
             let env = Env {
                 wal: &mut wal,
@@ -632,10 +633,16 @@ impl Runner {
                 staging: &staging,
                 remote: &remote,
                 clock: clock.as_ref(),
+                notice: &mut |event| {
+                    if let Event::CheckingIdentity { .. } = event {
+                        checking.set(true);
+                    }
+                },
             };
             actor.tick(env, now).await
         };
         let ended = self.w.run_tick(fut, plan);
+        self.gate_saw_identity_check(checking.get());
         self.w.sim_clock.settle();
         self.app_in_tick_seen();
         ended
@@ -805,6 +812,9 @@ impl Runner {
         let lists = self.w.remote_recorder.counts().lists;
         if lists.saturating_sub(lists_before) >= levels {
             self.failed_boots = self.failed_boots.saturating_add(1);
+            // A boot that listed the replica and did not boot: a fault, a stop, or a tick that
+            // decided nothing, each of which lists the replica again at the next boot.
+            self.report.reach.bump("boot.listed_unbooted");
         }
     }
 
@@ -843,13 +853,6 @@ impl Runner {
         let in_tick = self.took_commit_in_tick();
         if !crashed {
             self.judge_gate_kept(held, in_tick.is_some())?;
-            if let TickEnd::Done(Tick::Ran {
-                event: Event::WritesHeld { .. },
-                ..
-            }) = &ended
-            {
-                self.note_wait();
-            }
             self.keep_writes();
         }
         self.note_snapshots(newest_commit, in_tick, at);
@@ -972,12 +975,12 @@ impl Runner {
         // With staging intact, everything this engine put on the replica is at
         // or below what staging holds, under the bytes staging holds: a
         // refusal then has no cause. A staged copy that differs from the
-        // replica's object under the same key was damaged or put back (an
-        // operation), and the boot refuses that divergence by design.
+        // replica's object under the same key was damaged or put back, or its file at the
+        // refused tip is gone (an operation), and the boot refuses that by design.
         let key = lsr_core::FileKey::new(lsr_core::Level::ZERO, lsr_ltx::TxidRange::single(tip));
         let read =
             |err: lsr_core::StoreError| bug_fault(format!("reading the stores failed: {err}"));
-        let diverged = self.w.staged_differs_from_remote(key).map_err(read)?;
+        let diverged = self.w.staging_departs_from_remote(key).map_err(read)?;
         if !self.staging_disturbed && !diverged {
             return Err(bug_fault(format!(
                 "a boot refused replica files through {tip} with staging intact and no other writer"
@@ -1091,7 +1094,8 @@ impl Runner {
             | Event::WritesHeld { .. }
             | Event::Resnapshot(_)
             | Event::Clamped(_)
-            | Event::TakeoverWanted(_) => Ok(Step::Ran),
+            | Event::TakeoverWanted(_)
+            | Event::CheckingIdentity { .. } => Ok(Step::Ran),
         }
     }
 
@@ -1127,7 +1131,8 @@ impl Runner {
             | Event::Idle
             | Event::WritesHeld { .. }
             | Event::Clamped(_)
-            | Event::TakeoverWanted(_) => return Ok(()),
+            | Event::TakeoverWanted(_)
+            | Event::CheckingIdentity { .. } => return Ok(()),
         };
         self.forcings
             .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
@@ -1172,7 +1177,8 @@ impl Runner {
             | Event::Idle
             | Event::WritesHeld { .. }
             | Event::Clamped(_)
-            | Event::TakeoverWanted(_) => {}
+            | Event::TakeoverWanted(_)
+            | Event::CheckingIdentity { .. } => {}
         }
     }
 
@@ -2722,7 +2728,8 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Idle
         | Event::Resnapshot(_)
         | Event::Clamped(_)
-        | Event::TakeoverWanted(_) => return Ok(()),
+        | Event::TakeoverWanted(_)
+        | Event::CheckingIdentity { .. } => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
     let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);

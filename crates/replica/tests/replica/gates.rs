@@ -6,19 +6,12 @@
 //! it. A store that models a link on a virtual clock is restored from, and the waves
 //! are held to `ceil(chunks / width)`. A serial restore is one wave per chunk (11 here).
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
-use lsr_core::WriteMode;
-use lsr_core::conformance::block_on;
-use lsr_core::{
-    BatchKind, CreatedAt, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit,
-    ReadAt, ReadLen, StoreError, Upload,
-};
-use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
 use lsr_replica::{RestoreTarget, restore};
 
+<<<<<<< HEAD
 /// A store that models a link on a virtual clock: a lone read is one round trip, and a
 /// batch of `n` reads at the store's width is `ceil(n / width)` waves. It answers from
 /// memory, so the run is deterministic and nothing sleeps.
@@ -160,6 +153,9 @@ fn snapshot_store() -> (MemStore, usize) {
     });
     (store, bytes.len())
 }
+=======
+use crate::waves::{RESTORE_CHUNK, WIDTH, Waves, snapshot_store};
+>>>>>>> origin/main
 
 #[test]
 fn restore_through_the_public_entry_reads_side_by_side() {

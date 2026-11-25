@@ -355,10 +355,12 @@ impl Seeded {
     /// file quiet after a staged one (a snapshot taken for a doubt on a quiet WAL, or after the
     /// database was found equal to the replica). Without it a restart loses that knowledge
     /// and dates the file from its stamp as a commit. A span that ends elsewhere, or a header
-    /// with none, leaves the file counted: it may hold a commit.
+    /// with none, or a newest file the replica does not hold, leaves the file counted: it may
+    /// hold a commit.
     ///
     /// # Errors
-    /// The replica's fault when the newest file's header cannot be read.
+    /// The replica's fault when the newest file's header cannot be read, other than that it is
+    /// missing.
     pub(crate) async fn place<R: Role>(
         &mut self,
         remote: &R,
@@ -368,7 +370,16 @@ impl Seeded {
             return Ok(());
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(tip));
-        let header = read_header(remote, &key, R::fault).await?;
+        let header = match read_header(remote, &key, R::fault).await {
+            Ok(header) => header,
+            // The tip the engine believes the replica holds is not there (an upload whose
+            // answer was lost, a bucket rolled back): the boot lists the replica and decides
+            // from that, and the file stays counted, as with any span that ends elsewhere.
+            // Failing the boot instead would retry the same read for as long as the belief
+            // lasts.
+            Err(Fault::RemoteObjectMissing) => return Ok(()),
+            Err(fault) => return Err(fault),
+        };
         if header.as_ref().and_then(wal_end) == Some(end) {
             self.quiet.insert(txid);
         }

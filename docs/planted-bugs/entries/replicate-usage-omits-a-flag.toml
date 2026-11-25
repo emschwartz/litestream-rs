@@ -1,0 +1,5 @@
+# `lsr replicate -h` described `-force-snapshot` and `-enforce-retention` as refused when both work.
+name = "replicate-usage-omits-a-flag"
+fix = "claude/cli-truth"
+package = "lsr-sidecar"
+tests = ["the_usage_text_lists_exactly_the_flags_the_parser_defines"]

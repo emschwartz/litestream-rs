@@ -429,13 +429,6 @@ impl S3Config {
         self
     }
 
-    /// Replaces the per-request deadline.
-    #[must_use]
-    pub fn with_deadline(mut self, deadline: Duration) -> Self {
-        self.deadline = deadline;
-        self
-    }
-
     /// The endpoint.
     #[must_use]
     pub fn endpoint(&self) -> &Endpoint {

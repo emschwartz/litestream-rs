@@ -31,20 +31,7 @@ Rows that earn none of the three carry one of these instead:
 
 Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs/` and re-planted nightly.
 
-**Tally of the 176 rows in section 3** (counted by script from the tables; a row with a tested half and an untested half is counted by its tested half).
-
-| Mark | Rows |
-|---|---|
-| D R | 56 |
-| D | 71 |
-| D S | 6 |
-| D S R | 5 |
-| S | 1 |
-| untested | 14 |
-| code only | 8 |
-| unknown | 9 |
-| known wrong | 4 |
-| accepted, undetected | 2 |
+The count of rows by mark is not kept here, since a count in a committed file goes stale when two branches each add a row: `just behavior-tally` prints it from `docs/behavior.toml`.
 
 **Changes in review.** None. Main is described as it is. Four pull requests were once listed here: #96 (`claude/listing-trust`) and #89 (`claude/rewound-snapshot`) were closed unmerged, and #86 and #97 merged. A row whose In review cell still names one of them has a stale tag and is read again when it is next touched.
 
@@ -280,7 +267,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 | Credentials revoked, a policy refusing, a missing bucket, a failed TLS check | In | UP-4 | sim `creds_revoked_mid_run`, `permission_revoked_mid_run`, `bucket_deleted_mid_run`, `tls_fails_mid_run` |
 | Objects deleted by someone else (an operator, a lifecycle rule) | In for the newest files, partly for the middle | UP-11, UP-12, MAINT-11 | sim `remote_file_deleted_externally`, `bucket_rolled_back` |
 | Bucket rolled back to an earlier version | Seen while running when a listing ends below what the engine confirmed. Not seen across a restart, as Go | UP-11, BOOT-19 | sim `bucket_rolled_back`, `bucket_rolled_back_while_idle` |
-| A second writer on the same prefix | In, detected late while running; at boot when it wrote while this engine was down | UP-10, UP-14, BOOT-22 | sim `second_writer_mid_run`, `maintenance_stops_on_another_writer_seed_0x50c`, `foreign_file_while_down_stops` |
+| A second writer on the same prefix | In, detected late while running; at boot when it wrote while this engine was down | UP-10, UP-14, BOOT-22 | sim `second_writer_mid_run`, `maintenance_stops_on_another_writer`, `foreign_file_while_down_stops` |
 | Listings that lag the bucket | Not modelled: a store whose listings lag is unsupported (D173) | Not handled (BOOT-18, MAINT-12) | `consistency_probe` on MinIO: 0 stale results in 1000 rounds. On Tigris, AWS S3 and R2 (2026-11-24, from one region): 0 stale listings or reads in 1000 writes each, and 0 after a 2500-key delete (`provider::a_second_connection_lists_and_reads_each_of_1000_writes_at_once`); Tigris cross-region and long runs not measured |
 | Multipart quirks: 200 with an error body, a retried Complete answered `NoSuchUpload`, ETags not in MD5 form | Partly | UP-13 | store-s3 fault transport. Fixed on #96 |
 | Versioned buckets | **Gap.** Standard for backup buckets | A delete leaves a noncurrent version and a delete marker; the engine sees the key as gone, which is what it expects. A version restore by an operator is a rollback (BOOT-19, UP-11). Storage is not reclaimed by retention. All by reasoning | None. **unknown** (WORLD-24) |
@@ -518,7 +505,7 @@ Three other ways replication ends that are not a `StopCause`:
 | D3 | A bucket rolled back while the engine is down is taken as the bucket; freed transaction ids are reused. Accepted as a documented limit (`docs/decisions/D173.md`) | BOOT-19, G1 | None open. Issue #99 |
 | D4 | **Closed by #98.** A restore as of an instant could return a state committed up to one tick's read after the instant | G3 | Merged |
 | D5 | **Closed by scope.** A boot or relist listing that lags the bucket is trusted; a store that lags is unsupported (D173) | BOOT-18, MAINT-12 | `docs/decisions/D173.md` |
-| D6 | **Closed.** Level-0 writes are create-only, so a second writer or a reused id is refused, and UP-17 stops the refused writer (core `failover_with_the_old_host_alive_never_publishes_one_id_twice`, run in the gate). Open: a Go process's puts are unconditional (GO-9) | UP-14, GO-9, WORLD-5 | Merged |
+| D6 | **Closed.** Level-0 writes are create-only, so a second writer or a reused id is refused, and UP-17 stops the refused writer (core `failover_with_the_old_host_alive_never_publishes_one_id_twice`, run in the gate). Open: a Go process's puts are unconditional (GO-9) | UP-14, GO-9, WORLD-5 | Merged. GO-9: issue #346 |
 | D7 | A retried multipart Complete that already succeeded is reported as `store_refused` | UP-13 | #96 |
 | D9 | **Accepted limit** (`docs/decisions/D174.md`). Retry counts, waits and degraded states reset on restart, as Go's do. The one stop the engine makes by default, `OtherWriter`, holds across a restart because every boot refuses the other writer's files again (BOOT-13, BOOT-22), whether it saw them before or was down when they appeared | BOOT-21, BOOT-22; a halt across restarts goes unreported, reached by the simulator's overlapping holds (CHK-9), which count it and do not judge it | `claude/second-writer` for the stop; `docs/decisions/D174.md` for the rest, left out of v1 |
 | D10 | A commit is dated by when it was staged. After an outage, a restore as of an instant inside the outage leaves out commits made before that instant. The contract "what the replica held at t" is not stated anywhere a user reads | G3 | None. None |
@@ -645,7 +632,7 @@ The index tables for `Fault`, `PersistentCause`, `SnapshotCause` and `StopCause`
 7. **Known wrong is an expected failure.** A known-wrong row names a test that fails on main, or carries "(no failing test)", which the gate counts and prints. Today one row has such a test (RUN-3's restart half) and six rows or half-rows do not.
 8. **Every citation can fail (nightly).** Each cited test is linked to a planted bug that it kills. The plant must change the function the row's detection names, or the response path; a patch elsewhere that happens to fail the test does not count.
 9. **The cited test reaches the detecting branch (nightly).** Region coverage of the branch, not the function: every test reaches `policy` and `Actor::tick`.
-10. **Sections 1 and 6 are generated.** The table at the top of section 1 and the tally below come from the data, so a sentence like "three of four have an open violation" cannot go stale by itself.
+10. **Sections 1 and 6 are generated.** The table at the top of section 1 comes from the data, so a sentence like "three of four have an open violation" cannot go stale by itself. No count over rows is committed: `just behavior-tally` prints one.
 11. **A generic harness**, where a row has a simulator injector: run the injector, and assert the observed response, signal and restore outcome equal the row's.
 
 ### 7.4 What this still does not do

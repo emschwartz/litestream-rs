@@ -2,6 +2,9 @@
 //! [`super::Opts::write_gate`] set, the runner holds the application's writes as
 //! `lsr-replica`'s thread does, by the same rule (`lsr_core::blocks_writes` over the
 //! `AppGate`), through the model's held-write-lock door, at every start and after every tick.
+//! The boot is judged once it has listed the replica and decided how to start, before its
+//! snapshot is staged (`docs/decisions/D201.md`), so nothing the engine writes meets a hold
+//! for the boot.
 //!
 //! The judge here keeps its own record of what it held and checks two things the model must
 //! never let happen: a hold it took went away without a crash or a release of its own (checked
@@ -21,9 +24,6 @@ pub(super) struct WriteGate {
     app_gate: AppGate,
     /// The runner took the write lock and has not let it go.
     held: bool,
-    /// The pending boot waited on held writes: writes go through until it is judged, as the
-    /// replicator's thread lets them.
-    boot_write: bool,
 }
 
 impl WriteGate {
@@ -43,14 +43,6 @@ impl Runner {
         self.keep_writes();
     }
 
-    /// After a tick in which the engine waited on held writes, for the next
-    /// [`Self::keep_writes`].
-    pub(super) fn note_wait(&mut self) {
-        if self.write_gate.held {
-            self.write_gate.boot_write = true;
-        }
-    }
-
     /// Holds or releases the application's writes as the engine's state now asks.
     pub(super) fn keep_writes(&mut self) {
         let Some(mode) = self.write_gate.mode else {
@@ -60,10 +52,6 @@ impl Runner {
         let judged = self.actor.boot_judged() || trip.is_some();
         let gate = self.write_gate.app_gate.judge(mode, trip, judged);
         let why = blocks_writes(mode, gate);
-        if why != Some(WhyBlocked::Booting) {
-            self.write_gate.boot_write = false;
-        }
-        let why = why.filter(|why| !(self.write_gate.boot_write && *why == WhyBlocked::Booting));
         self.write_gate.held = match why {
             Some(why) => {
                 self.report.reach.bump(format!("writes.blocked.{why:?}"));
@@ -72,10 +60,23 @@ impl Runner {
                 self.w.sqlite.hold_writes()
             }
             None => {
+                if self.write_gate.held && self.actor.pending_snapshot().is_some() {
+                    self.report.reach.bump("writes.allowed.snapshot_owed");
+                }
                 self.w.sqlite.release_writes();
                 false
             }
         };
+    }
+
+    /// The tick told of the identity check as it started (`checking`): writes held for the boot
+    /// were held for the check, as the replicator's thread names it while the tick runs.
+    pub(super) fn gate_saw_identity_check(&mut self, checking: bool) {
+        if checking && self.write_gate.held {
+            self.report
+                .reach
+                .bump(format!("writes.blocked.{:?}", WhyBlocked::CheckingIdentity));
+        }
     }
 
     /// Whether the runner holds the application's writes now, by its own record.

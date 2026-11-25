@@ -8,8 +8,12 @@
 //! - Writes are held until the first boot is judged and while fail-stop holds
 //!   ([`Config::if_replication_stops`]): the replicator keeps the database's write lock, so every
 //!   writer, in this process or another, gets SQLite's "database is locked"
-//!   (`docs/decisions/D192.md`). [`Replicator::ready`] (a future that needs no runtime) and
-//!   [`Replicator::wait_booted`] say when writes go through; [`Health::writes`] and the
+//!   (`docs/decisions/D192.md`). The boot is judged once it has listed the replica and decided
+//!   how to start; a first snapshot it asks for is taken after, while the application writes
+//!   (`docs/decisions/D201.md`). A start with an empty meta directory first compares the
+//!   database with the replica's newest state, which takes as long as a restore, and holds
+//!   writes through it ([`WhyBlocked::CheckingIdentity`]). [`Replicator::ready`] (a future
+//!   that needs no runtime) and [`Replicator::wait_booted`] say when writes go through; [`Health::writes`] and the
 //!   `WritesBlocked` and `WritesAllowed` events say whether they are held, and why.
 //! - Each connection the application opens may go through `Replicator::app_connection`
 //!   (feature `rusqlite`, any rusqlite from 0.39 to 0.43) or [`app_connection_raw`] (any
@@ -59,7 +63,7 @@
 //!   (`crates/store-s3/tests/store-s3/memory.rs`, `an_upload_through_the_real_client_holds_five_parts`
 //!   and `the_bound_follows_part_size_and_concurrency`). A part is the one unit a request
 //!   must hold whole (its `Content-MD5` is signed before the body goes out), so this term
-//!   grows with the part size the operator sets; see `docs/decisions/D203.md`.
+//!   grows with the part size the operator sets; see `docs/decisions/D206.md`.
 //! - **Compaction:** the inputs' windows plus a 256 KiB output buffer that is kept for the
 //!   file. A level-1 compaction reads each staged file in a 128 KiB window: 5 MiB at `F` = 32
 //!   (`crates/store-fs/tests/store-fs/memory.rs`, `a_level_one_compaction_holds_a_staging_window_per_input`).

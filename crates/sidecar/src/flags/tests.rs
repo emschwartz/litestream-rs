@@ -202,3 +202,53 @@ fn help_succeeds_only_when_asked_for_literally() {
         assert_eq!(refused(&[other]), UsageError::HelpNotLiteral, "{other}");
     }
 }
+/// The usage text lists exactly the flags `replicate` defines, with the same arity: a flag
+/// the parser takes that the help does not name, or the reverse, cannot ship.
+#[test]
+fn the_usage_text_lists_exactly_the_flags_the_parser_defines() {
+    let arguments = USAGE
+        .split("Arguments:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\nSIGINT").next())
+        .unwrap_or_default();
+    let mut have: Vec<(&str, bool)> = arguments
+        .lines()
+        .filter_map(|line| line.strip_prefix("\t-"))
+        .map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next().unwrap_or_default(), words.next().is_some())
+        })
+        .collect();
+    let mut want: Vec<(&str, bool)> = DEFINED.iter().map(|def| (def.name, def.value)).collect();
+    have.sort_unstable();
+    want.sort_unstable();
+    assert_eq!(have, want);
+    // The two flags the help once called refused work, and the text says what they do.
+    assert!(!USAGE.contains("Not in this build"));
+}
+
+/// Every flag `replicate` defines changes what the command line means, or is refused.
+#[test]
+fn every_flag_changes_the_flags_or_is_refused() {
+    let base = ["test.db", "s3://bucket/test.db"];
+    let plain = parse(&args(&base));
+    for def in DEFINED {
+        let sample = match def.name {
+            "config" => "c.yml",
+            "exec" => "echo",
+            "log-level" => "debug",
+            _ => "",
+        };
+        let mut line = vec![format!("-{}", def.name)];
+        if def.value {
+            line.push(sample.to_owned());
+        }
+        line.extend(base.iter().map(|word| (*word).to_owned()));
+        let with = parse(&line);
+        assert!(
+            with.is_err() || with != plain,
+            "-{} is read and dropped",
+            def.name
+        );
+    }
+}
