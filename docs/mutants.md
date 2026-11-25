@@ -258,7 +258,7 @@ the files now excluded. All 21 timeouts are explained. No survivor in `core` is 
 | Where | Mutation | Why |
 | --- | --- | --- |
 | `verify/dry_run.rs:37:9` | `DigestSink::reset` becomes `Ok(())` | Restore resets the sink only to apply a whole chain again from transaction 1, and that chain writes every page any earlier attempt wrote (at its newest version) or truncates it away, so nothing a reset would have cleared reaches the checksum. |
-| `verify/dry_run.rs:118:9` | the dry run's `Counting::delete` becomes `Ok(())` | `restore_from` never deletes: restore, the planner, the inventory and the created-at time ledger only list and read. |
+| `verify/dry_run.rs:118:9` | the dry run's `Counting::delete` becomes `Ok(())` | `restore_within` never deletes: restore, the planner, the inventory and the created-at time ledger only list and read. |
 | `maintain/retain.rs:273:82` | `hole`: `max() > snapshot` becomes `>=` | A file that ends at the newest snapshot's end starts at or below it, so it never starts past `reach + 1`, and `reach.max(..)` leaves `reach`, which is already at least the snapshot's end, unchanged. |
 | `maintain/retain.rs:287:12` | `hole`: `reach < newest` becomes `>` | `reach` only takes file ends, so it never passes `newest` and `>` is never true; and `<` is true only when the newest file is a level-9 file that does not start at 1, which `gate` holds as a malformed snapshot before it calls `hole`. |
 | `maintain/retain.rs:537:37` | `self_check`: guard `Some(chain.reaches()) == inventory.newest()` becomes `true` | No rule deletes the last file of a level, so the newest file survives every job, and a `Latest` plan of the rest is either no plan or one that reaches the rest's newest, which is the listing's. |

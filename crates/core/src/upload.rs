@@ -290,25 +290,8 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     newest_staged: Option<Txid>,
     witnesses: &Witnesses,
 ) -> Result<Uploaded, UploadFailed> {
-    upload_next_in(
-        state,
-        &Staging(staging),
-        &Replica(remote),
-        newest_staged,
-        (witnesses, Guard::BucketRefuses),
-    )
-    .await
-}
-
-/// [`upload_next`] with each store as its role, and level-0 writes as `guard` says: the
-/// steps of [`upload_step`], a slice each, until one ends.
-pub(crate) async fn upload_next_in<L: Role, S: Role>(
-    state: UploadState,
-    staging: &L,
-    remote: &S,
-    newest_staged: Option<Txid>,
-    with: (&Witnesses, Guard),
-) -> Result<Uploaded, UploadFailed> {
+    let (staging, remote) = (&Staging(staging), &Replica(remote));
+    let with = (witnesses, Guard::BucketRefuses);
     let mut in_flight = InFlight::default();
     loop {
         let mut budget = SLICE.get();

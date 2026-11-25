@@ -165,12 +165,6 @@ impl Actor {
             return self.drained();
         }
         self.kept.final_snapshot = FinalSnapshot::Asked { tries };
-        self.ran(
-            Event::Maintained {
-                event: MaintainedEvent::Waiting { held: None },
-                created_at_read: 0,
-            },
-            now,
-        )
+        self.ran_maintained(MaintainedEvent::Waiting { held: None }, 0, now)
     }
 }
