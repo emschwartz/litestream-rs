@@ -1,0 +1,7 @@
+# A compaction output the store refuses (no create-only writes) switches level-0 uploads to
+# replacing writes without the upload task saying so: the first replace goes out while health
+# says uploads are healthy, which the simulator's judge of D79 fails.
+name = "refused-compaction-keeps-uploads-healthy"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = ["actor::tests::create_only::a_refused_compaction_output_is_written_again_by_replacing"]
