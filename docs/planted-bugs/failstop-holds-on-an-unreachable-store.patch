@@ -9,4 +9,4 @@ diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
 +        self.kept.listed || false
      }
  
-     /// Whether the pending boot is comparing the database with the replica's newest state
+     /// Whether an engine of this process has listed the replica.

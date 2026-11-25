@@ -80,13 +80,10 @@ impl Situation {
                 commit(2),
                 Op::OtherProcessReader { begin: false },
             ],
-            // The boot over a meta directory left with nothing staged first says it compares the
-            // database with the replica, in a tick of its own; the armed tick is the check's.
             Self::TornWalBoot => vec![
                 Op::Shutdown,
                 Op::StagingDamage(MetaOp::DeleteNewest),
                 Op::Wal(WalOp::TearHeader),
-                Op::Tick,
             ],
         }
     }

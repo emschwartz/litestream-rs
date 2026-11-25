@@ -505,6 +505,30 @@ impl Worker {
             Arc::clone(&self.shared.readers),
             self.shared.writes_held.clone(),
         );
+        let (sink, sink_panics) = (&mut self.sink, &mut self.seen.counters.sink_panics);
+        let (shared, held) = (&self.shared, self.gate.is_held());
+        let booting = matches!(self.blocked, Some(WhyBlocked::Booting));
+        let (why, reported) = (&mut self.why, &mut self.reported);
+        // The identity check restores the replica's state and reads every local page, as long
+        // as a restore takes, inside this tick: health and the log name it as it starts.
+        let mut notice = |event: &EngineEvent| {
+            emit_to(sink, sink_panics, &Event::Engine(event.clone()));
+            if !(booting && matches!(event, EngineEvent::CheckingIdentity { .. })) {
+                return;
+            }
+            let checking = WhyBlocked::CheckingIdentity;
+            let writes = if held {
+                Writes::Blocked(checking)
+            } else {
+                Writes::Blocking(checking)
+            };
+            shared.update(|state| state.health.writes = writes);
+            if held {
+                *why = checking;
+                *reported = writes;
+                emit_to(sink, sink_panics, &Event::WritesBlocked { why: checking });
+            }
+        };
         let env = Env {
             wal: &mut wal,
             db: &mut db,
@@ -512,6 +536,7 @@ impl Worker {
             staging: &self.staging,
             remote: &self.remote,
             clock: self.runtime.clock.as_ref(),
+            notice: &mut notice,
         };
         Ok(block_on(self.actor.tick(env, now)))
     }
@@ -658,12 +683,7 @@ impl Worker {
 
     /// Hands `event` to the sink; a panic in it is counted, never fatal.
     fn emit(&mut self, event: &Event) {
-        let Some(sink) = self.sink.as_mut() else {
-            return;
-        };
-        if catch_unwind(AssertUnwindSafe(|| sink.event(event))).is_err() {
-            self.seen.counters.sink_panics = self.seen.counters.sink_panics.saturating_add(1);
-        }
+        emit_to(&mut self.sink, &mut self.seen.counters.sink_panics, event);
     }
 
     /// A caught panic: drop the engine and the connections it may have unwound through, then
@@ -835,12 +855,7 @@ impl Worker {
         let gate = self
             .app_gate
             .judge(self.config.if_replication_stops, trip, judged);
-        self.blocked = blocks_writes(self.config.if_replication_stops, gate).map(|why| match why {
-            WhyBlocked::Booting if self.actor.checking_identity() => WhyBlocked::CheckingIdentity,
-            why @ (WhyBlocked::Booting | WhyBlocked::CheckingIdentity | WhyBlocked::Tripped(_)) => {
-                why
-            }
-        });
+        self.blocked = blocks_writes(self.config.if_replication_stops, gate);
         FailStop { trip, gate }
     }
 
@@ -1006,6 +1021,16 @@ struct SnapshotParts {
     wal_bytes: u64,
     db_bytes: u64,
     left: Unfinished,
+}
+
+/// Hands `event` to `sink`, if there is one; a panic in it is counted in `panics`, never fatal.
+fn emit_to(sink: &mut Option<Box<dyn EventSink>>, panics: &mut u64, event: &Event) {
+    let Some(sink) = sink.as_mut() else {
+        return;
+    };
+    if catch_unwind(AssertUnwindSafe(|| sink.event(event))).is_err() {
+        *panics = panics.saturating_add(1);
+    }
 }
 
 const fn deadline_reached(left: Unfinished) -> Stopped {

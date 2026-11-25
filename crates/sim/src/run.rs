@@ -624,6 +624,7 @@ impl Runner {
         self.w.high.note(now);
         self.marks.ticked();
         let actor = &mut self.actor;
+        let checking = std::cell::Cell::new(false);
         let fut = async {
             let env = Env {
                 wal: &mut wal,
@@ -632,10 +633,16 @@ impl Runner {
                 staging: &staging,
                 remote: &remote,
                 clock: clock.as_ref(),
+                notice: &mut |event| {
+                    if let Event::CheckingIdentity { .. } = event {
+                        checking.set(true);
+                    }
+                },
             };
             actor.tick(env, now).await
         };
         let ended = self.w.run_tick(fut, plan);
+        self.gate_saw_identity_check(checking.get());
         self.w.sim_clock.settle();
         self.app_in_tick_seen();
         ended
@@ -805,6 +812,9 @@ impl Runner {
         let lists = self.w.remote_recorder.counts().lists;
         if lists.saturating_sub(lists_before) >= levels {
             self.failed_boots = self.failed_boots.saturating_add(1);
+            // A boot that listed the replica and did not boot: a fault, a stop, or a tick that
+            // decided nothing, each of which lists the replica again at the next boot.
+            self.report.reach.bump("boot.listed_unbooted");
         }
     }
 

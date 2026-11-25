@@ -51,12 +51,7 @@ impl Runner {
         let trip = self.actor.trip();
         let judged = self.actor.boot_judged() || trip.is_some();
         let gate = self.write_gate.app_gate.judge(mode, trip, judged);
-        let why = blocks_writes(mode, gate).map(|why| match why {
-            WhyBlocked::Booting if self.actor.checking_identity() => WhyBlocked::CheckingIdentity,
-            why @ (WhyBlocked::Booting | WhyBlocked::CheckingIdentity | WhyBlocked::Tripped(_)) => {
-                why
-            }
-        });
+        let why = blocks_writes(mode, gate);
         self.write_gate.held = match why {
             Some(why) => {
                 self.report.reach.bump(format!("writes.blocked.{why:?}"));
@@ -72,6 +67,16 @@ impl Runner {
                 false
             }
         };
+    }
+
+    /// The tick told of the identity check as it started (`checking`): writes held for the boot
+    /// were held for the check, as the replicator's thread names it while the tick runs.
+    pub(super) fn gate_saw_identity_check(&mut self, checking: bool) {
+        if checking && self.write_gate.held {
+            self.report
+                .reach
+                .bump(format!("writes.blocked.{:?}", WhyBlocked::CheckingIdentity));
+        }
     }
 
     /// Whether the runner holds the application's writes now, by its own record.

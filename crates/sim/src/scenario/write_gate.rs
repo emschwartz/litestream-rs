@@ -100,6 +100,19 @@ pub fn writes_held_while_the_boot_checks_identity() -> Scenario {
     s
 }
 
+/// [`super::meta_lost_with_commits_not_uploaded`]: the boot over the empty meta directory runs
+/// the identity check in the tick that lists the replica, so no boot tick lists the replica
+/// without deciding. A tick of its own to announce the check listed the replica once more for
+/// each check, and left the check unrun when the process died between the two ticks
+/// (`docs/decisions/D201.md`).
+#[must_use]
+pub fn an_identity_check_runs_in_the_tick_that_lists() -> Scenario {
+    let mut s = super::meta_lost_with_commits_not_uploaded();
+    s.name = "an_identity_check_runs_in_the_tick_that_lists";
+    s.check = Some(|report| never(report, "boot.listed_unbooted"));
+    s
+}
+
 /// Once the boot is judged, commits land and the engine's checkpoints run.
 #[must_use]
 pub fn writes_allowed_after_the_boot() -> Scenario {

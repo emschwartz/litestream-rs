@@ -82,7 +82,9 @@ impl EventSink for Gates {
             Event::WritesBlocked { .. }
                 | Event::WritesAllowed
                 | Event::Engine(
-                    lsr_core::Event::WritesHeld { .. } | lsr_core::Event::Checkpointed { .. }
+                    lsr_core::Event::WritesHeld { .. }
+                        | lsr_core::Event::Checkpointed { .. }
+                        | lsr_core::Event::CheckingIdentity { .. }
                 )
         );
         if keep {
@@ -289,6 +291,62 @@ fn writes_go_through_before_the_boot_snapshot_is_staged() {
     );
     assert_eq!(rows(&site), 6);
     site.assert_restores(site.store().as_ref());
+}
+
+/// A start over a brand-new meta directory compares the database with the replica before it
+/// decides, as long as a restore takes, inside one engine tick: the thread names that hold while
+/// the tick runs, in health and as an event right after the engine's own notice, and lets writes
+/// go once the check has decided (`docs/decisions/D201.md`).
+#[test]
+fn a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds() {
+    let site = Site::new();
+    site.commit(2);
+    let (runtime, _clock) = fake();
+    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let stopped = first.stop(PATIENCE).wait();
+    assert!(
+        matches!(stopped, lsr_replica::Stopped::Drained { .. }),
+        "{stopped:?}"
+    );
+    drop(first);
+    // No frame left to vouch for the replica's files, and no meta directory to vouch for them.
+    site.app
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    std::fs::remove_dir_all(site.dir.path().join(".app.db-litestream")).unwrap();
+    let (runtime, _clock) = fake();
+    let gates = Gates::default();
+    let replicator = Replicator::start_with_events(
+        &site.db,
+        site.store(),
+        config(),
+        runtime,
+        Box::new(gates.clone()),
+    )
+    .unwrap();
+    assert_eq!(block_on(replicator.ready(PATIENCE)), Booted::Booted);
+    let seen: Vec<Event> = gates.0.lock().unwrap().clone();
+    let checking = WhyBlocked::CheckingIdentity;
+    let at = seen
+        .iter()
+        .position(|e| matches!(e, Event::Engine(lsr_core::Event::CheckingIdentity { .. })))
+        .unwrap_or_else(|| panic!("no identity check: {seen:?}"));
+    assert_eq!(
+        seen.get(at.saturating_add(1)),
+        Some(&Event::WritesBlocked { why: checking }),
+        "{seen:?}"
+    );
+    assert_eq!(
+        gates.changes(),
+        vec![
+            Event::WritesBlocked {
+                why: WhyBlocked::Booting
+            },
+            Event::WritesBlocked { why: checking },
+            Event::WritesAllowed,
+        ]
+    );
+    drop(replicator);
 }
 
 /// Replicates `site` at 4096-byte pages and stops, then rewrites the database at 8192. With

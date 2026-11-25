@@ -1,12 +1,11 @@
-diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
---- a/crates/core/src/actor/lag.rs
-+++ b/crates/core/src/actor/lag.rs
-@@ -296,7 +296,7 @@ impl Actor {
-     /// local page: the reason writes are held, for health.
-     #[must_use]
-     pub fn checking_identity(&self) -> bool {
--        self.kept.identity_announced && !self.booted()
-+        false
-     }
- 
-     /// Whether an engine of this process has listed the replica.
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2969,7 +2969,6 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
+         Some(tip) if resized.is_none() && gate.fresh() => {
+             // Said in the tick that lists the replica: a tick of its own to announce it would
+             // list the replica again, and a crash between the two would leave the check unrun.
+-            (env.notice)(&Event::CheckingIdentity { tip });
+             let local =
+                 identity::local_against_replica(env.wal, reader, committed, env.db, remote, tip)
+                     .await?;

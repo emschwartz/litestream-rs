@@ -415,6 +415,11 @@ fn writes_held_while_the_boot_checks_identity() {
 }
 
 #[test]
+fn an_identity_check_runs_in_the_tick_that_lists() {
+    run(scenario::an_identity_check_runs_in_the_tick_that_lists);
+}
+
+#[test]
 fn writes_allowed_after_the_boot() {
     run(scenario::writes_allowed_after_the_boot);
 }

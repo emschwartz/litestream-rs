@@ -1,0 +1,12 @@
+diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
+--- a/crates/replica/src/thread.rs
++++ b/crates/replica/src/thread.rs
+@@ -513,7 +513,7 @@ impl Worker {
+         // as a restore takes, inside this tick: health and the log name it as it starts.
+         let mut notice = |event: &EngineEvent| {
+             emit_to(sink, sink_panics, &Event::Engine(event.clone()));
+-            if !(booting && matches!(event, EngineEvent::CheckingIdentity { .. })) {
++            if !(booting && matches!(event, EngineEvent::CheckingIdentity { .. })) || booting {
+                 return;
+             }
+             let checking = WhyBlocked::CheckingIdentity;

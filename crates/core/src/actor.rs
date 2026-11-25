@@ -2967,7 +2967,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let resized = page_size.zip(now).filter(|(was, now)| was != now);
     let (refused_through, ahead) = match refused {
         Some(tip) if resized.is_none() && gate.fresh() => {
-            // Said before the check, in its own tick: a separate tick to announce it would
+            // Said in the tick that lists the replica: a tick of its own to announce it would
             // list the replica again, and a crash between the two would leave the check unrun.
             (env.notice)(&Event::CheckingIdentity { tip });
             let local =
