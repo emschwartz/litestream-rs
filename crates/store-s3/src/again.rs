@@ -53,8 +53,8 @@ impl Run {
     /// A part that starts at `offset` in the object and holds at most `part` bytes: room
     /// for every cell's tally is taken here, once.
     pub(crate) fn at(offset: u64, part: u64) -> Self {
-        let cells = usize::try_from(part.div_ceil(CELL))
-            .map_or(MOST_CELLS, |cells| cells.min(MOST_CELLS));
+        let cells =
+            usize::try_from(part.div_ceil(CELL)).map_or(MOST_CELLS, |cells| cells.min(MOST_CELLS));
         Self {
             offset,
             len: 0,

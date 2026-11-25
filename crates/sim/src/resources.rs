@@ -139,6 +139,11 @@ pub fn delta(before: RecorderCounts, after: RecorderCounts) -> RecorderCounts {
         commits: after.commits.saturating_sub(before.commits),
         deletes: after.deletes.saturating_sub(before.deletes),
         written_bytes: after.written_bytes.saturating_sub(before.written_bytes),
+        rereads_given: after.rereads_given.saturating_sub(before.rereads_given),
+        rereads_differing: after
+            .rereads_differing
+            .saturating_sub(before.rereads_differing),
+        rereads_refused: after.rereads_refused.saturating_sub(before.rereads_refused),
         max_upload_bytes: after.max_upload_bytes,
         max_write_bytes: after.max_write_bytes,
     }

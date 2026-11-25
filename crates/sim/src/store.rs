@@ -27,8 +27,9 @@ use std::task::{Context, Poll};
 
 use lsr_core::WriteMode;
 use lsr_core::{
-    BatchKind, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore,
-    PageLimit, ReadAt, ReadLen, Reread, SeededEntropy, StoreError, StoreOp, Upload,
+    BatchKind, BoxFuture, ByteTally, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt,
+    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, Reread, SeededEntropy, StoreError, StoreOp,
+    Upload,
 };
 use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_ltx::{HEADER_LEN, Header, Timestamp, TxidRange, WalOrigin};
@@ -1022,6 +1023,14 @@ pub struct RecorderCounts {
     pub max_write_bytes: u64,
     /// Every byte handed to `write`.
     pub written_bytes: u64,
+    /// Second reads (a store reading back, through the source the engine gave it, bytes it
+    /// was handed and let go of) that gave the bytes the engine first handed over.
+    pub rereads_given: u64,
+    /// Second reads that gave other bytes than the engine first handed over, or another
+    /// count than was asked for: bytes no first read verified, on their way to the store.
+    pub rereads_differing: u64,
+    /// Second reads the source refused.
+    pub rereads_refused: u64,
 }
 
 /// The latest time the code under test has been told, shared between the
@@ -1221,6 +1230,7 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
             head: Vec::new(),
             wrote: 0,
             digest: DIGEST_SEED,
+            first: Vec::new(),
             log: self.log.clone(),
         })
     }
@@ -1267,7 +1277,47 @@ pub struct TapUpload<S: ObjectStore> {
     head: Vec<u8>,
     wrote: u64,
     digest: u64,
+    /// The bytes handed over with a source to read them back from: the first read, which
+    /// every second read is compared with.
+    first: Vec<u8>,
     log: RecorderLog,
+}
+
+/// The source an engine gave with its bytes, watched: each second read is counted as what
+/// it was against the first read the recorder kept ([`RecorderCounts::rereads_given`] and
+/// the two beside it). It changes no answer.
+struct Watched<'u> {
+    inner: &'u dyn Reread,
+    first: &'u [u8],
+    log: &'u RecorderLog,
+}
+
+impl Reread for Watched<'_> {
+    fn read<'a>(
+        &'a self,
+        offset: u64,
+        was: &'a ByteTally,
+    ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let out = self.inner.read(offset, was).await;
+            self.log.with(|s| match &out {
+                Ok(bytes) => {
+                    let first = usize::try_from(offset)
+                        .ok()
+                        .and_then(|start| self.first.get(start..))
+                        .and_then(|rest| rest.get(..bytes.len()));
+                    let whole = u64::try_from(bytes.len()).is_ok_and(|len| len == was.size());
+                    if whole && first == Some(bytes.as_slice()) {
+                        bump(&mut s.counts.rereads_given);
+                    } else {
+                        bump(&mut s.counts.rereads_differing);
+                    }
+                }
+                Err(_) => bump(&mut s.counts.rereads_refused),
+            });
+            out
+        })
+    }
 }
 
 const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
@@ -1331,7 +1381,19 @@ impl<S: ObjectStore> TapUpload<S> {
         chunk: &[u8],
         again: Option<&dyn Reread>,
     ) -> Result<(), StoreError> {
-        write_of(&mut self.inner, chunk, again).await?;
+        match again {
+            Some(again) => {
+                // The store may read back inside this write, so the first read is kept first.
+                self.first.extend_from_slice(chunk);
+                let watched = Watched {
+                    inner: again,
+                    first: &self.first,
+                    log: &self.log,
+                };
+                self.inner.write_from(chunk, &watched).await?;
+            }
+            None => self.inner.write(chunk).await?,
+        }
         self.digest = digest_more(self.digest, chunk);
         let room = HEADER_LEN.saturating_sub(self.head.len());
         self.head
@@ -1359,10 +1421,21 @@ impl<S: ObjectStore> TapUpload<S> {
             head,
             wrote,
             digest,
+            first,
             log,
         } = self;
         let header = parse_header(&head);
-        let outcome = commit_of(inner, again).await;
+        let outcome = match again {
+            Some(again) => {
+                let watched = Watched {
+                    inner: again,
+                    first: &first,
+                    log: &log,
+                };
+                inner.commit_from(&watched).await
+            }
+            None => inner.commit().await,
+        };
         log.with(|s| {
             bump(&mut s.counts.commits);
             // An object the store accepted is recorded. The recorder sits below `Faults`, so a

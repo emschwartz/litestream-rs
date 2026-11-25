@@ -16,9 +16,16 @@ use lsr_sim::{FaultShape, Op, Opts, RunReport, Seed, Target};
 const SLICE: u64 = 128;
 
 fn run(ops: &[Op]) -> RunReport {
+    run_on(ops, false)
+}
+
+/// As [`run`], with the replica on the S3 store when `s3` says so: the store that lets go of
+/// what it is handed and reads the staged file again when it sends it.
+fn run_on(ops: &[Op], s3: bool) -> RunReport {
     let opts = Opts {
         slice_bytes: NonZeroU64::new(SLICE),
         record: true,
+        remote_s3: s3,
         ..Opts::default()
     };
     run_ops(Seed::new(1), ops, &opts)
@@ -226,5 +233,61 @@ fn a_staged_file_damaged_under_its_send_is_never_published() {
             "{damage:?}: {all:?}"
         );
         assert_eq!(report.reach.get("send.then_a_fault"), 1, "{damage:?}");
+    }
+}
+
+/// The staged file changes after the engine first read its middle and before the store reads
+/// it again. Every first read passed, so only the second read can tell. On the S3 store,
+/// which reads the file back when it sends it, that read is refused: the engine reports the
+/// staged file lost and nothing of it is published. On `MemStore`, which kept the bytes it was
+/// handed, the file the engine verified is what the replica holds and no read is a second one.
+#[test]
+fn a_staged_file_changed_between_its_two_reads_is_refused_at_the_second() {
+    // Three slices, then eighteen more: 2,688 bytes read, past the middle byte the damage flips.
+    let mut ops = in_flight();
+    ops.extend(ticks(18));
+    ops.push(Op::Meta(MetaOp::FlipNewestByte));
+    ops.extend(ticks(100));
+    ops.push(Op::Restore);
+
+    let report = run_on(&ops, true);
+    let all = events(&report);
+    let lost = all
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::Retrying {
+                    fault: Fault::StagedLost,
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("{all:?}"));
+    let published = all
+        .iter()
+        .position(|event| matches!(event, Event::Uploaded(Did::Put(_))))
+        .unwrap_or_else(|| panic!("{all:?}"));
+    assert!(lost < published, "{all:?}");
+    // Every first read of the file passed: the refusal came after its last slice.
+    let slices: Vec<u64> = (1..=22_u64).map(|n| n.saturating_mul(SLICE)).collect();
+    assert_eq!(sent(&report)[..22], slices);
+    assert!(
+        all[..lost]
+            .iter()
+            .filter(|event| matches!(event, Event::Sending { .. }))
+            .count()
+            >= 22,
+        "{all:?}"
+    );
+    assert_eq!(report.reach.get("reread.refused"), 1);
+    assert_eq!(report.reach.get("reread.refused.reported"), 1);
+    // The snapshot that took the file's place was read back whole and given.
+    assert!(report.reach.get("reread.given") >= 1);
+
+    let report = run_on(&ops, false);
+    assert_eq!(sent(&report)[..23], whole_file());
+    for key in ["reread.given", "reread.refused"] {
+        assert_eq!(report.reach.get(key), 0, "{key}");
     }
 }
