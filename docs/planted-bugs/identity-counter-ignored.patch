@@ -13,4 +13,4 @@ index 0000000..0000000 100644
 +        }
          (Some(_) | None, Some(_) | None) => false,
      };
-     Ok(if older { Identity::Other } else { Identity::Ahead })
+     Ok(if older {
