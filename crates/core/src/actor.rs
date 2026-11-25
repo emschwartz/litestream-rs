@@ -2439,8 +2439,13 @@ impl Actor {
             && Fault::from_maintain(err) == Fault::CreateOnlyUnsupported
         {
             // Nothing was published. The fault degrades the task (or stops), and from here
-            // on outputs and level-0 uploads replace, as after a refused upload (D79).
-            self.kept.unguarded = self.kept.unguarded.or(Some(now));
+            // on outputs and level-0 uploads replace, as after a refused upload (D79), so the
+            // upload task says so now, not after its first replacing write.
+            let since = *self.kept.unguarded.get_or_insert(now);
+            self.kept
+                .tasks
+                .get_mut(Task::Upload)
+                .stand(PersistentCause::ConditionalWritesUnsupported, since);
         }
         if let Job::Snapshot(_) = job {
             return self.snapshot_merged(job, outcome, now, created_at_read);

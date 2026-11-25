@@ -173,6 +173,13 @@ fn a_refused_compaction_output_is_written_again_by_replacing() {
         "{seen:?}"
     );
     assert_eq!(Rig::files(&rig.remote, one).len(), before, "{seen:?}");
+    // From the refusal on every level-0 upload replaces, so the upload task says so before
+    // the first one does (the simulator's judge of D79).
+    assert_eq!(
+        cause(&restarted),
+        Some(PersistentCause::ConditionalWritesUnsupported),
+        "{seen:?}"
+    );
     let seen = rig.follow(&mut restarted, T0 + 60_000, 50);
     assert_eq!(Rig::files(&rig.remote, one).len(), before + 1, "{seen:?}");
     commit_and_settle(&mut rig, &mut restarted, 3, T0 + 180_000);
