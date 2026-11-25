@@ -225,7 +225,16 @@ fn unpublished(err: StoreError, key: FileKey, mode: WriteMode) -> Unpublished {
             Unpublished::Taken(err)
         }
         _ if rejected => {
-            let own = (mode == WriteMode::New).then_some(Rejected(key));
+            // A part that came back wrong ended the upload before its commit asked the store
+            // for the key, so whatever the key holds is not this upload's to remove.
+            let whole = matches!(
+                err,
+                StoreError::Corrupt {
+                    cause: CorruptCause::ChecksumMismatch { part: None },
+                    ..
+                }
+            );
+            let own = (mode == WriteMode::New && whole).then_some(Rejected(key));
             Unpublished::Rejected(err, own)
         }
         _ => Unpublished::Failed(err),

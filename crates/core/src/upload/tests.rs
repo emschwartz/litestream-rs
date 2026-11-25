@@ -1246,6 +1246,28 @@ fn a_rejected_commit_deletes_the_key() {
     assert_eq!(failed.state, UploadState::At(None));
 }
 
+/// A part the store reports wrong during the commit ended the upload before the store was
+/// asked for the key. The key may hold another writer's object by then (a multipart upload
+/// meets a taken key only when it completes), and that object is not this upload's to delete.
+#[test]
+fn a_part_rejected_during_the_commit_deletes_nothing() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    stage(&staging, 1);
+    let theirs = encode_pages(1, 9);
+    put_bytes(&remote.inner, key(1), &theirs);
+    remote.log().commit_before.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch {
+            part: crate::PartNumber::new(2),
+        },
+    });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
+    assert_eq!(failed.state, UploadState::At(None));
+    assert_eq!(remote.log().deletes, Vec::new());
+    assert_eq!(read_all(&remote.inner, &key(1)), theirs);
+}
+
 #[test]
 fn the_upload_reads_in_quarter_mebibyte_chunks() {
     assert_eq!(CHUNK.get(), 256 * 1024);

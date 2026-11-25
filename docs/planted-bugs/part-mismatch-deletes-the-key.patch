@@ -1,0 +1,29 @@
+diff --git b/crates/core/src/publish.rs a/crates/core/src/publish.rs
+index 09493f3a3..f0cf5c18d 100644
+--- b/crates/core/src/publish.rs
++++ a/crates/core/src/publish.rs
+@@ -225,16 +225,7 @@ fn unpublished(err: StoreError, key: FileKey, mode: WriteMode) -> Unpublished {
+             Unpublished::Taken(err)
+         }
+         _ if rejected => {
+-            // A part that came back wrong ended the upload before its commit asked the store
+-            // for the key, so whatever the key holds is not this upload's to remove.
+-            let whole = matches!(
+-                err,
+-                StoreError::Corrupt {
+-                    cause: CorruptCause::ChecksumMismatch { part: None },
+-                    ..
+-                }
+-            );
+-            let own = (mode == WriteMode::New && whole).then_some(Rejected(key));
++            let own = (mode == WriteMode::New).then_some(Rejected(key));
+             Unpublished::Rejected(err, own)
+         }
+         _ => Unpublished::Failed(err),
+@@ -361,4 +352,4 @@ where
+ #[cfg(test)]
+ mod guard;
+ #[cfg(test)]
+-mod tests;
+\ No newline at end of file
++mod tests;
