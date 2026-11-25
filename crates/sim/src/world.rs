@@ -1070,13 +1070,14 @@ impl World {
         }
     }
 
-    /// Whether staging and the replica both hold `key` with different bytes:
-    /// a staged copy damaged or put back from a backup under a key the replica
-    /// took.
+    /// Whether staging does not hold what the replica holds under `key`: the file is gone
+    /// from staging (an operation emptied it, and what staging holds no longer vouches for
+    /// the files this engine put on the replica), or it has different bytes (a staged copy
+    /// damaged or put back from a backup under a key the replica took).
     ///
     /// # Errors
     /// Either store's error other than a missing key.
-    pub fn staged_differs_from_remote(&self, key: FileKey) -> Result<bool, StoreError> {
+    pub fn staging_departs_from_remote(&self, key: FileKey) -> Result<bool, StoreError> {
         let found = |read: Result<Vec<u8>, StoreError>| match read {
             Ok(bytes) => Ok(Some(bytes)),
             Err(StoreError::NotFound { .. }) => Ok(None),
@@ -1086,7 +1087,8 @@ impl World {
         let remote = found(read_all(&self.remote_raw, &key))?;
         Ok(match (staged, remote) {
             (Some(staged), Some(remote)) => staged != remote,
-            (Some(_) | None, None) | (None, Some(_)) => false,
+            (None, Some(_)) => true,
+            (Some(_) | None, None) => false,
         })
     }
 
