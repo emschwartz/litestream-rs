@@ -324,8 +324,19 @@ struct Decoded {
     checksum: FileChecksum,
 }
 
-/// The boot's one pass over the staged level-0 files the replica may still need: from
-/// `confirmed`, the replica's newest transaction, on (every one when the replica is empty),
+/// Where the boot's pass starts, which says which staged files are pending.
+#[derive(Debug)]
+pub(crate) enum Base<'a, S> {
+    /// The replica, and its newest transaction (`None`: it holds nothing): the staged files
+    /// above that are pending, and the first of them must follow the replica's newest file.
+    Replica(&'a S, Option<Txid>),
+    /// The oldest staged file, with no replica to ask (`docs/decisions/D220.md`): it stands
+    /// where the replica's newest file would, and every file after it is pending.
+    Oldest,
+}
+
+/// The boot's one pass over the staged level-0 files the replica may still need: from the
+/// replica's newest transaction on (every one when the replica is empty, or was not asked),
 /// oldest first. Each file is read whole once, and that read verifies it, mints the token of
 /// a pending file (one above `confirmed`), compares its pages with what `wal` holds in its
 /// range, and feeds the page checksum table (see the module docs). The first pending file must
@@ -337,25 +348,33 @@ struct Decoded {
 /// A store read or a WAL read that failed; that says nothing about the bytes.
 pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
     staging: &L,
-    remote: &S,
-    confirmed: Option<Txid>,
+    base: Base<'_, S>,
     mut wal: Option<BootWal<'_, R>>,
 ) -> Result<Scan, Fault> {
+    let (remote, mut confirmed) = match base {
+        Base::Replica(remote, newest) => (Some(remote), newest),
+        Base::Oldest => (None, None),
+    };
     let mut scan = Scan {
         tokens: Vec::new(),
         bad: None,
         scanned: Scanned::new(),
         seeding: Seeding::from(confirmed),
     };
-    let tail = confirmed.map(|tail| FileKey::new(Level::ZERO, TxidRange::single(tail)));
     let mut expect = confirmed.map_or(Some(Txid::MIN), Txid::next);
     // Where the file before sits in its WAL. The replica's newest file is asked of the
     // replica only when staging no longer holds it and a pending file needs it.
     let mut prev = None;
-    let mut linked = tail.is_none();
+    let mut linked = confirmed.is_none();
     let mut listing = StagedPages::from(confirmed);
     while let Some(page) = listing.next(staging).await? {
         for info in page {
+            if remote.is_none() && confirmed.is_none() {
+                // With no replica asked, the oldest staged file is the base.
+                confirmed = Some(info.key.range().max());
+                expect = info.key.range().max().next();
+            }
+            let tail = confirmed.map(|tail| FileKey::new(Level::ZERO, TxidRange::single(tail)));
             let pending = confirmed.is_none_or(|tip| info.key.range().max() > tip);
             // Past the cap a file could get no token: it goes as a file that leaves a gap
             // does, unread, and the WAL stages it again once uploads make room.
@@ -364,7 +383,7 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
                 scan.bad = Some((info.key, Bad::Unchained));
                 return Ok(scan);
             }
-            if let (true, false, Some(tail)) = (pending, linked, tail) {
+            if let (true, false, Some(tail), Some(remote)) = (pending, linked, tail, remote) {
                 prev = walk(remote, tail, S::fault, |_| Ok(()))
                     .await?
                     .and_then(|file| link_of(&file.header));

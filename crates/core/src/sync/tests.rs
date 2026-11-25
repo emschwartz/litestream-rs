@@ -518,8 +518,7 @@ fn a_boot_seed_from_the_staged_files_is_the_table_the_steps_built() {
 async fn boot_pass(staging: &MemStore) -> Result<crate::witness::Scan, Fault> {
     crate::witness::scan(
         &Staging(staging),
-        &crate::fault::role::Replica(&MemStore::new()),
-        None,
+        crate::witness::Base::Replica(&crate::fault::role::Replica(&MemStore::new()), None),
         None::<crate::recover::BootWal<'_, Cursor<Vec<u8>>>>,
     )
     .await

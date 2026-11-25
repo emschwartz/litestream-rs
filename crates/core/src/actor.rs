@@ -76,6 +76,7 @@
 
 mod clock;
 mod lag;
+mod local;
 mod once;
 mod once_retention;
 mod parts;
@@ -135,7 +136,7 @@ use crate::upload::{
     inventory_fault, plan_upload, upload_next, upload_next_in,
 };
 use crate::verify::LivePages;
-use crate::witness::{Bad, Scan, Witnessed, Witnesses, scan, still_holds};
+use crate::witness::{Bad, Base, Scan, Witnessed, Witnesses, scan, still_holds};
 
 /// What one tick may touch, lent for that tick only.
 pub struct Env<'a, W, P, C, L, R> {
@@ -623,7 +624,10 @@ impl Actor {
     fn pending(&self) -> Option<SnapshotCause> {
         match self.engine.course {
             Course::Unbooted => self.kept.asked(),
-            Course::Snapshot { .. } | Course::At { .. } => self.engine.course.pending(),
+            // A local course takes no snapshot: an operator's request waits for the boot.
+            Course::Local(_) | Course::Snapshot { .. } | Course::At { .. } => {
+                self.engine.course.pending()
+            }
         }
     }
 
@@ -1024,6 +1028,10 @@ impl Actor {
     /// replica and the WAL again ([`Self::rebuilt`] says what is kept). The
     /// connections are the same, so the application observer's last read stands.
     fn rebuild(&mut self) {
+        match self.engine.course {
+            Course::Local(_) => self.leave_local(),
+            Course::Unbooted | Course::Snapshot { .. } | Course::At { .. } => {}
+        }
         *self = Self {
             kept: self.kept.rebuilt(self.kept.app),
             engine: Engine::fresh(),
@@ -1072,10 +1080,10 @@ impl Actor {
     fn boot_step(&mut self, step: BootStep, took: Duration, now: Timestamp) -> Tick {
         match step {
             BootStep::Fault(fault) => self.boot_failed(fault, took, now),
-            BootStep::Vouch(record) => self.want_takeover(Task::Sync, record, now),
+            BootStep::Vouch(record) => self.want_takeover(self.boot_task(), record, now),
             BootStep::Refused(through) => {
                 self.kept.refused_through = Some(through);
-                self.verdict(Task::Sync, StopCause::OtherWriter, now)
+                self.verdict(self.boot_task(), StopCause::OtherWriter, now)
             }
         }
     }
@@ -1197,20 +1205,35 @@ impl Actor {
     /// attempt's time on the engine's clock.
     fn boot_failed(&mut self, fault: Fault, took: Duration, now: Timestamp) -> Tick {
         self.kept.work.sync_step(Some(fault), took, None, None);
-        self.fault(Task::Sync, fault, now)
+        self.fault(self.boot_task(), fault, now)
     }
 
-    /// Lists the replica, checks the pending staged files
-    /// (`crate::witness`), reads the newest staged file left and
-    /// recovers (in that order). A failure anywhere boots again from the start.
+    /// One unit of an engine that has not booted: a boot attempt when its task may run,
+    /// else a local course's own work (`local`).
     async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if !self.kept.tasks.ready(Task::Sync, now) {
-            return self.ran(Event::Idle, now);
+        if !self.kept.tasks.ready(self.boot_task(), now) {
+            return match self.local_unit(env, now).await {
+                Some(tick) => tick,
+                None => self.ran(Event::Idle, now),
+            };
         }
+        let tick = self.boot_attempt(env, now).await;
+        self.keep_local(env, tick, now).await
+    }
+
+    /// Lists the replica, checks the pending staged files
+    /// (`crate::witness`), reads the newest staged file left and
+    /// recovers (in that order). A failure anywhere boots again from the start.
+    async fn boot_attempt<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        now: Timestamp,
+    ) -> Tick {
+        let task = self.boot_task();
         let clock = env.clock;
         let began = clock.now();
         let took = || clock.now().saturating_duration_since(began);
@@ -1219,7 +1242,10 @@ impl Actor {
         let denied = &mut self.kept.scratch_sweep_denied;
         let listed = match boot_listing(env.staging, env.remote, denied, takeover).await {
             Ok(listed) => listed,
-            Err(step) => return self.boot_step(step, took(), now),
+            Err(step) => {
+                let tick = self.boot_step(step, took(), now);
+                return self.or_local(env, tick, now).await;
+            }
         };
         let suspect = &mut self.kept.suspect_staged;
         let Judged {
@@ -1259,7 +1285,7 @@ impl Actor {
             Recovered::Snapshot { cause, .. } => Err(cause),
             Recovered::Stop(cause) => {
                 self.kept.refused_through = refused_through;
-                return self.verdict(Task::Sync, cause, now);
+                return self.verdict(task, cause, now);
             }
         };
         let cause = boot_cause(dropped, refused, from.err());
@@ -1281,7 +1307,7 @@ impl Actor {
             witnesses: tokens.into_iter().collect(),
             ..Engine::fresh()
         };
-        self.kept.tasks.get_mut(Task::Sync).succeed();
+        self.kept.tasks.get_mut(task).succeed();
         self.ran(Event::Booted { cause }, now)
     }
 
@@ -1560,7 +1586,14 @@ impl Actor {
                 Ok((files, proof))
             }
             Ok(Stepped::Resnapshot(cause)) => {
-                self.engine.course.snapshot_for(cause, false);
+                match self.engine.course {
+                    // The WAL no longer continues staging, and only a boot numbers a
+                    // snapshot: it knows what the replica holds.
+                    Course::Local(_) => self.leave_local(),
+                    Course::Unbooted | Course::Snapshot { .. } | Course::At { .. } => {
+                        self.engine.course.snapshot_for(cause, false);
+                    }
+                }
                 Err(self.ran(Event::Resnapshot(cause), now))
             }
             Ok(Stepped::Held) => Ok((0, None)),
@@ -2507,18 +2540,22 @@ impl Actor {
     /// Whether some task could run now on work it already knows of. A WAL
     /// change it does not know of is the caller's to wake on.
     fn ready_work(&self, now: Timestamp) -> bool {
-        // Before the boot only the boot runs, on the sync task.
-        if !self.booted() {
-            return self.kept.tasks.ready(Task::Sync, now);
-        }
         let sync = self.kept.tasks.ready(Task::Sync, now)
             && self.staging_has_room()
             && (self.pending().is_some()
                 || self.more_wal()
-                || (self.running() && self.checkpoint_decision(now).is_some()));
-        sync || self.upload_ready(now)
-            || self.prune_ready(now).is_some()
-            || self.maintain_ready(now)
+                || (self.checkpoints() && self.checkpoint_decision(now).is_some()));
+        match self.engine.course {
+            // Before the boot only the boot runs, on the sync task.
+            Course::Unbooted => self.kept.tasks.ready(Task::Sync, now),
+            // A local course syncs between boot attempts, which wait on the upload task.
+            Course::Local(_) => sync || self.kept.tasks.ready(Task::Upload, now),
+            Course::Snapshot { .. } | Course::At { .. } => {
+                sync || self.upload_ready(now)
+                    || self.prune_ready(now).is_some()
+                    || self.maintain_ready(now)
+            }
+        }
     }
 
     /// Whether the upload task has a staged file to send and may run. The
@@ -2571,20 +2608,21 @@ impl Actor {
 
     /// Every deadline a task holds: retry waits, the checkpoint gate, the
     /// maintenance schedule (whose `Due::Wait` includes each level's backoff)
-    /// and the drain's end. Tasks a draining actor does not run hold none.
+    /// and the drain's end. Tasks a draining actor does not run hold none, nor do those an
+    /// engine that has not booted does not run.
     fn deadlines(&self) -> impl Iterator<Item = Timestamp> {
-        let running = self.running();
+        let (running, checkpoints) = (self.running(), self.checkpoints());
         let task = |task: Task| self.kept.tasks.get(task).until();
         let deadline = self.drain_deadline();
+        let only_checkpointing = [task(Task::Checkpoint), self.engine.gate.until()];
         let only_running = [
-            task(Task::Checkpoint),
             task(Task::Prune),
             task(Task::Maintenance),
-            self.engine.gate.until(),
             self.engine.maintain.until,
         ];
         [task(Task::Sync), task(Task::Upload), deadline]
             .into_iter()
+            .chain(only_checkpointing.into_iter().filter(move |_| checkpoints))
             .chain(only_running.into_iter().filter(move |_| running))
             .flatten()
     }
@@ -2597,7 +2635,7 @@ impl Actor {
             return Next::Now;
         }
         let schedule = next_wake(&self.engine.checkpoint, &self.kept.cfg.checkpoint)
-            .filter(|at| self.running() && *at > now);
+            .filter(|at| self.checkpoints() && *at > now);
         match self.deadlines().chain(schedule).min() {
             Some(at) if at <= now => Next::Now,
             Some(at) => Next::At(at),
@@ -2878,7 +2916,12 @@ async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
         bad,
         scanned,
         seeding,
-    } = scan(staging, remote, tip, boot_wal_again(&mut wal)).await?;
+    } = scan(
+        staging,
+        Base::Replica(remote, tip),
+        boot_wal_again(&mut wal),
+    )
+    .await?;
     let (lost, refused) = match bad {
         None => (None, None),
         Some((key, Bad::Unreadable)) if *suspect != Some(key) => {
@@ -2892,7 +2935,7 @@ async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
             (Some(from), None)
         }
         Some(refused @ (key, Bad::Unchained)) => {
-            if scan(staging, remote, tip, wal).await?.bad != Some(refused) {
+            if scan(staging, Base::Replica(remote, tip), wal).await?.bad != Some(refused) {
                 return Err(Fault::LocalIo.into());
             }
             let from = key.range().min();
@@ -2973,6 +3016,7 @@ async fn boot_seed<R: Role>(
             snapshot: Some(_), ..
         }
         | Course::Snapshot { .. }
+        | Course::Local(_)
         | Course::Unbooted => PageChecksumTable::new(),
     };
     Ok((table, seeded.quiet))

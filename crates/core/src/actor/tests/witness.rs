@@ -396,7 +396,7 @@ fn a_pending_snapshot_is_uploaded_as_staged_when_the_application_has_committed_s
 
 /// `bytes` re-encoded as the file for transaction `n`, pages and the rest of
 /// the header unchanged.
-fn relabelled(bytes: &[u8], n: u64) -> Vec<u8> {
+pub(super) fn relabelled(bytes: &[u8], n: u64) -> Vec<u8> {
     let mut decoder = ReadDecoder::new(bytes);
     let mut pages = Vec::new();
     while let Some(event) = decoder.next_event().unwrap() {

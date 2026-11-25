@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use super::*;
 use crate::fault::role::{Replica, Staging};
 use crate::layout::{CreatedAt, ListedTime};
-use crate::witness::{Bad, scan};
+use crate::witness::{Bad, Base, scan};
 
 /// Pages served before the listing gives up with an error, so a pass that reads it all fails
 /// instead of running forever.
@@ -110,8 +110,7 @@ fn the_boot_pass_judges_the_first_staged_file_without_listing_them_all() {
     let staging = Endless::default();
     let found = block_on(scan(
         &Staging(&staging),
-        &Replica(&MemStore::new()),
-        None,
+        Base::Replica(&Replica(&MemStore::new()), None),
         None::<crate::recover::BootWal<'_, std::io::Cursor<Vec<u8>>>>,
     ))
     .unwrap();

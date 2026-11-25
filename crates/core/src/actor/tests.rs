@@ -2300,6 +2300,7 @@ mod index_reset;
 mod lag;
 mod listing;
 mod live;
+mod local;
 mod newest_replica_file;
 mod no_wal_yet;
 mod once;

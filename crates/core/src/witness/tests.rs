@@ -244,8 +244,7 @@ fn holding(files: &[(u64, Option<WalOrigin>)]) -> MemStore {
 fn pass(staging: &MemStore, remote: &MemStore, confirmed: Option<u64>) -> Scan {
     block_on(scan(
         &Staging(staging),
-        &Replica(remote),
-        confirmed.map(txid),
+        Base::Replica(&Replica(remote), confirmed.map(txid)),
         None::<BootWal<'_, Cursor<Vec<u8>>>>,
     ))
     .unwrap()
@@ -360,4 +359,39 @@ fn a_replica_tail_that_does_not_decode_links_only_a_first_frame_file() {
     assert_eq!(found.bad, Some((key(2), Bad::Unchained)));
     let found = pass(&holding(&[(2, span(0, 1, 5))]), &remote, Some(1));
     assert_eq!((found.bad, witnessed(&found)), (None, vec![2]));
+}
+
+/// The pass with no replica to ask.
+fn pass_from_oldest(staging: &MemStore) -> Scan {
+    block_on(scan(
+        &Staging(staging),
+        Base::<Replica<'_, MemStore>>::Oldest,
+        None::<BootWal<'_, Cursor<Vec<u8>>>>,
+    ))
+    .unwrap()
+}
+
+/// With no replica asked, the oldest staged file stands where the replica's newest would:
+/// it gets no token and may start anywhere, and every file after it is pending.
+#[test]
+fn with_no_replica_the_oldest_staged_file_is_the_base() {
+    let staging = holding(&[(3, span(4, 1, 5)), (4, span(5, 1, 5)), (5, span(6, 2, 5))]);
+    let found = pass_from_oldest(&staging);
+    assert_eq!(found.bad, None);
+    assert_eq!(witnessed(&found), vec![4, 5]);
+    assert_eq!(found.scanned.len(), 3);
+}
+
+/// The files after the base must chain from it, with no gap, and the base must read whole.
+#[test]
+fn with_no_replica_the_files_after_the_oldest_must_follow_it() {
+    let found = pass_from_oldest(&holding(&[(3, span(4, 1, 5)), (5, span(5, 1, 5))]));
+    assert_eq!(found.bad, Some((key(5), Bad::Unchained)));
+    let found = pass_from_oldest(&holding(&[(3, span(4, 1, 5)), (4, span(7, 1, 5))]));
+    assert_eq!(found.bad, Some((key(4), Bad::Unchained)));
+    let staging = holding(&[(4, span(5, 1, 5))]);
+    put(&staging, key(3), b"not an ltx file");
+    let found = pass_from_oldest(&staging);
+    assert_eq!(found.bad, Some((key(3), Bad::Unreadable)));
+    assert!(pass_from_oldest(&MemStore::new()).scanned.is_empty());
 }

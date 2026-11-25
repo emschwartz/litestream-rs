@@ -205,8 +205,7 @@ fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(crate::MemStore::new());
     let got = crate::conformance::block_on(crate::witness::scan(
         &Staging(&staging),
-        &Replica(&crate::MemStore::new()),
-        None,
+        crate::witness::Base::Replica(&Replica(&crate::MemStore::new()), None),
         None::<crate::recover::BootWal<'_, std::io::Cursor<Vec<u8>>>>,
     ));
     assert_eq!(got.err(), Some(Fault::LocalIo));
