@@ -259,7 +259,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 
 | Fault | Scope | What the engine does | Rig |
 |---|---|---|---|
-| Errors, 5xx, connection reset, timeout (60 s per request, `store-s3/src/config.rs`) | In | UP-2 | sim `store_flaky_5pct`; store-s3 `the_deadline_bounds_a_silent_server` |
+| Errors, 5xx, connection reset, timeout (60 s without progress, and a cap that grows with an upload's length, D235; `store-s3/src/config.rs`) | In | UP-2 | sim `store_flaky_5pct`; store-s3 `the_deadline_bounds_a_silent_server`, `an_upload_that_keeps_moving_outlives_the_stall_bound` |
 | Unreachable from the start of a process: an outage across a restart. Go's database sync never asks the store (`db.go`), so Go stages and checkpoints through it | In, when staging and the WAL agree (BOOT-26 when they do not) | BOOT-25 to BOOT-29 | sim `store_down_across_a_restart`, `store_returns_with_another_writers_file`, `store_returns_rolled_back`, `store_returns_refusing`, `store_returns_unreadable_after_staging_fell_behind`; the fixed seeds reach it (`boot.local_course`) |
 | Throttling (429, `SlowDown`) | In | UP-3 | sim `store_429_retry_after` |
 | A response body cut short | In | Treated as transient (`store-s3/src/classify.rs`) | store-s3 `a_truncated_body_is_never_a_whole_response`. No proxy rig drives a real client through it |

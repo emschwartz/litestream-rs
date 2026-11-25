@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/reqwest_transport.rs b/crates/store-s3/src/reqwest_transport.rs
+index 0eda82655..483303f0f 100644
+--- a/crates/store-s3/src/reqwest_transport.rs
++++ b/crates/store-s3/src/reqwest_transport.rs
+@@ -346,7 +346,7 @@ async fn exchange(
+             }
+         }
+     };
+-    tokio::time::timeout(bounds.cap(expected), read)
++    tokio::time::timeout(bounds.stall(), read)
+         .await
+         .map_err(|_elapsed| TransportError::Timeout)??;
+     let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
