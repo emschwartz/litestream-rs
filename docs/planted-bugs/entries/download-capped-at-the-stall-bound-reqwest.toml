@@ -1,0 +1,8 @@
+# The same defect under reqwest.
+name = "download-capped-at-the-stall-bound-reqwest"
+fix = "claude/part-deadline"
+package = "lsr-store-s3"
+features = ["reqwest"]
+tests = [
+    "reqwest_transport::tests::a_download_that_keeps_moving_outlives_the_stall_bound",
+]
