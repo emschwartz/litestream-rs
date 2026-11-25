@@ -247,6 +247,15 @@ fn the_empty_stream_and_each_length_around_a_block_match_the_definition() {
 }
 
 #[test]
+fn every_two_way_split_of_a_stream_across_three_blocks_seals_alike() {
+    let data: Vec<u8> = (0..=255).rev().cycle().take(3 * BLOCK + 7).collect();
+    let want = reference_seal(&data);
+    for cut in 0..=data.len() {
+        assert_eq!(tally_in(&data, &[cut]).seal(), want, "cut at {cut}");
+    }
+}
+
+#[test]
 fn a_tally_differs_for_one_flipped_bit_one_swapped_word_and_a_trailing_zero() {
     let data: Vec<u8> = (0..=255).cycle().take(3 * BLOCK + 5).collect();
     let base = reference_seal(&data);
@@ -264,6 +273,13 @@ fn a_tally_differs_for_one_flipped_bit_one_swapped_word_and_a_trailing_zero() {
 }
 
 proptest::proptest! {
+    // No shrinking: the direct tests above name the small failing cases, and shrinking a failure
+    // under a mutant outlasts the mutation run's timeout.
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 64,
+        max_shrink_iters: 0,
+        ..proptest::prelude::ProptestConfig::default()
+    })]
     #[test]
     fn any_split_of_any_bytes_seals_as_the_definition(
         bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..400),
