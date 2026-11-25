@@ -9,7 +9,7 @@
 
 use lsr_core::{StoreError, StoreOp};
 use lsr_sim::run::run_ops;
-use lsr_sim::{FaultShape, Op, Opts, Seed, Target};
+use lsr_sim::{AfterRestart, FaultShape, Op, Opts, Seed, Target};
 
 /// The replica refuses uploads for forty ticks, long enough for the upload task to stall on the
 /// fault, then heals. With a task's success leaving its stall in place (the plant
