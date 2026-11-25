@@ -243,7 +243,9 @@ impl Opened for ProbeOpened {
             log.fail_held_read.take_if(|(at, _)| *at == nth)
         };
         let from = usize::try_from(offset).unwrap().min(self.bytes.len());
-        let to = (from + usize::try_from(len.get()).unwrap()).min(self.bytes.len());
+        let to = from
+            .saturating_add(usize::try_from(len.get()).unwrap())
+            .min(self.bytes.len());
         let read = match failed {
             Some((_, err)) => Err(err),
             None => Ok(self.bytes[from..to].to_vec()),
