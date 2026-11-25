@@ -1,6 +1,6 @@
 # A file lists every page of its plan before encoding it, so a snapshot holds 32 more bytes a page.
 name = "snapshot-plan-listed"
-fix = "b66582dd0"
+fix = "b616a4f10"
 package = "lsr-core"
 test_bin = "core"
 tests = [
