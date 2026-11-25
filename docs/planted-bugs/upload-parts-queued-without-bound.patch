@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
+index 9ed944831..c0dd83089 100644
+--- a/crates/store-s3/src/upload.rs
++++ b/crates/store-s3/src/upload.rs
+@@ -290,7 +290,7 @@ impl<T: Transport> S3Upload<T> {
+             return Ok(());
+         };
+         ready.push(std::mem::take(buf));
+-        if ready.len() >= width {
++        if ready.len() >= width && width == 0 {
+             return self.send_parts(start);
+         }
+         Ok(())
