@@ -2,6 +2,5 @@
 # the one first measured; the engine snapshots for a rewound WAL although nothing was lost.
 name = "running-step-calls-a-shrunk-wal-rewound"
 fix = "913d3dfba"
-package = "lsr-sim"
-test_bin = "sim"
-tests = ["needless_snapshot::a_truncate_checkpoint_inside_a_sync_step_is_not_a_rewound_wal"]
+package = "lsr-core"
+tests = ["actor::tests::wal_truncated_mid_step::a_wal_shrinking_between_the_length_and_the_frames_is_retried"]
