@@ -44,9 +44,6 @@ pub const REQUIRED: &[&str] = &[
     // needless-snapshot checks judge a course only through that reading.
     "staged.apart",
     "staged.moved_up",
-    // A slot deleted with no move: staged files given up, which the lost-restore-points check
-    // judges under the keys they would have had.
-    "staged.apart_given_up",
     // Every snapshot cause the needless-snapshot check maps to its forcings; a cause no run
     // reaches is a row of that map nothing tests. CheckpointBoundary and OperatorRequested have
     // no event of their own and are counted when staged (`snapshot.staged.*`).
@@ -122,6 +119,10 @@ pub const UNREQUIRED: &[(&str, &str)] = &[
     (
         "check.lost",
         "acknowledged transactions the replica legitimately lost: only a lying disk or a bucket rollback loses one, and the boot no longer deletes staged files the WAL cannot vouch for",
+    ),
+    (
+        "staged.apart_given_up",
+        "a local course's slot deleted with no move, its staged files given up: staging must fall behind the replica before a restart in an outage. One fixed seed reached it until a change to the upload path moved the histories; `store_returns_unreadable_after_staging_fell_behind` asserts it, and the rotating seeds reach it (21 files in 1,669 seeds)",
     ),
     (
         "check.damaged",
