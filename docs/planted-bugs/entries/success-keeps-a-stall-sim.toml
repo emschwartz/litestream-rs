@@ -1,0 +1,7 @@
+# The simulator's liveness check sees a task's success keeping its stall (`StuckRetrying`).
+name = "success-keeps-a-stall-sim"
+patch = "success-keeps-a-stall"
+fix = "checker-holes (stall liveness)"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["stall_liveness::a_stall_ends_with_the_fault_that_caused_it"]

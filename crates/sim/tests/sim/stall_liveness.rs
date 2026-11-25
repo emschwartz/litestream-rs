@@ -5,31 +5,44 @@
 //!
 //! With the defect "a success keeps a stall" planted
 //! (`docs/planted-bugs/success-keeps-a-stall.patch`), 2 of seeds 1 to 3000 failed on it unaided
-//! (0xa2 first, then 0x31c). With the engine reading past its listings (#96) seed 0xa2 no longer
-//! reached the stall, and on the tree that also stops at another writer neither did 0x31c. Seed
-//! 0x2a8 of the fixed set does; its history is recorded, with the settings its mix drew written
-//! out, so no change to the generator can lose the kill.
+//! (0xa2 first, then 0x31c).
 
+use lsr_core::{StoreError, StoreOp};
 use lsr_sim::run::run_ops;
-use lsr_sim::{AfterRestart, ClockLaw, Op, Opts, Seed};
+use lsr_sim::{AfterRestart, FaultShape, Op, Opts, Seed, Target};
 
-/// Seed 0x2a8 of the fixed set's mix, recorded: a stall on a retried fault outlasts every
-/// injected fault. With a task's success leaving its stall in place (the plant
-/// `success-keeps-a-stall`), the run ends with "the Sync task is still stalled on WalMoved after
-/// 1 failures with nothing causing it".
+/// The replica refuses uploads for forty ticks, long enough for the upload task to stall on the
+/// fault, then heals. With a task's success leaving its stall in place (the plant
+/// `success-keeps-a-stall`), the run ends with "the Upload task is still stalled on StoreTransient
+/// after 1 failures with nothing causing it".
 #[test]
-fn a_stall_ends_with_the_fault_that_caused_it_seed_0x2a8() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: false,
-        lying_wal_sync: false,
-        after_restart: AfterRestart::Nothing,
-        clock_law: ClockLaw::EachRead,
-        overlap: true,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(0x2a8), crate::histories::seed_0x2a8::OPS, &opts) {
+fn a_stall_ends_with_the_fault_that_caused_it() {
+    let mut ops = vec![
+        Op::StoreFault {
+            target: Target::Remote,
+            op: StoreOp::Upload,
+            ahead: 0,
+            shape: FaultShape::Rate {
+                per_mille: 1000,
+                err: StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: std::io::ErrorKind::ConnectionReset,
+                },
+            },
+        },
+        Op::Commit {
+            pages: 2,
+            grow: false,
+        },
+    ];
+    ops.extend(std::iter::repeat_n(Op::Tick, 40));
+    ops.push(Op::Heal);
+    ops.push(Op::Commit {
+        pages: 2,
+        grow: false,
+    });
+    ops.extend(std::iter::repeat_n(Op::Tick, 30));
+    if let Err(failure) = run_ops(Seed::new(0x2a8), &ops, &Opts::default()) {
         panic!("{failure}");
     }
 }

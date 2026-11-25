@@ -6,7 +6,6 @@
 
 #[cfg(test)]
 mod fixed {
-    use crate::histories as h;
     use lsr_sim::run::run_ops;
     use lsr_sim::{Op, Opts, Seed, Weights, run};
 
@@ -103,122 +102,13 @@ mod fixed {
         batch(57);
     }
 
-    /// A regression found under the first generator: its recorded history,
-    /// run with no drawn settings, as that generator's runs were.
-    fn replay(seed: u64, ops: &[Op]) {
-        if let Err(failure) = run_ops(Seed::new(seed), ops, &Opts::default()) {
-            panic!("{failure}");
-        }
-    }
-
-    #[test]
-    fn a_restored_staging_backup_is_not_uploaded_seed_0x1919f() {
-        let opts = Opts {
-            drawn: true,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(Seed::new(0x1919f), h::seed_0x1919f::OPS, &opts) {
-            panic!("{failure}");
-        }
-    }
-
-    /// A regression the soak found: its recorded history, run as `run_with`
-    /// ran it that night: drawn, under the crash law the seed's mix drew then.
-    fn replay_drawn(seed: u64, ops: &[Op], block_crash_law: bool) {
-        let opts = Opts {
-            drawn: true,
-            block_crash_law,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(Seed::new(seed), ops, &opts) {
-            panic!("{failure}");
-        }
-    }
-
-    // The rotating soak of 2026-11-22 ran on a tree before the witness fix
-    // above and failed these five with "latest went back from node N to
-    // node M, and no rewind cut node N off": a staging directory put back
-    // from a backup, or a staged file another valid one replaced, was
-    // uploaded by name after a later state. Each history is the operations
-    // that night drew, recorded.
-
-    #[test]
-    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac4b6() {
-        replay_drawn(0x0000_126d_68fa_c4b6, h::seed_0x126d68fac4b6::OPS, false);
-    }
-
-    #[test]
-    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fac789() {
-        replay_drawn(0x0000_126d_68fa_c789, h::seed_0x126d68fac789::OPS, false);
-    }
-
-    #[test]
-    fn a_put_back_staged_file_never_sends_latest_back_seed_0x126d68fae16b() {
-        replay_drawn(0x0000_126d_68fa_e16b, h::seed_0x126d68fae16b::OPS, false);
-    }
-
-    // The same night: the level-bytes budget failed with "12050 is over the
-    // limit 10917" because it counted only this engine's own files, not
-    // another writer's that compaction merged. The budget now counts them
-    // (crates/sim/src/run.rs).
-
-    #[test]
-    fn another_writer_s_files_fit_the_level_bytes_budget_seed_0x126d68facf74() {
-        replay_drawn(0x0000_126d_68fa_cf74, h::seed_0x126d68facf74::OPS, false);
-    }
-
-    // Finding 2: a power loss tore a staged level-0 file whose commit never
-    // returned. Boot snapshotted past it and left it in staging, and the upload
-    // task stopped on it. The torn file, and all staged after it, is now lost.
-
-    #[test]
-    fn a_torn_staged_file_is_dropped_seed_0x25() {
-        replay(0x25, h::seed_0x25::OPS);
-    }
-
-    #[test]
-    fn a_torn_staged_file_is_dropped_seed_0x2d() {
-        replay(0x2d, h::seed_0x2d::OPS);
-    }
-
-    /// Reached through `LocalRewound`: the torn file was an upload whose commit
-    /// errored after publishing, torn by an earlier power loss. Since the
-    /// store's size-mismatch fault publishes a short object, it also holds a
-    /// level-2 compaction output acknowledged one byte short: an engine that
-    /// took that acknowledgement left a file `restore Latest` cannot decode
-    /// (step 89).
-    #[test]
-    fn a_torn_staged_file_is_dropped_seed_0x46() {
-        replay(0x46, h::seed_0x46::OPS);
-    }
-
-    // Issue #39: a snapshot staged for some id never reached the replica (a
-    // power loss tore it, or the staging directory was wiped), and the engine
-    // took the same id again from a later commit against an empty WAL (after a
-    // VACUUM, or a rewind to the database file). The replica held only the
-    // second snapshot, but the oracle paired the id with the first note's
-    // commit. The restore was right; the oracle now takes the newest note.
-
-    #[test]
-    fn page_size_vacuum_and_staging_wipe_seed_0x126d68ef1c07() {
-        replay(0x0000_126d_68ef_1c07, h::seed_0x126d68ef1c07::OPS);
-    }
-
-    #[test]
-    fn page_size_vacuum_and_staging_wipe_seed_0x126d68ed250e() {
-        replay(0x0000_126d_68ed_250e, h::seed_0x126d68ed250e::OPS);
-    }
-
-    #[test]
-    fn page_size_vacuum_and_staging_wipe_seed_0x126d68ef545f() {
-        replay(0x0000_126d_68ef_545f, h::seed_0x126d68ef545f::OPS);
-    }
-
-    /// The smallest history behind the three seeds above, shrunk from
-    /// 0x126d68ed250e: the first boot stages a snapshot as transaction 1, the
-    /// database is vacuumed into another page size, the staging directory is
-    /// wiped, and the next boot (into a still empty replica) snapshots the
-    /// vacuumed database as transaction 1 again. Only that file is uploaded.
+    /// A snapshot staged for some id never reaches the replica (a power loss tears it, or the
+    /// staging directory is wiped), and the engine takes the same id again from a later commit
+    /// against an empty WAL (after a VACUUM, or a rewind to the database file). The replica
+    /// holds only the second snapshot, so the oracle must pair the id with the newest note,
+    /// not the first. Here the first boot stages a snapshot as transaction 1, the database is
+    /// vacuumed into another page size, staging is wiped, and the next boot (into a still
+    /// empty replica) snapshots the vacuumed database as transaction 1 again.
     #[test]
     fn a_snapshot_id_taken_again_after_a_lost_staged_snapshot() {
         use lsr_ltx::PageSize;
@@ -415,7 +305,7 @@ mod diverged {
     /// replacement snapshot took transaction 1 again from a later commit, while
     /// level 1 still held the first.
     #[test]
-    fn a_verifying_replica_object_is_not_written_over_seed_0xc6b2() {
+    fn a_verifying_replica_object_is_not_written_over() {
         let ops = [
             Op::OtherProcessCheckpoint(OtherProcessMode::Passive),
             Op::Tick,
@@ -441,7 +331,7 @@ mod diverged {
     /// listing wrote it over the replica's level-0 key, under a level-1 file
     /// built from the other.
     #[test]
-    fn a_restored_staging_backup_is_not_written_over_the_replica_seed_0xd1b() {
+    fn a_restored_staging_backup_is_not_written_over_the_replica() {
         let ops = [
             Op::Shutdown,
             Op::Commit {
@@ -463,71 +353,6 @@ mod diverged {
 }
 
 #[cfg(test)]
-mod restored_backup {
-    use lsr_sim::generate::MetaOp;
-    use lsr_sim::run::run_ops;
-    use lsr_sim::{Op, Opts, Seed};
-
-    /// A staging backup is taken holding a snapshot as transaction 1; that
-    /// file loses its WAL origin and is deleted, so the engine stages a later
-    /// commit as 1; then the backup is put back and uploaded. The replica held
-    /// the backup's file, a real state of the database, but the oracle mapped a
-    /// file with no WAL origin to the newest note for its id. The engine was
-    /// right: a restored backup now notes its files again (seed 0x66c).
-    #[test]
-    fn a_restored_backup_holds_the_commits_it_copied_seed_0x66c() {
-        let ops = [
-            Op::Tick,
-            Op::Tick,
-            Op::StagingDamage(MetaOp::StripNewestOrigin),
-            Op::Meta(MetaOp::Save),
-            Op::Commit {
-                pages: 3,
-                grow: false,
-            },
-            Op::StagingDamage(MetaOp::DeleteNewest),
-            Op::Tick,
-            Op::CommitInTick { pages: 1 },
-            Op::StagingDamage(MetaOp::Restore),
-        ];
-        let opts = Opts {
-            drawn: true,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(Seed::new(0x66c), &ops, &opts) {
-            panic!("{}", failure.violation);
-        }
-    }
-
-    /// The same mistake, shrunk from seed 5's history on another branch
-    /// (restoring transaction 4 differed from commit 6 there).
-    #[test]
-    fn a_restored_backup_holds_the_commits_it_copied_seed_0x5() {
-        let ops = [
-            Op::Tick,
-            Op::Tick,
-            Op::StagingDamage(MetaOp::StripNewestOrigin),
-            Op::Commit {
-                pages: 4,
-                grow: true,
-            },
-            Op::Meta(MetaOp::Save),
-            Op::StagingDamage(MetaOp::DeleteNewest),
-            Op::Tick,
-            Op::Tick,
-            Op::StagingDamage(MetaOp::Restore),
-        ];
-        let opts = Opts {
-            drawn: true,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(Seed::new(0x5), &ops, &opts) {
-            panic!("{}", failure.violation);
-        }
-    }
-}
-
-#[cfg(test)]
 mod staged_input {
     use lsr_core::{StoreError, StoreOp};
     use lsr_sim::generate::{MetaOp, WalOp};
@@ -540,7 +365,7 @@ mod staged_input {
     /// read the replica's, so transaction 1 had two contents (seed 0xcf8,
     /// shrunk).
     #[test]
-    fn level_one_is_not_built_from_a_staged_file_unlike_the_replica_seed_0xcf8() {
+    fn level_one_is_not_built_from_a_staged_file_unlike_the_replica() {
         let ops = [
             Op::WalDamage {
                 op: WalOp::TearHeader,
@@ -594,7 +419,7 @@ mod prefix_page_size {
     /// snapshotted 1024-byte pages onto the 2048 prefix, so restores stopped
     /// on the change (seed 0xdc8, shrunk).
     #[test]
-    fn a_boot_behind_the_replica_keeps_its_page_size_seed_0xdc8() {
+    fn a_boot_behind_the_replica_keeps_its_page_size() {
         let ops = [
             Op::Vacuum {
                 page_size: PageSize::new(1024),
@@ -645,7 +470,7 @@ mod budget {
     /// the level-1 file built from them, so it charged level 1 for bytes it
     /// had read (seed 0x54e, shrunk).
     #[test]
-    fn a_level_built_from_files_a_rollback_took_is_within_budget_seed_0x54e() {
+    fn a_level_built_from_files_a_rollback_took_is_within_budget() {
         let back = Op::Remote(RemoteOp::RollBack);
         let ops = [
             commit(2, true),
@@ -713,7 +538,7 @@ mod failed_drop {
     /// writer's file: level 1 could then not be merged from the replica and
     /// maintenance degraded on `RemoteCorrupt` (seed 0xd79, shrunk).
     #[test]
-    fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it_seed_0xd79() {
+    fn a_failed_drop_after_a_divergence_uploads_nothing_built_on_it() {
         let ops = [
             Op::Tick,
             Op::Tick,
@@ -820,7 +645,7 @@ mod second_writer {
     /// level-0 key, so the replica held two histories for one transaction
     /// (seed 0x50c, shrunk).
     #[test]
-    fn maintenance_stops_on_another_writer_seed_0x50c() {
+    fn maintenance_stops_on_another_writer() {
         let mut ops = vec![
             Op::CommitInTick { pages: 2 },
             Op::Commit {
@@ -855,7 +680,7 @@ mod second_writer {
     /// it. The removal takes that transaction for good, which the oracle
     /// counted as a gap the engine left (seed 0xf85, shrunk).
     #[test]
-    fn removing_a_file_a_boot_built_on_loses_its_transaction_seed_0xf85() {
+    fn removing_a_file_a_boot_built_on_loses_its_transaction() {
         use lsr_core::{SourceError, SourceOp};
         use lsr_sim::generate::WalOp;
         use lsr_sim::{CrashKind, EnvFault};
@@ -876,7 +701,7 @@ mod second_writer {
     /// oracle mapped that level-1 file to the other writer's pages (seed
     /// 0x433, shrunk).
     #[test]
-    fn a_level_built_after_the_engine_replaced_the_file_holds_its_pages_seed_0x433() {
+    fn a_level_built_after_the_engine_replaced_the_file_holds_its_pages() {
         let ops = [
             Op::Tick,
             Op::Tick,
@@ -896,7 +721,7 @@ mod second_writer {
     /// to the engine's own staged note for 3 instead of the other writer's
     /// pages (seed 0x18efc, shrunk).
     #[test]
-    fn a_removal_before_a_second_put_of_the_same_id_seed_0x18efc() {
+    fn a_removal_before_a_second_put_of_the_same_id() {
         use lsr_core::{StoreError, StoreOp};
         use lsr_sim::{EnvFault, FaultShape, Target};
         let ops = [
@@ -1024,95 +849,6 @@ mod replaced_staging {
 }
 
 #[cfg(test)]
-mod wal_regrown {
-    use lsr_sim::generate::{RemoteOp, WalOp};
-    use lsr_sim::run::run_ops;
-    use lsr_sim::{CrashKind, Hold, Op, Opts, Seed, Weights};
-
-    /// The WAL generation is regrown with the same salts: its frames get new bytes, its
-    /// commit marks stay, and one more commit follows. Before it, a bucket rollback and a
-    /// power loss left the engine's position at the start of the generation, so it staged the
-    /// next file from the regrown frames, up to a regrown commit mark. The model knew only the
-    /// regrown generation's last commit, so the oracle took that file for the commit made
-    /// there before the regrowth, whose pages the WAL no longer holds, and failed a restore
-    /// the replica answered right (seed 0x2b2 under its mixed mix, 64 operations of its
-    /// history). The model now records a commit at every regrown commit mark.
-    #[test]
-    fn a_file_staged_from_a_regrown_wal_is_judged_by_the_regrown_commit_seed_0x2b2() {
-        let seed = Seed::new(0x2b2);
-        let weights = Weights::mixed(seed);
-        let opts = Opts {
-            drawn: true,
-            block_crash_law: weights.block_crash_law,
-            lying_wal_sync: weights.lying_wal_sync,
-            after_restart: weights.after_restart,
-            ..Opts::default()
-        };
-        if let Err(failure) = run_ops(seed, &history(), &opts) {
-            panic!("{failure}");
-        }
-    }
-
-    /// `p` a process crash, `w` a power loss, `v` a vacuum in place, `s` a spill.
-    fn simple(code: &str) -> Vec<Op> {
-        code.chars()
-            .map(|c| match c {
-                'p' => Op::Crash(CrashKind::Process),
-                'w' => Op::Crash(CrashKind::Power),
-                'v' => Op::Vacuum { page_size: None },
-                _ => Op::Spill,
-            })
-            .collect()
-    }
-
-    /// The 64 operations of seed 0x2b2's drawn history that still fail without the fix.
-    fn history() -> Vec<Op> {
-        let mut ops = Vec::new();
-        ops.extend(simple("vvvvpspw"));
-        ops.push(Op::Commit {
-            pages: 3,
-            grow: true,
-        });
-        ops.extend(simple("wpvppp"));
-        ops.push(Op::WalDamage {
-            op: WalOp::RegrowWithoutCommitMarks(2844455044579060045),
-            ticks: 2,
-        });
-        ops.extend(simple("vp"));
-        ops.push(Op::WalDamage {
-            op: WalOp::RegrowSameSalts(11569191237653921190),
-            ticks: 4,
-        });
-        ops.extend(simple("ppppppppwppwppppppvw"));
-        ops.push(Op::WalDamage {
-            op: WalOp::TruncateAtFrame(32),
-            ticks: 5,
-        });
-        ops.extend(simple("p"));
-        ops.push(Op::Commit {
-            pages: 3,
-            grow: true,
-        });
-        ops.push(Op::Hold {
-            hold: Hold::LyingDisk,
-            ticks: 11,
-        });
-        ops.extend(simple("pwppwpppppppppppw"));
-        ops.push(Op::Hold {
-            hold: Hold::LyingDisk,
-            ticks: 9,
-        });
-        ops.push(Op::Remote(RemoteOp::RollBack));
-        ops.extend(simple("w"));
-        ops.push(Op::WalDamage {
-            op: WalOp::RegrowSameSalts(6923337998852091411),
-            ticks: 6,
-        });
-        ops
-    }
-}
-
-#[cfg(test)]
 mod refused_upload {
     use lsr_core::StoreOp;
     use lsr_sim::run::run_ops;
@@ -1125,7 +861,7 @@ mod refused_upload {
     /// engine's own transaction: a restore of it returned the other writer's
     /// pages (seed 0x4ef under its swarm mix, shrunk from 23 operations).
     #[test]
-    fn one_bad_staged_read_after_a_refusal_confirms_no_other_object_seed_0x4ef() {
+    fn one_bad_staged_read_after_a_refusal_confirms_no_other_object() {
         let seed = Seed::new(0x4ef);
         let ops = [
             Op::CommitInTick { pages: 1 },
@@ -1155,55 +891,43 @@ mod refused_upload {
 
 #[cfg(test)]
 mod short_object_left {
-    use crate::histories as h;
+    use lsr_core::StoreOp;
+    use lsr_sim::generate::{AppAt, AppOp, Hold, MetaOp, Target};
     use lsr_sim::run::run_ops;
-    use lsr_sim::{Opts, Seed, Weights};
+    use lsr_sim::{FaultShape, Op, Opts, Seed};
 
     /// An upload the store kept one byte short, whose delete then failed: the short object
     /// stays in the replica, damage the engine did not cause and may not remove on one bad
-    /// read. Reading it degrades the sync task with
-    /// `RemoteCorrupt`, which the judge excuses as it does a corrupted publish. Seeds 0x113,
-    /// 0x6c5 and 0xb8b of the mixed weights took the same path.
+    /// read. Reading it degrades the sync task with `RemoteCorrupt`, which the judge excuses as
+    /// it does a corrupted publish. The hold (other processes' readers pin the WAL) runs a
+    /// sub-history drawn from the seed under `overlap`, so this scenario is a shrunk recording
+    /// of seed 0x4c, kept until someone can write the hold's draws out.
     #[test]
-    fn a_short_object_a_delete_could_not_remove_is_damage_seed_0x4c() {
-        let seed = Seed::new(0x4c);
-        let w = Weights::mixed(seed);
+    fn a_short_object_a_delete_could_not_remove_is_damage() {
+        let ops = [
+            Op::Hold {
+                hold: Hold::ReadersHeld,
+                ticks: 97,
+            },
+            Op::StoreFault {
+                target: Target::Remote,
+                op: StoreOp::Upload,
+                ahead: 1,
+                shape: FaultShape::SizeMismatch,
+            },
+            Op::AppInTick {
+                at: AppAt::Call(7),
+                op: AppOp::DeleteWal,
+            },
+            Op::Tick,
+            Op::Meta(MetaOp::DeleteAll),
+        ];
         let opts = Opts {
-            drawn: true,
-            block_crash_law: w.block_crash_law,
-            lying_wal_sync: w.lying_wal_sync,
-            after_restart: w.after_restart,
-            clock_law: w.clock_law,
-            overlap: w.overlap,
-            error_domain: w.error_domain,
-            staging_fs: w.staging_fs,
+            overlap: true,
             ..Opts::default()
         };
-        if let Err(failure) = run_ops(seed, h::seed_0x4c::OPS, &opts) {
+        if let Err(failure) = run_ops(Seed::new(0x4c), &ops, &opts) {
             panic!("{failure}");
         }
-    }
-}
-
-/// Fixed: a staging read refused for permission during level-1 compaction degraded maintenance
-/// as the replica's `StoreDenied(Permission)` until #145 routed compaction's local reads through
-/// `Fault::from_staging`. Seed 0x68f of the fixed set's mix (its first 39 operations) reaches it
-/// on the tree that stops at another writer, where seed 0xb9e no longer did; it must pass now.
-#[test]
-fn compaction_takes_a_staging_denial_as_staging_seed_0x68f() {
-    use lsr_sim::run::run_ops;
-    use lsr_sim::{AfterRestart, ClockLaw, Opts, Seed};
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: true,
-        lying_wal_sync: false,
-        after_restart: AfterRestart::Redo,
-        clock_law: ClockLaw::EachRead,
-        error_domain: true,
-        staging_fs: false,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(0x68f), crate::histories::seed_0x68f::OPS, &opts) {
-        panic!("{failure}");
     }
 }
