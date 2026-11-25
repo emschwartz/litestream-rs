@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/retry.rs b/crates/core/src/retry.rs
+--- a/crates/core/src/retry.rs
++++ b/crates/core/src/retry.rs
+@@ -565,7 +565,7 @@
+                 Err(err) => {
+                     self.open = None;
+                     let reopen = || async move {
+-                        let mut fresh = core.inner.read_stream(key, offset);
++                        let mut fresh = core.inner.read_stream(key, 0);
+                         let bytes = fresh.next(len).await?;
+                         Ok((fresh, bytes))
+                     };

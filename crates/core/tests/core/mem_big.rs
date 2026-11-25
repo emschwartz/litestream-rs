@@ -2,15 +2,12 @@
 //! and an inventory of a million files. They are `#[ignore]`d out of `just check`
 //! (minutes in a debug build, gigabytes of disk); `just mem-big` runs them in release
 //! and the nightly workflow runs that recipe. The laws are the ones `mem.rs` holds at
-//! small sizes, with the read width the S3 store really uses.
+//! small sizes.
 
 use crate::mem::{
     assert_planning_borrows, assert_restore_flat_in_size, assert_retention_borrows,
     assert_snapshot_law,
 };
-
-/// The read width of the S3 store, so the window is the real one: eight 4 MiB chunks.
-const S3_WIDTH: usize = 8;
 
 /// 4 KiB pages in a mebibyte.
 const PAGES_PER_MIB: u32 = 256;
@@ -21,7 +18,7 @@ const RESTORE_BASE_MIB: u32 = 1024;
 #[test]
 #[ignore = "large; just mem-big"]
 fn restore_peak_heap_is_flat_from_one_to_four_gib() {
-    assert_restore_flat_in_size(RESTORE_BASE_MIB * PAGES_PER_MIB, S3_WIDTH);
+    assert_restore_flat_in_size(RESTORE_BASE_MIB * PAGES_PER_MIB);
 }
 
 #[test]

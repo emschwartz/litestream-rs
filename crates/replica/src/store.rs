@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
     BatchKind, Clock, CreatedAt, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit,
-    ReadAt, ReadLen, Reread, StoreError, Upload,
+    ReadAt, ReadLen, ReadStream, Reread, StoreError, Upload,
 };
 pub use lsr_core::{BoxFuture, DynUpload};
 use lsr_ltx::{Timestamp, TxidRange};
@@ -44,6 +44,9 @@ pub trait DynStore: Send + Sync {
         offset: u64,
         len: ReadLen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>>;
+
+    /// [`ObjectStore::read_stream`].
+    fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_>;
 
     /// [`ObjectStore::created_at`].
     fn created_at_boxed<'a>(
@@ -119,6 +122,10 @@ where
         Box::pin(self.read(key, offset, len))
     }
 
+    fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.read_stream(key, offset)
+    }
+
     fn created_at_boxed<'a>(
         &'a self,
         file: &'a FileInfo,
@@ -188,7 +195,13 @@ where
 #[derive(Clone, Copy)]
 pub(crate) struct Erased<P>(pub(crate) P);
 
-impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Erased<P> {
+// Bounded by `P::Target`, not by a named `dyn DynStore + 'a`: a borrow of the target then
+// lives as long as `P` does, which is what a stream that borrows the store needs.
+impl<P> ObjectStore for Erased<P>
+where
+    P: Deref + Send + Sync,
+    P::Target: DynStore,
+{
     type Upload = Box<dyn DynUpload>;
 
     async fn list(
@@ -202,6 +215,10 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.0.read_boxed(key, offset, len).await
+    }
+
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.0.read_stream_dyn(key, offset)
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -266,6 +283,11 @@ pub(crate) struct OpMeter {
 impl OpMeter {
     fn note<T>(&self, result: &Result<T, StoreError>, began: Timestamp, ended: Timestamp) {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        self.note_more(result, began, ended);
+    }
+
+    /// [`Self::note`] for a later part of a call already counted: its time and its error.
+    fn note_more<T>(&self, result: &Result<T, StoreError>, began: Timestamp, ended: Timestamp) {
         if result.is_err() {
             self.errors.fetch_add(1, Ordering::Relaxed);
         }
@@ -343,6 +365,32 @@ async fn metered<T>(
     let result = call.await;
     meter.note(&result, began, clock.now());
     result
+}
+
+/// A stream counted as one read call ([`Metered::read_stream`]).
+struct MeteredStream<'a> {
+    inner: Box<dyn ReadStream + 'a>,
+    meter: &'a OpMeter,
+    clock: &'a dyn Clock,
+    /// The call is counted: a piece was asked for.
+    counted: bool,
+}
+
+impl ReadStream for MeteredStream<'_> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let began = self.clock.now();
+            let result = self.inner.next(len).await;
+            let ended = self.clock.now();
+            if self.counted {
+                self.meter.note_more(&result, began, ended);
+            } else {
+                self.meter.note(&result, began, ended);
+                self.counted = true;
+            }
+            result
+        })
+    }
 }
 
 /// An upload whose writes and commit are counted; the bytes count once committed.
@@ -433,6 +481,17 @@ impl ObjectStore for Metered {
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         let call = self.store.read_boxed(key, offset, len);
         metered(&*self.clock, &self.meters.read, call).await
+    }
+
+    /// One call for the stream, as for the one request it is, counted at its first piece;
+    /// every piece's time and failure count toward it.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(MeteredStream {
+            inner: self.store.read_stream_dyn(key, offset),
+            meter: &self.meters.read,
+            clock: &*self.clock,
+            counted: false,
+        })
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {

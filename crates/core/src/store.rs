@@ -534,6 +534,22 @@ pub trait ObjectStore: Send + Sync {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send;
 
+    /// The object `key` from `offset` to its end, as one read the store keeps open and the
+    /// caller takes a piece at a time ([`ReadStream`]): on S3 one GET whose body is read as it
+    /// is used, so an object of any size costs one request and the memory of one piece. Nothing
+    /// is asked of the store before the first [`ReadStream::next`].
+    ///
+    /// The default reads each piece with [`Self::read`], one request a piece: what a store
+    /// whose reads cost nothing needs (memory, a directory). A store that bills by request
+    /// overrides it, and a wrapper forwards it, or its reads go back to one request a piece.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Ranged {
+            store: self,
+            key,
+            offset,
+        })
+    }
+
     /// The stored created-at time of a listed file. `NotFound` when it is gone;
     /// `Transient { InvalidData }` when its size is no longer `file.size`
     /// (another writer replaced it). With no stored created-at time the answer is
@@ -711,6 +727,40 @@ pub trait Upload: Send {
 
 /// A boxed future that may move between threads.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// One object read in order from an offset to its end ([`ObjectStore::read_stream`]).
+///
+/// The pieces follow each other: each starts where the one before ended. A piece is exactly
+/// the length asked for unless the object ends inside it, so a short piece is the end, as for
+/// [`ObjectStore::read`], and no read follows to learn it. A body cut off before the length
+/// the store declared for it is an error (`Transient`), never a short piece: only the end of
+/// the object is one.
+pub trait ReadStream: Send {
+    /// The next `len` bytes: fewer only at the end of the object, none past it.
+    ///
+    /// # Errors
+    /// The store's error. After one the stream is spent: a caller that goes on opens another
+    /// at the offset it reached.
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>>;
+}
+
+/// [`ObjectStore::read_stream`]'s default: one [`ObjectStore::read`] a piece.
+struct Ranged<'a, S: ?Sized> {
+    store: &'a S,
+    key: FileKey,
+    offset: u64,
+}
+
+impl<S: ObjectStore + ?Sized> ReadStream for Ranged<'_, S> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let bytes = self.store.read(&self.key, self.offset, len).await?;
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.offset = self.offset.saturating_add(read);
+            Ok(bytes)
+        })
+    }
+}
 
 /// [`Upload`] with boxed futures, so an upload of any store can be held as one type: the
 /// engine keeps a file part-way sent between ticks without naming its store. Every `Upload`

@@ -10,7 +10,7 @@ use crate::conformance::block_on;
 use crate::layout::Level;
 use crate::mem::MemStore;
 use crate::store::WriteMode;
-use crate::store::{ReadAt, StoreOp, Upload};
+use crate::store::{StoreOp, Upload};
 
 const PS: PageSize = PageSize::MIN;
 
@@ -198,31 +198,35 @@ fn a_vanished_object_is_a_store_fault() {
     ));
 }
 
-/// A store that runs batches `width` wide, records each batch's size, and
-/// fails the read at `fail_at`, whether alone or in a batch.
-struct Wide {
+/// A store that counts the streams it opens and fails the read at `fail_at`, whether a
+/// stream or a lone read asks it.
+struct Streams {
     inner: MemStore,
-    width: usize,
     fail_at: Option<u64>,
-    batches: std::sync::Mutex<Vec<usize>>,
+    opened: std::sync::atomic::AtomicUsize,
+    reads: std::sync::atomic::AtomicUsize,
 }
 
-impl Wide {
-    fn new(inner: MemStore, width: usize, fail_at: Option<u64>) -> Self {
+impl Streams {
+    fn new(inner: MemStore, fail_at: Option<u64>) -> Self {
         Self {
             inner,
-            width,
             fail_at,
-            batches: std::sync::Mutex::new(Vec::new()),
+            opened: std::sync::atomic::AtomicUsize::new(0),
+            reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    fn batches(&self) -> Vec<usize> {
-        self.batches.lock().unwrap().clone()
+    fn opened(&self) -> usize {
+        self.opened.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
-impl ObjectStore for Wide {
+impl ObjectStore for Streams {
     type Upload = <MemStore as ObjectStore>::Upload;
 
     /// Forwards to the store it wraps.
@@ -240,6 +244,7 @@ impl ObjectStore for Wide {
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if self.fail_at == Some(offset) {
             return Err(StoreError::Transient {
                 op: StoreOp::Read,
@@ -247,6 +252,16 @@ impl ObjectStore for Wide {
             });
         }
         self.inner.read(key, offset, len).await
+    }
+
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.opened
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::new(Pieces {
+            store: self,
+            key,
+            offset,
+        })
     }
 
     async fn created_at(
@@ -279,28 +294,34 @@ impl ObjectStore for Wide {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.inner.delete(keys).await
     }
+}
 
-    fn batch_width(&self, _: BatchKind) -> std::num::NonZeroUsize {
-        std::num::NonZeroUsize::new(self.width).unwrap()
-    }
+/// [`Streams`]'s stream: its pieces are its reads, in order.
+struct Pieces<'a> {
+    store: &'a Streams,
+    key: FileKey,
+    offset: u64,
+}
 
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        assert!(reads.len() <= self.width, "a batch wider than the store");
-        self.batches.lock().unwrap().push(reads.len());
-        let mut out = Vec::new();
-        for at in reads {
-            out.push(self.read(&at.key, at.offset, at.len).await);
-        }
-        out
+impl ReadStream for Pieces<'_> {
+    fn next(&mut self, len: ReadLen) -> crate::store::BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let bytes = self.store.read(&self.key, self.offset, len).await?;
+            self.offset = self
+                .offset
+                .checked_add(u64::try_from(bytes.len()).unwrap())
+                .unwrap();
+            Ok(bytes)
+        })
     }
 }
 
-fn pages_from(
-    store: &Wide,
+fn streamed_pages(
+    store: &Streams,
     read: &mut LtxRead,
 ) -> (Vec<u32>, Result<Verified, ReadFault<Infallible>>) {
     let mut pages = Vec::new();
-    let end = block_on(read.read_verified(store, |event| {
+    let end = block_on(read.read_streamed(store, |event| {
         if let Event::Page(page) = event {
             pages.push(page.pgno().get());
         }
@@ -310,52 +331,45 @@ fn pages_from(
 }
 
 #[test]
-fn reading_ahead_feeds_the_decoder_what_sequential_reads_would() {
+fn a_streamed_read_opens_one_stream_and_feeds_the_decoder_what_reads_would() {
     let bytes = snapshot(40);
     let size = u64::try_from(bytes.len()).unwrap();
-    let chunk = len(100);
-    let store = Wide::new(stored(&bytes), 4, None);
-    let mut read = LtxRead::new(key(), chunk).sized(size);
-    let (pages, end) = pages_from(&store, &mut read);
+    let store = Streams::new(stored(&bytes), None);
+    let mut read = LtxRead::new(key(), len(100));
+    let (pages, end) = streamed_pages(&store, &mut read);
     assert_eq!(pages, (1..=40).collect::<Vec<_>>());
     assert_eq!(end.unwrap().page_count(), 40);
     assert_eq!(read.bytes_read(), size);
     assert!(size > 800, "the file spans many chunks");
-    let batches = store.batches();
-    let chunks = usize::try_from(size.div_ceil(100)).unwrap();
-    assert!(batches.iter().all(|&n| n <= 4), "{batches:?}");
-    assert!(batches.first() == Some(&4), "{batches:?}");
-    assert!(
-        batches.iter().sum::<usize>() <= chunks,
-        "the listed size bounds the batches: no read past the end"
+    assert_eq!(store.opened(), 1, "one stream for the whole file");
+    assert_eq!(
+        store.reads(),
+        usize::try_from(size.div_ceil(100)).unwrap(),
+        "a piece per chunk, none past the short last one"
     );
-    assert_eq!(read.held(), 0);
+    assert_eq!(read.held(), 0, "the last chunk is dropped at the end");
 }
 
 #[test]
-fn a_read_without_a_listed_size_never_reads_ahead() {
+fn a_read_a_chunk_at_a_time_opens_no_stream() {
     let bytes = snapshot(40);
-    let store = Wide::new(stored(&bytes), 4, None);
+    let store = Streams::new(stored(&bytes), None);
     let mut read = LtxRead::new(key(), len(100));
-    let (pages, end) = pages_from(&store, &mut read);
-    assert_eq!(pages.len(), 40);
+    let end = block_on(read.read_verified(&store, |_| Ok::<(), Infallible>(())));
     end.unwrap();
-    assert!(store.batches().is_empty());
+    assert_eq!(store.opened(), 0);
 }
 
 #[test]
-fn a_failed_read_in_a_batch_surfaces_where_a_sequential_read_meets_it() {
+fn a_stream_that_fails_part_way_is_a_store_fault_after_the_pages_before_it() {
     let bytes = snapshot(40);
-    let size = u64::try_from(bytes.len()).unwrap();
-    let run = |width: usize| {
-        let store = Wide::new(stored(&bytes), width, Some(500));
-        let mut read = LtxRead::new(key(), len(100)).sized(size);
-        let (pages, end) = pages_from(&store, &mut read);
-        let failed = matches!(end, Err(ReadFault::Store(StoreError::Transient { .. })));
-        (pages, failed, read.bytes_read())
-    };
-    let sequential = run(1);
-    assert!(sequential.1);
-    assert_eq!(run(4), sequential);
-    assert_eq!(run(3), sequential);
+    let store = Streams::new(stored(&bytes), Some(500));
+    let mut read = LtxRead::new(key(), len(100));
+    let (pages, end) = streamed_pages(&store, &mut read);
+    assert!(matches!(
+        end,
+        Err(ReadFault::Store(StoreError::Transient { .. }))
+    ));
+    assert!(!pages.is_empty() && pages.len() < 40, "{pages:?}");
+    assert_eq!(read.bytes_read(), 500);
 }

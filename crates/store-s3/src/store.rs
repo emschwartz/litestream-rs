@@ -6,7 +6,7 @@
 //! means is decided in one place. The store never retries.
 //!
 //! Batches: a call that needs several independent requests (the parts of an
-//! upload, reads ahead, the levels of a listing, a set of created-at times) builds them
+//! upload, a batch of reads, the levels of a listing, a set of created-at times) builds them
 //! all, hands them to [`Transport::send_many`] with the limit of their kind,
 //! and judges each response alone, exactly as a single request. The kinds are
 //! limited apart, as Go does: multipart parts by the `concurrency` setting
@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
     BatchKind, Clock, CreatedAt, CreatedAtSource, FileInfo, FileKey, Level, ListAt, ListedTime,
-    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, WriteMode,
+    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, ReadStream, StoreError, StoreOp, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -43,6 +43,10 @@ use crate::transport::{HttpResponse, StreamedRequest, Transport};
 use crate::upload::S3Upload;
 #[cfg(feature = "ureq")]
 use crate::ureq_transport::UreqTransport;
+
+mod stream;
+
+use stream::S3Stream;
 
 /// What the created-at times read so far found, for the event layer (this crate emits no
 /// events). A listing reads none; each [`ObjectStore::created_at`] and
@@ -304,6 +308,11 @@ impl<T: Transport> ObjectStore for S3Store<T> {
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.inner.read(key, offset, len)
+    }
+
+    /// One GET for the rest of the object, its body read as the pieces are asked for.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(S3Stream::new(&self.inner, key, offset))
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {

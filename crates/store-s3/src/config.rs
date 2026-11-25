@@ -330,9 +330,10 @@ pub(crate) const R2_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add
 /// small responses.
 pub const CREATION_TIME_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(15);
 
-/// Ranged reads (a restore reading ahead) and listing pages (the levels of an
-/// inventory) in flight at once. Go does neither side by side, so there is no
-/// Go value; not configurable. Memory is this many read lengths for reads.
+/// Ranged reads of a batch (`read_many`) and listing pages (the levels of an
+/// inventory) in flight at once; a restore reads each file through one GET instead.
+/// Go does neither side by side, so there is no Go value; not configurable. Memory
+/// is this many read lengths for reads.
 pub const READ_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(7);
 
 /// A count as bytes, for the memory bounds below; a `usize` fits a `u64` on every target
@@ -363,7 +364,7 @@ const _: () = assert!(R2_CONCURRENCY.get() <= DEFAULT_CONCURRENCY.get());
 // One batch of read-ahead HEADs never asks for more than a decision names ahead.
 const _: () = assert!(CREATION_TIME_CONCURRENCY.get() <= lsr_core::MAX_AHEAD);
 // Memory in the worst case with the defaults: an upload buffers at most `concurrency`
-// parts (5 x 16 MiB on Tigris, 80 MiB), and a restore holds at most `READ_CONCURRENCY`
+// parts (5 x 16 MiB on Tigris, 80 MiB), and a batch of reads holds at most `READ_CONCURRENCY`
 // reads of the largest length (8 x 16 MiB, 128 MiB). Both stay under 128 MiB. What each
 // really holds, parts and bodies copied nowhere, is pinned through the real client by
 // `tests/store-s3/memory.rs`.

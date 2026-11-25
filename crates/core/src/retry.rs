@@ -34,8 +34,8 @@ use crate::env::{Clock, Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, Reread, StoreError,
-    Upload, WriteMode,
+    BatchKind, BoxFuture, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, ReadStream,
+    Reread, StoreError, Upload, WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -419,6 +419,15 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         core.run(|| core.inner.read(key, offset, len)).await
     }
 
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Resuming {
+            core: &self.core,
+            key,
+            offset,
+            open: None,
+        })
+    }
+
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let core = &*self.core;
         core.run(|| core.inner.created_at(file)).await
@@ -521,6 +530,54 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
             out.push(settled);
         }
         out
+    }
+}
+
+/// A stream through a [`Retrying`] store. A piece that fails is asked again of a new stream
+/// from the offset the pieces before it reached, under the policy as a read would be, so a
+/// connection lost a gigabyte into a file costs one request more, not the file.
+struct Resuming<'a, S, P, E> {
+    core: &'a Core<S, P, E>,
+    key: FileKey,
+    /// Where the next piece starts: the bytes handed out so far.
+    offset: u64,
+    /// The inner stream, once one answered; `None` before the first piece and after a failure.
+    open: Option<Box<dyn ReadStream + 'a>>,
+}
+
+impl<S: ObjectStore, P: Sleeper, E: Entropy> ReadStream for Resuming<'_, S, P, E> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let core = self.core;
+            let (key, offset) = (self.key, self.offset);
+            let first = match self.open.as_mut() {
+                Some(open) => open.next(len).await,
+                None => {
+                    Counters::bump(&core.counters.calls);
+                    let mut fresh = core.inner.read_stream(key, offset);
+                    let first = fresh.next(len).await;
+                    self.open = Some(fresh);
+                    first
+                }
+            };
+            let bytes = match first {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    self.open = None;
+                    let reopen = || async move {
+                        let mut fresh = core.inner.read_stream(key, offset);
+                        let bytes = fresh.next(len).await?;
+                        Ok((fresh, bytes))
+                    };
+                    let (fresh, bytes) = core.settle(Err(err), reopen, false).await?;
+                    self.open = Some(fresh);
+                    bytes
+                }
+            };
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.offset = offset.saturating_add(read);
+            Ok(bytes)
+        })
     }
 }
 

@@ -1,0 +1,9 @@
+# A restore's GET whose connection ends before the length it declared is taken as the end of
+# the object, so the decoder sees a short file instead of a failure the retry goes on from.
+name = "stream-short-body-taken-as-end"
+fix = "claude/restore-requests"
+package = "lsr-store-s3"
+tests = [
+    "stream::cases::a_body_short_of_its_length_fails",
+    "store::cases::a_stream_cut_short_fails_where_the_body_ends",
+]

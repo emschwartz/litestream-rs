@@ -1,0 +1,12 @@
+diff --git a/crates/store-s3/src/store/stream.rs b/crates/store-s3/src/store/stream.rs
+--- a/crates/store-s3/src/store/stream.rs
++++ b/crates/store-s3/src/store/stream.rs
+@@ -127,7 +127,7 @@
+         out.truncate(filled);
+         let got = u64::try_from(filled).unwrap_or(u64::MAX);
+         *left = left.map(|left| left.saturating_sub(got));
+-        if ended && left.is_some_and(|left| left > 0) {
++        if ended && left.is_some_and(|left| left > u64::from(u32::MAX)) {
+             // The connection ended before the body did.
+             self.state = State::Done;
+             return Err(StoreError::Transient {

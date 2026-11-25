@@ -47,7 +47,7 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::task::JoinSet;
 
 use crate::request::{HttpRequest, Method};
-use crate::transport::{Bounds, HttpResponse, Transport, TransportError};
+use crate::transport::{Bounds, HttpResponse, Opened, Transport, TransportError};
 use crate::transport::{MAX_BODY, map_io};
 use crate::trust;
 
@@ -170,20 +170,22 @@ impl ReqwestTransport {
     }
 
     fn build(&self, request: &HttpRequest) -> reqwest::RequestBuilder {
-        let mut builder = self
-            .client
+        let cap = self.bounds.cap(
+            u64::try_from(request.body().len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(if request.method() == Method::Get {
+                    MAX_BODY
+                } else {
+                    0
+                }),
+        );
+        Self::unbounded(&self.client, request).timeout(cap)
+    }
+
+    /// `request` as reqwest takes it, with no cap over the whole exchange.
+    fn unbounded(client: &reqwest::Client, request: &HttpRequest) -> reqwest::RequestBuilder {
+        let mut builder = client
             .request(method(request.method()), request.url().as_str())
-            .timeout(
-                self.bounds.cap(
-                    u64::try_from(request.body().len())
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(if request.method() == Method::Get {
-                            MAX_BODY
-                        } else {
-                            0
-                        }),
-                ),
-            )
             .body(request.body().to_vec());
         // Every header is sent as signed, `content-length` included: hyper keeps a
         // given length (it equals the body's), and without it an empty PUT goes
@@ -226,7 +228,99 @@ impl ReqwestTransport {
     }
 }
 
+/// A streamed GET's body ([`Transport::open`]): each chunk driven to completion as the caller
+/// asks, no later than the stall bound after the one before, and the whole body within the cap
+/// its declared length allows from its head.
+struct Streamed<'a> {
+    transport: &'a ReqwestTransport,
+    response: reqwest::Response,
+    /// The chunk being handed out, and how much of it is.
+    pending: Vec<u8>,
+    at: usize,
+    began: std::time::Instant,
+    allowed: Duration,
+}
+
+impl crate::transport::Body for Streamed<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        if self.at >= self.pending.len() {
+            if self.began.elapsed() > self.allowed {
+                return Err(TransportError::Timeout);
+            }
+            let stall = self.transport.bounds.stall();
+            let response = &mut self.response;
+            let next = self.transport.drive(
+                async move {
+                    tokio::time::timeout(stall, response.chunk())
+                        .await
+                        .map_err(|_elapsed| TransportError::Timeout)?
+                        .map_err(|err| map_error(&err))
+                        .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+                },
+                Err(TransportError::Io(io::ErrorKind::Other)),
+            )?;
+            let Some(chunk) = next else { return Ok(0) };
+            self.pending = chunk;
+            self.at = 0;
+        }
+        let rest = self.pending.get(self.at..).unwrap_or_default();
+        let count = rest.len().min(buf.len());
+        let (Some(to), Some(from)) = (buf.get_mut(..count), rest.get(..count)) else {
+            return Ok(0);
+        };
+        to.copy_from_slice(from);
+        self.at = self.at.saturating_add(count);
+        Ok(count)
+    }
+}
+
 impl Transport for ReqwestTransport {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a socket timeout runs on the real clock, which no injected clock reaches"
+    )]
+    fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
+        if request.method() != Method::Get {
+            return self.send(request).map(Opened::of);
+        }
+        // No cap over the whole exchange, which would cut a long body: the request up to its
+        // head has the stall bound, and the body its own cap from there.
+        let builder = Self::unbounded(&self.client, &request);
+        let stall = self.bounds.stall();
+        let response = self.drive(
+            async move {
+                tokio::time::timeout(stall, builder.send())
+                    .await
+                    .map_err(|_elapsed| TransportError::Timeout)?
+                    .map_err(|err| map_error(&err))
+            },
+            Err(TransportError::Io(io::ErrorKind::Other)),
+        )?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let bounds = self.bounds;
+            let whole = self.drive(
+                answer(response, false, bounds),
+                Err(TransportError::Io(io::ErrorKind::Other)),
+            )?;
+            return Ok(Opened::Whole(whole));
+        }
+        let headers = head_of(&response);
+        let allowed = self.bounds.cap(response.content_length().unwrap_or(0));
+        let body = Streamed {
+            transport: self,
+            response,
+            pending: Vec::new(),
+            at: 0,
+            began: std::time::Instant::now(),
+            allowed,
+        };
+        Ok(Opened::Streaming(
+            HttpResponse::new(status, headers, Vec::new(), true),
+            Box::new(body),
+        ))
+    }
+
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
         let sent = u64::try_from(request.body().len()).unwrap_or(u64::MAX);
@@ -311,12 +405,16 @@ async fn exchange(
     bounds: Bounds,
     sent: u64,
 ) -> Result<HttpResponse, TransportError> {
-    let mut response = tokio::time::timeout(bounds.cap(sent), builder.send())
+    let response = tokio::time::timeout(bounds.cap(sent), builder.send())
         .await
         .map_err(|_elapsed| TransportError::Timeout)?
         .map_err(|err| map_error(&err))?;
-    let status = response.status().as_u16();
-    let headers: Vec<(String, String)> = response
+    answer(response, head_only, bounds).await
+}
+
+/// A response's headers as received.
+fn head_of(response: &reqwest::Response) -> Vec<(String, String)> {
+    response
         .headers()
         .iter()
         .map(|(name, value)| {
@@ -325,7 +423,18 @@ async fn exchange(
                 String::from_utf8_lossy(value.as_bytes()).into_owned(),
             )
         })
-        .collect();
+        .collect()
+}
+
+/// The answer's body read whole within the cap its declared length allows, no chunk later than
+/// the stall bound after the one before.
+async fn answer(
+    mut response: reqwest::Response,
+    head_only: bool,
+    bounds: Bounds,
+) -> Result<HttpResponse, TransportError> {
+    let status = response.status().as_u16();
+    let headers = head_of(&response);
     let declared = response.content_length();
     let expected = declared
         .filter(|_| !head_only)

@@ -42,6 +42,8 @@ mod sourced;
 #[cfg(test)]
 mod store;
 #[cfg(test)]
+mod stream;
+#[cfg(test)]
 mod tigris;
 #[cfg(test)]
 #[path = "common/wire.rs"]

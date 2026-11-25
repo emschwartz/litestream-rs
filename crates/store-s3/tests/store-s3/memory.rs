@@ -19,9 +19,8 @@
 //! - An upload written from a file it can read again (`Upload::write_from`) holds no part:
 //!   a digest and a few tallies for each, and one 256 KiB read for each request being sent,
 //!   whatever the part size.
-//! - A restore holds one read window: `READ_CONCURRENCY` responses of the 4 MiB the engine
-//!   asks for, whatever the database's size, so each response holds its length and not the
-//!   capacity a read grown from empty ends with.
+//! - A restore holds one chunk: each file is one GET whose body is read from the connection
+//!   4 MiB at a time as the decoder takes it, whatever the database's size.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -52,8 +51,8 @@ use lsr_ltx::{
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{
-    BucketName, Endpoint, FakeS3, HttpRequest, Method, PartSize, Prefix, READ_CONCURRENCY,
-    S3Config, S3Store, Transport, object_key,
+    BucketName, Endpoint, FakeS3, HttpRequest, Method, PartSize, Prefix, S3Config, S3Store,
+    Transport, object_key,
 };
 use url::Url;
 
@@ -510,35 +509,60 @@ fn restore_peak(mib: usize) -> usize {
 /// result. Tighter than `MARGIN` so that one more chunk, a copy of a body, is over the bound.
 const RESTORE_MARGIN: usize = 3 * MIB;
 
-/// The most a restore may hold: `READ_CONCURRENCY` responses of the chunk it asks for in
-/// flight, and the margin.
+/// The most a restore may hold: the one chunk it takes from a file's stream, and the margin.
 fn restore_bound() -> usize {
-    READ_CONCURRENCY.get() * RESTORE_CHUNK + RESTORE_MARGIN
+    RESTORE_CHUNK + RESTORE_MARGIN
 }
 
-/// A restore through the real client holds its read window, and no more as the database
-/// grows from 72 MiB to 144 MiB.
+/// A restore through the real client streams each file through one GET and holds one chunk of
+/// it, and no more as the database grows from 72 MiB to 144 MiB: the body is read from the
+/// connection as the decoder takes it, never held whole.
 #[test]
-fn a_restore_through_the_real_client_holds_one_read_window() {
-    let window = READ_CONCURRENCY.get() * RESTORE_CHUNK;
-    assert!(
-        72 * MIB > window,
-        "the database must be larger than the window"
-    );
+fn a_restore_through_the_real_client_holds_one_chunk() {
     let few = restore_peak(72);
+    let many = restore_peak(144);
     eprintln!(
-        "restore 72 MiB: {} KiB (bound {} KiB)",
+        "restore 72 MiB: {} KiB, 144 MiB: {} KiB (bound {} KiB)",
         few >> 10,
+        many >> 10,
         restore_bound() >> 10
     );
-    assert!(
-        few <= restore_bound(),
-        "restore held {few} bytes, over {}",
-        restore_bound()
+    for peak in [few, many] {
+        assert!(
+            peak <= restore_bound(),
+            "restore held {peak} bytes, over {}",
+            restore_bound()
+        );
+        assert!(
+            peak >= RESTORE_CHUNK,
+            "the gate saw {peak} bytes: it cannot see the chunk"
+        );
+    }
+}
+
+/// A ranged read of 12 MiB (a compaction's replica reads are a mebibyte; the largest a
+/// `ReadLen` allows is 16): the response body is held once, at its length. A body copied out of
+/// the response, or read into a buffer grown from empty (16 MiB of capacity and an 8 MiB block
+/// beside it while it grows), is over the bound.
+#[test]
+fn a_ranged_read_through_the_real_client_holds_its_body_once() {
+    let fake = fake();
+    let len = 12 * MIB;
+    let key = FileKey::snapshot(txid(1));
+    fake.put_raw(
+        &object_key(config().prefix(), &key),
+        vec![7; len + MIB],
+        &[("x-amz-meta-litestream-timestamp", &now().to_string())],
     );
+    let store = store_on(serve(&fake), PartSize::MIN.get().try_into().unwrap(), 5);
+    let want = lsr_core::ReadLen::new(u32::try_from(len).unwrap()).unwrap();
+    let (read, peak) = process_peak_of(|| block_on(store.read(&key, 0, want)));
+    assert_eq!(read.unwrap().len(), len);
+    eprintln!("ranged read of {} KiB: {} KiB", len >> 10, peak.extra >> 10);
     assert!(
-        few >= window - RESTORE_CHUNK,
-        "the gate saw {few} bytes: it cannot see the window"
+        peak.extra <= len + RESTORE_MARGIN,
+        "a read of {len} bytes held {}",
+        peak.extra
     );
 }
 

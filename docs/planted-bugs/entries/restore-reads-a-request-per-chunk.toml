@@ -1,0 +1,9 @@
+# A restore reads each file a ranged read per 4 MiB chunk, a request each, instead of one stream.
+name = "restore-reads-a-request-per-chunk"
+fix = "claude/restore-requests"
+package = "lsr-core"
+test_bin = "core"
+tests = [
+    "gates::restore_of_a_chain_sends_one_request_per_file",
+    "gates::restore_through_the_retry_layer_reads_a_file_in_one_request",
+]
