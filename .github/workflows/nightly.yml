@@ -165,11 +165,16 @@ jobs:
 
   # Every defect fixed on main is planted again in a scratch tree and the tests that caught it must
   # fail (docs/planted-bugs.md). A survivor means a test no longer guards its fix; a patch that stops
-  # applying means the entry needs re-expressing against the current tree. About 25 minutes cold on
-  # a hosted runner (two test builds, eight entries).
+  # applying means the entry needs re-expressing against the current tree. The ledger (over 300
+  # entries, a build each) outgrew one runner's hour, so eight slices run in parallel; raising the
+  # ceiling would only hide the next outgrowth, so add shards when a slice nears 40 minutes.
   planted-bugs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -177,7 +182,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,just
-      - run: just planted-bugs
+      - run: just planted-bugs --shard "${{ matrix.shard }}/8"
 
   # The real-SQLite power-loss campaigns (`just power-loss-trials`): 50 seeds of the history rig
   # and 100 of the crash-cycle rig under the block crash law, judged by restores, some made while
