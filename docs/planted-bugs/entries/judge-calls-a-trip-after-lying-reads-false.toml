@@ -1,0 +1,7 @@
+# The fail-stop judge excuses an age trip only on ticks where reads lie, so a trip the engine
+# dated from a stamp while a listing lied, tripping on the first honest tick, is called false.
+name = "judge-calls-a-trip-after-lying-reads-false"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["failstop::a_trip_dated_by_lying_reads_stands_on_the_first_honest_tick"]
