@@ -3,6 +3,9 @@
 //! Each turn takes the pending commands, ticks the engine once, writes the health snapshot,
 //! and parks until the earliest of the engine's own next wake, the next poll of the WAL
 //! (`Config::poll_interval`) and a command. Work that is ready runs at once, without a park.
+//! New commits alone are not ready work inside a poll interval: the engine holds their sync
+//! until one interval after its last (`lsr_core::ActorConfig::sync_interval`) and names that
+//! time as its wake, so the ticks that follow one another at once do not each stage a file.
 //!
 //! A panic inside a tick is caught here and never leaves the thread. The engine and its
 //! SQLite connections are dropped, since the panic may have unwound through either; under

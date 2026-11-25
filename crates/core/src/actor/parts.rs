@@ -449,6 +449,10 @@ pub(super) struct Engine {
     /// The tokens of the staged files this engine put on the replica and has not pruned:
     /// what a level-1 compaction knows of the replica's copies without reading them.
     pub(super) sent: Sent,
+    /// When the last sync step began, for [`super::ActorConfig::sync_interval`].
+    pub(super) synced_at: Option<Timestamp>,
+    /// When the sync step this tick held back may run: the tick's wake.
+    pub(super) sync_due: Option<Timestamp>,
     /// The newest level-0 transaction this engine sent a put for. Past what a listing or a
     /// commit confirmed, only its own puts whose answer was lost can be on the replica: a
     /// boot's listing showed everything earlier processes put. So a takeover record before
@@ -483,6 +487,8 @@ impl Engine {
             dropped_through: None,
             witnesses: Witnesses::new(),
             sent: Sent::default(),
+            synced_at: None,
+            sync_due: None,
             attempted: None,
             syncs_ahead: 0,
             slices_ahead: 0,

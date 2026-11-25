@@ -640,6 +640,16 @@ recovered_by = "sim::`a_crash_between_two_slices_sends_the_file_again_from_its_f
 notes = "Before this a file was one unit of work however large, and the engine neither staged a commit nor ran a checkpoint until it was on the replica (issue #364). The simulator bounds every upload tick's bytes and the slices sent in a row while a commit waits (`sim/src/resources.rs`). Level-9 copies, compactions and the staging of a whole database are still one unit each"
 
 [[row]]
+table = "Running"
+id = "RUN-31"
+circumstance = "The application commits steadily while the engine ticks more often than it polls: a staged file waits to be uploaded, a compaction or a listing just ran"
+response = "continue. A sync step that only new commits ask for runs no sooner than one poll interval (`monitor-interval`, 1 s) after the last one began, and the tick that holds it names that time as its wake: one level-0 file per interval, as under Go. The rest of a sync the byte cap cut short, a snapshot, a due checkpoint's proof and a drain are not held (`docs/decisions/D237.md`)"
+signal = "none"
+at_risk = "None. A commit is staged at most one poll interval after it was made, as before"
+recovery = "None needed"
+detected_by = "core::`a_steady_writer_stages_one_file_per_poll_interval`, core::`a_commit_inside_the_interval_waits_for_it_and_the_tick_names_the_wake`, core::`a_snapshot_asked_for_does_not_wait_for_the_interval`, core::`the_rest_of_a_capped_sync_follows_at_once`, core::`a_due_checkpoint_syncs_inside_the_interval`, core::`a_drain_does_not_wait_for_the_interval`, replica::`new_commits_are_synced_once_per_poll_interval`; plant::`sync-interval-ignored`, plant::`held-sync-names-no-wake`, plant::`sync-interval-holds-a-forced-step`, plant::`sync-interval-holds-a-drain`"
+notes = "Before: every tick staged what was committed since the last, so a commit that landed while the poll's file was written became a second file in the same second (101 level-0 PUTs a minute against Go's 61 at 20 commits a second; in a run against a file replica 84 files in 42 s, 42 after). The simulator runs with no interval"
+[[row]]
 table = "Checkpoint"
 id = "CKPT-1"
 circumstance = "1000 synced frames, or 1 minute since the last checkpoint with something synced (`checkpoint.rs`). PASSIVE under a write barrier: seal (sync through the committed end), checkpoint, write one frame of its own, follow the WAL if it restarted (`checkpoint.rs`)"

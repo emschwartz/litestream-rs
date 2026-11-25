@@ -199,6 +199,12 @@ impl<
 pub struct ActorConfig {
     /// What a sync step may do.
     pub sync: SyncConfig,
+    /// The least time between two sync steps that only new commits ask for, so a steady
+    /// writer costs one level-0 file an interval however often the engine ticks: Go's
+    /// monitor interval (`db.go`, one `Sync` per tick of its ticker). Zero syncs on every
+    /// tick that finds the WAL moved. A step something else asks for is never held: the
+    /// rest of a sync the byte cap cut short, a snapshot, a checkpoint's proof, a drain.
+    pub sync_interval: Duration,
     /// When to checkpoint.
     pub checkpoint: CheckpointConfig,
     /// Upload limits.
@@ -1519,6 +1525,9 @@ impl Actor {
         now: Timestamp,
         may_checkpoint: bool,
     ) -> Option<Tick> {
+        // A held sync is held by this tick or not at all: a wake left from an earlier tick
+        // would be a deadline nothing acts on.
+        self.engine.sync_due = None;
         if !self.kept.tasks.ready(Task::Sync, now) {
             return None;
         }
@@ -1529,10 +1538,20 @@ impl Actor {
         self.kept.app.poll(committed);
         let wants_live = may_checkpoint && self.kept.live.wanted() && self.caught_up();
         let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
-        let quiet = !self.wal_moved(committed) && self.pending().is_none() && !self.more_wal();
-        if quiet && !wants_proof {
-            return None;
+        // Without one of these a step has only new commits to stage, and those wait out the
+        // sync interval: every tick that follows another at once (a file to upload, a
+        // compaction) would else stage the commits made since the last as a file of their own.
+        let forced = wants_proof || self.pending().is_some() || self.more_wal();
+        if !forced {
+            if !self.wal_moved(committed) {
+                return None;
+            }
+            if let Some(due) = self.sync_held_until(now) {
+                self.engine.sync_due = Some(due);
+                return None;
+            }
         }
+        self.engine.synced_at = Some(now);
         let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
         self.step_ended(env.clock, began, &stepped);
@@ -1551,6 +1570,16 @@ impl Actor {
             return Some(self.checkpoint_unit(env, proof, decision, mode, now).await);
         }
         (files > 0).then(|| self.ran(Event::Synced { files }, now))
+    }
+
+    /// When a sync step that only new commits ask for may run, if not yet: one
+    /// [`ActorConfig::sync_interval`] after the last step began. Engine time never reads
+    /// earlier than it did (`actor/clock.rs`), so the wait is never longer than the
+    /// interval. A drain waits for nothing.
+    fn sync_held_until(&self, now: Timestamp) -> Option<Timestamp> {
+        let last = self.engine.synced_at?;
+        let due = last.checked_add(self.kept.cfg.sync_interval)?;
+        (self.running() && now < due).then_some(due)
     }
 
     /// Whether everything staged is on the replica.
@@ -2728,8 +2757,9 @@ impl Actor {
     }
 
     /// Every deadline a task holds: retry waits, the checkpoint gate, the
-    /// maintenance schedule (whose `Due::Wait` includes each level's backoff)
-    /// and the drain's end. Tasks a draining actor does not run hold none.
+    /// maintenance schedule (whose `Due::Wait` includes each level's backoff),
+    /// the drain's end and a sync this tick held for its interval. Tasks a
+    /// draining actor does not run hold none.
     fn deadlines(&self) -> impl Iterator<Item = Timestamp> {
         let running = self.running();
         let task = |task: Task| self.kept.tasks.get(task).until();
@@ -2741,7 +2771,8 @@ impl Actor {
             self.engine.gate.until(),
             self.engine.maintain.until,
         ];
-        [task(Task::Sync), task(Task::Upload), deadline]
+        let held = self.engine.sync_due;
+        [task(Task::Sync), task(Task::Upload), deadline, held]
             .into_iter()
             .chain(only_running.into_iter().filter(move |_| running))
             .flatten()

@@ -288,6 +288,8 @@ pub fn actor_config() -> ActorConfig {
             min_pages: NonZeroU32::new(PASSIVE_PAGES),
             truncate_pages: NonZeroU32::new(TRUNCATE_PAGES),
         },
+        // The swarm ticks on its own schedule and wants every tick to stage what it finds.
+        sync_interval: Duration::ZERO,
         upload: UploadConfig::default(),
         maintenance: Maintenance::go_default(),
         retry_interval: Duration::from_secs(1),

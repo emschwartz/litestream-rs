@@ -514,6 +514,8 @@ impl Rig {
 fn cfg() -> ActorConfig {
     ActorConfig {
         sync: SyncConfig::default(),
+        // The tests tick when they have something to stage (`steady` sets an interval).
+        sync_interval: Duration::ZERO,
         checkpoint: CheckpointConfig {
             interval: None,
             min_pages: None,
