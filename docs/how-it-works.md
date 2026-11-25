@@ -41,10 +41,10 @@ One thread per database does everything, one unit of work at a time, in this ord
 
 1. **Sync.** Every second it reads the wal-index. If commits arrived, it syncs the WAL to disk, reads the new commits, and writes them as one level-0 file in the working folder. Syncing first means the bucket never holds a commit that a power loss could take from the database on an honest disk.
 2. **Checkpoint**, when one is due, in the same step as a sync that reached the WAL's end.
-3. **Upload** each staged file. Every file is verified on the read that uploads it and sent with a checksum. Uploads are create-only where the store supports it, so a second writer's file is refused instead of overwritten.
+3. **Upload** each staged file, 8 MiB a turn: a larger file is sent over several turns, with syncs and checkpoints in between, and appears on the replica only when it is whole. Every file is verified on the read that uploads it and sent with a checksum. Uploads are create-only where the store supports it, so a second writer's file is refused instead of overwritten.
 4. **Maintenance**: merges, snapshots and deletes, planned from a listing of the bucket. A restarted process reading the same listing plans the same job.
 
-A failure in one task does not stop the others, but a long unit does: while the thread copies the whole database (a first sync, a snapshot) or uploads one large file, nothing new is synced or uploaded. Each retry waits longer, up to 5 minutes, and a failure that persists becomes a named degraded state.
+A failure in one task does not stop the others, but a long unit does: while the thread copies the whole database (a first sync, a snapshot), nothing new is synced or uploaded. Each retry waits longer, up to 5 minutes, and a failure that persists becomes a named degraded state.
 
 ## Compaction, snapshots and retention
 
