@@ -1310,7 +1310,7 @@ response = "continue. A file this process put itself is aged by the created-at t
 signal = "`created_at_read` on the `Maintained` event counts the HEADs"
 at_risk = "None. The rule and what it deletes are unchanged"
 recovery = "n/a"
-detected_by = "core::`retention_reads_no_created_at_time_of_a_file_this_process_put`, core::`after_a_restart_retention_reads_the_created_at_times_it_does_not_know`, core::`a_remembered_put_answers_only_for_the_file_it_was`, core::`level_zero_is_kept_until_deleted_and_a_level_above_keeps_its_newest`, core::`a_known_created_at_time_costs_no_read`; plant::`known-created-at-not-used`, plant::`known-created-at-of-another-file`, plant::`known-created-at-never-forgotten`"
+detected_by = "core::`retention_reads_no_created_at_time_of_a_file_this_process_put`, core::`after_a_restart_retention_reads_the_created_at_times_it_does_not_know`, core::`a_remembered_put_answers_only_for_the_file_it_was`, core::`files_are_kept_until_deleted_and_each_level_has_a_cap`, core::`a_known_created_at_time_costs_no_read`; plant::`known-created-at-not-used`, plant::`known-created-at-of-another-file`, plant::`known-created-at-never-forgotten`"
 notes = "Before: one HEAD per level-0 file deleted, as many as level-0 PUTs once retention had begun, where Go sends none (it ages by `LastModified`)"
 [[row]]
 table = "Maintenance and retention"
