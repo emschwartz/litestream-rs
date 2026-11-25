@@ -2279,6 +2279,7 @@ mod degraded;
 mod first_start;
 mod index_reset;
 mod lag;
+mod level_holes;
 mod listing;
 mod live;
 mod newest_replica_file;

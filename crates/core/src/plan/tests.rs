@@ -228,6 +228,63 @@ fn a_higher_level_file_spanning_the_hole_heals_it() {
     }
 }
 
+/// What a restore gets: the transaction it reaches, or which refusal.
+fn answer(outcome: &PlanOutcome) -> Result<Txid, std::mem::Discriminant<PlanOutcome>> {
+    match outcome {
+        PlanOutcome::Plan(chain) => Ok(chain.reaches()),
+        refusal @ (PlanOutcome::EmptyReplica
+        | PlanOutcome::NoSnapshot { .. }
+        | PlanOutcome::BeyondNewest { .. }
+        | PlanOutcome::AsOfInsideFile { .. }
+        | PlanOutcome::Gap { .. }
+        | PlanOutcome::InsideFile { .. }
+        | PlanOutcome::MalformedSnapshot { .. }) => Err(std::mem::discriminant(refusal)),
+    }
+}
+
+/// Levels 2 and 3 with the holes a compaction that took only the newest file below left
+/// (`docs/decisions/D228.md`), over a whole level 1: every restore, to the newest
+/// transaction, to each transaction and to each instant, answers as it does on the same
+/// replica with no hole. The planner takes the level below wherever a level has a hole.
+#[test]
+fn holes_above_level_one_cost_a_restore_nothing() {
+    let base = [
+        at(9, 1, 3),
+        at(1, 4, 6),
+        at(1, 7, 9),
+        at(1, 10, 12),
+        at(1, 13, 15),
+        at(0, 15, 15),
+    ];
+    let whole = [at(2, 4, 6), at(2, 7, 9), at(2, 10, 12), at(2, 13, 15)];
+    let whole_three = [at(3, 4, 6), at(3, 7, 12), at(3, 13, 15)];
+    // Level 2 without 7 to 9, level 3 without 7 to 12.
+    let holed = [at(2, 4, 6), at(2, 10, 12), at(2, 13, 15)];
+    let holed_three = [at(3, 4, 6), at(3, 13, 15)];
+    let with_holes = inv(&[&base[..], &holed[..], &holed_three[..]].concat());
+    let without = inv(&[&base[..], &whole[..], &whole_three[..]].concat());
+    let mut targets = vec![RestoreTarget::Latest];
+    targets.extend((1..=15).map(|n| RestoreTarget::Txid(txid(n))));
+    targets.extend((1..=31).map(|n| RestoreTarget::AsOf(Timestamp::from_unix_millis(n * 50))));
+    for target in targets {
+        assert_eq!(
+            answer(&plan_reference(&with_holes, target)),
+            answer(&plan_reference(&without, target)),
+            "{target:?}"
+        );
+    }
+    // The targets a hole could have cost: the newest, the end of the level-1 file inside
+    // both holes, and an instant right after it.
+    assert_eq!(
+        answer(&plan_reference(&with_holes, RestoreTarget::Latest)),
+        Ok(txid(15))
+    );
+    assert_eq!(
+        keys(&plan_reference(&with_holes, RestoreTarget::Txid(txid(9)))),
+        vec![key(9, 1, 3), key(3, 4, 6), key(1, 7, 9)]
+    );
+}
+
 #[test]
 fn an_overlapping_higher_file_replaces_the_small_ones() {
     let files = [at(9, 1, 3), at(0, 4, 4), at(0, 5, 5), at(2, 3, 8)];
