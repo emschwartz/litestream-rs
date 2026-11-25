@@ -215,7 +215,6 @@ pub(crate) struct Seeding {
     seeded: Seeded,
     from: Option<Txid>,
     prev: Option<SeedRead>,
-    placed: bool,
 }
 
 impl Seeding {
@@ -229,7 +228,6 @@ impl Seeding {
             },
             from,
             prev: None,
-            placed: false,
         }
     }
 
@@ -259,14 +257,12 @@ impl Seeding {
         if pending && (!changes || nothing_new) {
             self.seeded.quiet.insert(key.range().max());
         } else if pending
-            && !self.placed
             && self.prev.is_none()
             && self.from.is_some()
             && let Some(end) = read.wal_end
         {
             self.seeded.unplaced = Some((key.range().max(), end));
         }
-        self.placed |= pending;
         self.prev = Some(read);
     }
 
