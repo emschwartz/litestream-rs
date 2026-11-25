@@ -404,6 +404,10 @@ fn a_store_fault_during_a_send_retries_the_file_from_its_first_byte() {
 #[test]
 fn maintenance_takes_its_turn_between_the_slices_of_a_file() {
     let (mut rig, mut actor) = caught_up_with(slicing(8));
+    // The first snapshot is written before any level, and a snapshot waits for idle uploads:
+    // with one in flight it holds the levels back (D231), so the replica has its snapshot first.
+    rig.follow(&mut actor, T0, 20);
+    assert!(!Rig::files(&rig.remote, Level::SNAPSHOT).is_empty());
     for n in 2..=5 {
         commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
     }

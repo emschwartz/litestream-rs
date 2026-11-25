@@ -134,6 +134,10 @@ pub(crate) struct Remembered {
     /// Levels whose newest file is one this engine's own job confirmed and no listing has
     /// replaced: the destination's last file is known without listing the level after it.
     own: BTreeSet<Level>,
+    /// The last whole listing held no snapshot and no level-1 file: the first snapshot is
+    /// planned before any level (D224), and only a whole listing plans it, so a short pass
+    /// that came first would compact level 1 while the snapshot waited.
+    first_snapshot_owed: bool,
 }
 
 /// A listing kept for the pass right after this engine's own job (see
@@ -193,6 +197,7 @@ impl Remembered {
     pub(crate) fn short_ok(&self, now: Timestamp) -> bool {
         self.known
             && !self.full_owed
+            && !self.first_snapshot_owed
             && self.gate == Gate::Clear
             && self.full_by.is_some_and(|by| now < by)
             && self.retention_wake.is_none_or(|wake| now < wake)
@@ -256,6 +261,8 @@ impl Remembered {
         };
         self.zero_min = first_zero;
         self.known = true;
+        self.first_snapshot_owed =
+            super::snapshot_end(inventory).is_none() && inventory.level(ONE).is_empty();
         self.quiet.clear();
         self.snapshot_quiet = None;
         self.fresh.clear();
