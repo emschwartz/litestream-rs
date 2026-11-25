@@ -20,8 +20,9 @@ use crate::store::RecorderCounts;
 const HELD_HEADER: u64 = 100;
 
 /// Slices that may run after the application commits before a tick ends in anything else:
-/// with a file in flight the WAL step and the slices take turns (`docs/decisions/D217.md`).
-pub const SLICES_AHEAD: u64 = 1;
+/// a file in flight leaves the WAL step the tick after each eight of its slices
+/// (`docs/decisions/D217.md`).
+pub const SLICES_AHEAD: u64 = 8;
 
 /// The largest piece the engine hands a store at once: its flush threshold
 /// (1 MiB) and a page of slack.

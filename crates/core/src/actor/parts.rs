@@ -437,6 +437,10 @@ pub(super) struct Engine {
     /// every tick keeps the WAL step busy on each one, and the upload step that follows it
     /// would otherwise never run.
     pub(super) syncs_ahead: u32,
+    /// Slices of the file in flight sent in a row since the WAL step last had its turn; at
+    /// [`super::state::FAIR_SHARE`] the WAL step goes first again. A file of many slices
+    /// would otherwise keep every commit made meanwhile in the WAL until it is whole.
+    pub(super) slices_ahead: u32,
 }
 
 impl Engine {
@@ -457,6 +461,7 @@ impl Engine {
             witnesses: Witnesses::new(),
             attempted: None,
             syncs_ahead: 0,
+            slices_ahead: 0,
         }
     }
 }

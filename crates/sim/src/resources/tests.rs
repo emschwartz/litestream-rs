@@ -165,33 +165,39 @@ fn an_upload_tick_that_hands_the_replica_more_than_a_slice_breaks_the_bound() {
     per_tick(&s, LIMITS).unwrap();
 }
 
-/// The checker can fail: two slices in a row after a commit are one too many, and a tick of
-/// anything else between them is the turn the WAL step is owed.
+/// The checker can fail: nine slices in a row after a commit are one too many, and a tick of
+/// anything else among them is the turn the WAL step is owed. Slices before the commit are
+/// not counted.
 #[test]
-fn two_slices_in_a_row_after_a_commit_break_the_bound() {
+fn nine_slices_in_a_row_after_a_commit_break_the_bound() {
     let mut reach = Reach::default();
     let mut turns = SendTurns::default();
-    turns.tick(sending().as_ref(), at(1), &mut reach).unwrap();
-    turns.tick(sending().as_ref(), at(2), &mut reach).unwrap();
+    for now in 1..=20 {
+        turns.tick(sending().as_ref(), at(now), &mut reach).unwrap();
+    }
     turns.committed();
-    turns.tick(sending().as_ref(), at(3), &mut reach).unwrap();
+    for now in 21..=28 {
+        turns.tick(sending().as_ref(), at(now), &mut reach).unwrap();
+    }
     let synced = Event::Synced { files: 1 };
-    turns.tick(Some(&synced), at(4), &mut reach).unwrap();
+    turns.tick(Some(&synced), at(29), &mut reach).unwrap();
     turns.committed();
-    turns.tick(sending().as_ref(), at(5), &mut reach).unwrap();
+    for now in 30..=37 {
+        turns.tick(sending().as_ref(), at(now), &mut reach).unwrap();
+    }
     let err = turns
-        .tick(sending().as_ref(), at(6), &mut reach)
+        .tick(sending().as_ref(), at(38), &mut reach)
         .unwrap_err();
     assert!(matches!(
         err,
         Violation::ResourceBound {
             what: Bound::SlicesAhead,
-            seen: 2,
-            limit: 1,
+            seen: 9,
+            limit: 8,
         }
     ));
     assert_eq!(reach.get("send.commit_between_slices"), 1);
-    assert_eq!(reach.get("send.turns.judged"), 3);
+    assert_eq!(reach.get("send.turns.judged"), 17);
 }
 
 /// While a task waits out a retry the slices are counted as excused, and judged again from
@@ -213,8 +219,10 @@ fn slices_during_a_retry_wait_are_excused_and_counted() {
     }
     assert_eq!(reach.get("send.turns.excused"), 7);
     assert_eq!(reach.get("send.turns.judged"), 0);
-    turns.tick(sending().as_ref(), at(10), &mut reach).unwrap();
-    assert!(turns.tick(sending().as_ref(), at(11), &mut reach).is_err());
-    turns.tick(None, at(12), &mut reach).unwrap();
+    for now in 10..18 {
+        turns.tick(sending().as_ref(), at(now), &mut reach).unwrap();
+    }
+    assert!(turns.tick(sending().as_ref(), at(18), &mut reach).is_err());
+    turns.tick(None, at(19), &mut reach).unwrap();
     assert_eq!(reach.get("send.then_the_process_ended"), 1);
 }

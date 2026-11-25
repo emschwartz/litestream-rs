@@ -15,9 +15,10 @@
 //!    checkpoint runs without one, and a proof never outlives its tick).
 //! 2. Upload while staged files are not on the replica. One step sends files until the
 //!    tick's bytes run out; a file they run out in stays in flight, and the next step
-//!    sends on from there (`docs/decisions/D217.md`). With a file in flight the sync and
-//!    the upload take turns, so commits are staged and checkpoints run while it goes up;
-//!    without it an upload goes first only after [`state::FAIR_SHARE`] syncs in a row.
+//!    sends on from there (`docs/decisions/D217.md`). A file in flight goes first, and
+//!    the sync takes a turn after every [`state::FAIR_SHARE`] slices, so commits are staged
+//!    and checkpoints run while it goes up; with no file in flight an upload goes first
+//!    only after that many syncs in a row.
 //! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
 //!    newest staged file.
 //! 4. Maintenance. Its first listing after a
@@ -1298,8 +1299,6 @@ impl Actor {
             }
         }
         if let Some(tick) = self.upload_unit(env, now).await {
-            let maintain = &mut self.engine.maintain;
-            maintain.passed_over = maintain.passed_over.saturating_add(1);
             return tick;
         }
         if let Some(tick) = self.prune_unit(env, now).await {
@@ -1921,6 +1920,9 @@ impl Actor {
             return None;
         }
         self.engine.syncs_ahead = 0;
+        // Owed or in its own turn, an upload tick is one that passed prune and maintenance over.
+        let maintain = &mut self.engine.maintain;
+        maintain.passed_over = maintain.passed_over.saturating_add(1);
         let limit = self
             .kept
             .cfg
@@ -1944,6 +1946,7 @@ impl Actor {
             .await;
             match uploaded {
                 Ok(None) if last == Did::Nothing => {
+                    self.engine.slices_ahead = self.engine.slices_ahead.saturating_add(1);
                     let bytes = self.engine.in_flight.sent().unwrap_or_default();
                     return Some(self.ran(Event::Sending { bytes }, now));
                 }
@@ -2536,18 +2539,21 @@ impl Actor {
 
     /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row ended
     /// in the WAL step; it runs only when uploads are ready, and resets the count when it does.
-    /// With a file in flight the two take turns: one tick of the WAL step, then a slice, so the
-    /// file's upload is at most doubled in ticks by an application that commits before each.
+    /// A file in flight turns the share around: its slices go first, and the WAL step (and
+    /// with it prune and maintenance) has the tick after each [`state::FAIR_SHARE`] of them.
+    /// A turn after every slice would have an application that commits before each tick pay
+    /// a sync, and stage a file, for every slice (`docs/decisions/D217.md`).
     async fn owed_upload<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Option<Tick> {
-        let share = match self.engine.in_flight.sent() {
-            Some(_) => 1,
-            None => state::FAIR_SHARE,
+        let owed = match self.engine.in_flight.sent() {
+            Some(_) => self.engine.slices_ahead < state::FAIR_SHARE,
+            None => self.engine.syncs_ahead >= state::FAIR_SHARE,
         };
-        if self.engine.syncs_ahead < share {
+        if !owed {
+            self.engine.slices_ahead = 0;
             return None;
         }
         self.upload_unit(env, now).await

@@ -127,17 +127,17 @@ fn a_file_larger_than_the_ticks_bytes_goes_up_a_slice_a_tick() {
     assert_eq!(restored(&rig), 2);
 }
 
-/// With a file in flight the WAL step and the slices take turns: an application that commits
-/// before every tick has each commit staged by the second tick after it, and the file takes
-/// the slices it takes with no commits at all.
+/// A file in flight goes first, and the WAL step has the tick after each `FAIR_SHARE` slices:
+/// an application that commits before every tick has its commits staged within that many
+/// slices, and the file takes the slices it takes with no commits at all.
 #[test]
-fn a_file_in_flight_and_an_application_that_commits_every_tick_take_turns() {
+fn a_file_in_flight_leaves_the_wal_step_a_tick_after_each_share_of_slices() {
     let (mut rig, mut actor) = caught_up_with(slicing(SLICE));
     in_flight(&mut rig, &mut actor, 2, T0 + 1);
     let size = staged_size(&rig, 2);
     // The helper sent two slices with no commit between them.
     let mut seen = vec![Tick::Stopped(StopCause::Shutdown); 0];
-    let before = 2;
+    let before = 2_u64;
     for n in 3..100_u8 {
         rig.commit(n);
         let tick = rig.tick(&mut actor, T0 + i64::from(n));
@@ -149,31 +149,32 @@ fn a_file_in_flight_and_an_application_that_commits_every_tick_take_turns() {
     }
     let synced = |t: &Tick| matches!(event(t), Some(Event::Synced { files: 1 }));
     let sliced = |t: &Tick| matches!(event(t), Some(Event::Sending { .. } | Event::Uploaded(_)));
-    for pair in seen.chunks(2) {
-        assert!(
-            matches!(pair, [first, second] if synced(first) && sliced(second)),
-            "{seen:?}"
-        );
+    // Every tick is a slice but the one after each share of them, which stages the commits
+    // made since the last in one file.
+    let (mut in_a_row, mut slices, mut syncs) = (before, before, 0_usize);
+    for tick in &seen {
+        if in_a_row == u64::from(state::FAIR_SHARE) {
+            assert!(synced(tick), "{seen:?}");
+            (in_a_row, syncs) = (0, syncs.saturating_add(1));
+        } else {
+            assert!(sliced(tick), "{seen:?}");
+            (in_a_row, slices) = (in_a_row.saturating_add(1), slices.saturating_add(1));
+        }
     }
-    let slices = seen.iter().filter(|t| sliced(t)).count();
-    assert_eq!(
-        u64::try_from(slices).unwrap() + before,
-        size / SLICE + 1,
-        "{seen:?}"
-    );
+    assert!(syncs >= 2, "{seen:?}");
+    assert_eq!(slices, size / SLICE + 1, "{seen:?}");
     assert_eq!(newest_replica_file(&rig), Some(2));
-    // Every commit but the one before the last slice is staged already.
-    assert_eq!(staged(&rig).len(), seen.len() / 2 + 2);
+    assert_eq!(staged(&rig).len(), syncs.saturating_add(2));
 }
 
-/// Checkpoints are the WAL step's, so they run between the slices of a file: the WAL does not
-/// grow for as long as the file takes.
+/// Checkpoints are the WAL step's, so they run in its turns between the slices of a file: the
+/// WAL does not grow for as long as the file takes.
 #[test]
 fn checkpoints_run_while_a_file_is_in_flight() {
     let mut config = slicing(SLICE);
     config.checkpoint.min_pages = Some(nz(1));
     let (mut rig, mut actor) = caught_up_with(config);
-    rig.commit(2);
+    commit_big(&rig, 2);
     rig.tick(&mut actor, T0 + 1);
     assert_eq!(
         event(&rig.tick(&mut actor, T0 + 1)),
@@ -181,16 +182,31 @@ fn checkpoints_run_while_a_file_is_in_flight() {
     );
     let before = rig.ck.calls().len();
     rig.commit(3);
+    let share = u64::from(state::FAIR_SHARE);
+    for slice in 2..=share {
+        assert_eq!(
+            event(&rig.tick(&mut actor, T0 + 2)),
+            Some(&Event::Sending {
+                bytes: slice.saturating_mul(SLICE)
+            })
+        );
+    }
     let tick = rig.tick(&mut actor, T0 + 2);
     assert!(
         matches!(event(&tick), Some(Event::Checkpointed { busy: false, .. })),
         "{tick:?}"
     );
     assert!(rig.ck.calls().len() > before, "{:?}", rig.ck.calls());
-    assert_eq!(sent(&actor), Some(SLICE), "the file is still in flight");
+    assert_eq!(
+        sent(&actor),
+        Some(share.saturating_mul(SLICE)),
+        "the file is still in flight"
+    );
     assert_eq!(
         event(&rig.tick(&mut actor, T0 + 2)),
-        Some(&Event::Sending { bytes: 2 * SLICE })
+        Some(&Event::Sending {
+            bytes: share.saturating_add(1).saturating_mul(SLICE)
+        })
     );
 }
 

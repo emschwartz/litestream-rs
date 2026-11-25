@@ -85,8 +85,8 @@ fn reset() -> StoreError {
 }
 
 /// The application commits before every tick while the first file is in flight. The WAL step
-/// and the slices take turns, so each commit is staged by the tick after it or the one after
-/// that, checkpoints run, and the file takes the slices it takes with no commits at all.
+/// has the tick after each eight slices, so every commit is staged within eight slices of
+/// landing, checkpoints run, and the file takes the slices it takes with no commits at all.
 /// Thirty commits of two frames would leave 60 frames in a WAL no checkpoint ran on.
 #[test]
 fn commits_between_slices_are_staged_and_checkpointed_while_the_file_goes_up() {
@@ -102,25 +102,24 @@ fn commits_between_slices_are_staged_and_checkpointed_while_the_file_goes_up() {
     let all = events(&report);
     let during = &all[5..35];
     let slice = |event: &&Event| matches!(event, Event::Sending { .. });
-    assert!(
-        during
-            .chunks(2)
-            .all(|pair| matches!(pair, [first, second] if !slice(first) && slice(second))),
-        "{during:?}"
-    );
+    // Three slices went before the first commit: five more, the WAL step's tick, eight, its
+    // tick again, and the six that are left.
+    let turns: Vec<usize> = (0..21).filter(|at| !slice(&&during[*at])).collect();
+    assert_eq!(turns, [5, 14], "{during:?}");
     let checkpoints = during
         .iter()
         .filter(|event| matches!(event, Event::Checkpointed { .. }))
         .count();
-    assert!(checkpoints >= 5, "{during:?}");
+    assert!(checkpoints >= 2, "{during:?}");
+    // Nine commits of two frames land between two of the WAL step's turns.
     assert!(
-        report.max_wal_frames <= 16,
+        report.max_wal_frames <= 20,
         "{} frames",
         report.max_wal_frames
     );
     assert_eq!(sent(&report)[..23], whole_file());
-    assert_eq!(report.reach.get("send.commit_between_slices"), 15);
-    assert_eq!(report.reach.get("send.turns.judged"), 15);
+    assert_eq!(report.reach.get("send.commit_between_slices"), 24);
+    assert_eq!(report.reach.get("send.turns.judged"), 24);
     assert_eq!(report.reach.get("send.turns.excused"), 0);
 }
 
