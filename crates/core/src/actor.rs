@@ -2314,9 +2314,12 @@ impl Actor {
         self.engine.maintain.stale = false;
         self.engine.maintain.passed_over = 0;
         self.engine.maintain.snapshot_waits = false;
+        // Level 1 starts above the newest snapshot when it is empty (D224), so what the
+        // snapshot holds is as compacted as level 1 would make it.
         self.engine.maintain.level_one = Level::new(1)
             .and_then(|level| inventory.level(level).last())
-            .map(|info| info.key.range().max());
+            .map(|info| info.key.range().max())
+            .or_else(|| crate::maintain::snapshot_end(&inventory));
         self.engine.maintain.remembered.learn_full(
             &inventory,
             now,
