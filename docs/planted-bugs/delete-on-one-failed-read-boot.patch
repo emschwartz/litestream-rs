@@ -1,9 +1,9 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 2277d4143..776d03669 100644
+index 143825550..439b0d971 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2881,7 +2881,7 @@ async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
-     } = scan(staging, remote, tip, boot_wal_again(&mut wal)).await?;
+@@ -2931,7 +2931,7 @@ async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
+     .await?;
      let (lost, refused) = match bad {
          None => (None, None),
 -        Some((key, Bad::Unreadable)) if *suspect != Some(key) => {

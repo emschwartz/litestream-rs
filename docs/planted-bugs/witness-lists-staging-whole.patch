@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
-index 1c5cb1a8b..ab0c41ff4 100644
+index c0a3c48a5..bfee56872 100644
 --- a/crates/core/src/witness.rs
 +++ b/crates/core/src/witness.rs
-@@ -354,7 +354,11 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
+@@ -367,7 +367,11 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
      let mut prev = None;
-     let mut linked = tail.is_none();
+     let mut linked = confirmed.is_none();
      let mut listing = StagedPages::from(confirmed);
 +    let mut all = Vec::new();
      while let Some(page) = listing.next(staging).await? {
@@ -12,5 +12,5 @@ index 1c5cb1a8b..ab0c41ff4 100644
 +    }
 +    for page in all {
          for info in page {
-             let pending = confirmed.is_none_or(|tip| info.key.range().max() > tip);
-             // Past the cap a file could get no token: it goes as a file that leaves a gap
+             if remote.is_none() && confirmed.is_none() {
+                 // With no replica asked, the oldest staged file is the base.

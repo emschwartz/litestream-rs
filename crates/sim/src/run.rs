@@ -808,6 +808,10 @@ impl Runner {
             self.booted = true;
             return;
         }
+        if self.actor.staged().is_some() {
+            // A position before any boot: the local course of a store outage.
+            self.report.reach.bump("boot.local_course");
+        }
         let levels = u64::try_from(lsr_core::Level::ALL.len()).unwrap_or(u64::MAX);
         let lists = self.w.remote_recorder.counts().lists;
         if lists.saturating_sub(lists_before) >= levels {

@@ -1,0 +1,10 @@
+# A local course counts as booted: an engine that never listed the replica runs uploads and
+# maintenance, so a staged file goes up before any boot judged the replica.
+name = "local-course-uploads"
+fix = "claude/boot-local"
+package = "lsr-core"
+tests = [
+    "nothing_is_uploaded_before_a_boot_lists_the_replica",
+    "a_restart_during_an_outage_stages_and_checkpoints_from_local_state",
+    "the_boot_after_the_course_stops_for_another_writer",
+]

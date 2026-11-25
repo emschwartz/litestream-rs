@@ -1,0 +1,12 @@
+# The boot that lists the replica moves a local course's files up to level 0 whatever the replica
+# holds: files the course staged at transactions the replica already has become pending files, and
+# one of them is written over the replica's newest file when that file does not read.
+name = "local-course-files-unjudged"
+fix = "claude/boot-local"
+package = "lsr-core"
+tests = [
+    "a_course_begun_behind_the_replica_is_dropped_when_the_replica_is_listed",
+    "a_courses_file_is_never_written_over_an_unreadable_replica_file",
+    "the_files_of_a_course_that_ended_early_are_still_judged",
+    "slot_files_over_an_empty_level_zero_are_settled_against_the_replica",
+]

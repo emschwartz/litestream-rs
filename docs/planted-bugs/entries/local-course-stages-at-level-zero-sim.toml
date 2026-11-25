@@ -1,0 +1,9 @@
+# The same plant under the simulator, by an explicit scenario (the seed that found it is not pinned).
+name = "local-course-stages-at-level-zero-sim"
+patch = "local-course-stages-at-level-zero"
+fix = "claude/boot-local"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::store_returns_unreadable_after_staging_fell_behind",
+]

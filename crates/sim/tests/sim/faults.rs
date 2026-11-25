@@ -435,6 +435,31 @@ fn writes_never_held_under_report() {
 }
 
 #[test]
+fn store_down_across_a_restart() {
+    run(scenario::store_down_across_a_restart);
+}
+
+#[test]
+fn store_returns_with_another_writers_file() {
+    run(scenario::store_returns_with_another_writers_file);
+}
+
+#[test]
+fn store_returns_rolled_back() {
+    run(scenario::store_returns_rolled_back);
+}
+
+#[test]
+fn store_returns_refusing() {
+    run(scenario::store_returns_refusing);
+}
+
+#[test]
+fn store_returns_unreadable_after_staging_fell_behind() {
+    run(scenario::store_returns_unreadable_after_staging_fell_behind);
+}
+
+#[test]
 fn shm_header_mid_update() {
     run(scenario::shm_header_mid_update);
 }

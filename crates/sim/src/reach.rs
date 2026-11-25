@@ -36,6 +36,9 @@ pub const REQUIRED: &[&str] = &[
     "crash.Power",
     "power.kept_unsynced_wal",
     "power.kept_cut_frame",
+    // A process that started while the store was down and staged from local state before it
+    // booted: the course whose files the boot settles (ledger: local-course-*).
+    "boot.local_course",
     // Every snapshot cause the needless-snapshot check maps to its forcings; a cause no run
     // reaches is a row of that map nothing tests. CheckpointBoundary and OperatorRequested have
     // no event of their own and are counted when staged (`snapshot.staged.*`).

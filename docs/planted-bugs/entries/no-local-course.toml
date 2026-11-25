@@ -1,0 +1,9 @@
+# The local course never begins: a process that starts while the store is down stages nothing
+# and checkpoints nothing until the replica's listing answers, and the WAL grows meanwhile.
+name = "no-local-course"
+fix = "claude/boot-local"
+package = "lsr-core"
+tests = [
+    "a_restart_during_an_outage_stages_and_checkpoints_from_local_state",
+    "the_course_begins_at_the_bound_and_not_before",
+]
