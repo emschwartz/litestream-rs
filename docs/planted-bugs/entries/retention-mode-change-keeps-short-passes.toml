@@ -1,0 +1,8 @@
+# Switching the retention mode leaves what was remembered under the old setting in place, so the
+# next pass is a short one that never re-reads the gate.
+name = "retention-mode-change-keeps-short-passes"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::listing::changing_the_retention_mode_forces_a_whole_listing",
+]

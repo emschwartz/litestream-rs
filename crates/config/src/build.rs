@@ -74,6 +74,7 @@ pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
         l0_retention_check_interval: top
             .duration("l0-retention-check-interval", walk)
             .unwrap_or(defaults::L0_RETENTION_CHECK_INTERVAL),
+        l0_check_set: top.duration("l0-retention-check-interval", walk).is_some(),
         retention_enabled: top
             .map("retention", walk)
             .and_then(|r| r.boolean("enabled", walk))

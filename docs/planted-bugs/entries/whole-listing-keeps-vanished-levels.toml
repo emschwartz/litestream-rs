@@ -1,0 +1,8 @@
+# A whole listing that finds a level empty leaves the old remembered newest file of that level
+# in place, so a later short pass reads a file that is gone as the anchor and the destination.
+name = "whole-listing-keeps-vanished-levels"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "maintain::short::tests::a_whole_listing_that_finds_a_level_empty_forgets_its_record",
+]

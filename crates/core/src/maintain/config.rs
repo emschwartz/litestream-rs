@@ -38,6 +38,9 @@ const DEFAULT_SNAPSHOT_MILLIS: u64 = 86_400_000;
 const DEFAULT_L0_RETENTION_MILLIS: u64 = 300_000;
 /// Go's level-0 retention check interval, 15 s (`store.go:92`).
 const DEFAULT_L0_CHECK_MILLIS: u64 = 15_000;
+/// How often level-0 retention is decided when the interval was not set: 8 times Go's 15 s
+/// (D193). A set interval is used as it is.
+const DEFAULT_RETENTION_CHECK_MILLIS: u64 = 120_000;
 
 /// Which setting a [`ConfigError`] is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -207,6 +210,8 @@ pub struct Maintenance {
     snapshot_retention: Duration,
     l0: L0Retention,
     l0_check: Interval,
+    /// Whether `l0_check` was set rather than defaulted.
+    l0_check_set: bool,
     retention: RetentionMode,
 }
 
@@ -256,6 +261,7 @@ impl Maintenance {
             snapshot_retention,
             l0,
             l0_check: Interval(DEFAULT_L0_CHECK_MILLIS),
+            l0_check_set: false,
             retention: RetentionMode::Enforce,
         })
     }
@@ -311,6 +317,7 @@ impl Maintenance {
             snapshot_retention: Duration::from_millis(DEFAULT_SNAPSHOT_MILLIS),
             l0: L0Retention::After(Duration::from_millis(DEFAULT_L0_RETENTION_MILLIS)),
             l0_check: Interval(DEFAULT_L0_CHECK_MILLIS),
+            l0_check_set: false,
             retention: RetentionMode::Enforce,
         }
     }
@@ -348,16 +355,37 @@ impl Maintenance {
     }
 
     /// How often level-0 retention is checked while uploads continue (Go's
-    /// `l0-retention-check-interval`, 15 s unless set).
+    /// `l0-retention-check-interval`, 15 s unless set). [`Self::retention_check_every`] is how
+    /// often the check runs: the set value, or 120 s when unset.
     #[must_use]
     pub const fn l0_check_interval(&self) -> Interval {
         self.l0_check
+    }
+
+    /// How often level-0 retention is decided: the set interval exactly, else 120 s (and up to
+    /// twice that behind a compaction job), which is a difference from Go's 15 s default
+    /// (docs/decisions/D193.md).
+    #[must_use]
+    pub const fn retention_check_every(&self) -> Interval {
+        if self.l0_check_set {
+            self.l0_check
+        } else {
+            Interval(DEFAULT_RETENTION_CHECK_MILLIS)
+        }
+    }
+
+    /// How many check intervals the check may wait behind a compaction job: one more for the
+    /// default, so the job goes first and the pass lists once; none for a set interval, because
+    /// the operator's value means what it says.
+    pub(crate) const fn retention_check_behind_a_job(&self) -> i64 {
+        if self.l0_check_set { 1 } else { 2 }
     }
 
     /// The same schedule with another level-0 retention check interval.
     #[must_use]
     pub const fn with_l0_check_interval(mut self, every: Interval) -> Self {
         self.l0_check = every;
+        self.l0_check_set = true;
         self
     }
 
