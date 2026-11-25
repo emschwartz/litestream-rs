@@ -9,6 +9,7 @@
 //! keeps the clock it had.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use lsr_ltx::{Timestamp, Txid};
 use lsr_wal::CommittedEnd;
@@ -19,6 +20,13 @@ use crate::fault::{Fault, Next, SnapshotCause};
 use crate::layout::FileKey;
 use crate::source::WalSource;
 use crate::sync::StepEnd;
+
+/// How long boot attempts may keep failing, none by a refusal, before the boot is judged without
+/// having decided how to start, so a store that is down does not hold the application's writes
+/// (Go holds nothing at start). One failed attempt never judges it: the boot fails on purpose to
+/// read a staged file twice, and one transient error says nothing about the replica's files, so
+/// the attempt after it may still find another writer (`docs/decisions/D207.md`).
+pub(crate) const BOOT_UNDECIDED_BOUND: Duration = Duration::from_secs(15);
 
 /// Whether a snapshot for `cause` is a doubt about continuity, not a finding of commits the
 /// staged files lack.
@@ -74,13 +82,25 @@ impl Actor {
         if self.kept.listed {
             self.kept.sync_failed_after_listing = true;
         } else {
-            self.kept.boot_failed = true;
             self.kept.refused_at_boot = if let Some(Fault::StoreDenied(why)) = fault {
                 Some(why)
             } else {
                 None
             };
+            // A refusal ends the run: it holds until healed, and what follows starts afresh.
+            self.kept.boot_failing_since = match self.kept.refused_at_boot {
+                Some(_) => None,
+                None => self.kept.boot_failing_since.or(Some(now)),
+            };
         }
+    }
+
+    /// The time the boot is judged for having failed too long, if a run of failures is on.
+    fn boot_overdue_at(&self) -> Option<Timestamp> {
+        self.kept
+            .boot_failing_since
+            .filter(|_| !self.kept.listed && self.kept.refused_at_boot.is_none())
+            .map(|since| since.saturating_add(BOOT_UNDECIDED_BOUND))
     }
 
     /// Lets the sync and upload waits go when the bound has passed with no probe made for it.
@@ -97,6 +117,7 @@ impl Actor {
 
     /// After a tick: what is off the replica, for the clock.
     pub(super) fn observe_lag<W: WalSource>(&mut self, wal: &mut W, now: Timestamp) {
+        self.kept.boot_overdue = self.boot_overdue_at().is_some_and(|at| now >= at);
         if self.booted() {
             self.kept.listed = true;
             self.kept.refused_at_boot = None;
@@ -247,9 +268,12 @@ impl Actor {
         }
     }
 
-    /// The tick, waking no later than the next probe is due.
+    /// The tick, waking no later than the next probe is due, or the bound on a failing boot.
     pub(super) fn wake_for_probe(&self, tick: Tick) -> Tick {
-        let Some(probe) = self.kept.lag.next_probe(self.kept.cfg.max_unreplicated_age) else {
+        let probe = self.kept.lag.next_probe(self.kept.cfg.max_unreplicated_age);
+        // A boot that keeps failing is judged at the bound, however long its retry waits.
+        let overdue = self.boot_overdue_at().filter(|_| !self.kept.boot_overdue);
+        let Some(probe) = probe.into_iter().chain(overdue).min() else {
             return tick;
         };
         match tick {
@@ -285,13 +309,14 @@ impl Actor {
 
     /// Whether this process's boot has been judged, for [`crate::AppGate`]: the replica was
     /// listed and the snapshot the boot asked for, if any, was staged or tried (a stop it finds
-    /// is a stop at boot); or a boot attempt failed for anything but the store refusing access
-    /// (a store that times out at boot does not hold the application).
+    /// is a stop at boot); or boot attempts have kept failing for [`BOOT_UNDECIDED_BOUND`],
+    /// none of the last run by the store refusing access (a store that is down at boot does
+    /// not hold the application for long). A failure that is the boot's own deliberate retry,
+    /// or one transient error, judges nothing.
     #[must_use]
     pub fn boot_judged(&self) -> bool {
         let settled = self.pending().is_none() || self.kept.sync_failed_after_listing;
-        (self.kept.listed && settled)
-            || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
+        (self.kept.listed && settled) || self.kept.boot_overdue
     }
 
     /// Whether an engine of this process has listed the replica.

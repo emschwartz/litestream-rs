@@ -155,9 +155,14 @@ pub(super) struct Kept {
     pub(super) listed: bool,
     /// The last boot failure before the first listing was the store refusing access.
     pub(super) refused_at_boot: Option<Denied>,
-    /// A boot attempt of this process has failed: with no refusal behind it, the boot is
-    /// judged and the application may start (`crate::failstop`).
-    pub(super) boot_failed: bool,
+    /// When the current run of boot attempts that failed, none by a refusal, began (the first
+    /// failure after the last refusal, or after the start). Only a run that outlasts
+    /// `BOOT_UNDECIDED_BOUND` without a decision judges the boot and lets the application
+    /// start (`crate::failstop`); one failed attempt never does.
+    pub(super) boot_failing_since: Option<Timestamp>,
+    /// The run above has outlasted the bound and the last failure was not a refusal, as of
+    /// the last tick: the boot is judged without having decided.
+    pub(super) boot_overdue: bool,
     /// A sync step failed after the first listing: a snapshot the boot asked for was tried.
     pub(super) sync_failed_after_listing: bool,
     /// Pending staged files that hold no commit of the application's: a file that changes no
@@ -201,7 +206,8 @@ impl Kept {
             lag: Lag::default(),
             listed: false,
             refused_at_boot: None,
-            boot_failed: false,
+            boot_failing_since: None,
+            boot_overdue: false,
             sync_failed_after_listing: false,
             quiet: BTreeSet::new(),
             doubt_baseline: None,
@@ -238,7 +244,8 @@ impl Kept {
             lag,
             listed,
             refused_at_boot,
-            boot_failed,
+            boot_failing_since,
+            boot_overdue,
             sync_failed_after_listing,
             quiet: _,
             doubt_baseline: _,
@@ -271,7 +278,8 @@ impl Kept {
             lag: *lag,
             listed: *listed,
             refused_at_boot: *refused_at_boot,
-            boot_failed: *boot_failed,
+            boot_failing_since: *boot_failing_since,
+            boot_overdue: *boot_overdue,
             sync_failed_after_listing: *sync_failed_after_listing,
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),

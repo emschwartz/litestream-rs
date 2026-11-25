@@ -3,6 +3,7 @@
 //! the probe at the bound, clearing at zero age, and the refusal at boot.
 
 use super::*;
+use crate::actor::lag::BOOT_UNDECIDED_BOUND;
 use crate::failstop::{MaxUnreplicatedAge, Trip};
 use crate::store::Denied;
 
@@ -238,7 +239,8 @@ fn a_refused_scratch_sweep_is_not_asked_again() {
     let asked = rig.remote.scratch_calls.load(Ordering::SeqCst);
     assert_eq!(asked, 1);
     actor.rebuild();
-    rig.settle(&mut actor, T0 + 2);
+    // Past every retry wait, so an ask the process made again would show.
+    rig.settle(&mut actor, T0 + 600_000);
     assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), asked);
 }
 
@@ -282,9 +284,123 @@ fn a_timeout_at_boot_is_no_refusal() {
     assert!(!actor.listed());
     assert_eq!(actor.trip(), None);
     assert!(
-        actor.boot_judged(),
-        "a store that times out does not hold the start"
+        !actor.boot_judged(),
+        "one timeout says nothing about what the replica holds"
     );
+}
+
+/// A store that stays down does not hold the start for long: a run of failed attempts judges
+/// the boot at the bound, counted from the run's first failure, and not a moment sooner.
+#[test]
+fn a_store_down_for_the_bound_judges_the_boot() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    for _ in 0..1_000 {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::List, transient(StoreOp::List));
+    }
+    let bound = i64::try_from(BOOT_UNDECIDED_BOUND.as_millis()).unwrap();
+    let seen = drive(&mut rig, &mut actor, T0, T0 + bound - 1);
+    assert!(seen.len() > 1, "{seen:?}");
+    assert!(!actor.boot_judged(), "{seen:?}");
+    let tick = rig.tick(&mut actor, T0 + bound);
+    assert!(actor.boot_judged(), "{tick:?}");
+    assert!(!actor.listed());
+    assert_eq!(actor.trip(), None);
+}
+
+/// The retry wait never carries the judgment past the bound: the tick is due at it.
+#[test]
+fn a_failing_boot_wakes_at_the_bound() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    for _ in 0..1_000 {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::List, transient(StoreOp::List));
+    }
+    let bound = i64::try_from(BOOT_UNDECIDED_BOUND.as_millis()).unwrap();
+    let seen = drive(&mut rig, &mut actor, T0, T0 + 2 * bound);
+    let first_judged = seen.iter().position(|(at, _)| *at >= T0 + bound);
+    assert!(first_judged.is_some(), "{seen:?}");
+    let waits: Vec<i64> = seen.windows(2).map(|w| w[1].0 - w[0].0).collect();
+    assert!(
+        seen.iter().any(|(at, _)| *at == T0 + bound),
+        "no tick at the bound: {seen:?} {waits:?}"
+    );
+}
+
+/// A refusal ends the run: the bound is counted from the first failure after it.
+#[test]
+fn a_refusal_restarts_the_bound() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    let bound = i64::try_from(BOOT_UNDECIDED_BOUND.as_millis()).unwrap();
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::List, transient(StoreOp::List));
+    rig.tick(&mut actor, T0);
+    rig.remote.inner.inject_failure(
+        StoreOp::List,
+        StoreError::Denied {
+            op: StoreOp::List,
+            why: Denied::Permission,
+        },
+    );
+    for _ in 0..1_000 {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::List, transient(StoreOp::List));
+    }
+    // The refusal lands after the first run would have reached the bound.
+    let refused_at = T0 + bound;
+    rig.tick(&mut actor, refused_at);
+    assert!(!actor.boot_judged(), "a refusal holds");
+    drive(&mut rig, &mut actor, refused_at + 1, refused_at + bound);
+    assert!(!actor.boot_judged(), "the run began after the refusal");
+    drive(
+        &mut rig,
+        &mut actor,
+        refused_at + bound + 1,
+        refused_at + 3 * bound,
+    );
+    assert!(actor.boot_judged());
+}
+
+/// A failure the boot raises on purpose, or one local error, judges nothing: the next attempt
+/// lists the replica and may find another writer (the history that released writes, started
+/// the `-exec` child, then stopped for another writer while the application ran on).
+#[test]
+fn a_local_failure_before_the_listing_does_not_release_a_start_another_writer_stops() {
+    let mut rig = Rig::new();
+    let mut first_run = Actor::new(go_like());
+    rig.settle(&mut first_run, T0);
+    let ours = first_run.staged().max(first_run.engine.upload.confirmed());
+    super::second_writer::put_foreign(&rig, ours.unwrap().next().unwrap().get());
+    // A restart: the next boot lists the replica and refuses the other writer's file.
+    let mut actor = Actor::new(go_like());
+    rig.staging
+        .inner
+        .inject_failure(StoreOp::List, transient(StoreOp::List));
+    let first = rig.tick(&mut actor, T0 + 1_000);
+    assert!(
+        !matches!(event(&first), Some(Event::Booted { .. })),
+        "{first:?}"
+    );
+    assert!(!actor.boot_judged(), "attempt 1 failed locally: {first:?}");
+    let mut now = T0 + 1_000;
+    for _ in 0..50 {
+        now += 100;
+        let tick = rig.tick(&mut actor, now);
+        let stopped = matches!(tick, Tick::Stopped(_))
+            || matches!(actor.phase(), Phase::Stopped(StopCause::OtherWriter));
+        if stopped {
+            return;
+        }
+        assert!(!actor.boot_judged(), "released before it decided: {tick:?}");
+    }
+    panic!("attempt 2 never decided");
 }
 
 /// After the first listing a refusal is an ordinary degraded state: no refusal trip, only the
@@ -522,7 +638,7 @@ fn a_failed_boot_snapshot_judges_the_boot_and_an_earlier_timeout_does_not() {
         .inner
         .inject_failure(StoreOp::List, transient(StoreOp::List));
     rig.tick(&mut actor, T0);
-    assert!(actor.boot_judged(), "a timeout at boot judges it");
+    assert!(!actor.boot_judged(), "one timeout judges nothing");
     rig.staging.inner.inject_failure(
         StoreOp::Upload,
         StoreError::Transient {

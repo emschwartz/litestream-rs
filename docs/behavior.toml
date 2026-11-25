@@ -2563,6 +2563,17 @@ detected_by = "core::`writes_are_blocked_by_a_held_gate_and_by_a_pending_boot_ex
 
 [[row]]
 table = "Fail-stop"
+id = "FS-12"
+circumstance = "Before the replica was listed, boot attempts fail: a store that is down or slow, a DNS error, a local fault, or the boot's own deliberate retry (`StagedLost`, `Swept::Suspect`, `WalMoved`)"
+response = "one failed attempt, of any kind, never judges the boot: the next attempt may list the replica and find another writer. A run of failed attempts, none by a refusal, that has lasted 15 s (`BOOT_UNDECIDED_BOUND`, counted from the run's first failure) judges it: writes are released and an `-exec` child starts, as Go would have started it. A refusal ends the run and holds until healed (FS-6); a hang holds for the request deadline plus the bound (decision D207)"
+signal = "`writes blocked` with `held_by=booting` until `writes allowed`; `Health::writes`"
+at_risk = "After a release without a decision, commits are unreplicated until the boot succeeds; if that boot then stops for another writer, the application has already started. Fail-stop's age bound does not run before the first boot (D80)"
+recovery = "Automatic once the store answers"
+detected_by = "core::`a_local_failure_before_the_listing_does_not_release_a_start_another_writer_stops`, core::`a_timeout_at_boot_is_no_refusal`, core::`a_store_down_for_the_bound_judges_the_boot`, core::`a_failing_boot_wakes_at_the_bound`, core::`a_refusal_restarts_the_bound`, sim::`a_store_down_at_boot_does_not_trip`, plant::`boot-judged-by-one-failed-attempt`"
+notes = "Found by a review of what a start does when one attempt fails before the listing. **untested** end to end: no replica or CLI test shows the child starting after the bound"
+
+[[row]]
+table = "Fail-stop"
 id = "FS-11"
 circumstance = "A checkpoint, the write barrier or a sequence bump comes due while the replicator holds the application's writes"
 response = "the engine waits (`Fault::WritesHeld`, retried after the retry interval, never counted and never degraded) and checkpoints once writes go through; the held lock survives every engine step, a panic and a rebuild (decision D192)"
