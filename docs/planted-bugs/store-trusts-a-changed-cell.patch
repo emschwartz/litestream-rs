@@ -1,5 +1,5 @@
 diff --git a/crates/store-s3/src/again.rs b/crates/store-s3/src/again.rs
-index 6aeab347b..65ff21487 100644
+index 6aeab347b..dd0900838 100644
 --- a/crates/store-s3/src/again.rs
 +++ b/crates/store-s3/src/again.rs
 @@ -82,7 +82,7 @@ fn cell(
@@ -11,10 +11,3 @@ index 6aeab347b..65ff21487 100644
          return Err(StoreError::Transient {
              op: StoreOp::Upload,
              kind: io::ErrorKind::InvalidData,
-@@ -366,4 +366,4 @@ mod tests {
-         assert_eq!(body.failed(), Some(stopped()));
-         assert!(sent.is_empty());
-     }
--}
-+}
-\ No newline at end of file

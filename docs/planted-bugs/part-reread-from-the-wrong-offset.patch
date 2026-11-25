@@ -1,5 +1,5 @@
 diff --git a/crates/store-s3/src/again.rs b/crates/store-s3/src/again.rs
-index 6aeab347b..49b38bc7e 100644
+index 6aeab347b..6d0c10b26 100644
 --- a/crates/store-s3/src/again.rs
 +++ b/crates/store-s3/src/again.rs
 @@ -178,7 +178,7 @@ impl Sealed {
@@ -11,10 +11,3 @@ index 6aeab347b..49b38bc7e 100644
              stop,
              cell: Vec::new(),
              given: 0,
-@@ -366,4 +366,4 @@ mod tests {
-         assert_eq!(body.failed(), Some(stopped()));
-         assert!(sent.is_empty());
-     }
--}
-+}
-\ No newline at end of file

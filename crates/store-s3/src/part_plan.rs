@@ -163,9 +163,9 @@ mod tests {
             let got = u64::try_from(width(concurrency, part)).unwrap();
             let most = u64::try_from(concurrency).unwrap();
             prop_assert!((1..=most).contains(&got));
-            let held = |width: u64| (width + 1).saturating_mul(part);
+            let held = |width: u64| width.saturating_add(1).saturating_mul(part);
             prop_assert!(held(got) <= HELD_BUDGET || got == 1);
-            prop_assert!(got == most || held(got + 1) > HELD_BUDGET);
+            prop_assert!(got == most || held(got.saturating_add(1)) > HELD_BUDGET);
         }
 
         /// Every length up to S3's limit gets at most 10000 parts, at a legal part
