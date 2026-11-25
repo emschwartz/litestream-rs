@@ -368,6 +368,21 @@ fn a_refusal_restarts_the_bound() {
     assert!(actor.boot_judged());
 }
 
+/// The bound runs only while the replica is unlisted and no refusal is on: each of the two
+/// conditions alone ends it.
+#[test]
+fn the_bound_runs_only_while_unlisted_and_unrefused() {
+    let since = Some(ts(T0));
+    let mut actor = Actor::new(go_like());
+    actor.kept.boot_failing_since = since;
+    assert!(actor.boot_overdue_at().is_some(), "a run of failures is on");
+    actor.kept.listed = true;
+    assert!(actor.boot_overdue_at().is_none(), "listed ends it");
+    actor.kept.listed = false;
+    actor.kept.refused_at_boot = Some(Denied::Permission);
+    assert!(actor.boot_overdue_at().is_none(), "a refusal ends it");
+}
+
 /// A failure the boot raises on purpose, or one local error, judges nothing: the next attempt
 /// lists the replica and may find another writer (the history that released writes, started
 /// the `-exec` child, then stopped for another writer while the application ran on).

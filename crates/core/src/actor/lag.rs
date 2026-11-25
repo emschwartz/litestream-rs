@@ -93,7 +93,7 @@ impl Actor {
     }
 
     /// The time the boot is judged for having failed too long, if a run of failures is on.
-    fn boot_overdue_at(&self) -> Option<Timestamp> {
+    pub(super) fn boot_overdue_at(&self) -> Option<Timestamp> {
         self.kept
             .boot_failing_since
             .filter(|_| !self.kept.listed && self.kept.refused_at_boot.is_none())
