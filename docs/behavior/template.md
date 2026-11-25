@@ -314,6 +314,7 @@ Five tasks keep separate retry waits and degraded states: sync, checkpoint, uplo
 | `lsr_app_notice`, `lsr_app_checkpoints_total` | `replica/src/health.rs` | The application ran checkpoints of its own. A notice, not a failure |
 | `lsr_panics_total` | `replica/src/health.rs` | Panics caught at the thread boundary |
 | `lsr_read_lock_violations_total` | `replica/src/health.rs` | Recoveries that found commits lost to a WAL restart the read lock should have prevented: a broken lock or a bug |
+| `lsr_scratch_sweeps_denied_total` | `replica/src/health.rs` | 1 once the replica refused the start-up sweep of leftover uploads for want of permission (skipped; replication is unaffected) |
 
 There is no per-cause count of snapshots taken on main. It is on #86 (`lsr_snapshots_total{db,cause}`).
 

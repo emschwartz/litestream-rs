@@ -143,6 +143,11 @@ pub struct Counters {
     /// prevented: a broken lock or a bug in the continuity proof. Each takes a snapshot, counted
     /// as `generation_changed`; any count above zero is worth a report.
     pub read_lock_violations: u64,
+    /// 1 once the replica refused the boot's sweep of leftover scratch files and open
+    /// uploads for want of permission (an S3 policy without
+    /// `s3:ListBucketMultipartUploads` or `s3:AbortMultipartUpload`, as Go's published one),
+    /// and the sweep was skipped for the rest of the process; replication is unaffected.
+    pub scratch_sweeps_denied: u64,
 }
 
 /// One copy of the replicator's state, written by its thread after every tick.
@@ -331,6 +336,7 @@ impl Health {
                 panics: 0,
                 sink_panics: 0,
                 read_lock_violations: 0,
+                scratch_sweeps_denied: 0,
                 store: StoreCounters {
                     list: OpCounters::ZERO,
                     read: OpCounters::ZERO,

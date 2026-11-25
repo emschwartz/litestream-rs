@@ -202,6 +202,75 @@ fn a_refusal_at_boot_trips_until_the_first_listing() {
     assert_eq!(actor.trip(), None, "the first listing releases it");
 }
 
+/// The boot's sweep of open uploads is best effort: Go's published S3 policy does not allow
+/// the call, so a replica that refuses it must still be listed, judged and released.
+#[test]
+fn a_refused_scratch_sweep_does_not_hold_the_boot() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    *rig.remote.scratch_error.lock().unwrap() = Some(StoreError::Denied {
+        op: StoreOp::Upload,
+        why: Denied::Permission,
+    });
+    let boot = rig.tick(&mut actor, T0);
+    assert!(
+        matches!(event(&boot), Some(Event::Booted { .. })),
+        "{boot:?}"
+    );
+    assert!(actor.listed());
+    assert_eq!(actor.trip(), None);
+    assert!(actor.scratch_sweep_denied(), "it is reported");
+    rig.settle(&mut actor, T0);
+    assert!(actor.boot_judged());
+}
+
+/// A refused sweep is not asked again by the same process: the answer would be the same, and
+/// each ask is a request and a log line.
+#[test]
+fn a_refused_scratch_sweep_is_not_asked_again() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(go_like());
+    *rig.remote.scratch_error.lock().unwrap() = Some(StoreError::Denied {
+        op: StoreOp::Upload,
+        why: Denied::Permission,
+    });
+    rig.tick(&mut actor, T0);
+    let asked = rig.remote.scratch_calls.load(Ordering::SeqCst);
+    assert_eq!(asked, 1);
+    actor.rebuild();
+    rig.settle(&mut actor, T0 + 2);
+    assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), asked);
+}
+
+/// Only a policy's refusal of the sweep is skipped. The sweep failing for any other reason
+/// is the replica not answering, and the boot tries again; a refusal about the host or the
+/// credentials is a refusal at boot, as before.
+#[test]
+fn only_a_permission_refusal_of_the_scratch_sweep_is_skipped() {
+    for err in [
+        transient(StoreOp::Upload),
+        StoreError::Denied {
+            op: StoreOp::Upload,
+            why: Denied::ClockSkew,
+        },
+        StoreError::Denied {
+            op: StoreOp::Upload,
+            why: Denied::Credentials,
+        },
+    ] {
+        let mut rig = Rig::new();
+        let mut actor = Actor::new(go_like());
+        *rig.remote.scratch_error.lock().unwrap() = Some(err.clone());
+        let boot = rig.tick(&mut actor, T0);
+        assert!(
+            !matches!(event(&boot), Some(Event::Booted { .. })),
+            "{err:?}: {boot:?}"
+        );
+        assert!(!actor.scratch_sweep_denied(), "{err:?}");
+        assert!(!actor.listed(), "{err:?}");
+    }
+}
+
 #[test]
 fn a_timeout_at_boot_is_no_refusal() {
     let mut rig = Rig::new();

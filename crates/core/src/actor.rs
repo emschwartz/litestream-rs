@@ -126,7 +126,7 @@ use crate::recover::{
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
-use crate::store::{ObjectStore, PageLimit};
+use crate::store::{Denied, ObjectStore, PageLimit, StoreError};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
@@ -535,6 +535,16 @@ impl Actor {
     #[must_use]
     pub const fn read_lock_violations(&self) -> u64 {
         self.kept.read_lock_violations
+    }
+
+    /// Whether the replica refused the boot's sweep of its leftover scratch files and open
+    /// uploads for want of permission, so the sweep was skipped for this process. Replication
+    /// is unaffected; what a killed process left open stays until the bucket's own lifecycle
+    /// rule or an operator removes it. Go sweeps nothing, and its documented S3 policy
+    /// allows neither listing nor aborting multipart uploads.
+    #[must_use]
+    pub const fn scratch_sweep_denied(&self) -> bool {
+        self.kept.scratch_sweep_denied
     }
 
     /// The task's degraded state, if a persistent failure left it in one.
@@ -1187,7 +1197,8 @@ impl Actor {
         let takeover = self.boot_takeover();
         let doubted = self.kept.suspect_staged;
         let suspect = &mut self.kept.suspect_staged;
-        let listed = boot_listing(env.staging, env.remote, suspect, takeover).await;
+        let denied = &mut self.kept.scratch_sweep_denied;
+        let listed = boot_listing(env.staging, env.remote, suspect, denied, takeover).await;
         let Listed {
             upload,
             dropped,
@@ -2669,16 +2680,35 @@ impl BootGate {
 /// A crash loop otherwise leaves one per boot, each as large as the file it was writing; at
 /// boot nothing of this engine is uploading yet. A failure is the directory's, which every
 /// upload and prune needs too.
-async fn remove_scratch<L: Role, R: Role>(staging: &L, remote: &R) -> Result<(), Fault> {
+///
+/// The replica's sweep is best effort, as Go's nothing is: S3 policies that allow all Go needs
+/// do not allow listing or aborting multipart uploads, and a refusal there says nothing about
+/// the replica's contents. A refusal for want of permission is noted in `denied`, skipped, and
+/// not asked again by this process; the listing right after fails the same way if the
+/// permission it needs is missing too. Any other failure is the replica not answering.
+async fn remove_scratch<L: Role, R: Role>(
+    staging: &L,
+    remote: &R,
+    denied: &mut bool,
+) -> Result<(), Fault> {
     staging
         .remove_scratch()
         .await
         .map_err(|err| L::fault(&err))?;
-    remote
-        .remove_scratch()
-        .await
-        .map_err(|err| R::fault(&err))?;
-    Ok(())
+    if *denied {
+        return Ok(());
+    }
+    match remote.remove_scratch().await {
+        Ok(_) => Ok(()),
+        Err(StoreError::Denied {
+            why: Denied::Permission,
+            ..
+        }) => {
+            *denied = true;
+            Ok(())
+        }
+        Err(err) => Err(R::fault(&err)),
+    }
 }
 
 /// What boot's listing and sweep deleted from staging, from which transaction on.
@@ -2711,9 +2741,10 @@ async fn boot_listing<L: Role, R: Role>(
     staging: &L,
     remote: &R,
     suspect: &mut Option<FileKey>,
+    denied: &mut bool,
     takeover: Takeover,
 ) -> Result<Listed, BootStep> {
-    remove_scratch(staging, remote).await?;
+    remove_scratch(staging, remote, denied).await?;
     // Where staging stood before this boot dropped anything of its own: the
     // position replica files must be vouched for above.
     let local = newest_level_zero(staging)

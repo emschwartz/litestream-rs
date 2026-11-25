@@ -1,12 +1,13 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 9c0c170f..696276bd 100644
+index 0000000..0000000 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2655,7 +2655,6 @@ async fn boot_listing<L: Role, R: Role>(
-     suspect: &mut Option<FileKey>,
+@@ -2744,7 +2744,7 @@ async fn boot_listing<L: Role, R: Role>(
+     denied: &mut bool,
      takeover: Takeover,
  ) -> Result<Listed, BootStep> {
--    remove_scratch(staging, remote).await?;
+-    remove_scratch(staging, remote, denied).await?;
++
      // Where staging stood before this boot dropped anything of its own: the
      // position replica files must be vouched for above.
      let local = newest_level_zero(staging)

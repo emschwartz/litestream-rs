@@ -300,6 +300,11 @@ impl EventSink for DbEvents {
                 "the application checkpointed the database",
                 vec![("seen", debug(seen)), ("total", (*total).into())],
             ),
+            Event::ScratchSweepDenied => (
+                LogLevel::Warn,
+                "the replica refused the sweep of leftover uploads at start (needs s3:ListBucketMultipartUploads and s3:AbortMultipartUpload); replication continues, and open multipart uploads a killed process left stay until a bucket lifecycle rule or an operator removes them",
+                vec![],
+            ),
             Event::Panicked { rebuilt } => (
                 LogLevel::Error,
                 "replicator panicked",

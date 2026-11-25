@@ -170,6 +170,10 @@ pub(super) struct Kept {
     /// Recoveries that found a commit abandoned after the read lock was taken: a report,
     /// kept across rebuilds, since the snapshot that follows names only the generation change.
     pub(super) read_lock_violations: u64,
+    /// The replica refused the boot's sweep of its scratch files and open uploads for want of
+    /// permission, and the process does not ask again: the sweep is best effort. Kept across
+    /// rebuilds.
+    pub(super) scratch_sweep_denied: bool,
 }
 
 impl Kept {
@@ -202,6 +206,7 @@ impl Kept {
             quiet: BTreeSet::new(),
             doubt_baseline: None,
             read_lock_violations: 0,
+            scratch_sweep_denied: false,
         }
     }
 
@@ -238,6 +243,7 @@ impl Kept {
             quiet: _,
             doubt_baseline: _,
             read_lock_violations,
+            scratch_sweep_denied,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -271,6 +277,7 @@ impl Kept {
             quiet: BTreeSet::new(),
             doubt_baseline: None,
             read_lock_violations: *read_lock_violations,
+            scratch_sweep_denied: *scratch_sweep_denied,
         }
     }
 

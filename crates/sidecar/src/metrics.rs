@@ -58,6 +58,9 @@
 //! - `lsr_read_lock_violations_total{db}`: recoveries that found commits lost to a WAL restart
 //!   the engine's read lock should have prevented, a broken lock or a bug. Each takes a snapshot
 //!   counted as `generation_changed`; any value above zero is worth a report.
+//! - `lsr_scratch_sweeps_denied_total{db}`: 1 once the replica refused the start-up sweep of
+//!   leftover multipart uploads for want of permission (Go's published S3 policy allows neither
+//!   the list nor the abort); the sweep is skipped, replication is unaffected.
 //! - `lsr_replica_operation_errors_total{replica_type,operation}`.
 //! - `lsr_health_report_age_seconds{db}`: how old the replicator's last health write is; a large
 //!   value means its thread is stuck in a store call.
@@ -510,7 +513,7 @@ fn app_series(out: &mut Out, dbs: &[(String, &Health)]) {
 }
 
 fn counter_series(out: &mut Out, dbs: &[(String, &Health)]) {
-    let series: [CounterSeries; 7] = [
+    let series: [CounterSeries; 8] = [
         (
             "lsr_syncs_staged_total",
             "Sync steps that staged a file",
@@ -541,6 +544,11 @@ fn counter_series(out: &mut Out, dbs: &[(String, &Health)]) {
             "lsr_read_lock_violations_total",
             "Recoveries that found commits lost to a WAL restart the read lock should have prevented",
             |h| h.counters.read_lock_violations,
+        ),
+        (
+            "lsr_scratch_sweeps_denied_total",
+            "1 once the replica refused the start-up sweep of leftover uploads for want of permission (skipped; replication is unaffected)",
+            |h| h.counters.scratch_sweeps_denied,
         ),
     ];
     for (name, help, value) in series {
