@@ -307,31 +307,21 @@ impl Transport for UreqTransport {
             .configure_request(Self::build(&request)?)
             .timeout_global(None)
             .build();
-        let mut response = self.agent.run(built).map_err(|err| map_error(&err))?;
-        let status = response.status().as_u16();
-        let headers = head_of(&response);
-        let declared = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.trim().parse::<u64>().ok());
-        if !(200..300).contains(&status) {
-            // An error's body names its code: read whole, as any answer is.
-            let expected = declared.map_or(0, |n| n.min(MAX_BODY));
-            let body = read_body(&mut response, expected, self.bounds)?;
-            let complete = declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
-            return Ok(Opened::Whole(HttpResponse::new(
-                status, headers, body, complete,
-            )));
-        }
+        let response = self.agent.run(built).map_err(|err| map_error(&err))?;
+        let head = HttpResponse::new(
+            response.status().as_u16(),
+            head_of(&response),
+            Vec::new(),
+            true,
+        );
         let body = Streamed {
+            allowed: self
+                .bounds
+                .cap(response.body().content_length().unwrap_or(0)),
             reader: response.into_body().into_reader(),
             began: std::time::Instant::now(),
-            allowed: self.bounds.cap(declared.unwrap_or(0)),
         };
-        Ok(Opened::Streaming(
-            HttpResponse::new(status, headers, Vec::new(), true),
-            Box::new(body),
-        ))
+        Ok((head, Box::new(body)))
     }
 
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {

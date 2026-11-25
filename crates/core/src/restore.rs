@@ -694,7 +694,7 @@ async fn apply_file<S: ObjectStore, K: DatabaseSink>(
     let key = info.key;
     let mut read = LtxRead::new(key, chunk_len());
     let applied = read
-        .read_streamed(store, |event| match event {
+        .read_verified(store, |event| match event {
             Event::Header(header) => check_header(key, &header, previous)
                 .map_err(|fault| RestoreError::File { key, fault }),
             Event::Page(page) => sink.write_page(page).map_err(sink_fault(SinkOp::WritePage)),

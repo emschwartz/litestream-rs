@@ -593,11 +593,8 @@ impl RequestBuilder {
     ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
         let mut action = self.bucket.get_object(Some(&self.credentials), &object);
-        let extra = if offset == 0 {
-            Vec::new()
-        } else {
-            vec![("range", format!("bytes={offset}-"))]
-        };
+        let range = (offset > 0).then(|| ("range", format!("bytes={offset}-")));
+        let extra = range.into_iter().collect();
         let signed = self.sign(&mut action, now, extra)?;
         Ok(Self::finish(Method::Get, signed, Vec::new()))
     }

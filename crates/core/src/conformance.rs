@@ -22,7 +22,7 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 
 use crate::layout::{CreatedAtSource, FileInfo, FileKey, Level, ListedTime};
 use crate::store::{
-    ListAt, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, Upload, WriteMode,
+    ListAt, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload, WriteMode,
 };
 
 /// Why a conformance case failed.
@@ -895,56 +895,35 @@ pub async fn read_with_created_at_agrees_with_read_and_created_at<H: Harness>(h:
     Ok(())
 }
 
-/// `read_many` answers each read as `read` does, in order: a missing key
-/// fails only its own slot.
+/// `read_stream` hands out what `read` does, piece after piece from its offset: a short
+/// piece at the end, then nothing. A missing key fails as `read` does.
 ///
 /// # Errors
 /// A [`Failure`] naming the rule that broke.
-pub async fn read_many_agrees_with_read<H: Harness>(h: &H) -> Check {
+pub async fn read_stream_agrees_with_read<H: Harness>(h: &H) -> Check {
     let store = h.store();
     let target = key(6, 3, 3)?;
     let absent = key(6, 4, 4)?;
     put_with_created_at(store, target, b"abcdefgh", at(CREATED_AT)).await?;
-    let reads = [
-        ReadAt {
-            key: target,
-            offset: 0,
-            len: read_len(3)?,
-        },
-        ReadAt {
-            key: absent,
-            offset: 0,
-            len: read_len(3)?,
-        },
-        ReadAt {
-            key: target,
-            offset: 6,
-            len: read_len(3)?,
-        },
-        ReadAt {
-            key: target,
-            offset: 8,
-            len: read_len(3)?,
-        },
-        ReadAt {
-            key: target,
-            offset: 3,
-            len: read_len(3)?,
-        },
-    ];
-    let mut want = Vec::new();
-    for at in &reads {
-        want.push(store.read(&at.key, at.offset, at.len).await);
+    let len = read_len(3)?;
+    for offset in [0, 3, 8] {
+        let mut stream = store.read_stream(target, offset);
+        let mut reached = offset;
+        loop {
+            let piece = stream.next(len).await;
+            let want = store.read(&target, reached, len).await;
+            ensure_eq!(piece, want, "a piece against read");
+            let Ok(piece) = piece else { break };
+            if piece.len() < 3 {
+                break;
+            }
+            reached = reached.saturating_add(3);
+        }
     }
     ensure_eq!(
-        store.read_many(&reads).await,
-        want,
-        "read_many against read"
-    );
-    ensure_eq!(
-        want.get(1).cloned(),
-        Some(Err(StoreError::NotFound { key: absent })),
-        "the missing key's slot"
+        store.read_stream(absent, 0).next(len).await,
+        Err(StoreError::NotFound { key: absent }),
+        "a stream of a missing key"
     );
     Ok(())
 }
@@ -1062,7 +1041,7 @@ macro_rules! conformance_suite {
             created_at_of_a_vanished_file_is_not_found,
             created_at_of_an_overwritten_file_is_refused,
             read_with_created_at_agrees_with_read_and_created_at,
-            read_many_agrees_with_read,
+            read_stream_agrees_with_read,
             list_many_agrees_with_list,
             created_at_many_agrees_with_created_at,
         );

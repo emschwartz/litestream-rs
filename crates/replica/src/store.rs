@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
     BatchKind, Clock, CreatedAt, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit,
-    ReadAt, ReadLen, ReadStream, Reread, StoreError, Upload,
+    ReadLen, ReadStream, Reread, StoreError, Upload,
 };
 pub use lsr_core::{BoxFuture, DynUpload};
 use lsr_ltx::{Timestamp, TxidRange};
@@ -78,12 +78,6 @@ pub trait DynStore: Send + Sync {
 
     /// [`ObjectStore::batch_width`].
     fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize;
-
-    /// [`ObjectStore::read_many`].
-    fn read_many_boxed<'a>(
-        &'a self,
-        reads: &'a [ReadAt],
-    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>>;
 
     /// [`ObjectStore::created_at_many`].
     fn created_at_many_boxed<'a>(
@@ -167,13 +161,6 @@ where
         self.batch_width(kind)
     }
 
-    fn read_many_boxed<'a>(
-        &'a self,
-        reads: &'a [ReadAt],
-    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>> {
-        Box::pin(self.read_many(reads))
-    }
-
     fn list_many_boxed<'a>(
         &'a self,
         pages: &'a [ListAt],
@@ -253,10 +240,6 @@ where
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         self.0.batch_width_dyn(kind)
-    }
-
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        self.0.read_many_boxed(reads).await
     }
 
     async fn list_many(
@@ -372,8 +355,6 @@ struct MeteredStream<'a> {
     inner: Box<dyn ReadStream + 'a>,
     meter: &'a OpMeter,
     clock: &'a dyn Clock,
-    /// The call is counted: a piece was asked for.
-    counted: bool,
 }
 
 impl ReadStream for MeteredStream<'_> {
@@ -381,13 +362,7 @@ impl ReadStream for MeteredStream<'_> {
         Box::pin(async move {
             let began = self.clock.now();
             let result = self.inner.next(len).await;
-            let ended = self.clock.now();
-            if self.counted {
-                self.meter.note_more(&result, began, ended);
-            } else {
-                self.meter.note(&result, began, ended);
-                self.counted = true;
-            }
+            self.meter.note_more(&result, began, self.clock.now());
             result
         })
     }
@@ -483,14 +458,14 @@ impl ObjectStore for Metered {
         metered(&*self.clock, &self.meters.read, call).await
     }
 
-    /// One call for the stream, as for the one request it is, counted at its first piece;
-    /// every piece's time and failure count toward it.
+    /// One call for the stream, as for the one request it is; every piece's time and failure
+    /// count toward it.
     fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.meters.read.calls.fetch_add(1, Ordering::Relaxed);
         Box::new(MeteredStream {
             inner: self.store.read_stream_dyn(key, offset),
             meter: &self.meters.read,
             clock: &*self.clock,
-            counted: false,
         })
     }
 
@@ -536,18 +511,6 @@ impl ObjectStore for Metered {
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         self.store.batch_width_dyn(kind)
-    }
-
-    /// Each read of the batch counts as one call, timed as the whole batch:
-    /// the reads ran side by side, so each took about that long.
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        let began = self.clock.now();
-        let results = self.store.read_many_boxed(reads).await;
-        let ended = self.clock.now();
-        for result in &results {
-            self.meters.read.note(result, began, ended);
-        }
-        results
     }
 
     /// Each listing of the batch counts as one call, timed as the whole batch.

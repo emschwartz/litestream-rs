@@ -1,12 +1,19 @@
-diff --git a/crates/core/src/restore.rs b/crates/core/src/restore.rs
---- a/crates/core/src/restore.rs
-+++ b/crates/core/src/restore.rs
-@@ -694,7 +694,7 @@
-     let key = info.key;
-     let mut read = LtxRead::new(key, chunk_len());
-     let applied = read
--        .read_streamed(store, |event| match event {
-+        .read_verified(store, |event| match event {
-             Event::Header(header) => check_header(key, &header, previous)
-                 .map_err(|fault| RestoreError::File { key, fault }),
-             Event::Page(page) => sink.write_page(page).map_err(sink_fault(SinkOp::WritePage)),
+diff --git a/crates/core/src/ltx_read.rs b/crates/core/src/ltx_read.rs
+--- a/crates/core/src/ltx_read.rs
++++ b/crates/core/src/ltx_read.rs
+@@ -229,7 +229,7 @@
+                 // The old chunk goes first so a read never holds two.
+                 self.chunk = Vec::new();
+                 let chunk = match stream.as_deref_mut() {
+-                    Some(stream) => stream.next(self.len).await,
++                    Some(_stream) => store.read(&self.key, self.offset, self.len).await,
+                     None => store.read(&self.key, self.offset, self.len).await,
+                 };
+                 self.take(chunk.map_err(ReadFault::Store)?);
+@@ -285,4 +285,4 @@
+         self.chunk = chunk;
+         self.pos = 0;
+     }
+-}
++}
+\ No newline at end of file

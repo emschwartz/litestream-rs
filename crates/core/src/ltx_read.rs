@@ -14,10 +14,11 @@
 //!   one value.
 //!
 //! Memory is one chunk: the old chunk is dropped before the next read. A read
-//! may take its chunks from one [`ObjectStore::read_stream`] instead of a read
-//! each ([`LtxRead::read_streamed`], restore's way): the chunks are the same, in
-//! the same order, so the verification rule above is unchanged, and on S3 the
-//! whole file is one request.
+//! to the end ([`LtxRead::read_verified`]) takes its chunks from one
+//! [`ObjectStore::read_stream`], so on S3 the whole file is one request; a read
+//! stepped event by event ([`LtxRead::next`], a compaction's inputs) reads each
+//! chunk alone and holds no connection between steps. The chunks are the same
+//! either way, so the verification rule above is unchanged.
 
 use std::convert::Infallible;
 use std::mem;
@@ -137,14 +138,6 @@ pub(crate) enum Next<R> {
     End(Verified),
 }
 
-/// Where a read's chunks come from: a read each, or one stream.
-enum Source<'s, S> {
-    /// [`ObjectStore::read`] per chunk.
-    Reads(&'s S),
-    /// One [`ObjectStore::read_stream`].
-    Stream(Box<dyn ReadStream + 's>),
-}
-
 /// One object being read and decoded.
 #[derive(Debug)]
 pub(crate) struct LtxRead {
@@ -216,13 +209,14 @@ impl LtxRead {
         store: &S,
         on_event: impl FnOnce(Event<'_>) -> Result<R, E>,
     ) -> Result<Next<R>, ReadFault<E>> {
-        self.next_from(&mut Source::Reads(store), on_event).await
+        self.next_from(store, None, on_event).await
     }
 
-    /// [`Self::next`], its bytes taken from `source`.
+    /// [`Self::next`], its chunks taken from `stream` when there is one, else a read each.
     async fn next_from<S: ObjectStore, R, E>(
         &mut self,
-        source: &mut Source<'_, S>,
+        store: &S,
+        mut stream: Option<&mut (dyn ReadStream + '_)>,
         on_event: impl FnOnce(Event<'_>) -> Result<R, E>,
     ) -> Result<Next<R>, ReadFault<E>> {
         loop {
@@ -232,11 +226,13 @@ impl LtxRead {
                     let decoder = mem::take(&mut self.decoder);
                     return decoder.finish().map(Next::End).map_err(ReadFault::Decode);
                 }
-                match source {
-                    Source::Reads(store) => self.refill(*store).await,
-                    Source::Stream(stream) => self.refill_from(&mut **stream).await,
-                }
-                .map_err(ReadFault::Store)?;
+                // The old chunk goes first so a read never holds two.
+                self.chunk = Vec::new();
+                let chunk = match stream.as_deref_mut() {
+                    Some(stream) => stream.next(self.len).await,
+                    None => store.read(&self.key, self.offset, self.len).await,
+                };
+                self.take(chunk.map_err(ReadFault::Store)?);
                 continue;
             }
             let rest = self.chunk.get(self.pos..).unwrap_or_default();
@@ -259,8 +255,9 @@ impl LtxRead {
         }
     }
 
-    /// Reads to the end, handing every event to `on_event` in file order.
-    /// The summary is returned only once the whole file verified.
+    /// Reads to the end through one [`ObjectStore::read_stream`] from where the read stands,
+    /// handing every event to `on_event` in file order. The summary is returned only once
+    /// the whole file verified.
     ///
     /// # Errors
     /// [`ReadFault`], the first one met.
@@ -269,51 +266,16 @@ impl LtxRead {
         store: &S,
         mut on_event: impl FnMut(Event<'_>) -> Result<(), E>,
     ) -> Result<Verified, ReadFault<E>> {
+        let mut stream = store.read_stream(self.key, self.offset);
         loop {
-            match self.next(store, &mut on_event).await? {
+            match self
+                .next_from(store, Some(&mut *stream), &mut on_event)
+                .await?
+            {
                 Next::Event(()) => {}
                 Next::End(verified) => return Ok(verified),
             }
         }
-    }
-
-    /// [`Self::read_verified`] through one [`ObjectStore::read_stream`] from where the read
-    /// stands: on S3 one request for the rest of the object, however large, and memory for one
-    /// chunk. The bytes reach the decoder exactly as reads of the same chunks would, so the
-    /// verification rule of the module docs is unchanged.
-    ///
-    /// # Errors
-    /// As [`Self::read_verified`].
-    pub(crate) async fn read_streamed<S: ObjectStore, E>(
-        &mut self,
-        store: &S,
-        mut on_event: impl FnMut(Event<'_>) -> Result<(), E>,
-    ) -> Result<Verified, ReadFault<E>> {
-        let mut source: Source<'_, S> = Source::Stream(store.read_stream(self.key, self.offset));
-        loop {
-            match self.next_from(&mut source, &mut on_event).await? {
-                Next::Event(()) => {}
-                Next::End(verified) => return Ok(verified),
-            }
-        }
-    }
-
-    /// The next chunk from `stream`, the old one dropped first.
-    async fn refill_from(&mut self, stream: &mut dyn ReadStream) -> Result<(), StoreError> {
-        self.chunk = Vec::new();
-        self.pos = 0;
-        let chunk = stream.next(self.len).await?;
-        self.take(chunk);
-        Ok(())
-    }
-
-    async fn refill<S: ObjectStore>(&mut self, store: &S) -> Result<(), StoreError> {
-        // The old chunk goes first so a read never holds two.
-        self.chunk = Vec::new();
-        self.pos = 0;
-        let chunk = store.read(&self.key, self.offset, self.len).await?;
-        self.take(chunk);
-        Ok(())
     }
 
     fn take(&mut self, chunk: Vec<u8>) {

@@ -1,12 +1,12 @@
 diff --git a/crates/store-s3/src/reqwest_transport.rs b/crates/store-s3/src/reqwest_transport.rs
 --- a/crates/store-s3/src/reqwest_transport.rs
 +++ b/crates/store-s3/src/reqwest_transport.rs
-@@ -405,7 +405,7 @@
+@@ -395,7 +395,7 @@
      bounds: Bounds,
      sent: u64,
  ) -> Result<HttpResponse, TransportError> {
--    let response = tokio::time::timeout(bounds.cap(sent), builder.send())
-+    let response = tokio::time::timeout(bounds.stall(), builder.send())
+-    let mut response = tokio::time::timeout(bounds.cap(sent), builder.send())
++    let mut response = tokio::time::timeout(bounds.stall(), builder.send())
          .await
          .map_err(|_elapsed| TransportError::Timeout)?
          .map_err(|err| map_error(&err))?;

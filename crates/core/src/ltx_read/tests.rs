@@ -321,7 +321,7 @@ fn streamed_pages(
     read: &mut LtxRead,
 ) -> (Vec<u32>, Result<Verified, ReadFault<Infallible>>) {
     let mut pages = Vec::new();
-    let end = block_on(read.read_streamed(store, |event| {
+    let end = block_on(read.read_verified(store, |event| {
         if let Event::Page(page) = event {
             pages.push(page.pgno().get());
         }
@@ -351,12 +351,12 @@ fn a_streamed_read_opens_one_stream_and_feeds_the_decoder_what_reads_would() {
 }
 
 #[test]
-fn a_read_a_chunk_at_a_time_opens_no_stream() {
+fn a_read_stepped_event_by_event_opens_no_stream() {
     let bytes = snapshot(40);
     let store = Streams::new(stored(&bytes), None);
     let mut read = LtxRead::new(key(), len(100));
-    let end = block_on(read.read_verified(&store, |_| Ok::<(), Infallible>(())));
-    end.unwrap();
+    while let Next::Event(()) = block_on(read.next(&store, |_| Ok::<(), Infallible>(()))).unwrap() {
+    }
     assert_eq!(store.opened(), 0);
 }
 

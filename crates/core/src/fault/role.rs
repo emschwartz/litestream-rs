@@ -21,8 +21,8 @@ use super::Fault;
 use crate::compact::CompactError;
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, ListAt, Listing, ObjectStore, Opened, PageLimit, ReadAt, ReadLen, ReadStream,
-    StoreError, WriteMode,
+    BatchKind, ListAt, Listing, ObjectStore, Opened, PageLimit, ReadLen, ReadStream, StoreError,
+    WriteMode,
 };
 
 /// A store whose errors mean what they mean on one side of the engine.
@@ -164,10 +164,6 @@ macro_rules! pass_through {
 
             fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
                 self.0.batch_width(kind)
-            }
-
-            async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-                self.0.read_many(reads).await
             }
 
             async fn created_at_many(

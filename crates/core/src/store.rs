@@ -27,12 +27,12 @@
 //! - Retrying is the caller's decision, made from the [`StoreError`] variant.
 //! - Every method returns within a deadline the implementation enforces, failing as
 //!   `Transient`; core holds no timer.
-//! - The batch methods (`read_many`, `list_many`, `created_at_many`) answer
+//! - The batch methods (`list_many`, `created_at_many`) answer
 //!   each item exactly as the single method would, one result per item in
 //!   order. Their defaults call the single method item by item, so a store
 //!   that is not concurrent (the simulator's, a directory) needs nothing.
 //!   [`ObjectStore::batch_width`] says how many items of a [`BatchKind`] a
-//!   store runs at once (a store may allow more HEADs than ranged reads);
+//!   store runs at once (a store may allow more HEADs than listings);
 //!   callers size their batches by it, so at width one nothing is fetched
 //!   ahead of need and the call sequence is the one sequential code makes.
 
@@ -434,17 +434,6 @@ impl StoreError {
     }
 }
 
-/// One ranged read of a batch: up to `len` bytes of `key` from `offset`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ReadAt {
-    /// The object.
-    pub key: FileKey,
-    /// The first byte.
-    pub offset: u64,
-    /// How many bytes, at most.
-    pub len: ReadLen,
-}
-
 /// One listing of a batch: the page of `level` strictly after `after`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ListAt {
@@ -500,8 +489,6 @@ impl ListAt {
 /// because a backend's limits differ per kind of request.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BatchKind {
-    /// [`ObjectStore::read_many`].
-    Reads,
     /// [`ObjectStore::list_many`].
     Lists,
     /// [`ObjectStore::created_at_many`].
@@ -626,20 +613,6 @@ pub trait ObjectStore: Send + Sync {
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         let _ = kind;
         NonZeroUsize::MIN
-    }
-
-    /// [`Self::read`] for each item, one result per item, in order.
-    fn read_many(
-        &self,
-        reads: &[ReadAt],
-    ) -> impl Future<Output = Vec<Result<Vec<u8>, StoreError>>> + Send {
-        async move {
-            let mut out = Vec::with_capacity(reads.len());
-            for at in reads {
-                out.push(self.read(&at.key, at.offset, at.len).await);
-            }
-            out
-        }
     }
 
     /// [`Self::created_at`] for each file, one result per file, in order.

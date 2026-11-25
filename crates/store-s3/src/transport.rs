@@ -212,37 +212,8 @@ impl Body for Held {
     }
 }
 
-/// What [`Transport::open`] got: a 2xx head with its body still to read, or any other answer
-/// whole, as [`Transport::send`] returns it, so its status and code can be judged.
-pub enum Opened<'a> {
-    /// A success: the status and headers (an empty body), and the body to read.
-    Streaming(HttpResponse, Box<dyn Body + 'a>),
-    /// Any other status, its body read whole within `MAX_BODY`.
-    Whole(HttpResponse),
-}
-
-impl fmt::Debug for Opened<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Streaming(head, _) => f.debug_tuple("Streaming").field(head).finish(),
-            Self::Whole(response) => f.debug_tuple("Whole").field(response).finish(),
-        }
-    }
-}
-
-impl Opened<'_> {
-    /// `response` as `open` hands it back: a success's body moved out to be read.
-    #[must_use]
-    pub fn of(mut response: HttpResponse) -> Self {
-        if !(200..300).contains(&response.status()) {
-            return Self::Whole(response);
-        }
-        let body = std::mem::take(&mut response.body);
-        // The head is whole; a body cut short shows as fewer bytes than declared.
-        response.body_complete = true;
-        Self::Streaming(response, Box::new(Held(io::Cursor::new(body))))
-    }
-}
+/// What [`Transport::open`] got: the status and headers (an empty body), and the body to read.
+pub type Opened<'a> = (HttpResponse, Box<dyn Body + 'a>);
 
 /// Why no response came back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -368,7 +339,11 @@ pub trait Transport: Send + Sync + 'static {
     /// # Errors
     /// [`TransportError`] when no response arrived.
     fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
-        self.send(request).map(Opened::of)
+        let mut response = self.send(request)?;
+        let body = std::mem::take(&mut response.body);
+        // The head is whole; a body cut short shows as fewer bytes than declared.
+        response.body_complete = true;
+        Ok((response, Box::new(Held(io::Cursor::new(body)))))
     }
 
     /// Sends every request with at most `limit` in flight and returns their

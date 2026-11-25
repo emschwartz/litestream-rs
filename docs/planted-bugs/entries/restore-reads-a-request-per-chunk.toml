@@ -1,4 +1,5 @@
-# A restore reads each file a ranged read per 4 MiB chunk, a request each, instead of one stream.
+# A read to the end, a restore's, takes a ranged read per 4 MiB chunk, a request each, instead of
+# the one stream it opened.
 name = "restore-reads-a-request-per-chunk"
 fix = "claude/restore-requests"
 package = "lsr-core"

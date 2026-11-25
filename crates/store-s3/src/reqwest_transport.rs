@@ -280,9 +280,6 @@ impl Transport for ReqwestTransport {
         reason = "a socket timeout runs on the real clock, which no injected clock reaches"
     )]
     fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
-        if request.method() != Method::Get {
-            return self.send(request).map(Opened::of);
-        }
         // No cap over the whole exchange, which would cut a long body: the request up to its
         // head has the stall bound, and the body its own cap from there.
         let builder = Self::unbounded(&self.client, &request);
@@ -296,16 +293,12 @@ impl Transport for ReqwestTransport {
             },
             Err(TransportError::Io(io::ErrorKind::Other)),
         )?;
-        let status = response.status().as_u16();
-        if !(200..300).contains(&status) {
-            let bounds = self.bounds;
-            let whole = self.drive(
-                answer(response, false, bounds),
-                Err(TransportError::Io(io::ErrorKind::Other)),
-            )?;
-            return Ok(Opened::Whole(whole));
-        }
-        let headers = head_of(&response);
+        let head = HttpResponse::new(
+            response.status().as_u16(),
+            head_of(&response),
+            Vec::new(),
+            true,
+        );
         let allowed = self.bounds.cap(response.content_length().unwrap_or(0));
         let body = Streamed {
             transport: self,
@@ -315,10 +308,7 @@ impl Transport for ReqwestTransport {
             began: std::time::Instant::now(),
             allowed,
         };
-        Ok(Opened::Streaming(
-            HttpResponse::new(status, headers, Vec::new(), true),
-            Box::new(body),
-        ))
+        Ok((head, Box::new(body)))
     }
 
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
@@ -405,34 +395,10 @@ async fn exchange(
     bounds: Bounds,
     sent: u64,
 ) -> Result<HttpResponse, TransportError> {
-    let response = tokio::time::timeout(bounds.cap(sent), builder.send())
+    let mut response = tokio::time::timeout(bounds.cap(sent), builder.send())
         .await
         .map_err(|_elapsed| TransportError::Timeout)?
         .map_err(|err| map_error(&err))?;
-    answer(response, head_only, bounds).await
-}
-
-/// A response's headers as received.
-fn head_of(response: &reqwest::Response) -> Vec<(String, String)> {
-    response
-        .headers()
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_owned(),
-                String::from_utf8_lossy(value.as_bytes()).into_owned(),
-            )
-        })
-        .collect()
-}
-
-/// The answer's body read whole within the cap its declared length allows, no chunk later than
-/// the stall bound after the one before.
-async fn answer(
-    mut response: reqwest::Response,
-    head_only: bool,
-    bounds: Bounds,
-) -> Result<HttpResponse, TransportError> {
     let status = response.status().as_u16();
     let headers = head_of(&response);
     let declared = response.content_length();
@@ -460,6 +426,20 @@ async fn answer(
         .map_err(|_elapsed| TransportError::Timeout)??;
     let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
     Ok(HttpResponse::new(status, headers, body, complete))
+}
+
+/// A response's headers as received.
+fn head_of(response: &reqwest::Response) -> Vec<(String, String)> {
+    response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// Maps a reqwest failure to a kind; the error's own text carries the URL.

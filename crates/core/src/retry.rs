@@ -34,8 +34,8 @@ use crate::env::{Clock, Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, BoxFuture, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, ReadStream,
-    Reread, StoreError, Upload, WriteMode,
+    BatchKind, BoxFuture, ListAt, Listing, ObjectStore, PageLimit, ReadLen, ReadStream, Reread,
+    StoreError, Upload, WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -515,22 +515,6 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         }
         out
     }
-
-    /// One batch through the inner store, then each failed read retried
-    /// alone under the policy, in order.
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        let core = &*self.core;
-        let firsts = core.inner.read_many(reads).await;
-        let mut out = Vec::with_capacity(firsts.len());
-        for (at, first) in reads.iter().zip(firsts) {
-            Counters::bump(&core.counters.calls);
-            let settled = core
-                .settle(first, || core.inner.read(&at.key, at.offset, at.len), false)
-                .await;
-            out.push(settled);
-        }
-        out
-    }
 }
 
 /// A stream through a [`Retrying`] store. A piece that fails is asked again of a new stream
@@ -548,32 +532,22 @@ struct Resuming<'a, S, P, E> {
 impl<S: ObjectStore, P: Sleeper, E: Entropy> ReadStream for Resuming<'_, S, P, E> {
     fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
-            let core = self.core;
-            let (key, offset) = (self.key, self.offset);
-            let first = match self.open.as_mut() {
-                Some(open) => open.next(len).await,
+            let (core, key, offset) = (self.core, self.key, self.offset);
+            let reopen = move || async move {
+                let mut fresh = core.inner.read_stream(key, offset);
+                let bytes = fresh.next(len).await?;
+                Ok((fresh, bytes))
+            };
+            // A stream that failed is dropped here: the retry opens another.
+            let first = match self.open.take() {
+                Some(mut open) => open.next(len).await.map(|bytes| (open, bytes)),
                 None => {
                     Counters::bump(&core.counters.calls);
-                    let mut fresh = core.inner.read_stream(key, offset);
-                    let first = fresh.next(len).await;
-                    self.open = Some(fresh);
-                    first
+                    reopen().await
                 }
             };
-            let bytes = match first {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    self.open = None;
-                    let reopen = || async move {
-                        let mut fresh = core.inner.read_stream(key, offset);
-                        let bytes = fresh.next(len).await?;
-                        Ok((fresh, bytes))
-                    };
-                    let (fresh, bytes) = core.settle(Err(err), reopen, false).await?;
-                    self.open = Some(fresh);
-                    bytes
-                }
-            };
+            let (open, bytes) = core.settle(first, reopen, false).await?;
+            self.open = Some(open);
             let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             self.offset = offset.saturating_add(read);
             Ok(bytes)
