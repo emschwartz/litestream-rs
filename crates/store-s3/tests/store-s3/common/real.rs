@@ -920,6 +920,7 @@ macro_rules! shared_cases {
                 abort_publishes_nothing,
                 pending_and_dropped_uploads_are_invisible,
                 read_spans_the_end,
+                an_opened_object_reads_as_a_read_by_range,
                 read_of_missing_key_is_not_found,
                 delete_is_idempotent,
                 two_uploads_to_one_key,

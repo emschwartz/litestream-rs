@@ -550,6 +550,21 @@ pub trait ObjectStore: Send + Sync {
         })
     }
 
+    /// Opens `key` for a caller that reads it in many reads, one after another (a send of a
+    /// staged file), when this store would otherwise open the object again for each:
+    /// [`Opened`]. `None`, the default, is a store with nothing to keep open, and the
+    /// caller reads by range. A wrapper forwards this, or its store is read by range.
+    ///
+    /// # Errors
+    /// As [`Self::read`] of the same key.
+    fn open(
+        &self,
+        key: &FileKey,
+    ) -> impl Future<Output = Result<Option<Box<dyn Opened>>, StoreError>> + Send {
+        let _ = key;
+        async { Ok(None) }
+    }
+
     /// The stored created-at time of a listed file. `NotFound` when it is gone;
     /// `Transient { InvalidData }` when its size is no longer `file.size`
     /// (another writer replaced it). With no stored created-at time the answer is
@@ -656,6 +671,22 @@ pub trait ObjectStore: Send + Sync {
             out
         }
     }
+}
+
+/// One object held open for a run of reads ([`ObjectStore::open`]). It borrows nothing, so
+/// a caller can keep it between ticks.
+///
+/// It reads the object that was opened. A file store's follows the file, not the name: a
+/// file renamed over the key afterwards is not what it reads, and bytes changed in the file
+/// where it lies are. Every caller verifies what it reads on the read that produced it, so
+/// either is safe; which of the two files a reader ends up holding is the only difference
+/// (`docs/decisions/D234.md`).
+pub trait Opened: Send + fmt::Debug {
+    /// [`ObjectStore::read`] of the opened object.
+    ///
+    /// # Errors
+    /// As [`ObjectStore::read`].
+    fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>>;
 }
 
 /// The object an upload is being handed, read again: what lets a store with parts keep a
