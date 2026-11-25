@@ -113,6 +113,7 @@ pub struct DbPlan {
     entry: KeyPath,
     path: PathBuf,
     config: Config,
+    meta_dir: PathBuf,
     replica: ReplicaPlan,
     restore_if_missing: bool,
     from_dir: bool,
@@ -137,7 +138,7 @@ impl DbPlan {
     /// The meta directory.
     #[must_use]
     pub fn meta_dir(&self) -> &Path {
-        self.config.meta_dir.as_deref().unwrap_or(Path::new(""))
+        &self.meta_dir
     }
     /// Where it replicates to.
     #[must_use]
@@ -401,11 +402,13 @@ fn one(
     base: Option<&Config>,
 ) -> Option<DbPlan> {
     let mut config = base?.clone();
-    config.meta_dir = Some(meta?);
+    let meta_dir = meta?;
+    config.meta_dir = Some(meta_dir.clone());
     Some(DbPlan {
         entry: entry.clone(),
         path,
         config,
+        meta_dir,
         replica: replica?,
         restore_if_missing: db.restore_if_db_not_exists()
             && matches!(db.source(), DbSource::Path(_)),

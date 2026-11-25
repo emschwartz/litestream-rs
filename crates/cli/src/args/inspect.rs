@@ -3,10 +3,10 @@
 //! `wal` (`main.go:175-178`, a warning and then `ltx`). Go's flag package rules
 //! ([`lsr_sidecar::goflag`]), Go's flags, Go's messages, Go's order.
 
+use lsr_config::is_url;
 use lsr_core::Level;
 use lsr_sidecar::goflag::{self, Def, Scan};
 
-use super::restore::is_url;
 use super::{Command, FlagRow, UsageError};
 
 /// `databases`.

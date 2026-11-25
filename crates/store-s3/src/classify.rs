@@ -259,11 +259,24 @@ pub fn classify(
             kind: io::ErrorKind::TimedOut,
         }),
         501 => Err(StoreError::Refused { op, status }),
-        500..=599 => Err(StoreError::Transient {
-            op,
-            kind: io::ErrorKind::Other,
-        }),
+        500..=599 => Err(transient_other(op)),
         _ => Err(StoreError::Refused { op, status }),
+    }
+}
+
+/// A response or body that cannot be what the provider meant to send.
+pub(crate) const fn invalid_data(op: StoreOp) -> StoreError {
+    StoreError::Transient {
+        op,
+        kind: io::ErrorKind::InvalidData,
+    }
+}
+
+/// A failure with no better kind: retry it.
+pub(crate) const fn transient_other(op: StoreOp) -> StoreError {
+    StoreError::Transient {
+        op,
+        kind: io::ErrorKind::Other,
     }
 }
 
@@ -318,10 +331,7 @@ pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<
         | S3Code::InvalidRange
         | S3Code::ConditionalRequestConflict
         | S3Code::NotImplemented
-        | S3Code::Other => StoreError::Transient {
-            op,
-            kind: io::ErrorKind::InvalidData,
-        },
+        | S3Code::Other => invalid_data(op),
     };
     Some(err)
 }
@@ -349,10 +359,7 @@ pub fn classify_delete_failures(op: StoreOp, codes: &[S3Code]) -> Result<(), Sto
     if codes.is_empty() {
         return Ok(());
     }
-    Err(StoreError::Transient {
-        op,
-        kind: io::ErrorKind::Other,
-    })
+    Err(transient_other(op))
 }
 
 /// Maps a failure to get any response.

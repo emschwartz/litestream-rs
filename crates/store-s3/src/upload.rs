@@ -49,7 +49,6 @@
 //! (every request answered or timed out) before its call returns, so no part
 //! is ever in flight when an id is orphaned or aborted.
 
-use std::io;
 use std::sync::Arc;
 
 use lsr_core::{
@@ -59,7 +58,7 @@ use lsr_core::{
 use lsr_ltx::Timestamp;
 
 use crate::again::{Run, Sealed};
-use crate::classify::{classify, is_not_implemented};
+use crate::classify::{classify, invalid_data, is_not_implemented, transient_other};
 use crate::multipart::{Sent, completed_etag_fits};
 use crate::part_plan::{MAX_OBJECT, plan_part_size};
 use crate::request::{Precondition, UploadId};
@@ -174,19 +173,48 @@ impl<T> S3Upload<T> {
         }
     }
 
-    /// Moves a live multipart id to the orphan list and ends the upload.
-    fn orphan(&mut self) {
+    /// Ends the upload and returns its multipart id, when it had one.
+    fn take_multipart_id(&mut self) -> Option<UploadId> {
         match std::mem::replace(&mut self.state, UploadState::Done) {
             UploadState::Multipart { id, .. }
             | UploadState::Sourced {
                 multipart: Some((id, _)),
                 ..
-            } => self.inner.orphans.push(self.key, id),
+            } => Some(id),
             UploadState::Buffering(_)
             | UploadState::Sourced {
                 multipart: None, ..
             }
-            | UploadState::Done => {}
+            | UploadState::Done => None,
+        }
+    }
+
+    /// Moves a live multipart id to the orphan list and ends the upload.
+    fn orphan(&mut self) {
+        if let Some(id) = self.take_multipart_id() {
+            self.inner.orphans.push(self.key, id);
+        }
+    }
+
+    /// Files the ETags of a batch of parts, or ends the upload and orphans its id when the
+    /// batch failed.
+    fn record_parts(&mut self, outcome: Result<Vec<String>, StoreError>) -> Result<(), StoreError> {
+        match outcome {
+            Ok(sent) => {
+                if let UploadState::Multipart { etags, .. }
+                | UploadState::Sourced {
+                    multipart: Some((_, etags)),
+                    ..
+                } = &mut self.state
+                {
+                    etags.extend(sent);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                self.orphan();
+                Err(err)
+            }
         }
     }
 
@@ -280,10 +308,7 @@ impl<T: Transport> Inner<T> {
         if let Some(unread) = body.failed() {
             return Err(unread);
         }
-        let response = sent.unwrap_or(Err(StoreError::Transient {
-            op,
-            kind: io::ErrorKind::Other,
-        }))?;
+        let response = sent.unwrap_or(Err(transient_other(op)))?;
         self.judge_put(key, created_at, sized, precondition, &response)
     }
 
@@ -312,10 +337,7 @@ impl<T: Transport> Inner<T> {
                 size: wrote,
                 listed: ListedTime::Created(CreatedAt::metadata(created_at)),
             }),
-            EtagCheck::Missing => Err(StoreError::Transient {
-                op,
-                kind: io::ErrorKind::InvalidData,
-            }),
+            EtagCheck::Missing => Err(invalid_data(op)),
             EtagCheck::Mismatch => Err(self.delete_bad_object(key, None)),
         }
     }
@@ -410,16 +432,7 @@ impl<T: Transport> S3Upload<T> {
             .inner
             .within_budget(StoreOp::Upload, start)
             .and_then(|()| self.inner.put_parts(&self.key, id, first, bodies));
-        match outcome {
-            Ok(sent) => {
-                etags.extend(sent);
-                Ok(())
-            }
-            Err(err) => {
-                self.orphan();
-                Err(err)
-            }
-        }
+        self.record_parts(outcome)
     }
 
     /// The last part (when anything is left), then CompleteMultipartUpload and
@@ -550,16 +563,7 @@ impl<T: Transport> S3Upload<T> {
                 self.inner
                     .put_parts_from(&self.key, id, first, &parts, again)
             });
-        match outcome {
-            Ok(sent) => {
-                etags.extend(sent);
-                Ok(())
-            }
-            Err(err) => {
-                self.orphan();
-                Err(err)
-            }
-        }
+        self.record_parts(outcome)
     }
 
     /// Commits an upload written from a source: one PUT when it never filled a part, else
@@ -643,23 +647,13 @@ impl<T: Transport> Upload for S3Upload<T> {
     }
 
     async fn abort(mut self) -> Result<(), StoreError> {
-        match std::mem::replace(&mut self.state, UploadState::Done) {
-            UploadState::Multipart { id, .. }
-            | UploadState::Sourced {
-                multipart: Some((id, _)),
-                ..
-            } => {
-                let aborted = self.inner.abort_upload(&self.key, &id);
-                if aborted.is_err() {
-                    self.inner.orphans.push(self.key, id);
-                }
-                aborted
-            }
-            UploadState::Buffering(_)
-            | UploadState::Sourced {
-                multipart: None, ..
-            }
-            | UploadState::Done => Ok(()),
+        let Some(id) = self.take_multipart_id() else {
+            return Ok(());
+        };
+        let aborted = self.inner.abort_upload(&self.key, &id);
+        if aborted.is_err() {
+            self.inner.orphans.push(self.key, id);
         }
+        aborted
     }
 }

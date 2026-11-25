@@ -570,9 +570,9 @@ impl FileSink {
         self
     }
 
-    /// The scratch file's path, for diagnostics.
-    #[must_use]
-    pub fn scratch_path(&self) -> &Path {
+    /// The scratch file's path, for the tests.
+    #[cfg(test)]
+    pub(crate) fn scratch_path(&self) -> &Path {
         &self.scratch
     }
 }

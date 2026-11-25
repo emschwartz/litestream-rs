@@ -196,6 +196,35 @@ fn a_first_file_sent_in_slices_does_not_let_the_levels_run() {
     assert!(!Rig::files(&rig.remote, Level::SNAPSHOT).is_empty());
 }
 
+/// The first snapshot starts when the first level-0 file is confirmed, not at the next
+/// window of some level: a send that took many ticks already let a listing see the empty
+/// replica, and the clock stands still from the confirmation on.
+#[test]
+fn the_first_snapshot_starts_as_the_first_level_zero_file_is_confirmed() {
+    let mut rig = big();
+    let mut actor = Actor::new(ActorConfig {
+        upload: UploadConfig {
+            bytes_per_tick: std::num::NonZeroU64::new(256 * 1024).unwrap(),
+            ..UploadConfig::default()
+        },
+        ..cfg()
+    });
+    let mut now = T0;
+    for _ in 0..400 {
+        rig.tick(&mut actor, now);
+        if !Rig::files(&rig.remote, Level::ZERO).is_empty() {
+            break;
+        }
+        now += SLICE_MILLIS;
+    }
+    assert!(!Rig::files(&rig.remote, Level::ZERO).is_empty());
+    rig.settle(&mut actor, now);
+    assert!(
+        !Rig::files(&rig.remote, Level::SNAPSHOT).is_empty(),
+        "no snapshot at the instant level 0 was confirmed"
+    );
+}
+
 /// A config that sends a quarter of a megabyte a tick.
 fn slow() -> ActorConfig {
     ActorConfig {

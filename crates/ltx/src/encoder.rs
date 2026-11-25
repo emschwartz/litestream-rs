@@ -37,15 +37,24 @@ pub struct Encoder<W> {
     file: Crc64,
     offset: u64,
     index: VecDeque<Vec<u8>>,
-    /// Whether the end-of-pages marker is written: no page may follow it.
-    marker: bool,
+    phase: Phase,
     /// Bytes of index written so far.
     index_written: u64,
     /// The compressor's output for one page, reused so a page costs no allocation.
     block: Vec<u8>,
     /// The database checksum so far, for tracked snapshots only.
     db: Option<DbChecksum>,
-    failed: bool,
+}
+
+/// How far the file is written. Only `Pages` takes a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// Pages are being written.
+    Pages,
+    /// The end-of-pages marker is written, so no page may follow it.
+    Index,
+    /// A write failed; nothing more can be written.
+    Failed,
 }
 
 impl<W: Write> Encoder<W> {
@@ -74,11 +83,10 @@ impl<W: Write> Encoder<W> {
             file,
             offset: u64_from(HEADER_LEN),
             index: VecDeque::new(),
-            marker: false,
+            phase: Phase::Pages,
             index_written: 0,
             block: vec![0; get_maximum_output_size(header.page_size().bytes())],
-            db: (header.tracked() && header.is_snapshot()).then_some(DbChecksum::EMPTY),
-            failed: false,
+            db: header.snapshot_db_checksum(),
         })
     }
 
@@ -89,7 +97,7 @@ impl<W: Write> Encoder<W> {
     /// [`EncodeError::PageLen`] or [`EncodeError::Order`] reject the page and
     /// leave the encoder usable; [`EncodeError::Io`] poisons it.
     pub fn write_page(&mut self, pgno: PageNo, data: &[u8]) -> Result<(), EncodeError> {
-        if self.failed || self.marker {
+        if self.phase != Phase::Pages {
             return Err(EncodeError::Poisoned);
         }
         let expected = self.header.page_size().bytes();
@@ -104,7 +112,7 @@ impl<W: Write> Encoder<W> {
         let mut block = std::mem::take(&mut self.block);
         let Ok(used) = compress_into(data, &mut block) else {
             // The buffer holds the compressor's worst case for a page, so this cannot happen.
-            self.failed = true;
+            self.phase = Phase::Failed;
             return Err(EncodeError::Io(io::Error::other(
                 "lz4 output buffer too small",
             )));
@@ -151,7 +159,7 @@ impl<W: Write> Encoder<W> {
     /// [`EncodeError::Poisoned`] for a failed write. Nothing is written on the
     /// first three.
     pub fn finish(mut self, post_apply: Option<DbChecksum>) -> Result<(W, Trailer), EncodeError> {
-        if self.failed {
+        if self.phase == Phase::Failed {
             return Err(EncodeError::Poisoned);
         }
         self.seq.finish()?;
@@ -189,15 +197,15 @@ impl<W: Write> Encoder<W> {
     /// [`EncodeError::Order`] for an incomplete snapshot (nothing is written),
     /// [`EncodeError::Io`] or [`EncodeError::Poisoned`] for a failed write.
     pub fn write_index_chunk(&mut self) -> Result<bool, EncodeError> {
-        if self.failed {
+        if self.phase == Phase::Failed {
             return Err(EncodeError::Poisoned);
         }
         self.seq.finish()?;
-        if !self.marker {
+        if self.phase == Phase::Pages {
             let marker = [0_u8; PAGE_HEADER_LEN];
             self.file.update(&marker);
             self.write(&marker)?;
-            self.marker = true;
+            self.phase = Phase::Index;
         }
         let Some(chunk) = self.index.pop_front() else {
             return Ok(false);
@@ -216,7 +224,7 @@ impl<W: Write> Encoder<W> {
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
         self.writer.write_all(bytes).map_err(|err| {
-            self.failed = true;
+            self.phase = Phase::Failed;
             EncodeError::Io(err)
         })
     }
