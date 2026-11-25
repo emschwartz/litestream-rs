@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 791ddb66f..fe1aa22cc 100644
+index 6cd9de794..67d3d12c2 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2540,7 +2540,7 @@ impl Actor {
+@@ -2549,7 +2549,7 @@ impl Actor {
          now: Timestamp,
      ) -> Option<Tick> {
-         let share = match self.engine.in_flight.sent() {
--            Some(_) => 1,
-+            Some(_) => 0,
-             None => state::FAIR_SHARE,
+         let owed = match self.engine.in_flight.sent() {
+-            Some(_) => self.engine.slices_ahead < state::FAIR_SHARE,
++            Some(_) => true,
+             None => self.engine.syncs_ahead >= state::FAIR_SHARE,
          };
-         if self.engine.syncs_ahead < share {
+         if !owed {
