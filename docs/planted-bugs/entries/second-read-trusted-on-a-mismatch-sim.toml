@@ -1,0 +1,8 @@
+# The same plant, seen by the simulator's judge of second reads: the replica's recorder kept
+# the first read and the source gave the S3 store other bytes.
+name = "second-read-trusted-on-a-mismatch-sim"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+patch = "second-read-trusted-on-a-mismatch"
+tests = ["sliced::a_staged_file_changed_between_its_two_reads_is_refused_at_the_second"]

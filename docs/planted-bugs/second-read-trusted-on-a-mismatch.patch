@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 11a67e0bb..1c6d21600 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -993,7 +993,7 @@ impl<'a, L: Role> Staged<'a, L> {
+             .map_err(Unread::Failed)?;
+         let mut tally = ByteTally::new();
+         tally.add(&bytes);
+-        if tally == *was {
++        if tally.size() == was.size() {
+             Ok(bytes)
+         } else {
+             Err(Unread::Changed)
