@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/short.rs b/crates/core/src/actor/short.rs
+index 2fb93f3be..e259a92a0 100644
+--- a/crates/core/src/actor/short.rs
++++ b/crates/core/src/actor/short.rs
+@@ -83,7 +83,7 @@ impl Actor {
+                 now,
+             )));
+         }
+-        if listed < tail.baseline() {
++        if listed < None::<lsr_ltx::Txid> {
+             return Err(Box::new(self.fault(
+                 Task::Upload,
+                 Fault::RemoteRegressed,
