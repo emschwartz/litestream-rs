@@ -219,14 +219,7 @@ fn a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snap
     ops.extend([Op::Tick, Op::Restart]);
     ops.extend(ticks(20));
     ops.push(Op::Restore);
-    let opts = Opts {
-        slice_bytes: NonZeroU64::new(second),
-        record: true,
-        ..Opts::default()
-    };
-    let report = run_ops(Seed::new(1), &ops, &opts)
-        .map_err(|failure| failure.violation.to_string())
-        .unwrap();
+    let report = run_sliced(&ops, second);
     let all = events(&report);
     assert_eq!(all[11], &Event::Sending { bytes: second }, "{all:?}");
     assert!(
