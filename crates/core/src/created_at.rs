@@ -43,12 +43,14 @@ impl ResolvedCreatedAt {
 
     /// How many created-at times were resolved through the store.
     #[must_use]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.resolved.len()
     }
 
     /// Whether none were.
     #[must_use]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.resolved.is_empty()
     }

@@ -1095,6 +1095,16 @@ impl Actor {
         }
     }
 
+    fn ran_maintained(&self, event: MaintainedEvent, created_at_read: u64, now: Timestamp) -> Tick {
+        self.ran(
+            Event::Maintained {
+                event,
+                created_at_read,
+            },
+            now,
+        )
+    }
+
     /// A boot that could not finish: a fault, or a takeover it needs durable
     /// before it drops staged files.
     fn boot_step(&mut self, step: BootStep, took: Duration, now: Timestamp) -> Tick {
@@ -2231,11 +2241,7 @@ impl Actor {
             return None;
         }
         self.engine.maintain.passed_over = 0;
-        let event = Event::Maintained {
-            event: MaintainedEvent::Deleted(keys.len()),
-            created_at_read: 0,
-        };
-        Some(self.ran(event, now))
+        Some(self.ran_maintained(MaintainedEvent::Deleted(keys.len()), 0, now))
     }
 
     /// The newest staged transaction a prune may delete through, when it is
@@ -2374,11 +2380,7 @@ impl Actor {
         // The listing no longer holds: the next tick lists and reads back again.
         self.engine.maintain.stale = true;
         self.maintained(now);
-        let event = Event::Maintained {
-            event: MaintainedEvent::Repaired(key),
-            created_at_read: 0,
-        };
-        Some(self.ran(event, now))
+        Some(self.ran_maintained(MaintainedEvent::Repaired(key), 0, now))
     }
 
     async fn run_job<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
@@ -2410,13 +2412,7 @@ impl Actor {
             }
         };
         self.maintained(now);
-        self.ran(
-            Event::Maintained {
-                event,
-                created_at_read,
-            },
-            now,
-        )
+        self.ran_maintained(event, created_at_read, now)
     }
 
     /// What ends a maintenance tick before anything is planned from a listing whose newest
@@ -2450,11 +2446,7 @@ impl Actor {
         self.engine.maintain.stale = false;
         self.engine.maintain.until = Some(again);
         self.maintained(now);
-        let event = Event::Maintained {
-            event: MaintainedEvent::Waiting { held: None },
-            created_at_read: 0,
-        };
-        self.ran(event, now)
+        self.ran_maintained(MaintainedEvent::Waiting { held: None }, 0, now)
     }
 
     /// A maintenance step went well. The task's degraded state goes unless a
@@ -2489,13 +2481,7 @@ impl Actor {
     fn snapshot_written(&mut self, info: FileInfo, now: Timestamp, created_at_read: u64) -> Tick {
         self.maintained(now);
         let event = MaintainedEvent::Snapshot(info);
-        self.ran(
-            Event::Maintained {
-                event,
-                created_at_read,
-            },
-            now,
-        )
+        self.ran_maintained(event, created_at_read, now)
     }
 
     /// How a snapshot built from the replica's level-0 files ended ([`Job::merge`]): no step, no
@@ -2519,13 +2505,7 @@ impl Actor {
                 self.engine.maintain.remembered.owe_full();
                 self.maintained(now);
                 let event = MaintainedEvent::Replan;
-                self.ran(
-                    Event::Maintained {
-                        event,
-                        created_at_read,
-                    },
-                    now,
-                )
+                self.ran_maintained(event, created_at_read, now)
             }
             Outcome::Failed(err) => {
                 if let MaintainError::OutputDistrusted { key, .. } = &err {
@@ -2553,13 +2533,7 @@ impl Actor {
         if !self.kept.tasks.ready(Task::Sync, now) {
             self.wait_for_sync();
             let event = MaintainedEvent::Waiting { held: None };
-            return self.ran(
-                Event::Maintained {
-                    event,
-                    created_at_read,
-                },
-                now,
-            );
+            return self.ran_maintained(event, created_at_read, now);
         }
         let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
@@ -2573,13 +2547,7 @@ impl Actor {
                 self.engine.maintain.stale = false;
                 self.engine.maintain.until = None;
                 let event = MaintainedEvent::Waiting { held: None };
-                return self.ran(
-                    Event::Maintained {
-                        event,
-                        created_at_read,
-                    },
-                    now,
-                );
+                return self.ran_maintained(event, created_at_read, now);
             }
             Ok((files, _)) => return self.ran(Event::Synced { files }, now),
             // A failed step waits on the sync task, and the listing with it:
