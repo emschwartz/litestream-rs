@@ -11,7 +11,7 @@ use lsr_sim::{Op, Opts, Seed};
 /// earlier history built on another writer's removed file stopped reaching the gap once the
 /// engine learned to stop on another writer.
 #[test]
-fn verify_reports_a_live_transaction_a_rollback_took_seed_0xd() {
+fn verify_reports_a_live_transaction_a_rollback_took() {
     use lsr_sim::generate::{Hold, RemoteOp, WalOp};
     let ops = [
         Op::Shutdown,

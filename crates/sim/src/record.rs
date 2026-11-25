@@ -3,8 +3,8 @@
 //! A regression pinned by a seed number replays whatever the generator draws for that seed
 //! today, so a new draw anywhere in the generator silently gives it another history, one that
 //! may no longer reach the bug it was written for. A recorded history cannot drift: it is the
-//! operations themselves, kept in `crates/sim/tests/sim/histories/` as a `const` array that
-//! [`crate::run::run_ops`] runs. This module writes that source: each operation as a fully
+//! operations themselves, written out as a `const` array that [`crate::run::run_ops`] runs, to
+//! be shrunk into an explicit scenario (`docs/decisions/D165.md`). This module writes that source: each operation as a fully
 //! qualified constructor expression. Every match is exhaustive, so a new operation, fault shape
 //! or field does not compile until it says how it is written; a shape no recorded history has
 //! needed yet (most [`StoreError`] variants) is refused with [`Unprintable`] instead of written

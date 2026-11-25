@@ -31,3 +31,5 @@ mod secret_shapes;
 mod skip_guard;
 #[cfg(test)]
 mod walk;
+#[cfg(test)]
+mod waves;
