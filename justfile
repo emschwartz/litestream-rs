@@ -471,16 +471,12 @@ upstream:
 
 # Every counterpart the upstream test map (docs/upstream-test-map.toml) names is a Rust test that exists,
 # so a renamed or deleted counterpart fails the gate. The Rust test list is generated here into
-# target/ and never committed, so a branch that adds a test touches no shared list. Some tests
-# are Linux-only and the test map names some of them, so on another OS the step is skipped; CI, on
-# Linux, still enforces it.
+# target/ and never committed, so a branch that adds a test touches no shared list. It runs on
+# every system: the test excuses the few Linux-only counterparts it names (`LINUX_ONLY`) where
+# the listing cannot hold them, and nothing else.
 upstream-test-map-fresh:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ "$(uname)" != Linux ]; then
-        echo "upstream-test-map-fresh: skipped: the test map names Linux-only tests"
-        exit 0
-    fi
     # Absolute, since nextest runs the test in the package's directory.
     mkdir -p "${CARGO_TARGET_DIR:-target}/upstream-test-map"
     list="$(cd "${CARGO_TARGET_DIR:-target}/upstream-test-map" && pwd)/rust-tests.txt"
