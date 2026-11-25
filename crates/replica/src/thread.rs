@@ -224,10 +224,6 @@ pub(crate) struct Worker {
     why: WhyBlocked,
     /// What the last `WritesBlocked` or `WritesAllowed` event said.
     reported: Writes,
-    /// The pending boot waited on held writes (a sequence bump for a missing WAL): the gate
-    /// lets writes through until the boot is judged, so it is judged on what it finds and not
-    /// on the hold, which would never end.
-    boot_write: bool,
     /// When a hold or release that failed is tried again at the latest.
     gate_retry: Option<Timestamp>,
     /// The clock's last reading, to notice it stepping back.
@@ -308,7 +304,6 @@ impl Worker {
             gate,
             why: WhyBlocked::Booting,
             reported: Writes::Allowed,
-            boot_write: false,
             gate_retry: None,
         }
     }
@@ -562,11 +557,6 @@ impl Worker {
 
     fn ran(&mut self, event: EngineEvent, next: lsr_core::Next, now: Timestamp) -> Turn {
         let idle = event == EngineEvent::Idle;
-        if matches!(event, EngineEvent::WritesHeld { .. })
-            && self.blocked == Some(WhyBlocked::Booting)
-        {
-            self.boot_write = true;
-        }
         // A drain that made progress ticks again at once: the engine reports `Drained` only on
         // the tick after its last upload, and would otherwise name the drain's deadline (or the
         // next poll) as its wake. A retry is not progress: it waits its backoff.
@@ -575,7 +565,8 @@ impl Worker {
             | EngineEvent::Synced { .. }
             | EngineEvent::Uploaded(_)
             | EngineEvent::Resnapshot(_)
-            | EngineEvent::TakeoverWanted(_) => true,
+            | EngineEvent::TakeoverWanted(_)
+            | EngineEvent::CheckingIdentity { .. } => true,
             EngineEvent::Checkpointed { .. }
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
@@ -639,7 +630,8 @@ impl Worker {
             | EngineEvent::Clamped(_)
             // A wait on held writes is not a failure: nothing is counted.
             | EngineEvent::WritesHeld { .. }
-            | EngineEvent::TakeoverWanted(_) => {}
+            | EngineEvent::TakeoverWanted(_)
+            | EngineEvent::CheckingIdentity { .. } => {}
         }
     }
 
@@ -843,10 +835,12 @@ impl Worker {
         let gate = self
             .app_gate
             .judge(self.config.if_replication_stops, trip, judged);
-        self.blocked = blocks_writes(self.config.if_replication_stops, gate);
-        if self.blocked != Some(WhyBlocked::Booting) {
-            self.boot_write = false;
-        }
+        self.blocked = blocks_writes(self.config.if_replication_stops, gate).map(|why| match why {
+            WhyBlocked::Booting if self.actor.checking_identity() => WhyBlocked::CheckingIdentity,
+            why @ (WhyBlocked::Booting | WhyBlocked::CheckingIdentity | WhyBlocked::Tripped(_)) => {
+                why
+            }
+        });
         FailStop { trip, gate }
     }
 
@@ -858,8 +852,9 @@ impl Worker {
             self.why = why;
         }
         let hold = match self.blocked {
-            Some(WhyBlocked::Booting) => !self.boot_write,
-            Some(WhyBlocked::Tripped(_)) => true,
+            Some(WhyBlocked::Booting | WhyBlocked::CheckingIdentity | WhyBlocked::Tripped(_)) => {
+                true
+            }
             None => false,
         };
         let kept = if hold {

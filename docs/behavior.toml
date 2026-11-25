@@ -2532,11 +2532,31 @@ detected_by = "cli::`stop_app_without_exec_is_accepted`, cli::`a_plain_sidecar_b
 table = "Fail-stop"
 id = "FS-10"
 circumstance = "The boot has not been judged yet (gate `Pending`), under `hold-start` or `stop-app`"
-response = "writes are held from the start: the replicator takes the write lock before its thread runs and lets go once the boot is judged; `Replicator::ready` and `wait_booted` answer `Booted` only then. Under `report` nothing is held (decision D192)"
-signal = "log `writes blocked` with `held_by=booting`, then `writes allowed`; `Health::writes`; events `WritesBlocked`, `WritesAllowed`"
-at_risk = "None: writes wait a boot"
+response = "writes are held from the start: the replicator takes the write lock before its thread runs and lets go once the boot is judged, which is once it has listed the replica and decided how to start (continue, or snapshot for a named cause), or once a boot attempt failed for anything but a refusal. A snapshot the boot asked for is taken after the release, while the application writes (D201); `Replicator::ready` and `wait_booted` answer `Booted` at the release, and the first snapshot is on the replica once `Health::resnapshot` and `unreplicated_since` are both `None`. Stops found before the decision (another writer, a page size change seen in the WAL, a refusal) are judged before any release. Under `report` nothing is held (decision D192)"
+signal = "log `writes blocked` with `held_by=booting` (INFO), then `writes allowed`; `Health::writes`; events `WritesBlocked`, `WritesAllowed`"
+at_risk = "None: writes wait a boot's listing and decision, not its snapshot (a 294 MiB database on a file replica: held 0.9 to 2.1 s before D201, 1 to 5 ms after)"
 recovery = "Automatic once the boot is judged"
-detected_by = "core::`writes_are_blocked_by_a_held_gate_and_by_a_pending_boot_except_under_report`, replica::`writes_are_held_while_the_boot_is_pending`, replica::`report_never_blocks_a_write`, sim::`writes_held_while_the_boot_is_pending`, sim::`writes_allowed_after_the_boot`, sim::`writes_never_held_under_report`, plant::`gate-not-held-while-pending`"
+detected_by = "core::`writes_are_blocked_by_a_held_gate_and_by_a_pending_boot_except_under_report`, core::`a_boot_is_judged_once_it_decides_not_once_its_snapshot_is_staged`, replica::`writes_are_held_while_the_boot_is_pending`, replica::`writes_go_through_before_the_boot_snapshot_is_staged`, replica::`a_stop_found_before_the_decision_still_holds_the_start`, replica::`report_never_blocks_a_write`, cli::`the_child_starts_before_the_boot_snapshot_is_staged`, sim::`writes_held_while_the_boot_is_pending`, sim::`writes_allowed_after_the_boot`, sim::`writes_allowed_before_the_boot_snapshot`, sim::`writes_never_held_under_report`, plant::`gate-not-held-while-pending`, plant::`failstop-held-until-the-boot-snapshot`"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-12"
+circumstance = "The boot's snapshot, taken after writes were released, finds a stop: the page size changed (a WAL missing at boot), the WAL is corrupt or truncated below what was committed, unlinked, or failed to sync, a database page does not match, or a bug"
+response = "handled as any later fault (D201): the stop's response applies; under `stop` fail-stop trips, and under `stop-app` the replicator takes the write lock again (under `hold-start` the start was already released, so the application goes on) with the trip as its reason. The trip is kept in health until a restart; nothing panics. Under `keep-trying` the task degrades and the unreplicated-age bound trips it later. Transient faults (local I/O, a full disk, a moved WAL, a lost read transaction, a busy database) are retried"
+signal = "log `writes blocked` with `held_by=<cause>` at WARN; `Health::held_by`, `Health::writes` `Blocked(Tripped(..))`, `Health::phase` `Stopped`; events `WritesBlocked` after `WritesAllowed`"
+at_risk = "Commits the application made between the release and the stop are in the database and the WAL, not on the replica, until an operator resolves the stop"
+recovery = "As the stop's row"
+detected_by = "replica::`a_stop_the_boot_snapshot_finds_blocks_writes_again_under_stop_app`, cli::`a_plain_sidecar_blocks_writes_under_stop_app`"
+
+[[row]]
+table = "Fail-stop"
+id = "FS-13"
+circumstance = "A boot over an empty meta directory finds the replica's own state and compares the database with the replica's newest state before it decides (the identity check)"
+response = "writes stay held through the check, which restores the replica's newest state into page checksums and reads every local page: about a restore's time, store bandwidth plus one read of the database (minutes for tens of GiB on S3). The engine announces the check a tick before it runs it (`Event::CheckingIdentity`), and the hold's reason is `checking_identity`, not `booting` (D201)"
+signal = "log `comparing the database with the replica before starting` (INFO, field `tip`), then `writes blocked` with `held_by=checking_identity` (INFO); `Health::writes` `Blocked(CheckingIdentity)`"
+at_risk = "None: writes wait"
+recovery = "Automatic once the check decides"
+detected_by = "core::`a_new_meta_directory_over_the_replicas_own_state_snapshots_above_it`, sim::`writes_held_while_the_boot_checks_identity`, plant::`failstop-identity-check-unnamed`"
 
 [[row]]
 table = "Fail-stop"

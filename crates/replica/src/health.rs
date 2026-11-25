@@ -18,7 +18,8 @@ use lsr_ltx::{Timestamp, Txid};
 /// What the replicator is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
-    /// The first boot (listing the replica, recovering the position) has not finished.
+    /// The first boot (listing the replica, recovering the position, deciding how to start)
+    /// has not finished.
     Booting,
     /// Replicating.
     Running,

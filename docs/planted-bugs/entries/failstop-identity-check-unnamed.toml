@@ -1,0 +1,7 @@
+# Writes held while a boot with an empty meta directory compares the database with the replica
+# are reported as plain booting: an operator cannot tell a hold that lasts a restore's time from
+# the second or two every start takes (docs/decisions/D201.md).
+name = "failstop-identity-check-unnamed"
+fix = "plant"
+package = "lsr-core"
+tests = ["vouch::a_new_meta_directory_over_the_replicas_own_state_snapshots_above_it"]

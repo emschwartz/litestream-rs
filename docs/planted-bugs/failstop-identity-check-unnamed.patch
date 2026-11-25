@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+--- a/crates/core/src/actor/lag.rs
++++ b/crates/core/src/actor/lag.rs
+@@ -296,7 +296,7 @@ impl Actor {
+     /// local page: the reason writes are held, for health.
+     #[must_use]
+     pub fn checking_identity(&self) -> bool {
+-        self.kept.identity_announced && !self.booted()
++        false
+     }
+ 
+     /// Whether an engine of this process has listed the replica.

@@ -497,6 +497,10 @@ fn a_new_meta_directory_over_the_replicas_own_state_snapshots_above_it() {
     let mut rig = redeployed_with_a_new_meta_directory();
     let mut actor = go_like_actor();
     let boot = rig.tick(&mut actor, T0 + 2);
+    // The boot said it checks first, and the start was held through the check (the rig's
+    // `tick` asserts both), then it decided.
+    assert_eq!(rig.announced, [tx(3)]);
+    assert!(actor.boot_judged() && !actor.checking_identity());
     assert_eq!(
         booted(&boot),
         Some(Some(SnapshotCause::GenerationChanged)),

@@ -264,6 +264,9 @@ struct Rig {
     /// The takeover record a driver would keep in the meta directory: what an
     /// actor asked for ([`Actor::takeover_wanted`]), handed back at once.
     takeover: Option<crate::TakeoverRecord>,
+    /// Boots that said they compare the database with the replica before deciding
+    /// ([`Event::CheckingIdentity`]), each with the replica transaction it named.
+    announced: Vec<Txid>,
 }
 
 impl Rig {
@@ -289,6 +292,7 @@ impl Rig {
             staging: Counting::default(),
             remote: Counting::default(),
             takeover: None,
+            announced: Vec::new(),
         };
         rig.commit(1);
         rig
@@ -319,6 +323,21 @@ impl Rig {
             let held = self.takeover.filter(|held| held.txid() > wanted.txid());
             self.takeover = Some(held.unwrap_or(wanted));
             actor.remember_takeover(wanted);
+            return self.tick(actor, now);
+        }
+        // A boot that announces the identity check runs it on the next tick; the rig ticks on,
+        // as the replicator thread does, once it has seen the announcement.
+        if let Tick::Ran {
+            event: Event::CheckingIdentity { tip },
+            ..
+        } = tick
+        {
+            assert!(
+                actor.checking_identity(),
+                "announced, so the boot checks next"
+            );
+            assert!(!actor.boot_judged(), "the start is held through the check");
+            self.announced.push(tip);
             return self.tick(actor, now);
         }
         tick

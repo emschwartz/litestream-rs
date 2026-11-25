@@ -158,8 +158,9 @@ pub(super) struct Kept {
     /// A boot attempt of this process has failed: with no refusal behind it, the boot is
     /// judged and the application may start (`crate::failstop`).
     pub(super) boot_failed: bool,
-    /// A sync step failed after the first listing: a snapshot the boot asked for was tried.
-    pub(super) sync_failed_after_listing: bool,
+    /// This boot announced that it compares the database with the replica's newest state
+    /// before it decides ([`super::Event::CheckingIdentity`]); the next boot runs the check.
+    pub(super) identity_announced: bool,
     /// Pending staged files that hold no commit of the application's: a file that changes no
     /// page, or a snapshot for a doubt alone staged while nothing was off the replica. They are
     /// not lag (`actor::lag`). At most one per pending file, so bounded by the witness tokens.
@@ -198,7 +199,7 @@ impl Kept {
             listed: false,
             refused_at_boot: None,
             boot_failed: false,
-            sync_failed_after_listing: false,
+            identity_announced: false,
             quiet: BTreeSet::new(),
             doubt_baseline: None,
             read_lock_violations: 0,
@@ -234,7 +235,7 @@ impl Kept {
             listed,
             refused_at_boot,
             boot_failed,
-            sync_failed_after_listing,
+            identity_announced: _,
             quiet: _,
             doubt_baseline: _,
             read_lock_violations,
@@ -266,7 +267,8 @@ impl Kept {
             listed: *listed,
             refused_at_boot: *refused_at_boot,
             boot_failed: *boot_failed,
-            sync_failed_after_listing: *sync_failed_after_listing,
+            // A rebuilt engine boots again and says again what its boot does.
+            identity_announced: false,
             // Beliefs about staged files: the rebuilt engine's boot judges them again.
             quiet: BTreeSet::new(),
             doubt_baseline: None,

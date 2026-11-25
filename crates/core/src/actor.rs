@@ -297,6 +297,14 @@ pub enum Event {
     /// driver writes it, hands it back with [`Actor::remember_takeover`], and
     /// ticks again. Nothing else ran.
     TakeoverWanted(TakeoverRecord),
+    /// A boot with a brand-new meta directory found replica files through `tip` that nothing
+    /// local vouches for: before it decides, it restores the replica's state at `tip` and
+    /// compares it with the database, page by page (`crate::identity`). The next tick runs
+    /// that check; the start is held through it. Nothing else ran.
+    CheckingIdentity {
+        /// The replica's newest transaction, the state compared.
+        tip: Txid,
+    },
 }
 
 /// How a tick ended.
@@ -861,26 +869,21 @@ impl Actor {
             Policy::Persistent(cause) => self.persistent(waiter, cause, Backoff::Doubling, now),
             Policy::Shutdown => self.stop(StopCause::Shutdown),
             Policy::Wait => {
-                // A boot not yet judged is held by its own start: the host lets its write through
-                // (`docs/decisions/D192.md`), so it tries again at once. A hold for a trip waits.
-                let at_once = !self.boot_judged() && self.trip().is_none();
-                let until = self.hold(waiter, now, at_once);
+                // Only a trip holds a judged start, and nothing writes before the boot decides
+                // (`docs/decisions/D201.md`): the hold lasts, so the task waits.
+                let until = self.hold(waiter, now);
                 self.ran(Event::WritesHeld { until }, now)
             }
         }
     }
 
-    /// Waits one retry interval, or not at all (`at_once`), without counting a failure
-    /// ([`Policy::Wait`]); returns when the wait ends.
-    fn hold(&mut self, waiter: Waiter, now: Timestamp, at_once: bool) -> Timestamp {
+    /// Waits one retry interval without counting a failure ([`Policy::Wait`]); returns when
+    /// the wait ends.
+    fn hold(&mut self, waiter: Waiter, now: Timestamp) -> Timestamp {
         match waiter {
             Waiter::Kept(until) => until,
             Waiter::Task(task) => {
-                let until = if at_once {
-                    now
-                } else {
-                    now.saturating_add(self.kept.cfg.retry_interval)
-                };
+                let until = now.saturating_add(self.kept.cfg.retry_interval);
                 self.kept.tasks.get_mut(task).hold(until);
                 until
             }
@@ -1048,6 +1051,13 @@ impl Actor {
                 self.kept.refused_through = Some(through);
                 self.verdict(Task::Sync, StopCause::OtherWriter, now)
             }
+            BootStep::CheckIdentity(tip) => {
+                self.kept.identity_announced = true;
+                Tick::Ran {
+                    event: Event::CheckingIdentity { tip },
+                    next: Next::Now,
+                }
+            }
         }
     }
 
@@ -1191,7 +1201,7 @@ impl Actor {
                     page_size,
                     refused_through,
                 },
-        } = match boot_judge(env, upload, gate).await {
+        } = match boot_judge(env, upload, gate, self.kept.identity_announced).await {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, now),
         };
@@ -1231,6 +1241,7 @@ impl Actor {
             ..Engine::fresh()
         };
         self.kept.tasks.get_mut(Task::Sync).succeed();
+        self.kept.identity_announced = false;
         self.ran(Event::Booted { cause }, now)
     }
 
@@ -2569,6 +2580,9 @@ enum BootStep {
     /// The replica holds another writer's file through this transaction:
     /// the boot stops with `OtherWriter`.
     Refused(Txid),
+    /// The boot must compare the database with the replica's state at this transaction
+    /// before it decides, and has not said so yet: it says so, and the next boot runs it.
+    CheckIdentity(Txid),
 }
 
 impl From<Fault> for BootStep {
@@ -2864,6 +2878,7 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     upload: UploadState,
     gate: BootGate,
+    may_check: bool,
 ) -> Result<Judged, BootStep> {
     // The length first: a file that shrinks after it shows in the header or the wal-index read
     // after it (a missing WAL, a new generation), never as a short file.
@@ -2877,6 +2892,7 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
         (len, committed),
         upload.confirmed(),
         gate,
+        may_check,
     )
     .await?;
     Ok(Judged {
@@ -2906,7 +2922,8 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     (len, committed): (Option<WalFileLen>, CommittedRead),
     confirmed: Option<Txid>,
     gate: BootGate,
-) -> Result<Booted, Fault> {
+    may_check: bool,
+) -> Result<Booted, BootStep> {
     let (staging, remote) = (env.staging, env.remote);
     let end = committed.end();
     let staged = NewestStagedFile::load(staging, boot_wal_of(reader.as_deref_mut(), end)).await?;
@@ -2922,7 +2939,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
             match NewestStagedFile::load_remote(remote, wal, tip).await {
                 Ok(file) => file,
                 Err(Fault::RemoteCorrupt) if staged.is_some() => None,
-                Err(fault) => return Err(fault),
+                Err(fault) => return Err(fault.into()),
             }
         }
         None => None,
@@ -2947,6 +2964,9 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let resized = page_size.zip(now).filter(|(was, now)| was != now);
     let (refused_through, ahead) = match refused {
         Some(tip) if resized.is_none() && gate.fresh() => {
+            if !may_check {
+                return Err(BootStep::CheckIdentity(tip));
+            }
             let local =
                 identity::local_against_replica(env.wal, reader, committed, env.db, remote, tip)
                     .await?;
@@ -2996,7 +3016,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
             .map_or(0, WalFileLen::bytes)
             < was.bytes()
     {
-        return Err(Fault::WalMoved);
+        return Err(Fault::WalMoved.into());
     }
     Ok(Booted {
         newest_staged,

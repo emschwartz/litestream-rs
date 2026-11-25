@@ -1,5 +1,6 @@
 //! One scenario per state of the replicator's write gate (`docs/decisions/D192.md`): writes
-//! held while the boot is pending, let through once it is judged, and held again by a stop
+//! held while the boot is pending, let through once it is judged (before its snapshot is
+//! staged, `docs/decisions/D201.md`), and held again by a stop
 //! under `stop-app`, but never under `report`. The run's write-gate judge
 //! (`crate::run`) fails any of them in which the held lock goes away or a commit lands under
 //! it; each scenario's check says the state it is about was reached.
@@ -55,6 +56,47 @@ pub fn writes_held_while_the_boot_is_pending() -> Scenario {
         reached(report, "writes.blocked.Booting")?;
         reached(report, REFUSED)
     });
+    s
+}
+
+/// The boot is judged once it has decided how to start, not once its snapshot is staged
+/// (`docs/decisions/D201.md`): the tick that boots lets writes go with the first snapshot still
+/// owed, and a commit made before the next tick, which takes that snapshot, lands.
+#[must_use]
+pub fn writes_allowed_before_the_boot_snapshot() -> Scenario {
+    let mut s = gated(
+        build(
+            "writes_allowed_before_the_boot_snapshot",
+            vec![
+                vec![Op::Tick, commit(2, false)],
+                ticks(SETTLE),
+                vec![Op::Restore],
+            ],
+            vec![Expect::Oracle],
+        ),
+        IfReplicationStops::StopApp,
+    );
+    s.check = Some(|report| {
+        reached(report, "writes.allowed.snapshot_owed")?;
+        never(report, REFUSED)
+    });
+    s
+}
+
+/// [`super::meta_lost_with_commits_not_uploaded`] under `stop-app`: the boot over the empty meta
+/// directory compares the database with the replica before it decides, and writes are held
+/// through that check with a reason of their own.
+#[must_use]
+pub fn writes_held_while_the_boot_checks_identity() -> Scenario {
+    let mut s = gated(
+        super::meta_lost_with_commits_not_uploaded(),
+        IfReplicationStops::StopApp,
+    );
+    s.name = "writes_held_while_the_boot_checks_identity";
+    // The commits the gate refuses change what the boot finds, so only the oracle's verdict
+    // and the reason the writes were held are this scenario's.
+    s.expect = vec![Expect::Oracle];
+    s.check = Some(|report| reached(report, "writes.blocked.CheckingIdentity"));
     s
 }
 

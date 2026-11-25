@@ -421,10 +421,11 @@ fn a_quiet_snapshot_stays_quiet_across_a_restart_that_takes_a_snapshot() {
     assert_eq!(actor.trip(), None);
 }
 
-/// A boot that asks for a snapshot is judged once that snapshot is staged or its step fails:
-/// a stop the snapshot finds is a stop at boot, and holds an application not yet started.
+/// A boot is judged once it has listed the replica and decided how to start, not once the
+/// snapshot it asked for is staged (`docs/decisions/D201.md`): the snapshot is still owed, and a
+/// stop it finds later is an ordinary stop.
 #[test]
-fn a_boot_is_judged_once_its_snapshot_is_tried() {
+fn a_boot_is_judged_once_it_decides_not_once_its_snapshot_is_staged() {
     let mut rig = Rig::new();
     let mut actor = Actor::new(go_like());
     let boot = rig.tick(&mut actor, T0);
@@ -438,9 +439,9 @@ fn a_boot_is_judged_once_its_snapshot_is_tried() {
         "{boot:?}"
     );
     assert!(actor.listed());
-    assert!(!actor.boot_judged(), "the boot's snapshot is still owed");
-    rig.settle(&mut actor, T0);
-    assert!(actor.boot_judged());
+    assert_eq!(actor.pending_snapshot(), Some(SnapshotCause::FirstSync));
+    assert!(actor.boot_judged(), "judged with its snapshot still owed");
+    assert!(!actor.checking_identity());
 }
 
 /// A boot that timed out once, then listed, still waits for its snapshot; a snapshot step
