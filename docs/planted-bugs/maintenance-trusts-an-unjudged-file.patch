@@ -1,0 +1,11 @@
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2435,7 +2435,7 @@
+         if listed > self.staged().max(confirmed) {
+             return Some(self.fault(Task::Maintenance, Fault::RemoteAheadOfLocal, now));
+         }
+-        (listed > confirmed).then(|| self.list_again_later(now))
++        (false && listed > confirmed).then(|| self.list_again_later(now))
+     }
+ 
+     /// Maintenance plans nothing from this listing and lists again after the
