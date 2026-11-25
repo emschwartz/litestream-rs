@@ -14,7 +14,7 @@ matters is code. AGENTS.md says why: production code should not grow without nee
 
     uv run scripts/prod-lines.py [--base REF] [--markdown]
 
---base REF also counts the crates as REF has them and prints the change. --markdown prints a
+--base REF also counts the crates where this branch forked from REF and prints the change. --markdown prints a
 table for a CI job summary.
 """
 
@@ -211,7 +211,9 @@ def count_tree(root, base=False):
 
 
 def checkout(ref, into):
-    archive = subprocess.run(["git", "archive", ref, "crates"], check=True, capture_output=True).stdout
+    # The fork point, not the ref's tip: a base that moved on would count its own changes.
+    fork = subprocess.run(["git", "merge-base", ref, "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    archive = subprocess.run(["git", "archive", fork, "crates"], check=True, capture_output=True).stdout
     subprocess.run(["tar", "-x", "-C", into], input=archive, check=True)
     return Path(into)
 
