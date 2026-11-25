@@ -222,7 +222,7 @@ fn a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snap
     ops.extend([Op::Tick, Op::Restart]);
     ops.extend(ticks(20));
     ops.push(Op::Restore);
-    let report = run_sliced(&ops, second);
+    let report = run_with(&ops, second, false);
     let all = events(&report);
     assert_eq!(all[11], &Event::Sending { bytes: second }, "{all:?}");
     assert!(
