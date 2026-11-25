@@ -1044,6 +1044,13 @@ fn the_first_hole_is_before_the_first_source_or_between_two_neighbours() {
         hole(Some(10), &[(11, 14), (12, 13), (16, 16)]),
         Some(range(15, 15))
     );
+    // Files at or below the destination's newest change nothing, and one that ends above it
+    // holds what follows.
+    assert_eq!(
+        hole(Some(10), &[(1, 5), (6, 10), (12, 15)]),
+        Some(range(11, 11))
+    );
+    assert_eq!(hole(Some(10), &[(8, 15), (16, 20)]), None);
 }
 
 #[test]
@@ -1077,6 +1084,11 @@ fn a_hole_whose_first_transaction_no_file_starts_at_is_not_filled() {
     // The level below holds the hole's first transaction in a file that starts before it.
     let straddling = level_one(&[(9, 12), (13, 14)]);
     assert_eq!(fill(&inv(straddling), level(2), range(11, 14)), None);
+    // Also when that file starts at the first transaction there is, and the level below it
+    // holds the hole in files of its own.
+    let mut from_the_start = l0_run(11, 14, T0);
+    from_the_start.extend(level_one(&[(1, 12), (13, 14)]));
+    assert_eq!(fill(&inv(from_the_start), level(2), range(11, 14)), None);
     // Nothing below holds it: the range is lost.
     assert_eq!(
         fill(

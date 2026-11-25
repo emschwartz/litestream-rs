@@ -1,6 +1,6 @@
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -749,7 +749,7 @@
+@@ -751,7 +751,7 @@
      // first source file above the destination's newest, and that file starts at the
      // transaction after it. A tail that shows otherwise is not planned from.
      let follows = dst_max.is_none_or(|max| max.next() == Some(first.key.range().min()));

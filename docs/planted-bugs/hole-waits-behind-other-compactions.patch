@@ -1,6 +1,6 @@
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -615,12 +615,6 @@
+@@ -617,12 +617,6 @@
          .take(usize::from(config.top().get()));
      // A hole is closed before any other job, at whatever level it is: the next passes see
      // only tails, where a hole that is not right above a level's newest file does not show.

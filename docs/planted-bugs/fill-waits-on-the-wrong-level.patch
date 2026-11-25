@@ -1,6 +1,6 @@
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -801,7 +801,7 @@
+@@ -800,7 +800,7 @@
      }
      let job = fill(inventory, src_level, hole)?;
      // The fill may start at a lower level than the hole's: it waits out the level it writes.

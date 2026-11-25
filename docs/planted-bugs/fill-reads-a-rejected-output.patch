@@ -1,6 +1,6 @@
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -796,7 +796,7 @@
+@@ -795,7 +795,7 @@
      // A rejected output is never an input, and its level gains nothing before its delete.
      // A fill may read or write any level up to the hole's, so the hole waits for the delete.
      let rejected = |level: &Level| *level <= src_level && state.distrusted_at(*level).is_some();

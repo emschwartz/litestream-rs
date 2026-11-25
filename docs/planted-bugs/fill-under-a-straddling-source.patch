@@ -1,11 +1,15 @@
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -791,7 +791,7 @@
-     let above = inventory
-         .level(src_level)
-         .iter()
--        .filter(|info| dst_max.is_none_or(|max| info.key.range().max() > max));
+@@ -791,7 +791,11 @@
+     // Every source counts, not only those that start above the destination's newest: one that
+     // starts at or below it and ends above holds the transactions between, and a fill would
+     // be written under it.
+-    let hole = first_hole(dst_max, inventory.level(src_level).iter())?;
++    let above = inventory
++        .level(src_level)
++        .iter()
 +        .filter(|info| dst_max.is_none_or(|max| info.key.range().min() > max));
-     let hole = first_hole(dst_max, above)?;
++    let hole = first_hole(dst_max, above)?;
      // A rejected output is never an input, and its level gains nothing before its delete.
      // A fill may read or write any level up to the hole's, so the hole waits for the delete.
+     let rejected = |level: &Level| *level <= src_level && state.distrusted_at(*level).is_some();

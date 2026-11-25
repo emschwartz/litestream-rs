@@ -95,6 +95,8 @@ mod retain;
 mod short;
 mod state;
 
+use std::cmp::Ordering;
+
 use lsr_ltx::{TRAILER_LEN, Timestamp, Txid, TxidRange};
 use thiserror::Error;
 
@@ -786,13 +788,10 @@ fn plan_fill(
         .level(dst)
         .last()
         .map(|info| info.key.range().max());
-    // A source that starts at or below the destination's newest and ends above it holds the
-    // transactions between: it counts, or a fill would be written under it.
-    let above = inventory
-        .level(src_level)
-        .iter()
-        .filter(|info| dst_max.is_none_or(|max| info.key.range().max() > max));
-    let hole = first_hole(dst_max, above)?;
+    // Every source counts, not only those that start above the destination's newest: one that
+    // starts at or below it and ends above holds the transactions between, and a fill would
+    // be written under it.
+    let hole = first_hole(dst_max, inventory.level(src_level).iter())?;
     // A rejected output is never an input, and its level gains nothing before its delete.
     // A fill may read or write any level up to the hole's, so the hole waits for the delete.
     let rejected = |level: &Level| *level <= src_level && state.distrusted_at(*level).is_some();
@@ -807,8 +806,8 @@ fn plan_fill(
     })
 }
 
-/// The first transactions above `after` (the destination's newest) that `files` (the sources
-/// that reach above it, ascending) do not hold: before the first file or between two neighbours. A
+/// The first transactions above `after` (the destination's newest) that `files` (the source
+/// level, ascending) do not hold: before the first file or between two neighbours. A
 /// destination with no file has no hole before the first source. Files that overlap leave none.
 fn first_hole<'a>(
     after: Option<Txid>,
@@ -843,14 +842,17 @@ fn fill(inventory: &Inventory, level: Level, hole: TxidRange) -> Option<CompactJ
             .skip_while(|info| info.key.range().max() < hole.min())
             .peekable();
         let start = from.peek().map(|info| info.key.range().min());
-        if start == Some(hole.min()) {
-            let inside = from.take_while(|info| info.key.range().max() <= hole.max());
-            let inputs = CompactionInputs::new(contiguous_run(inside)).ok()?;
-            return CompactJob::new(inputs, level).ok();
-        }
-        // The level below holds the hole's first transaction in a file that starts before it.
-        if start.is_some_and(|start| start < hole.min()) {
-            return None;
+        match start.map(|start| start.cmp(&hole.min())) {
+            Some(Ordering::Equal) => {
+                let inside = from.take_while(|info| info.key.range().max() <= hole.max());
+                let inputs = CompactionInputs::new(contiguous_run(inside)).ok()?;
+                return CompactJob::new(inputs, level).ok();
+            }
+            // The level below holds the hole's first transaction in a file that starts
+            // before it.
+            Some(Ordering::Less) => return None,
+            // The level below lacks it too: its own hole, up to its next file, goes first.
+            Some(Ordering::Greater) | None => {}
         }
         let end = start
             .and_then(Txid::prev)
