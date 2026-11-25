@@ -19,6 +19,7 @@ use crate::source::{CheckpointCall, FakeCheckpointer, FakeDb, FakeWal, SourceErr
 use crate::store::WriteMode;
 use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
+mod after_delete;
 mod ahead;
 mod audit;
 
@@ -244,11 +245,12 @@ impl ObjectStore for Counting {
         self.inner.read_with_created_at(file, len)
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send {
         self.count();
         if let Some(wal) = self.moves_epoch.lock().unwrap().take() {
@@ -258,7 +260,7 @@ impl ObjectStore for Counting {
             wal.append_tx(&[(pg(1), vec![n; PS.bytes()])], nz(3));
         }
         let refused = self.refuse_uploads.load(Ordering::SeqCst);
-        let begun = self.inner.begin_upload(key, created_at, mode);
+        let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
         async move {
             if refused {
                 return Err(StoreError::Transient {
@@ -2274,6 +2276,7 @@ mod boot_truncated;
 mod checkpoint_failed;
 mod create_only;
 mod degraded;
+mod first_start;
 mod index_reset;
 mod lag;
 mod listing;
@@ -2294,6 +2297,7 @@ mod wal_barrier;
 mod wal_truncated_mid_step;
 mod witness;
 mod work;
+mod writes_held;
 
 /// Ticks at `now` onto a staged file that fails verification for the first
 /// time: one failed read deletes nothing and the task retries. Returns when

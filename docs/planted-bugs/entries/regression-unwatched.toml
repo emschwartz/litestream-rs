@@ -2,4 +2,4 @@
 name = "regression-unwatched"
 fix = "5cf9f56"
 package = "lsr-core"
-tests = ["a_rollback_while_running_is_seen_by_the_next_maintenance_listing"]
+tests = ["a_rollback_is_seen_by_a_whole_listing_too"]

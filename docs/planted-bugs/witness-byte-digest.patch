@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
-index 54b2dc44..2acdc89a 100644
+index a38e4b75f..ebcf308c5 100644
 --- a/crates/core/src/witness.rs
 +++ b/crates/core/src/witness.rs
-@@ -128,7 +128,7 @@ impl Witnessed {
-     /// Whether a read of the file that verified whole, tallied as `bytes` and
-     /// ending in `checksum`, read the bytes this token was minted for.
-     pub(crate) fn matches(&self, bytes: ByteTally, checksum: FileChecksum) -> bool {
+@@ -221,7 +221,7 @@ impl Witnessed {
+ 
+     /// [`Self::matches`] for a tally already sealed.
+     fn matches_sealed(&self, bytes: Sealed, checksum: FileChecksum) -> bool {
 -        self.bytes == bytes && self.checksum == checksum
 +        self.bytes.size == bytes.size && self.checksum == checksum
      }

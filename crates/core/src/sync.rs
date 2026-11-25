@@ -625,9 +625,15 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: Role>(
     let map_store: fn(&StoreError) -> Fault = L::fault;
     // A staged file replaces a torn one under its key, and a snapshot (level 9)
     // shares its key with Go's snapshot of the same transaction: both replace.
-    let mut upload = Writer::begin(store, key, header.fields().timestamp, WriteMode::Replace)
-        .await
-        .map_err(|err| map_store(&err))?;
+    let mut upload = Writer::begin(
+        store,
+        key,
+        header.fields().timestamp,
+        WriteMode::Replace,
+        None,
+    )
+    .await
+    .map_err(|err| map_store(&err))?;
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
         Ok(filled) => {
             let file = upload

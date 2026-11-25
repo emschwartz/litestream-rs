@@ -124,8 +124,9 @@ impl<'s, S: ObjectStore> Writer<'s, S> {
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self, StoreError> {
-        let upload = store.begin_upload(key, created_at, mode).await?;
+        let upload = store.begin_sized_upload(key, created_at, mode, len).await?;
         Ok(Self {
             store,
             key: *key,

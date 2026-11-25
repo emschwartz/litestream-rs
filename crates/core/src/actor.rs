@@ -114,8 +114,8 @@ use crate::identity::{self, Identity};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due_full,
-    listing_after_upload, read_back, run_compact, run_delete,
+    Due, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, RetentionHold, due_full,
+    listing_after_upload, read_back, run_compaction, run_delete,
 };
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
@@ -1068,9 +1068,9 @@ impl Actor {
 
     /// A boot that could not finish: a fault, or a takeover it needs durable
     /// before it drops staged files.
-    fn boot_step(&mut self, step: BootStep, now: Timestamp) -> Tick {
+    fn boot_step(&mut self, step: BootStep, took: Duration, now: Timestamp) -> Tick {
         match step {
-            BootStep::Fault(fault) => self.boot_failed(fault, now),
+            BootStep::Fault(fault) => self.boot_failed(fault, took, now),
             BootStep::Vouch(record) => self.want_takeover(Task::Sync, record, now),
             BootStep::Refused(through) => {
                 self.kept.refused_through = Some(through);
@@ -1171,6 +1171,7 @@ impl Actor {
         doubted: Option<FileKey>,
         newest: Option<&NewestStagedFile>,
         recovered: &Recovered,
+        took: Duration,
         now: Timestamp,
     ) -> Option<Tick> {
         let read_disagreed = matches!(
@@ -1185,11 +1186,16 @@ impl Actor {
             return None;
         }
         self.kept.suspect_staged = Some(key);
-        Some(self.boot_failed(Fault::StagedLost, now))
+        Some(self.boot_failed(Fault::StagedLost, took, now))
     }
 
-    /// A boot step failed: the boot ends and is retried.
-    fn boot_failed(&mut self, fault: Fault, now: Timestamp) -> Tick {
+    /// A boot step failed: the boot ends and is retried. The attempt is a sync step that
+    /// failed, as Go counts the `init` its sync runs first (`db.go:1360-1376`, `db.go:1210`),
+    /// which is where a store that refuses the credentials or cannot be reached shows in
+    /// `litestream_sync_error_count`; Go's later upload failures are only logged. `took` is the
+    /// attempt's time on the engine's clock.
+    fn boot_failed(&mut self, fault: Fault, took: Duration, now: Timestamp) -> Tick {
+        self.kept.work.sync_step(Some(fault), took, None, None);
         self.fault(Task::Sync, fault, now)
     }
 
@@ -1204,6 +1210,9 @@ impl Actor {
         if !self.kept.tasks.ready(Task::Sync, now) {
             return self.ran(Event::Idle, now);
         }
+        let clock = env.clock;
+        let began = clock.now();
+        let took = || clock.now().saturating_duration_since(began);
         let takeover = self.boot_takeover();
         let doubted = self.kept.suspect_staged;
         let suspect = &mut self.kept.suspect_staged;
@@ -1215,7 +1224,7 @@ impl Actor {
             gate,
         } = match listed {
             Ok(listed) => listed,
-            Err(step) => return self.boot_step(step, now),
+            Err(step) => return self.boot_step(step, took(), now),
         };
         let Judged {
             pending: Pending { tokens, refused },
@@ -1229,13 +1238,15 @@ impl Actor {
                 },
         } = match boot_judge(env, upload, gate).await {
             Ok(found) => found,
-            Err(step) => return self.boot_step(step, now),
+            Err(step) => return self.boot_step(step, took(), now),
         };
         // A refusal or a drop the sweep and the staged-file check already proved explains the
         // snapshot; only a verdict resting on the newest staged file's one read is doubted.
         let proven = refused.is_some() || !matches!(dropped, Dropped::Nothing);
         if let Some(tick) = (!proven)
-            .then(|| self.doubt_newest_read(doubted, newest_staged.as_ref(), &recovered, now))
+            .then(|| {
+                self.doubt_newest_read(doubted, newest_staged.as_ref(), &recovered, took(), now)
+            })
             .flatten()
         {
             return tick;
@@ -1254,7 +1265,7 @@ impl Actor {
         let (pages, quiet) =
             match boot_seed(env.staging, env.remote, &course, upload.confirmed()).await {
                 Ok(seeded) => seeded,
-                Err(fault) => return self.boot_failed(fault, now),
+                Err(fault) => return self.boot_failed(fault, took(), now),
             };
         self.quiet_at_boot(quiet);
         // Every step succeeded: the engine is assigned whole.
@@ -2296,11 +2307,17 @@ impl Actor {
         now: Timestamp,
         created_at_read: u64,
     ) -> Tick {
-        let outcome = match job {
-            Job::Compact(compact) => run_compact(compact, env.staging, env.remote).await,
-            Job::Delete(delete) => run_delete(delete, env.remote).await,
-            Job::Snapshot(_) => return self.snapshot_job(env, job, now, created_at_read).await,
+        // One call site for every merge, so the tick's future holds one compaction.
+        let outcome = if let Some((inputs, level)) = job.merge() {
+            run_compaction(inputs, level, env.staging, env.remote).await
+        } else if let Job::Delete(delete) = job {
+            run_delete(delete, env.remote).await
+        } else {
+            return self.snapshot_job(env, job, now, created_at_read).await;
         };
+        if let Job::Snapshot(_) = job {
+            return self.snapshot_merged(job, outcome, now, created_at_read);
+        }
         self.engine.maintain.state.record(now, job, &outcome);
         let event = match outcome {
             Outcome::Compacted { info, .. } => MaintainedEvent::Compacted(info),
@@ -2384,6 +2401,48 @@ impl Actor {
             },
             now,
         )
+    }
+
+    /// How a snapshot built from the replica's level-0 files ended ([`Job::merge`]): no step, no
+    /// proof and no read of the database file. A failure makes the next snapshot a read of the
+    /// database, so a replica whose files cannot be merged still gets one.
+    fn snapshot_merged(
+        &mut self,
+        job: &Job,
+        outcome: Outcome,
+        now: Timestamp,
+        created_at_read: u64,
+    ) -> Tick {
+        let state = &mut self.engine.maintain.state;
+        match outcome {
+            Outcome::Compacted { info, .. } => {
+                state.record_snapshot(now, None);
+                self.snapshot_written(info, now, created_at_read)
+            }
+            // The listing changed under the job; the next listing is what to plan from.
+            Outcome::Replan { .. } | Outcome::Deleted { .. } => {
+                self.engine.maintain.remembered.owe_full();
+                self.maintained(now);
+                let event = MaintainedEvent::Replan;
+                self.ran(
+                    Event::Maintained {
+                        event,
+                        created_at_read,
+                    },
+                    now,
+                )
+            }
+            Outcome::Failed(err) => {
+                if let MaintainError::OutputDistrusted { key, .. } = &err {
+                    state.distrust_snapshot(*key);
+                }
+                let fault = Fault::from_maintain(&err);
+                state.record_snapshot(now, Some(&fault));
+                state.refuse_seed();
+                let waiter = self.job_waiter(job, now);
+                self.fault(waiter, fault, now)
+            }
+        }
     }
 
     /// A level-9 snapshot of a fresh proof. A sync that staged a file first

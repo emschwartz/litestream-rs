@@ -441,3 +441,22 @@ fn the_table_counts_and_cuts_pages_across_chunk_edges() {
     table.record(pg(4097), digest(4097, 3));
     assert_eq!(table.len(), 3, "a slot cut and recorded again counts once");
 }
+
+/// Only a first pending file that decodes can be the one nothing staged stands before: a first
+/// file that does not decode still places the pending files after it, so a later file is no
+/// "first pending file" the replica must be asked about.
+#[test]
+fn a_later_pending_file_is_not_the_first_when_an_earlier_one_did_not_decode() {
+    let staging = crate::MemStore::new();
+    let (unreadable, _) = file_from_wal(3, &[(1, 2)], 32, 200);
+    put_all(
+        &staging,
+        vec![
+            (unreadable, vec![0xff; 64]),
+            file_from_wal(4, &[(1, 3)], 200, 300),
+        ],
+    );
+    let seeded =
+        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
+    assert_eq!(seeded.unplaced, None);
+}

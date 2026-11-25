@@ -1,5 +1,5 @@
 name = "regression-unwatched-sim"
-patch = "regression-unwatched"
+patch = "regression-unwatched-sim"
 fix = "5cf9f56"
 package = "lsr-sim"
 test_bin = "sim"

@@ -195,6 +195,35 @@ fn a_rollback_while_running_is_seen_by_the_next_maintenance_listing() {
     );
 }
 
+/// A whole listing, which the short pass's own check does not stand in for, reports a replica
+/// below what the engine confirmed too.
+#[test]
+fn a_rollback_is_seen_by_a_whole_listing_too() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    rig.settle(&mut actor, T0);
+    rig.commit(2);
+    rig.settle(&mut actor, T0 + 10);
+    roll_back(&rig);
+    actor.engine.maintain.remembered.owe_full();
+    let listing = rig.tick(&mut actor, super::listing_due(T0 + 10));
+    assert!(regressed(&[listing]));
+}
+
+/// The listing that finds the replica below what the engine confirmed reports it on that
+/// tick, not at some later one that happens upon the same loss (an upload's relist).
+#[test]
+fn a_rollback_is_reported_by_the_listing_that_sees_it() {
+    let mut rig = Rig::new();
+    let mut actor = go_like_actor();
+    rig.settle(&mut actor, T0);
+    rig.commit(2);
+    rig.settle(&mut actor, T0 + 10);
+    roll_back(&rig);
+    let listing = rig.tick(&mut actor, super::listing_due(T0 + 10));
+    assert!(regressed(&[listing]));
+}
+
 /// Failover with the old host still running: this engine's upload of the
 /// next id lost its answer, and before its relist the new host's file took
 /// the same id with other bytes. The relist finds the replica's object

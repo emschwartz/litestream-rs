@@ -34,7 +34,7 @@ use thiserror::Error;
 mod inspect;
 mod restore;
 
-pub use inspect::{DatabasesArgs, Inspect, LtxArgs, LtxFrom};
+pub use inspect::{DatabasesArgs, Inspect, LtxArgs, LtxFrom, VersionArgs};
 pub use restore::{Restore, RestoreArgs, RestoreFrom};
 
 /// Every word `lsr` takes first, in help order. The dispatcher in [`parse`] matches on it
@@ -60,11 +60,13 @@ pub enum CommandName {
     Replicate,
     /// `lsr config check <file>`.
     Config,
+    /// `lsr version`, Go's `litestream version`.
+    Version,
 }
 
 impl CommandName {
     /// Every command, in help order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Restore,
         Self::Databases,
         Self::Ltx,
@@ -74,6 +76,7 @@ impl CommandName {
         Self::TrustLocal,
         Self::Replicate,
         Self::Config,
+        Self::Version,
     ];
 
     /// The word typed after `lsr`.
@@ -88,6 +91,7 @@ impl CommandName {
             Self::TrustLocal => "trust-local",
             Self::Replicate => "replicate",
             Self::Config => "config",
+            Self::Version => "version",
         }
     }
 
@@ -102,7 +106,12 @@ impl CommandName {
             Self::Restore => Some("[DB_PATH | REPLICA_URL]"),
             Self::Ltx | Self::Wal => Some("<DB_PATH | REPLICA_URL>"),
             Self::TrustLocal => Some("<db>"),
-            Self::Databases | Self::Verify | Self::Files | Self::Replicate | Self::Config => None,
+            Self::Databases
+            | Self::Verify
+            | Self::Files
+            | Self::Replicate
+            | Self::Config
+            | Self::Version => None,
         }
     }
 
@@ -118,7 +127,8 @@ impl CommandName {
             | Self::Wal
             | Self::Verify
             | Self::Files
-            | Self::TrustLocal => None,
+            | Self::TrustLocal
+            | Self::Version => None,
         }
     }
 
@@ -140,6 +150,9 @@ impl CommandName {
             }
             Self::Replicate => DAEMON_SUMMARY,
             Self::Config => CONFIG_CHECK_SUMMARY,
+            Self::Version => {
+                "print the version, as Go's version command does (a bare line); -verbose adds the build details lsr has"
+            }
         }
     }
 }
@@ -147,7 +160,7 @@ impl CommandName {
 /// Every word `lsr` takes first, for the error that names them; a test holds it to
 /// [`CommandName::ALL`].
 const COMMAND_WORDS: &str =
-    "replicate, restore, databases, ltx, wal, config, verify, files, trust-local";
+    "replicate, restore, databases, ltx, wal, config, verify, files, trust-local, version";
 
 /// One flag of a command's help text.
 #[derive(Debug)]
@@ -215,8 +228,10 @@ pub enum Command {
     ConfigCheck(PathBuf),
     /// Print the help text.
     Help,
-    /// Print the version.
+    /// Print the version, as `--version` does.
     Version,
+    /// Go's `version` command: a bare version line, or `-verbose` details.
+    VersionLine(VersionArgs),
 }
 
 /// The daemon's usage line, for the help text.
@@ -504,7 +519,8 @@ fn own_command(command: CommandName) -> Option<clap::Command> {
         | CommandName::Ltx
         | CommandName::Wal
         | CommandName::Replicate
-        | CommandName::Config => None,
+        | CommandName::Config
+        | CommandName::Version => None,
         CommandName::Verify => Some(
             replica_flags(base)
                 .arg(value_flag(
@@ -537,6 +553,7 @@ pub fn help_flags(command: CommandName) -> Vec<HelpFlag> {
             CommandName::Restore => restore::HELP,
             CommandName::Databases => inspect::DATABASES_HELP,
             CommandName::Ltx | CommandName::Wal => inspect::LTX_HELP,
+            CommandName::Version => inspect::VERSION_HELP,
             CommandName::Replicate | CommandName::Config => &[],
             CommandName::Verify | CommandName::Files | CommandName::TrustLocal => &[],
         };
@@ -753,6 +770,10 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         CommandName::Verify | CommandName::Files | CommandName::TrustLocal => {
             parse_own(command, rest)
         }
+        CommandName::Version => match inspect::parse_version(rest)? {
+            Inspect::Run(args) => Ok(Command::VersionLine(args)),
+            Inspect::Help => Ok(Command::Help),
+        },
         CommandName::Replicate => Ok(Command::Daemon(rest.to_vec())),
         CommandName::Config => parse_config(rest),
     }
@@ -808,7 +829,8 @@ fn parse_own(command: CommandName, rest: &[String]) -> Result<Command, UsageErro
         | CommandName::Ltx
         | CommandName::Wal
         | CommandName::Replicate
-        | CommandName::Config => return Err(UsageError::NoCommand),
+        | CommandName::Config
+        | CommandName::Version => return Err(UsageError::NoCommand),
     })
 }
 

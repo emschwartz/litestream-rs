@@ -354,6 +354,28 @@ mod tests {
         up.commit().await.unwrap();
     }
 
+    /// A refreshed level takes the fetched files and unrecognized-name count; every other level
+    /// keeps its own.
+    #[test]
+    fn replacing_levels_swaps_those_levels_and_keeps_the_rest() {
+        let kept = Inventory::from_files([info(0, 1, 1), info(1, 1, 4), info(2, 1, 8)])
+            .unwrap()
+            .with_skipped(Level::ZERO, 5)
+            .with_skipped(Level::new(1).unwrap(), 3);
+        let fetched = Inventory::from_files([info(0, 1, 1), info(0, 2, 2)])
+            .unwrap()
+            .with_skipped(Level::ZERO, 2);
+        let merged = kept.replacing_levels(&[Level::ZERO], &fetched).unwrap();
+        let keys: Vec<FileKey> = merged.files().iter().map(|f| f.key).collect();
+        assert_eq!(
+            keys,
+            vec![key(0, 1, 1), key(0, 2, 2), key(1, 1, 4), key(2, 1, 8)]
+        );
+        assert_eq!(merged.skipped(Level::ZERO), 2);
+        assert_eq!(merged.skipped(Level::new(1).unwrap()), 3);
+        assert_eq!(merged.skipped_total(), 5);
+    }
+
     #[test]
     fn from_files_sorts_and_dedups() {
         let inv = Inventory::from_files([info(1, 5, 6), info(0, 2, 2), info(0, 2, 2)]).unwrap();
@@ -542,11 +564,12 @@ mod tests {
             ready(Err(StoreError::NotFound { key: file.key }))
         }
 
-        fn begin_upload(
+        fn begin_sized_upload(
             &self,
             key: &FileKey,
             _created_at: Timestamp,
             _mode: WriteMode,
+            _len: Option<u64>,
         ) -> impl Future<Output = Result<MemUpload, StoreError>> + Send {
             ready(Err(StoreError::NotFound { key: *key }))
         }

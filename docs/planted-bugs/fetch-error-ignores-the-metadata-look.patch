@@ -1,0 +1,15 @@
+diff --git a/crates/store-s3/src/signer.rs b/crates/store-s3/src/signer.rs
+--- a/crates/store-s3/src/signer.rs
++++ b/crates/store-s3/src/signer.rs
+@@ -71,7 +71,10 @@
+ 
+ /// A failed fetch, once the credentials in hand have expired.
+ fn fetch_error(op: StoreOp, err: &CredentialError) -> StoreError {
+-    match err.fetch_failure() {
++    match match err {
++        CredentialError::Source(source) => Some(source),
++        _ => None,
++    } {
+         Some(source) if source.transient() => StoreError::Transient {
+             op,
+             kind: io::ErrorKind::NotConnected,

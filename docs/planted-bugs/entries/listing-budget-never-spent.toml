@@ -1,0 +1,10 @@
+# A listing budget that is never spent, so an endpoint that never answers is retried by the policy alone
+# for every level (about half an hour) with no word of why.
+name = "listing-budget-never-spent"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "a_spent_listing_budget_stops_the_retries_and_says_what_was_tried",
+    "the_budget_ends_a_retry_that_would_begin_at_its_end",
+    "a_batch_listing_is_held_to_the_budget_too",
+]

@@ -29,7 +29,7 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 | `shutdown-sync-interval` | No effect: litestream-rs's final sync retries on its own schedule. |
 | `shutdown-timeout` | No effect: litestream-rs bounds shutdown by shutdown-sync-timeout alone. |
 | `part-size` | No effect: Go does not copy a top-level part-size into replicas. |
-| `litestream-rs` | A section; its keys are below. |
+| `litestream-rs` | A section; its keys are below. A config shared with Go may carry it: Go reads the file leniently, warns once per start ("configuration contains unrecognized or duplicate key") and ignores the section, so the same file starts either program. |
 
 ## Replica settings (at the top level as the default for every replica, or inside a replica)
 
@@ -164,7 +164,7 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 | `identities` | Not supported (age encryption). Accepted at an empty list; any other value is refused. |
 | `recipients` | Not supported (age encryption). Accepted at an empty list; any other value is refused. |
 
-## `litestream-rs` (read only by litestream-rs; Go ignores it)
+## `litestream-rs` (read only by litestream-rs; Go warns of it once and ignores it)
 
 | Key | What it does |
 | --- | --- |

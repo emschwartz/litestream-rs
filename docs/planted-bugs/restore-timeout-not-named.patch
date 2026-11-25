@@ -1,0 +1,12 @@
+diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
+--- a/crates/cli/src/run.rs
++++ b/crates/cli/src/run.rs
+@@ -912,7 +912,7 @@
+     replica: &Replica,
+ ) -> Result<T, CliError> {
+     let (Err(error), Some(expired), Replica::S3(config)) =
+-        (&done, store.listing_expired(), replica)
++        (&done, None::<lsr_core::ListingExpired>, replica)
+     else {
+         return done;
+     };

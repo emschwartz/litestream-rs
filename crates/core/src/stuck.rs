@@ -84,13 +84,14 @@ impl ObjectStore for StuckListing {
         self.inner.read_with_created_at(file, len)
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> impl Future<Output = Result<MemUpload, StoreError>> + Send {
-        self.inner.begin_upload(key, created_at, mode)
+        self.inner.begin_sized_upload(key, created_at, mode, len)
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {

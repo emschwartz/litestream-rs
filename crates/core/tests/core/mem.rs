@@ -270,11 +270,12 @@ impl ObjectStore for Spool {
         ))
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         _created_at: Timestamp,
         _mode: WriteMode,
+        _len: Option<u64>,
     ) -> Result<NoUpload, StoreError> {
         Err(StoreError::NotFound { key: *key })
     }
@@ -484,11 +485,12 @@ impl ObjectStore for Void {
         Err(StoreError::NotFound { key: file.key })
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         _created_at: Timestamp,
         _mode: WriteMode,
+        _len: Option<u64>,
     ) -> Result<VoidUpload, StoreError> {
         Ok(VoidUpload {
             key: *key,

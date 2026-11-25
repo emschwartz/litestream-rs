@@ -1,0 +1,7 @@
+# litestream_db_size reads the file before any sync, where Go reads 0.
+name = "db-size-counted-before-a-sync"
+fix = "claude/dropin-gaps"
+package = "lsr-sidecar"
+tests = [
+    "the_db_size_reads_zero_until_a_sync_ran",
+]

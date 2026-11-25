@@ -41,8 +41,8 @@ pub struct Encoder<W> {
     marker: bool,
     /// Bytes of index written so far.
     index_written: u64,
-    /// The compressed block of the page being written, kept between pages.
-    scratch: Vec<u8>,
+    /// The compressor's output for one page, reused so a page costs no allocation.
+    block: Vec<u8>,
     /// The database checksum so far, for tracked snapshots only.
     db: Option<DbChecksum>,
     failed: bool,
@@ -76,7 +76,7 @@ impl<W: Write> Encoder<W> {
             index: VecDeque::new(),
             marker: false,
             index_written: 0,
-            scratch: Vec::new(),
+            block: vec![0; get_maximum_output_size(header.page_size().bytes())],
             db: (header.tracked() && header.is_snapshot()).then_some(DbChecksum::EMPTY),
             failed: false,
         })
@@ -87,8 +87,7 @@ impl<W: Write> Encoder<W> {
     /// # Errors
     ///
     /// [`EncodeError::PageLen`] or [`EncodeError::Order`] reject the page and
-    /// leave the encoder usable; [`EncodeError::Io`] poisons it, and so does a page after
-    /// [`Encoder::write_index_chunk`] has begun the index ([`EncodeError::Poisoned`]).
+    /// leave the encoder usable; [`EncodeError::Io`] poisons it.
     pub fn write_page(&mut self, pgno: PageNo, data: &[u8]) -> Result<(), EncodeError> {
         if self.failed || self.marker {
             return Err(EncodeError::Poisoned);
@@ -102,27 +101,28 @@ impl<W: Write> Encoder<W> {
         }
         let mut seq = self.seq;
         let pgno = seq.push(pgno.nonzero())?;
-        // One scratch buffer for the encoder's life: a block per page was an allocation per page.
-        self.scratch.resize(get_maximum_output_size(data.len()), 0);
-        let used = compress_into(data, &mut self.scratch).map_err(|_err| {
+        let mut block = std::mem::take(&mut self.block);
+        let Ok(used) = compress_into(data, &mut block) else {
+            // The buffer holds the compressor's worst case for a page, so this cannot happen.
             self.failed = true;
-            EncodeError::Io(io::Error::other("lz4 compression failed"))
-        })?;
+            return Err(EncodeError::Io(io::Error::other(
+                "lz4 output buffer too small",
+            )));
+        };
         let len = u32::try_from(used).unwrap_or(u32::MAX);
         let mut head = [0_u8; PAGE_HEADER_LEN + 4];
         head[0..4].copy_from_slice(&pgno.get().to_be_bytes());
         head[4..6].copy_from_slice(&1_u16.to_be_bytes());
         head[6..10].copy_from_slice(&len.to_be_bytes());
+        let packed = block.get(..used).unwrap_or_default();
         self.write(&head)?;
-        let block = std::mem::take(&mut self.scratch);
-        let written = self.write(block.get(..used).unwrap_or_default());
-        self.scratch = block;
-        written?;
+        self.write(packed)?;
         self.seq = seq;
         self.file.update(&head);
         self.file.update(data);
         self.db = self.db.map(|db| db.toggle(PageChecksum::of(pgno, data)));
-        let size = u64_from(head.len()).saturating_add(u64_from(used));
+        let size = u64_from(head.len()).saturating_add(u64_from(packed.len()));
+        self.block = block;
         let room = self
             .index
             .back()
@@ -181,8 +181,8 @@ impl<W: Write> Encoder<W> {
     /// and says whether more of the index is left. A caller that buffers in memory calls it
     /// after the last page until it returns `false`, handing the bytes onward between calls, so
     /// the index (about nine bytes a page) is never held a second time in the output buffer;
-    /// [`Encoder::finish` ](Self::finish) writes whatever is left. No page may be written once
-    /// it has been called.
+    /// [`Encoder::finish`] writes whatever is left. No page may be written once it has been
+    /// called.
     ///
     /// # Errors
     ///
@@ -317,5 +317,47 @@ mod tests {
             rest = &rest[used..];
         }
         assert_eq!(decoder.finish().unwrap().page_count(), 3);
+    }
+
+    #[test]
+    fn page_blocks_are_the_compressors_own_output_whatever_the_reused_buffer_held() {
+        let size = PageSize::new(512).unwrap();
+        let header = Header::new(HeaderFields {
+            tracked: false,
+            page_size: size,
+            commit: 3,
+            txids: TxidRange::single(Txid::MIN),
+            timestamp: Timestamp::from_unix_millis(1),
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .unwrap();
+        // An incompressible page, a compressible one, then a short-lived pattern: the buffer
+        // holds the previous page's block when the next is compressed.
+        let pages: Vec<Vec<u8>> = vec![
+            (0..512_u32)
+                .map(|i| u8::try_from((i.wrapping_mul(2_654_435_761) >> 13) & 0xff).unwrap())
+                .collect(),
+            vec![7; 512],
+            (0..512_u32).map(|i| u8::try_from(i % 5).unwrap()).collect(),
+        ];
+        let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+        for (n, page) in (1..=3_u32).zip(&pages) {
+            encoder
+                .write_page(PageNo::new(n, size).unwrap(), page)
+                .unwrap();
+        }
+        let (bytes, _) = encoder.finish(None).unwrap();
+        let mut at = HEADER_LEN;
+        for page in &pages {
+            let len = usize::try_from(u32::from_be_bytes(
+                bytes[at + 6..at + 10].try_into().unwrap(),
+            ))
+            .unwrap();
+            let block = &bytes[at + PAGE_HEADER_LEN + 4..at + PAGE_HEADER_LEN + 4 + len];
+            assert_eq!(block, lz4_flex::block::compress(page).as_slice());
+            at += PAGE_HEADER_LEN + 4 + len;
+        }
     }
 }

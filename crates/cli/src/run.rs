@@ -33,7 +33,8 @@ use lsr_config::{
 use lsr_core::{
     AsOfInside, AsOfPlanner, ContiguousChain, Depth, Inventory, InventoryError, KeyTarget,
     MAX_ATTEMPTS, ObjectStore, PlanOutcome, Report, ResolveError, RestoreError, RestoreOptions,
-    RestoreTarget, Restored, Severity, VerifyError, plan, resolve, restore_with, verify,
+    RestoreTarget, Restored, Retrying, Severity, StoreError, VerifyError, plan, resolve,
+    restore_with, verify,
 };
 use lsr_replica::local::{
     ClearError, CreateError, Existing, FileSink, IntegrityCheck, IntegrityFailure, PublishError,
@@ -202,6 +203,9 @@ pub enum Finished {
         integrity_check: IntegrityCheck,
         /// Wall time of the clearing and the restore, for Go's `duration_ms`.
         elapsed: Duration,
+        /// Whether a takeover record was left for a replicator started on the database: only
+        /// for a database a config names.
+        takeover_recorded: bool,
     },
     /// `--dry-run`: the files a restore would apply; nothing was written.
     Planned {
@@ -296,6 +300,11 @@ pub enum Done {
     Help,
     /// The version.
     Version,
+    /// Go's `version` command.
+    VersionLine {
+        /// `-verbose`.
+        verbose: bool,
+    },
 }
 
 /// Why a command failed.
@@ -403,6 +412,23 @@ pub enum CliError {
     /// `CalcRestoreTarget`, which `-if-replica-exists` does not excuse).
     #[error("no backups found")]
     NoBackupsFound,
+    /// A restore's listing of the replica stopped retrying because its time budget ran out:
+    /// the endpoint did not answer, or answered only with failures. Nothing was written.
+    #[error(
+        "the restore could not list {endpoint} within {} seconds: {listings} listing requests \
+         were made, each failed one retried with backoff, and the last failed with: {last}",
+        .budget.as_secs()
+    )]
+    ListingTimedOut {
+        /// The endpoint asked.
+        endpoint: String,
+        /// The budget that was spent.
+        budget: Duration,
+        /// Listing requests made, the retries included.
+        listings: u64,
+        /// What the last one failed with.
+        last: StoreError,
+    },
     /// The output's parent directory could not be created.
     #[error("create parent directory: {0}")]
     Parent(#[source] io::Error),
@@ -469,7 +495,8 @@ pub fn exit_for_done(done: &Done) -> Exit {
         | Done::Files { .. }
         | Done::DaemonHelp(_)
         | Done::Help
-        | Done::Version => Exit::Success,
+        | Done::Version
+        | Done::VersionLine { .. } => Exit::Success,
     }
 }
 
@@ -523,7 +550,7 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::NoDatabase
         | CliError::DatabasePath(_)
         | CliError::NotInConfig { .. } => Exit::Refused,
-        CliError::Parent(_) => Exit::Environment,
+        CliError::Parent(_) | CliError::ListingTimedOut { .. } => Exit::Environment,
         CliError::NoBackupsFound => Exit::Refused,
         CliError::Restore(err) => match err {
             RestoreError::NoPlan(_)
@@ -572,6 +599,9 @@ pub async fn run(command: Command) -> Result<Done, CliError> {
         Command::ConfigCheck(path) => Ok(Done::ConfigChecked(Box::new(lsr_sidecar::check(&path)))),
         Command::Help => Ok(Done::Help),
         Command::Version => Ok(Done::Version),
+        Command::VersionLine(args) => Ok(Done::VersionLine {
+            verbose: args.verbose,
+        }),
     }
 }
 
@@ -706,11 +736,12 @@ fn resolve_from(
                 command: "restore",
                 flag: "--output",
             })?;
+            let meta = configured_meta(&output);
             Ok(Resolution::Open(
                 Opening {
                     replica,
                     keys: None,
-                    meta: None,
+                    meta,
                 },
                 output,
             ))
@@ -721,7 +752,8 @@ fn resolve_from(
                 let source = Source::of_url(&url);
                 return Ok(Resolution::OutputExists(output, source));
             }
-            let opening = url_replica(&output.to_string_lossy(), &url)?;
+            let mut opening = url_replica(&output.to_string_lossy(), &url)?;
+            opening.meta = configured_meta(&output);
             Ok(Resolution::Open(opening, output))
         }
         RestoreFrom::Database {
@@ -739,6 +771,22 @@ fn resolve_from(
             Ok(Resolution::Open(opening, output.unwrap_or(db)))
         }
     }
+}
+
+/// The meta directory of the database a config names at `output`: where a replicator started on
+/// the restored database looks for the takeover record. The config is the one `replicate` reads
+/// by default (`LITESTREAM_CONFIG`, else `/etc/litestream.yml`); one that is missing, reads
+/// standard input or does not load names nothing, and a database no config names is a copy that
+/// nothing replicates, so Go's restore leaves it alone and so does this.
+fn configured_meta(output: &Path) -> Option<PathBuf> {
+    if std::env::var("LITESTREAM_CONFIG").is_ok_and(|path| path == "-") {
+        return None;
+    }
+    let loaded = lsr_sidecar::load_config(None, Expand::Env).ok()?;
+    let want = expand_path(&output.to_string_lossy(), &ProcessEnv).ok()?;
+    let narrowed = loaded.config.only_database(&want)?;
+    let plan = lsr_config::plan(&narrowed, &ProcessEnv).ok()?;
+    Some(plan.dbs().first()?.meta_dir().to_path_buf())
 }
 
 /// Go's `NewReplicaFromConfig(&ReplicaConfig{URL: url})`: the replica a URL names, read as a
@@ -850,7 +898,7 @@ async fn restore_or_plan(
             (Opened::Dir(FsStore::new(path)), bare)
         }
         Replica::S3(config) => (
-            Opened::S3(replica::open_s3_with(
+            Opened::S3(replica::open_s3_for_restore(
                 (**config).clone(),
                 opening.keys.clone(),
             )?),
@@ -860,8 +908,14 @@ async fn restore_or_plan(
     let finished = match (opened, dry_run) {
         (Opened::Dir(store), false) => restore_on(&store, output, how).await,
         (Opened::Dir(store), true) => plan_on(&store, output, how).await,
-        (Opened::S3(store), false) => restore_on(&store, output, how).await,
-        (Opened::S3(store), true) => plan_on(&store, output, how).await,
+        (Opened::S3(store), false) => {
+            let done = restore_on(&store, output, how).await;
+            name_listing_timeout(done, &store, &opening.replica)
+        }
+        (Opened::S3(store), true) => {
+            let done = plan_on(&store, output, how).await;
+            name_listing_timeout(done, &store, &opening.replica)
+        }
     };
     let Some(path) = bare else {
         return finished;
@@ -879,6 +933,34 @@ async fn restore_or_plan(
     }
 }
 
+/// A failed restore whose listing ran out of its budget, as the error that names the endpoint
+/// and what was tried; any other outcome unchanged. The store's last error is what the restore
+/// reported, so this only adds the endpoint, the budget and the count.
+fn name_listing_timeout<T, S, P, E>(
+    done: Result<T, CliError>,
+    store: &Retrying<S, P, E>,
+    replica: &Replica,
+) -> Result<T, CliError> {
+    let (Err(error), Some(expired), Replica::S3(config)) =
+        (&done, store.listing_expired(), replica)
+    else {
+        return done;
+    };
+    let named = CliError::ListingTimedOut {
+        endpoint: config.endpoint().url().as_str().to_owned(),
+        budget: expired.budget,
+        listings: expired.listings,
+        last: expired.last,
+    };
+    if let CliError::AfterClearing { cleared, .. } = error {
+        return Err(CliError::AfterClearing {
+            cleared: cleared.clone(),
+            source: Box::new(named),
+        });
+    }
+    Err(named)
+}
+
 /// An empty-replica refusal from a directory without `ltx/`, named as that.
 fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
     match error {
@@ -890,6 +972,7 @@ fn no_ltx_folder(error: CliError, path: PathBuf) -> CliError {
         other @ (CliError::NoPlan(_)
         | CliError::Parent(_)
         | CliError::NoBackupsFound
+        | CliError::ListingTimedOut { .. }
         | CliError::Config(_)
         | CliError::Plan(_)
         | CliError::NoDatabase
@@ -930,7 +1013,8 @@ fn output_exists(output: &Path, existing: Existing) -> Result<bool, CliError> {
 
 /// How a restore runs, apart from where from and where to.
 struct How {
-    /// Where the takeover record goes; the output's default meta directory when `None`.
+    /// Where the takeover record goes, for a database a config names; `None` for any other, which
+    /// gets no record and no folder beside it.
     meta: Option<PathBuf>,
     target: RestoreTarget,
     as_of_inside: AsOfInside,
@@ -976,26 +1060,24 @@ async fn restore_on<S: ObjectStore>(
         Vec::new()
     };
     let created = create_parents(output).map_err(CliError::Parent)?;
+    let takeover_recorded = meta.is_some();
     let attempt = async {
         // A replicator started on the restored database builds on the replica it came from,
-        // through the takeover record: an output with no meta directory is refused before
-        // anything is written, never restored without one.
-        let meta = match meta {
-            Some(meta) => meta,
-            None => meta_dir_of(output)?,
-        };
+        // through the takeover record, which the database's config says where to put.
         let sink = FileSink::create_over(output, existing)?.with_integrity_check(integrity_check);
         if txid_and_timestamp {
             return Err(UsageError::GoTxidAndTimestamp.into());
         }
         let options = RestoreOptions { as_of_inside };
         let restored = restore_with(store, target, options, sink).await?;
-        lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
-            CliError::Takeover {
-                meta,
-                kind: err.kind(),
-            }
-        })?;
+        if let Some(meta) = meta {
+            lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
+                CliError::Takeover {
+                    meta,
+                    kind: err.kind(),
+                }
+            })?;
+        }
         Ok::<_, CliError>(restored)
     }
     .await;
@@ -1008,6 +1090,7 @@ async fn restore_on<S: ObjectStore>(
             cleared,
             integrity_check,
             elapsed: start.elapsed(),
+            takeover_recorded,
         }),
         Err(CliError::NoPlan(PlanOutcome::EmptyReplica)) if if_replica_exists => {
             Ok(Finished::Skipped {
