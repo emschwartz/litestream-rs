@@ -76,7 +76,7 @@
 //!   to four GiB in `crates/core/tests/core/mem_big.rs`).
 //! - **Idle:** a replicator on a quiet database holds about 1 MiB of live heap (the page
 //!   checksum table and the HTTP client's idle connections: 16 of them, 64 KiB of buffers each).
-//! - **Snapshot:** 17 bytes a page on top of the above, 4.4 MiB at 1 GiB of 4 KiB pages and 70 MB
+//! - **Snapshot:** 18 bytes a page on top of the above, 4 MiB at 1 GiB of 4 KiB pages and 74 MiB
 //!   at 16 GiB: an 8-byte slot a page in the page checksum table, which a replicator holds for
 //!   good, and about 9 bytes of the file's page index, which it holds while the snapshot is
 //!   written (`snapshot_peak_heap_is_linear_in_pages_with_a_pinned_coefficient`; issue #64 and

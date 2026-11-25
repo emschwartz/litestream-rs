@@ -585,6 +585,20 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
             encoder.writer_mut().clear();
         }
     }
+    // The index leaves in pieces, as the pages did, so it is never copied whole into the buffer.
+    while encoder
+        .write_index_chunk()
+        .map_err(|_err| BugSite::Encode.hit())?
+    {
+        if encoder.writer_mut().len() >= FLUSH_AT {
+            upload
+                .write(encoder.writer_mut())
+                .await
+                .map_err(|err| map_store(&err))?;
+            bytes.add(encoder.writer_mut());
+            encoder.writer_mut().clear();
+        }
+    }
     let (rest, trailer) = encoder.finish(None).map_err(|_err| BugSite::Encode.hit())?;
     upload.write(&rest).await.map_err(|err| map_store(&err))?;
     bytes.add(&rest);

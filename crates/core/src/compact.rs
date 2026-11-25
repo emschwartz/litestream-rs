@@ -709,6 +709,16 @@ async fn write_output<S: Role, D: ObjectStore>(
     merge.check_unheld(unchecked_from, header.commit().saturating_add(1))?;
     let last = merge.verified_chain()?;
     let post_apply = last.trailer().post_apply().filter(|_| header.tracked());
+    // The index leaves in pieces, as the pages did, so it is never copied whole into the buffer.
+    while encoder.write_index_chunk().map_err(CompactError::Encode)? {
+        if encoder.writer_mut().len() >= flush {
+            upload
+                .write(encoder.writer_mut())
+                .await
+                .map_err(CompactError::Dest)?;
+            encoder.writer_mut().clear();
+        }
+    }
     let (tail, trailer) = encoder.finish(post_apply).map_err(CompactError::Encode)?;
     upload.write(&tail).await.map_err(CompactError::Dest)?;
     Ok((trailer, pages))

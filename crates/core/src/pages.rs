@@ -82,20 +82,26 @@ pub struct Mismatch {
 /// at 16 GiB of 4 KiB pages), where a map of them cost about 20. A checksum always has bit 63
 /// set (the LTX flag), so a slot that is zero holds no page. The vector reaches the highest
 /// page recorded, which is a page of the database (every caller passes a page at or below the
-/// database's size), and grows by an eighth at a time so the slack stays small.
+/// database's size). The slots live in chunks of 4,096, added as pages arrive, so growing the
+/// table never copies it (a vector that grew held the old and the new copy at once: 17 bytes a
+/// page at the peak, not 8) and the slack is under one chunk.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageChecksumTable {
     page_size: Option<PageSize>,
-    slots: Vec<u64>,
+    chunks: Vec<Vec<u64>>,
     held: usize,
-    /// Pages found different from `slots`, with the digest found: reported,
+    /// Pages found different from the table, with the digest found: reported,
     /// and accepted as the file's bytes until a frame records the page again.
     mismatched: BTreeMap<PageNo, PageChecksum>,
 }
 
-/// The slot of a page.
-fn slot(pgno: PageNo) -> usize {
-    usize::try_from(pgno.get().saturating_sub(1)).unwrap_or(usize::MAX)
+/// Slots in a chunk of the table.
+const CHUNK: usize = 4096;
+
+/// The chunk and the place in it of a page's slot.
+fn slot(pgno: PageNo) -> (usize, usize) {
+    let at = usize::try_from(pgno.get().saturating_sub(1)).unwrap_or(usize::MAX);
+    (at / CHUNK, at % CHUNK)
 }
 
 impl PageChecksumTable {
@@ -104,7 +110,7 @@ impl PageChecksumTable {
     pub const fn new() -> Self {
         Self {
             page_size: None,
-            slots: Vec::new(),
+            chunks: Vec::new(),
             held: 0,
             mismatched: BTreeMap::new(),
         }
@@ -120,16 +126,11 @@ impl PageChecksumTable {
 
     /// Puts `digest` in the slot of `pgno`, making room for it.
     fn put(&mut self, pgno: PageNo, digest: PageChecksum) {
-        let at = slot(pgno);
-        if at >= self.slots.len() {
-            let want = at
-                .saturating_add(1)
-                .max(self.slots.len().saturating_add(self.slots.len() / 8));
-            self.slots
-                .reserve_exact(want.saturating_sub(self.slots.len()));
-            self.slots.resize(want, 0);
+        let (chunk, place) = slot(pgno);
+        while self.chunks.len() <= chunk {
+            self.chunks.push(vec![0; CHUNK]);
         }
-        if let Some(held) = self.slots.get_mut(at) {
+        if let Some(held) = self.chunks.get_mut(chunk).and_then(|c| c.get_mut(place)) {
             if *held == 0 {
                 self.held = self.held.saturating_add(1);
             }
@@ -169,22 +170,25 @@ impl PageChecksumTable {
     /// Forgets every page above `commit`, the database's size in pages.
     pub fn truncate(&mut self, commit: NonZeroU32) {
         let keep = usize::try_from(commit.get()).unwrap_or(usize::MAX);
-        if keep < self.slots.len() {
-            self.held = self.held.saturating_sub(
-                self.slots
-                    .iter()
-                    .skip(keep)
-                    .filter(|slot| **slot != 0)
-                    .count(),
-            );
-            self.slots.truncate(keep);
+        let (whole, part) = (keep / CHUNK, keep % CHUNK);
+        let mut dropped = 0_usize;
+        for chunk in self.chunks.iter().skip(whole.saturating_add(1)) {
+            dropped = dropped.saturating_add(chunk.iter().filter(|slot| **slot != 0).count());
         }
+        self.chunks.truncate(whole.saturating_add(1));
+        if let Some(last) = self.chunks.get_mut(whole) {
+            for slot in last.iter_mut().skip(part).filter(|slot| **slot != 0) {
+                *slot = 0;
+                dropped = dropped.saturating_add(1);
+            }
+        }
+        self.held = self.held.saturating_sub(dropped);
         self.mismatched.retain(|pgno, _| pgno.get() <= commit.get());
     }
 
     /// Forgets every page.
     pub fn clear(&mut self) {
-        self.slots = Vec::new();
+        self.chunks = Vec::new();
         self.held = 0;
         self.mismatched.clear();
     }
@@ -206,8 +210,10 @@ impl PageChecksumTable {
     /// The digest the table holds for `pgno`.
     #[must_use]
     pub fn get(&self, pgno: PageNo) -> Option<PageChecksum> {
-        self.slots
-            .get(slot(pgno))
+        let (chunk, place) = slot(pgno);
+        self.chunks
+            .get(chunk)
+            .and_then(|chunk| chunk.get(place))
             .and_then(|raw| PageChecksum::from_raw(*raw))
     }
 

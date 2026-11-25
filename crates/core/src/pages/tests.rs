@@ -383,3 +383,43 @@ fn a_first_pending_file_ending_where_the_replicas_newest_ended_is_quiet() {
     assert_eq!(quiet(&at_the_end), vec![3]);
     assert_eq!(quiet(&past_it), Vec::<u64>::new());
 }
+/// The table holds its pages in chunks of slots, so the places that matter are the chunk
+/// edges: a page on each side of one, a hole between pages, and a cut inside a chunk.
+#[test]
+fn the_table_counts_and_cuts_pages_across_chunk_edges() {
+    let mut table = table();
+    let pages = [1_u32, 4096, 4097, 8192, 9000];
+    for n in pages {
+        table.record(pg(n), digest(n, 1));
+    }
+    assert_eq!(table.len(), 5);
+    assert_eq!(
+        table.get(pg(5000)),
+        None,
+        "a hole inside a chunk is no page"
+    );
+    assert_eq!(
+        table.get(pg(20_000)),
+        None,
+        "past the last chunk is no page"
+    );
+    table.record(pg(4096), digest(4096, 2));
+    assert_eq!(table.len(), 5, "a page recorded again is not counted twice");
+    assert_eq!(table.get(pg(4096)), Some(digest(4096, 2)));
+
+    table.truncate(nz(4097));
+    assert_eq!(table.len(), 3);
+    assert_eq!(table.get(pg(4097)), Some(digest(4097, 1)));
+    assert_eq!(table.get(pg(8192)), None);
+    assert_eq!(table.get(pg(9000)), None);
+
+    table.truncate(nz(4096));
+    assert_eq!(table.len(), 2);
+    assert_eq!(
+        table.get(pg(4097)),
+        None,
+        "a cut inside a chunk empties the slots above it"
+    );
+    table.record(pg(4097), digest(4097, 3));
+    assert_eq!(table.len(), 3, "a slot cut and recorded again counts once");
+}
