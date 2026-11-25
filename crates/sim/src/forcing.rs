@@ -16,7 +16,11 @@
 //! once an upload brings the replica up to the newest staged file, since an
 //! upload's read or a listing is what finds a damaged staged file or a
 //! divergence, and an upload that only repairs an older file proves nothing
-//! about the rest; a request once its snapshot is staged. What a tick noted itself
+//! about the rest, nor does one whose bytes were read before the damage (a
+//! file read on one tick and published on a later one, damaged in between):
+//! while a staged file is one the replica never took, or has other bytes than
+//! the replica's copy, the fault that left it stays; a request once its
+//! snapshot is staged. What a tick noted itself
 //! (a fault that hit in it, staged files it gave up) outlives that tick's
 //! own staging and uploads, whose order inside the tick is not known.
 //!
@@ -379,8 +383,14 @@ impl Forcings {
             .staged_level_zero()
             .iter()
             .any(|key| !self.uploaded.contains(key));
+        // Nor while a staged file has other bytes than the replica's copy of it: a file read on
+        // one tick and published on a later one, damaged in between, is published as it was
+        // read, and no read of that upload met the damage. The boot that finds it has the edit
+        // for its cause. Asked last, and only of an upload that would otherwise have caught
+        // up: it reads every staged file and its copy.
         let caught_up = !left_behind
-            && took.is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest));
+            && took.is_some_and(|took| newest_staged.is_none_or(|newest| took >= newest))
+            && !world.staged_differs_from_replica();
         let staged = self.take_staging(staging, world, reach)?;
         let grew = self.snapshots.take_counts(counts, &self.window, reach)?;
         let checkable = ended && !self.in_tick.contains(&Forcing::StagingFault);
@@ -490,6 +500,8 @@ pub trait TickWorld {
     fn replica_ends_at(&self, txid: u64) -> bool;
     /// The level-0 files in staging.
     fn staged_level_zero(&self) -> Vec<FileKey>;
+    /// Whether a staged level-0 file has other bytes than the replica's object under its key.
+    fn staged_differs_from_replica(&self) -> bool;
 }
 
 impl TickWorld for crate::World {
@@ -520,6 +532,15 @@ impl TickWorld for crate::World {
 
     fn staged_level_zero(&self) -> Vec<FileKey> {
         crate::World::staged_level_zero(self)
+    }
+
+    fn staged_differs_from_replica(&self) -> bool {
+        crate::World::staged_level_zero(self)
+            .into_iter()
+            .any(|key| {
+                self.staging_departs_from_remote(key)
+                    .is_ok_and(|departs| departs)
+            })
     }
 }
 
@@ -560,6 +581,10 @@ impl<W: TickWorld> TickWorld for WithEngine<'_, W> {
     fn staged_level_zero(&self) -> Vec<FileKey> {
         self.world.staged_level_zero()
     }
+
+    fn staged_differs_from_replica(&self) -> bool {
+        self.world.staged_differs_from_replica()
+    }
 }
 
 /// What one tick staged at level 0.
@@ -597,6 +622,9 @@ mod tests {
 
         fn staged_level_zero(&self) -> Vec<FileKey> {
             Vec::new()
+        }
+        fn staged_differs_from_replica(&self) -> bool {
+            false
         }
     }
 
@@ -670,6 +698,8 @@ mod tests {
     /// never took, beside 43, the newest, which it did.
     struct LeftBehind {
         staged: Vec<FileKey>,
+        /// Whether a staged file has other bytes than the replica's copy.
+        differs: bool,
     }
 
     impl TickWorld for LeftBehind {
@@ -688,6 +718,9 @@ mod tests {
         fn staged_level_zero(&self) -> Vec<FileKey> {
             self.staged.clone()
         }
+        fn staged_differs_from_replica(&self) -> bool {
+            self.differs
+        }
     }
 
     /// An upload that reaches the newest staged file has not caught up while staging still
@@ -701,6 +734,7 @@ mod tests {
         forcings.note(Forcing::StagingEdited);
         let world = LeftBehind {
             staged: vec![key(37), key(43)],
+            differs: false,
         };
         let none = SnapshotCounts::default();
         forcings
@@ -715,11 +749,45 @@ mod tests {
         }];
         let world = LeftBehind {
             staged: vec![key(43)],
+            differs: false,
         };
         forcings
             .after_tick((&prune, &[remote_put(43)]), &world, none, false, &mut reach)
             .unwrap();
         assert_eq!(reach.get("lost_restore_points.counted"), 1);
+    }
+
+    /// An upload that reaches the newest staged file has not caught up while a staged file
+    /// has other bytes than the replica's copy of it: the file was damaged after its bytes
+    /// were read for a send that a later tick published, so no read of the upload met the damage.
+    /// The edit stays in the window until the damaged file is gone, so the boot that drops
+    /// it and snapshots has its cause.
+    #[test]
+    fn an_upload_of_a_file_damaged_under_its_send_keeps_the_staging_edit() {
+        let mut forcings = Forcings::new();
+        let mut reach = Reach::default();
+        forcings.window.clear();
+        forcings.note(Forcing::StagingEdited);
+        let none = SnapshotCounts::default();
+        let damaged = LeftBehind {
+            staged: vec![key(43)],
+            differs: true,
+        };
+        forcings
+            .after_tick((&[], &[remote_put(43)]), &damaged, none, false, &mut reach)
+            .unwrap();
+        assert!(forcings.window.contains(&Forcing::StagingEdited));
+        // The damaged file is dropped: the next upload that reaches the newest staged file
+        // has caught up.
+        let whole = LeftBehind {
+            staged: vec![key(44)],
+            differs: false,
+        };
+        let remote = [remote_put(43), remote_put(44)];
+        forcings
+            .after_tick((&[], &remote), &whole, none, false, &mut reach)
+            .unwrap();
+        assert!(!forcings.window.contains(&Forcing::StagingEdited));
     }
 
     #[test]
@@ -758,6 +826,9 @@ mod tests {
         }
         fn staged_level_zero(&self) -> Vec<FileKey> {
             Vec::new()
+        }
+        fn staged_differs_from_replica(&self) -> bool {
+            false
         }
     }
 

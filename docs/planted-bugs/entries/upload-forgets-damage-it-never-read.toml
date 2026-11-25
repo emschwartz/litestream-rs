@@ -1,0 +1,10 @@
+# The simulator's forcing window forgets an edit of staging at any upload that reaches the newest
+# staged file, though the file was damaged after its bytes were read and was published whole:
+# the snapshot the next boot takes over the damaged staged file is then called needless.
+name = "upload-forgets-damage-it-never-read"
+fix = "plant"
+package = "lsr-sim"
+tests = [
+    "an_upload_of_a_file_damaged_under_its_send_keeps_the_staging_edit",
+    "a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snapshot",
+]
