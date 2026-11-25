@@ -25,10 +25,13 @@ fn ticks(n: usize) -> impl Iterator<Item = Op> {
 #[test]
 fn level_one_files_that_share_a_window_all_reach_level_two() {
     let mut ops = vec![commit()];
-    // The first sync, the first files of every level, and the wait for the next commit.
-    ops.extend(ticks(12));
+    // The first sync, the first files of every level, and then an idle five minutes (60 ticks of
+    // five seconds): the first window of level 2 opens and closes, so what follows is the
+    // engine's steady state, whose maintenance passes list only what each one decides from
+    // and plan from a listing carried over from the pass before.
+    ops.extend(ticks(72));
     // The run starts 100 seconds before a five-minute boundary (Go's default level 2) and
-    // the idle engine has reached second 60: the next commit's ticks end at second 100,
+    // the idle engine has reached second 360: the next commit's ticks end at second 400,
     // where the windows of levels 1 and 2 both open.
     ops.push(Op::ClockJump(30_000));
     ops.push(commit());
@@ -63,7 +66,7 @@ fn level_one_files_that_share_a_window_all_reach_level_two() {
     // The scenario is the one described: level-1 files at the boundary (level 1 starts above the first snapshot, at 2), then one
     // level-2 file over them (what follows is the run's end, a later window).
     let (one, two) = (put_at(1), put_at(2));
-    assert!(one.starts_with(&[(2, 2), (3, 5), (6, 6)]), "{one:?}");
-    assert!(two.starts_with(&[(2, 2), (3, 6)]), "{two:?}");
+    assert!(one.starts_with(&[(2, 2), (3, 6), (7, 7)]), "{one:?}");
+    assert!(two.starts_with(&[(2, 2), (3, 7)]), "{two:?}");
     assert!(report.reach.get("levels.Joins") > 0, "{:?}", report.reach);
 }
