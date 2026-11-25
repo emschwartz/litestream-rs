@@ -431,7 +431,18 @@ impl<R: Read + Seek> WalReader<R> {
             }
             let found = read_at(&mut self.reader, at.next.get(), &mut buf)?;
             if found < buf.len() {
-                return partial_frame(cursor, at.next, limit, found, frames.len());
+                let pending = frames.len();
+                let tail = match (limit, found, pending) {
+                    (ScanLimit::Committed(_), _, _) => {
+                        return Err(WalError::TruncatedBelowCommitted { offset: at.next });
+                    }
+                    (ScanLimit::FirstInvalidFrame, 0, 0) => Tail::Clean,
+                    (ScanLimit::FirstInvalidFrame, 0, pending) => Tail::Uncommitted {
+                        frames: u32::try_from(pending).unwrap_or(u32::MAX),
+                    },
+                    (ScanLimit::FirstInvalidFrame, _, _) => Tail::PartialFrame,
+                };
+                return Ok(stop(cursor, tail));
             }
             let frame = match verify_frame(
                 &buf,
@@ -441,7 +452,15 @@ impl<R: Read + Seek> WalReader<R> {
                 at.checksum,
             ) {
                 Ok(frame) => frame,
-                Err(fault) => return bad_frame(cursor, at.next, limit, fault),
+                Err(fault) => {
+                    return match limit {
+                        ScanLimit::Committed(_) => Err(WalError::CorruptBelowCommitted {
+                            offset: at.next,
+                            fault,
+                        }),
+                        ScanLimit::FirstInvalidFrame => Ok(stop(cursor, Tail::InvalidFrame(fault))),
+                    };
+                }
             };
             frames.push(FrameRef {
                 pgno: frame.pgno,
@@ -546,37 +565,4 @@ impl<R: Read + Seek> WalReader<R> {
 
 fn stop(cursor: &FrameCursor, tail: Tail) -> TxOutcome {
     TxOutcome::End { at: *cursor, tail }
-}
-
-/// The file ended inside the frame at `offset` after `found` of its bytes.
-fn partial_frame(
-    cursor: &FrameCursor,
-    offset: WalOffset,
-    limit: ScanLimit,
-    found: usize,
-    pending: usize,
-) -> Result<TxOutcome, WalError> {
-    let tail = match (limit, found, pending) {
-        (ScanLimit::Committed(_), _, _) => {
-            return Err(WalError::TruncatedBelowCommitted { offset });
-        }
-        (ScanLimit::FirstInvalidFrame, 0, 0) => Tail::Clean,
-        (ScanLimit::FirstInvalidFrame, 0, pending) => Tail::Uncommitted {
-            frames: u32::try_from(pending).unwrap_or(u32::MAX),
-        },
-        (ScanLimit::FirstInvalidFrame, _, _) => Tail::PartialFrame,
-    };
-    Ok(stop(cursor, tail))
-}
-
-fn bad_frame(
-    cursor: &FrameCursor,
-    offset: WalOffset,
-    limit: ScanLimit,
-    fault: FrameFault,
-) -> Result<TxOutcome, WalError> {
-    match limit {
-        ScanLimit::Committed(_) => Err(WalError::CorruptBelowCommitted { offset, fault }),
-        ScanLimit::FirstInvalidFrame => Ok(stop(cursor, Tail::InvalidFrame(fault))),
-    }
 }

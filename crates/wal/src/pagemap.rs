@@ -22,12 +22,17 @@ use crate::scan::CommittedTx;
 /// included, so a page that returns later comes only from a later frame.
 #[derive(Clone, Debug)]
 pub struct PageMap {
-    page_size: PageSize,
     pages: BTreeMap<PageNo, FrameRef>,
-    commit: Option<NonZeroU32>,
-    start: Option<WalOffset>,
+    run: Option<Run>,
     end: WalOffset,
-    salts: Option<Salts>,
+}
+
+/// What the first transaction fixes and the latest one sets.
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    start: WalOffset,
+    salts: Salts,
+    commit: NonZeroU32,
 }
 
 impl PageMap {
@@ -35,12 +40,9 @@ impl PageMap {
     #[must_use]
     pub const fn new(page_size: PageSize) -> Self {
         Self {
-            page_size,
             pages: BTreeMap::new(),
-            commit: None,
-            start: None,
+            run: None,
             end: WalOffset::start(page_size),
-            salts: None,
         }
     }
 
@@ -50,29 +52,30 @@ impl PageMap {
     /// [`PageMapError`] when the transaction is for another page size or generation, or
     /// does not start exactly where those applied end.
     pub fn apply(&mut self, tx: &CommittedTx) -> Result<(), PageMapError> {
-        if tx.end().next().page_size() != self.page_size {
+        if tx.end().next().page_size() != self.end.page_size() {
             return Err(PageMapError::PageSizeMismatch {
-                expected: self.page_size,
+                expected: self.end.page_size(),
                 found: tx.end().next().page_size(),
             });
         }
         let found = tx.end().salts();
-        if let Some(expected) = self.salts.filter(|expected| *expected != found) {
+        if let Some(expected) = self.salts().filter(|expected| *expected != found) {
             return Err(PageMapError::Generation { expected, found });
         }
-        let first = tx.frames().first().map(FrameRef::offset);
-        if let (Some(_), Some(found)) = (self.start, first) {
-            match found.frame_index().cmp(&self.end.frame_index()) {
+        // A committed transaction always holds its commit frame, so the fallback never applies.
+        let first = tx.frames().first().map_or(self.end, FrameRef::offset);
+        if self.run.is_some() {
+            match first.frame_index().cmp(&self.end.frame_index()) {
                 Ordering::Less => {
                     return Err(PageMapError::NotAfterEnd {
                         end: self.end,
-                        found,
+                        found: first,
                     });
                 }
                 Ordering::Greater => {
                     return Err(PageMapError::Gap {
                         expected: self.end,
-                        found,
+                        found: first,
                     });
                 }
                 Ordering::Equal => {}
@@ -82,15 +85,17 @@ impl PageMap {
             self.pages.insert(frame.pgno(), *frame);
         }
         let commit = tx.commit();
-        self.commit = Some(commit);
         while let Some(top) = self.pages.last_entry() {
             if top.key().get() <= commit.get() {
                 break;
             }
             top.remove();
         }
-        self.start = self.start.or(first);
-        self.salts = Some(found);
+        self.run = Some(Run {
+            start: self.run.map_or(first, |run| run.start),
+            salts: found,
+            commit,
+        });
         self.end = tx.end().next();
         Ok(())
     }
@@ -109,7 +114,10 @@ impl PageMap {
     /// The database size in pages after the last transaction applied; `None` before any.
     #[must_use]
     pub const fn commit(&self) -> Option<NonZeroU32> {
-        self.commit
+        match self.run {
+            Some(run) => Some(run.commit),
+            None => None,
+        }
     }
 
     /// The WAL bytes the applied transactions span: the first frame's start and the last commit frame's end.
@@ -117,7 +125,8 @@ impl PageMap {
     #[must_use]
     pub fn range(&self) -> (WalOffset, WalOffset) {
         (
-            self.start.unwrap_or(WalOffset::start(self.page_size)),
+            self.run
+                .map_or(WalOffset::start(self.end.page_size()), |run| run.start),
             self.end,
         )
     }
@@ -125,12 +134,15 @@ impl PageMap {
     /// The generation of the applied transactions; `None` before any.
     #[must_use]
     pub const fn salts(&self) -> Option<Salts> {
-        self.salts
+        match self.run {
+            Some(run) => Some(run.salts),
+            None => None,
+        }
     }
 
     /// The page size of the WAL this map describes.
     #[must_use]
     pub const fn page_size(&self) -> PageSize {
-        self.page_size
+        self.end.page_size()
     }
 }

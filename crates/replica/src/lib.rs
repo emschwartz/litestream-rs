@@ -147,7 +147,7 @@ pub use restore::{
 };
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
-pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};
+pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime, lock};
 pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{

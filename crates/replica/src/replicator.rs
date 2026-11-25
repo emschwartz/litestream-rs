@@ -21,7 +21,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -37,14 +37,9 @@ use crate::events::EventSink;
 use crate::health::{Booted, Gone, Health, Phase, Stopped, Writes};
 use crate::meta::{MetaLock, read_takeover};
 use crate::readers::ReaderGuard;
-use crate::runtime::{CALLER_SLICE, Park, Runtime, later};
+use crate::runtime::{CALLER_SLICE, Park, Runtime, later, lock};
 use crate::store::{DynStore, Meters};
 use crate::thread::Worker;
-
-pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Every critical section leaves plain data behind, so a poisoned lock is still usable.
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// What the thread writes and the handles read.
 #[derive(Debug)]
@@ -253,16 +248,6 @@ impl Shared {
     }
 }
 
-/// What [`Replicator::launch`] hands the thread.
-struct Launch<'a> {
-    database: &'a Path,
-    meta: &'a Path,
-    store: Arc<dyn DynStore>,
-    config: Config,
-    runtime: Runtime,
-    events: Option<Box<dyn EventSink>>,
-}
-
 /// One replicated database. Cheap to clone: every clone is the same thread.
 #[derive(Clone)]
 pub struct Replicator {
@@ -355,15 +340,7 @@ impl Replicator {
         })?;
         let shared = Arc::new(Shared::new(file, &config, &runtime));
         register(&shared)?;
-        let launch = Launch {
-            database,
-            meta: &meta,
-            store,
-            config,
-            runtime,
-            events,
-        };
-        let started = Self::launch(&shared, launch);
+        let started = Self::launch(&shared, database, &meta, store, config, runtime, events);
         if started.is_err() {
             shared.unregister();
         }
@@ -376,15 +353,15 @@ impl Replicator {
         })
     }
 
-    fn launch(shared: &Arc<Shared>, launch: Launch<'_>) -> Result<(), StartError> {
-        let Launch {
-            database,
-            meta,
-            store,
-            config,
-            runtime,
-            events,
-        } = launch;
+    fn launch(
+        shared: &Arc<Shared>,
+        database: &Path,
+        meta: &Path,
+        store: Arc<dyn DynStore>,
+        config: Config,
+        runtime: Runtime,
+        events: Option<Box<dyn EventSink>>,
+    ) -> Result<(), StartError> {
         std::fs::create_dir_all(meta).map_err(|err| StartError::MetaDir { kind: err.kind() })?;
         let meta_lock = MetaLock::take(meta)?;
         let takeover = read_takeover(meta);
@@ -422,9 +399,10 @@ impl Replicator {
             store,
             config,
             runtime,
-        )
-        .with_sink(events)
-        .with_meta(meta_lock, takeover);
+            events,
+            meta_lock,
+            takeover,
+        );
         let handle = crate::stack::spawn("lsr-replica", crate::stack::ENGINE_STACK, move || {
             worker.run()
         })

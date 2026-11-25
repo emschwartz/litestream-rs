@@ -368,6 +368,21 @@ impl ReadStream for MeteredStream<'_> {
     }
 }
 
+/// Runs a batch `call`, counting each result as one call timed as the whole batch.
+async fn metered_many<T>(
+    clock: &dyn Clock,
+    meter: &OpMeter,
+    call: impl Future<Output = Vec<Result<T, StoreError>>>,
+) -> Vec<Result<T, StoreError>> {
+    let began = clock.now();
+    let results = call.await;
+    let ended = clock.now();
+    for result in &results {
+        meter.note(result, began, ended);
+    }
+    results
+}
+
 /// An upload whose writes and commit are counted; the bytes count once committed.
 pub(crate) struct MeteredUpload {
     inner: Box<dyn DynUpload>,
@@ -519,24 +534,14 @@ impl ObjectStore for Metered {
         pages: &[ListAt],
         limit: PageLimit,
     ) -> Vec<Result<Listing, StoreError>> {
-        let began = self.clock.now();
-        let results = self.store.list_many_boxed(pages, limit).await;
-        let ended = self.clock.now();
-        for result in &results {
-            self.meters.list.note(result, began, ended);
-        }
-        results
+        let call = self.store.list_many_boxed(pages, limit);
+        metered_many(&*self.clock, &self.meters.list, call).await
     }
 
     /// Each created-at time of the batch counts as one call, timed as the whole batch.
     async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
-        let began = self.clock.now();
-        let results = self.store.created_at_many_boxed(files).await;
-        let ended = self.clock.now();
-        for result in &results {
-            self.meters.created_at.note(result, began, ended);
-        }
-        results
+        let call = self.store.created_at_many_boxed(files);
+        metered_many(&*self.clock, &self.meters.created_at, call).await
     }
 }
 

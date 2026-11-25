@@ -23,9 +23,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use lsr_replica::{Gate, Trip};
+use lsr_replica::{Gate, Trip, lock};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use crate::daemon::{Daemon, Finished, Started};
 use crate::exec::{Child, ChildEnd, ExecCommand, Wake};
@@ -40,11 +40,6 @@ pub(crate) struct Control {
     child: Mutex<Option<Child>>,
     begun: AtomicBool,
     wake: SyncSender<Wake>,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Each critical section leaves plain data behind.
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Control {
