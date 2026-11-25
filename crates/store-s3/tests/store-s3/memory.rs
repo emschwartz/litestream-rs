@@ -12,6 +12,10 @@
 //!
 //! - An upload holds at most `concurrency` parts (the batch being sent), whatever its size:
 //!   the part buffers are the request bodies, so nothing copies them.
+//! - An upload allocates each part's buffer once, at the part's size: a buffer regrown by doubling
+//!   leaves a ladder of blocks of other sizes that macOS keeps mapped, so a long upload at a large
+//!   part size held about its own length (measured: 6 GB for four uploads of 1.5 GiB at 100 MiB
+//!   parts and a concurrency of 10), whatever the live count said.
 //! - A restore holds one read window: `READ_CONCURRENCY` responses of the 4 MiB the engine
 //!   asks for, whatever the database's size, so each response holds its length and not the
 //!   capacity a read grown from empty ends with.
@@ -56,7 +60,7 @@ use crate::common::{config, credentials, now};
 )]
 mod heap;
 
-use heap::{Counting, exclude_thread, process_peak_of};
+use heap::{Counting, exclude_thread, large_allocs_of, process_peak_of};
 
 #[global_allocator]
 static HEAP: Counting = Counting;
@@ -213,20 +217,22 @@ fn assert_upload_holds_one_batch(part: usize, concurrency: usize, total: usize) 
     let store = store_on(serve(&fake), part, concurrency);
     let key = FileKey::snapshot(txid(1));
     let written = vec![0xA5_u8; MIB];
-    let (done, peak) = process_peak_of(|| {
-        block_on(async {
-            let mut upload = store
-                .begin_upload(
-                    &key,
-                    Timestamp::from_unix_millis(1_700_000_000_000),
-                    WriteMode::New,
-                )
-                .await
-                .unwrap();
-            for _ in 0..total / MIB {
-                upload.write(&written).await.unwrap();
-            }
-            upload.commit().await
+    let ((done, peak), large) = large_allocs_of(|| {
+        process_peak_of(|| {
+            block_on(async {
+                let mut upload = store
+                    .begin_upload(
+                        &key,
+                        Timestamp::from_unix_millis(1_700_000_000_000),
+                        WriteMode::New,
+                    )
+                    .await
+                    .unwrap();
+                for _ in 0..total / MIB {
+                    upload.write(&written).await.unwrap();
+                }
+                upload.commit().await
+            })
         })
     });
     assert_eq!(done.unwrap().size, u64::try_from(total).unwrap());
@@ -251,11 +257,27 @@ fn assert_upload_holds_one_batch(part: usize, concurrency: usize, total: usize) 
         "the gate saw {} bytes: it cannot see the part buffers",
         peak.extra
     );
+    // One block per part, and a few for the request and the result: a part regrown from
+    // empty by doubling is a dozen blocks a part, which the live count above never shows.
+    let parts = total.div_ceil(part);
+    eprintln!("upload part {} MiB x {concurrency}: {large} large blocks for {parts} parts", part / MIB);
+    assert!(
+        large <= parts + 4,
+        "{large} blocks of {} KiB or more for {parts} parts: a part buffer is allocated once, whole",
+        heap::LARGE_BLOCK >> 10
+    );
 }
 
 #[test]
 fn an_upload_through_the_real_client_holds_five_parts() {
     assert_upload_holds_one_batch(PartSize::MIN.get().try_into().unwrap(), 5, 56 * MIB);
+}
+
+/// A part size above the default and an object of many more parts than the concurrency, the
+/// shape where a per-part cost multiplies: twelve parts of 16 MiB, three at a time.
+#[test]
+fn a_long_upload_at_a_large_part_size_holds_one_batch_and_allocates_each_part_once() {
+    assert_upload_holds_one_batch(16 * MIB, 3, 12 * 16 * MIB);
 }
 
 #[test]
@@ -404,6 +426,17 @@ const FLUSH: usize = MIB;
 /// real client. The two bounds add: the inputs' windows and one batch of parts.
 #[test]
 fn a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts() {
+    assert_compaction_holds_one_batch(PartSize::MIN.get().try_into().unwrap(), 5);
+}
+
+/// The same at a part size above the default and a concurrency below it: the output is four
+/// parts, two batches, so a part held past its batch shows.
+#[test]
+fn a_compaction_into_s3_at_a_large_part_size_holds_one_batch_of_parts() {
+    assert_compaction_holds_one_batch(16 * MIB, 2);
+}
+
+fn assert_compaction_holds_one_batch(part: usize, concurrency: usize) {
     let from = tempfile::tempdir().unwrap();
     let staging = FsStore::new(from.path());
     let commit = INPUT_PAGES * u32::try_from(MAX_INPUTS).unwrap();
@@ -427,8 +460,6 @@ fn a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts() {
         .unwrap()
         .files;
     let inputs = CompactionInputs::new(files).unwrap();
-    let part = usize::try_from(PartSize::MIN.get()).unwrap();
-    let concurrency = 5;
     let fake = fake();
     let dest = store_on(serve(&fake), part, concurrency);
 
@@ -443,7 +474,7 @@ fn a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts() {
 
     let done = done.unwrap();
     assert_eq!(done.pages(), commit);
-    assert!(done.info().size > u64::try_from(2 * concurrency * part).unwrap());
+    assert!(done.info().size > u64::try_from(concurrency * part).unwrap());
     let bound = MAX_INPUTS * (STAGED_WINDOW + PAGE) + FLUSH + concurrency * part + MARGIN;
     eprintln!(
         "compaction into s3: {} KiB (bound {} KiB)",
