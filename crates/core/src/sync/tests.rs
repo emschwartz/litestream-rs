@@ -28,6 +28,7 @@ fn plan_pages(
 }
 use crate::conformance::block_on;
 use crate::fault::role::{Role, Staging};
+use crate::layout::Level;
 use crate::mem::MemStore;
 use crate::source::{FakeDb, FakeWal, SourceError};
 use crate::store::Upload;

@@ -1206,6 +1206,34 @@ pub enum Next {
     OnWalChange,
 }
 
+/// A checkpoint gate: when the decision may be asked again ([`crate::after_checkpoint`]'s
+/// wake). `Now` asks on any tick, `At` from that time on, `OnWalChange` after the next sync
+/// that stages a file.
+impl Next {
+    pub(crate) fn open(self, now: Timestamp) -> bool {
+        match self {
+            Self::Now => true,
+            Self::At(at) => now >= at,
+            Self::OnWalChange => false,
+        }
+    }
+
+    pub(crate) const fn until(self) -> Option<Timestamp> {
+        match self {
+            Self::At(at) => Some(at),
+            Self::Now | Self::OnWalChange => None,
+        }
+    }
+
+    /// A passed `At` is open: the decision is asked on this tick.
+    pub(crate) fn expire(self, now: Timestamp) -> Self {
+        match self {
+            Self::At(at) if at <= now => Self::Now,
+            Self::At(_) | Self::Now | Self::OnWalChange => self,
+        }
+    }
+}
+
 /// The clock read earlier than its last reading. Engine time keeps its value
 /// and advances at half the wall clock's rate until the wall clock catches up,
 /// so no timer stops; each step back is reported once. An event, not a fault:

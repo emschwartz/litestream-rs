@@ -1049,7 +1049,7 @@ impl World {
     /// # Errors
     /// The store's error when it cannot list or write.
     pub fn remote_put_foreign(&mut self) -> Result<Option<(FileKey, Vec<u8>)>, StoreError> {
-        use lsr_core::{Level, ObjectStore};
+        use lsr_core::ObjectStore;
         use lsr_ltx::TxidRange;
         let Some(newest) = self.remote_level_zero()?.last().map(|f| f.key) else {
             return Ok(None);
@@ -1057,7 +1057,7 @@ impl World {
         let Some(next) = newest.range().max().next() else {
             return Ok(None);
         };
-        let key = FileKey::new(Level::ZERO, TxidRange::single(next));
+        let key = FileKey::staged(next);
         // Another writer's file is a sound one: the same pages under the next
         // transaction, from a WAL that is not this database's, so it names no
         // origin in it and the live WAL cannot vouch for it.

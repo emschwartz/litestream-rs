@@ -510,7 +510,7 @@ mod tests {
 
     fn key() -> FileKey {
         let id = Txid::new(1).unwrap();
-        FileKey::new(Level::ZERO, TxidRange::single(id))
+        FileKey::staged(id)
     }
 
     #[test]

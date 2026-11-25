@@ -53,11 +53,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Header, PageChecksum, PageNo, PageSize, Txid, TxidRange};
+use lsr_ltx::{Header, PageChecksum, PageNo, PageSize, Txid};
 
 use crate::fault::role::Role;
 use crate::fault::{Fault, SnapshotCause};
-use crate::layout::{FileKey, Level};
+use crate::layout::FileKey;
 use crate::recover::read_header;
 
 /// A database-file page whose bytes are not the ones the table holds.
@@ -382,7 +382,7 @@ impl Seeded {
         let (Some((txid, end)), Some(tip)) = (self.unplaced.take(), tip) else {
             return Ok(());
         };
-        let key = FileKey::new(Level::ZERO, TxidRange::single(tip));
+        let key = FileKey::staged(tip);
         let header = match read_header(remote, &key, R::fault).await {
             Ok(header) => header,
             // The tip the engine believes the replica holds is not there (an upload whose

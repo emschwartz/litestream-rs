@@ -99,15 +99,15 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
+use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 use clock::EngineClock;
 pub use once::{FinalSnapshot, FinalSnapshotFailure};
 pub use once_retention::FinalRetention;
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
+use state::Live;
 pub use state::{Degraded, Phase, Task};
-use state::{Gate, Live};
 
 use crate::app::AppCheckpoints;
 use crate::checkpoint::{
@@ -140,11 +140,11 @@ use crate::recover::{
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
-use crate::store::{Denied, ObjectStore, PageLimit, StoreError};
+use crate::store::{Denied, ObjectStore, PageLimit, StoreError, WriteMode};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
-    Did, Guard, InFlight, Unsent, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
+    Did, InFlight, Unsent, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
     drop_staged_from, inventory_fault, plan_upload, upload_next, upload_step,
 };
 use crate::verify::LivePages;
@@ -366,6 +366,19 @@ pub enum Tick {
     DeadlineReached(Unfinished),
 }
 
+impl Tick {
+    /// The tick with its wake rewritten by `f`; a tick that stopped has none.
+    fn map_next(self, f: impl FnOnce(Next) -> Next) -> Self {
+        match self {
+            Self::Ran { event, next } => Self::Ran {
+                event,
+                next: f(next),
+            },
+            other @ (Self::Stopped(_) | Self::Drained { .. } | Self::DeadlineReached(_)) => other,
+        }
+    }
+}
+
 /// What a drain left when its deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unfinished {
@@ -425,6 +438,19 @@ const fn mode_of(decision: Decision) -> Option<CheckpointMode> {
         Decision::Passive(_) => Some(CheckpointMode::Passive),
         Decision::Truncate => Some(CheckpointMode::Truncate),
     }
+}
+
+/// Whether the WAL file is now shorter than `was`, the length statted before its frames were
+/// read: a file that shrank under a read was truncated by a checkpoint, not damaged.
+fn wal_shrank<W: WalSource>(wal: &mut W, was: Option<WalFileLen>) -> Result<bool, Fault> {
+    let Some(was) = was else {
+        return Ok(false);
+    };
+    Ok(wal
+        .len()
+        .map_err(Fault::from_source)?
+        .map_or(0, WalFileLen::bytes)
+        < was.bytes())
 }
 
 /// A WAL reader, or `None` when there is no file or its header is torn
@@ -730,8 +756,7 @@ impl Actor {
         let released = self.kept.verify_restore_point.is_some() && txid.is_none();
         self.kept.verify_restore_point = txid;
         if released {
-            self.engine.maintain.stale = true;
-            self.engine.maintain.remembered.owe_full();
+            self.engine.maintain.relist();
         }
     }
 
@@ -892,19 +917,13 @@ impl Actor {
 
     /// The tick with its wake moved to the wall clock the host sleeps on.
     fn wake_on_wall(&self, tick: Tick) -> Tick {
-        match (tick, self.kept.clock) {
-            (
-                Tick::Ran {
-                    event,
-                    next: Next::At(at),
-                },
-                Some(clock),
-            ) => Tick::Ran {
-                event,
-                next: Next::At(clock.wall_at(at)),
-            },
-            (tick, _) => tick,
-        }
+        let Some(clock) = self.kept.clock else {
+            return tick;
+        };
+        tick.map_next(|next| match next {
+            Next::At(at) => Next::At(clock.wall_at(at)),
+            Next::Now | Next::OnWalChange => next,
+        })
     }
 
     /// Routes a fault by its policy. The only place `policy` is called.
@@ -1045,8 +1064,7 @@ impl Actor {
         if self.kept.task_restore_point != TaskRestorePoint::Free && !self.kept.tasks.any_degraded()
         {
             self.kept.task_restore_point = TaskRestorePoint::Free;
-            self.engine.maintain.stale = true;
-            self.engine.maintain.remembered.owe_full();
+            self.engine.maintain.relist();
         }
     }
 
@@ -1157,8 +1175,7 @@ impl Actor {
                 return false;
             }
             Did::Listed { .. } => {
-                self.engine.maintain.stale = true;
-                self.engine.maintain.remembered.owe_full();
+                self.engine.maintain.relist();
             }
             Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
                 let at = listing_after_upload(now, &self.kept.cfg.maintenance);
@@ -1219,7 +1236,7 @@ impl Actor {
                 ..
             }
         );
-        let key = FileKey::new(Level::ZERO, TxidRange::single(newest?.txid()));
+        let key = FileKey::staged(newest?.txid());
         if !read_disagreed || doubted == Some(key) {
             return None;
         }
@@ -1694,13 +1711,7 @@ impl Actor {
                 if matches!(
                     verdict,
                     Stepped::Resnapshot(SnapshotCause::LocalRewound { .. })
-                ) && let Some(was) = len
-                    && env
-                        .wal
-                        .len()
-                        .map_err(Fault::from_source)?
-                        .map_or(0, WalFileLen::bytes)
-                        < was.bytes()
+                ) && wal_shrank(&mut *env.wal, len)?
                 {
                     return Err(Fault::WalMoved);
                 }
@@ -1877,8 +1888,8 @@ impl Actor {
                     self.kept.snapshot_asked = false;
                     self.kept.snapshots.count(&cause);
                 }
-                if self.engine.gate == Gate::NextWrite {
-                    self.engine.gate = Gate::Open;
+                if self.engine.gate == Next::OnWalChange {
+                    self.engine.gate = Next::Now;
                 }
                 (1, txs, end)
             }
@@ -1963,7 +1974,7 @@ impl Actor {
             &self.kept.cfg.checkpoint,
         );
         self.engine.checkpoint = state;
-        self.engine.gate = Gate::of(next);
+        self.engine.gate = next;
         self.kept.tasks.get_mut(Task::Checkpoint).succeed();
         // An overtaken checkpoint did not look at the WAL again: SQLite's own word stands.
         let busy = match done.outcome {
@@ -1986,7 +1997,7 @@ impl Actor {
         let skips = skips.map_or(NonZeroU32::MIN, |skips| skips.saturating_add(1));
         self.engine.lock_busy = Some(skips);
         let until = now.saturating_add(lock_busy_wait(skips, self.kept.cfg.retry_interval));
-        self.engine.gate = Gate::Until(until);
+        self.engine.gate = Next::At(until);
         self.ran(Event::CheckpointDeferred { until }, now)
     }
 
@@ -2062,8 +2073,8 @@ impl Actor {
                 // The tick published a file before this one ran out of budget: it says that.
                 Ok(None) => break,
                 Ok(Some(uploaded)) => {
-                    if let Did::Diverged { from, .. } = uploaded.did {
-                        return Some(self.diverged(env, uploaded.state, from, now).await);
+                    if let Did::Diverged { confirmed } = uploaded.did {
+                        return Some(self.diverged(env, uploaded.state, confirmed, now).await);
                     }
                     self.set_upload(uploaded.state);
                     last = uploaded.did;
@@ -2097,10 +2108,10 @@ impl Actor {
     }
 
     /// How level-0 uploads write: create-only until the store said it cannot (D79).
-    const fn guard(&self) -> Guard {
+    const fn guard(&self) -> WriteMode {
         match self.kept.unguarded {
-            Some(_) => Guard::Unguarded,
-            None => Guard::BucketRefuses,
+            Some(_) => WriteMode::Replace,
+            None => WriteMode::New,
         }
     }
 
@@ -2152,7 +2163,7 @@ impl Actor {
         from: Txid,
         now: Timestamp,
     ) -> Tick {
-        let key = FileKey::new(Level::ZERO, TxidRange::single(from));
+        let key = FileKey::staged(from);
         let token = self.engine.witnesses.get(&key).copied();
         // An id one of this engine's own drops vouched for holds its own
         // earlier upload on the replica (one whose answer was lost), not
@@ -2356,8 +2367,9 @@ impl Actor {
         self.engine.maintain.snapshot_waits = false;
         // Level 1 starts above the newest snapshot when it is empty (D224), so what the
         // snapshot holds is as compacted as level 1 would make it.
-        self.engine.maintain.level_one = Level::new(1)
-            .and_then(|level| inventory.level(level).last())
+        self.engine.maintain.level_one = inventory
+            .level(Level::ONE)
+            .last()
             .map(|info| info.key.range().max())
             .or_else(|| crate::maintain::snapshot_end(&inventory));
         self.engine.maintain.remembered.learn_full(
@@ -2986,7 +2998,7 @@ async fn boot_listing<L: Role, R: Role>(
     let (upload, diverged) = match listed {
         Ok(Uploaded {
             state,
-            did: Did::Diverged { from, .. },
+            did: Did::Diverged { confirmed: from },
         }) => (state, Some(from)),
         Ok(listed) => (listed.state, None),
         Err(failed) => return Err(failed.fault.into()),
@@ -3321,13 +3333,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
             cause: SnapshotCause::LocalRewound { .. },
             ..
         }
-    ) && let Some(was) = len
-        && env
-            .wal
-            .len()
-            .map_err(Fault::from_source)?
-            .map_or(0, WalFileLen::bytes)
-            < was.bytes()
+    ) && wal_shrank(&mut *env.wal, len)?
     {
         return Err(Fault::WalMoved.into());
     }

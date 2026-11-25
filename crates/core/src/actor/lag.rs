@@ -274,17 +274,11 @@ impl Actor {
         let Some(probe) = probe.into_iter().chain(overdue).min() else {
             return tick;
         };
-        match tick {
-            Tick::Ran { event, next } => {
-                let next = match next {
-                    Next::Now => Next::Now,
-                    Next::At(at) => Next::At(at.min(probe)),
-                    Next::OnWalChange => Next::At(probe),
-                };
-                Tick::Ran { event, next }
-            }
-            other @ (Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_)) => other,
-        }
+        tick.map_next(|next| match next {
+            Next::Now => Next::Now,
+            Next::At(at) => Next::At(at.min(probe)),
+            Next::OnWalChange => Next::At(probe),
+        })
     }
 
     /// Why fail-stop trips for this engine now, if it does (`crate::failstop`).
