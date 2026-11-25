@@ -155,7 +155,7 @@ pub trait Fs: Clone + Send + Sync + Debug + 'static {
 }
 
 /// The calls the store makes on an open file.
-pub trait FsFile: Send + Debug {
+pub trait FsFile: Send + Debug + 'static {
     /// The open file's metadata.
     ///
     /// # Errors
