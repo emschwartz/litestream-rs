@@ -704,3 +704,56 @@ fn the_course_wakes_for_its_checkpoint_schedule() {
         "{seen:?}"
     );
 }
+
+/// The course's own step comes before a boot attempt that is due, as the WAL step comes
+/// before an upload; after eight ticks in a row that ended in the course's step, the attempt
+/// goes first, so an application that never stops writing does not hide the store's return.
+#[test]
+fn a_due_boot_attempt_waits_its_turn_behind_the_courses_steps() {
+    let (mut rig, mut actor, _) = restarted_down(go_like());
+    let due = actor
+        .kept
+        .tasks
+        .get(Task::Upload)
+        .until()
+        .unwrap()
+        .unix_millis();
+    let scratch = rig.remote.scratch_calls.load(Ordering::SeqCst);
+    for n in 4..12_u8 {
+        rig.commit(n);
+        let tick = rig.tick(&mut actor, due);
+        assert_eq!(event(&tick), Some(&Event::Synced { files: 1 }), "{n}");
+        assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), scratch);
+    }
+    // The ninth tick is the attempt's, with a commit waiting.
+    rig.commit(12);
+    let tick = rig.tick(&mut actor, due);
+    assert!(
+        matches!(
+            event(&tick),
+            Some(Event::Retrying { .. } | Event::Degraded { .. })
+        ),
+        "{tick:?}"
+    );
+    assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), scratch + 1);
+    let tick = rig.tick(&mut actor, due);
+    assert_eq!(event(&tick), Some(&Event::Synced { files: 1 }));
+    assert_eq!(staged(&rig).len(), 11);
+    // The count began again: the next attempt, due now, waits eight more steps.
+    let due = actor
+        .kept
+        .tasks
+        .get(Task::Upload)
+        .until()
+        .unwrap()
+        .unix_millis();
+    let scratch = rig.remote.scratch_calls.load(Ordering::SeqCst);
+    for n in 13..20_u8 {
+        rig.commit(n);
+        rig.tick(&mut actor, due);
+    }
+    assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), scratch);
+    rig.commit(20);
+    rig.tick(&mut actor, due);
+    assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), scratch + 1);
+}

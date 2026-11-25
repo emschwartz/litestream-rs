@@ -221,7 +221,8 @@ impl Actor {
         }
     }
 
-    /// `tick`, the end of a boot attempt. One that deleted staged files before it failed (a
+    /// `tick`, the end of a boot attempt, which leaves a local course as it was. One that
+    /// deleted staged files before it failed (a
     /// drop takes the newest first) left a local course at a position whose file is gone:
     /// the course ends, where carrying on would stage the next file across the hole.
     pub(super) async fn keep_local<W, P, C, L, R>(
@@ -238,6 +239,8 @@ impl Actor {
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(at.position().txid()));
         if matches!(crate::store::exists(env.staging, &key).await, Ok(true)) {
+            // The attempt had its turn ahead of the course's own steps.
+            self.engine.syncs_ahead = 0;
             return tick;
         }
         self.leave_local();

@@ -1208,18 +1208,23 @@ impl Actor {
         self.fault(self.boot_task(), fault, now)
     }
 
-    /// One unit of an engine that has not booted: a boot attempt when its task may run,
-    /// else a local course's own work (`local`).
+    /// One unit of an engine that has not booted. A local course's own work (`local`) comes
+    /// first, as the WAL step does in `run`, and a boot attempt whose task may run goes ahead
+    /// of it once [`state::FAIR_SHARE`] ticks in a row ended in that work, as an upload does
+    /// (`owed_upload`): an application that never stops writing does not keep the engine from
+    /// seeing the store answer.
     async fn boot<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if !self.kept.tasks.ready(self.boot_task(), now) {
-            return match self.local_unit(env, now).await {
-                Some(tick) => tick,
-                None => self.ran(Event::Idle, now),
-            };
+        let ready = self.kept.tasks.ready(self.boot_task(), now);
+        let owed = ready && self.engine.syncs_ahead >= state::FAIR_SHARE;
+        if !owed && let Some(tick) = self.local_unit(env, now).await {
+            return self.passed_over_uploads(tick);
+        }
+        if !ready {
+            return self.ran(Event::Idle, now);
         }
         let tick = self.boot_attempt(env, now).await;
         self.keep_local(env, tick, now).await
@@ -2577,7 +2582,8 @@ impl Actor {
         self.upload_unit(env, now).await
     }
 
-    /// `tick`, from the WAL step, counted: the upload step resets the count when it runs.
+    /// `tick`, from the WAL step, counted: the upload step resets the count when it runs, and
+    /// so does a local course's boot attempt.
     fn passed_over_uploads(&mut self, tick: Tick) -> Tick {
         self.engine.syncs_ahead = self.engine.syncs_ahead.saturating_add(1);
         tick
