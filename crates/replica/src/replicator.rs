@@ -433,8 +433,9 @@ impl Replicator {
         Ok(())
     }
 
-    /// Blocks until the replicator is ready, or cannot be, or until `within` passes on the
-    /// replicator's clock: [`Replicator::ready`] for a caller without async.
+    /// Blocks until the replicator is ready (the start was judged and writes go through, not
+    /// the first snapshot taken), or cannot be, or until `within` passes on the replicator's
+    /// clock: [`Replicator::ready`] for a caller without async.
     #[must_use]
     pub fn wait_booted(&self, within: Duration) -> Booted {
         if self.shared.forked() {
@@ -443,12 +444,29 @@ impl Replicator {
         settle_boot(&self.shared, later(self.shared.clock.now(), within))
     }
 
-    /// Resolves once the replicator is ready: the first boot finished and was judged, so the
+    /// Resolves once the replicator is ready: the first boot listed the replica and decided how
+    /// this start proceeds (continue from a position, or snapshot for a named cause), so the
     /// write hold that covers it is over (`Booted::Booted`). Or once it cannot be: the boot
     /// keeps failing (`Degraded`), the replicator stopped, its thread is gone, or `within`
     /// passed on the replicator's clock (`TimedOut`). It answers as
     /// [`Replicator::wait_booted`] does. The future needs no runtime: `.await` it or call
     /// [`Ready::wait`]; a poll that finds no answer starts a thread that waits for it.
+    ///
+    /// Ready does not mean the first snapshot exists: a start that decided on one takes it in
+    /// the background, while the application writes (`docs/decisions/D201.md`), and a stop
+    /// only that snapshot can find comes later, as any later stop does. An application that
+    /// must wait for the first snapshot to reach the replica waits on health: the snapshot is
+    /// staged once `resnapshot` is `None`, and on the replica once `unreplicated_since` is
+    /// also `None`:
+    ///
+    /// ```no_run
+    /// # fn wait(replicator: &lsr_replica::Replicator) {
+    /// # use std::time::Duration;
+    /// let on_replica = replicator.wait_until(Duration::from_secs(600), |h| {
+    ///     h.resnapshot.is_none() && h.unreplicated_since.is_none() && h.replicated.is_some()
+    /// });
+    /// # }
+    /// ```
     pub fn ready(&self, within: Duration) -> Ready {
         let deadline = later(self.shared.clock.now(), within);
         let watched = Watched::new(&self.shared, deadline, settle_boot, "lsr-ready");

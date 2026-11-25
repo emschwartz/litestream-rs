@@ -36,7 +36,8 @@ impl Runner {
                 | Event::Idle
                 | Event::Resnapshot(_)
                 | Event::Clamped(_)
-                | Event::TakeoverWanted(_) => false,
+                | Event::TakeoverWanted(_)
+                | Event::CheckingIdentity { .. } => false,
             },
             TickEnd::Done(_) | TickEnd::Crashed { .. } => false,
         };

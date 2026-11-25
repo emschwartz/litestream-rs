@@ -333,7 +333,7 @@ impl EventSink for DbEvents {
             ),
             Event::Verified { txid, outcome } => verified_line(*txid, *outcome),
             Event::WritesBlocked { why } => (
-                LogLevel::Warn,
+                failstop::writes_blocked_level(*why),
                 failstop::WRITES_BLOCKED,
                 vec![("held_by", failstop::why_name(*why).into())],
             ),
@@ -471,6 +471,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             LogLevel::Warn,
             "clock went backwards",
             vec![("clamped", debug(clamped))],
+        ),
+        EngineEvent::CheckingIdentity { tip } => (
+            LogLevel::Info,
+            "comparing the database with the replica before starting",
+            vec![("tip", tip.get().into())],
         ),
         EngineEvent::TakeoverWanted(record) => (
             LogLevel::Info,

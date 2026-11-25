@@ -1,0 +1,8 @@
+# The boot never tells its driver it is comparing the database with the replica: writes held
+# while a start with an empty meta directory runs that check, for as long as a restore takes, are
+# reported as plain booting, which an operator cannot tell from the second or two every start
+# takes (docs/decisions/D201.md).
+name = "failstop-identity-check-unnamed"
+fix = "plant"
+package = "lsr-core"
+tests = ["vouch::a_new_meta_directory_over_the_replicas_own_state_snapshots_above_it"]

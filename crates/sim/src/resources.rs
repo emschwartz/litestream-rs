@@ -156,7 +156,8 @@ const fn lists_allowed(event: &Event) -> bool {
         | Event::Idle
         | Event::Resnapshot(_)
         | Event::Clamped(_)
-        | Event::TakeoverWanted(_) => false,
+        | Event::TakeoverWanted(_)
+        | Event::CheckingIdentity { .. } => false,
     }
 }
 

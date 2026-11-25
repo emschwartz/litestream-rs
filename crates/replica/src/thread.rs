@@ -224,10 +224,6 @@ pub(crate) struct Worker {
     why: WhyBlocked,
     /// What the last `WritesBlocked` or `WritesAllowed` event said.
     reported: Writes,
-    /// The pending boot waited on held writes (a sequence bump for a missing WAL): the gate
-    /// lets writes through until the boot is judged, so it is judged on what it finds and not
-    /// on the hold, which would never end.
-    boot_write: bool,
     /// When a hold or release that failed is tried again at the latest.
     gate_retry: Option<Timestamp>,
     /// The clock's last reading, to notice it stepping back.
@@ -308,7 +304,6 @@ impl Worker {
             gate,
             why: WhyBlocked::Booting,
             reported: Writes::Allowed,
-            boot_write: false,
             gate_retry: None,
         }
     }
@@ -510,6 +505,30 @@ impl Worker {
             Arc::clone(&self.shared.readers),
             self.shared.writes_held.clone(),
         );
+        let (sink, sink_panics) = (&mut self.sink, &mut self.seen.counters.sink_panics);
+        let (shared, held) = (&self.shared, self.gate.is_held());
+        let booting = matches!(self.blocked, Some(WhyBlocked::Booting));
+        let (why, reported) = (&mut self.why, &mut self.reported);
+        // The identity check restores the replica's state and reads every local page, as long
+        // as a restore takes, inside this tick: health and the log name it as it starts.
+        let mut notice = |event: &EngineEvent| {
+            emit_to(sink, sink_panics, &Event::Engine(event.clone()));
+            if !(booting && matches!(event, EngineEvent::CheckingIdentity { .. })) {
+                return;
+            }
+            let checking = WhyBlocked::CheckingIdentity;
+            let writes = if held {
+                Writes::Blocked(checking)
+            } else {
+                Writes::Blocking(checking)
+            };
+            shared.update(|state| state.health.writes = writes);
+            if held {
+                *why = checking;
+                *reported = writes;
+                emit_to(sink, sink_panics, &Event::WritesBlocked { why: checking });
+            }
+        };
         let env = Env {
             wal: &mut wal,
             db: &mut db,
@@ -517,6 +536,7 @@ impl Worker {
             staging: &self.staging,
             remote: &self.remote,
             clock: self.runtime.clock.as_ref(),
+            notice: &mut notice,
         };
         Ok(block_on(self.actor.tick(env, now)))
     }
@@ -562,11 +582,6 @@ impl Worker {
 
     fn ran(&mut self, event: EngineEvent, next: lsr_core::Next, now: Timestamp) -> Turn {
         let idle = event == EngineEvent::Idle;
-        if matches!(event, EngineEvent::WritesHeld { .. })
-            && self.blocked == Some(WhyBlocked::Booting)
-        {
-            self.boot_write = true;
-        }
         // A drain that made progress ticks again at once: the engine reports `Drained` only on
         // the tick after its last upload, and would otherwise name the drain's deadline (or the
         // next poll) as its wake. A retry is not progress: it waits its backoff.
@@ -576,7 +591,8 @@ impl Worker {
             | EngineEvent::Uploaded(_)
             | EngineEvent::Sending { .. }
             | EngineEvent::Resnapshot(_)
-            | EngineEvent::TakeoverWanted(_) => true,
+            | EngineEvent::TakeoverWanted(_)
+            | EngineEvent::CheckingIdentity { .. } => true,
             EngineEvent::Checkpointed { .. }
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle
@@ -642,7 +658,8 @@ impl Worker {
             | EngineEvent::Clamped(_)
             // A wait on held writes is not a failure: nothing is counted.
             | EngineEvent::WritesHeld { .. }
-            | EngineEvent::TakeoverWanted(_) => {}
+            | EngineEvent::TakeoverWanted(_)
+            | EngineEvent::CheckingIdentity { .. } => {}
         }
     }
 
@@ -669,12 +686,7 @@ impl Worker {
 
     /// Hands `event` to the sink; a panic in it is counted, never fatal.
     fn emit(&mut self, event: &Event) {
-        let Some(sink) = self.sink.as_mut() else {
-            return;
-        };
-        if catch_unwind(AssertUnwindSafe(|| sink.event(event))).is_err() {
-            self.seen.counters.sink_panics = self.seen.counters.sink_panics.saturating_add(1);
-        }
+        emit_to(&mut self.sink, &mut self.seen.counters.sink_panics, event);
     }
 
     /// A caught panic: drop the engine and the connections it may have unwound through, then
@@ -847,9 +859,6 @@ impl Worker {
             .app_gate
             .judge(self.config.if_replication_stops, trip, judged);
         self.blocked = blocks_writes(self.config.if_replication_stops, gate);
-        if self.blocked != Some(WhyBlocked::Booting) {
-            self.boot_write = false;
-        }
         FailStop { trip, gate }
     }
 
@@ -861,8 +870,9 @@ impl Worker {
             self.why = why;
         }
         let hold = match self.blocked {
-            Some(WhyBlocked::Booting) => !self.boot_write,
-            Some(WhyBlocked::Tripped(_)) => true,
+            Some(WhyBlocked::Booting | WhyBlocked::CheckingIdentity | WhyBlocked::Tripped(_)) => {
+                true
+            }
             None => false,
         };
         let kept = if hold {
@@ -1014,6 +1024,16 @@ struct SnapshotParts {
     wal_bytes: u64,
     db_bytes: u64,
     left: Unfinished,
+}
+
+/// Hands `event` to `sink`, if there is one; a panic in it is counted in `panics`, never fatal.
+fn emit_to(sink: &mut Option<Box<dyn EventSink>>, panics: &mut u64, event: &Event) {
+    let Some(sink) = sink.as_mut() else {
+        return;
+    };
+    if catch_unwind(AssertUnwindSafe(|| sink.event(event))).is_err() {
+        *panics = panics.saturating_add(1);
+    }
 }
 
 const fn deadline_reached(left: Unfinished) -> Stopped {

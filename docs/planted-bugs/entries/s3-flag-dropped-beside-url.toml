@@ -1,0 +1,9 @@
+# `restore --endpoint X s3://bucket/path` read the flag and dropped it, so the restore went to AWS.
+name = "s3-flag-dropped-beside-url"
+fix = "claude/cli-truth"
+package = "lsr-cli"
+bin = "lsr"
+tests = [
+    "an_s3_flag_beside_a_bare_url_or_database_is_refused_and_the_query_form_is_kept",
+    "every_flag_changes_the_command_or_is_refused",
+]
