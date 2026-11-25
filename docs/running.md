@@ -37,7 +37,7 @@ litestream-rs:
 - `url` is `s3://<bucket>/<path>` or `file:///<dir>`. For the top of a bucket write `s3://bucket/` with the slash; `s3://bucket` without it is refused.
 - `endpoint` names the service for anything but AWS S3. Without it the endpoint is AWS S3 in `region` (`us-east-1` unless set).
 - Settings Go does not have live under `litestream-rs`. Go warns of that section once at each start ("configuration contains unrecognized or duplicate key") and ignores it, so one file starts either program.
-- `part-size` on the replica sets the multipart part size (`64MB`, for example): 5 MiB by default, 16 MiB on Tigris. One object holds at most 10,000 parts, so raise it when the database's compressed copy could pass 10,000 parts.
+- `part-size` on the replica sets the multipart part size (`64MB`, for example): 5 MiB by default, 16 MiB on Tigris. One object holds at most 10,000 parts, so raise it when the database's compressed copy could pass 10,000 parts. An upload holds `concurrency` parts in memory at once (25 MiB at the defaults, 1 GB at `100MB` and 10), per database uploading at the same time: lower `concurrency` before raising `part-size` if memory matters (D226).
 - The file is read strictly: an unknown key, a key set twice, or a feature that is not built is refused at load with the key and line. Run `lsr config check <file>` before a deploy.
 
 [config-keys.md](config-keys.md) lists every key and what it sets.
