@@ -906,19 +906,29 @@ pub async fn read_stream_agrees_with_read<H: Harness>(h: &H) -> Check {
     let absent = key(6, 4, 4)?;
     put_with_created_at(store, target, b"abcdefgh", at(CREATED_AT)).await?;
     let len = read_len(3)?;
-    for offset in [0, 3, 8] {
+    let whole = [(0, b"abcdefgh".as_slice()), (3, b"defgh"), (8, b"")];
+    for (offset, want) in whole {
         let mut stream = store.read_stream(target, offset);
-        let mut reached = offset;
-        loop {
+        let mut got = Vec::new();
+        let mut ended = false;
+        // Eight bytes in pieces of three end by the fourth piece.
+        for _ in 0..4 {
+            let reached = offset.saturating_add(u64::try_from(got.len()).unwrap_or(u64::MAX));
             let piece = stream.next(len).await;
-            let want = store.read(&target, reached, len).await;
-            ensure_eq!(piece, want, "a piece against read");
+            ensure_eq!(
+                piece,
+                store.read(&target, reached, len).await,
+                "a piece against read"
+            );
             let Ok(piece) = piece else { break };
-            if piece.len() < 3 {
+            ended = piece.len() < 3;
+            got.extend(piece);
+            if ended {
                 break;
             }
-            reached = reached.saturating_add(3);
         }
+        ensure_eq!(got.as_slice(), want, "the stream's bytes from its offset");
+        ensure_eq!(ended, true, "the stream ends with a short piece");
     }
     ensure_eq!(
         store.read_stream(absent, 0).next(len).await,
