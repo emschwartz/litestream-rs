@@ -148,6 +148,22 @@ pub const UNREQUIRED: &[(&str, &str)] = &[
         "a torn newest staged file at boot: seeds 1..64 never tear one, 3 of seeds 1..400 do",
     ),
     (
+        "reread.given",
+        "a store reading back a staged file it was handed: only the S3 store does, and the fixed seed set runs on MemStore (tests/sim/remote_s3.rs asserts it for its seeds)",
+    ),
+    (
+        "reread.refused",
+        "a second read the source refused: needs the S3 store and a staged file changed or a staging read failed between its two reads (tests/sim/sliced.rs)",
+    ),
+    (
+        "reread.refused.reported",
+        "a refused second read the engine reported as the staged file's or the staging directory's (tests/sim/sliced.rs)",
+    ),
+    (
+        "reread.refused.beside_a_replica_fault",
+        "a refused second read in a tick where a fault of the replica's fired too, so the report may be either's; never drawn together in a short history",
+    ),
+    (
         "staging_fs.undone_entries",
         "on the directory store: a power loss that undid a directory entry no sync covered",
     ),

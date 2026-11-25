@@ -8,6 +8,7 @@ use crate::conformance::{self, Harness};
 use crate::env::{RecordingSleeper, SeededEntropy};
 use crate::layout::CreatedAt;
 use crate::mem::MemStore;
+use crate::mem::reread::{Handed, Rereads, lost, mixed};
 use crate::mem::short::{LyingUpload, SizeLiar};
 use crate::store::{CorruptCause, PartNumber, StoreOp};
 
@@ -352,6 +353,68 @@ fn upload_commit_failure_passes_through_with_one_call() {
     });
     assert!(sleeper.waits().is_empty());
     assert_eq!(store.stats().calls, 3);
+}
+
+/// An upload written from a source reaches the store with it, once for each call, and its
+/// commit is checked against the bytes written as any commit is.
+#[test]
+fn an_upload_written_from_a_source_reaches_the_store_with_it() {
+    let inner = Rereads::default();
+    let store = Retrying::new(
+        inner.clone(),
+        RecordingSleeper::new(),
+        SeededEntropy::new(1),
+        policy(5),
+    );
+    let handed = Handed::of(b"abcd");
+    let info = conformance::block_on(async {
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::New)
+            .await
+            .unwrap();
+        up.write_from(b"ab", &handed).await.unwrap();
+        up.write_from(b"cd", &handed).await.unwrap();
+        up.commit_from(&handed).await
+    })
+    .unwrap();
+    assert_eq!(info.size, 4);
+    assert_eq!(handed.reads(), 2, "the store read back each write");
+    // The begin, two writes and the commit.
+    assert_eq!(store.stats().calls, 4);
+    let read = conformance::block_on(inner.read(&key(), 0, ReadLen::CHUNK)).unwrap();
+    assert_eq!(read, b"abcd");
+}
+
+/// A source that no longer holds the bytes fails the commit with its own error, passed
+/// through as it is, and a plain commit of an upload written from a source is the store's
+/// refusal: neither is retried, and nothing is published.
+#[test]
+fn a_source_that_gives_nothing_fails_the_commit_once() {
+    let inner = Rereads::default();
+    let sleeper = RecordingSleeper::new();
+    let store = Retrying::new(
+        inner.clone(),
+        sleeper.clone(),
+        SeededEntropy::new(1),
+        policy(5),
+    );
+    let at = key();
+    let begin = || store.begin_upload(&at, created_at(), WriteMode::New);
+    let (gone, plain) = conformance::block_on(async {
+        let handed = Handed::of(b"abcd");
+        let other = Handed::of(b"abxd");
+        let mut up = begin().await.unwrap();
+        up.write_from(b"abcd", &handed).await.unwrap();
+        let gone = up.commit_from(&other).await;
+        let mut up = begin().await.unwrap();
+        up.write_from(b"abcd", &handed).await.unwrap();
+        (gone, up.commit().await)
+    });
+    assert_eq!(gone, Err(lost()));
+    assert_eq!(plain, Err(mixed()));
+    assert!(sleeper.waits().is_empty());
+    let listed = conformance::block_on(inner.list(Level::ZERO, None, limit())).unwrap();
+    assert!(listed.files.is_empty());
 }
 
 #[test]

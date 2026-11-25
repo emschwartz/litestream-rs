@@ -21,7 +21,7 @@ fn weights(seed: Seed, s3: bool) -> Weights {
 
 #[test]
 fn swarm_seeds_pass_on_the_s3_replica_as_on_memstore() {
-    let (mut ran, mut s3_runs) = (0, 0_u64);
+    let (mut ran, mut s3_runs, mut read_back) = (0, 0_u64, 0_u64);
     for n in 1..=12 {
         let seed = Seed::new(n);
         if run_with(seed, STEPS, &weights(seed, false), &Opts::default()).is_err() {
@@ -31,9 +31,16 @@ fn swarm_seeds_pass_on_the_s3_replica_as_on_memstore() {
         let report = run_with(seed, STEPS, &weights(seed, true), &Opts::default())
             .unwrap_or_else(|failure| panic!("{failure}\n{}", replay_line(seed, None)));
         s3_runs += report.reach.get("remote_s3.runs");
+        read_back += u64::from(report.reach.get("reread.given") > 0);
     }
     assert!(ran >= 9, "MemStore passed only {ran} of 12 seeds");
     assert_eq!(s3_runs, ran, "every S3 run put the replica on S3");
+    // The S3 store reads each staged file back when it sends it, and the judge of second
+    // reads (`lsr_sim::oracle`) saw them: most runs upload at least one.
+    assert!(
+        read_back >= 6,
+        "only {read_back} of {ran} runs read a file back"
+    );
 }
 
 /// Each refusal the provider answers an upload with, and what the engine must report it as:

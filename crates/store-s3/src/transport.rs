@@ -32,6 +32,83 @@ use thiserror::Error;
 
 use crate::request::HttpRequest;
 
+/// A write whose body is read while it is sent: a part, or a small object, that the upload
+/// did not keep and reads again from its source (`again.rs`). The request carries every
+/// header to send, `Content-Length` among them, and no body of its own.
+pub struct StreamedRequest<'a> {
+    request: HttpRequest,
+    len: u64,
+    body: &'a mut (dyn io::Read + Send),
+}
+
+impl<'a> StreamedRequest<'a> {
+    /// `request`, to be sent with the `len` bytes `body` yields.
+    pub(crate) fn new(request: HttpRequest, len: u64, body: &'a mut (dyn io::Read + Send)) -> Self {
+        Self { request, len, body }
+    }
+
+    /// The request: method, URL and headers. Its own body is empty.
+    #[must_use]
+    pub fn request(&self) -> &HttpRequest {
+        &self.request
+    }
+
+    /// How many bytes the body is: the `Content-Length` the request declares.
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the body is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The body, to read exactly [`Self::len`] bytes from. An error from it means the
+    /// request must fail: it never ends early without one.
+    pub fn body(&mut self) -> &mut (dyn io::Read + Send) {
+        &mut *self.body
+    }
+
+    /// The same request with its body read whole into memory, for a transport that sends
+    /// only buffers.
+    ///
+    /// # Errors
+    /// [`TransportError::Io`] with the kind of the body's failure, `UnexpectedEof` when it
+    /// ended before its length, or `OutOfMemory` when there is no room for it.
+    pub fn into_buffered(self) -> Result<HttpRequest, TransportError> {
+        let Self {
+            mut request,
+            len,
+            body,
+        } = self;
+        let room =
+            usize::try_from(len).map_err(|_wide| TransportError::Io(io::ErrorKind::OutOfMemory))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(room)
+            .map_err(|_full| TransportError::Io(io::ErrorKind::OutOfMemory))?;
+        let mut limited = io::Read::take(body, len);
+        io::Read::read_to_end(&mut limited, &mut bytes)
+            .map_err(|err| TransportError::Io(err.kind()))?;
+        if bytes.len() != room {
+            return Err(TransportError::Io(io::ErrorKind::UnexpectedEof));
+        }
+        request.set_body(bytes);
+        Ok(request)
+    }
+}
+
+impl fmt::Debug for StreamedRequest<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamedRequest")
+            .field("request", &self.request)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A response as received: status, headers, body.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -183,6 +260,39 @@ pub trait Transport: Send + Sync + 'static {
             .map(|request| self.send(request))
             .collect()
     }
+
+    /// [`Self::send_many`] for requests whose bodies are read while they are sent. The
+    /// default reads every body whole and hands the batch to [`Self::send_many`], so a
+    /// transport that does not override it sends what it always sent and holds what it always
+    /// held, one body for each request of the batch. A request whose body fails is not sent,
+    /// and its result is that failure.
+    fn send_streamed(
+        &self,
+        requests: Vec<StreamedRequest<'_>>,
+        limit: NonZeroUsize,
+    ) -> Vec<Result<HttpResponse, TransportError>> {
+        let mut whole = Vec::with_capacity(requests.len());
+        let mut failed = Vec::with_capacity(requests.len());
+        for request in requests {
+            match request.into_buffered() {
+                Ok(request) => {
+                    whole.push(request);
+                    failed.push(None);
+                }
+                Err(err) => failed.push(Some(err)),
+            }
+        }
+        let mut sent = self.send_many(whole, limit).into_iter();
+        failed
+            .into_iter()
+            .map(|failed| match failed {
+                Some(err) => Err(err),
+                None => sent
+                    .next()
+                    .unwrap_or(Err(TransportError::Io(io::ErrorKind::Other))),
+            })
+            .collect()
+    }
 }
 
 /// The stack of a batch worker thread: an HTTPS request through ureq and
@@ -229,13 +339,19 @@ pub fn send_on_threads<T: Transport + ?Sized>(
     requests: Vec<HttpRequest>,
     limit: NonZeroUsize,
 ) -> Vec<Result<HttpResponse, TransportError>> {
+    on_threads(requests, limit, |request| transport.send(request))
+}
+
+/// [`send_on_threads`] for any kind of request: `send` is what one thread does with one.
+pub(crate) fn on_threads<R: Send>(
+    requests: Vec<R>,
+    limit: NonZeroUsize,
+    send: impl Fn(R) -> Result<HttpResponse, TransportError> + Sync,
+) -> Vec<Result<HttpResponse, TransportError>> {
     let count = requests.len();
     let helpers = limit.get().min(count).saturating_sub(1);
     if helpers == 0 {
-        return requests
-            .into_iter()
-            .map(|request| transport.send(request))
-            .collect();
+        return requests.into_iter().map(send).collect();
     }
     let queue = Mutex::new(requests.into_iter().enumerate());
     let slots: Mutex<Slots> = Mutex::new((0..count).map(|_| None).collect());
@@ -243,7 +359,7 @@ pub fn send_on_threads<T: Transport + ?Sized>(
         loop {
             let next = queue.lock().unwrap_or_else(PoisonError::into_inner).next();
             let Some((at, request)) = next else { break };
-            let sent = panic::catch_unwind(AssertUnwindSafe(|| transport.send(request)));
+            let sent = panic::catch_unwind(AssertUnwindSafe(|| send(request)));
             let result = sent.unwrap_or(Err(TransportError::Io(io::ErrorKind::Other)));
             if let Some(slot) = slots
                 .lock()

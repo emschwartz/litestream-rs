@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/publish.rs b/crates/core/src/publish.rs
-index 8989cfff..1fd14ae8 100644
+index 27b6dc506..a8648c5b3 100644
 --- a/crates/core/src/publish.rs
 +++ b/crates/core/src/publish.rs
-@@ -192,7 +192,7 @@ fn unpublished(err: StoreError, key: FileKey, mode: WriteMode) -> Unpublished {
-             Unpublished::Taken(err)
-         }
-         _ if rejected => {
--            let own = (mode == WriteMode::New).then_some(Rejected(key));
-+            let own = Some(Rejected(key));
+@@ -277,7 +277,7 @@ fn unpublished(err: StoreError, key: FileKey, mode: WriteMode) -> Unpublished {
+                     ..
+                 }
+             );
+-            let own = (mode == WriteMode::New && whole).then_some(Rejected(key));
++            let own = whole.then_some(Rejected(key));
              Unpublished::Rejected(err, own)
          }
          _ => Unpublished::Failed(err),

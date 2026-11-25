@@ -1,0 +1,11 @@
+# Every part's body is read back from the start of the staged file, where only the first
+# part lies. The source refuses what does not tally, so nothing wrong is sent, and no upload
+# of more than one part can finish (docs/decisions/D222.md).
+name = "part-reread-from-the-wrong-offset"
+fix = "plant"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "sourced::an_upload_from_a_source_sends_what_a_buffered_upload_sends",
+    "memory::an_upload_from_a_file_at_a_large_part_size_holds_no_part",
+]

@@ -158,6 +158,34 @@ fn only_a_rejected_create_only_write_hands_back_its_object() {
     assert_eq!(listed(&store.0), 1);
 }
 
+/// A part the store reports wrong ended a multipart upload before anything was published:
+/// the commit never asked for the key, so a create-only write has no object of its own.
+#[test]
+fn a_rejected_part_hands_back_no_object() {
+    let part = StoreError::Corrupt {
+        key: Some(key()),
+        cause: CorruptCause::ChecksumMismatch {
+            part: crate::PartNumber::new(2),
+        },
+    };
+    for mode in [WriteMode::New, WriteMode::Replace] {
+        let left = unpublished(part.clone(), key(), mode);
+        assert!(
+            matches!(left, Unpublished::Rejected(_, None)),
+            "{mode:?}: {left:?}"
+        );
+    }
+    let whole = StoreError::Corrupt {
+        key: Some(key()),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    };
+    let left = unpublished(whole, key(), WriteMode::New);
+    assert!(
+        matches!(left, Unpublished::Rejected(_, Some(_))),
+        "{left:?}"
+    );
+}
+
 #[test]
 fn a_removal_deletes_the_keys_it_names() {
     let store = MemStore::new();

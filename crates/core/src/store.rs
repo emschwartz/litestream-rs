@@ -47,6 +47,7 @@ use lsr_ltx::{Timestamp, TxidRange};
 use thiserror::Error;
 
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, cmp_range, file_name, is_scratch_name};
+use crate::witness::ByteTally;
 
 /// How many entries one listing page may hold: 1 to 1000, S3's own cap, so
 /// every backend can return exactly the page asked for.
@@ -641,16 +642,68 @@ pub trait ObjectStore: Send + Sync {
     }
 }
 
+/// The object an upload is being handed, read again: what lets a store with parts keep a
+/// digest of the bytes it was given instead of the bytes, and read each part back when it
+/// sends it (`docs/decisions/D222.md`).
+///
+/// A read answers with bytes only when they are the bytes `was` was taken over, so nothing
+/// read a second time reaches a store unverified. Offsets are offsets in the object. The
+/// future completes on any executor, as a store's do.
+pub trait Reread: Send + Sync {
+    /// The bytes of the object from `offset` that `was` tallied when they were first handed
+    /// over: as many as it counted, at most one read's worth ([`ReadLen::MAX_RAW`]).
+    ///
+    /// # Errors
+    /// The read's own error when it fails, and an error when the bytes read are fewer or
+    /// other than `was` holds. The upload they were for cannot go on: its caller fails it.
+    fn read<'a>(
+        &'a self,
+        offset: u64,
+        was: &'a ByteTally,
+    ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>>;
+}
+
 /// One object being written. See the module docs for visibility.
 pub trait Upload: Send {
     /// Appends a chunk.
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
+
+    /// [`Self::write`] for a caller that can produce the object's bytes again: `again` reads
+    /// any of them already handed over, `chunk` included. A store that cuts an object into
+    /// parts may then keep a [`ByteTally`] of what it was given in place of the bytes and
+    /// read them back through `again` when it sends them. The default keeps the bytes, as
+    /// [`Self::write`] does, and a store with no parts needs no other.
+    ///
+    /// An upload is written through this method and [`Self::commit_from`] or through
+    /// [`Self::write`] and [`Self::commit`], never both. A wrapper forwards both pairs.
+    fn write_from(
+        &mut self,
+        chunk: &[u8],
+        again: &dyn Reread,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        let _ = again;
+        self.write(chunk)
+    }
 
     /// Publishes the object: under [`WriteMode::Replace`] over any object
     /// under the key, under [`WriteMode::New`] only into a free key. The object
     /// is whole and durable once this returns `Ok`. After an `Err` the object may
     /// or may not be visible (see the module docs): list again.
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send;
+
+    /// [`Self::commit`] of an upload written with [`Self::write_from`]: what the store let
+    /// go of and has not sent yet is read back through `again` first. An error from
+    /// `again` fails the commit before anything is published.
+    fn commit_from(
+        self,
+        again: &dyn Reread,
+    ) -> impl Future<Output = Result<FileInfo, StoreError>> + Send
+    where
+        Self: Sized,
+    {
+        let _ = again;
+        self.commit()
+    }
 
     /// Discards the written bytes; a prior object under the key is untouched.
     fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send;
@@ -665,8 +718,19 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait DynUpload: Send {
     /// [`Upload::write`].
     fn write_boxed<'a>(&'a mut self, chunk: &'a [u8]) -> BoxFuture<'a, Result<(), StoreError>>;
+    /// [`Upload::write_from`].
+    fn write_from_boxed<'a>(
+        &'a mut self,
+        chunk: &'a [u8],
+        again: &'a dyn Reread,
+    ) -> BoxFuture<'a, Result<(), StoreError>>;
     /// [`Upload::commit`].
     fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<FileInfo, StoreError>>;
+    /// [`Upload::commit_from`].
+    fn commit_from_boxed<'a>(
+        self: Box<Self>,
+        again: &'a dyn Reread,
+    ) -> BoxFuture<'a, Result<FileInfo, StoreError>>;
     /// [`Upload::abort`].
     fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>>;
 }
@@ -676,8 +740,23 @@ impl<U: Upload + 'static> DynUpload for U {
         Box::pin(self.write(chunk))
     }
 
+    fn write_from_boxed<'a>(
+        &'a mut self,
+        chunk: &'a [u8],
+        again: &'a dyn Reread,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(self.write_from(chunk, again))
+    }
+
     fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<FileInfo, StoreError>> {
         Box::pin((*self).commit())
+    }
+
+    fn commit_from_boxed<'a>(
+        self: Box<Self>,
+        again: &'a dyn Reread,
+    ) -> BoxFuture<'a, Result<FileInfo, StoreError>> {
+        Box::pin((*self).commit_from(again))
     }
 
     fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>> {
@@ -694,9 +773,19 @@ impl Upload for Box<dyn DynUpload> {
         upload.write_boxed(chunk).await
     }
 
+    async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
+        let upload: &mut dyn DynUpload = &mut **self;
+        upload.write_from_boxed(chunk, again).await
+    }
+
     async fn commit(self) -> Result<FileInfo, StoreError> {
         let upload: Box<dyn DynUpload> = self;
         DynUpload::commit_boxed(upload).await
+    }
+
+    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+        let upload: Box<dyn DynUpload> = self;
+        DynUpload::commit_from_boxed(upload, again).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

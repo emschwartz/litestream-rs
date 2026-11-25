@@ -27,7 +27,10 @@ use crate::forcing::Forcing;
 use crate::generate::{
     AfterRestart, EnvFault, MetaOp, Op, RemoteOp, Target, WalOp, Weights, history,
 };
-use crate::oracle::{Bound, Violation, Windows, bug_fault, judge_level_put, judge_put, within};
+use crate::oracle::{
+    Bound, SecondReads, Violation, Windows, bug_fault, judge_level_put, judge_put, judge_rereads,
+    within,
+};
 use crate::reach::{Reach, variant};
 use crate::resources::{
     CheckpointTally, CountingCheckpointer, IdleWindow, Limits, SendTurns, TickStats, delta, memory,
@@ -946,7 +949,14 @@ impl Runner {
             checkpoints: self.tally.total().saturating_sub(total0),
         };
         per_tick(&stats, self.limits())?;
+        let replica_fired = self.remote_fired().all > fired0.0.all;
         let reach = &mut self.report.reach;
+        judge_rereads(
+            SecondReads::of(&stats.remote),
+            stats.event.as_ref(),
+            replica_fired,
+            reach,
+        )?;
         self.turns.tick(stats.event.as_ref(), began, reach)?;
         // A commit that landed inside the tick waits for the WAL step unless the tick staged a
         // file after it (a checkpoint's seal stages the commit that lands before its barrier).

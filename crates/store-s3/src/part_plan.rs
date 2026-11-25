@@ -15,7 +15,8 @@
 //! object over it is refused before a byte is sent, with
 //! [`StoreError::ObjectTooLarge`].
 //!
-//! Memory: an upload holds up to `concurrency` parts, so its bound is
+//! Memory: an upload that buffers its parts (one with no file behind it, `upload.rs`) holds
+//! up to `concurrency` of them, so its bound is
 //! `concurrency * max(configured part, ceil(length / 10000))`. That exceeds
 //! the configured part only for an object over `10000 * configured part`
 //! (about 977 GiB at 100 MB), and at 5 TiB with a concurrency of 10 it is about
