@@ -527,6 +527,41 @@ pub async fn read_spans_the_end<H: Harness>(h: &H) -> Check {
     Ok(())
 }
 
+/// An object a store holds open reads as a read by range of it does, at every offset, and a
+/// key that does not exist is not opened. A store with nothing to hold open passes.
+///
+/// # Errors
+/// A [`Failure`] naming the rule that broke.
+pub async fn an_opened_object_reads_as_a_read_by_range<H: Harness>(h: &H) -> Check {
+    let store = h.store();
+    let absent = key(4, 1, 2)?;
+    match store.open(&absent).await {
+        Ok(None) => {}
+        Ok(Some(_)) => return Err(Failure("a missing key was opened".to_owned())),
+        Err(err) => ensure_eq!(
+            err,
+            StoreError::NotFound { key: absent },
+            "open of a missing key"
+        ),
+    }
+    let target = key(0, 1, 1)?;
+    put(store, target, b"0123456789").await?;
+    let Some(mut held) = store.open(&target).await? else {
+        return Ok(());
+    };
+    // Forward as a send reads, then back and past the end: the handle keeps no place.
+    let offsets = [0, 3, 8, 9, 10, 1000, 1 << 63, u64::MAX, 3, 0];
+    for offset in offsets {
+        for len in [1, 4, 11] {
+            let len = read_len(len)?;
+            let got = held.read(offset, len).await?;
+            let want = store.read(&target, offset, len).await?;
+            ensure_eq!(got, want, format!("held read at {offset} for {len:?}"));
+        }
+    }
+    Ok(())
+}
+
 /// Reading a key that does not exist is [`StoreError::NotFound`].
 ///
 /// # Errors
@@ -1016,6 +1051,7 @@ macro_rules! conformance_suite {
             abort_publishes_nothing,
             pending_and_dropped_uploads_are_invisible,
             read_spans_the_end,
+            an_opened_object_reads_as_a_read_by_range,
             read_of_missing_key_is_not_found,
             delete_is_idempotent,
             two_uploads_to_one_key,

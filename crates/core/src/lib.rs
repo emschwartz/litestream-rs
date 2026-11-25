@@ -143,8 +143,8 @@ pub use source::{
 };
 pub use store::{
     BatchKind, BoxFuture, CorruptCause, Denied, DynUpload, ListAt, Listing, ListingStalled,
-    ObjectStore, PageLimit, PartNumber, ReadAt, ReadLen, Reread, StoreError, StoreOp, Upload,
-    WriteMode, build_listing,
+    ObjectStore, Opened, PageLimit, PartNumber, ReadAt, ReadLen, Reread, StoreError, StoreOp,
+    Upload, WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use takeover::{TakeoverRecord, TakeoverRecordError};

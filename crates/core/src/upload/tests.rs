@@ -192,6 +192,14 @@ struct Log {
     whole_reads: u32,
     /// The read, counted from one over every read of the store, that fails, and with what.
     fail_read: Option<(u32, StoreError)>,
+    /// Whether the store holds a file open when asked to ([`ObjectStore::open`]).
+    hold_open: bool,
+    /// Files it was asked to hold open, and did.
+    opens: u32,
+    /// Reads through what it held open.
+    held_reads: u32,
+    /// The read through a held file, counted from one over all of them, that fails.
+    fail_held_read: Option<(u32, StoreError)>,
 }
 
 /// A [MemStore] that counts calls and can fail a commit before it publishes
@@ -211,6 +219,37 @@ impl Probe {
 struct ProbeUpload {
     inner: MemUpload,
     log: Arc<Mutex<Log>>,
+}
+
+/// A file a [`Probe`] holds open: the bytes it had when it was opened, whatever is put
+/// under its key afterwards, as an open file outlives a rename over its name.
+struct ProbeOpened {
+    bytes: Vec<u8>,
+    log: Arc<Mutex<Log>>,
+}
+
+impl std::fmt::Debug for ProbeOpened {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProbeOpened").finish_non_exhaustive()
+    }
+}
+
+impl Opened for ProbeOpened {
+    fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        let failed = {
+            let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            log.held_reads = log.held_reads.saturating_add(1);
+            let nth = log.held_reads;
+            log.fail_held_read.take_if(|(at, _)| *at == nth)
+        };
+        let from = usize::try_from(offset).unwrap().min(self.bytes.len());
+        let to = (from + usize::try_from(len.get()).unwrap()).min(self.bytes.len());
+        let read = match failed {
+            Some((_, err)) => Err(err),
+            None => Ok(self.bytes[from..to].to_vec()),
+        };
+        Box::pin(std::future::ready(read))
+    }
 }
 
 impl ObjectStore for Probe {
@@ -277,6 +316,27 @@ impl ObjectStore for Probe {
                 *byte ^= 0x40;
             }
             Ok(bytes)
+        }
+    }
+
+    fn open(
+        &self,
+        key: &FileKey,
+    ) -> impl Future<Output = Result<Option<Box<dyn Opened>>, StoreError>> + Send {
+        let hold = self.log().hold_open;
+        let (inner, log, key) = (self.inner.clone(), Arc::clone(&self.log), *key);
+        async move {
+            if !hold {
+                return Ok(None);
+            }
+            let whole = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+            let bytes = inner.read(&key, 0, whole).await?;
+            {
+                let mut log = log.lock().unwrap_or_else(PoisonError::into_inner);
+                log.opens = log.opens.saturating_add(1);
+            }
+            let held: Box<dyn Opened> = Box::new(ProbeOpened { bytes, log });
+            Ok(Some(held))
         }
     }
 
