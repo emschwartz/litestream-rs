@@ -359,6 +359,14 @@ class Rig:
             r = subprocess.run(["fusermount3", "-u", str(self.mnt)], capture_output=True)
             if r.returncode != 0:
                 subprocess.run(["fusermount3", "-uz", str(self.mnt)], capture_output=True)
+            # Confirmed, never assumed: removing a directory tree through a live mount fails, or
+            # worse, deletes what the mount shows. A mount that stays is an error that names it.
+            deadline = time.monotonic() + 10
+            while self.mounted() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if self.mounted():
+                raise RuntimeError(f"the LazyFS mount {self.mnt} will not unmount: "
+                                   f"{r.stderr.decode(errors='replace').strip()}")
         if self.lazyfs is not None:
             try:
                 self.lazyfs.wait(timeout=10)
