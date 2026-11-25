@@ -1,11 +1,16 @@
 //! Witness token tests: what the set keeps, and that a token matches only the
-//! bytes it was minted for. The boot pass is driven through the actor
-//! (`crate::actor` tests, `witness`) and the simulator.
+//! bytes it was minted for; and what the boot's pass makes of the staged files it is
+//! handed. The pass inside a boot is driven through the actor (`crate::actor` tests,
+//! `witness`) and the simulator.
 
-use lsr_ltx::{Encoder, HeaderFields, PageNo, PageSize, Timestamp};
+use std::io::Cursor;
+
+use lsr_ltx::{Encoder, HeaderFields, PageNo, PageSize, Timestamp, WalOrigin};
 
 use super::*;
-use crate::fault::role::{Role, Staging};
+use crate::conformance::block_on;
+use crate::fault::role::{Replica, Role, Staging};
+use crate::mem::MemStore;
 
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
@@ -16,6 +21,24 @@ fn key(n: u64) -> FileKey {
 }
 
 fn file(n: u64, fill: u8) -> Vec<u8> {
+    file_from(n, fill, None)
+}
+
+/// The WAL span of `frames` frames from frame `first` (counting from 0) of the generation
+/// salted `salt`.
+fn span(first: u64, frames: u64, salt: u32) -> Option<WalOrigin> {
+    // A frame header and a page of `PageSize::MIN`; the first frame follows the WAL header.
+    const FRAME: u64 = 536;
+    WalOrigin::new(
+        first.saturating_mul(FRAME).saturating_add(32),
+        frames.saturating_mul(FRAME),
+        salt,
+        salt,
+    )
+}
+
+/// A whole file for transaction `n` whose header names the WAL span `wal`.
+fn file_from(n: u64, fill: u8, wal: Option<WalOrigin>) -> Vec<u8> {
     let page_size = PageSize::MIN;
     let header = Header::new(HeaderFields {
         tracked: false,
@@ -24,7 +47,7 @@ fn file(n: u64, fill: u8) -> Vec<u8> {
         txids: TxidRange::single(txid(n)),
         timestamp: Timestamp::from_unix_millis(1),
         pre_apply: None,
-        wal: None,
+        wal,
         node_id: 0,
     })
     .unwrap();
@@ -232,10 +255,11 @@ fn a_file_longer_than_one_read_is_decoded_whole() {
         crate::store::Upload::write(&mut up, &bytes).await.unwrap();
         crate::store::Upload::commit(up).await.unwrap();
     });
-    let decoded = crate::conformance::block_on(decode(
+    let decoded = crate::conformance::block_on(walk(
         &store,
         key(1),
         Staging::<crate::mem::MemStore>::fault,
+        |_| Ok(()),
     ))
     .unwrap()
     .unwrap();
@@ -243,6 +267,186 @@ fn a_file_longer_than_one_read_is_decoded_whole() {
     let mut tally = ByteTally::new();
     tally.add(&bytes);
     assert_eq!(decoded.bytes, tally);
+}
+
+fn put(store: &MemStore, key: FileKey, bytes: &[u8]) {
+    block_on(async {
+        let mut up = store
+            .begin_upload(
+                &key,
+                Timestamp::from_unix_millis(1),
+                crate::store::WriteMode::Replace,
+            )
+            .await
+            .unwrap();
+        crate::store::Upload::write(&mut up, bytes).await.unwrap();
+        crate::store::Upload::commit(up).await.unwrap();
+    });
+}
+
+/// A store holding one file per `(transaction, span)`.
+fn holding(files: &[(u64, Option<WalOrigin>)]) -> MemStore {
+    let store = MemStore::new();
+    for (n, wal) in files {
+        put(&store, key(*n), &file_from(*n, 7, *wal));
+    }
+    store
+}
+
+/// The boot's pass with no WAL to compare with.
+fn pass(staging: &MemStore, remote: &MemStore, confirmed: Option<u64>) -> Scan {
+    block_on(scan(
+        &Staging(staging),
+        Base::Replica(&Replica(remote), confirmed.map(txid)),
+        None::<BootWal<'_, Cursor<Vec<u8>>>>,
+    ))
+    .unwrap()
+}
+
+/// The transactions the pass minted tokens for, in order.
+fn witnessed(scan: &Scan) -> Vec<u64> {
+    scan.tokens
+        .iter()
+        .map(|token| token.key().range().max().get())
+        .collect()
+}
+
+/// Files that each start where the one before ended get a token apiece, oldest first, and
+/// every one is kept for recovery and seeds the page table.
+#[test]
+fn pending_files_that_chain_are_all_witnessed() {
+    let staging = holding(&[(1, span(0, 1, 5)), (2, span(1, 2, 5)), (3, span(3, 1, 5))]);
+    let found = pass(&staging, &MemStore::new(), None);
+    assert_eq!(found.bad, None);
+    assert_eq!(witnessed(&found), vec![1, 2, 3]);
+    let kept: Vec<u64> = found.scanned.keys().map(|txid| txid.get()).collect();
+    assert_eq!(kept, vec![1, 2, 3]);
+    assert_eq!(found.seeding.finish().table.len(), 1);
+}
+
+/// The key is part of what a read verifies: a whole, valid file for another transaction
+/// under this key is no file of this key's.
+#[test]
+fn a_file_under_another_transactions_key_does_not_read() {
+    let staging = MemStore::new();
+    put(&staging, key(1), &file_from(2, 7, span(0, 1, 5)));
+    let found = pass(&staging, &MemStore::new(), None);
+    assert_eq!(found.bad, Some((key(1), Bad::Unreadable)));
+    assert!(found.tokens.is_empty());
+    assert!(found.scanned.is_empty());
+}
+
+/// A pending file must say where in the WAL it came from.
+#[test]
+fn a_pending_file_that_names_no_wal_range_does_not_chain() {
+    let staging = holding(&[(1, None)]);
+    let found = pass(&staging, &MemStore::new(), None);
+    assert_eq!(found.bad, Some((key(1), Bad::Unchained)));
+    assert!(found.tokens.is_empty());
+}
+
+/// A file that starts neither where the one before it ended nor at the first frame is
+/// refused with all after it, and the files before it keep their tokens. The same offsets
+/// in another generation do not chain either.
+#[test]
+fn a_pending_file_from_elsewhere_in_the_wal_ends_the_run() {
+    for second in [span(4, 1, 5), span(1, 1, 6), span(2, 1, 5)] {
+        let staging = holding(&[(1, span(0, 1, 5)), (2, second), (3, span(5, 1, 5))]);
+        let found = pass(&staging, &MemStore::new(), None);
+        assert_eq!(found.bad, Some((key(2), Bad::Unchained)), "{second:?}");
+        assert_eq!(witnessed(&found), vec![1]);
+        assert_eq!(found.scanned.len(), 1);
+    }
+}
+
+/// A file at the first frame starts a generation or a snapshot, whatever came before it.
+#[test]
+fn a_pending_file_at_the_first_frame_starts_a_run() {
+    let staging = holding(&[(1, span(0, 3, 5)), (2, span(0, 1, 6))]);
+    let found = pass(&staging, &MemStore::new(), None);
+    assert_eq!(found.bad, None);
+    assert_eq!(witnessed(&found), vec![1, 2]);
+}
+
+/// A transaction with no staged file leaves a gap no upload may cross.
+#[test]
+fn a_gap_in_the_pending_transactions_ends_the_run() {
+    let staging = holding(&[(1, span(0, 1, 5)), (3, span(1, 1, 5))]);
+    let found = pass(&staging, &MemStore::new(), None);
+    assert_eq!(found.bad, Some((key(3), Bad::Unchained)));
+    assert_eq!(witnessed(&found), vec![1]);
+    let staging = holding(&[(2, span(0, 1, 5))]);
+    let found = pass(&staging, &MemStore::new(), None);
+    assert_eq!(found.bad, Some((key(2), Bad::Unchained)));
+}
+
+/// The staged copy of the replica's newest file gives the first pending file its link and
+/// gets no token itself: the replica, which holds nothing here, is not asked.
+#[test]
+fn the_confirmed_files_staged_copy_links_the_first_pending_file() {
+    let staging = holding(&[(1, span(0, 1, 5)), (2, span(1, 1, 5))]);
+    let found = pass(&staging, &MemStore::new(), Some(1));
+    assert_eq!(found.bad, None);
+    assert_eq!(witnessed(&found), vec![2]);
+    assert_eq!(found.scanned.len(), 2);
+}
+
+/// With the replica's newest file gone from staging, its link is read from the replica: a
+/// pending file that follows it chains, one that does not is refused.
+#[test]
+fn the_replicas_newest_file_links_the_first_pending_file_when_staging_lacks_it() {
+    let remote = holding(&[(1, span(0, 1, 5))]);
+    let found = pass(&holding(&[(2, span(1, 1, 5))]), &remote, Some(1));
+    assert_eq!((found.bad, witnessed(&found)), (None, vec![2]));
+    let found = pass(&holding(&[(2, span(2, 1, 5))]), &remote, Some(1));
+    assert_eq!(found.bad, Some((key(2), Bad::Unchained)));
+}
+
+/// A replica's newest file that does not decode links nothing: only a file at the first
+/// frame can follow it.
+#[test]
+fn a_replica_tail_that_does_not_decode_links_only_a_first_frame_file() {
+    let remote = MemStore::new();
+    put(&remote, key(1), b"not an ltx file");
+    let found = pass(&holding(&[(2, span(1, 1, 5))]), &remote, Some(1));
+    assert_eq!(found.bad, Some((key(2), Bad::Unchained)));
+    let found = pass(&holding(&[(2, span(0, 1, 5))]), &remote, Some(1));
+    assert_eq!((found.bad, witnessed(&found)), (None, vec![2]));
+}
+
+/// The pass with no replica to ask.
+fn pass_from_oldest(staging: &MemStore) -> Scan {
+    block_on(scan(
+        &Staging(staging),
+        Base::<Replica<'_, MemStore>>::Oldest,
+        None::<BootWal<'_, Cursor<Vec<u8>>>>,
+    ))
+    .unwrap()
+}
+
+/// With no replica asked, the oldest staged file stands where the replica's newest would:
+/// it gets no token and may start anywhere, and every file after it is pending.
+#[test]
+fn with_no_replica_the_oldest_staged_file_is_the_base() {
+    let staging = holding(&[(3, span(4, 1, 5)), (4, span(5, 1, 5)), (5, span(6, 2, 5))]);
+    let found = pass_from_oldest(&staging);
+    assert_eq!(found.bad, None);
+    assert_eq!(witnessed(&found), vec![4, 5]);
+    assert_eq!(found.scanned.len(), 3);
+}
+
+/// The files after the base must chain from it, with no gap, and the base must read whole.
+#[test]
+fn with_no_replica_the_files_after_the_oldest_must_follow_it() {
+    let found = pass_from_oldest(&holding(&[(3, span(4, 1, 5)), (5, span(5, 1, 5))]));
+    assert_eq!(found.bad, Some((key(5), Bad::Unchained)));
+    let found = pass_from_oldest(&holding(&[(3, span(4, 1, 5)), (4, span(7, 1, 5))]));
+    assert_eq!(found.bad, Some((key(4), Bad::Unchained)));
+    let staging = holding(&[(4, span(5, 1, 5))]);
+    put(&staging, key(3), b"not an ltx file");
+    let found = pass_from_oldest(&staging);
+    assert_eq!(found.bad, Some((key(3), Bad::Unreadable)));
+    assert!(pass_from_oldest(&MemStore::new()).scanned.is_empty());
 }
 
 /// The definition the incremental tally must meet: whole blocks into the lanes by position, then

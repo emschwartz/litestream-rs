@@ -1,0 +1,9 @@
+name = "no-local-course-sim"
+patch = "no-local-course"
+fix = "claude/boot-local"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::store_down_across_a_restart",
+    "faults::store_returns_refusing",
+]

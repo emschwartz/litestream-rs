@@ -1,8 +1,42 @@
 use proptest::prelude::*;
 
 use super::*;
-use crate::fault::role::{Replica, Staging};
-use crate::store::ObjectStore;
+use crate::fault::Fault;
+use crate::fault::role::{Replica, Role, Staging};
+use crate::store::{ObjectStore, ReadLen};
+
+/// What a boot's pass seeds from the staged files of `staging` from `from` on, truncated to
+/// `commit`: each file decoded here and handed to [`Seeding`] oldest first, as
+/// `crate::witness::scan` hands over the files it read.
+async fn seeded<L: Role>(
+    staging: &L,
+    from: Option<Txid>,
+    commit: NonZeroU32,
+) -> Result<Seeded, Fault> {
+    let mut seeding = Seeding::from(from);
+    let mut listing = crate::upload::StagedPages::from(from);
+    while let Some(page) = listing.next(staging).await? {
+        for info in page {
+            let len = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+            let bytes = staging.read(&info.key, 0, len).await.unwrap();
+            let mut decoder = lsr_ltx::Decoder::new();
+            let mut pages = Vec::new();
+            let mut rest = bytes.as_slice();
+            while !rest.is_empty() {
+                let (used, event) = decoder.feed(rest).unwrap();
+                if let Some(lsr_ltx::Event::Page(page)) = event {
+                    pages.push((page.pgno(), page.checksum()));
+                }
+                rest = &rest[used..];
+            }
+            let verified = decoder.finish().unwrap();
+            seeding.add(&info.key, verified.header(), &pages);
+        }
+    }
+    let mut seeded = seeding.finish();
+    seeded.table.truncate(commit);
+    Ok(seeded)
+}
 
 const PS: PageSize = PageSize::MIN;
 
@@ -169,7 +203,11 @@ proptest! {
 #[test]
 fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(crate::MemStore::new());
-    let got = crate::conformance::block_on(seeded(&Staging(&staging), None, nz(1)));
+    let got = crate::conformance::block_on(crate::witness::scan(
+        &Staging(&staging),
+        crate::witness::Base::Replica(&Replica(&crate::MemStore::new()), None),
+        None::<crate::recover::BootWal<'_, std::io::Cursor<Vec<u8>>>>,
+    ));
     assert_eq!(got.err(), Some(Fault::LocalIo));
 }
 
@@ -440,23 +478,4 @@ fn the_table_counts_and_cuts_pages_across_chunk_edges() {
     );
     table.record(pg(4097), digest(4097, 3));
     assert_eq!(table.len(), 3, "a slot cut and recorded again counts once");
-}
-
-/// Only a first pending file that decodes can be the one nothing staged stands before: a first
-/// file that does not decode still places the pending files after it, so a later file is no
-/// "first pending file" the replica must be asked about.
-#[test]
-fn a_later_pending_file_is_not_the_first_when_an_earlier_one_did_not_decode() {
-    let staging = crate::MemStore::new();
-    let (unreadable, _) = file_from_wal(3, &[(1, 2)], 32, 200);
-    put_all(
-        &staging,
-        vec![
-            (unreadable, vec![0xff; 64]),
-            file_from_wal(4, &[(1, 3)], 200, 300),
-        ],
-    );
-    let seeded =
-        crate::conformance::block_on(seeded(&Staging(&staging), Txid::new(2), nz(3))).unwrap();
-    assert_eq!(seeded.unplaced, None);
 }

@@ -14,7 +14,7 @@
 //! A token is minted in exactly two places, both in this crate:
 //! - **Made here.** [`crate::sync`] staged the file: this process wrote those
 //!   bytes, and the token comes from the encoder's own trailer.
-//! - **Read at boot.** [`check_pending`] reads every pending staged file
+//! - **Read at boot.** [`scan`] reads every pending staged file
 //!   (above the replica's newest transaction) whole, verifies it, and mints
 //!   its token from that read, as Go uploads the files it finds in its local
 //!   directory (`docs/decisions/D175.md`). A file keeps the header time it was
@@ -25,9 +25,16 @@
 //! where the one before it ended (same salts, next offset; for the first
 //! pending file, the replica's newest file), or at the first frame (a new WAL
 //! generation or a snapshot). The first file that fails is
-//! refused with every file after it. It does not compare the files with the
-//! WAL: recovery compares the newest staged file with it, and the live WAL is
-//! not the proof that a file's bytes are the commits' bytes.
+//! refused with every file after it, once the next boot's pass finds the same
+//! file again: one read never condemns a file.
+//!
+//! That pass is the only read a boot makes of a pending file
+//! (`docs/decisions/D219.md`). As the decoder yields each page, the same read
+//! compares it with what the live WAL holds in the file's range (recovery then
+//! judges the newest staged file from that, `crate::recover`) and records it
+//! for the page checksum table (`crate::pages`). Nothing is taken from a file
+//! that did not verify whole on that read. The live WAL is not the proof that
+//! a file's bytes are the commits' bytes: the token is.
 //!
 //! A token outlives its upload in [`Sent`]: once the replica has acknowledged this
 //! process's put of a file, the token says what the replica holds under that key, and the
@@ -35,15 +42,20 @@
 //! read the replica's copy back (`crate::maintain`, `docs/decisions/D236.md`).
 
 use std::collections::BTreeMap;
+use std::io::{Read, Seek};
 
-use lsr_ltx::{Decoder, FileChecksum, Header, Timestamp, Txid, TxidRange};
+use lsr_ltx::{
+    Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Timestamp, Txid, TxidRange,
+};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::fault::role::Role;
 use crate::fault::{BugSite, Fault};
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{FileKey, Level};
+use crate::pages::Seeding;
+use crate::recover::{BootWal, Compare, NewestStagedFile, Origin, Scanned};
 use crate::store::{ObjectStore, ReadLen, StoreError};
-use crate::upload::staged_from;
+use crate::upload::StagedPages;
 
 /// The most tokens held for pending staged files; at about 40 bytes a token
 /// the cap bounds the memory. A file staged without a token would be refused
@@ -372,7 +384,7 @@ impl Witnesses {
     #[cfg(test)]
     pub(crate) fn trust_all<S: ObjectStore>(staging: &S) -> Self {
         let mut all = Self::new();
-        let files = crate::conformance::block_on(staged_from(
+        let files = crate::conformance::block_on(crate::upload::staged_from(
             &crate::fault::role::Staging(staging),
             None,
             usize::MAX,
@@ -454,14 +466,36 @@ impl FromIterator<Witnessed> for Witnesses {
     }
 }
 
-/// What the boot pass found among the pending staged files.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Pending {
-    /// Tokens for the files that read whole and chain, oldest first: a run
+/// Why a staged file cannot stay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Bad {
+    /// It did not verify whole on the pass's read.
+    Unreadable,
+    /// It does not follow the file before it: a gap in the transactions, a WAL range that
+    /// does not chain, or a file past the cap, which is not read.
+    Unchained,
+}
+
+/// What a boot's one pass over the staged files found.
+#[derive(Debug)]
+pub(crate) struct Scan {
+    /// Tokens for the pending files that read whole and chain, oldest first: a run
     /// from the first pending transaction with no gap.
     pub(crate) tokens: Vec<Witnessed>,
-    /// The first pending file that failed: it and every one after it must go.
-    pub(crate) refused: Option<Txid>,
+    /// The first file that cannot stay, and why: it and every one after it must go.
+    /// Nothing past it was read.
+    pub(crate) bad: Option<(FileKey, Bad)>,
+    /// Every file read, as recovery sees it against the WAL.
+    pub(crate) scanned: Scanned,
+    /// The page checksum table and the quiet files those reads give.
+    pub(crate) seeding: Seeding,
+}
+
+/// One staged file, verified on the read that produced everything here.
+struct StagedRead {
+    file: Decoded,
+    pages: Vec<(PageNo, PageChecksum)>,
+    view: NewestStagedFile,
 }
 
 /// A whole file, verified on this read: its header, its bytes and its trailer
@@ -472,79 +506,144 @@ struct Decoded {
     checksum: FileChecksum,
 }
 
-/// Reads the staged level-0 files above `confirmed`, the replica's newest
-/// transaction, and mints a token for each from the read (see the module
-/// docs). The first file must follow the replica's newest file, read from
-/// staging when it is still there, else from the replica; when that file does
-/// not decode, only a file at the first frame can start the run.
-///
-/// # Errors
-/// A store read that failed; that says nothing about the bytes.
-pub(crate) async fn check_pending<L: Role, S: Role>(
-    staging: &L,
-    remote: &S,
-    confirmed: Option<Txid>,
-) -> Result<Pending, Fault> {
-    let mut expect = confirmed.map_or(Some(Txid::MIN), Txid::next);
-    let pending: Vec<FileInfo> = match expect {
-        // One past the cap: the first file no token could be minted for.
-        Some(from) => staged_from(staging, Some(from), MAX_WITNESSED.saturating_add(1)).await?,
-        None => Vec::new(),
-    };
-    let mut tokens = Vec::new();
-    if pending.is_empty() {
-        return Ok(Pending::default());
-    }
-    let mut prev = match confirmed {
-        Some(tail) => tail_link(staging, remote, tail).await?,
-        None => None,
-    };
-    for info in &pending {
-        // Past the cap a file could get no token: it goes as refused files do,
-        // and the WAL stages it again once uploads make room.
-        let wanted = expect.map(|txid| FileKey::new(Level::ZERO, TxidRange::single(txid)));
-        let read = if tokens.len() < MAX_WITNESSED && Some(info.key) == wanted {
-            decode(staging, info.key, L::fault).await?
-        } else {
-            None
-        };
-        let chained = read.and_then(|file| {
-            let link = link_of(&file.header)?;
-            let first_frame = WalOffset::start(file.header.page_size()).get();
-            // A file starts where the one before it ended, or starts a new
-            // generation or a snapshot at the first frame.
-            let starts = link.start == first_frame
-                || prev.is_some_and(|prev| prev.salts == link.salts && prev.end == link.start);
-            starts.then_some((file, link))
-        });
-        let Some((file, next)) = chained else {
-            return Ok(Pending {
-                tokens,
-                refused: Some(info.key.range().min()),
-            });
-        };
-        tokens.push(Witnessed::of_read(info.key, &file));
-        prev = Some(next);
-        expect = info.key.range().max().next();
-    }
-    Ok(Pending {
-        tokens,
-        refused: None,
-    })
+/// Where the boot's pass starts, which says which staged files are pending.
+#[derive(Debug)]
+pub(crate) enum Base<'a, S> {
+    /// The replica, and its newest transaction (`None`: it holds nothing): the staged files
+    /// above that are pending, and the first of them must follow the replica's newest file.
+    Replica(&'a S, Option<Txid>),
+    /// The oldest staged file, with no replica to ask (`docs/decisions/D220.md`): it stands
+    /// where the replica's newest file would, and every file after it is pending.
+    Oldest,
 }
 
-/// Where the replica's newest file sits in its WAL, when it reads whole.
-async fn tail_link<L: Role, S: Role>(
+/// The boot's one pass over the staged level-0 files the replica may still need: from the
+/// replica's newest transaction on (every one when the replica is empty, or was not asked),
+/// oldest first. Each file is read whole once, and that read verifies it, mints the token of
+/// a pending file (one above `confirmed`), compares its pages with what `wal` holds in its
+/// range, and feeds the page checksum table (see the module docs). The first pending file must
+/// follow the replica's newest file, read from staging when it is still there, else from the
+/// replica; when that file does not decode, only a file at the first frame can start the run.
+/// The pass ends at the first file that cannot stay.
+///
+/// # Errors
+/// A store read or a WAL read that failed; that says nothing about the bytes.
+pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
     staging: &L,
-    remote: &S,
-    tail: Txid,
-) -> Result<Option<Link>, Fault> {
-    let key = FileKey::new(Level::ZERO, TxidRange::single(tail));
-    let file = match decode(staging, key, L::fault).await? {
-        Some(file) => Some(file),
-        None => decode(remote, key, S::fault).await?,
+    base: Base<'_, S>,
+    mut wal: Option<BootWal<'_, R>>,
+) -> Result<Scan, Fault> {
+    let (remote, mut confirmed) = match base {
+        Base::Replica(remote, newest) => (Some(remote), newest),
+        Base::Oldest => (None, None),
     };
-    Ok(file.and_then(|file| link_of(&file.header)))
+    let mut scan = Scan {
+        tokens: Vec::new(),
+        bad: None,
+        scanned: Scanned::new(),
+        seeding: Seeding::from(confirmed),
+    };
+    let mut expect = confirmed.map_or(Some(Txid::MIN), Txid::next);
+    // Where the file before sits in its WAL. The replica's newest file is asked of the
+    // replica only when staging no longer holds it and a pending file needs it.
+    let mut prev = None;
+    let mut linked = confirmed.is_none();
+    let mut listing = StagedPages::from(confirmed);
+    while let Some(page) = listing.next(staging).await? {
+        for info in page {
+            if remote.is_none() && confirmed.is_none() {
+                // With no replica asked, the oldest staged file is the base.
+                confirmed = Some(info.key.range().max());
+                expect = info.key.range().max().next();
+            }
+            let tail = confirmed.map(|tail| FileKey::new(Level::ZERO, TxidRange::single(tail)));
+            let pending = confirmed.is_none_or(|tip| info.key.range().max() > tip);
+            // Past the cap a file could get no token: it goes as a file that leaves a gap
+            // does, unread, and the WAL stages it again once uploads make room.
+            let wanted = expect.map(|txid| FileKey::new(Level::ZERO, TxidRange::single(txid)));
+            if pending && (scan.tokens.len() >= MAX_WITNESSED || Some(info.key) != wanted) {
+                scan.bad = Some((info.key, Bad::Unchained));
+                return Ok(scan);
+            }
+            if let (true, false, Some(tail), Some(remote)) = (pending, linked, tail, remote) {
+                prev = walk(remote, tail, S::fault, |_| Ok(()))
+                    .await?
+                    .and_then(|file| link_of(&file.header));
+                linked = true;
+            }
+            let borrowed = wal.as_mut().map(|wal| BootWal {
+                reader: &mut *wal.reader,
+                committed: wal.committed,
+            });
+            let Some(read) = read_staged(staging, info.key, borrowed).await? else {
+                scan.bad = Some((info.key, Bad::Unreadable));
+                return Ok(scan);
+            };
+            let header = read.file.header;
+            let link = link_of(&header);
+            if pending {
+                let first_frame = WalOffset::start(header.page_size()).get();
+                // A file starts where the one before it ended, or starts a new
+                // generation or a snapshot at the first frame.
+                let chained = link.is_some_and(|link| {
+                    link.start == first_frame
+                        || prev.is_some_and(|prev: Link| {
+                            prev.salts == link.salts && prev.end == link.start
+                        })
+                });
+                if !chained {
+                    scan.bad = Some((info.key, Bad::Unchained));
+                    return Ok(scan);
+                }
+                scan.tokens.push(Witnessed::of_read(info.key, &read.file));
+                expect = info.key.range().max().next();
+            }
+            linked |= Some(info.key) == tail;
+            prev = link;
+            scan.seeding.add(&info.key, &header, &read.pages);
+            scan.scanned
+                .insert(info.key.range().max(), (header, read.view));
+        }
+    }
+    Ok(scan)
+}
+
+/// Reads the staged file `key` whole, once: verified, with its pages and what it is as a
+/// position against `wal`. `None` when it does not verify and name exactly `key`.
+async fn read_staged<L: Role, R: Read + Seek>(
+    staging: &L,
+    key: FileKey,
+    mut wal: Option<BootWal<'_, R>>,
+) -> Result<Option<StagedRead>, Fault> {
+    let mut compare = None;
+    let mut pages = Vec::new();
+    let file = walk(staging, key, L::fault, |event| {
+        match event {
+            Event::Header(header) => {
+                if let Some(at) = Origin::of(&header) {
+                    compare = Some(Compare::begin(at, wal.take())?);
+                }
+            }
+            Event::Page(page) => {
+                pages.push((page.pgno(), page.checksum()));
+                if let Some(compare) = &mut compare {
+                    compare.page(page.pgno(), page.checksum());
+                }
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    let Some(file) = file else {
+        return Ok(None);
+    };
+    let view = match compare {
+        Some(compare) => compare.end(&file.header)?,
+        None => NewestStagedFile::Unreadable {
+            txid: key.range().max(),
+        },
+    };
+    Ok(Some(StagedRead { file, pages, view }))
 }
 
 /// Where a file sits in its WAL: its generation and the offsets it spans.
@@ -579,16 +678,18 @@ fn link_of(header: &Header) -> Option<Link> {
 /// # Errors
 /// The staging store's fault when a read fails.
 pub(crate) async fn still_holds<L: Role>(staging: &L, token: &Witnessed) -> Result<bool, Fault> {
-    let decoded = decode(staging, token.key(), L::fault).await?;
+    let decoded = walk(staging, token.key(), L::fault, |_| Ok(())).await?;
     Ok(decoded.is_some_and(|file| token.matches(file.bytes, file.checksum)))
 }
 
-/// Reads `key` whole through the decoder, tallying its raw bytes; `None` when
-/// it is missing or does not verify and name exactly `key`.
-async fn decode<S: ObjectStore>(
+/// Reads `key` whole through the decoder, tallying its raw bytes and handing every header
+/// and page to `on_event` as it is decoded; `None` when it is missing or does not verify and
+/// name exactly `key`, whatever `on_event` was handed before that.
+async fn walk<S: ObjectStore>(
     store: &S,
     key: FileKey,
     fault: fn(&StoreError) -> Fault,
+    mut on_event: impl FnMut(Event<'_>) -> Result<(), Fault>,
 ) -> Result<Option<Decoded>, Fault> {
     let mut decoder = Decoder::new();
     let mut bytes = ByteTally::new();
@@ -602,9 +703,12 @@ async fn decode<S: ObjectStore>(
         bytes.add(&chunk);
         let mut rest = chunk.as_slice();
         while !rest.is_empty() {
-            let Ok((used, _)) = decoder.feed(rest) else {
+            let Ok((used, event)) = decoder.feed(rest) else {
                 return Ok(None);
             };
+            if let Some(event) = event {
+                on_event(event)?;
+            }
             crate::invariant!(used != 0, BugSite::DecoderStalled);
             rest = rest.get(used..).unwrap_or_default();
         }

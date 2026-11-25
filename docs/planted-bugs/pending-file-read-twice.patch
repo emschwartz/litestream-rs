@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 2277d4143..55c5a5254 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -3028,7 +3028,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
+     let (staging, remote) = (env.staging, env.remote);
+     let end = committed.end();
+     let wal = boot_wal_of(reader.as_deref_mut(), end);
+-    let staged = NewestStagedFile::load_in(staging, wal, scanned).await?;
++    let staged = NewestStagedFile::load_in(staging, wal, &Scanned::new()).await?;
+     // The replica's newest level-0 file stands in for an empty staging
+     // directory (a fault reading it is the boot's), and is read for the WAL's
+     // word when it is above the local position (one that does not decode

@@ -6,4 +6,5 @@ package = "lsr-core"
 tests = [
     "a_pending_file_that_skips_a_range_is_refused",
     "a_full_file_that_neither_follows_nor_starts_the_generation_is_refused",
+    "a_pending_file_from_elsewhere_in_the_wal_ends_the_run",
 ]

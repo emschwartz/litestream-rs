@@ -74,8 +74,9 @@ impl Actor {
         }
         self.kept.lag.failed(now);
         // Held writes judge no boot: nothing a boot does before it decides writes to the
-        // database, so a hold can only meet a judged start.
-        if task != Task::Sync || matches!(fault, Some(Fault::WritesHeld)) {
+        // database, so a hold can only meet a judged start. Nor does a failure of any task
+        // but the boot's (a local course's own sync step fails on the sync task).
+        if task != self.boot_task() || matches!(fault, Some(Fault::WritesHeld)) {
             return;
         }
         if !self.kept.listed {
