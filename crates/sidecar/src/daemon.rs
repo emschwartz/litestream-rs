@@ -195,12 +195,21 @@ impl Started {
     }
 }
 
+/// How the daemon runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// The long-running daemon: a waiter retries a start that fails for a cause that passes by
+    /// itself, and each replicator runs its whole maintenance schedule.
+    Serving,
+    /// `-once`: no waiter, so such a start is a failed start (it would end clean without
+    /// replicating otherwise), and no replicator runs maintenance, as Go switches its monitors
+    /// off before it opens the store (`docs/decisions/D221.md`).
+    Once,
+}
+
 /// The daemon over a plan.
 pub(crate) struct Daemon {
-    /// Whether a waiter will run: a start that fails for a cause that passes by itself is left
-    /// waiting only then, since under `-once` nothing would retry it and the run would end
-    /// clean without replicating it.
-    waiter: bool,
+    mode: Mode,
     log: Arc<Logger>,
     clock: Arc<dyn Clock>,
     started: Started,
@@ -229,10 +238,10 @@ impl Daemon {
         log: Arc<Logger>,
         started: Started,
         board: Board,
-        waiter: bool,
+        mode: Mode,
     ) -> Self {
         let daemon = Self {
-            waiter,
+            mode,
             log,
             clock: Runtime::system().clock,
             started,
@@ -298,7 +307,7 @@ impl Daemon {
                     // The waiter retries a slot that is waiting, as it does a file that
                     // appears mid-creation.
                     let failure = Failure {
-                        transient: failure.transient && self.waiter,
+                        transient: failure.transient && self.mode == Mode::Serving,
                         ..failure
                     };
                     if failure.transient {
@@ -328,10 +337,14 @@ impl Daemon {
             return Ok(State::Waiting);
         }
         // The log sink goes in with the start: one set afterwards can miss the boot's line.
+        let mut config = slot.plan.config().clone();
+        if self.mode == Mode::Once {
+            config.maintenance = config.maintenance.one_off();
+        }
         let started = Replicator::start_with_events(
             path,
             Arc::clone(store),
-            slot.plan.config().clone(),
+            config,
             Runtime::system(),
             Box::new(DbEvents::new(Arc::clone(&self.log), path)),
         );
@@ -810,7 +823,14 @@ mod tests {
             Runtime::system().clock,
             Box::new(io::sink()),
         ));
-        Daemon::start(&plan, false, log, started.clone(), Board::default(), true)
+        Daemon::start(
+            &plan,
+            false,
+            log,
+            started.clone(),
+            Board::default(),
+            Mode::Serving,
+        )
     }
 
     /// An application holding the write lock while the database opens makes the start busy.
@@ -840,7 +860,7 @@ mod tests {
         ));
         let board = Board::default();
         let started = Started::default();
-        let daemon = Daemon::start(&plan, false, log, started, board.clone(), true);
+        let daemon = Daemon::start(&plan, false, log, started, board.clone(), Mode::Serving);
         let state = |board: &Board| board.views().remove(0).state;
         assert!(matches!(state(&board), DbState::Waiting));
         assert!(daemon.retry_waiting(), "still locked: still waiting");
@@ -876,7 +896,14 @@ mod tests {
                 Box::new(io::sink()),
             ));
             let board = Board::default();
-            let daemon = Daemon::start(&plan, false, log, Started::default(), board.clone(), true);
+            let daemon = Daemon::start(
+                &plan,
+                false,
+                log,
+                Started::default(),
+                board.clone(),
+                Mode::Serving,
+            );
             (app, daemon, board)
         };
         let state = |board: &Board| board.views().remove(0).state;
@@ -891,7 +918,7 @@ mod tests {
         drop(new.stop(None, new.now(), false, false));
     }
 
-    fn start_from(text: &str, waiter: bool) -> (Daemon, Board) {
+    fn start_from(text: &str, mode: Mode) -> (Daemon, Board) {
         let loaded = GoConfig::parse(text, Expand::Off, &ProcessEnv).unwrap();
         let plan = lsr_config::plan(&loaded.config, &ProcessEnv).unwrap();
         let log = Arc::new(Logger::to(
@@ -901,7 +928,7 @@ mod tests {
             Box::new(io::sink()),
         ));
         let board = Board::default();
-        let daemon = Daemon::start(&plan, false, log, Started::default(), board.clone(), waiter);
+        let daemon = Daemon::start(&plan, false, log, Started::default(), board.clone(), mode);
         (daemon, board)
     }
 
@@ -929,15 +956,15 @@ mod tests {
         let busy = wal_db(&dir.path().join("busy.db"));
         busy.execute_batch("BEGIN IMMEDIATE; INSERT INTO t VALUES (1);")
             .unwrap();
-        let (daemon, board) = start_from(&text("busy.db", "busy-meta"), false);
+        let (daemon, board) = start_from(&text("busy.db", "busy-meta"), Mode::Once);
         assert!(matches!(board.views().remove(0).state, DbState::Failed));
         let finished = daemon.stop(None, daemon.now(), false, false);
         assert!(!finished.clean());
         // Locked: another daemon holds the meta directory.
         let _holder = wal_db(&dir.path().join("a.db"));
         let _other = wal_db(&dir.path().join("b.db"));
-        let (first, _) = start_from(&text("a.db", "shared-meta"), false);
-        let (second, board) = start_from(&text("b.db", "shared-meta"), false);
+        let (first, _) = start_from(&text("a.db", "shared-meta"), Mode::Once);
+        let (second, board) = start_from(&text("b.db", "shared-meta"), Mode::Once);
         assert!(matches!(board.views().remove(0).state, DbState::Failed));
         let finished = second.stop(None, second.now(), false, false);
         assert!(!finished.clean());

@@ -2285,6 +2285,7 @@ mod newest_replica_file;
 mod no_wal_yet;
 mod once;
 mod once_retention;
+mod one_off;
 mod pages;
 mod rejected_snapshot;
 mod requested_snapshot_after_restart;
