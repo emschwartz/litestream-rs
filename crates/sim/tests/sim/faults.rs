@@ -285,6 +285,16 @@ fn second_writer_mid_run() {
 }
 
 #[test]
+fn second_writer_between_whole_listings() {
+    run(scenario::second_writer_between_whole_listings);
+}
+
+#[test]
+fn fault_drops_what_the_engine_remembers_of_the_replica() {
+    run(scenario::fault_drops_what_the_engine_remembers_of_the_replica);
+}
+
+#[test]
 fn second_writer_survives_restart() {
     run(scenario::second_writer_survives_restart);
 }

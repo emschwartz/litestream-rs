@@ -16,7 +16,7 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 | `snapshot` | A section; its keys are below. |
 | `validation` | A section; its keys are below. |
 | `l0-retention` | `Config.maintenance`: how long a covered level 0 file is kept before it is deleted; 0 keeps every one. |
-| `l0-retention-check-interval` | `Config.maintenance`: how often the level 0 retention pass runs (whole milliseconds, above 0). |
+| `l0-retention-check-interval` | `Config.maintenance`: how often the level 0 retention pass runs (whole milliseconds, above 0). Unset, it runs every 120 s (up to 240 s while a compaction job waits), not Go's 15 s (docs/decisions/D193.md); set, exactly at the value. |
 | `verify-compaction` | Not supported (compaction verification). Accepted at `false` or empty; any other value is refused. |
 | `retention` | A section; its keys are below. |
 | `heartbeat-url` | Not supported (heartbeats). Accepted at empty; any other value is refused. |

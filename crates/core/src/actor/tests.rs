@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::io::ErrorKind;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use lsr_ltx::{PageNo, PageSize, ReadDecoder, TxidRange};
 use lsr_wal::Salts;
@@ -47,6 +47,8 @@ struct Counting {
     calls: Arc<AtomicU32>,
     /// The listing calls among them.
     lists: Arc<AtomicU32>,
+    /// The file entries those listings returned, summed.
+    listed: Arc<AtomicU64>,
     reads: Arc<std::sync::Mutex<Vec<FileKey>>>,
     deletes: Arc<std::sync::Mutex<Vec<FileKey>>>,
     /// When non-zero, the most keys one listing page returns: a store may
@@ -92,6 +94,11 @@ impl Counting {
 
     fn lists(&self) -> u32 {
         self.lists.load(Ordering::SeqCst)
+    }
+
+    /// File entries all listings returned so far.
+    fn listed(&self) -> u64 {
+        self.listed.load(Ordering::SeqCst)
     }
 
     /// How often `key`'s bytes were read from their start.
@@ -150,8 +157,13 @@ impl ObjectStore for Counting {
             .collect();
         let hidden = self.hidden.lock().unwrap().clone();
         let listed = self.inner.list(level, after, limit);
+        let entries = self.listed.clone();
         async move {
             let mut page = listed.await?;
+            entries.fetch_add(
+                u64::try_from(page.files.len()).unwrap_or(u64::MAX),
+                Ordering::SeqCst,
+            );
             page.files.retain(|info| !hidden.contains(&info.key));
             if page.next.is_none() {
                 page.files.extend(ghosts);

@@ -81,13 +81,29 @@ impl Inventory {
     /// The first failed page in level order, or a cursor that does not
     /// advance. Never a partial inventory.
     pub async fn load<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
-        let mut files = Vec::new();
-        let mut skipped = BTreeMap::new();
-        let width = store.batch_width(BatchKind::Lists).get();
-        let mut going: Vec<ListAt> = Level::ALL
+        let all: Vec<ListAt> = Level::ALL
             .iter()
             .map(|&level| ListAt::first(level))
             .collect();
+        Self::load_from(store, &all).await
+    }
+
+    /// Lists each of `starts` to the end and returns what was listed: an inventory of those
+    /// listings only, which is **not** a picture of the replica unless `starts` holds every
+    /// level from its first page. Only the maintenance tail view
+    /// ([`crate::maintain`]'s `Tail`) builds one on purpose, and says what it may decide
+    /// from it.
+    ///
+    /// # Errors
+    /// As [`Self::load`].
+    pub(crate) async fn load_from<S: ObjectStore>(
+        store: &S,
+        starts: &[ListAt],
+    ) -> Result<Self, InventoryError> {
+        let mut files = Vec::new();
+        let mut skipped = BTreeMap::new();
+        let width = store.batch_width(BatchKind::Lists).get();
+        let mut going: Vec<ListAt> = starts.to_vec();
         while !going.is_empty() {
             let round: Vec<ListAt> = going.iter().take(width).copied().collect();
             let pages = store.list_many(&round, SCAN_PAGE).await;
@@ -114,6 +130,36 @@ impl Inventory {
     /// a different size or timestamp.
     pub fn from_files(files: impl IntoIterator<Item = FileInfo>) -> Result<Self, InventoryError> {
         Self::from_parts(files.into_iter().collect(), BTreeMap::new())
+    }
+
+    /// This inventory with the files and unrecognized-name counts of `levels` taken from
+    /// `fetched` instead: a kept listing refreshed where a newer one was made.
+    ///
+    /// # Errors
+    /// As [`Self::from_files`].
+    pub(crate) fn replacing_levels(
+        &self,
+        levels: &[Level],
+        fetched: &Self,
+    ) -> Result<Self, InventoryError> {
+        let kept = self
+            .files
+            .iter()
+            .filter(|info| !levels.contains(&info.key.level()))
+            .chain(fetched.files.iter())
+            .copied()
+            .collect();
+        let mut skipped: BTreeMap<Level, usize> = self
+            .skipped
+            .iter()
+            .filter(|(level, _)| !levels.contains(level))
+            .map(|(level, count)| (*level, *count))
+            .collect();
+        for (level, count) in &fetched.skipped {
+            let entry = skipped.entry(*level).or_default();
+            *entry = entry.saturating_add(*count);
+        }
+        Self::from_parts(kept, skipped)
     }
 
     /// Records the unrecognized names a level held, as a store's listings counted them.

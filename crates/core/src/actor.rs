@@ -79,6 +79,7 @@ mod lag;
 mod once;
 mod once_retention;
 mod parts;
+mod short;
 mod state;
 
 use std::collections::BTreeSet;
@@ -113,8 +114,8 @@ use crate::identity::{self, Identity};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due, listing_after_upload,
-    read_back, run_compact, run_delete,
+    Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due_full,
+    listing_after_upload, read_back, run_compact, run_delete,
 };
 use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
@@ -683,6 +684,7 @@ impl Actor {
         self.kept.verify_restore_point = txid;
         if released {
             self.engine.maintain.stale = true;
+            self.engine.maintain.remembered.owe_full();
         }
     }
 
@@ -807,6 +809,9 @@ impl Actor {
             .map_or((EngineClock::start(now), false), |clock| clock.read(now));
         self.kept.clock = Some(clock);
         if stepped {
+            // The 15-minute backstop for a whole listing runs on engine time, which holds and
+            // then slews after a step back: the next pass lists everything rather than wait.
+            self.engine.maintain.remembered.owe_full();
             return Err(Clamped {
                 prev: clock.now(),
                 now,
@@ -856,6 +861,8 @@ impl Actor {
 
     /// Routes a fault by its policy. The only place `policy` is called.
     fn fault(&mut self, waiter: impl Into<Waiter>, fault: Fault, now: Timestamp) -> Tick {
+        // What the engine remembers of the replica may be what the fault is about.
+        self.engine.maintain.remembered.forget();
         let waiter = waiter.into();
         self.lag_failed(waiter, Some(fault), now);
         match policy(&fault) {
@@ -991,6 +998,7 @@ impl Actor {
         {
             self.kept.task_restore_point = TaskRestorePoint::Free;
             self.engine.maintain.stale = true;
+            self.engine.maintain.remembered.owe_full();
         }
     }
 
@@ -1095,8 +1103,15 @@ impl Actor {
     /// nothing more to do this tick.
     fn after_upload_step(&mut self, did: &Did, now: Timestamp) -> bool {
         match *did {
-            Did::Nothing | Did::Diverged { .. } => return false,
-            Did::Listed { .. } => self.engine.maintain.stale = true,
+            Did::Nothing => return false,
+            Did::Diverged { .. } => {
+                self.engine.maintain.remembered.forget();
+                return false;
+            }
+            Did::Listed { .. } => {
+                self.engine.maintain.stale = true;
+                self.engine.maintain.remembered.owe_full();
+            }
             Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
                 let at = listing_after_upload(now, &self.kept.cfg.maintenance);
                 self.engine.maintain.list_by(at);
@@ -1225,10 +1240,11 @@ impl Actor {
         let cause = boot_cause(dropped, refused, from.err());
         let staged = newest_staged.map(|newest_staged| newest_staged.txid());
         let course = boot_course(from, cause, self.kept.asked(), staged);
-        let (pages, quiet) = match boot_seed(env.staging, &course, upload.confirmed()).await {
-            Ok(seeded) => seeded,
-            Err(fault) => return self.boot_failed(fault, now),
-        };
+        let (pages, quiet) =
+            match boot_seed(env.staging, env.remote, &course, upload.confirmed()).await {
+                Ok(seeded) => seeded,
+                Err(fault) => return self.boot_failed(fault, now),
+            };
         self.quiet_at_boot(quiet);
         // Every step succeeded: the engine is assigned whole.
         self.engine = Engine {
@@ -2127,6 +2143,15 @@ impl Actor {
         if !self.maintain_ready(now) {
             return None;
         }
+        if self.short_pass_ok(now) {
+            return Some(match self.maintain_short(env, now).await {
+                Ok(pass) => {
+                    self.act_on(env, pass.due, pass.after_delete, pass.created_at_read, now)
+                        .await
+                }
+                Err(tick) => *tick,
+            });
+        }
         let loaded = Inventory::load(env.remote).await;
         let inventory = match loaded.map_err(|err| inventory_fault::<R>(&err)) {
             Ok(inventory) => inventory,
@@ -2157,7 +2182,7 @@ impl Actor {
         let decided = {
             let (cfg, state) = (&self.kept.cfg.maintenance, &mut self.engine.maintain.state);
             let mut step = |resolved: &ResolvedCreatedAt| {
-                due(&inventory, now, cfg, published, state, resolved)
+                due_full(&inventory, now, cfg, published, state, resolved)
             };
             resolve(env.remote, &mut step).await
         };
@@ -2174,34 +2199,16 @@ impl Actor {
         self.engine.maintain.level_one = Level::new(1)
             .and_then(|level| inventory.level(level).last())
             .map(|info| info.key.range().max());
-        let created_at_read = decided.created_at_read;
-        match decided.value {
-            Due::Wait { until, held } => {
-                self.maintained(now);
-                self.engine.maintain.until = until;
-                let event = Event::Maintained {
-                    event: MaintainedEvent::Waiting { held },
-                    created_at_read,
-                };
-                Some(self.ran(event, now))
-            }
-            // A snapshot's last transaction must be at most what was published: with
-            // uploads busy it waits, and the next listing with them.
-            Due::Run(Job::Snapshot(_)) if !self.uploads_idle() => {
-                self.engine.maintain.stale = true;
-                self.engine.maintain.snapshot_waits = true;
-                let event = Event::Maintained {
-                    event: MaintainedEvent::Waiting { held: None },
-                    created_at_read,
-                };
-                Some(self.ran(event, now))
-            }
-            Due::Run(job) => {
-                // Whatever the job does, the next listing is what to plan from.
-                self.engine.maintain.stale = true;
-                Some(self.run_job(env, &job, now, created_at_read).await)
-            }
-        }
+        self.engine.maintain.remembered.learn_full(
+            &inventory,
+            now,
+            &self.kept.cfg.maintenance,
+            &decided.value,
+        );
+        Some(
+            self.act_on(env, decided.value.due, None, decided.created_at_read, now)
+                .await,
+        )
     }
 
     /// A listing that ends below the transaction this engine confirmed: the replica lost
@@ -2847,8 +2854,9 @@ struct Judged {
 /// reads. The quiet files are found for every course: a pending file that holds no commit
 /// stays no commit when this boot takes a snapshot of its own, and dated by its stamp it would
 /// trip the age bound after a long pause.
-async fn boot_seed<L: Role>(
+async fn boot_seed<L: Role, R: Role>(
     staging: &L,
+    remote: &R,
     course: &Course,
     confirmed: Option<Txid>,
 ) -> Result<(PageChecksumTable, BTreeSet<Txid>), Fault> {
@@ -2858,14 +2866,16 @@ async fn boot_seed<L: Role>(
             snapshot: None,
             ..
         } => {
-            let seeded = seeded(staging, confirmed, position.commit()).await?;
+            let mut seeded = seeded(staging, confirmed, position.commit()).await?;
+            seeded.place(remote, confirmed).await?;
             Ok((seeded.table, seeded.quiet))
         }
         Course::At {
             snapshot: Some(_), ..
         }
         | Course::Snapshot { .. } => {
-            let seeded = seeded(staging, confirmed, NonZeroU32::MIN).await?;
+            let mut seeded = seeded(staging, confirmed, NonZeroU32::MIN).await?;
+            seeded.place(remote, confirmed).await?;
             Ok((PageChecksumTable::new(), seeded.quiet))
         }
         Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),

@@ -10,6 +10,8 @@ mod gates;
 #[cfg(test)]
 mod heap;
 #[cfg(test)]
+mod heap_check;
+#[cfg(test)]
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "the fixtures size databases and inventories from small bounded counts"

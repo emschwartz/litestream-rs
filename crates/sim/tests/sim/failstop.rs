@@ -407,3 +407,250 @@ fn an_age_trip_while_every_read_of_the_replica_lies_is_excused() {
         "no age trip was judged under the lie"
     );
 }
+
+/// A trip the judge accepted holds until the commits it tripped on reach the replica, not until
+/// the age falls under the bound (`lsr_core::failstop`, Clearing). A clock stepped back after
+/// the trip makes the age on the clock the engine reads shorter than the bound, and the engine's
+/// trip stands all the same: that is the module's rule, not a trip that came early.
+#[test]
+fn a_trip_stands_when_the_clock_steps_back_under_the_bound() {
+    let mut ops = vec![
+        down(StoreOp::Upload, timeout(StoreOp::Upload)),
+        commit(),
+        Op::Tick,
+    ];
+    ops.push(Op::ClockJump(BOUND + 10_000));
+    ops.extend(ticks(3));
+    ops.push(Op::ClockJump(-100_000));
+    ops.extend(ticks(3));
+    let report = run(&ops);
+    assert!(age_trips(&report) > 0, "{:?}", report.trips);
+}
+
+/// The store refuses conditional writes, so nothing uploads, and the application writes
+/// nothing after its first transaction. A boot with its staging directory lost finds the
+/// database equal to the replica and stages a snapshot that holds no commit. A day-long clock
+/// step later, fail-stop must not trip: no commit of the application is off the replica (#345).
+fn no_conditional_writes() -> Opts {
+    Opts {
+        no_create_only: true,
+        allow_stop: true,
+        ..Opts::default()
+    }
+}
+
+/// The eight operations of #345: two snapshots with no commit in them, a second writer, and a
+/// restart before the day-long step.
+#[test]
+fn two_no_commit_snapshots_and_a_second_writer_never_trip_the_age_bound() {
+    let ops = [
+        Op::Shutdown,
+        Op::EnvFault(lsr_sim::EnvFault::WipeStaging),
+        Op::SecondWriter { ticks: 3 },
+        Op::Tick,
+        Op::RequestSnapshot,
+        Op::Tick,
+        Op::SecondWriter { ticks: 6 },
+        Op::ClockJump(93_600_000),
+    ];
+    run_with(&ops, &no_conditional_writes());
+}
+
+/// A power loss inside a tick drops a staged file whose upload had landed. The staging check
+/// looks between ticks and never saw the file, so the boot's refusal of the replica's files
+/// is not a refusal without cause: the operator trusts the local database and starts again.
+#[test]
+fn a_power_loss_inside_a_tick_that_drops_an_uploaded_staged_file_is_a_cause_for_a_refusal() {
+    use lsr_core::{SourceOp, StoreError, StoreOp};
+    use lsr_sim::generate::{AppAt, AppOp, WalOp};
+    use lsr_sim::{CrashKind, OtherProcessMode};
+    let ops = [
+        Op::Crash(CrashKind::Process),
+        Op::CommitInTick { pages: 2 },
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::List,
+            ahead: 0,
+            shape: FaultShape::Error(StoreError::Transient {
+                op: StoreOp::List,
+                kind: ErrorKind::Other,
+            }),
+        },
+        Op::Crash(CrashKind::Power),
+        Op::Tick,
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::Upload,
+            ahead: 1,
+            shape: FaultShape::ErrorAfterPublish(StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: ErrorKind::ConnectionReset,
+            }),
+        },
+        Op::AppInTick {
+            at: AppAt::Call(20),
+            op: AppOp::Commit {
+                pages: 3,
+                grow: false,
+            },
+        },
+        Op::Crash(CrashKind::Process),
+        Op::AppInTick {
+            at: AppAt::Call(2),
+            op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+        },
+        Op::AppInTick {
+            at: AppAt::Before(SourceOp::PageCount),
+            op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+        },
+        Op::WalDamage {
+            op: WalOp::TearHeader,
+            ticks: 7,
+        },
+        Op::Crash(CrashKind::Process),
+        Op::Crash(CrashKind::Power),
+    ];
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        after_restart: lsr_sim::AfterRestart::Nothing,
+        overlap: true,
+        kill_after_fault: true,
+        remote_s3: true,
+        no_create_only: true,
+        truncate_pages: std::num::NonZeroU32::new(3),
+        ..Opts::default()
+    };
+    match run_ops(Seed::new(0x6b06_248f), &ops, &opts) {
+        Ok(_) => {}
+        Err(failure) => panic!("{}\n{}", failure.violation, failure.message(failure.steps)),
+    }
+}
+
+/// The engine's trip over WAL frames it could not read stands after the replica holds every
+/// commit, while its own clock still dates the frames: the judge keeps the trip it accepted
+/// until the engine lets go (a day-long clock step under a source that fails to open, a
+/// checkpoint and a deleted WAL).
+#[test]
+fn an_accepted_trip_over_unread_frames_stands_until_the_engine_lets_go() {
+    use lsr_core::{SourceError, SourceOp};
+    use lsr_sim::OtherProcessMode;
+    use lsr_sim::generate::{AppAt, AppOp, EnvFault, Hold, WalOp};
+    let ops = [
+        Op::WalDamage {
+            op: WalOp::RegrowSameSalts(16571050836624415656),
+            ticks: 3,
+        },
+        Op::CommitInTick { pages: 2 },
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::Upload,
+            ahead: 3,
+            shape: FaultShape::Rate {
+                per_mille: 56,
+                err: StoreError::Transient {
+                    op: StoreOp::Upload,
+                    kind: ErrorKind::ConnectionReset,
+                },
+            },
+        },
+        Op::CommitInTick { pages: 2 },
+        Op::WalDamage {
+            op: WalOp::TearHeader,
+            ticks: 1,
+        },
+        Op::SecondWriter { ticks: 2 },
+        Op::ClockJump(114138),
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::List,
+            ahead: 2,
+            shape: FaultShape::Error(StoreError::Transient {
+                op: StoreOp::List,
+                kind: ErrorKind::ConnectionReset,
+            }),
+        },
+        Op::CommitInTick { pages: 1 },
+        Op::CommitInTick { pages: 2 },
+        Op::CommitInTick { pages: 3 },
+        Op::AppInTick {
+            at: AppAt::Call(1),
+            op: AppOp::Checkpoint(OtherProcessMode::Restart),
+        },
+        Op::Hold {
+            hold: Hold::CredentialsRevoked,
+            ticks: 71,
+        },
+        Op::Commit {
+            pages: 1,
+            grow: false,
+        },
+        Op::Hold {
+            hold: Hold::LyingReads,
+            ticks: 56,
+        },
+        Op::Hold {
+            hold: Hold::LyingReads,
+            ticks: 105,
+        },
+        Op::CommitInTick { pages: 4 },
+        Op::WalDamage {
+            op: WalOp::FlipLastFrameBit,
+            ticks: 2,
+        },
+        Op::Tick,
+        Op::CommitInTick { pages: 2 },
+        Op::StoreFault {
+            target: Target::Staging,
+            op: StoreOp::Upload,
+            ahead: 3,
+            shape: FaultShape::ErrorAfterPublish(StoreError::Transient {
+                op: StoreOp::Upload,
+                kind: ErrorKind::ConnectionReset,
+            }),
+        },
+        Op::Tick,
+        Op::EnvFault(EnvFault::WipeStaging),
+        Op::CommitInTick { pages: 1 },
+        Op::CommitInTick { pages: 1 },
+        Op::OtherProcessReader { begin: true },
+        Op::ClockJump(65406),
+        Op::CommitInTick { pages: 1 },
+        Op::CommitInTick { pages: 3 },
+        Op::EnvFault(EnvFault::Source(
+            SourceOp::Open,
+            SourceError::Io(ErrorKind::Other),
+        )),
+        Op::ClockJump(93600000),
+        Op::AppInTick {
+            at: AppAt::Call(18),
+            op: AppOp::Checkpoint(OtherProcessMode::Passive),
+        },
+        Op::CommitInTick { pages: 1 },
+        Op::AppInTick {
+            at: AppAt::Before(SourceOp::EndBarrier),
+            op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+        },
+        Op::CommitInTick { pages: 1 },
+        Op::CommitInTick { pages: 4 },
+        Op::AppInTick {
+            at: AppAt::Before(SourceOp::Sync),
+            op: AppOp::DeleteWal,
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        lying_wal_sync: true,
+        after_restart: lsr_sim::AfterRestart::Busy,
+        overlap: true,
+        remote_s3: true,
+        no_create_only: true,
+        truncate_pages: std::num::NonZeroU32::new(4),
+        ..Opts::default()
+    };
+    match run_ops(Seed::new(0x6b06_17e5), &ops, &opts) {
+        Ok(_) => {}
+        Err(failure) => panic!("{}\n{}", failure.violation, failure.message(failure.steps)),
+    }
+}

@@ -1,0 +1,7 @@
+# Staged inputs read a mebibyte at a time: 32 inputs hold 32 MiB.
+name = "staged-window-one-mebibyte"
+fix = "52b7ff1ea"
+package = "lsr-store-fs"
+tests = [
+    "memory::a_level_one_compaction_holds_a_staging_window_per_input",
+]

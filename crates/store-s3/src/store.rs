@@ -511,7 +511,7 @@ impl<T: Transport> Inner<T> {
         limit: NonZeroUsize,
         items: impl IntoIterator<Item = I>,
         mut build: impl FnMut(I) -> Result<(HttpRequest, J), StoreError>,
-        judge: impl Fn(J, &HttpResponse) -> Result<R, StoreError>,
+        judge: impl Fn(J, HttpResponse) -> Result<R, StoreError>,
     ) -> Vec<Result<R, StoreError>> {
         let mut requests = Vec::new();
         let mut contexts = Vec::new();
@@ -533,7 +533,7 @@ impl<T: Transport> Inner<T> {
                     op,
                     kind: io::ErrorKind::Other,
                 }))?;
-                judge(context, &response)
+                judge(context, response)
             })
             .collect()
     }
@@ -542,7 +542,7 @@ impl<T: Transport> Inner<T> {
         let op = StoreOp::Read;
         let request = self.request(op, |b, now| b.get_range(now, key, offset, len))?;
         let response = self.send(op, request)?;
-        Self::range_body(key, offset, len, &response)
+        Self::range_body(key, offset, len, response)
     }
 
     /// One HEAD: the created-at time the object carries, else the `LastModified` the
@@ -584,7 +584,7 @@ impl<T: Transport> Inner<T> {
             Self::width(BatchKind::ResolvedCreatedAt),
             files.iter(),
             |file| Ok((self.request(op, |b, now| b.head(now, &file.key))?, file)),
-            |file, response| Self::judge_head(file, response),
+            |file, response| Self::judge_head(file, &response),
         );
         for result in &results {
             self.tally_created_at(result);
@@ -603,16 +603,20 @@ impl<T: Transport> Inner<T> {
         let key = file.key;
         let request = self.request(op, |b, now| b.get_range(now, &key, 0, len))?;
         let response = self.send(op, request)?;
-        let bytes = Self::range_body(&key, 0, len, &response).inspect_err(|err| {
+        // The metadata is read before the body is taken out of the response, and judged after
+        // the body's own errors, as it was when the body was copied.
+        let carried = match response.status() {
+            200 | 206 => Some(parse_created_at_header(&response)),
+            _ => None,
+        };
+        let bytes = Self::range_body(&key, 0, len, response).inspect_err(|err| {
             if let StoreError::NotFound { .. } = err {
                 self.tally_created_at(&Err(err.clone()));
             }
         })?;
-        let carried = match response.status() {
-            200 | 206 => {
-                parse_created_at_header(&response).map_err(|err| err.into_store(op, Some(key)))?
-            }
-            _ => None,
+        let carried = match carried {
+            Some(header) => header.map_err(|err| err.into_store(op, Some(key)))?,
+            None => None,
         };
         match carried {
             Some(at) => {
@@ -624,19 +628,21 @@ impl<T: Transport> Inner<T> {
         }
     }
 
+    /// The bytes a ranged GET answered, taken out of the response, not copied: the body was
+    /// sized to its length when it was read, and a restore holds eight of them at once.
     fn range_body(
         key: &FileKey,
         offset: u64,
         len: ReadLen,
-        response: &HttpResponse,
+        response: HttpResponse,
     ) -> Result<Vec<u8>, StoreError> {
         let op = StoreOp::Read;
-        if is_range_past_end(response) {
+        if is_range_past_end(&response) {
             return Ok(Vec::new());
         }
-        classify(op, Some(key), None, response)?;
-        let body = response.body();
-        let body = if response.status() == 206 {
+        classify(op, Some(key), None, &response)?;
+        let partial = response.status() == 206;
+        if partial {
             // A 206 for another range would hand back the wrong bytes under the right key.
             let starts = response
                 .header("content-range")
@@ -647,14 +653,19 @@ impl<T: Transport> Inner<T> {
                     kind: io::ErrorKind::InvalidData,
                 });
             }
-            body
-        } else {
+        }
+        let mut body = response.into_body();
+        if !partial {
             // A server that ignored the Range header sent the whole object.
             let from = usize::try_from(offset).unwrap_or(usize::MAX);
-            body.get(from..).unwrap_or_default()
-        };
+            body.drain(..from.min(body.len()));
+        }
         let want = usize::try_from(len.get()).unwrap_or(usize::MAX);
-        Ok(body.get(..want).unwrap_or(body).to_vec())
+        if body.len() > want {
+            body.truncate(want);
+            body.shrink_to_fit();
+        }
+        Ok(body)
     }
 
     /// Deletes in batches of `MAX_DELETE_KEYS`, in key order, naming each key once.

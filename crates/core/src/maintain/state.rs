@@ -228,6 +228,11 @@ impl MaintainState {
         self.distrusted.get(&level).copied()
     }
 
+    /// Whether any level holds a rejected output that could not be deleted.
+    pub(crate) fn has_distrusted(&self) -> bool {
+        !self.distrusted.is_empty()
+    }
+
     /// Forgets distrusted keys that `listed` no longer holds.
     pub(super) fn forget_unlisted(&mut self, listed: impl Fn(&FileKey) -> bool) {
         self.distrusted.retain(|_, key| listed(key));
