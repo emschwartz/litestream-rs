@@ -53,12 +53,6 @@ impl GoDuration {
         Self(secs.saturating_mul(1_000_000_000))
     }
 
-    /// Whole milliseconds, for defaults; saturates.
-    #[must_use]
-    pub const fn from_millis(millis: i64) -> Self {
-        Self(millis.saturating_mul(1_000_000))
-    }
-
     /// The nanoseconds.
     #[must_use]
     pub const fn nanos(self) -> i64 {

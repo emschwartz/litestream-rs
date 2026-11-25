@@ -293,7 +293,7 @@ pub enum ProblemKind {
         /// The value.
         value: String,
         /// The values it may take.
-        allowed: &'static str,
+        allowed: String,
     },
     /// A duration Go requires to be above zero.
     #[error("must be greater than 0 (got {value})")]
