@@ -196,6 +196,126 @@ fn a_first_file_sent_in_slices_does_not_let_the_levels_run() {
     assert!(!Rig::files(&rig.remote, Level::SNAPSHOT).is_empty());
 }
 
+/// A config that sends a quarter of a megabyte a tick.
+fn slow() -> ActorConfig {
+    ActorConfig {
+        upload: UploadConfig {
+            bytes_per_tick: std::num::NonZeroU64::new(256 * 1024).unwrap(),
+            ..UploadConfig::default()
+        },
+        ..cfg()
+    }
+}
+
+/// Ticks until the actor waits on the WAL or the clock reaches `until`, the clock moving [`SLICE_MILLIS`] a tick, and
+/// returns the levels of the objects the replica gained, in the order each first appeared.
+fn written(
+    rig: &mut Rig,
+    actor: &mut Actor,
+    now: &mut i64,
+    until: i64,
+    after_tick: &mut dyn FnMut(&Rig),
+) -> Vec<u8> {
+    let mut seen: Vec<FileKey> = (0..=9)
+        .filter_map(Level::new)
+        .flat_map(|level| Rig::files(&rig.remote, level))
+        .map(|file| file.key)
+        .collect();
+    let mut order = Vec::new();
+    for _ in 0..600 {
+        if *now >= until {
+            break;
+        }
+        let tick = rig.tick(actor, *now);
+        after_tick(rig);
+        for level in (0..=9).filter_map(Level::new) {
+            for file in Rig::files(&rig.remote, level) {
+                if !seen.contains(&file.key) {
+                    seen.push(file.key);
+                    order.push(level.get());
+                }
+            }
+        }
+        match tick {
+            Tick::Ran {
+                next: Next::Now, ..
+            } => *now = now.saturating_add(SLICE_MILLIS),
+            Tick::Ran {
+                next: Next::At(at), ..
+            } => *now = now.saturating_add(SLICE_MILLIS).max(at.unix_millis()),
+            Tick::Ran {
+                next: Next::OnWalChange,
+                ..
+            }
+            | Tick::Stopped(_)
+            | Tick::Drained { .. }
+            | Tick::DeadlineReached(_) => break,
+        }
+    }
+    order
+}
+
+/// A restart on a replica that already holds a snapshot and files (a database restored from
+/// it, with no staging) and a large new transaction sent in slices: the rule that holds the
+/// levels back applies only while there is no snapshot, so the new file goes through levels 1
+/// to 3 as in steady state (above the snapshot's end, as an empty level starts), and no second
+/// snapshot is written before the schedule's next one.
+#[test]
+fn a_first_start_after_a_restore_does_not_hold_the_levels_or_write_another_snapshot() {
+    let mut rig = quiet();
+    let mut actor = Actor::new(slow());
+    let mut now = T0;
+    let first = written(&mut rig, &mut actor, &mut now, i64::MAX, &mut |_| {});
+    assert_eq!(first, vec![0, 9], "the replica the restore starts from");
+    // The restart: no staging, a new engine, and a transaction too big for one slice.
+    rig.staging = Counting::default();
+    let pages: Vec<_> = (2..=4000).map(|n| (pg(n), noisy(n))).collect();
+    rig.wal.append_tx(&pages, nz(4000));
+    let mut actor = Actor::new(slow());
+    now += 60_000;
+    let hour = now + 3_600_000;
+    let after = written(&mut rig, &mut actor, &mut now, hour, &mut |_| {});
+    assert_eq!(after, vec![0, 1, 2, 3]);
+    for level in [1, 2, 3] {
+        let files = Rig::files(&rig.remote, Level::new(level).unwrap());
+        let ranges: Vec<_> = files
+            .iter()
+            .map(|f| (f.key.range().min().get(), f.key.range().max().get()))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![(2, 2)],
+            "level {level} starts above the snapshot"
+        );
+    }
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
+}
+
+/// A first snapshot the store refuses once: it backs off, the levels run meanwhile (a failing
+/// snapshot never stops compaction), and the snapshot is written when its backoff ends, after
+/// the levels.
+#[test]
+fn a_refused_first_snapshot_lets_the_levels_run_and_is_retried() {
+    let mut rig = big();
+    let mut actor = Actor::new(slow());
+    let mut now = T0;
+    let mut refused = false;
+    let order = written(&mut rig, &mut actor, &mut now, i64::MAX, &mut |rig| {
+        if !refused && !Rig::files(&rig.remote, Level::ZERO).is_empty() {
+            rig.remote
+                .inner
+                .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+            refused = true;
+        }
+    });
+    assert_eq!(order, vec![0, 1, 2, 3, 9]);
+    let snapshots = Rig::files(&rig.remote, Level::SNAPSHOT);
+    let [snapshot] = snapshots.as_slice() else {
+        panic!("one snapshot expected: {snapshots:?}");
+    };
+    assert_eq!(snapshot.key.range().max().get(), 1);
+}
+
 /// The pages the file holds, by its own trailer.
 fn page_count(rig: &Rig, info: &FileInfo) -> u32 {
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
