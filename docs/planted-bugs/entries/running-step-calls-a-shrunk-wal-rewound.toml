@@ -1,0 +1,6 @@
+# A TRUNCATE checkpoint inside a running sync step shows as frames gone from a file shorter than
+# the one first measured; the engine snapshots for a rewound WAL although nothing was lost.
+name = "running-step-calls-a-shrunk-wal-rewound"
+fix = "913d3dfba"
+package = "lsr-core"
+tests = ["actor::tests::wal_truncated_mid_step::a_wal_shrinking_between_the_length_and_the_frames_is_retried"]

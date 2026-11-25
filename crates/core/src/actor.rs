@@ -1581,7 +1581,26 @@ impl Actor {
         self.engine.page_size = Some(size);
         let step = match self.plan_step(len, &mut reader, committed)? {
             Ok(step) => step,
-            Err(verdict) => return Ok(verdict),
+            Err(verdict) => {
+                // The frames are read after the length: a TRUNCATE checkpoint that lands
+                // between shows as frames gone from a file now shorter than the one first
+                // statted, what a power loss leaves with no power loss. The step runs again
+                // over the file as it is.
+                if matches!(
+                    verdict,
+                    Stepped::Resnapshot(SnapshotCause::LocalRewound { .. })
+                ) && let Some(was) = len
+                    && env
+                        .wal
+                        .len()
+                        .map_err(Fault::from_source)?
+                        .map_or(0, WalFileLen::bytes)
+                        < was.bytes()
+                {
+                    return Err(Fault::WalMoved);
+                }
+                return Ok(verdict);
+            }
         };
         wal_barrier(&mut *env.wal)?;
         let synced = sync_step(

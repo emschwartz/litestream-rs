@@ -2368,6 +2368,17 @@ notes = "The replica tests run each deploy as a real child process and kill it w
 
 
 [[row]]
+table = "Circumstances the code does not distinguish"
+id = "WORLD-42"
+circumstance = "The provider lists names out of bytewise order: Cloudflare R2 lists a name after the longer names that extend it (`X.ltx.tmp`, `X.ltx`, `X`), so a stray name in a level folder lands out of place. The replica's own names have one width and never extend one another"
+response = "Listed as any other level. The store accepts any order inside a page, sorts each page's files, and counts a stray name on the page whose last file the provider listed it before, so a listing that pages through the level counts it once. Go does not look at order. Still refused, as a retryable fault with no shorter listing: a key outside the level, a key listed twice (in a page or across pages), a page whose files are at or before a file already passed, and a continuation token sent back"
+signal = "none; a refused listing is a retryable `InvalidData`"
+at_risk = "None for a provider whose names that extend one another are the only ones out of order. A provider that lists the files themselves out of order across pages is refused every time (it would otherwise hide a file). The count of unrecognized names at a page cut follows the order the provider listed"
+recovery = "Automatic"
+detected_by = "store-s3::`a_stray_name_that_extends_a_file_name_lists_on_r2`, store-s3::`a_page_in_any_order_lists_the_same`, store-s3::`any_permutation_of_a_page_gives_the_same_listing`, store-s3::`r2_order_and_bytewise_order_page_to_the_same_inventory`, store-s3::`a_listing_that_goes_back_to_a_file_it_passed_is_refused`, store-s3::`a_file_listed_again_on_the_next_page_is_refused`, store-s3::`a_stray_name_listed_again_on_the_next_page_is_refused`, store-s3::`a_name_listed_twice_in_one_page_is_refused`, store-s3::`a_continuation_token_sent_back_is_refused`; plant::`list-refuses-names-out-of-order`"
+notes = "Found by the provider checks on R2 (issue 342). The shared conformance suite also runs over a fake that lists as R2 does, and `just test-provider r2` passes the case that failed (`unrecognized_names_are_skipped_and_counted`). A provider that lists strays in an order of its own is covered only as far as its next listing starting after a file finds the strays left"
+
+[[row]]
 table = "The checkers themselves"
 id = "CHK-1"
 circumstance = "A transaction id covers a second commit after a power loss that cut neither commit"

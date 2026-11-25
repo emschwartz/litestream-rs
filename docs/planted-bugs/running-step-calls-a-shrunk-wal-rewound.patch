@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 9a4b98217..0256048b4 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -1597,7 +1597,7 @@ impl Actor {
+                         .map_or(0, WalFileLen::bytes)
+                         < was.bytes()
+                 {
+-                    return Err(Fault::WalMoved);
++                    return Ok(verdict);
+                 }
+                 return Ok(verdict);
+             }
