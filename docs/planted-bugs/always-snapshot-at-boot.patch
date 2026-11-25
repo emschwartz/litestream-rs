@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 4adb584ec..d68ccca48 100644
+index 2277d4143..4ebc14cc4 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1212,7 +1212,8 @@ impl Actor {
+@@ -1262,7 +1262,8 @@ impl Actor {
                  return self.verdict(Task::Sync, cause, now);
              }
          };
@@ -11,4 +11,4 @@ index 4adb584ec..d68ccca48 100644
 +            boot_cause(dropped, refused, from.err()).or(Some(SnapshotCause::LastPageMismatch));
          let staged = newest_staged.map(|newest_staged| newest_staged.txid());
          let course = boot_course(from, cause, self.kept.asked(), staged);
-         let (pages, quiet) =
+         let (pages, quiet) = match boot_seed(env.remote, &course, upload.confirmed(), seeding).await

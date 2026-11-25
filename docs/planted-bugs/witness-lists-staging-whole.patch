@@ -1,13 +1,16 @@
 diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
-index 54b2dc44..fba50042 100644
+index 1c5cb1a8b..ab0c41ff4 100644
 --- a/crates/core/src/witness.rs
 +++ b/crates/core/src/witness.rs
-@@ -306,7 +306,7 @@ pub(crate) async fn check_pending<L: Role, S: Role>(
-     let mut expect = confirmed.map_or(Some(Txid::MIN), Txid::next);
-     let pending: Vec<FileInfo> = match expect {
-         // One past the cap: the first file no token could be minted for.
--        Some(from) => staged_from(staging, Some(from), MAX_WITNESSED.saturating_add(1)).await?,
-+        Some(from) => staged_from(staging, Some(from), usize::MAX).await?,
-         None => Vec::new(),
-     };
-     let mut tokens = Vec::new();
+@@ -354,7 +354,11 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
+     let mut prev = None;
+     let mut linked = tail.is_none();
+     let mut listing = StagedPages::from(confirmed);
++    let mut all = Vec::new();
+     while let Some(page) = listing.next(staging).await? {
++        all.push(page);
++    }
++    for page in all {
+         for info in page {
+             let pending = confirmed.is_none_or(|tip| info.key.range().max() > tip);
+             // Past the cap a file could get no token: it goes as a file that leaves a gap

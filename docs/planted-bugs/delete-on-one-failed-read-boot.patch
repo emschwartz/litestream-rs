@@ -1,12 +1,13 @@
-diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
---- a/crates/core/src/upload.rs
-+++ b/crates/core/src/upload.rs
-@@ -749,7 +749,7 @@
-     while let Some(page) = pages.next(staging).await? {
-         for info in page {
-             if !staged_verifies(staging, &info.key).await? {
--                if suspect != Some(info.key) {
-+                if false {
-                     return Ok(Swept::Suspect(info.key));
-                 }
-                 return Ok(Swept::Condemned(info.key.range().min()));
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 2277d4143..776d03669 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2881,7 +2881,7 @@ async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
+     } = scan(staging, remote, tip, boot_wal_again(&mut wal)).await?;
+     let (lost, refused) = match bad {
+         None => (None, None),
+-        Some((key, Bad::Unreadable)) if *suspect != Some(key) => {
++        Some((key, Bad::Unreadable)) if false && *suspect != Some(key) => {
+             *suspect = Some(key);
+             return Err(Fault::StagedLost.into());
+         }
