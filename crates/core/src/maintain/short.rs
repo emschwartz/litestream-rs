@@ -710,17 +710,37 @@ pub(crate) struct ShortDecided {
 }
 
 impl ShortDecided {
-    /// A decision of `due` that learned nothing else.
-    fn new(due: Due) -> Self {
+    /// A decision of `due` that asks again at `until`, with the windows it found closed, and
+    /// that neither decided retention nor asks for a whole listing.
+    fn new(
+        due: Due,
+        until: Option<Timestamp>,
+        quiet: Vec<(Level, Timestamp)>,
+        snapshot_quiet: Option<Timestamp>,
+    ) -> Self {
         Self {
             due,
             settled_min: None,
-            until: None,
-            quiet: Vec::new(),
-            snapshot_quiet: None,
+            until,
+            quiet,
+            snapshot_quiet,
             retention_decided: false,
             whole: false,
         }
+    }
+
+    /// Nothing to run: wait until `until`.
+    fn wait(
+        until: Option<Timestamp>,
+        quiet: Vec<(Level, Timestamp)>,
+        snapshot_quiet: Option<Timestamp>,
+    ) -> Self {
+        Self::new(
+            Due::Wait { until, held: None },
+            until,
+            quiet,
+            snapshot_quiet,
+        )
     }
 }
 
@@ -748,10 +768,7 @@ fn decide(
 ) -> Result<ShortDecided, Need> {
     let mut quiet = Vec::new();
     let mut snapshot_quiet = None;
-    let run = |job, quiet| ShortDecided {
-        quiet,
-        ..ShortDecided::new(Due::Run(job))
-    };
+    let run = |job, quiet| ShortDecided::new(Due::Run(job), None, quiet, None);
     let mut until: Option<Timestamp> = None;
     for level in compaction_levels(config).filter(|level| tail.plan.active.contains(level)) {
         let step = plan_level(
@@ -766,15 +783,9 @@ fn decide(
         match step {
             Step::Wait(at) => quiet.push((level, at)),
             Step::Whole => {
-                return Ok(ShortDecided {
-                    until: Some(now),
-                    quiet,
-                    whole: true,
-                    ..ShortDecided::new(Due::Wait {
-                        until: Some(now),
-                        held: None,
-                    })
-                });
+                let mut decided = ShortDecided::wait(Some(now), quiet, None);
+                decided.whole = true;
+                return Ok(decided);
             }
             Step::Run(_) | Step::Idle => {}
         }
@@ -791,14 +802,8 @@ fn decide(
             return Ok(run(job, quiet));
         }
     }
-    let wait = |until, quiet, snapshot_quiet| ShortDecided {
-        until,
-        quiet,
-        snapshot_quiet,
-        ..ShortDecided::new(Due::Wait { until, held: None })
-    };
     if config.retention() == RetentionMode::Off || !tail.plan.retention {
-        return Ok(wait(until, quiet, snapshot_quiet));
+        return Ok(ShortDecided::wait(until, quiet, snapshot_quiet));
     }
     let zero = match short_level_zero(
         &tail.listed,
@@ -813,19 +818,12 @@ fn decide(
         Resolve::Need(file) => return Err(file),
     };
     let settled_min = zero.settled_min;
-    Ok(match DeleteJob::new(zero.keys) {
-        Ok(job) => ShortDecided {
-            settled_min,
-            until: soonest(until, zero.wake),
-            quiet,
-            snapshot_quiet,
-            retention_decided: true,
-            ..ShortDecided::new(Due::Run(Job::Delete(job)))
-        },
-        Err(_) => ShortDecided {
-            settled_min,
-            retention_decided: true,
-            ..wait(soonest(until, zero.wake), quiet, snapshot_quiet)
-        },
-    })
+    let until = soonest(until, zero.wake);
+    let mut decided = match DeleteJob::new(zero.keys) {
+        Ok(job) => ShortDecided::new(Due::Run(Job::Delete(job)), until, quiet, snapshot_quiet),
+        Err(_) => ShortDecided::wait(until, quiet, snapshot_quiet),
+    };
+    decided.settled_min = settled_min;
+    decided.retention_decided = true;
+    Ok(decided)
 }
