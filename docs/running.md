@@ -37,6 +37,7 @@ litestream-rs:
 - `url` is `s3://<bucket>/<path>` or `file:///<dir>`. For the top of a bucket write `s3://bucket/` with the slash; `s3://bucket` without it is refused.
 - `endpoint` names the service for anything but AWS S3. Without it the endpoint is AWS S3 in `region` (`us-east-1` unless set).
 - Settings Go does not have live under `litestream-rs`, which Go ignores, so one file starts either program.
+- `part-size` on the replica sets the multipart part size (`64MB`, for example): 5 MiB by default, 16 MiB on Tigris. One object holds at most 10,000 parts, so raise it when the database's compressed copy could pass 10,000 parts.
 - The file is read strictly: an unknown key, a key set twice, or a feature that is not built is refused at load with the key and line. Run `lsr config check <file>` before a deploy.
 
 [config-keys.md](config-keys.md) lists every key and what it sets.
@@ -52,6 +53,8 @@ litestream-rs:
 5. Container credentials, then the EC2 instance metadata service.
 
 Temporary credentials are fetched again before they expire. A profile that needs an assumed role, IAM Identity Center or a login session is refused by name: those are not built ([#176](https://github.com/emschwartz/litestream-rs/issues/176)).
+
+On AWS the keys need the policy in Litestream's S3 guide plus two actions it does not grant: `s3:ListBucketMultipartUploads` on the bucket and `s3:AbortMultipartUpload` on its objects. `lsr` lists and aborts unfinished multipart uploads at every start, and Go does neither. Without them the start is refused as a permission error, although every get, put, list and delete works by hand.
 
 ## Running an application under -exec
 
@@ -94,7 +97,7 @@ Logs go to standard error in Go's `slog` text format, `time=... level=... msg=..
 | `replica position recovered; snapshot required` with `cause=` | A snapshot follows. `FirstSync` is a new replica; other causes say what broke continuity |
 | `retrying` with `error=` and `retry_at=` | A fault that is being retried, for example `StoreTransient` while the store is unreachable |
 | `replication degraded` with `task=` and `cause=` | A failure that persists. That task waits and retries |
-| `writes blocked` with `held_by=refused_at_start` | The store refused the first request (credentials, permissions). Writes stay held until it accepts one |
+| `writes blocked` with `held_by=refused_at_start` | The store refused a request the start needs (credentials, or a permission such as the two multipart ones). Writes stay held until it accepts |
 | `replicate refused: the replica holds transactions up to ...`, then `replication stopped` with `cause=OtherWriter` | The bucket holds files this database cannot account for. See "When it stops" |
 | `database drained` with `txid=` | At shutdown, everything committed reached the replica |
 | `database not drained: deadline reached` | Shutdown ran out of time (`shutdown-sync-timeout`, 30 seconds by default) with changes not uploaded |
@@ -127,7 +130,7 @@ Set `addr` in the config and `lsr replicate` serves two paths on exactly that ad
 - `/healthz`: JSON with `status`, the list `down`, and for each database its `state`, `stop_cause`, `degraded` tasks with their causes, `synced_txid`, `replicated_txid`, `unreplicated_since` and `held_by`. It answers 200 while every database is booting, running, or degraded and retrying. It answers 503 once a database has stopped, failed to start, or is holding the application.
 - `/metrics`: Prometheus text. Go's `litestream_*` series that the engine can count, and `lsr_*` series, among them `lsr_unreplicated_age_seconds`, `lsr_replicated_txid`, `lsr_db_state` and `lsr_snapshots_total` by cause.
 
-Alert on `lsr_unreplicated_age_seconds`, not on `/healthz` alone: a store that is unreachable keeps `/healthz` at 200 while `lsr` retries. Do not wire `/healthz` to a supervisor that restarts on 503: a restart forgets the degraded state and repeats the start.
+Alert on `lsr_unreplicated_age_seconds`, not on `/healthz` alone: a store that is unreachable keeps `/healthz` at 200 while `lsr` retries. The gauge climbs for the length of each whole-database copy ([limitations.md](limitations.md)), so set the threshold above that. Do not wire `/healthz` to a supervisor that restarts on 503: a restart forgets the degraded state and repeats the start.
 
 ## When it stops
 
@@ -142,6 +145,6 @@ The first says this database is the right one; the next start takes a snapshot a
 
 ## Moving from Go Litestream, and back
 
-Stop Go completely before `lsr` starts on the same bucket path, and the reverse. Both running at once, even for the seconds of a rolling deploy, can leave restores that are wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
+Never let Go and `lsr` run on one bucket path at the same moment, not even for the seconds of a rolling deploy: restores can then come back wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)). Nothing enforces it, because the working folder's lock does not exclude Go, and an application that embeds the library while a Go sidecar still runs is the same overlap. To swap them: stop the one that is running, confirm its process has exited, then start the other.
 
-With Go stopped, `lsr` reads the same config and the same working folder (`.<name>-litestream` beside the database) and continues from Go's files, with no snapshot when the WAL is intact. Run `lsr config check` first: `lsr` refuses settings for features it does not have. To go back, stop `lsr` and start Go v0.5.16 or later.
+With Go stopped, `lsr` reads the same config and the same working folder (`.<name>-litestream` beside the database) and continues from Go's files, with no snapshot when the WAL is intact. Before the swap, run `lsr config check` (it refuses settings for features `lsr` lacks), add the two permissions above, and keep free disk about the size of the database beside it: a start that cannot continue from the WAL stages a compressed copy there first. To go back, stop `lsr`, confirm it has exited, and start Go v0.5.16 or later.

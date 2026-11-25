@@ -44,7 +44,7 @@ One thread per database does everything, one unit of work at a time, in this ord
 3. **Upload** each staged file. Every file is verified on the read that uploads it and sent with a checksum. Uploads are create-only where the store supports it, so a second writer's file is refused instead of overwritten.
 4. **Maintenance**: merges, snapshots and deletes, planned from a listing of the bucket. A restarted process reading the same listing plans the same job.
 
-A failure in one task does not stop the others. Each retry waits longer, up to 5 minutes, and a failure that persists becomes a named degraded state.
+A failure in one task does not stop the others, but a long unit does: while the thread copies the whole database (a first sync, a snapshot) or uploads one large file, nothing new is synced or uploaded. Each retry waits longer, up to 5 minutes, and a failure that persists becomes a named degraded state.
 
 ## Compaction, snapshots and retention
 
@@ -58,7 +58,7 @@ Deletes are a separate job. By default a level-0 file goes 5 minutes after a lev
 
 A restore lists the replica and plans a chain: the newest snapshot at or below the target, then the files that continue from it without a hole, up to the target. The target is the newest state, a transaction id, or an instant.
 
-It checks every file's checksum and name before applying any of its pages. It builds the database in a scratch file beside the target, syncs it, and only then puts it in place, so the target is absent, as it was, or complete. If the chain has a hole the restore fails with `Gap`. It never returns a shorter history.
+It checks every file's checksum before the result is put in place. It builds the database in a scratch file beside the target, syncs it, and only then puts it in place, so the target is absent, as it was, or complete (one open exception with `-force` is in [limitations.md](limitations.md)). If the chain has a hole the restore fails with `Gap`. It never returns a shorter history.
 
 Two limits follow from merging. A transaction older than the level-0 retention can be restored only where a remaining file ends on it. An instant that falls inside a merged file is refused unless `--allow-earlier` asks for the newest state before it.
 
@@ -72,7 +72,7 @@ At start the replicator decides how to continue, from the working folder, the WA
 
 That last case is the one place it stops by default. Another replicator writing to the same path, an empty or wrong database, and a disk put back from an older copy all look the same from here, and carrying on would make the wrong database the newest state. An operator chooses: `lsr trust-local` if the database is right, `lsr restore` if the bucket is.
 
-A working folder that was lost is not a stop when the database can speak for itself. The replicator compares the database with the bucket's newest state page by page. If they are equal it continues. If the database was written after the bucket's newest file and still holds at least half of its pages, it takes a snapshot on top and warns (`ahead_of_replica`).
+A working folder that was lost is not a stop when the database can speak for itself. The replicator compares the database with the bucket's newest state page by page. If they are equal it continues. If the database was written after the bucket's newest file and still holds at least half of its pages, it takes a snapshot on top and warns (`ahead_of_replica`). An older copy of the database whose modified time is new, as after a plain `cp`, passes the same test, and the replica's newest state then goes backwards.
 
 ## What stops replication, and what blocking writes means
 
@@ -83,10 +83,10 @@ Separately, `if-replication-stops` decides what a stopped or stuck replicator do
 | Value | At start | While running |
 |---|---|---|
 | `report` | Writes are never held. This is what Go does | Report only |
-| `hold-start` (default) | Writes are held until the start is judged, and stay held if the replicator stops there or the store refuses it (wrong credentials, for example) | Report only |
+| `hold-start` (default) | Writes are held until the start is judged, and stay held if that first attempt stops or the store refuses it (wrong credentials, a missing permission). Best effort: a first attempt that fails any other way releases them | Report only |
 | `stop-app` | As `hold-start` | Writes are also held when replication stops, or when a commit has waited longer than `max-unreplicated-age` (10 minutes by default) and a fresh attempt fails |
 
-"Held" means the replicator keeps SQLite's write lock, so every write, from any process, fails with "database is locked". Reads go on. Under `lsr replicate -exec` the application is also not started, or is stopped. A store that is merely slow or briefly down never holds writes at start: only a refusal does.
+"Held" means the replicator keeps SQLite's write lock, so every write, from any process, fails with "database is locked". Reads go on. Under `lsr replicate -exec` the application is also not started, or is stopped. A store that is down does not hold writes at start past the first failed attempt, which with a store that hangs is the request deadline (60 seconds). A refusal holds them.
 
 The hold at start ends once the replica is listed and the start is decided. A first snapshot, when one is needed, is taken after that, with writes allowed. The one long hold is a start with no working folder, which compares the database with the replica before it lets writes through.
 

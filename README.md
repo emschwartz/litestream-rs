@@ -4,8 +4,8 @@ litestream-rs is an in-process Rust port of [Litestream](https://github.com/benb
 
 **Status: unpublished and unproven.** The version is 0.0.0, nothing is on crates.io, the name is a working name, and nobody has run it in production. Read [docs/limitations.md](docs/limitations.md) before you trust it with data.
 
-- **Tested:** restores compared page for page with Go Litestream's for every v0.5 release, a deterministic simulator with injected faults, real SQLite under a power-loss model, the real binary killed and partitioned against an S3 server (MinIO), and one conformance run each on AWS S3, Cloudflare R2 and Tigris.
-- **Not tested:** a production workload, a long soak on any provider at the current code, and a review by anyone outside the project.
+- **Tested:** restores compared page for page with Go Litestream's for every v0.5 release, on small test databases; a deterministic simulator with injected faults; real SQLite under a power-loss model; and one conformance run each on AWS S3, Cloudflare R2 and Tigris.
+- **Not tested:** a production workload, a database of tens of gigabytes with `lsr` as the writer, a long soak on any provider at the current code, and a review by anyone outside the project. The rig that kills and partitions the real binary against an S3 server has made exploring runs only, with no counted run yet.
 
 The code and these documents were written by Claude models under the repository owner's direction ([docs/how-it-was-built.md](docs/how-it-was-built.md)).
 
@@ -13,8 +13,8 @@ The code and these documents were written by Claude models under the repository 
 
 - **In-process.** `lsr-replica` replicates from one thread inside the application: no second process to deploy, supervise and keep in step with the application. The `lsr` binary runs the same engine as a sidecar and takes Go's `litestream.yml` and Go's `replicate` and `restore` arguments, for applications that cannot embed Rust.
 - **A typed health handle.** `Replicator::health()` is one lock and no I/O. Every failure that lasts is a named degraded state or stop cause, in the handle, in `/healthz` and in `/metrics`, never only a log line.
-- **Bounded memory.** The library's buffers are bounded by named constants, and a test pins each bound and fails when it grows. A restore's memory does not grow with the database or the length of its history.
-- **Never silently wrong.** Every file is verified before its pages are used. A restore that cannot be exact is an error, never a shorter history. A start on a bucket the database cannot account for stops and asks, where Go carries on.
+- **Bounded memory.** The library's buffers are bounded by named constants, and a test pins each bound and fails when it grows. A restore's memory does not grow with the database or the length of its history. A snapshot's still grows with the number of pages.
+- **Exact or refused.** Every file is verified before a restore is put in place. A restore that cannot be exact is an error, never a shorter history. A start that finds files in the bucket its working folder cannot account for stops and asks, where Go carries on.
 
 ## Quickstart: the binary
 
@@ -99,8 +99,8 @@ The library and the application share one SQLite, because `libsqlite3-sys` allow
 
 ## How it differs from Go Litestream
 
-- **The replica is the same.** Either implementation restores the other's files (Go from v0.5.16 for files written here) and takes over the other's bucket and local files with a plain restart. Never run both at once on one bucket path ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
-- **It stops where Go carries on.** A start that finds files in the bucket this database cannot account for stops with `other_writer` until an operator chooses the database or the bucket.
+- **The replica is the same.** Either implementation restores the other's files (Go from v0.5.16 for files written here). Either takes over the other's bucket and working folder, but only once the other has fully stopped: both running on one bucket path, even for seconds, can corrupt the replica ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
+- **It stops where Go carries on.** A start that finds files in the bucket this database cannot account for stops with `other_writer` until an operator chooses the database or the bucket. With the working folder lost it judges by comparing pages, and an older copy of the database can pass.
 - **It can hold the application back.** The `if-replication-stops` setting decides whether a replicator that cannot start, or has stopped, blocks the application's writes. The default holds them at start only.
 - **Restores are checked.** Every file is verified before use, and a restore the replica cannot give exactly fails with `Gap`. Go's restore does not check by default.
 - **The WAL is synced before it is copied**, so a power loss does not leave the bucket ahead of the database on an honest disk.
@@ -114,8 +114,9 @@ The full list is [docs/differences-from-go.md](docs/differences-from-go.md).
 - Nobody runs it in production, and no long soak has run at the current code.
 - Go Litestream and `lsr` writing one bucket path at the same time can leave restores that are wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
 - A disk that loses writes it acknowledged, followed by an application that redoes the same last write, can leave a replica whose history differs from the database's, with no report ([#12](https://github.com/emschwartz/litestream-rs/issues/12)).
-- The first start on a database reads and uploads it twice ([#340](https://github.com/emschwartz/litestream-rs/issues/340)).
-- Two memory terms still grow with the database: the page checksum table ([#64](https://github.com/emschwartz/litestream-rs/issues/64)) and the replica listing ([#68](https://github.com/emschwartz/litestream-rs/issues/68)). A snapshot's read load on the application's disk is not limited ([#315](https://github.com/emschwartz/litestream-rs/issues/315)).
+- Replication pauses while the database is copied whole: three passes at a first start ([#340](https://github.com/emschwartz/litestream-rs/issues/340)) and one for each snapshot, daily by default. Go keeps syncing through its snapshots.
+- It needs two S3 permissions that the policy in Litestream's guide does not grant, and free disk about the size of the database at a first start ([docs/running.md](docs/running.md)).
+- Memory during a snapshot grows with the page count ([#64](https://github.com/emschwartz/litestream-rs/issues/64)), and a replica's whole listing is held in memory ([#68](https://github.com/emschwartz/litestream-rs/issues/68)). A snapshot's read load on the application's disk is not limited ([#315](https://github.com/emschwartz/litestream-rs/issues/315)).
 - A filesystem where SQLite's locks or shared memory do not work (NFS, some container file sharing) is not refused ([#332](https://github.com/emschwartz/litestream-rs/issues/332)).
 - It is built and tested on Linux and macOS only. Assumed-role and SSO credentials are not built ([#176](https://github.com/emschwartz/litestream-rs/issues/176)).
 
@@ -146,7 +147,7 @@ Each crate is `crates/<name>`, package `lsr-<name>`. `just check` is the land ga
 | Nothing | `just shuttle` | Schedule exploration of the replica thread and the S3 batch under a `--cfg shuttle` build of its own. Not in `just check`; CI runs it on pull requests that touch `crates/store-s3` or `crates/replica`, and nightly runs far more schedules. |
 | Nothing, minutes | `just sqlite-big`, `just mem-big`, `just sim-soak <secs>`, `just sim-nightly`, `just fuzz-seed`, `just mutants <crate>` | The large real-SQLite cases (several GB of disk), the memory gates at 1 to 4 GiB and a million files, rotating simulator seeds, the fuzz seed corpus, mutation testing. |
 | Docker | `just test-s3`, `just compat-s3` | The S3 store, `lsr` and the history judge's real-engine run (and Go and Rust together) against a throwaway MinIO. Fails when Docker is down; `LSR_SKIP=minio just test-s3` opts out and runs nothing. `just test-s3` also needs Go, to build the pinned Toxiproxy (MIT licence) that the history judge's network-fault tests put between the engine and MinIO; `LSR_SKIP=toxiproxy` opts out of those. |
-| Docker, Go | `just fault-rig <cycles>`, `just fault-rig-canary`, `just fault-rig-plant <name>` | The real `lsr replicate` beside a SQLite writer with its replica on MinIO behind Toxiproxy, under a seeded menu (kill -9, partitions, slow and cut transfers, the pinned Go Litestream on the same prefix; LazyFS power loss and a libfaketime clock step on Linux), judged by point-in-time restores (`scripts/fault_rig.py`, `docs/decisions/D195.md`). Nightly runs 1,000 cycles. Exit 1 on an anomaly, whose evidence is kept under `target/fault-rig/evidence`. |
+| Docker, Go | `just fault-rig <cycles>`, `just fault-rig-canary`, `just fault-rig-plant <name>` | The real `lsr replicate` beside a SQLite writer with its replica on MinIO behind Toxiproxy, under a seeded menu (kill -9, partitions, slow and cut transfers, the pinned Go Litestream on the same prefix; LazyFS power loss and a libfaketime clock step on Linux), judged by point-in-time restores (`scripts/fault_rig.py`, `docs/decisions/D195.md`). The nightly job is set to 1,000 cycles; none had completed on 2026-11-24. Exit 1 on an anomaly, whose evidence is kept under `target/fault-rig/evidence`. |
 | Go | `just upstream`, then `just compat`, `just compat-live <names>`, `just compat-releases`, `just compat-tags`, `just compat-regen` | Pinned Go builds from `.upstream/` (a worktree shares the main checkout's): Go writes and Rust restores, the reverse, handovers and alternation, the Go VFS (which also needs a C compiler and SQLite headers), and the effective-config differentials against a dumper built from the pinned Go source (`crates/compat/src/dump.rs`). `compat-tags` needs only the clone. |
 | A real provider (Tigris, AWS S3, Cloudflare R2) | `just test-provider <tigris\|aws\|r2>`, `just test-tigris`, `just tigris-restore`, `just soak-tigris <hours>` | The real bucket, with credentials from `~/.config/litestream-rs/<provider>.env` (`scripts/provider.sh`; Tigris also takes `AWS_*`). `test-provider` runs the conformance suite, the create-only write and race checks, consistency, error classification, abandoned uploads and one `lsr replicate` and restore, under a run prefix it empties afterwards; `test-tigris` is its Tigris case. `tigris-restore` also builds Go v0.5.18. Never in CI. |
 | Nightly Rust | `just fuzz <target> <secs>`, `just fuzz-cmin <target>` | cargo-fuzz over `fuzz/`. |
