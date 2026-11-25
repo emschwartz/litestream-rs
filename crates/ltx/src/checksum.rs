@@ -101,6 +101,15 @@ impl DbChecksum {
 pub struct PageChecksum(u64);
 
 impl PageChecksum {
+    /// Returns `None` unless bit 63 is set, as on every checksum a page has.
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Option<Self> {
+        match flagged(raw) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
+
     /// The checksum of one page.
     #[must_use]
     pub fn of(pgno: PageNo, data: &[u8]) -> Self {

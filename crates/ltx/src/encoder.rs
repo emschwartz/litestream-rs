@@ -21,6 +21,12 @@ use crate::order::PageSequence;
 use crate::trailer::check_post_apply;
 use crate::{DbChecksum, EncodeError, HEADER_LEN, Header, PageChecksum, PageNo, Trailer};
 
+/// The most one page adds to the index: three varints of at most ten bytes.
+const MAX_ENTRY: usize = 30;
+
+/// How much index one allocation holds: the index grows by whole chunks, never by copying.
+const INDEX_CHUNK: usize = 16 * 1024;
+
 /// Writes one LTX file to `W`.
 #[derive(Debug)]
 pub struct Encoder<W> {
@@ -29,7 +35,7 @@ pub struct Encoder<W> {
     seq: PageSequence,
     file: Crc64,
     offset: u64,
-    index: Vec<u8>,
+    index: Vec<Vec<u8>>,
     /// The compressed block of the page being written, kept between pages.
     scratch: Vec<u8>,
     /// The database checksum so far, for tracked snapshots only.
@@ -109,9 +115,18 @@ impl<W: Write> Encoder<W> {
         self.file.update(data);
         self.db = self.db.map(|db| db.toggle(PageChecksum::of(pgno, data)));
         let size = u64_from(head.len()).saturating_add(u64_from(used));
-        put_uvarint(&mut self.index, u64::from(pgno.get()));
-        put_uvarint(&mut self.index, self.offset);
-        put_uvarint(&mut self.index, size);
+        let room = self
+            .index
+            .last()
+            .is_some_and(|chunk| chunk.capacity().saturating_sub(chunk.len()) >= MAX_ENTRY);
+        if !room {
+            self.index.push(Vec::with_capacity(INDEX_CHUNK));
+        }
+        if let Some(chunk) = self.index.last_mut() {
+            put_uvarint(chunk, u64::from(pgno.get()));
+            put_uvarint(chunk, self.offset);
+            put_uvarint(chunk, size);
+        }
         self.offset = self.offset.saturating_add(size);
         Ok(())
     }
@@ -138,10 +153,20 @@ impl<W: Write> Encoder<W> {
         {
             return Err(EncodeError::PostApplyMismatch { computed, given });
         }
-        let mut tail = vec![0_u8; PAGE_HEADER_LEN];
-        tail.append(&mut self.index);
+        // The index goes out a chunk at a time, each freed once written: copying it into one
+        // buffer first held it two or three times over at the end of a large snapshot.
+        let marker = [0_u8; PAGE_HEADER_LEN];
+        self.file.update(&marker);
+        self.writer.write_all(&marker)?;
+        let mut index_len = 0_u64;
+        for chunk in std::mem::take(&mut self.index) {
+            self.file.update(&chunk);
+            self.writer.write_all(&chunk)?;
+            index_len = index_len.saturating_add(u64_from(chunk.len()));
+        }
+        let mut tail = Vec::with_capacity(32);
         put_uvarint(&mut tail, 0);
-        let index_len = u64_from(tail.len().saturating_sub(PAGE_HEADER_LEN));
+        let index_len = index_len.saturating_add(u64_from(tail.len()));
         tail.extend_from_slice(&index_len.to_be_bytes());
         tail.extend_from_slice(&post_apply.map_or(0, DbChecksum::get).to_be_bytes());
         self.file.update(&tail);

@@ -76,9 +76,13 @@
 //!   to four GiB in `crates/core/tests/core/mem_big.rs`).
 //! - **Idle:** a replicator on a quiet database holds about 1 MiB of live heap (the page
 //!   checksum table and the HTTP client's idle connections: 16 of them, 64 KiB of buffers each).
+//! - **Snapshot:** 17 bytes a page on top of the above, 4.4 MiB at 1 GiB of 4 KiB pages and 70 MB
+//!   at 16 GiB: an 8-byte slot a page in the page checksum table, which a replicator holds for
+//!   good, and about 9 bytes of the file's page index, which it holds while the snapshot is
+//!   written (`snapshot_peak_heap_is_linear_in_pages_with_a_pinned_coefficient`; issue #64 and
+//!   `docs/decisions/D205.md`).
 //!
-//! Not in these bounds: the page checksum table (about 20 bytes a page, 5 MiB at 1 GiB; issue
-//! #64), SQLite's own page cache, the `reqwest` transport (the gates run the `ureq` one that
+//! Not in these bounds: SQLite's own page cache, the `reqwest` transport (the gates run the `ureq` one that
 //! `S3Store::new` builds), and what the process's allocator keeps after a free: a resident
 //! size can sit well above the live heap (about three times on macOS, where freed large blocks
 //! stay mapped), which no gate here sees.
