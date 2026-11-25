@@ -23,11 +23,11 @@
 //! A create-only upload ([`WriteMode::New`]) sends `If-None-Match: *` on its
 //! PUT, or on its complete (`multipart.rs`). A 412 is
 //! [`StoreError::AlreadyExists`]. A provider that answers the condition with
-//! `NotImplemented` has no conditional writes: the PUT fails `Transient` (its
-//! body is not kept, so the caller writes again), and from then on this store
-//! sends create-only writes without the condition, as Go's are, and counts
-//! them in [`crate::WriteStats`]. A provider that ignores the header
-//! silently cannot be told apart here.
+//! `NotImplemented` has no conditional writes: the write fails with
+//! [`StoreError::CreateOnlyUnsupported`] and publishes nothing, and the caller
+//! decides whether to write the key as a replace. The store never drops the
+//! condition itself (`docs/decisions/D079.md`). A provider that ignores the
+//! header silently cannot be told apart here.
 //!
 //! **Written from a source.** An upload whose first write is
 //! [`Upload::write_from`] keeps no part buffer: of each part it keeps the MD5 and a tally
