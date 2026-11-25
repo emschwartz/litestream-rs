@@ -1,5 +1,5 @@
 # The boot's sweep of open uploads is not best effort: a policy that refuses it (Go's published one does) fails every boot attempt as a refusal, so the start is never judged.
 name = "scratch-sweep-refusal-stops-boot"
-fix = "pending"
+fix = "4d442fe"
 package = "lsr-core"
 tests = ["a_refused_scratch_sweep_does_not_hold_the_boot", "a_refused_scratch_sweep_is_not_asked_again"]
