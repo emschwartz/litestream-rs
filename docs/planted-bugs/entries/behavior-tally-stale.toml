@@ -1,6 +1,0 @@
-# The behaviour document's tally was typed by hand and read 176 rows when the table held 234.
-name = "behavior-tally-stale"
-fix = "claude/cli-truth"
-package = "lsr-compat"
-test_bin = "compat"
-tests = ["the_behavior_doc_is_rendered_from_its_rows"]
