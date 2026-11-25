@@ -49,15 +49,6 @@ impl KeyPath {
         segments.push(Segment::Index(index));
         Self(segments)
     }
-
-    /// The last key named on the path, if any.
-    #[must_use]
-    pub fn last_key(&self) -> Option<&str> {
-        self.0.iter().rev().find_map(|segment| match segment {
-            Segment::Key(key) => Some(key.as_str()),
-            Segment::Index(_) => None,
-        })
-    }
 }
 
 impl fmt::Display for KeyPath {

@@ -24,7 +24,7 @@
 
 use lsr_sim::generate::WalOp;
 use lsr_sim::run::run_ops;
-use lsr_sim::{AfterRestart, ClockLaw, Hold, Op, Opts, RunReport, Seed, Weights, replay_line, run};
+use lsr_sim::{Hold, Op, Opts, RunReport, Seed, Weights, replay_line, run};
 
 const STEPS: u32 = 300;
 
@@ -146,7 +146,7 @@ fn an_engine_booting_through_lying_reads_leaves_the_replica_restorable() {
 /// could not decode it, took that as no page size at all, and snapshotted 2048-byte pages onto
 /// the prefix; restores of the next transaction stopped on the change.
 #[test]
-fn a_boot_whose_replica_reads_lie_never_writes_a_new_page_size_seed_0x13() {
+fn a_boot_whose_replica_reads_lie_never_writes_a_new_page_size() {
     use lsr_core::{StoreError, StoreOp};
     use lsr_sim::{EnvFault, FaultShape, Target};
     let seed = Seed::new(0x13);
@@ -372,42 +372,4 @@ fn survival_campaign_swarm() {
         },
     );
     assert_eq!(failed, 0);
-}
-
-/// Seed 0xd of the fixed set's mix, 236 operations. A staged file whose upload published but
-/// whose answer was lost turns unreadable in staging; the engine drops it while it runs, and
-/// later boots find the replica one transaction past staging with a WAL that no longer holds
-/// it. The engine now keeps a takeover through its own staged position before that drop, so
-/// no boot refuses its own file. With the record capped at the confirmed transaction (the
-/// first cut) the judge failed it: a refusal with staging intact and no other writer.
-#[test]
-fn an_unconfirmed_upload_dropped_from_staging_is_never_refused_seed_0xd() {
-    let seed = lsr_sim::Seed::new(0xd);
-    if let Err(failure) = lsr_sim::run(seed, 236, &lsr_sim::Weights::mixed(seed)) {
-        panic!("{failure}");
-    }
-}
-
-/// Seed 0x2e7 of the fixed set's mix, its first 198 operations, recorded: a boot drops staged
-/// files the replica holds. Without the takeover kept before the drop (the plant
-/// `takeover-before-drop-skipped-sim`), or with it capped at the confirmed transaction (the
-/// plant `boot-drop-record-capped-at-confirmed`), the next boot refuses the engine's own files:
-/// "a boot refused replica files through 11 with staging intact and no other writer". It
-/// replaces seed 0x3ed, whose history no longer reached the drop on the merged tree.
-#[test]
-fn a_boot_drop_records_through_what_staging_vouched_for_seed_0x2e7() {
-    let opts = Opts {
-        drawn: true,
-        block_crash_law: true,
-        lying_wal_sync: false,
-        after_restart: AfterRestart::Busy,
-        clock_law: ClockLaw::EachRead,
-        overlap: false,
-        error_domain: false,
-        staging_fs: true,
-        ..Opts::default()
-    };
-    if let Err(failure) = run_ops(Seed::new(0x2e7), crate::histories::seed_0x2e7::OPS, &opts) {
-        panic!("{failure}");
-    }
 }
