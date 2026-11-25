@@ -189,7 +189,12 @@ mod cases {
         let page = parse_list(&response, &level_prefix(), Level::ZERO).unwrap();
         let mut want: Vec<String> = odd.iter().map(|name| (*name).to_owned()).collect();
         want.sort();
-        assert_eq!(page.unrecognized, want, "order is by raw key bytes");
+        let listed: Vec<String> = page
+            .unrecognized
+            .into_iter()
+            .map(|stray| stray.name)
+            .collect();
+        assert_eq!(listed, want, "a bytewise provider lists by raw key bytes");
         assert!(page.next_token.is_none());
     }
 

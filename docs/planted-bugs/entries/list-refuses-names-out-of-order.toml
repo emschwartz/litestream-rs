@@ -1,0 +1,8 @@
+name = "list-refuses-names-out-of-order"
+fix = "b677c7a"
+package = "lsr-store-s3"
+tests = [
+    "list_order::cases::a_stray_name_that_extends_a_file_name_lists_on_r2",
+    "list_order::cases::a_page_in_any_order_lists_the_same",
+    "list_order::cases::conformance::conformance_cases::unrecognized_names_are_skipped_and_counted",
+]
