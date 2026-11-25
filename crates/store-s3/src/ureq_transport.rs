@@ -4,14 +4,20 @@
 //! is a response (classification belongs to [`classify`](crate::classify)),
 //! redirects are not followed (a redirect from a presigned URL is a
 //! misconfigured endpoint, and the retry layers decide what to do), nothing is
-//! retried, and [`timeout_global`] bounds each request end to end. TLS is
+//! retried, and each request is bounded by progress, not by one deadline (see below). TLS is
 //! rustls on ring, trusting what Go's `crypto/x509` trusts (the system store,
 //! with `SSL_CERT_FILE` and `SSL_CERT_DIR` on Linux; see the `trust` module);
 //! ureq speaks HTTP/1.1 only.
 //!
+//! Bounds (D235): the deadline given to [`UreqTransport::new`] is the longest the request may go
+//! with no progress, as ureq measures it: connecting, each socket read, each socket write, and the
+//! wait for the response head once the body is sent. A request is also capped in all at the deadline
+//! plus the time its body, and the body of its answer by the length it declares, need at 16 KiB a
+//! second ([`Bounds`]), so a peer that takes a byte a minute still ends.
+//!
 //! A batch runs on scoped threads ([`send_on_threads`]) and the parts of uploads on the
 //! store's sender threads ([`Sender`]), all over the one agent, so their requests share the
-//! connection pool and each keeps the deadline.
+//! connection pool and each keeps its bounds.
 //!
 //! Response bodies are read whole but bounded: a body over `MAX_BODY` is an
 //! error, so a server that ignores a Range header cannot make a read allocate
@@ -29,6 +35,7 @@ use ureq::tls::RootCerts;
 
 use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
+use crate::transport::Bounds;
 use crate::transport::{
     HttpResponse, MAX_BODY, StreamedRequest, Transport, TransportError, map_io, send_on_threads,
 };
@@ -51,6 +58,7 @@ const WRITE_BUFFER: usize = 128 * 1024;
 #[derive(Clone)]
 pub struct UreqTransport {
     agent: ureq::Agent,
+    bounds: Bounds,
 }
 
 impl std::fmt::Debug for UreqTransport {
@@ -70,11 +78,19 @@ impl UreqTransport {
         let tls = ureq::tls::TlsConfig::builder()
             .root_certs(root_certs(trust::system()))
             .build();
+        let bounds = Bounds::new(deadline);
+        let stall = Some(bounds.stall());
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .max_redirects_will_error(false)
-            .timeout_global(Some(deadline))
+            // A request with no body ends within the stall bound in all, as one deadline made
+            // every request end. A body raises the cap per request (`UreqTransport::capped`).
+            .timeout_global(stall)
+            .timeout_connect(stall)
+            .timeout_recv_response(stall)
+            .timeout_per_read(stall)
+            .timeout_per_write(stall)
             // ureq keeps 3 idle connections per host, fewer than the batches the store sends
             // (up to `CREATION_TIME_CONCURRENCY`), so most requests of a restore opened a
             // socket and, over TLS, a handshake. The pool holds as many as the widest batch.
@@ -89,7 +105,35 @@ impl UreqTransport {
             .build();
         Self {
             agent: ureq::Agent::new_with_config(config),
+            bounds,
         }
+    }
+
+    /// The same transport with another floor under its uploads' speed, for a test.
+    #[cfg(test)]
+    fn with_floor(mut self, bytes_per_second: std::num::NonZeroU64) -> Self {
+        self.bounds = self.bounds.with_floor(bytes_per_second);
+        self
+    }
+
+    /// `request` with the cap on its whole life that a body of `body_len` bytes allows: the
+    /// agent's own bounds only cut a request that makes no progress.
+    fn capped<S: ureq::AsSendBody>(
+        &self,
+        request: http::Request<S>,
+        body_len: u64,
+    ) -> http::Request<S> {
+        // A GET's answer is read under its own cap once its length is declared
+        // (`read_body`); this one is the ceiling over request and answer together.
+        let answer = if request.method() == http::Method::GET {
+            MAX_BODY
+        } else {
+            0
+        };
+        self.agent
+            .configure_request(request)
+            .timeout_global(Some(self.bounds.cap(body_len.saturating_add(answer))))
+            .build()
     }
 
     /// The request as ureq takes it. The body is borrowed from `request`, not copied: a
@@ -139,19 +183,35 @@ fn method_name(method: Method) -> &'static str {
 /// Reads the response body, bounded by `MAX_BODY`, into a buffer sized to the `expected`
 /// length the server declared. Growing one from empty doubles it, so a 4 MiB ranged
 /// read would hold an 8 MiB allocation, and a restore keeps eight of them in flight.
+///
+/// The body may take the time `expected` bytes need at the floor rate, from its first byte
+/// (`Bounds::cap`); a read that makes no progress ends sooner, at ureq's per-read bound.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a socket timeout runs on the real clock, which no injected clock reaches"
+)]
 fn read_body(
     response: &mut http::Response<ureq::Body>,
     expected: u64,
+    bounds: Bounds,
 ) -> Result<Vec<u8>, TransportError> {
+    let allowed = bounds.cap(expected);
+    let began = std::time::Instant::now();
     let mut body = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
-    response
-        .body_mut()
-        .with_config()
-        .limit(MAX_BODY)
-        .reader()
-        .read_to_end(&mut body)
-        .map_err(|err| map_error(&ureq::Error::from(err)))?;
-    Ok(body)
+    let mut reader = response.body_mut().with_config().limit(MAX_BODY).reader();
+    let mut buf = [0_u8; CONN_BUFFER];
+    loop {
+        let read = reader
+            .read(&mut buf)
+            .map_err(|err| map_error(&ureq::Error::from(err)))?;
+        let Some(chunk) = buf.get(..read).filter(|chunk| !chunk.is_empty()) else {
+            return Ok(body);
+        };
+        body.extend_from_slice(chunk);
+        if began.elapsed() > allowed {
+            return Err(TransportError::Timeout);
+        }
+    }
 }
 
 impl UreqTransport {
@@ -181,7 +241,7 @@ impl UreqTransport {
         let expected = declared
             .filter(|_| !head_only)
             .map_or(0, |n| n.min(MAX_BODY));
-        let body = read_body(&mut response, expected)?;
+        let body = read_body(&mut response, expected, self.bounds)?;
         let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
         Ok(HttpResponse::new(status, headers, body, complete))
     }
@@ -190,7 +250,8 @@ impl UreqTransport {
 impl Transport for UreqTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
-        self.exchange(Self::build(&request)?, head_only)
+        let len = u64::try_from(request.body().len()).unwrap_or(u64::MAX);
+        self.exchange(self.capped(Self::build(&request)?, len), head_only)
     }
 
     /// The body is read from the request's reader as it goes: the parts of an upload that
@@ -206,11 +267,12 @@ impl Transport for UreqTransport {
         for (name, value) in streamed.request().headers() {
             builder = builder.header(*name, value.as_str());
         }
+        let len = streamed.len();
         let body: &mut dyn io::Read = streamed.body();
         let request = builder
             .body(ureq::SendBody::from_reader(body))
             .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))?;
-        self.exchange(request, false)
+        self.exchange(self.capped(request, len), false)
     }
 
     fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {
@@ -313,6 +375,76 @@ mod tests {
     }
 
     const OK: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+
+    const MIB: usize = 1024 * 1024;
+
+    /// Half a MiB a second: the floor the upload tests hold a request to, so that a cap that
+    /// scales with the body is seconds here and not minutes.
+    fn floor() -> std::num::NonZeroU64 {
+        std::num::NonZeroU64::new(524_288).expect("nonzero")
+    }
+
+    fn upload(url: &str, len: usize) -> HttpRequest {
+        HttpRequest::new(
+            Method::Put,
+            url::Url::parse(url).expect("url"),
+            vec![("content-length", len.to_string())],
+            vec![7; len],
+        )
+    }
+
+    /// The server reads 4 MiB at about 1 MiB a second, so the request takes about 4 s on a
+    /// 3 s stall bound (the socket buffers hold some of it, a second's worth at most): it never stalls, and it is not cut for taking longer than the bound.
+    #[test]
+    fn an_upload_that_keeps_moving_outlives_the_stall_bound() {
+        use crate::transport::slow_servers::serve_paced_reader;
+        let (url, served) = serve_paced_reader(4 * MIB, Duration::from_millis(62));
+        let transport = UreqTransport::new(Duration::from_secs(3)).with_floor(floor());
+        let response = transport
+            .send(upload(&url, 4 * MIB))
+            .expect("an upload that moves is not a timeout");
+        assert_eq!(response.status(), 200);
+        assert_eq!(served.join().expect("server"), 4 * MIB);
+    }
+
+    /// A server that never reads fails the write at the stall bound, not at the cap the body's
+    /// length allows (64 s here).
+    #[test]
+    fn a_body_the_server_never_reads_times_out_at_the_stall_bound() {
+        use crate::transport::slow_servers::{serve_never_reading, timed};
+        let (url, release) = serve_never_reading();
+        let transport = UreqTransport::new(Duration::from_millis(300)).with_floor(floor());
+        let (err, took) = timed(|| transport.send(upload(&url, 32 * MIB)).err());
+        assert_eq!(err, Some(TransportError::Timeout));
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        let _released = release.send(());
+    }
+
+    /// A download that keeps moving is not cut for taking longer than the deadline: 1 MiB comes
+    /// in 16 KiB pieces 31 ms apart (about 2 s) on a 1 s deadline.
+    #[test]
+    fn a_download_that_keeps_moving_outlives_the_stall_bound() {
+        use crate::transport::slow_servers::serve_paced_writer;
+        let url = serve_paced_writer(MIB, 16 * 1024, Duration::from_millis(31));
+        let transport = UreqTransport::new(Duration::from_secs(1)).with_floor(floor());
+        let response = transport
+            .send(get(&url))
+            .expect("a download that moves is not a timeout");
+        assert_eq!(response.body().len(), MIB);
+        assert!(response.body_complete());
+    }
+
+    /// A server that takes the whole body and never answers fails at the stall bound after it.
+    #[test]
+    fn a_server_that_never_answers_times_out_at_the_stall_bound() {
+        use crate::transport::slow_servers::timed;
+        let (url, release) = serve_silence();
+        let transport = UreqTransport::new(Duration::from_millis(300)).with_floor(floor());
+        let (err, took) = timed(|| transport.send(get(&url)).err());
+        assert_eq!(err, Some(TransportError::Timeout));
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        let _released = release.send(());
+    }
 
     /// A server that answers every request on a connection (keep-alive) and counts the
     /// connections it accepted.

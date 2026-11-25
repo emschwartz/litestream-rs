@@ -17,9 +17,11 @@
 //! at most `limit` requests spawned at a time; each keeps its own timeout.
 //!
 //! The policy matches [`UreqTransport`](crate::UreqTransport): a non-2xx status
-//! is a response, nothing is retried, each request is bounded by the deadline
-//! end to end (reqwest's per-request timeout, which covers the body), and a
-//! body over `MAX_BODY` is an error. The own
+//! is a response, nothing is retried, and a body over `MAX_BODY` is an error. The deadline
+//! bounds a connect and each chunk of an answer; a request is capped in all at the deadline plus
+//! the time its body, and its answer's declared length, need at 16 KiB a second (D235). reqwest cannot bound a
+//! stalled write or the wait for a response head by progress, so those are bounded by that cap,
+//! not by the deadline alone as under [`UreqTransport`](crate::UreqTransport). The own
 //! client follows no redirects. An application client keeps its own redirect policy;
 //! reqwest's default follows up to ten, and a presigned URL redirected to
 //! another host fails its signature there, so the store sees a 403 instead of
@@ -47,7 +49,7 @@ use tokio::task::JoinSet;
 
 use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
-use crate::transport::{HttpResponse, Transport, TransportError};
+use crate::transport::{Bounds, HttpResponse, Transport, TransportError};
 use crate::transport::{MAX_BODY, map_io};
 use crate::trust;
 
@@ -94,7 +96,7 @@ impl Driver {
 pub struct ReqwestTransport {
     client: reqwest::Client,
     driver: Driver,
-    deadline: Duration,
+    bounds: Bounds,
 }
 
 impl std::fmt::Debug for ReqwestTransport {
@@ -105,7 +107,7 @@ impl std::fmt::Debug for ReqwestTransport {
         };
         f.debug_struct("ReqwestTransport")
             .field("driver", &driver)
-            .field("deadline", &self.deadline)
+            .field("bounds", &self.bounds)
             .finish_non_exhaustive()
     }
 }
@@ -120,15 +122,20 @@ impl ReqwestTransport {
     pub fn new(deadline: Duration) -> Result<Self, ReqwestSetupError> {
         let tls =
             trust::rustls_config(trust::system()).map_err(|_tls| ReqwestSetupError::Client)?;
+        let bounds = Bounds::new(deadline);
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // A connect that makes no progress ends at the stall bound. reqwest has no bound
+            // on a stalled write, and its read timeout starts when the request does and so
+            // would cut a long upload: the cap on each request (`build`) is the bound.
+            .connect_timeout(bounds.stall())
             .tls_backend_preconfigured(tls)
             .build()
             .map_err(|_build| ReqwestSetupError::Client)?;
         Ok(Self {
             client,
             driver: Driver::own()?,
-            deadline,
+            bounds,
         })
     }
 
@@ -143,7 +150,7 @@ impl ReqwestTransport {
         Ok(Self {
             client,
             driver: Driver::own()?,
-            deadline,
+            bounds: Bounds::new(deadline),
         })
     }
 
@@ -153,15 +160,32 @@ impl ReqwestTransport {
         Self {
             client,
             driver: Driver::App(runtime),
-            deadline,
+            bounds: Bounds::new(deadline),
         }
+    }
+
+    /// The same transport with another floor under its uploads' speed, for a test.
+    #[cfg(test)]
+    fn with_floor(mut self, bytes_per_second: std::num::NonZeroU64) -> Self {
+        self.bounds = self.bounds.with_floor(bytes_per_second);
+        self
     }
 
     fn build(&self, request: &HttpRequest) -> reqwest::RequestBuilder {
         let mut builder = self
             .client
             .request(method(request.method()), request.url().as_str())
-            .timeout(self.deadline)
+            .timeout(
+                self.bounds.cap(
+                    u64::try_from(request.body().len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(if request.method() == Method::Get {
+                            MAX_BODY
+                        } else {
+                            0
+                        }),
+                ),
+            )
             .body(request.body().to_vec());
         // Every header is sent as signed, `content-length` included: hyper keeps a
         // given length (it equals the body's), and without it an empty PUT goes
@@ -207,7 +231,8 @@ impl ReqwestTransport {
 impl Transport for ReqwestTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
-        let exchange = exchange(self.build(&request), head_only);
+        let sent = u64::try_from(request.body().len()).unwrap_or(u64::MAX);
+        let exchange = exchange(self.build(&request), head_only, self.bounds, sent);
         self.drive(exchange, Err(TransportError::Io(io::ErrorKind::Other)))
     }
 
@@ -225,24 +250,28 @@ impl Transport for ReqwestTransport {
         let count = requests.len();
         let builders: Vec<_> = requests
             .iter()
-            .map(|request| (self.build(request), request.method() == Method::Head))
+            .map(|request| {
+                let sent = u64::try_from(request.body().len()).unwrap_or(u64::MAX);
+                (self.build(request), request.method() == Method::Head, sent)
+            })
             .collect();
         let failed = (0..count)
             .map(|_| Err(TransportError::Io(io::ErrorKind::Other)))
             .collect();
-        self.drive(exchange_many(builders, limit), failed)
+        self.drive(exchange_many(builders, limit, self.bounds), failed)
     }
 }
 
 /// Runs every exchange with at most `limit` spawned at once and returns the
 /// results in request order.
 async fn exchange_many(
-    builders: Vec<(reqwest::RequestBuilder, bool)>,
+    builders: Vec<(reqwest::RequestBuilder, bool, u64)>,
     limit: NonZeroUsize,
+    bounds: Bounds,
 ) -> Vec<Result<HttpResponse, TransportError>> {
     let tasks = builders
         .into_iter()
-        .map(|(builder, head_only)| exchange(builder, head_only))
+        .map(|(builder, head_only, sent)| exchange(builder, head_only, bounds, sent))
         .collect();
     bounded(tasks, limit)
         .await
@@ -281,11 +310,19 @@ where
     slots
 }
 
+/// One request and its whole answer, in two phases (D235): the request, up to the response head,
+/// within the cap its body's length allows; then the answer's body within the cap its declared
+/// length allows, no chunk later than the stall bound after the one before.
 async fn exchange(
     builder: reqwest::RequestBuilder,
     head_only: bool,
+    bounds: Bounds,
+    sent: u64,
 ) -> Result<HttpResponse, TransportError> {
-    let mut response = builder.send().await.map_err(|err| map_error(&err))?;
+    let mut response = tokio::time::timeout(bounds.cap(sent), builder.send())
+        .await
+        .map_err(|_elapsed| TransportError::Timeout)?
+        .map_err(|err| map_error(&err))?;
     let status = response.status().as_u16();
     let headers: Vec<(String, String)> = response
         .headers()
@@ -298,13 +335,28 @@ async fn exchange(
         })
         .collect();
     let declared = response.content_length();
+    let expected = declared
+        .filter(|_| !head_only)
+        .map_or(0, |n| n.min(MAX_BODY));
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|err| map_error(&err))? {
-        body.extend_from_slice(&chunk);
-        if u64::try_from(body.len()).map_or(true, |len| len > MAX_BODY) {
-            return Err(TransportError::Io(io::ErrorKind::InvalidData));
+    let read = async {
+        loop {
+            let next = tokio::time::timeout(bounds.stall(), response.chunk())
+                .await
+                .map_err(|_elapsed| TransportError::Timeout)?
+                .map_err(|err| map_error(&err))?;
+            let Some(chunk) = next else {
+                return Ok(());
+            };
+            body.extend_from_slice(&chunk);
+            if u64::try_from(body.len()).map_or(true, |len| len > MAX_BODY) {
+                return Err(TransportError::Io(io::ErrorKind::InvalidData));
+            }
         }
-    }
+    };
+    tokio::time::timeout(bounds.cap(expected), read)
+        .await
+        .map_err(|_elapsed| TransportError::Timeout)??;
     let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
     Ok(HttpResponse::new(status, headers, body, complete))
 }
@@ -535,6 +587,71 @@ mod tests {
             Some(TransportError::Timeout)
         );
         let _released = release.send(());
+    }
+
+    const MIB: usize = 1024 * 1024;
+
+    /// Half a MiB a second: the floor the upload tests hold a request to, so that a cap that
+    /// scales with the body is seconds here and not minutes.
+    fn floor() -> std::num::NonZeroU64 {
+        std::num::NonZeroU64::new(524_288).expect("nonzero")
+    }
+
+    fn upload(url: &str, len: usize) -> HttpRequest {
+        HttpRequest::new(
+            Method::Put,
+            Url::parse(url).expect("url"),
+            vec![("content-length", len.to_string())],
+            vec![7; len],
+        )
+    }
+
+    /// The server reads 4 MiB at about 1 MiB a second, so the request takes about 4 s on a
+    /// 3 s stall bound (the socket buffers hold some of it, a second's worth at most): it is not cut for taking longer than the bound.
+    #[test]
+    fn an_upload_that_keeps_moving_outlives_the_stall_bound() {
+        use crate::transport::slow_servers::serve_paced_reader;
+        let (url, served) = serve_paced_reader(4 * MIB, Duration::from_millis(62));
+        let transport = ReqwestTransport::new(Duration::from_secs(3))
+            .expect("transport")
+            .with_floor(floor());
+        let response = transport
+            .send(upload(&url, 4 * MIB))
+            .expect("an upload that moves is not a timeout");
+        assert_eq!(response.status(), 200);
+        assert_eq!(served.join().expect("server"), 4 * MIB);
+    }
+
+    /// A server that never reads fails the request at the cap its body's length allows
+    /// (here 300 ms and 8 MiB at 8 MiB a second; reqwest has no bound on a stalled write).
+    #[test]
+    fn a_body_the_server_never_reads_times_out_at_the_cap() {
+        use crate::transport::slow_servers::{serve_never_reading, timed};
+        let (url, release) = serve_never_reading();
+        // 8 MiB at 8 MiB a second: a cap of 1.3 s.
+        let transport = ReqwestTransport::new(Duration::from_millis(300))
+            .expect("transport")
+            .with_floor(std::num::NonZeroU64::new(8 * 1_048_576).expect("nonzero"));
+        let (err, took) = timed(|| transport.send(upload(&url, 8 * MIB)).err());
+        assert_eq!(err, Some(TransportError::Timeout));
+        assert!(took < Duration::from_secs(15), "{took:?}");
+        let _released = release.send(());
+    }
+
+    /// A download that keeps moving is not cut for taking longer than the deadline: 1 MiB comes
+    /// in 16 KiB pieces 31 ms apart (about 2 s) on a 1 s deadline.
+    #[test]
+    fn a_download_that_keeps_moving_outlives_the_stall_bound() {
+        use crate::transport::slow_servers::serve_paced_writer;
+        let url = serve_paced_writer(MIB, 16 * 1024, Duration::from_millis(31));
+        let transport = ReqwestTransport::new(Duration::from_secs(1))
+            .expect("transport")
+            .with_floor(floor());
+        let response = transport
+            .send(request(Method::Get, &url))
+            .expect("a download that moves is not a timeout");
+        assert_eq!(response.body().len(), MIB);
+        assert!(response.body_complete());
     }
 
     #[test]

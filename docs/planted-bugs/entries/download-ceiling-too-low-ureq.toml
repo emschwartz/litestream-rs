@@ -1,0 +1,7 @@
+# The request-wide ceiling leaves no room for a GET answer, so the whole request is cut at the deadline whatever the answer declares.
+name = "download-ceiling-too-low-ureq"
+fix = "claude/part-deadline"
+package = "lsr-store-s3"
+tests = [
+    "ureq_transport::tests::a_download_that_keeps_moving_outlives_the_stall_bound",
+]

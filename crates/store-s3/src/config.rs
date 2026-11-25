@@ -316,7 +316,9 @@ pub struct S3Config {
     deadline: Duration,
 }
 
-/// How long one request may take end to end unless told otherwise.
+/// How long one request may go without progress unless told otherwise, and how long one with
+/// no body may take in all. A body adds the time it needs at a floor rate to the cap on the
+/// whole request (`docs/decisions/D235.md`).
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Multipart parts in flight unless told otherwise (Go: `DefaultConcurrency`).
@@ -510,7 +512,9 @@ impl S3Config {
         }
     }
 
-    /// The per-request deadline the transport enforces.
+    /// How long a request may make no progress before the transport fails it as a timeout,
+    /// and the most a request with no body may take in all. A request with a body may take
+    /// longer, in step with the body's length (`docs/decisions/D235.md`).
     #[must_use]
     pub fn deadline(&self) -> Duration {
         self.deadline

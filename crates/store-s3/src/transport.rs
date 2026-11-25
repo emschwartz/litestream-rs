@@ -19,9 +19,13 @@
 
 use std::fmt;
 use std::io;
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, PoisonError};
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+use std::time::Duration;
 
 // Under `--cfg shuttle` (`just shuttle`) the batch runs on shuttle's scheduler, which explores
 // thread interleavings; every other build uses std.
@@ -214,6 +218,61 @@ pub enum TransportError {
     Io(io::ErrorKind),
 }
 
+/// How long a request may take, by what it moves rather than by the clock alone.
+///
+/// A request fails as [`TransportError::Timeout`] when it makes no progress for `stall`: no
+/// connection, no response head after its body was sent, or (where the client can tell) no write
+/// or read. Progress is not enough on its own, because a peer that takes a byte a minute never
+/// stalls, so a whole request also has a cap: `stall` plus the time the bytes it moves need at `floor`
+/// bytes a second: an upload's body, a download's declared length. A request that moves no bytes
+/// is capped at `stall`, as it was when one deadline bounded every request (D235).
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Bounds {
+    stall: Duration,
+    floor: NonZeroU64,
+}
+
+#[cfg(any(feature = "ureq", feature = "reqwest"))]
+impl Bounds {
+    /// The slowest upload that is not a failure: 16 KiB a second, so a 5 MiB part may take
+    /// 320 s and a 64 MiB one about 68 minutes (Go has no floor, only 24 hours in all).
+    const DEFAULT_FLOOR: NonZeroU64 = NonZeroU64::MIN.saturating_add(16 * 1024 - 1);
+
+    /// Bounds that fail a request after `stall` without progress.
+    pub(crate) const fn new(stall: Duration) -> Self {
+        Self {
+            stall,
+            floor: Self::DEFAULT_FLOOR,
+        }
+    }
+
+    /// The same bounds with a different floor, for a test that cannot wait minutes.
+    #[cfg(test)]
+    pub(crate) const fn with_floor(self, bytes_per_second: NonZeroU64) -> Self {
+        Self {
+            floor: bytes_per_second,
+            ..self
+        }
+    }
+
+    /// How long a request may go without progress.
+    pub(crate) const fn stall(self) -> Duration {
+        self.stall
+    }
+
+    /// The most a request with a body of `body_len` bytes may take in all.
+    pub(crate) fn cap(self, body_len: u64) -> Duration {
+        let nanos = u128::from(body_len)
+            .saturating_mul(1_000_000_000)
+            .checked_div(u128::from(self.floor.get()))
+            .unwrap_or(u128::MAX);
+        self.stall.saturating_add(Duration::from_nanos(
+            u64::try_from(nanos).unwrap_or(u64::MAX),
+        ))
+    }
+}
+
 /// The largest response body read: twice the largest ranged read (a test pins
 /// the relation), which is room for a listing page or a delete result and no more.
 #[cfg(any(feature = "ureq", feature = "reqwest"))]
@@ -375,6 +434,8 @@ pub fn send_on_threads<T: Transport + ?Sized>(
 }
 
 #[cfg(test)]
+pub(crate) mod slow_servers;
+#[cfg(test)]
 pub(crate) mod wire_proof;
 
 #[cfg(all(test, any(feature = "ureq", feature = "reqwest")))]
@@ -386,6 +447,19 @@ mod tests {
     #[test]
     fn body_cap_is_twice_the_largest_read() {
         assert_eq!(MAX_BODY, 2 * u64::from(ReadLen::MAX_RAW));
+    }
+
+    #[test]
+    fn a_requests_cap_grows_with_its_body_at_the_floor() {
+        let bounds = Bounds::new(Duration::from_secs(60));
+        assert_eq!(bounds.stall(), Duration::from_secs(60));
+        assert_eq!(bounds.cap(0), Duration::from_secs(60));
+        // 5 MiB at 16 KiB a second is 320 s.
+        assert_eq!(bounds.cap(5 * 1024 * 1024), Duration::from_secs(380));
+        let fast = bounds.with_floor(NonZeroU64::new(1_000_000).expect("nonzero"));
+        assert_eq!(fast.cap(1_500_000), Duration::from_millis(61_500));
+        // A length no body has saturates instead of wrapping.
+        assert!(fast.cap(u64::MAX) > Duration::from_secs(1_000_000_000));
     }
 
     #[test]
