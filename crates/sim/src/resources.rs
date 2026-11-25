@@ -294,6 +294,7 @@ impl SendTurns {
             Some(
                 Event::Retrying { until, .. }
                 | Event::Degraded { until, .. }
+                | Event::CheckpointDeferred { until }
                 | Event::WritesHeld { until },
             ) => {
                 self.waits_until = self.waits_until.max(Some(*until));
