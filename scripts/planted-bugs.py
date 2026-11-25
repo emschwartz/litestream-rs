@@ -11,6 +11,14 @@ HEAD, then must each fail once the entry's patch is applied. Exits 1 when a plan
 current tree, or retire the entry with a reason), a test does not run, or a build breaks.
 
     uv run scripts/planted-bugs.py [--only NAME]... [--shard K/N] [--keep] [--no-wait]
+    uv run scripts/planted-bugs.py --names
+    uv run scripts/planted-bugs.py --changed BASE [--list] [--shard K/N]
+
+`--names` checks, without building anything, that every entry's tests exist as `fn <name>` in its
+package (a renamed test leaves its entry unable to run). `--changed BASE` keeps the entries a pull
+request against BASE can have affected: the diff touches the entry file, its patch, a file the
+patch edits or a file that defines a named test, or the patch no longer applies. `--list` prints
+their names and exits.
 
 `--shard K/N` runs every N-th entry starting at the K-th (by file name), plus the canaries, so
 the nightly can split the ledger across N runners.
@@ -246,11 +254,74 @@ def passed(verdict: str) -> bool:
     return verdict.startswith("killed") or verdict.startswith("canary ok")
 
 
+def patch_files(patch: Path) -> set[str]:
+    """The repository files a patch edits."""
+    found = set()
+    for line in patch.read_text().splitlines():
+        if line.startswith(("--- a/", "+++ b/")):
+            found.add(line[6:].split("\t")[0].strip())
+    return found
+
+
+_FN_FILES: dict[str, set[str]] = {}
+
+
+def fn_files(name: str) -> set[str]:
+    """The files under crates/ that define `fn <name>`. One scan of the tree answers every
+    entry: a scan per test made the check take half a minute."""
+    if not _FN_FILES:
+        out = git("grep", "-o", "-E", r"fn [A-Za-z0-9_]+", "--", "crates").stdout
+        for line in out.splitlines():
+            path, _, text = line.partition(":")
+            _FN_FILES.setdefault(text.removeprefix("fn "), set()).add(path)
+    return _FN_FILES.get(name, set())
+
+
+def test_files(bug: dict) -> tuple[set[str], list[str]]:
+    """The files that define the entry's named tests, and the tests with no definition (a name
+    is the last path segment). The whole workspace is searched, not the entry's package: the
+    shared conformance cases are defined in lsr-core and run by the store crates' test binaries."""
+    files, missing = set(), []
+    for test in bug.get("tests", []):
+        hit = fn_files(test.split("::")[-1])
+        files.update(hit)
+        if not hit:
+            missing.append(test)
+    return files, missing
+
+
+def missing_tests(bugs: list[dict]) -> list[str]:
+    """`entry: test` for each named test that no `fn` defines."""
+    return [f"{b['name']}: {t}" for b in bugs for t in test_files(b)[1]]
+
+
+def affected(bugs: list[dict], base: str) -> list[dict]:
+    """The non-canary entries a change since `base` can have stopped killing."""
+    changed = set(git("diff", "--name-only", f"{base}...HEAD").stdout.split())
+    picked = []
+    for bug in bugs:
+        if "canary" in bug:
+            continue
+        patch = PATCHES / f"{bug.get('patch', bug['name'])}.patch"
+        rel = patch.relative_to(ROOT).as_posix()
+        entry = (ENTRIES / f"{bug['file']}.toml").relative_to(ROOT).as_posix()
+        stale = git("apply", "--check", str(patch), check=False).returncode != 0
+        touched = {rel, entry} | patch_files(patch) | test_files(bug)[0]
+        if stale or touched & changed:
+            picked.append(bug)
+    return picked
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", action="append", default=[], help="run just this entry (repeatable)")
     ap.add_argument("--shard", default="0/1", metavar="K/N",
                     help="run only the K-th of N interleaved slices of the entries (canaries always run)")
+    ap.add_argument("--names", action="store_true",
+                    help="only check that every entry's named tests are defined, then exit")
+    ap.add_argument("--changed", metavar="BASE",
+                    help="run only the entries a diff against BASE can have affected")
+    ap.add_argument("--list", action="store_true", help="--changed: print the names and exit")
     ap.add_argument("--keep", action="store_true", help="leave the scratch worktree and target dir")
     ap.add_argument("--unaided", action="store_true",
                     help="seeds the swarm needs to find each plant, with no named test run")
@@ -268,6 +339,13 @@ def main() -> int:
         print(f"planted-bugs: an entry's file must be named <name>.toml: {misnamed}", file=sys.stderr)
         return 1
     names = [b["name"] for b in bugs]
+    if opts.names:
+        gone = missing_tests(bugs)
+        for line in gone:
+            print(f"planted-bugs: no test function for {line}", file=sys.stderr)
+        if not gone:
+            print(f"planted-bugs: every named test of {len(bugs)} entries is defined")
+        return 1 if gone else 0
     unknown = [n for n in opts.only if n not in names]
     if unknown:
         print(f"planted-bugs: no such entry: {unknown}", file=sys.stderr)
@@ -279,6 +357,15 @@ def main() -> int:
         return 1
     # The canaries always run: they are what says the verdicts below mean anything.
     bugs = [b for b in bugs if not opts.only or b["name"] in opts.only or "canary" in b]
+    if opts.changed:
+        picked = {b["name"] for b in affected(bugs, opts.changed)}
+        bugs = [b for b in bugs if b["name"] in picked or "canary" in b]
+        if opts.list:
+            print("\n".join(sorted(picked)))
+            return 0
+        if not picked:
+            print("planted-bugs: the diff affects no entry")
+            return 0
     try:
         k, n = (int(part) for part in opts.shard.split("/"))
     except ValueError:
