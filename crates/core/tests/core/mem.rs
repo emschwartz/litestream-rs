@@ -580,13 +580,13 @@ pub fn snapshot_run(pages: u32) -> SnapshotRun {
 }
 
 /// Bytes a snapshot holds for each page of the database, in the page checksum table
-/// and the page plan together. The table is a `BTreeMap` entry a page (a 4-byte page
-/// number, an 8-byte digest, the map's nodes) and the plan one `PageFrom` a page, so
-/// the law is linear in the database's pages. Issue #64 asks whether to bound it; until
-/// then this ceiling holds the line. Measured: 91 to 96 bytes a page, which is the table,
-/// the plan, and the encoder's index entry for the page; the ceiling is that plus about
-/// 15%, so holding page contents, which is 4096 bytes a page, breaks it at once.
-pub const SNAPSHOT_BYTES_PER_PAGE: usize = 112;
+/// and the encoder's page index. The table is a `BTreeMap` entry a page (a 4-byte page
+/// number, an 8-byte digest, the map's nodes) and the index a few varint bytes, so the
+/// law is linear in the database's pages. The plan holds nothing a page costs: it is
+/// walked, never listed (it was 32 bytes a page, 48 while sorted). Measured: 62 bytes a
+/// page; the ceiling is that plus about 15%, so listing every page again, or holding
+/// page contents, which is 4096 bytes a page, breaks it at once.
+pub const SNAPSHOT_BYTES_PER_PAGE: usize = 72;
 
 /// The most one `Upload::write` may carry, apart from the last: a snapshot streams in
 /// chunks of about 1 MiB, so no write is a file.

@@ -14,6 +14,18 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 
 use super::*;
+
+/// The pages of a plan, listed.
+fn plan_pages(
+    map: &PageMap,
+    prev_commit: Option<u32>,
+    commit: NonZeroU32,
+    page_size: PageSize,
+) -> Vec<PageFrom> {
+    Plan::new(map, prev_commit, commit, page_size)
+        .iter()
+        .collect()
+}
 use crate::conformance::block_on;
 use crate::fault::role::{Role, Staging};
 use crate::mem::MemStore;
@@ -884,7 +896,8 @@ fn a_small_file_reaches_the_upload_in_one_write() {
         db.write_page(pg(n), &[db_fill(n); 512]);
     }
     db.set_page_count(4);
-    let plan: Vec<PageFrom> = (1..=4).map(|n| PageFrom::Db(pg(n))).collect();
+    let map = PageMap::new(PS);
+    let plan = Plan::new(&map, None, nz(4), PS);
     let origin = WalOrigin::new(32, 0, 1, 2).unwrap();
     let header = Header::new(header_fields(Txid::MIN, nz(4), PS, origin, ts(1), 0)).unwrap();
     let mut chunks = Chunks::default();

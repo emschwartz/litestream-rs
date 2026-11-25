@@ -1,0 +1,239 @@
+diff --git a/crates/core/src/sync.rs b/crates/core/src/sync.rs
+index 65de53417..0b6ebe062 100644
+--- a/crates/core/src/sync.rs
++++ b/crates/core/src/sync.rs
+@@ -22,6 +22,7 @@
+ //! `WalSource::epoch` again and hands back the proof, or the position
+ //! unpinned when the epoch moved.
+ 
++use std::cmp::Ordering;
+ use std::num::{NonZeroU32, NonZeroU64};
+ 
+ use lsr_ltx::{
+@@ -162,41 +163,108 @@ impl PageFrom {
+     }
+ }
+ 
+-/// The pages of one file, ascending.
++/// The pages of one file, ascending, listed on demand: no list of them is held.
+ ///
+ /// A snapshot (`prev_commit` is `None`) lists every page up to `commit` except
+ /// the lock page. An incremental lists the map's pages and the pages
+ /// the database grew by that no scanned frame holds ("grown pages": those above
+ /// `prev_commit` that the map lacks), which come from the
+ /// database file (Go `db.go:2504-2561`).
+-#[must_use]
+-pub(crate) fn plan_pages(
+-    map: &PageMap,
++///
++/// Every page of a database used to take a list entry of its own (32 bytes, 48 while it was
++/// sorted); the plan is a walk of the map and a counter instead, so it holds nothing that
++/// grows with the database (issue #64).
++#[derive(Clone, Copy)]
++pub(crate) struct Plan<'a> {
++    map: &'a PageMap,
+     prev_commit: Option<u32>,
+     commit: NonZeroU32,
+     page_size: PageSize,
+-) -> Vec<PageFrom> {
+-    let mut pages: Vec<PageFrom> = match prev_commit {
+-        Some(_) => map.pages().map(|frame| PageFrom::Wal(*frame)).collect(),
+-        None => Vec::new(),
+-    };
+-    let first = prev_commit.map_or(1, |prev| prev.saturating_add(1));
+-    for raw in first..=commit.get() {
+-        let Some(pgno) = PageNo::new(raw, page_size) else {
+-            continue;
+-        };
+-        match map.get(pgno) {
+-            Some(frame) => {
+-                if prev_commit.is_none() {
+-                    pages.push(PageFrom::Wal(*frame));
+-                }
++}
++
++impl<'a> Plan<'a> {
++    /// The plan of a file that ends at `commit` pages, after `prev_commit` for an incremental.
++    #[must_use]
++    pub(crate) const fn new(
++        map: &'a PageMap,
++        prev_commit: Option<u32>,
++        commit: NonZeroU32,
++        page_size: PageSize,
++    ) -> Self {
++        Self {
++            map,
++            prev_commit,
++            commit,
++            page_size,
++        }
++    }
++
++    /// At least as many pages as the plan lists, without listing them: a buffer for the file is
++    /// sized from it.
++    #[must_use]
++    pub(crate) fn at_most(&self) -> usize {
++        let commit = self.commit.get();
++        match self.prev_commit {
++            None => usize::try_from(commit).unwrap_or(usize::MAX),
++            Some(prev) => {
++                let held = self
++                    .map
++                    .pages()
++                    .take_while(|frame| frame.pgno().get() <= commit)
++                    .count();
++                let grown = usize::try_from(commit.saturating_sub(prev)).unwrap_or(usize::MAX);
++                held.saturating_add(grown)
+             }
+-            None => pages.push(PageFrom::Db(pgno)),
+         }
+     }
+-    pages.retain(|page| page.pgno().get() <= commit.get());
+-    pages.sort_by_key(|page| page.pgno());
+-    pages
++
++    /// The pages, in ascending page order.
++    pub(crate) fn iter(&self) -> impl Iterator<Item = PageFrom> + '_ {
++        let commit = self.commit.get();
++        let snapshot = self.prev_commit.is_none();
++        let mut raw = self.prev_commit.map_or(1, |prev| prev.saturating_add(1));
++        let mut held = self.map.pages().peekable();
++        std::iter::from_fn(move || {
++            loop {
++                let from_map = held.peek().map(|frame| frame.pgno().get());
++                let grown = (raw <= commit).then_some(raw);
++                let (take_map, take_grown) = match (from_map, grown) {
++                    (None, None) => return None,
++                    (None, Some(_)) => (false, true),
++                    (Some(held_pgno), None) => {
++                        if held_pgno > commit {
++                            return None;
++                        }
++                        (true, false)
++                    }
++                    (Some(held_pgno), Some(next)) => match held_pgno.cmp(&next) {
++                        Ordering::Less => (true, false),
++                        Ordering::Equal => (true, true),
++                        Ordering::Greater => (false, true),
++                    },
++                };
++                // A frame the map holds for a page the loop has passed (below the first grown
++                // page of an incremental) is a page of the file; in a snapshot the counter
++                // reaches every page, so a map entry only matches it.
++                let frame = if take_map { held.next() } else { None };
++                let pgno = grown.filter(|_| take_grown);
++                if take_grown {
++                    raw = raw.saturating_add(1);
++                }
++                match (frame, pgno) {
++                    (Some(frame), _) if !snapshot || take_grown => {
++                        return Some(PageFrom::Wal(*frame));
++                    }
++                    (Some(_), _) | (None, None) => {}
++                    (None, Some(pgno)) => {
++                        if let Some(pgno) = PageNo::new(pgno, self.page_size) {
++                            return Some(PageFrom::Db(pgno));
++                        }
++                    }
++                }
++            }
++        })
++    }
+ }
+ 
+ /// The header Go writes (`db.go:2294-2311`): untracked, with no pre-apply checksum.
+@@ -464,7 +532,7 @@ impl<S: ObjectStore> FileSink for Writer<'_, S> {
+ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
+     upload: &mut U,
+     header: Header,
+-    plan: &[PageFrom],
++    plan: &Plan<'_>,
+     wal: &mut WalReader<R>,
+     db: &mut P,
+     pages: &mut PageChecksumTable,
+@@ -475,7 +543,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
+     let page = header.page_size().bytes();
+     let room = FLUSH_AT.saturating_add(page.saturating_mul(2));
+     let out = Vec::with_capacity(
+-        plan.len()
++        plan.at_most()
+             .saturating_mul(page)
+             .saturating_add(page)
+             .min(room),
+@@ -484,15 +552,16 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
+     let mut buf = vec![0_u8; header.page_size().bytes()];
+     let mut last = None;
+     let mut bytes = ByteTally::new();
+-    for (index, page) in plan.iter().enumerate() {
++    let mut listed = plan.iter().collect::<Vec<_>>().into_iter().peekable();
++    while let Some(page) = listed.next() {
+         match page {
+             PageFrom::Wal(frame) => wal
+-                .read_page(frame, &mut buf)
++                .read_page(&frame, &mut buf)
+                 .map_err(|err| page_fault(wal, err))?,
+             PageFrom::Db(pgno) => {
+-                db.read_page(*pgno, &mut buf).map_err(Fault::from_source)?;
++                db.read_page(pgno, &mut buf).map_err(Fault::from_source)?;
+                 pages
+-                    .check(*pgno, &buf)
++                    .check(pgno, &buf)
+                     .map_err(|mismatch| Fault::DatabasePageMismatch {
+                         pgno: mismatch.pgno,
+                     })?;
+@@ -501,7 +570,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
+         encoder
+             .write_page(page.pgno(), &buf)
+             .map_err(|_err| BugSite::Encode.hit())?;
+-        if index.saturating_add(1) == plan.len() {
++        if listed.peek().is_none() {
+             last = Some(LastPage::new(
+                 page.pgno(),
+                 PageChecksum::of(page.pgno(), &buf),
+@@ -536,7 +605,7 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: Role>(
+     store: &L,
+     key: &FileKey,
+     header: Header,
+-    plan: &[PageFrom],
++    plan: &Plan<'_>,
+     wal: &mut WalReader<R>,
+     db: &mut P,
+     pages: &mut PageChecksumTable,
+@@ -678,7 +747,7 @@ async fn run<R: Read + Seek, P: PageSource, L: Role>(
+     }
+     let page_size = wal.header().page_size();
+     let commit = commit_of(&scanned.map, db)?;
+-    let plan = plan_pages(&scanned.map, start.prev_commit, commit, page_size);
++    let plan = Plan::new(&scanned.map, start.prev_commit, commit, page_size);
+     let header = created_at(&start, &scanned, wal, commit, cfg.node_id, now)?;
+     let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
+     let (file, last_written, witness, changes) = stage_recorded(
+@@ -756,7 +825,7 @@ async fn stage_recorded<R: Read + Seek, P: PageSource, L: Role>(
+     staging: &L,
+     key: &FileKey,
+     header: Header,
+-    plan: &[PageFrom],
++    plan: &Plan<'_>,
+     wal: &mut WalReader<R>,
+     db: &mut P,
+     pages: &mut PageChecksumTable,
+@@ -774,7 +843,7 @@ async fn stage_recorded<R: Read + Seek, P: PageSource, L: Role>(
+ /// or a size other than `prev_commit`, all may.
+ fn changes_pages(
+     pages: &PageChecksumTable,
+-    plan: &[PageFrom],
++    plan: &Plan<'_>,
+     prev_commit: Option<u32>,
+     commit: NonZeroU32,
+ ) -> bool {
+@@ -787,8 +856,8 @@ fn changes_pages(
+ 
+ /// Records the staged WAL pages, the newest copy of each, and forgets pages the
+ /// database no longer has.
+-fn record(pages: &mut PageChecksumTable, plan: &[PageFrom], commit: NonZeroU32) {
+-    for page in plan {
++fn record(pages: &mut PageChecksumTable, plan: &Plan<'_>, commit: NonZeroU32) {
++    for page in plan.iter() {
+         match page {
+             PageFrom::Wal(frame) => pages.record(frame.pgno(), frame.digest()),
+             PageFrom::Db(_) => {}
