@@ -1,0 +1,9 @@
+# A restore to a path no config names leaves a working folder beside the database, where Go leaves only the database.
+name = "restore-records-for-a-path-no-config-names"
+fix = "claude/dropin-gaps"
+package = "lsr-cli"
+test_bin = "cli"
+tests = [
+    "a_restore_to_a_path_no_config_names_leaves_only_the_database",
+    "integrity_check_publishes_a_valid_database_in_every_mode",
+]

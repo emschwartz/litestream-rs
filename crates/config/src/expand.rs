@@ -76,6 +76,23 @@ pub(crate) struct Expanded {
 
 /// Go's `os.Expand(text, mapping)` with Litestream's mapping.
 pub(crate) fn expand_env(text: &str, env: &dyn Env) -> Expanded {
+    expand_with(text, env, false)
+}
+
+/// The text a reference to the `index`th unset name is replaced with by [`expand_probe`]: it
+/// holds no character YAML reads, and none of the markers ends inside another.
+pub(crate) fn probe_sentinel(index: usize) -> String {
+    format!("lsr-unset-probe-{index}-end")
+}
+
+/// [`expand_env`] with each unset name replaced by its [`probe_sentinel`], in the order of
+/// [`Expanded::unset`], instead of by nothing: parsed, the text shows which names a value reads
+/// (a name in a comment leaves no trace). Go says nothing about an unset name at all.
+pub(crate) fn expand_probe(text: &str, env: &dyn Env) -> String {
+    expand_with(text, env, true).text
+}
+
+fn expand_with(text: &str, env: &dyn Env, probe: bool) -> Expanded {
     let mut out = String::with_capacity(text.len());
     let mut unset: Vec<String> = Vec::new();
     let mut rest = text;
@@ -96,8 +113,18 @@ pub(crate) fn expand_env(text: &str, env: &dyn Env) -> Expanded {
             Some("PID") => out.push_str(&env.pid().to_string()),
             Some(name) => match env.var(name) {
                 Some(value) => out.push_str(&value),
-                None if unset.iter().any(|seen| seen == name) => {}
-                None => unset.push(name.to_owned()),
+                None => {
+                    let index = match unset.iter().position(|seen| seen == name) {
+                        Some(index) => index,
+                        None => {
+                            unset.push(name.to_owned());
+                            unset.len().saturating_sub(1)
+                        }
+                    };
+                    if probe {
+                        out.push_str(&probe_sentinel(index));
+                    }
+                }
             },
         }
         rest = after.get(width..).unwrap_or("");

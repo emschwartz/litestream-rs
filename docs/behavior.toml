@@ -1199,13 +1199,13 @@ notes = "Accepted limit (L1). It is why BOOT-18 and BOOT-19 are silent at restor
 [[row]]
 table = "Restore"
 id = "REST-11"
-circumstance = "Every restore that publishes writes a takeover record through the restored transaction into the meta directory the database uses: `lsr restore` of a configured database (`-config`, to its own path) and the sidecar's `-restore-if-db-not-exists` write it into the configured one (`meta-path` or `meta-dir`), and every other restore into the target's default one (`.<name>-litestream`). Failing to write it is an error after the database is in place (`RestoreError::TakeoverRecord`, `CliError::Takeover`). A destination that names no file has no meta directory and is refused before anything is written (`RestoreError::NoMetaDir`, `CliError::NoMetaDir`, exit 3)"
-response = "A replicator started on the restored database snapshots above the replica it came from instead of refusing it (BOOT-22). The CLI prints \"takeover recorded through {txid}\""
+circumstance = "A restore that publishes, by the CLI (`lsr restore`), and a config names the restored path: the config `-config` gives for a DB_PATH restored to its own path, else the default one (`LITESTREAM_CONFIG`, else `/etc/litestream.yml`) for a REPLICA_URL or `--replica` restore. It writes a takeover record through the restored transaction into that database's meta directory (`meta-path` or `meta-dir`, else `.<name>-litestream` beside it). Any other restore, a backup or a copy no config names (no config, one that does not load, one that names other paths, `LITESTREAM_CONFIG=-`), leaves only the database, as Go's does. The library's `restore` and the sidecar's `-restore-if-db-not-exists` still write the record. Failing to write it is an error after the database is in place (`RestoreError::TakeoverRecord`, `CliError::Takeover`)"
+response = "For a database a config names: a replicator started on the restored database snapshots above the replica it came from instead of refusing it (BOOT-22), and the CLI prints \"takeover recorded through {txid}\". For any other restore: no folder beside the output and no such line, so a script that removes `backup.sqlite*` leaves nothing behind (D215)"
 signal = "exit 0; exit 3 when the record cannot be written"
-at_risk = "None"
+at_risk = "A restore to a path no config names, replicated later from a new working folder: the start compares the database with the bucket and goes on when they are equal; otherwise it stops with `other_writer` (BOOT-22). A config that is missing at the restore and present at the start is that case"
 recovery = "Run `lsr trust-local`"
-detected_by = "replica::`second_writer::a_restored_database_replicates_without_a_refusal`, cli::`integrity_check_publishes_a_valid_database_in_every_mode`, replica::`restored::a_restore_to_a_path_with_no_file_name_is_refused_before_writing`, cli::`restore_to_an_output_with_no_file_name_is_refused_before_writing`, cli::`a_restore_by_config_records_the_takeover_in_the_configured_meta_directory`; plant::`restore-writes-no-takeover`, plant::`restore-writes-no-takeover-cli`"
-notes = "The record failing to write after a publish is **code only**"
+detected_by = "replica::`second_writer::a_restored_database_replicates_without_a_refusal`, cli::`integrity_check_publishes_a_valid_database_in_every_mode`, cli::`a_restore_to_a_path_no_config_names_leaves_only_the_database`, cli::`a_restore_to_a_path_a_config_names_records_the_takeover_where_the_replicator_looks`, replica::`restored::a_restore_to_a_path_with_no_file_name_is_refused_before_writing`, cli::`restore_to_an_output_with_no_file_name_is_refused_before_writing`, cli::`a_restore_by_config_records_the_takeover_in_the_configured_meta_directory`; plant::`restore-writes-no-takeover`, plant::`restore-writes-no-takeover-cli`, plant::`restore-records-for-a-path-no-config-names`"
+notes = "Before D215 every CLI restore left `.<output>-litestream/lsr-takeover` beside its output. The record failing to write after a publish is **code only**"
 
 [[row]]
 table = "Restore"
@@ -1801,8 +1801,8 @@ response = "continue. A departure from Go for the families not built and for ppr
 signal = "none"
 at_risk = "None. A dashboard or alert on a family not built sees no data"
 recovery = "Operator: alert on `lsr_unreplicated_age_seconds` and `/healthz`"
-detected_by = "compat::`go_and_lsr_serve_the_same_metric_families`; cli::`metrics_and_health_are_served_on_exactly_the_given_address`"
-notes = "Not built: `litestream_replica_operation_errors_total`, `_l0_retention_files_total`, `_compaction_verify_error_count`, the three `_validation_*` series, and pprof. `sync_count` counts sync steps, not every one-second poll, and checkpoint series are served for every mode from the start (D163)"
+detected_by = "compat::`go_and_lsr_serve_the_same_metric_families`, compat::`go_and_lsr_agree_on_every_series_under_a_failing_store`; cli::`metrics_and_health_are_served_on_exactly_the_given_address`, sidecar::`health::tests::the_db_size_reads_zero_until_a_sync_ran`; plant::`db-size-counted-before-a-sync`"
+notes = "Not built: `litestream_replica_operation_errors_total`, `_l0_retention_files_total`, the three `_validation_*` series, and pprof. `litestream_compaction_verify_error_count` is served at 0, as Go's is with verification off, which is its default and the only setting accepted here. `sync_count` counts sync steps, not every one-second poll, and checkpoint series are served for every mode from the start (D163). `litestream_db_size` reads 0 until a sync has staged, as Go's does. A differential scrapes both daemons under a store that fails every call (CFG-48)"
 
 [[row]]
 table = "Config and startup"
@@ -1934,6 +1934,61 @@ at_risk = "None: every departure keeps more than Go, never less"
 recovery = "Operator: fix what the hold names (a stray object, a missing created-at time) and run it again"
 detected_by = "compat::`go_and_lsr_delete_the_same_aged_snapshots`, compat::`on_an_idle_replica_lsr_keeps_a_snapshot_go_deletes`, core::`the_pass_deletes_aged_snapshots_and_ends_the_drain`, core::`an_idle_replica_keeps_snapshots_go_would_delete`, core::`a_hold_deletes_nothing_and_names_itself`, core::`a_failed_delete_ends_the_pass`, core::`a_listing_that_keeps_a_deleted_key_stops_the_pass`, core::`retention_switched_off_deletes_nothing`, core::`a_passed_deadline_does_not_cut_the_pass`, sim::`the_pass_deletes_aged_snapshots_and_the_replica_restores`, sim::`a_failed_delete_ends_the_pass_and_a_power_loss_after_it_restores`, cli::`once_replicates_everything_committed_and_exits`"
 notes = "The idle-replica departure holds only while the run stages nothing new: a write since the newest snapshot, or the last connection's checkpoint, makes level 0 current and ages then run from now, as Go's. Go runs database by database and stops at the first error; every database runs here and each outcome is reported (D167)"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-48"
+circumstance = "The store refuses the credentials or cannot be reached when a database starts. Go counts `litestream_sync_error_count` for each failed attempt, because the database's first sync begins by asking the replica for its newest file (`db.go:1210`) and an error there fails the sync (`db.go:1360-1376`); an upload that fails later is only logged"
+response = "continue, as Go: each failed boot attempt is one `litestream_sync_count` and one `litestream_sync_error_count`, with its time in `litestream_sync_seconds`, so an alert on the error counter fires on the store as it does under Go. The same boot retries on its backoff and is a named degraded state in `lsr_degraded`. `litestream_db_size`, `_txid`, `_wal_size` and `_total_wal_bytes` read 0 until a sync has staged, as Go's do"
+signal = "`litestream_sync_error_count`, `lsr_degraded`"
+at_risk = "None. An upload that fails once the database has started raises `lsr_degraded` and `lsr_unreplicated_age_seconds`, and not the Go series, as in Go"
+recovery = "Automatic once the store answers"
+detected_by = "core::`work::a_boot_the_store_fails_counts_as_a_failed_sync_step`, core::`work::each_boot_attempt_that_fails_counts_once`, compat::`go_and_lsr_agree_on_every_series_under_a_failing_store`; plant::`boot-failure-not-a-failed-sync`"
+notes = "Go retries once a second and this daemon on a doubling wait, so the counts diverge as the outage lasts; both rise"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-49"
+circumstance = "`lsr version`, which a runbook calls as it calls `litestream version`; `-verbose`"
+response = "prints the version on one line, as Go's bare line. `-verbose` prints `Version:     <v>` and `OS/Arch:     <os>/<arch>` in Go's column, with Go's names for the system and the architecture, and not Go's Go-version, commit and commit-time lines (this is not a Go build). Extra arguments are ignored, as Go ignores them. The command is in `lsr --help`"
+signal = "exit 0"
+at_risk = "None. A script that reads the version expects Go's tag; this prints the crate's (`0.0.0` before a release)"
+recovery = "n/a"
+detected_by = "cli::`the_version_command_prints_go_s_bare_line`, cli::`args::tests::version_is_a_command_with_go_s_one_flag`, cli::`render::tests::the_version_is_a_bare_line_and_verbose_is_go_s_labelled_lines`; plant::`version-line-prefixed`"
+notes = "Go's version is its release tag, or `(development build)`"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-50"
+circumstance = "A snapshot or a compaction finishes. Go logs `snapshot complete` (`txid`, `size`) or `compaction complete` (`level`, `txid.min`, `txid.max`, `size`) at info level, after `system=store db=<name>`, and a deploy script may grep for either"
+response = "the same message, level and attribute names, in the text and the JSON log formats (the JSON handler nests `txid` as a group). Go's reasons for a snapshot are the `reason` of a debug `sync` line and not messages; this daemon keeps its own `replica position recovered; snapshot required` and `snapshot required` lines (docs/differences-from-go.md)"
+signal = "an info log line"
+at_risk = "None. A script that greps Go's snapshot reasons finds nothing"
+recovery = "n/a"
+detected_by = "sidecar::`logging::tests::a_compaction_and_a_snapshot_are_logged_as_go_logs_them`, sidecar::`logging::tests::json_nests_a_group_and_closes_it_before_the_next_key`, sidecar::`logging::tests::the_boot_lines_keep_their_wording`, cli::`crash_loop::a_crash_loop_with_writes_and_wal_restarts_stays_bounded`; plant::`maintenance-lines-not-go-s`"
+notes = "Go names the compaction of level 9 a snapshot; the level-9 files here are the same files"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-51"
+circumstance = "A `$NAME` or `${NAME}` that is not set, in a config file read with environment expansion. Go expands the whole file as text and says nothing; one in a comment or a key or value is the same to it"
+response = "expands to nothing, as Go. This daemon warns once per name when the parsed file shows a key or value read it, and is silent when the reference is only in a comment (`# the price is $9`), where Go is silent too. A file that does not parse keeps every warning"
+signal = "a config warning, or none"
+at_risk = "None"
+recovery = "Set the variable, or write `$` for the character"
+detected_by = "config::`env::an_unset_reference_in_a_comment_is_silent`, config::`env::an_unset_reference_that_changes_a_value_still_warns`, config::`env::only_the_names_a_value_reads_are_warned`, config::`env::an_unset_variable_is_empty_and_warned_once`; plant::`unset-in-a-comment-warns`"
+notes = "The check parses the file once more with each unset name replaced by a marker, and looks for the marker in the keys and values"
+
+[[row]]
+table = "Config and startup"
+id = "CFG-52"
+circumstance = "A config shared with Go carries a `litestream-rs:` section. Go reads the file leniently and then strictly into a scratch value, to warn of keys it does not know (`main.go:735-746`)"
+response = "Go warns once per start (`configuration contains unrecognized or duplicate key`, `line N: field litestream-rs not found in type main.Config`) and ignores the section, so one file starts either program and a rollback to Go needs no other file. This daemon reads the section"
+signal = "a warning in Go's log"
+at_risk = "None"
+recovery = "n/a"
+no_test = "Go's warning: code only"
+notes = "Go's side was checked by hand against the pinned build (it warned and replicated); nothing in this repository exercises it. Documented in docs/config-keys.md and docs/running.md"
 
 [[row]]
 table = "Circumstances the code does not distinguish"
