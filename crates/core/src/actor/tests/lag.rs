@@ -844,6 +844,35 @@ fn a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag() {
     assert_eq!(first_trip(&seen), None, "{seen:?}");
 }
 
+/// The same doubt while staging refuses the snapshot: before any snapshot is staged, only the
+/// end the WAL had when the doubt was first observed says its frames are on the replica, so
+/// they start no clock however long staging and the replica stay down.
+#[test]
+fn a_doubt_at_boot_over_a_replicated_wal_is_not_lag_before_its_snapshot() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    tear(&rig, 3, flipped);
+    let mut actor = Actor::new(go_like());
+    let again = first_bad_read(&mut rig, &mut actor, T0 + 2);
+    remote_down(&rig, 10_000);
+    staging_down(&rig);
+    let boot = rig.tick(&mut actor, again);
+    assert_eq!(
+        event(&boot),
+        Some(&Event::Booted {
+            cause: Some(SnapshotCause::NewestStagedFileUnreadable)
+        })
+    );
+    let seen = drive(&mut rig, &mut actor, again, again + 2 * BOUND);
+    assert!(
+        actor.staged() <= actor.replicated(),
+        "no snapshot was staged"
+    );
+    assert_eq!(actor.unreplicated_since(), None);
+    assert_eq!(first_trip(&seen), None, "{seen:?}");
+}
+
 /// The same doubt with a commit after the boot: that commit is lag, dated from when it was
 /// first seen, and trips once it has stayed off the replica past the bound. Staging refuses
 /// the snapshot, so only the baseline can tell the commit from the frames before it.
