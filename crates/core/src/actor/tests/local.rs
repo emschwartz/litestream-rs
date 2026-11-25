@@ -83,7 +83,7 @@ fn restarted_down(cfg: ActorConfig) -> (Rig, Actor, i64) {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
     assert_eq!(
-        (staged(&rig), ranges(&rig.remote)),
+        (all_staged(&rig), ranges(&rig.remote)),
         (vec![2, 3], vec![(1, 1)])
     );
     down(&rig);
@@ -108,7 +108,7 @@ fn a_restart_during_an_outage_stages_and_checkpoints_from_local_state() {
     let before = run(&mut rig, &mut actor, start, start + bound() - 1);
     assert!(!is_local(&actor), "{before:?}");
     assert_eq!(
-        staged(&rig),
+        all_staged(&rig),
         vec![2, 3],
         "nothing is staged before the bound"
     );
@@ -122,12 +122,15 @@ fn a_restart_during_an_outage_stages_and_checkpoints_from_local_state() {
         rig.commit(n);
         let now = start + bound() + i64::from(n);
         seen.extend(rig.settle(&mut actor, now));
-        assert_eq!(actor.staged().map(Txid::get), staged(&rig).last().copied());
+        assert_eq!(
+            actor.staged().map(Txid::get),
+            all_staged(&rig).last().copied()
+        );
         frames.push(rig.wal.committed_end().offset().frame_index());
     }
     no_stop(&seen);
     // One file a commit, and the engine's own write after each checkpoint.
-    assert!(staged(&rig).len() >= 23, "{:?}", staged(&rig));
+    assert!(all_staged(&rig).len() >= 23, "{:?}", all_staged(&rig));
     let checkpoints = seen
         .iter()
         .filter(|tick| matches!(event(tick), Some(Event::Checkpointed { .. })))
@@ -150,6 +153,7 @@ fn a_restart_during_an_outage_stages_and_checkpoints_from_local_state() {
         .collect();
     assert_eq!(booted, vec![&Event::Booted { cause: None }], "{after:?}");
     assert!(actor.booted() && actor.listed());
+    assert_eq!(actor.kept.local, LocalTry::Spent);
     assert_eq!(commits_restorable(&rig), (1..25).collect::<Vec<u8>>());
     assert_eq!(snapshots(&rig), vec![1], "{after:?}");
 }
@@ -207,7 +211,7 @@ fn boot_attempts_wait_on_the_upload_task_while_the_course_runs() {
     rig.commit(4);
     let tick = rig.tick(&mut actor, at + 1);
     assert_eq!(event(&tick), Some(&Event::Synced { files: 1 }));
-    assert_eq!(staged(&rig), vec![2, 3, 4]);
+    assert_eq!(all_staged(&rig), vec![2, 3, 4]);
     // The next attempt runs when the upload task's wait ends, fails there and waits longer.
     let due = upload.until().unwrap().unix_millis();
     let scratch = rig.remote.scratch_calls.load(Ordering::SeqCst);
@@ -247,7 +251,7 @@ fn nothing_is_uploaded_before_a_boot_lists_the_replica() {
         ));
     }
     seen.extend(run(&mut rig, &mut actor, at + 100, at + 120_000));
-    assert_eq!(staged(&rig), vec![2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(all_staged(&rig), vec![2, 3, 4, 5, 6, 7, 8, 9]);
     assert_eq!(rig.remote.calls(), calls, "{seen:?}");
     assert_eq!(ranges(&rig.remote), vec![(1, 1)]);
     assert!(
@@ -284,7 +288,11 @@ fn staging_that_does_not_read_whole_begins_no_course() {
         start + 10 * bound(),
     );
     assert_eq!(rig.staging.calls(), reads);
-    assert_eq!(staged(&rig), vec![2, 3, 4], "nothing was staged or deleted");
+    assert_eq!(
+        all_staged(&rig),
+        vec![2, 3, 4],
+        "nothing was staged or deleted"
+    );
 }
 
 /// A staged file that does not start where the one before it ended is no agreement either.
@@ -321,7 +329,7 @@ fn a_wal_that_does_not_continue_staging_begins_no_course() {
     run(&mut rig, &mut actor, T0 + 1_000, T0 + 1_000 + bound());
     assert!(!is_local(&actor));
     assert_eq!(actor.kept.local, LocalTry::Spent);
-    assert_eq!(staged(&rig), vec![2, 3]);
+    assert_eq!(all_staged(&rig), vec![2, 3]);
 }
 
 /// With nothing staged there is nothing to agree with: a first start during an outage waits
@@ -334,7 +342,7 @@ fn empty_staging_begins_no_course() {
     run(&mut rig, &mut actor, T0, T0 + bound());
     assert!(!is_local(&actor));
     assert_eq!(actor.kept.local, LocalTry::Spent);
-    assert!(staged(&rig).is_empty());
+    assert!(all_staged(&rig).is_empty());
 }
 
 /// A read of staging that fails during the try judges nothing: the next failed boot attempt
@@ -386,7 +394,7 @@ fn the_boot_after_the_course_stops_for_another_writer() {
         rig.commit(n);
         rig.settle(&mut actor, at + i64::from(n));
     }
-    assert_eq!(staged(&rig), vec![2, 3, 4, 5, 6]);
+    assert_eq!(all_staged(&rig), vec![2, 3, 4, 5, 6]);
     let foreign = put_foreign(&rig, 2);
     let theirs = super::second_writer::read_whole(&rig.remote.inner, &foreign);
     up(&rig);
@@ -402,7 +410,7 @@ fn the_boot_after_the_course_stops_for_another_writer() {
         theirs
     );
     assert_eq!(
-        staged(&rig),
+        all_staged(&rig),
         vec![2, 3, 4, 5, 6],
         "staging is left for the operator"
     );
@@ -429,7 +437,7 @@ fn local_past_three() -> (Rig, Actor, i64) {
     commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
     stage_held(&mut rig, &mut actor, &[4, 5], T0 + 2);
     assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
-    assert_eq!(staged(&rig), vec![2, 3, 4, 5]);
+    assert_eq!(all_staged(&rig), vec![2, 3, 4, 5]);
     down(&rig);
     let mut actor = Actor::new(go_like());
     let at = (T0 + 1_000).saturating_add(bound());
@@ -439,7 +447,7 @@ fn local_past_three() -> (Rig, Actor, i64) {
         rig.commit(n);
         rig.settle(&mut actor, at.saturating_add(i64::from(n)));
     }
-    assert_eq!(staged(&rig), vec![2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(all_staged(&rig), vec![2, 3, 4, 5, 6, 7, 8]);
     (rig, actor, at.saturating_add(10))
 }
 
@@ -550,7 +558,7 @@ fn a_step_that_needs_a_snapshot_ends_the_course() {
     assert!(matches!(actor.engine.course, Course::Unbooted));
     assert_eq!(actor.kept.tasks.get(Task::Sync).failures(), failures);
     assert_eq!(actor.kept.tasks.get(Task::Upload).failures(), 0);
-    assert_eq!(staged(&rig), vec![2, 3], "no snapshot was staged");
+    assert_eq!(all_staged(&rig), vec![2, 3], "no snapshot was staged");
     // The course is not tried again.
     run(&mut rig, &mut actor, at + 2, at + 10 * bound());
     assert!(matches!(actor.engine.course, Course::Unbooted));
@@ -660,13 +668,13 @@ fn a_draining_course_syncs_without_checkpointing() {
     assert!(actor.checkpoints());
     actor.begin_shutdown(ts(at + 5_000));
     assert!(!actor.checkpoints());
-    let before = staged(&rig).len();
+    let before = all_staged(&rig).len();
     let mut seen = Vec::new();
     for n in 4..10_u8 {
         rig.commit(n);
         seen.extend(rig.settle(&mut actor, at + i64::from(n)));
     }
-    assert_eq!(staged(&rig).len(), before + 6, "a file a commit");
+    assert_eq!(all_staged(&rig).len(), before + 6, "a file a commit");
     assert!(
         !seen
             .iter()
@@ -690,7 +698,7 @@ fn the_course_wakes_for_its_checkpoint_schedule() {
     };
     let (mut rig, mut actor, at) = restarted_down(cfg);
     rig.commit(4);
-    let seen = rig.settle(&mut actor, at + 1);
+    let seen = rig.settle(&mut actor, at.saturating_add(1));
     let boot = actor.kept.tasks.get(Task::Upload).until().unwrap();
     let wake = match seen.last().and_then(next_of) {
         Some(Next::At(wake)) => wake,
@@ -738,7 +746,7 @@ fn a_due_boot_attempt_waits_its_turn_behind_the_courses_steps() {
     assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), scratch + 1);
     let tick = rig.tick(&mut actor, due);
     assert_eq!(event(&tick), Some(&Event::Synced { files: 1 }));
-    assert_eq!(staged(&rig).len(), 11);
+    assert_eq!(all_staged(&rig).len(), 11);
     // The count began again: the next attempt, due now, waits eight more steps.
     let due = actor
         .kept
@@ -756,4 +764,321 @@ fn a_due_boot_attempt_waits_its_turn_behind_the_courses_steps() {
     rig.commit(20);
     rig.tick(&mut actor, due);
     assert_eq!(rig.remote.scratch_calls.load(Ordering::SeqCst), scratch + 1);
+}
+
+/// The transactions of the files in the course's slot.
+fn apart(rig: &Rig) -> Vec<u64> {
+    Rig::files(&rig.staging, Level::LOCAL_COURSE)
+        .iter()
+        .map(|f| f.key.range().max().get())
+        .collect()
+}
+
+/// Every staged file's transaction: level 0, then the course's slot.
+fn all_staged(rig: &Rig) -> Vec<u64> {
+    let mut all = staged(rig);
+    all.extend(apart(rig));
+    all
+}
+
+fn l0(n: u64) -> FileKey {
+    FileKey::new(Level::ZERO, TxidRange::single(Txid::new(n).unwrap()))
+}
+
+/// The replica holds transactions 1 to 3 and staging only 2: its newest file was deleted
+/// and an older one put back, as an operator restoring an old copy of the directory leaves
+/// it. The WAL still holds everything from the end of 2.
+fn staging_behind() -> Rig {
+    let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    let two = block_on(rig.staging.inner.read(&l0(2), 0, all)).unwrap();
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    let held: Vec<FileKey> = staged(&rig).into_iter().map(l0).collect();
+    block_on(rig.staging.inner.delete(&held)).unwrap();
+    super::second_writer::put_whole(&rig.staging.inner, &l0(2), &two);
+    assert_eq!(all_staged(&rig), vec![2]);
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
+    rig
+}
+
+/// The transaction each batch of uploads in `seen` ended at.
+fn uploaded(seen: &[Tick]) -> Vec<u64> {
+    seen.iter()
+        .filter_map(|tick| match event(tick) {
+            Some(Event::Uploaded(crate::upload::Did::Put(info))) => {
+                Some(info.key.range().max().get())
+            }
+            Some(_) | None => None,
+        })
+        .collect()
+}
+
+/// [`staging_behind`], restarted with the store down and a commit made, on a local course
+/// that began at transaction 2 and staged its own transaction 3 and 4.
+fn course_begun_behind() -> (Rig, Actor, i64) {
+    let mut rig = staging_behind();
+    down(&rig);
+    let mut actor = Actor::new(go_like());
+    let at = (T0 + 1_000).saturating_add(bound());
+    rig.commit(4);
+    run(&mut rig, &mut actor, T0 + 1_000, at);
+    assert!(is_local(&actor));
+    rig.commit(5);
+    rig.settle(&mut actor, at.saturating_add(1));
+    assert_eq!((staged(&rig), apart(&rig)), (vec![2], vec![3, 4]));
+    (rig, actor, at)
+}
+
+/// A course that began with staging behind the replica staged its files at transactions
+/// the replica already holds. The boot that lists the replica deletes them before it judges
+/// anything, and decides as if the course had not run: the WAL still vouches for the
+/// replica's newest file, so it continues from there, and the replica's file is untouched.
+#[test]
+fn a_course_begun_behind_the_replica_is_dropped_when_the_replica_is_listed() {
+    let (mut rig, mut actor, at) = course_begun_behind();
+    up(&rig);
+    let seen = run(&mut rig, &mut actor, at + 600_000, at + 600_000);
+    no_stop(&seen);
+    assert!(
+        seen.iter()
+            .any(|tick| event(tick) == Some(&Event::Booted { cause: None })),
+        "{seen:?}"
+    );
+    assert_eq!(actor.kept.local, LocalTry::Spent);
+    // Commits 4 and 5 go up as the one file the boot's engine staged for them, above the
+    // replica's own transaction 3.
+    assert_eq!(uploaded(&seen), vec![4]);
+    assert_eq!(restored(&rig), 5);
+}
+
+/// The same with the replica's newest file unreadable when the store returns, to the process
+/// that ran the course and to one started after it. An upload that found a staged file under
+/// an unreadable object's key would take the object for its own, cut short, and write the
+/// staged file over it: here that file would be the course's, with other content than the
+/// replica's. No boot or upload reads the course's slot, so nothing stands at that key: the
+/// unreadable file is reported and left alone, and once it reads again the course's files are
+/// deleted for numbering transactions the replica holds.
+#[test]
+fn a_courses_file_is_never_written_over_an_unreadable_replica_file() {
+    for later_process in [false, true] {
+        let (mut rig, mut actor, at) = course_begun_behind();
+        if later_process {
+            actor = Actor::new(go_like());
+        }
+        let three = super::second_writer::read_whole(&rig.remote.inner, &l0(3));
+        let rotten = b"not an ltx file".to_vec();
+        super::second_writer::put_whole(&rig.remote.inner, &l0(3), &rotten);
+        up(&rig);
+        let seen = run(&mut rig, &mut actor, at + 600_000, at + 660_000);
+        assert_eq!(
+            super::second_writer::read_whole(&rig.remote.inner, &l0(3)),
+            rotten,
+            "{seen:?}"
+        );
+        assert_eq!((staged(&rig), apart(&rig)), (vec![2], vec![3, 4]));
+        assert!(!actor.booted());
+        assert!(
+            seen.iter().any(|tick| matches!(
+                event(tick),
+                Some(
+                    Event::Retrying {
+                        fault: Fault::RemoteCorrupt,
+                        ..
+                    } | Event::Degraded {
+                        cause: PersistentCause::RemoteCorrupt,
+                        ..
+                    }
+                )
+            )),
+            "{seen:?}"
+        );
+        super::second_writer::put_whole(&rig.remote.inner, &l0(3), &three);
+        let seen = run(&mut rig, &mut actor, at + 1_200_000, at + 1_200_000);
+        no_stop(&seen);
+        assert!(actor.booted(), "{seen:?}");
+        assert!(apart(&rig).is_empty());
+        assert_eq!(uploaded(&seen), vec![4]);
+        assert_eq!(restored(&rig), 5);
+    }
+}
+
+/// A course that ended early (here by a rebuild) leaves its files in staging, and the
+/// process still knows no boot judged them: the boot that lists the replica deletes them.
+#[test]
+fn the_files_of_a_course_that_ended_early_are_still_judged() {
+    let (mut rig, mut actor, at) = course_begun_behind();
+    actor.rebuild();
+    assert_eq!((staged(&rig), apart(&rig)), (vec![2], vec![3, 4]));
+    up(&rig);
+    let seen = run(&mut rig, &mut actor, at + 600_000, at + 600_000);
+    no_stop(&seen);
+    assert!(actor.booted(), "{seen:?}");
+    assert_eq!(actor.kept.local, LocalTry::Spent);
+    assert_eq!(uploaded(&seen), vec![4]);
+    assert_eq!(restored(&rig), 5);
+}
+
+/// A delete of the course's files that fails leaves them unjudged: the boot attempt fails
+/// with the fault, and the next one deletes what is left before it judges.
+#[test]
+fn a_failed_delete_of_the_courses_files_is_tried_again() {
+    let (mut rig, mut actor, at) = course_begun_behind();
+    up(&rig);
+    rig.staging
+        .inner
+        .inject_failure(StoreOp::Delete, transient(StoreOp::Delete));
+    let due = actor
+        .kept
+        .tasks
+        .get(Task::Upload)
+        .until()
+        .unwrap()
+        .unix_millis()
+        .max(at + 2);
+    let tick = rig.tick(&mut actor, due);
+    assert!(
+        matches!(
+            event(&tick),
+            Some(Event::Retrying { .. } | Event::Degraded { .. })
+        ),
+        "{tick:?}"
+    );
+    assert_eq!(apart(&rig), vec![3, 4], "the delete failed");
+    assert!(!actor.booted());
+    let seen = run(&mut rig, &mut actor, due + 600_000, due + 600_000);
+    no_stop(&seen);
+    assert!(actor.booted(), "{seen:?}");
+    assert_eq!(actor.kept.local, LocalTry::Spent);
+    assert_eq!(uploaded(&seen), vec![4]);
+    assert_eq!(restored(&rig), 5);
+}
+
+/// The replica's newest file is the one the course began at: the course's files are all
+/// above it, and the boot sends them as staged, one restore point a commit.
+#[test]
+fn a_course_begun_at_the_replicas_newest_file_keeps_its_files() {
+    let (mut rig, mut actor) = caught_up();
+    commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+    commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+    assert_eq!(ranges(&rig.remote), vec![(1, 1), (2, 2), (3, 3)]);
+    down(&rig);
+    let mut actor = Actor::new(go_like());
+    let at = (T0 + 1_000).saturating_add(bound());
+    rig.commit(4);
+    run(&mut rig, &mut actor, T0 + 1_000, at);
+    rig.commit(5);
+    rig.settle(&mut actor, at.saturating_add(1));
+    up(&rig);
+    let seen = run(&mut rig, &mut actor, at + 600_000, at + 600_000);
+    no_stop(&seen);
+    assert_eq!(actor.kept.local, LocalTry::Spent);
+    // Two files, one a commit, in one batch that ends at the second.
+    assert_eq!(uploaded(&seen), vec![5]);
+    assert_eq!(restored(&rig), 5);
+}
+
+/// A replica that holds nothing has no file above the course either: the snapshot that
+/// never went up and the course's files after it are sent as staged.
+#[test]
+fn a_course_over_an_empty_replica_keeps_its_files() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+    rig.commit(1);
+    rig.settle(&mut actor, T0);
+    assert_eq!(all_staged(&rig), vec![1]);
+    assert!(ranges(&rig.remote).is_empty());
+    down(&rig);
+    let mut actor = Actor::new(go_like());
+    let at = (T0 + 1_000).saturating_add(bound());
+    rig.commit(2);
+    run(&mut rig, &mut actor, T0 + 1_000, at);
+    rig.commit(3);
+    rig.settle(&mut actor, at.saturating_add(1));
+    up(&rig);
+    let seen = run(&mut rig, &mut actor, at + 600_000, at + 600_000);
+    no_stop(&seen);
+    assert_eq!(actor.kept.local, LocalTry::Spent);
+    assert_eq!(uploaded(&seen), vec![3]);
+    assert_eq!(restored(&rig), 3);
+}
+
+/// A second restart while the store is still down: the new process finds the first one's
+/// files in the slot, sees that they continue level 0 and that the WAL continues them, and
+/// goes on from the newest. When the store answers, every commit of both is a restore point.
+#[test]
+fn a_later_process_goes_on_from_the_course_of_the_first() {
+    let (mut rig, mut first, at) = restarted_down(go_like());
+    rig.commit(4);
+    rig.settle(&mut first, at.saturating_add(1));
+    assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3], vec![4]));
+    let mut second = Actor::new(go_like());
+    let start = at.saturating_add(1_000);
+    let begun = start.saturating_add(bound());
+    rig.commit(5);
+    run(&mut rig, &mut second, start, begun);
+    assert!(is_local(&second));
+    rig.commit(6);
+    rig.settle(&mut second, begun.saturating_add(1));
+    assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3], vec![4, 5, 6]));
+    assert_eq!(second.staged(), Txid::new(6));
+    up(&rig);
+    let seen = run(&mut rig, &mut second, begun + 600_000, begun + 600_000);
+    no_stop(&seen);
+    assert!(second.booted(), "{seen:?}");
+    assert!(apart(&rig).is_empty());
+    assert_eq!(commits_restorable(&rig), (1..=6).collect::<Vec<u8>>());
+}
+
+/// A boot whose listing answered moved the course's files up to level 0 and then failed
+/// further on: the course goes on, over the level 0 it has now, and its next file is the
+/// slot's again.
+#[test]
+fn a_course_goes_on_over_the_files_a_boot_moved_up() {
+    use crate::fault::role::{Replica, Staging};
+    let (mut rig, mut actor, at) = restarted_down(go_like());
+    rig.commit(4);
+    rig.settle(&mut actor, at.saturating_add(1));
+    assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3], vec![4]));
+    // The replica holds transaction 1, below level 0's newest.
+    let moved = block_on(actor.settle_course(&Staging(&rig.staging), &Replica(&rig.remote)));
+    assert_eq!(moved, Ok(true));
+    assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3, 4], vec![]));
+    assert!(is_local(&actor));
+    rig.commit(5);
+    rig.settle(&mut actor, at.saturating_add(2));
+    assert_eq!((staged(&rig), apart(&rig)), (vec![2, 3, 4], vec![5]));
+    assert_eq!(actor.staged(), Txid::new(5));
+    up(&rig);
+    let seen = run(&mut rig, &mut actor, at + 600_000, at + 600_000);
+    no_stop(&seen);
+    assert_eq!(commits_restorable(&rig), (1..=5).collect::<Vec<u8>>());
+}
+
+/// Level 0 was emptied under a course: its files are above no level-0 file. A replica that
+/// holds anything is past them, and they are deleted; over an empty replica they move up.
+#[test]
+fn slot_files_over_an_empty_level_zero_are_settled_against_the_replica() {
+    use crate::fault::role::{Replica, Staging};
+    let slot = |n: u64| {
+        FileKey::new(
+            Level::LOCAL_COURSE,
+            TxidRange::single(Txid::new(n).unwrap()),
+        )
+    };
+    for replica_holds in [false, true] {
+        let rig = Rig::new();
+        let mut actor = Actor::new(cfg());
+        super::second_writer::put_whole(&rig.staging.inner, &slot(1), b"one");
+        if replica_holds {
+            super::second_writer::put_whole(&rig.remote.inner, &l0(1), b"its own");
+        }
+        let moved = block_on(actor.settle_course(&Staging(&rig.staging), &Replica(&rig.remote)));
+        assert_eq!(moved, Ok(!replica_holds));
+        let want = if replica_holds { vec![] } else { vec![1] };
+        assert_eq!((staged(&rig), apart(&rig)), (want, vec![]));
+    }
 }

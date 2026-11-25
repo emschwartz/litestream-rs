@@ -74,6 +74,7 @@
 //! checkpoints it did not run and infers the application's automatic checkpoints that
 //! cannot run ([`Actor::app_checkpoints`]). The count changes no decision.
 
+mod apart;
 mod clock;
 mod lag;
 mod local;
@@ -1238,20 +1239,20 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        let task = self.boot_task();
         let clock = env.clock;
         let began = clock.now();
         let took = || clock.now().saturating_duration_since(began);
         let takeover = self.boot_takeover();
         let doubted = self.kept.suspect_staged;
-        let denied = &mut self.kept.scratch_sweep_denied;
-        let listed = match boot_listing(env.staging, env.remote, denied, takeover).await {
+        let listed = match self.boot_listed(env, takeover).await {
             Ok(listed) => listed,
             Err(step) => {
                 let tick = self.boot_step(step, took(), now);
                 return self.or_local(env, tick, now).await;
             }
         };
+        // After the listing: it may have ended a local course, whose attempts wait elsewhere.
+        let task = self.boot_task();
         let suspect = &mut self.kept.suspect_staged;
         let Judged {
             staged:

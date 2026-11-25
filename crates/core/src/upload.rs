@@ -438,7 +438,7 @@ async fn judge_tail<L: Role, S: Role>(
 }
 
 /// Streams both copies and compares them chunk by chunk.
-async fn same_bytes<L: Role, S: Role>(
+pub(crate) async fn same_bytes<L: Role, S: Role>(
     staging: &L,
     remote: &S,
     key: &FileKey,

@@ -29,6 +29,10 @@ impl Level {
     pub const SNAPSHOT: Self = Self(9);
     /// The level every sync writes first.
     pub const ZERO: Self = Self(0);
+    /// The level whose slot in the staging directory holds the files a local course staged
+    /// before any boot listed the replica (`crate::actor`'s `local` module). Staging holds
+    /// level 0 otherwise, and on a replica this is an ordinary compaction level.
+    pub(crate) const LOCAL_COURSE: Self = Self(8);
     /// Every level, lowest first.
     pub const ALL: [Self; 10] = [
         Self(0),

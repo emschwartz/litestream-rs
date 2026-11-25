@@ -21,6 +21,7 @@ use crate::store::{Listing, PageLimit, ReadLen, StoreError, StoreOp, Upload};
 
 mod after_delete;
 mod ahead;
+mod apart;
 mod audit;
 
 const PS: PageSize = PageSize::MIN;

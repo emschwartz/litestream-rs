@@ -23,18 +23,47 @@
 //!   numbers a snapshot. So does a boot attempt that deleted staged files before it failed.
 //!
 //! The try is made once per process ([`LocalTry`]): it reads every staged file.
+//!
+//! # Where the course's files are kept
+//!
+//! Every level-0 file a boot finds in staging is taken to be above the replica's newest
+//! file, or to be this engine's own copy of it: files are staged only after a boot listed the
+//! replica. An upload leans on that when the replica's newest file does not read: it takes
+//! the object for its own, cut short, and writes the staged file over it. A course stages
+//! with no listing. When staging was behind the replica as the course began (its newest files
+//! deleted, an old copy of the directory put back), its files number transactions the
+//! replica already holds, with other content, and nothing in the files says so.
+//!
+//! So where a file is kept says what made it. A course writes its files in a slot of their
+//! own ([`Level::LOCAL_COURSE`], which staging uses for nothing else) and sees staging
+//! through [`Apart`]: level 0 through the newest file there as it began (its base), and
+//! above that the slot. No boot, upload or prune reads the slot, in this process or a later
+//! one. The boot that lists the replica settles it first (`Actor::boot_listed`): with the
+//! replica's newest transaction at or below the newest level-0 file, every file in the slot is
+//! above the replica, and is moved up to level 0 to be judged as any pending file is; with
+//! the replica past it, the slot's files are deleted, and the boot decides as if no course
+//! had run.
 
-use lsr_ltx::{PageSize, Timestamp, TxidRange};
+use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
 
+use super::apart::{Apart, raise_course};
 use super::parts::{Course, Engine, Stop, Tail};
-use super::{Actor, Env, Task, Tick, boot_wal_of, open_reader, wal_view};
+use super::{
+    Actor, BootStep, Env, Listed, Takeover, Task, Tick, boot_listing, boot_wal_of, open_reader,
+    wal_view,
+};
 use crate::checkpoint::CheckpointState;
 use crate::fault::role::Role;
 use crate::fault::{Fault, Next};
+use crate::inventory::Inventory;
 use crate::layout::{FileKey, Level};
 use crate::position::Position;
-use crate::recover::{NewestStagedFile, PositionSource, Recovered, recover_traced};
+use crate::recover::{
+    NewestStagedFile, PositionSource, Recovered, newest_level_zero, recover_traced,
+};
 use crate::source::{Checkpointer, PageSource, WalSource};
+use crate::store::{PageLimit, exists};
+use crate::upload::{drop_staged_from, inventory_fault};
 use crate::witness::{Base, Witnessed, scan};
 
 /// Whether this process may still try the local course.
@@ -44,6 +73,22 @@ pub(super) enum LocalTry {
     Open,
     /// Staging and the WAL were judged once, whatever the answer.
     Spent,
+}
+
+/// `env` with staging as a local course sees it.
+fn lend<'e, W, P, C, L, R>(
+    env: &'e mut Env<'_, W, P, C, L, R>,
+    staging: &'e Apart<'e, L>,
+) -> Env<'e, W, P, C, Apart<'e, L>, R> {
+    Env {
+        wal: &mut *env.wal,
+        db: &mut *env.db,
+        ck: &mut *env.ck,
+        staging,
+        remote: env.remote,
+        clock: env.clock,
+        notice: &mut *env.notice,
+    }
 }
 
 /// Proof that staging and the WAL agree, as of the reads that made it: every staged level-0
@@ -64,6 +109,8 @@ struct Agreed {
 pub(super) struct LocalAt {
     position: Position,
     tail: Tail,
+    /// The newest level-0 file under the course's own ([`Apart`]).
+    base: Option<Txid>,
 }
 
 impl LocalAt {
@@ -77,16 +124,30 @@ impl LocalAt {
 
     /// The course after one of its steps left it at `position`.
     pub(super) const fn moved(self, position: Position, tail: Tail) -> Self {
-        Self { position, tail }
+        Self {
+            position,
+            tail,
+            base: self.base,
+        }
+    }
+
+    /// The course after a boot moved its files up to level 0: the file it stands at is the
+    /// newest there.
+    const fn raised(self) -> Self {
+        Self {
+            base: Some(self.position.txid()),
+            ..self
+        }
     }
 }
 
 impl Course {
-    /// The local course `agreed` proves.
-    const fn local(agreed: &Agreed) -> Self {
+    /// The local course `agreed` proves, over level 0 through `base`.
+    const fn local(agreed: &Agreed, base: Option<Txid>) -> Self {
         Self::Local(LocalAt {
             position: agreed.position,
             tail: Tail::Synced,
+            base,
         })
     }
 }
@@ -167,7 +228,11 @@ impl Actor {
         R: Role,
     {
         match self.engine.course {
-            Course::Local(_) => self.wal_unit(env, now, self.checkpoints()).await,
+            Course::Local(at) => {
+                let staging = Apart::over(env.staging, at.base);
+                let mut env = lend(env, &staging);
+                self.wal_unit(&mut env, now, self.checkpoints()).await
+            }
             Course::Unbooted | Course::Snapshot { .. } | Course::At { .. } => None,
         }
     }
@@ -199,7 +264,13 @@ impl Actor {
             | Tick::DeadlineReached(_)) => return other,
         };
         // A read that failed judges nothing: the next failed attempt asks again.
-        let Ok(agreed) = agree::<W, L, R>(env.wal, env.staging).await else {
+        let Ok(base) = newest_level_zero(env.staging).await else {
+            return Tick::Ran { event, next };
+        };
+        let base = base.map(|info| info.key.range().max());
+        // With the slot's files: a course an earlier process began goes on from them.
+        let staging = Apart::over(env.staging, base);
+        let Ok(agreed) = agree::<W, _, R>(env.wal, &staging).await else {
             return Tick::Ran { event, next };
         };
         self.kept.local = LocalTry::Spent;
@@ -207,7 +278,7 @@ impl Actor {
             return Tick::Ran { event, next };
         };
         self.engine = Engine {
-            course: Course::local(&agreed),
+            course: Course::local(&agreed, base),
             page_size: Some(agreed.page_size),
             checkpoint: CheckpointState::boot(now),
             witnesses: agreed.tokens.into_iter().collect(),
@@ -219,6 +290,67 @@ impl Actor {
             event,
             next: Next::Now,
         }
+    }
+
+    /// The boot's listing ([`boot_listing`]), with the files a local course left in its slot
+    /// settled before anything is made of it (the module docs say why they are kept apart).
+    /// The slot is looked at on every boot whose listing answers, whatever this process
+    /// knows: the course may have been an earlier process's.
+    pub(super) async fn boot_listed<W, P, C, L, R>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        takeover: Takeover,
+    ) -> Result<Listed, BootStep>
+    where
+        L: Role,
+        R: Role,
+    {
+        let denied = &mut self.kept.scratch_sweep_denied;
+        let listed = boot_listing(env.staging, env.remote, denied, takeover).await?;
+        let slot = env
+            .staging
+            .list(Level::LOCAL_COURSE, None, PageLimit::ONE)
+            .await
+            .map_err(|err| L::fault(&err))?;
+        if slot.files.is_empty() || !self.settle_course(env.staging, env.remote).await? {
+            return Ok(listed);
+        }
+        // Level 0 gained the course's files: the listing is made again over them.
+        let denied = &mut self.kept.scratch_sweep_denied;
+        boot_listing(env.staging, env.remote, denied, takeover).await
+    }
+
+    /// Settles the files in the course's slot against the replica as listed now. The
+    /// replica's newest transaction, at any level, at or below the newest level-0 staged
+    /// file: every file in the slot is above the replica, as a file staged after a boot is,
+    /// and moves up to level 0. Past it: the slot's files number transactions the replica
+    /// holds, so they are deleted and a course in progress ends. Says whether level 0 gained
+    /// files. Called once the boot's own listing answered, so a boot that cannot reach the
+    /// replica leaves staging as it found it.
+    pub(super) async fn settle_course<L: Role, R: Role>(
+        &mut self,
+        staging: &L,
+        remote: &R,
+    ) -> Result<bool, Fault> {
+        let base = newest_level_zero(staging)
+            .await?
+            .map(|info| info.key.range().max());
+        let held = Inventory::load(remote)
+            .await
+            .map_err(|err| inventory_fault::<R>(&err))?
+            .newest();
+        if held > base {
+            drop_staged_from(&Apart::over(staging, None), Txid::MIN).await?;
+            if matches!(self.engine.course, Course::Local(_)) {
+                self.leave_local();
+            }
+            return Ok(false);
+        }
+        raise_course(staging).await?;
+        if let Course::Local(at) = self.engine.course {
+            self.engine.course = Course::Local(at.raised());
+        }
+        Ok(true)
     }
 
     /// `tick`, the end of a boot attempt, which leaves a local course as it was. One that
@@ -238,7 +370,8 @@ impl Actor {
             return tick;
         };
         let key = FileKey::new(Level::ZERO, TxidRange::single(at.position().txid()));
-        if matches!(crate::store::exists(env.staging, &key).await, Ok(true)) {
+        let staging = Apart::over(env.staging, at.base);
+        if matches!(exists(&staging, &key).await, Ok(true)) {
             // The attempt had its turn ahead of the course's own steps.
             self.engine.syncs_ahead = 0;
             return tick;
