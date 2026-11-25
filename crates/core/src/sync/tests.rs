@@ -885,6 +885,55 @@ impl FileSink for Chunks {
     }
 }
 
+/// A file larger than the flush size leaves in writes of that size: every write but the last
+/// is at least `FLUSH_AT`, and not more than one page past it.
+#[test]
+fn a_large_file_reaches_the_upload_in_writes_of_the_flush_size() {
+    let pages = 2_000_u32;
+    let wal = FakeWal::new(PS, Salts { salt1: 1, salt2: 2 });
+    commit(&wal, &[1], 1);
+    let mut db = FakeDb::new(PS);
+    let mut state = 0x9e37_79b9_u32;
+    for n in 1..=pages {
+        let page: Vec<u8> = (0..PS.bytes())
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        db.write_page(pg(n), &page);
+    }
+    db.set_page_count(pages);
+    let map = PageMap::new(PS);
+    let plan = Plan::new(&map, None, nz(pages), PS);
+    let origin = WalOrigin::new(32, 0, 1, 2).unwrap();
+    let header = Header::new(header_fields(Txid::MIN, nz(pages), PS, origin, ts(1), 0)).unwrap();
+    let mut chunks = Chunks::default();
+    let mut wal = reader(wal.file_bytes());
+    block_on(fill(
+        &mut chunks,
+        header,
+        &plan,
+        &mut wal,
+        &mut db,
+        &mut PageChecksumTable::new(),
+        Staging::<MemStore>::fault,
+    ))
+    .unwrap();
+    let (last, rest) = chunks.0.split_last().unwrap();
+    assert!(rest.len() >= 3, "{} writes", chunks.0.len());
+    assert!(!last.is_empty());
+    for chunk in rest {
+        assert!(
+            (FLUSH_AT..FLUSH_AT + 4 * PS.bytes()).contains(&chunk.len()),
+            "a write of {} bytes",
+            chunk.len()
+        );
+    }
+}
+
 /// The encoder's output is held until a mebibyte is ready, so a file smaller
 /// than that reaches the store in one write, not one per page.
 #[test]

@@ -232,6 +232,8 @@ struct Script {
     begins: usize,
     fail_begin: Option<StoreError>,
     writes: usize,
+    /// The length of every chunk written, in order.
+    write_lens: Vec<usize>,
     fail_write: Option<(usize, StoreError)>,
     fail_commit: Option<StoreError>,
     abort_error: Option<StoreError>,
@@ -349,6 +351,7 @@ impl Upload for SpyUpload {
         let mut script = self.script();
         let nth = script.writes;
         script.writes += 1;
+        script.write_lens.push(chunk.len());
         let injected = match script.fail_write.take() {
             Some((n, err)) if n == nth => Some(err),
             other => {
@@ -1352,4 +1355,37 @@ fn an_output_acknowledged_short_is_reported_and_left_to_the_caller() {
         1,
         "the compactor deleted a replace's key"
     );
+}
+
+/// The output reaches the upload in writes of the flush size, the pages and the index alike:
+/// every write but the last is at least `FLUSH_BYTES`, and the file is several of them. A
+/// flush size gone wrong, or an index that went out in pieces of its own size, shows here.
+#[test]
+fn the_output_reaches_the_upload_in_writes_of_the_flush_size() {
+    let ps = size(512);
+    let source = MemStore::new();
+    let mut big = Spec::plain(512, 40_000, 1, 1, &[]);
+    big.pages = (1..=40_000_u32)
+        .map(|p| (p, vec![u8::try_from(p % 251).unwrap(); ps.bytes()]))
+        .collect();
+    let small = Spec::plain(512, 40_000, 2, 2, &[(1, 9)]);
+    let infos = vec![put(&source, 0, &big), put(&source, 0, &small)];
+    let dest = Spy::default();
+    block_on(compact_in(
+        &Staging(&source),
+        &dest,
+        &inputs(&infos),
+        level(1),
+    ))
+    .unwrap();
+    let lens = dest.script().write_lens.clone();
+    let (last, rest) = lens.split_last().unwrap();
+    assert!(rest.len() >= 3, "{lens:?}");
+    assert!(*last > 0);
+    for len in rest {
+        assert!(
+            (FLUSH_BYTES..FLUSH_BYTES + 32 * 1024).contains(len),
+            "a write of {len} bytes in {lens:?}"
+        );
+    }
 }
