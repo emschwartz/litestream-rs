@@ -57,7 +57,7 @@ const READ: ReadLen = ReadLen::CHUNK;
 /// The digest reads the stream as little-endian words dealt round-robin to four independent
 /// multiply-and-rotate lanes, so a core runs about eight bytes a cycle where a byte-at-a-time
 /// FNV-1a runs at its multiply latency, one byte in four or five cycles (measured at
-/// 0.75 GB/s against more than 5 GB/s, `docs/decisions/D205.md`). The words are laid out by
+/// 0.75 GB/s against more than 5 GB/s, `docs/decisions/D210.md`). The words are laid out by
 /// position in the stream, so any split of the same bytes into `add` calls gives the same
 /// digest; up to 31 bytes wait in `pending` for the next call. It is an equality check
 /// between two reads of one file, not a defence against an adversary, and it is never stored.
