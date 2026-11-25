@@ -61,7 +61,7 @@ const SETS: &[(&str, &str)] = &[
     ),
     (
         "top.l0-retention-check-interval",
-        "`Config.maintenance`: how often the level 0 retention pass runs (whole milliseconds, above 0).",
+        "`Config.maintenance`: how often the level 0 retention pass runs (whole milliseconds, above 0). Unset, it runs every 120 s (up to 240 s while a compaction job waits), not Go's 15 s (docs/decisions/D193.md); set, exactly at the value.",
     ),
     ("top.retention", CONTAINER),
     (

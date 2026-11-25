@@ -274,7 +274,11 @@ pub fn names_fault(scenario: &Scenario, kind: FaultKind) -> bool {
 #[must_use]
 pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
     match kind {
-        FaultKind::StoreTransient => &[store_flaky_5pct, commit_fails_after_publish],
+        FaultKind::StoreTransient => &[
+            store_flaky_5pct,
+            commit_fails_after_publish,
+            fault_drops_what_the_engine_remembers_of_the_replica,
+        ],
         FaultKind::StoreThrottled => &[store_429_retry_after],
         FaultKind::StoreCredentials => &[creds_revoked_mid_run],
         FaultKind::StorePermission => &[permission_revoked_mid_run],
@@ -289,6 +293,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::RemoteAheadOfLocal => &[
             second_writer_mid_run,
             second_writer_survives_restart,
+            second_writer_between_whole_listings,
             super::foreign_file_while_down_stops,
         ],
         FaultKind::RemoteRegressed => &[bucket_rolled_back, bucket_rolled_back_while_idle],
@@ -850,6 +855,124 @@ pub fn second_writer_mid_run() -> Scenario {
         vec![Expect::Stopped(StopCause::OtherWriter), Expect::Oracle],
     );
     s.check = Some(quiet_after_stop);
+    s
+}
+
+/// Work that leaves the engine listing a tail of the replica instead of all of it: the
+/// clock moves past a compaction window each round, so maintenance has something to plan.
+fn steady(rounds: usize) -> Vec<Op> {
+    let mut ops = Vec::new();
+    for _ in 0..rounds {
+        ops.push(commit(2, false));
+        ops.push(Op::ClockJump(40_000));
+        ops.extend(ticks(3));
+    }
+    ops
+}
+
+/// The listings one tick made (recorded before the tick's own event), in order.
+fn listings(report: &RunReport) -> Vec<(usize, u64)> {
+    report
+        .seen
+        .iter()
+        .enumerate()
+        .filter_map(|(at, seen)| match seen {
+            Seen::Tick { remote_lists, .. } => Some((at, *remote_lists)),
+            Seen::Event(_)
+            | Seen::Stop(_)
+            | Seen::Recovered(_)
+            | Seen::Snapshot(_)
+            | Seen::Oracle => None,
+        })
+        .collect()
+}
+
+/// A listing of every level asks for this many pages at least; a tail pass asks for fewer.
+const WHOLE_LISTING: u64 = 10;
+
+/// Another writer's file lands between two whole listings, while the engine lists a tail and
+/// uploads nothing: level 0 is always listed whole, so maintenance alone stops the engine.
+#[must_use]
+pub fn second_writer_between_whole_listings() -> Scenario {
+    let mut s = build(
+        "second_writer_between_whole_listings",
+        vec![
+            live(),
+            steady(3),
+            // No commit: the upload path would find it, and the point is that maintenance does.
+            vec![Op::Remote(RemoteOp::PutUnrecognized), Op::ClockJump(40_000)],
+            ticks(SETTLE),
+            vec![Op::Remote(RemoteOp::RemoveUnrecognized), Op::Restore],
+        ],
+        vec![Expect::Stopped(StopCause::OtherWriter), Expect::Oracle],
+    );
+    s.check = Some(|report| {
+        let stop = report
+            .seen
+            .iter()
+            .position(|seen| matches!(seen, Seen::Stop(StopCause::OtherWriter)))
+            .ok_or("the engine never stopped")?;
+        let tail_passes = listings(report)
+            .iter()
+            .filter(|(at, lists)| *at < stop && (1..WHOLE_LISTING).contains(lists))
+            .count();
+        if tail_passes == 0 {
+            return Err("no tail pass ran before the stop: the scenario tests nothing".into());
+        }
+        quiet_after_stop(report)
+    });
+    s
+}
+
+/// A fault drops what the engine remembers of the replica: the first listing after it asks for
+/// every level, where the passes before it asked for a tail.
+#[must_use]
+pub fn fault_drops_what_the_engine_remembers_of_the_replica() -> Scenario {
+    let mut s = build(
+        "fault_drops_what_the_engine_remembers_of_the_replica",
+        vec![
+            live(),
+            steady(3),
+            vec![
+                remote_fault(
+                    StoreOp::Upload,
+                    0,
+                    FaultShape::ErrorAfterPublish(transient(StoreOp::Upload)),
+                ),
+                commit(2, false),
+            ],
+            ticks(SETTLE),
+            steady(2),
+            vec![Op::Restore],
+        ],
+        vec![retries(FaultKind::StoreTransient), Expect::Oracle],
+    );
+    s.check = Some(|report| {
+        let fault = report
+            .seen
+            .iter()
+            .position(|seen| matches!(seen, Seen::Event(Event::Retrying { .. })))
+            .ok_or("no retried fault")?;
+        let all = listings(report);
+        if !all
+            .iter()
+            .any(|(at, lists)| *at < fault && (1..WHOLE_LISTING).contains(lists))
+        {
+            return Err("no tail pass before the fault: the scenario tests nothing".into());
+        }
+        // Passes of five levels or more are maintenance's: the first after the fault is whole.
+        let after = all
+            .iter()
+            .find(|(at, lists)| *at > fault && *lists >= 5)
+            .ok_or("no maintenance listing after the fault")?;
+        if after.1 < WHOLE_LISTING {
+            return Err(format!(
+                "the first listing after the fault asked for {} pages, not every level",
+                after.1
+            ));
+        }
+        Ok(())
+    });
     s
 }
 

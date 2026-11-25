@@ -394,3 +394,81 @@ fn a_restart_keeps_the_age_of_a_commit_off_the_replica() {
         after.unreplicated_since
     );
 }
+
+/// Every directory under `dir`, `dir` included, set to `mode`.
+fn chmod_dirs(dir: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut stack = vec![dir.to_path_buf()];
+    let mut all = Vec::new();
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                stack.push(entry.path());
+            }
+        }
+        all.push(at);
+    }
+    for at in all {
+        std::fs::set_permissions(at, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+/// A replicator restarted over and over, each process living a few seconds, over a staging
+/// directory that takes no new file (a full filesystem, modelled as a directory that refuses
+/// creates): nothing is ever staged, so no staged file carries the age of the commit from one
+/// process to the next. The age health reports must still grow across the restarts, dated from
+/// the database's last write, so an alert on it fires within the bound's worth of restarts
+/// (issue #331, `docs/decisions/D197.md`).
+#[test]
+fn a_crash_loop_over_a_staging_disk_that_takes_nothing_reports_a_growing_age() {
+    let site = Site::new();
+    let store = site.store();
+    let (runtime, clock) = fake();
+    let first =
+        Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime.clone()).unwrap();
+    wait(&first, |h| h.phase == Phase::Running);
+    site.commit(1);
+    clock.advance(POLL);
+    let caught = wait(&first, |h| {
+        h.replicated.is_some()
+            && h.replicated.map(|(txid, _)| txid) == h.synced.map(|(txid, _)| txid)
+            && h.unreplicated_since.is_none()
+    });
+    let written_at = caught.replicated.unwrap().1;
+    drop(first);
+    let staging = site.dir.path().join(".app.db-litestream");
+    chmod_dirs(&staging, 0o555);
+    let refused = std::fs::File::create_new(staging.join("ltx").join("0").join("probe"));
+    assert!(
+        refused.is_err(),
+        "the staging directory still takes files (a process that ignores modes, such as root, \
+         cannot run this test)"
+    );
+    site.commit(2);
+    // The commits were written at the first process's last reading of the fake clock.
+    let written = std::time::UNIX_EPOCH
+        + Duration::from_millis(u64::try_from(written_at.unix_millis()).unwrap());
+    for name in ["app.db", "app.db-wal"] {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(site.dir.path().join(name))
+            .unwrap();
+        file.set_modified(written).unwrap();
+    }
+    let mut oldest = None;
+    for _ in 0..6 {
+        clock.advance(Duration::from_secs(120));
+        let again = Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime.clone())
+            .unwrap();
+        let health = wait(&again, |h| h.unreplicated_since == Some(written_at));
+        oldest = health.unreplicated_since;
+        drop(again);
+    }
+    chmod_dirs(&staging, 0o755);
+    let age = clock.now().unix_millis() - oldest.unwrap().unix_millis();
+    assert!(
+        age >= 6 * 120_000 - 1_000,
+        "the age after six restarts is {age} ms, dated {oldest:?}"
+    );
+}

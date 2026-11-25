@@ -113,6 +113,8 @@ struct Progress {
     replicated: Option<(Txid, Timestamp)>,
     unreplicated_since: Option<Timestamp>,
     left: Unfinished,
+    /// Whether a booted engine has been read yet.
+    advanced: bool,
 }
 
 impl Default for Progress {
@@ -125,12 +127,21 @@ impl Default for Progress {
                 unsynced_wal_bytes: 0,
                 staged_not_uploaded: 0,
             },
+            advanced: false,
         }
     }
 }
 
 impl Progress {
-    fn advance(&mut self, engine: BootedEngine<'_>, left: Unfinished, now: Timestamp) {
+    /// `written` is when the database was last written, read with the first booted reading and
+    /// not asked for after it.
+    fn advance(
+        &mut self,
+        engine: BootedEngine<'_>,
+        left: Unfinished,
+        written: Option<Timestamp>,
+        now: Timestamp,
+    ) {
         let staged = engine.0.staged();
         let replicated = engine.0.replicated();
         if self.synced.map(|(txid, _)| txid) != staged {
@@ -142,8 +153,18 @@ impl Progress {
         // Only what is not staged: a staged file the replica lacks is the engine's own lag
         // clock, dated from that file, which is never later than this reading.
         let behind = left.unsynced_wal_bytes > 0;
+        // The first booted reading finds lag that began before this process did, when the
+        // database's last write says so: no commit is newer than it, so the age from there is
+        // never too long. A process restarted every few seconds over a staging directory that
+        // takes no file (staged nothing, so no staged file dates the commit) would otherwise
+        // start the age over each time (issue #331).
+        self.advanced = true;
         self.unreplicated_since = if behind {
-            self.unreplicated_since.or(Some(now))
+            let first = self.unreplicated_since.or(Some(now));
+            match written {
+                Some(written) => first.map(|first| first.min(written)),
+                None => first,
+            }
         } else {
             None
         };
@@ -727,7 +748,14 @@ impl Worker {
         let measured = self.left();
         let left = match (booted(&self.actor), measured) {
             (Some(engine), Some(left)) => {
-                self.progress.advance(engine, left, now);
+                let written = if self.progress.advanced {
+                    None
+                } else {
+                    self.sqlite
+                        .clone()
+                        .and_then(|mut sqlite| sqlite.modified().ok().flatten())
+                };
+                self.progress.advance(engine, left, written, now);
                 left
             }
             (Some(_) | None, _) => {

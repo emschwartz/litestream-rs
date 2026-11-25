@@ -44,6 +44,9 @@ pub struct GoConfig {
     pub(crate) snapshot: Snapshot,
     pub(crate) l0_retention: GoDuration,
     pub(crate) l0_retention_check_interval: GoDuration,
+    /// Whether the file set `l0-retention-check-interval`: a set value is the interval the
+    /// check runs at, exactly; only the unset default is stretched (D193).
+    pub(crate) l0_check_set: bool,
     pub(crate) retention_enabled: bool,
     pub(crate) shutdown_sync_timeout: GoDuration,
     pub(crate) validation_interval: Option<GoDuration>,
@@ -93,6 +96,12 @@ impl GoConfig {
     pub fn l0_retention(&self) -> GoDuration {
         self.l0_retention
     }
+    /// Whether the file set `l0-retention-check-interval`.
+    #[must_use]
+    pub fn l0_retention_check_interval_is_set(&self) -> bool {
+        self.l0_check_set
+    }
+
     /// `l0-retention-check-interval`.
     #[must_use]
     pub fn l0_retention_check_interval(&self) -> GoDuration {
