@@ -453,14 +453,18 @@ fn another_writers_file_at_the_id_in_flight_is_not_compacted(whole: bool) {
     for n in 2..=5 {
         commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
     }
-    // A new level-1 window, with level-0 files to compact.
-    let now = T0 + 60_000;
-    rig.commit(6);
+    // The first snapshot goes before any level (`crate::maintain`), so it is written first.
+    // The commit after it is level 1's to compact, in a listing its upload makes due.
+    rig.settle(&mut actor, T0 + 60_000);
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
+    commit_and_settle(&mut rig, &mut actor, 6, T0 + 60_001);
+    let now = T0 + 120_000;
+    rig.commit(7);
     assert_eq!(
         event(&rig.tick(&mut actor, now)),
         Some(&Event::Synced { files: 1 })
     );
-    let theirs = super::second_writer::put_foreign(&rig, 6);
+    let theirs = super::second_writer::put_foreign(&rig, 7);
     if whole {
         actor.engine.maintain.remembered.owe_full();
     }
@@ -470,7 +474,7 @@ fn another_writers_file_at_the_id_in_flight_is_not_compacted(whole: bool) {
             .filter(|level| *level != Level::ZERO)
             .flat_map(|level| Rig::files(&rig.remote, level))
             .map(|info| info.key)
-            .filter(|key| key.range().max().get() >= 6)
+            .filter(|key| key.range().max().get() >= 7)
             .collect()
     };
     let all = u32::try_from(Level::ALL.len()).unwrap();
@@ -481,8 +485,15 @@ fn another_writers_file_at_the_id_in_flight_is_not_compacted(whole: bool) {
         let tick = rig.tick(&mut actor, now);
         assert_eq!(above_level_zero(&rig), [], "after {tick:?}: {seen:?}");
         if let Some(Event::Maintained { event, .. }) = event(&tick) {
-            assert_eq!(*event, MaintainedEvent::Waiting { held: None }, "{seen:?}");
-            waits.push(rig.remote.lists().saturating_sub(lists));
+            // The prune of staged files reports as maintenance and lists nothing. A pass that
+            // lists the replica plans nothing from what it shows.
+            let listed = rig.remote.lists().saturating_sub(lists);
+            if listed == 0 {
+                assert!(matches!(event, MaintainedEvent::Deleted(_)), "{seen:?}");
+            } else {
+                assert_eq!(*event, MaintainedEvent::Waiting { held: None }, "{seen:?}");
+                waits.push(listed);
+            }
         }
         let stopped = matches!(tick, Tick::Stopped(_));
         seen.push(tick);
@@ -503,8 +514,8 @@ fn another_writers_file_at_the_id_in_flight_is_not_compacted(whole: bool) {
     let mut next = Actor::new(slicing(8));
     let seen = rig.follow(&mut next, now + 1000, 400);
     no_stop(&seen);
-    assert_eq!(newest_replica_file(&rig), Some(6));
-    assert_eq!(restored(&rig), 6);
+    assert_eq!(newest_replica_file(&rig), Some(7));
+    assert_eq!(restored(&rig), 7);
 }
 
 #[test]
