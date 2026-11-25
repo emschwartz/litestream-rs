@@ -1,0 +1,8 @@
+# The encoder joins its index into one buffer at the end of a file, so a snapshot holds the index twice.
+name = "snapshot-index-copied"
+fix = "316429884"
+package = "lsr-core"
+test_bin = "core"
+tests = [
+    "mem::snapshot_peak_heap_is_linear_in_pages_with_a_pinned_coefficient",
+]

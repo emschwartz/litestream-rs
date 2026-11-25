@@ -1,0 +1,13 @@
+diff --git a/crates/ltx/src/encoder.rs b/crates/ltx/src/encoder.rs
+index 778aa76d3..202cc8e63 100644
+--- a/crates/ltx/src/encoder.rs
++++ b/crates/ltx/src/encoder.rs
+@@ -159,7 +159,7 @@ impl<W: Write> Encoder<W> {
+         self.file.update(&marker);
+         self.writer.write_all(&marker)?;
+         let mut index_len = 0_u64;
+-        for chunk in std::mem::take(&mut self.index) {
++        for chunk in vec![std::mem::take(&mut self.index).concat()] {
+             self.file.update(&chunk);
+             self.writer.write_all(&chunk)?;
+             index_len = index_len.saturating_add(u64_from(chunk.len()));
