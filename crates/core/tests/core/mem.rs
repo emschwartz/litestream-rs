@@ -589,12 +589,11 @@ pub fn snapshot_run(pages: u32) -> SnapshotRun {
 /// page contents, which is 4096 bytes a page, breaks it.
 pub const SNAPSHOT_BYTES_PER_PAGE: usize = 20;
 
-/// The most one `Upload::write` may carry, apart from the last: a snapshot streams in
-/// chunks of about 1 MiB, so no write is a file.
-pub const SNAPSHOT_WRITE_CEILING: u64 = 2 * 1024 * 1024;
-
-/// The last write is the file's index and trailer, about 10 bytes a page; this allows 16.
-pub const SNAPSHOT_INDEX_BYTES_PER_PAGE: u64 = 16;
+/// The most one `Upload::write` may carry, the last included: a snapshot streams its pages
+/// and then its index in pieces of about 256 KiB (measured: 271 KiB), so no write is a file
+/// or an index. The index is about nine bytes a page, so one that went out whole would pass
+/// this at 60,000 pages.
+pub const SNAPSHOT_WRITE_CEILING: u64 = 512 * 1024;
 
 /// What a snapshot holds that does not grow with the pages: its buffers and
 /// bookkeeping, and the parts an upload buffers, which are the store's to bound (and which
@@ -626,7 +625,7 @@ pub fn assert_snapshot_law(small: u32) {
     );
     assert!(few.bytes >= u64::from(small) * 4096 && many.bytes >= u64::from(small * 4) * 4096);
     for (run, pages) in [(&few, small), (&many, small * 4)] {
-        let ceiling = SNAPSHOT_WRITE_CEILING + SNAPSHOT_INDEX_BYTES_PER_PAGE * u64::from(pages);
+        let ceiling = SNAPSHOT_WRITE_CEILING;
         assert!(
             run.largest_write <= ceiling,
             "one write carried {} bytes for {pages} pages, ceiling {ceiling}",
@@ -637,7 +636,7 @@ pub fn assert_snapshot_law(small: u32) {
 
 #[test]
 fn snapshot_peak_heap_is_linear_in_pages_with_a_pinned_coefficient() {
-    assert_snapshot_law(8 * 1024);
+    assert_snapshot_law(16 * 1024);
 }
 
 /// The inventory of a replica in the writer's shape: level-0 singletons, a level-1 file
