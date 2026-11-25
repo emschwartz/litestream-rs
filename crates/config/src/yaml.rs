@@ -69,6 +69,28 @@ impl Node {
         }
     }
 
+    /// Appends every key and scalar of the tree to `out`, a space after each.
+    pub(crate) fn push_text(&self, out: &mut String) {
+        match &self.kind {
+            NodeKind::Scalar { text, .. } => {
+                out.push_str(text);
+                out.push(' ');
+            }
+            NodeKind::Map(entries) => {
+                for entry in entries {
+                    out.push_str(&entry.key);
+                    out.push(' ');
+                    entry.value.push_text(out);
+                }
+            }
+            NodeKind::Seq(items) => {
+                for item in items {
+                    item.push_text(out);
+                }
+            }
+        }
+    }
+
     /// Whether this is yaml.v2's null: a plain `~`, `null`, `Null`, `NULL` or nothing.
     pub(crate) fn is_null(&self) -> bool {
         matches!(&self.kind, NodeKind::Scalar { text, plain: true }

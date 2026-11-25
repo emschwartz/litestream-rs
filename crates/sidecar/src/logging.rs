@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_config::{LogFormat, LogLevel};
 use lsr_core::Task;
-use lsr_core::{Clock, Event as EngineEvent, SnapshotCause};
+use lsr_core::{Clock, Event as EngineEvent, MaintainedEvent, SnapshotCause};
 use lsr_replica::{DegradedCause, Event, EventSink, Timestamp, Txid, VerifyOutcome};
 
 use crate::failstop;
@@ -244,13 +244,37 @@ pub(crate) fn json_line(
         name(level),
         json_string(msg)
     );
+    // A key `group.leaf` is slog's text spelling of a group; the JSON handler nests the
+    // consecutive keys of one group in an object.
+    let mut open: Option<&str> = None;
     for (key, value) in fields {
+        let (group, leaf) = key
+            .split_once('.')
+            .map_or((None, *key), |(group, leaf)| (Some(group), leaf));
         let value = match value {
             Value::Text(text) => json_string(text),
             Value::Int(n) => n.to_string(),
             Value::Bool(b) => b.to_string(),
         };
-        line.push_str(&format!(",{}:{value}", json_string(key)));
+        if group.is_some() && group == open {
+            line.push_str(&format!(",{}:{value}", json_string(leaf)));
+            continue;
+        }
+        if open.is_some() {
+            line.push('}');
+        }
+        match group {
+            Some(group) => line.push_str(&format!(
+                ",{}:{{{}:{value}",
+                json_string(group),
+                json_string(leaf)
+            )),
+            None => line.push_str(&format!(",{}:{value}", json_string(key))),
+        }
+        open = group;
+    }
+    if open.is_some() {
+        line.push('}');
     }
     line.push_str("}\n");
     line
@@ -279,8 +303,31 @@ fn debug(value: &impl std::fmt::Debug) -> Value {
     Value::Text(format!("{value:?}"))
 }
 
+impl DbEvents {
+    /// Logs a finished snapshot or compaction as Go does, with its `system=store` field, and
+    /// says whether the event was one.
+    fn log_store(&mut self, event: &Event) -> bool {
+        let Event::Engine(EngineEvent::Maintained { event, .. }) = event else {
+            return false;
+        };
+        let Some((msg, rest)) = store_line(event) else {
+            return false;
+        };
+        let mut all = vec![
+            ("system", Value::from("store")),
+            ("db", Value::Text(self.db.clone())),
+        ];
+        all.extend(rest);
+        self.log.log(LogLevel::Info, msg, &all);
+        true
+    }
+}
+
 impl EventSink for DbEvents {
     fn event(&mut self, event: &Event) {
+        if self.log_store(event) {
+            return;
+        }
         let db = ("db", Value::Text(self.db.clone()));
         let (level, msg, fields): (LogLevel, &str, Vec<(&str, Value)>) = match event {
             Event::Engine(EngineEvent::Booted {
@@ -299,6 +346,11 @@ impl EventSink for DbEvents {
                 LogLevel::Warn,
                 "the application checkpointed the database",
                 vec![("seen", debug(seen)), ("total", (*total).into())],
+            ),
+            Event::ScratchSweepDenied => (
+                LogLevel::Warn,
+                "the replica refused the sweep of leftover uploads at start (needs s3:ListBucketMultipartUploads and s3:AbortMultipartUpload); replication continues, and open multipart uploads a killed process left stay until a bucket lifecycle rule or an operator removes them",
+                vec![],
             ),
             Event::Panicked { rebuilt } => (
                 LogLevel::Error,
@@ -414,6 +466,38 @@ fn degraded_line(task: Task, cause: DegradedCause, until: Timestamp) -> Line {
             ],
         ),
     }
+}
+
+/// Go's `store` logs a finished compaction and a finished snapshot at info level (`store.go:828`,
+/// `store.go:849`), which a deploy script may grep for: the same message and attribute names, after
+/// `system=store db=<name>`. A level-9 file is Go's snapshot, its `txid` the newest transaction in
+/// it; any other level is a compaction with its `txid` group (slog's `txid.min`, `txid.max`).
+fn store_line(event: &MaintainedEvent) -> Option<(&'static str, Vec<(&'static str, Value)>)> {
+    Some(match event {
+        MaintainedEvent::Compacted(info) => {
+            let range = info.key.range();
+            (
+                "compaction complete",
+                vec![
+                    ("level", u64::from(info.key.level().get()).into()),
+                    ("txid.min", range.min().to_string().into()),
+                    ("txid.max", range.max().to_string().into()),
+                    ("size", info.size.into()),
+                ],
+            )
+        }
+        MaintainedEvent::Snapshot(info) => (
+            "snapshot complete",
+            vec![
+                ("txid", info.key.range().max().to_string().into()),
+                ("size", info.size.into()),
+            ],
+        ),
+        MaintainedEvent::Deleted(_)
+        | MaintainedEvent::Replan
+        | MaintainedEvent::Repaired(_)
+        | MaintainedEvent::Waiting { .. } => return None,
+    })
 }
 
 fn engine_line(event: &EngineEvent) -> Option<Line> {

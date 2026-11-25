@@ -1,11 +1,11 @@
 diff --git a/crates/cli/src/run.rs b/crates/cli/src/run.rs
-index e58a7fea..5e8c5a19 100644
+index d3f18195c..2f6a522ce 100644
 --- a/crates/cli/src/run.rs
 +++ b/crates/cli/src/run.rs
-@@ -864,6 +864,13 @@ async fn restore_on<S: ObjectStore>(
-         Vec::new()
+@@ -1008,6 +1008,13 @@ async fn restore_on<S: ObjectStore>(
      };
      let created = create_parents(output).map_err(CliError::Parent)?;
+     let takeover_recorded = meta.is_some();
 +    if existing == Existing::Any {
 +        for suffix in ["", "-wal", "-shm", "-journal"] {
 +            let mut path = output.as_os_str().to_owned();
@@ -15,4 +15,9 @@ index e58a7fea..5e8c5a19 100644
 +    }
      let attempt = async {
          // A replicator started on the restored database builds on the replica it came from,
-         // through the takeover record: an output with no meta directory is refused before
+         // through the takeover record, which the database's config says where to put.
+@@ -1253,3 +1260,4 @@ async fn files_on_s3<T: lsr_store_s3::Transport>(
+ 
+ #[cfg(test)]
+ mod tests;
++

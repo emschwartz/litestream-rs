@@ -1,11 +1,12 @@
 diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+index 0000000..0000000 100644
 --- a/crates/core/src/actor/lag.rs
 +++ b/crates/core/src/actor/lag.rs
-@@ -288,7 +288,7 @@ impl Actor {
-     /// not hold the application).
+@@ -313,7 +313,7 @@ impl Actor {
+     /// transient error judges nothing.
      #[must_use]
      pub const fn boot_judged(&self) -> bool {
--        self.kept.listed || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
+-        self.kept.listed || self.kept.boot_overdue
 +        self.kept.listed || false
      }
  
