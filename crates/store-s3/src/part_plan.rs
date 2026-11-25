@@ -83,6 +83,36 @@ mod tests {
         len.div_ceil(part.get())
     }
 
+    fn width(concurrency: usize, part: u64) -> usize {
+        held_width(NonZeroUsize::new(concurrency).unwrap(), part).get()
+    }
+
+    /// The setting stands while the parts in flight and one more fit the budget: the default
+    /// five 5 MiB parts and ten, and the last part size at which each still fits.
+    #[test]
+    fn parts_that_fit_the_budget_keep_the_configured_concurrency() {
+        assert_eq!(width(5, 5 * MIB), 5);
+        assert_eq!(width(10, 5 * MIB), 10);
+        assert_eq!(width(1, 100 * MIB), 1);
+        // Six parts held: the largest part is a sixth of the budget.
+        assert_eq!(width(5, HELD_BUDGET / 6), 5);
+        assert_eq!(width(5, HELD_BUDGET / 6 + 1), 4);
+    }
+
+    /// A large part cuts how many are in flight to what the budget holds with one more
+    /// filling, whatever the setting, and never below one.
+    #[test]
+    fn large_parts_are_cut_to_what_the_budget_holds() {
+        assert_eq!(width(10, 100 * MIB), 1);
+        assert_eq!(width(10, 64 * MIB), 3);
+        assert_eq!(width(10, 32 * MIB), 7);
+        assert_eq!(width(10, HELD_BUDGET / 2), 1);
+        // Past half the budget one is still in flight: the bound is then two parts.
+        assert_eq!(width(10, HELD_BUDGET), 1);
+        assert_eq!(width(10, MAX_PART), 1);
+        assert_eq!(width(1, u64::MAX), 1);
+    }
+
     #[test]
     fn an_object_that_fits_keeps_the_configured_part() {
         for configured in [PartSize::MIN, part(100 * MIB)] {
@@ -122,6 +152,22 @@ mod tests {
     }
 
     proptest! {
+        /// Never more in flight than the setting, never fewer than one, and what is held
+        /// (the parts in flight and one more) fits the budget unless one in flight already
+        /// does not; the cut is the least that fits.
+        #[test]
+        fn the_width_is_the_most_within_the_setting_that_the_budget_holds(
+            concurrency in 1_usize..64,
+            part in 1_u64..=6 * GIB,
+        ) {
+            let got = u64::try_from(width(concurrency, part)).unwrap();
+            let most = u64::try_from(concurrency).unwrap();
+            prop_assert!((1..=most).contains(&got));
+            let held = |width: u64| (width + 1).saturating_mul(part);
+            prop_assert!(held(got) <= HELD_BUDGET || got == 1);
+            prop_assert!(got == most || held(got + 1) > HELD_BUDGET);
+        }
+
         /// Every length up to S3's limit gets at most 10000 parts, at a legal part
         /// size, and never one below the configured size.
         #[test]

@@ -6,5 +6,5 @@ package = "lsr-store-s3"
 test_bin = "store-s3"
 tests = [
     "memory::an_upload_through_the_real_client_holds_five_parts",
-    "memory::a_long_upload_at_a_large_part_size_holds_one_batch_and_allocates_each_part_once",
+    "memory::a_long_upload_at_a_large_part_size_holds_its_parts_and_allocates_each_once",
 ]

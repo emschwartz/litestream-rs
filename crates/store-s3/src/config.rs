@@ -442,9 +442,13 @@ impl S3Config {
 
     /// Replaces how many parts of one multipart upload may be in flight at
     /// once, Go's `concurrency`. It governs nothing else: reads, listings and
-    /// HEADs have their own fixed limits. Memory held by an upload is at most
-    /// this many parts (`concurrency` times the part size). One sends every
-    /// part after the one before it.
+    /// HEADs have their own fixed limits. One sends every part after the one
+    /// before it.
+    ///
+    /// Memory: an upload of a staged file holds no part, each is read from the
+    /// file as it is sent. An upload with no file behind it holds the parts in
+    /// flight and one more, and has fewer in flight than this when that many
+    /// would pass 256 MiB (`part_plan.rs`, `docs/decisions/D232.md`).
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
         self.concurrency = Some(concurrency);
