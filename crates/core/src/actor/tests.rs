@@ -21,6 +21,7 @@ use crate::store::{Flight, Listing, PageLimit, ReadLen, Rest, StoreError, StoreO
 
 mod after_delete;
 mod ahead;
+mod apart;
 mod audit;
 mod older_copy;
 
@@ -52,6 +53,8 @@ struct Counting {
     /// The file entries those listings returned, summed.
     listed: Arc<AtomicU64>,
     reads: Arc<std::sync::Mutex<Vec<FileKey>>>,
+    /// The bytes every read returned, summed.
+    read_bytes: Arc<AtomicU64>,
     deletes: Arc<std::sync::Mutex<Vec<FileKey>>>,
     /// When non-zero, the most keys one listing page returns: a store may
     /// return fewer than the limit.
@@ -140,6 +143,11 @@ impl Counting {
     fn reads_of(&self, key: &FileKey) -> usize {
         let reads = self.reads.lock().unwrap();
         reads.iter().filter(|read| *read == key).count()
+    }
+
+    /// Bytes all reads returned so far.
+    fn read_bytes(&self) -> u64 {
+        self.read_bytes.load(Ordering::SeqCst)
     }
 
     /// The next read of `key` returns one byte flipped.
@@ -240,8 +248,13 @@ impl ObjectStore for Counting {
             }
         };
         let read = self.inner.read(key, offset, len);
+        let tally = self.read_bytes.clone();
         async move {
             let mut bytes = read.await?;
+            tally.fetch_add(
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                Ordering::SeqCst,
+            );
             if let Some(wal) = moves.and_then(|armed| armed.lock().unwrap().take()) {
                 wal.set_epoch(wal.epoch().next());
             }
@@ -271,7 +284,16 @@ impl ObjectStore for Counting {
     ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send {
         self.count();
         self.reads.lock().unwrap().push(file.key);
-        self.inner.read_with_created_at(file, len)
+        let read = self.inner.read_with_created_at(file, len);
+        let tally = self.read_bytes.clone();
+        async move {
+            let (bytes, created_at) = read.await?;
+            tally.fetch_add(
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                Ordering::SeqCst,
+            );
+            Ok((bytes, created_at))
+        }
     }
 
     fn begin_sized_upload(
@@ -2327,6 +2349,7 @@ mod lag;
 mod level_holes;
 mod listing;
 mod live;
+mod local;
 mod newest_replica_file;
 mod no_wal_yet;
 mod once;

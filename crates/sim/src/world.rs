@@ -1181,9 +1181,18 @@ impl World {
     /// is what a snapshot looks like: the engine writes one as a level-0 file
     /// whose header still names the WAL range it was cut from. False when the
     /// file is gone or does not decode.
+    ///
+    /// A file a local course staged is asked for under its level-0 key while it is still in
+    /// the slot ([`crate::slot`]), so the slot is read when level 0 has no such file. A course
+    /// writes only above level 0, so the two hold the same transactions only during a move
+    /// (the same bytes) or once another build has staged over a slot left behind, which is
+    /// after the tick that asked about the slot's file.
     #[must_use]
     pub fn staged_is_full_image(&self, key: &FileKey) -> bool {
+        let apart =
+            lsr_core::Level::new(crate::slot::LEVEL).map(|slot| FileKey::new(slot, key.range()));
         self.read_staged(key)
+            .or_else(|err| apart.map_or(Err(err), |apart| self.read_staged(&apart)))
             .is_ok_and(|bytes| is_full_image(&bytes))
     }
 

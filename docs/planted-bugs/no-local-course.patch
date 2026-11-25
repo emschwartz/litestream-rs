@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/local.rs b/crates/core/src/actor/local.rs
+index c6a45fcaf..b1c3292e7 100644
+--- a/crates/core/src/actor/local.rs
++++ b/crates/core/src/actor/local.rs
+@@ -188,7 +188,7 @@ impl Actor {
+         R: Role,
+     {
+         let due = matches!(self.engine.course, Course::Unbooted)
+-            && self.kept.local == LocalTry::Open
++            && self.kept.local != LocalTry::Open
+             && self.kept.stop == Stop::No
+             && self.boot_overdue_at().is_some_and(|at| now >= at);
+         let (event, next) = match tick {

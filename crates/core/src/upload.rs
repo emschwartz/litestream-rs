@@ -41,8 +41,8 @@
 //! never becomes visible. One failed read is evidence about the read, not the
 //! file, so the actor retries; when a read on a later tick fails too, it
 //! deletes the file and everything staged after it ([`drop_staged_from`]) and
-//! snapshots in its place. At boot, [`sweep_staged`] applies the same rule
-//! before anything is uploaded.
+//! snapshots in its place. At boot, the one pass over the staged files
+//! (`crate::witness::scan`) applies the same rule before anything is uploaded.
 //!
 //! Every upload here is of a key the engine takes to be free (the confirmed
 //! transaction plus one), so it is a [`WriteMode::New`] write: the bucket, not
@@ -525,7 +525,7 @@ async fn judge_tail<L: Role, S: Role>(
 }
 
 /// Streams both copies and compares them chunk by chunk.
-async fn same_bytes<L: Role, S: Role>(
+pub(crate) async fn same_bytes<L: Role, S: Role>(
     staging: &L,
     remote: &S,
     key: &FileKey,
@@ -645,6 +645,7 @@ impl StagedPages {
 ///
 /// # Errors
 /// As [`StagedPages::next`].
+#[cfg(test)]
 pub(crate) async fn staged_from<L: Role>(
     staging: &L,
     from: Option<Txid>,
@@ -692,48 +693,6 @@ pub(crate) async fn drop_staged_from<L: Role>(
                 .map_err(|err| L::fault(&err))?;
         }
     }
-}
-
-/// What a sweep of the staged files found.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Swept {
-    /// Every staged file the replica may still need verifies.
-    Clean,
-    /// This file failed verification on its first failed read: nothing was
-    /// deleted, since one read says nothing about the stored bytes.
-    Suspect(FileKey),
-    /// The suspect failed again: it and every staged file after it must go,
-    /// from this transaction on ([`drop_staged_from`]). The caller deletes
-    /// them, once what they vouched for is recorded.
-    Condemned(Txid),
-}
-
-/// Verifies every staged level-0 file the replica may still need: from
-/// `confirmed`, the replica's newest transaction, on (everything when the
-/// replica is empty). The first that does not verify is condemned, with every
-/// one after it, only when it is `suspect`, the file an earlier tick's read
-/// already failed on; otherwise it is reported as the new suspect. The sweep
-/// deletes nothing itself.
-///
-/// # Errors
-/// The staging store's fault when it cannot list, read or delete.
-pub(crate) async fn sweep_staged<L: Role>(
-    staging: &L,
-    confirmed: Option<Txid>,
-    suspect: Option<FileKey>,
-) -> Result<Swept, Fault> {
-    let mut pages = StagedPages::from(confirmed);
-    while let Some(page) = pages.next(staging).await? {
-        for info in page {
-            if !staged_verifies(staging, &info.key).await? {
-                if suspect != Some(info.key) {
-                    return Ok(Swept::Suspect(info.key));
-                }
-                return Ok(Swept::Condemned(info.key.range().min()));
-            }
-        }
-    }
-    Ok(Swept::Clean)
 }
 
 /// Why a copy did not commit, and so what the state becomes.
@@ -1253,7 +1212,11 @@ impl Sending {
         Ok(flight == Flight::Idle)
     }
 
-    /// Commits the upload of a file that ended, verified, with every part answered.
+    /// Commits the upload of a file that ended, verified, with every part answered. A file
+    /// replaced after it was witnessed is refused here and its upload aborted: one replaced
+    /// before the first slice always, one replaced between two slices when the store reads it
+    /// by range (a file held open is still the file that was opened, and goes up if that one
+    /// is what was witnessed).
     ///
     /// A second read that gave nothing fails the commit before anything is published, so
     /// the state stands and nothing is deleted, whatever the store's error would mean
