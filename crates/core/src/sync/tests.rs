@@ -505,21 +505,31 @@ fn a_boot_seed_from_the_staged_files_is_the_table_the_steps_built() {
     let (mut rig, position) = recorded();
     commit(&rig.wal, &[1, 3], 3);
     let next = position_of(rig.step_at(Step::Incremental(position)).unwrap());
-    let seeded = block_on(crate::pages::seeded(
-        &Staging(&rig.store),
-        None,
-        next.commit(),
-    ))
-    .unwrap()
-    .table;
+    let mut seeded = block_on(boot_pass(&rig.store))
+        .unwrap()
+        .seeding
+        .finish()
+        .table;
+    seeded.truncate(next.commit());
     assert_eq!(seeded, rig.pages);
 }
 
+/// The boot's one pass over `staging` with an empty replica and no WAL to compare with.
+async fn boot_pass(staging: &MemStore) -> Result<crate::witness::Scan, Fault> {
+    crate::witness::scan(
+        &Staging(staging),
+        &crate::fault::role::Replica(&MemStore::new()),
+        None,
+        None::<crate::recover::BootWal<'_, Cursor<Vec<u8>>>>,
+    )
+    .await
+}
+
 #[test]
-fn a_staged_file_that_does_not_verify_empties_the_seed_up_to_it() {
+fn a_staged_file_that_does_not_verify_ends_the_pass_and_seeds_nothing() {
     let (mut rig, position) = recorded();
     commit(&rig.wal, &[1], 3);
-    let next = position_of(rig.step_at(Step::Incremental(position)).unwrap());
+    rig.step_at(Step::Incremental(position)).unwrap();
     let first = rig.files()[0].0.key;
     let len = ReadLen::new(ReadLen::MAX_RAW).unwrap();
     let mut bytes = block_on(rig.store.read(&first, 0, len)).unwrap();
@@ -534,15 +544,10 @@ fn a_staged_file_that_does_not_verify_empties_the_seed_up_to_it() {
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap();
     });
-    let seeded = block_on(crate::pages::seeded(
-        &Staging(&rig.store),
-        None,
-        next.commit(),
-    ))
-    .unwrap()
-    .table;
-    assert_eq!(seeded.len(), 1);
-    assert_eq!(seeded.get(pg(1)), rig.pages.get(pg(1)));
+    let found = block_on(boot_pass(&rig.store)).unwrap();
+    assert_eq!(found.bad, Some((first, crate::witness::Bad::Unreadable)));
+    assert!(found.tokens.is_empty());
+    assert!(found.seeding.finish().table.is_empty());
 }
 
 // A wal-index reset ahead of the WAL header (#26).

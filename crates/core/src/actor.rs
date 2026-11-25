@@ -117,12 +117,13 @@ use crate::maintain::{
     Due, Job, MAX_DELETE, Maintenance, Outcome, ReadBack, RetentionHold, due_full,
     listing_after_upload, read_back, run_compact, run_delete,
 };
-use crate::pages::{PageChecksumTable, seeded, snapshot_clears};
+use crate::pages::{PageChecksumTable, Seeding, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
 use crate::publish::Why;
 use crate::recover::{
     BootWal, FrameCheck, Miss, NewestStagedFile, PositionSource, Probes, RecoverEvent, Recovered,
-    Verdict, WalView, newest_level_zero, newest_replica_level_zero, read_header, recover_traced,
+    Scanned, Verdict, WalView, newest_level_zero, newest_replica_level_zero, read_header,
+    recover_traced,
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
@@ -130,11 +131,11 @@ use crate::store::{Denied, ObjectStore, PageLimit, StoreError};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
-    Did, Guard, Swept, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
-    drop_staged_from, inventory_fault, plan_upload, sweep_staged, upload_next, upload_next_in,
+    Did, Guard, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded, drop_staged_from,
+    inventory_fault, plan_upload, upload_next, upload_next_in,
 };
 use crate::verify::LivePages;
-use crate::witness::{Pending, Witnesses, check_pending, still_holds};
+use crate::witness::{Bad, Scan, Witnessed, Witnesses, scan, still_holds};
 
 /// What one tick may touch, lent for that tick only.
 pub struct Env<'a, W, P, C, L, R> {
@@ -1215,20 +1216,22 @@ impl Actor {
         let took = || clock.now().saturating_duration_since(began);
         let takeover = self.boot_takeover();
         let doubted = self.kept.suspect_staged;
-        let suspect = &mut self.kept.suspect_staged;
         let denied = &mut self.kept.scratch_sweep_denied;
-        let listed = boot_listing(env.staging, env.remote, suspect, denied, takeover).await;
-        let Listed {
-            upload,
-            dropped,
-            gate,
-        } = match listed {
+        let listed = match boot_listing(env.staging, env.remote, denied, takeover).await {
             Ok(listed) => listed,
             Err(step) => return self.boot_step(step, took(), now),
         };
+        let suspect = &mut self.kept.suspect_staged;
         let Judged {
-            pending: Pending { tokens, refused },
-            upload,
+            staged:
+                BootStaged {
+                    upload,
+                    dropped,
+                    refused,
+                    tokens,
+                    seeding,
+                    scanned: _,
+                },
             booted:
                 Booted {
                     newest_staged,
@@ -1236,7 +1239,7 @@ impl Actor {
                     page_size,
                     refused_through,
                 },
-        } = match boot_judge(env, upload, gate).await {
+        } = match boot_judge(env, listed, suspect).await {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, took(), now),
         };
@@ -1262,11 +1265,11 @@ impl Actor {
         let cause = boot_cause(dropped, refused, from.err());
         let staged = newest_staged.map(|newest_staged| newest_staged.txid());
         let course = boot_course(from, cause, self.kept.asked(), staged);
-        let (pages, quiet) =
-            match boot_seed(env.staging, env.remote, &course, upload.confirmed()).await {
-                Ok(seeded) => seeded,
-                Err(fault) => return self.boot_failed(fault, took(), now),
-            };
+        let (pages, quiet) = match boot_seed(env.remote, &course, upload.confirmed(), seeding).await
+        {
+            Ok(seeded) => seeded,
+            Err(fault) => return self.boot_failed(fault, took(), now),
+        };
         self.quiet_at_boot(quiet);
         // Every step succeeded: the engine is assigned whole.
         self.engine = Engine {
@@ -2763,24 +2766,12 @@ enum Dropped {
     Diverged(Txid),
 }
 
-/// Boot's scratch removal, listing and staging sweep: the upload state to start from, and
-/// what was deleted.
-///
-/// A staged file that fails verification is deleted, with all after it, only
-/// when it is `suspect`, the file a read on an earlier tick failed on;
-/// otherwise it becomes the suspect and the boot fails with `StagedLost`, to
-/// read it again on the next try.
-///
-/// A replica newest level-0 file that verifies and differs from the staged
-/// copy under the same key is another writer's unless a takeover record
-/// covers it: this engine uploads only from witnessed, synced staged copies
-/// and keeps a takeover record before deleting its own, so without an
-/// operator's hand a boot divergence is a second writer (the contested id).
-/// The boot refuses it before touching staging (`BootStep::Refused`).
+/// Boot's scratch removal and listing: the upload state to start from, the transaction the
+/// staged files diverge from the replica at, if they do, and the gate. Nothing in staging is
+/// read or deleted here: a boot that cannot reach the replica leaves it as it found it.
 async fn boot_listing<L: Role, R: Role>(
     staging: &L,
     remote: &R,
-    suspect: &mut Option<FileKey>,
     denied: &mut bool,
     takeover: Takeover,
 ) -> Result<Listed, BootStep> {
@@ -2803,8 +2794,75 @@ async fn boot_listing<L: Role, R: Role>(
         Ok(listed) => (listed.state, None),
         Err(failed) => return Err(failed.fault.into()),
     };
+    Ok(Listed {
+        upload,
+        diverged,
+        gate: BootGate { takeover, local },
+    })
+}
+
+/// What boot's listing leaves for the rest of the boot.
+struct Listed {
+    /// The upload state to start from.
+    upload: UploadState,
+    /// The staged files from this transaction on hold other content than the replica's
+    /// newest level-0 file.
+    diverged: Option<Txid>,
+    /// What replica files above the local position need.
+    gate: BootGate,
+}
+
+/// What a boot makes of the staged files once the replica is listed.
+struct BootStaged {
+    /// The upload state to start from.
+    upload: UploadState,
+    /// What was deleted from staging for diverging or failing verification.
+    dropped: Dropped,
+    /// The first pending file deleted, with those after it, for not following the file
+    /// before it.
+    refused: Option<Txid>,
+    /// The tokens of the pending files left.
+    tokens: Vec<Witnessed>,
+    /// The files the pass read, for recovery.
+    scanned: Scanned,
+    /// The page checksum table and the quiet files, from the same reads.
+    seeding: Seeding,
+}
+
+/// Judges the staged files against the listed replica: drops the ones that diverged from it,
+/// then reads every one the replica may still need, once (`crate::witness::scan`).
+///
+/// A replica newest level-0 file that verifies and differs from the staged
+/// copy under the same key is another writer's unless a takeover record
+/// covers it: this engine uploads only from witnessed, synced staged copies
+/// and keeps a takeover record before deleting its own, so without an
+/// operator's hand a boot divergence is a second writer (the contested id).
+/// The boot refuses it before touching staging (`BootStep::Refused`).
+///
+/// One read never condemns a file. The first staged file that fails verification is deleted,
+/// with all after it, only when it is `suspect`, the file a read on an earlier tick failed on;
+/// otherwise it becomes the suspect and the boot fails with `StagedLost`, to read it again on
+/// the next try. The first pending file that does not follow the file before it is deleted,
+/// with all after it, once a second pass agrees; two passes that disagree retry the boot.
+///
+/// The listing leaves a torn newest key unconfirmed, for its staged copy to
+/// be uploaded over it. When that copy is the file refused and a read finds
+/// the key on the replica (a read, since a listing may lag), the key stays as
+/// the replica holds it and is confirmed: new content never takes a
+/// transaction the replica holds, so the snapshot goes above it.
+async fn boot_staged<L: Role, R: Role, W: std::io::Read + std::io::Seek>(
+    staging: &L,
+    remote: &R,
+    listed: Listed,
+    suspect: &mut Option<FileKey>,
+    mut wal: Option<BootWal<'_, W>>,
+) -> Result<BootStaged, BootStep> {
+    let Listed {
+        mut upload,
+        diverged,
+        gate,
+    } = listed;
     let tip = upload.confirmed();
-    let gate = BootGate { takeover, local };
     // The staged files from `from` on cannot continue the replica: unless
     // the replica's object is another writer's, they go, and recovery
     // snapshots above what the replica holds.
@@ -2815,16 +2873,40 @@ async fn boot_listing<L: Role, R: Role>(
         gate.vouch(remote, tip).await?;
         drop_staged_from(staging, from).await?;
     }
-    let lost = match sweep_staged(staging, tip, *suspect).await? {
-        Swept::Clean => None,
-        Swept::Suspect(key) => {
+    let Scan {
+        tokens,
+        bad,
+        scanned,
+        seeding,
+    } = scan(staging, remote, tip, boot_wal_again(&mut wal)).await?;
+    let (lost, refused) = match bad {
+        None => (None, None),
+        Some((key, Bad::Unreadable)) if *suspect != Some(key) => {
             *suspect = Some(key);
             return Err(Fault::StagedLost.into());
         }
-        Swept::Condemned(from) => {
+        Some((key, Bad::Unreadable)) => {
+            let from = key.range().min();
             gate.vouch(remote, tip).await?;
             drop_staged_from(staging, from).await?;
-            Some(from)
+            (Some(from), None)
+        }
+        Some(refused @ (key, Bad::Unchained)) => {
+            if scan(staging, remote, tip, wal).await?.bad != Some(refused) {
+                return Err(Fault::LocalIo.into());
+            }
+            let from = key.range().min();
+            gate.vouch(remote, tip).await?;
+            drop_staged_from(staging, from).await?;
+            // A read, not a listing: a listing may lag the replica's writes, and one that
+            // leaves the key out would let new content take a transaction the replica holds.
+            let held = crate::store::exists(remote, &key)
+                .await
+                .map_err(|err| R::fault(&err))?;
+            if held && tip.map_or(Some(Txid::MIN), Txid::next) == Some(from) {
+                upload = UploadState::At(Some(from));
+            }
+            (None, Some(from))
         }
     };
     *suspect = None;
@@ -2833,61 +2915,22 @@ async fn boot_listing<L: Role, R: Role>(
         (None, Some(from)) => Dropped::Unreadable(from),
         (None, None) => Dropped::Nothing,
     };
-    Ok(Listed {
+    Ok(BootStaged {
         upload,
         dropped,
-        gate,
+        refused,
+        tokens,
+        scanned,
+        seeding,
     })
 }
 
-/// What boot's listing leaves for the rest of the boot.
-struct Listed {
-    /// The upload state to start from.
-    upload: UploadState,
-    /// What the listing or the sweep deleted from staging.
-    dropped: Dropped,
-    /// What replica files above the local position need.
-    gate: BootGate,
-}
-
-/// Boot's check of the pending staged files (`crate::witness`).
-/// The first file that fails is deleted with every one after it, once a
-/// second pass agrees: one read never condemns a file. Two passes that
-/// disagree retry the boot.
-///
-/// The listing leaves a torn newest key unconfirmed, for its staged copy to
-/// be uploaded over it. When that copy is the file refused and a read finds
-/// the key on the replica (a read, since a listing may lag), the key stays as
-/// the replica holds it and is confirmed: new content never takes a
-/// transaction the replica holds, so the snapshot goes above it.
-async fn boot_witness<L: Role, R: Role>(
-    staging: &L,
-    remote: &R,
-    upload: UploadState,
-    gate: BootGate,
-) -> Result<(Pending, UploadState), BootStep> {
-    let confirmed = upload.confirmed();
-    let first = check_pending(staging, remote, confirmed).await?;
-    let Some(from) = first.refused else {
-        return Ok((first, upload));
-    };
-    let second = check_pending(staging, remote, confirmed).await?;
-    if second.refused != Some(from) {
-        return Err(Fault::LocalIo.into());
-    }
-    gate.vouch(remote, confirmed).await?;
-    drop_staged_from(staging, from).await?;
-    let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
-    let key = FileKey::new(Level::ZERO, TxidRange::single(from));
-    // A read, not a listing: a listing may lag the replica's writes, and one that leaves the
-    // key out would let new content take a transaction the replica holds.
-    let held = crate::store::exists(remote, &key)
-        .await
-        .map_err(|err| R::fault(&err))?;
-    if next == Some(from) && held {
-        return Ok((first, UploadState::At(Some(from))));
-    }
-    Ok((first, upload))
+/// The boot's WAL lent once more, for a second read under the same committed end.
+fn boot_wal_again<'a, R>(wal: &'a mut Option<BootWal<'_, R>>) -> Option<BootWal<'a, R>> {
+    wal.as_mut().map(|wal| BootWal {
+        reader: &mut *wal.reader,
+        committed: wal.committed,
+    })
 }
 
 /// The boot's reader bounded by its committed end.
@@ -2898,73 +2941,67 @@ fn boot_wal_of<R>(
     reader.map(|reader| BootWal { reader, committed })
 }
 
-/// What the boot's judges found: the staged-file check, the upload state it leaves, and
-/// recovery.
+/// What the boot's judges found: what was made of the staged files, and recovery.
 struct Judged {
-    pending: Pending,
-    upload: UploadState,
+    staged: BootStaged,
     booted: Booted,
 }
 
-/// The page table and the quiet files a boot starts with. Only a boot that continues seeds
-/// the table, from the staged files boot already verified: a snapshot records every page it
-/// reads. The quiet files are found for every course: a pending file that holds no commit
-/// stays no commit when this boot takes a snapshot of its own, and dated by its stamp it would
-/// trip the age bound after a long pause.
-async fn boot_seed<L: Role, R: Role>(
-    staging: &L,
+/// The page table and the quiet files a boot starts with, from the reads its pass made
+/// (`seeding`). Only a boot that continues keeps the table, truncated to the newest staged
+/// file's size: a snapshot records every page it reads. The quiet files are kept for every
+/// course: a pending file that holds no commit stays no commit when this boot takes a snapshot
+/// of its own, and dated by its stamp it would trip the age bound after a long pause.
+async fn boot_seed<R: Role>(
     remote: &R,
     course: &Course,
     confirmed: Option<Txid>,
+    seeding: Seeding,
 ) -> Result<(PageChecksumTable, BTreeSet<Txid>), Fault> {
-    match course {
+    let mut seeded = seeding.finish();
+    seeded.place(remote, confirmed).await?;
+    let table = match course {
         Course::At {
             position,
             snapshot: None,
             ..
         } => {
-            let mut seeded = seeded(staging, confirmed, position.commit()).await?;
-            seeded.place(remote, confirmed).await?;
-            Ok((seeded.table, seeded.quiet))
+            seeded.table.truncate(position.commit());
+            seeded.table
         }
         Course::At {
             snapshot: Some(_), ..
         }
-        | Course::Snapshot { .. } => {
-            let mut seeded = seeded(staging, confirmed, NonZeroU32::MIN).await?;
-            seeded.place(remote, confirmed).await?;
-            Ok((PageChecksumTable::new(), seeded.quiet))
-        }
-        Course::Unbooted => Ok((PageChecksumTable::new(), BTreeSet::new())),
-    }
+        | Course::Snapshot { .. }
+        | Course::Unbooted => PageChecksumTable::new(),
+    };
+    Ok((table, seeded.quiet))
 }
 
-/// The staged-file check and recovery. Recovery judges the WAL on one wal-index read and one
-/// reader opened after it, and no range past that committed end.
+/// The pass over the staged files and recovery. Both judge the WAL on one wal-index read and
+/// one reader opened after it, and no range past that committed end.
 async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
-    upload: UploadState,
-    gate: BootGate,
+    listed: Listed,
+    suspect: &mut Option<FileKey>,
 ) -> Result<Judged, BootStep> {
     // The length first: a file that shrinks after it shows in the header or the wal-index read
     // after it (a missing WAL, a new generation), never as a short file.
     let len = env.wal.len().map_err(Fault::from_source)?;
     let committed = env.wal.committed().map_err(Fault::from_source)?;
     let mut reader = open_reader(env.wal)?;
-    let (pending, upload) = boot_witness(env.staging, env.remote, upload, gate).await?;
+    let gate = listed.gate;
+    let wal = boot_wal_of(reader.as_mut(), committed.end());
+    let staged = boot_staged(env.staging, env.remote, listed, suspect, wal).await?;
     let booted = boot_recover(
         env,
         reader.as_mut(),
         (len, committed),
-        upload.confirmed(),
+        (staged.upload.confirmed(), &staged.scanned),
         gate,
     )
     .await?;
-    Ok(Judged {
-        pending,
-        upload,
-        booted,
-    })
+    Ok(Judged { staged, booted })
 }
 
 /// The newest staged file (or, with none staged, the replica's newest
@@ -2985,12 +3022,13 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     mut reader: Option<&mut WalReader<W::Wal>>,
     (len, committed): (Option<WalFileLen>, CommittedRead),
-    confirmed: Option<Txid>,
+    (confirmed, scanned): (Option<Txid>, &Scanned),
     gate: BootGate,
 ) -> Result<Booted, BootStep> {
     let (staging, remote) = (env.staging, env.remote);
     let end = committed.end();
-    let staged = NewestStagedFile::load(staging, boot_wal_of(reader.as_deref_mut(), end)).await?;
+    let wal = boot_wal_of(reader.as_deref_mut(), end);
+    let staged = NewestStagedFile::load_in(staging, wal, scanned).await?;
     // The replica's newest level-0 file stands in for an empty staging
     // directory (a fault reading it is the boot's), and is read for the WAL's
     // word when it is above the local position (one that does not decode
