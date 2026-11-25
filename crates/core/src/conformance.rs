@@ -550,7 +550,7 @@ pub async fn an_opened_object_reads_as_a_read_by_range<H: Harness>(h: &H) -> Che
         return Ok(());
     };
     // Forward as a send reads, then back and past the end: the handle keeps no place.
-    let offsets = [0, 3, 8, 9, 10, 1000, 1 << 63, u64::MAX, 3, 0];
+    let offsets = [0, 3, 8, 9, 10, 1000, 0x8000_0000_0000_0000, u64::MAX, 3, 0];
     for offset in offsets {
         for len in [1, 4, 11] {
             let len = read_len(len)?;
