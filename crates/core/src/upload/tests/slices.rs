@@ -290,3 +290,12 @@ fn a_torn_object_under_the_key_is_replaced_a_slice_a_step() {
     assert_eq!(remote.log().modes, [WriteMode::New, WriteMode::Replace]);
     assert_eq!(read_all(&remote.inner, &key(1)), bytes);
 }
+
+#[test]
+fn a_tick_hands_the_replica_eight_mebibytes_unless_the_configuration_says_otherwise() {
+    // The default is the bound `docs/decisions/D217.md` states: 32 reads of a quarter mebibyte.
+    assert_eq!(
+        UploadConfig::default().bytes_per_tick.get(),
+        QUARTER_MIB.saturating_mul(32)
+    );
+}
