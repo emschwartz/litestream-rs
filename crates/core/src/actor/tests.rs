@@ -596,7 +596,7 @@ fn backlog(last: u8, at: i64) -> Rig {
     for n in 2..=5 {
         commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
     }
-    assert_eq!(level_one_max(&rig), Some(1));
+    assert_eq!(level_one_max(&rig), None);
     // The replica refuses uploads meanwhile, so each commit is staged and stays there. A
     // tick that gave the refused uploads their turn stages two commits in the next file, so
     // the newest transaction can be below `last`.
@@ -1741,7 +1741,11 @@ proptest::proptest! {
 #[test]
 fn prune_keeps_exactly_the_uncompacted_and_the_newest_staged_file() {
     let (mut rig, mut actor) = caught_up();
-    assert_eq!(level_one_max(&rig), Some(1));
+    assert_eq!(
+        level_one_max(&rig),
+        None,
+        "level 1 starts above the first snapshot"
+    );
     for n in 2..=4 {
         commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
     }
@@ -1758,7 +1762,11 @@ fn prune_keeps_exactly_the_uncompacted_and_the_newest_staged_file() {
 #[test]
 fn the_newest_staged_file_stays_even_when_compacted() {
     let (rig, _actor) = caught_up();
-    assert_eq!(level_one_max(&rig), Some(1));
+    assert_eq!(
+        level_one_max(&rig),
+        None,
+        "level 1 starts above the first snapshot"
+    );
     assert_eq!(staged(&rig), vec![1]);
 }
 
@@ -1989,7 +1997,13 @@ fn created_at_failure_is_a_maintain_fault() {
     let mut rig = Rig::lazy();
     let mut actor = Actor::new(cfg());
     rig.settle(&mut actor, T0);
-    stage_and_upload(&mut rig, &mut actor, 2, T0 + 10);
+    // A level-1 file, so the next level-1 decision reads its created-at time (an empty level
+    // starts above the snapshot and needs none).
+    rig.commit(2);
+    rig.settle(&mut actor, T0 + 1);
+    rig.settle(&mut actor, listing_due(T0 + 1));
+    assert!(level_one_max(&rig).is_some());
+    stage_and_upload(&mut rig, &mut actor, 3, T0 + 60_010);
     let before = Rig::files(&rig.remote, Level::ZERO);
     // A throttle hint longer than the 1 s backoff, then one shorter than the 2 s.
     for millis in [30_000, 500] {
@@ -1997,7 +2011,7 @@ fn created_at_failure_is_a_maintain_fault() {
             .inner
             .inject_failure(StoreOp::Read, throttled(StoreOp::Read, millis));
     }
-    let at = listing_due(T0 + 10);
+    let at = listing_due(T0 + 60_010);
     let tick = rig.tick(&mut actor, at);
     let until = ts(at + 30_000);
     assert!(
@@ -2008,7 +2022,7 @@ fn created_at_failure_is_a_maintain_fault() {
     // Before its wait the task neither relists nor reads a created-at time.
     let io = rig.io();
     let idle = rig.tick(&mut actor, at + 29_000);
-    assert_eq!(event(&idle), Some(&Event::Idle), "{idle:?}");
+    assert_eq!(event(&idle), Some(&Event::Idle), "{idle:?} at {at}");
     assert_eq!(rig.io(), io);
     // At the wait it lists again and the next failure doubles the wait.
     let second = rig.tick(&mut actor, until.unix_millis());
@@ -2287,6 +2301,7 @@ mod newest_replica_file;
 mod no_wal_yet;
 mod once;
 mod once_retention;
+mod one_off;
 mod own_checkpoint;
 mod pages;
 mod rejected_snapshot;

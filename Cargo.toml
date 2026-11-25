@@ -36,6 +36,9 @@ base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 # Argument parsing for `lsr`'s own commands, `verify`, `files`, `trust-local` and `config check` (MIT OR Apache-2.0). Go-compatible commands keep the hand-written Go flag parser.
 clap = { version = "4", default-features = false, features = ["std", "error-context"] }
 crc = "3.4.0"
+# The format's CRC-64 on SIMD (MIT OR Apache-2.0), see docs/decisions/D223.md. No default features:
+# they add the C-compatible API and a panic handler this crate has no use for.
+crc-fast = { version = "1.10.0", default-features = false, features = ["std"] }
 jiff = { version = "1.0", default-features = false, features = ["std"] }
 lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 md-5 = { version = "0.11", default-features = false }

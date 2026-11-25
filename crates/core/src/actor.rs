@@ -2312,9 +2312,12 @@ impl Actor {
         self.engine.maintain.stale = false;
         self.engine.maintain.passed_over = 0;
         self.engine.maintain.snapshot_waits = false;
+        // Level 1 starts above the newest snapshot when it is empty (D224), so what the
+        // snapshot holds is as compacted as level 1 would make it.
         self.engine.maintain.level_one = Level::new(1)
             .and_then(|level| inventory.level(level).last())
-            .map(|info| info.key.range().max());
+            .map(|info| info.key.range().max())
+            .or_else(|| crate::maintain::snapshot_end(&inventory));
         self.engine.maintain.remembered.learn_full(
             &inventory,
             now,
@@ -2684,11 +2687,13 @@ impl Actor {
 
     /// Whether maintenance may list the replica now: when a listing could change what is
     /// due, and uploads are idle or have had their [`state::FAIR_SHARE`] (unless the last
-    /// listing's snapshot waits for idle uploads).
+    /// listing's snapshot waits for idle uploads). Never for a one-off engine
+    /// ([`Maintenance::one_off`]), which has no schedule to run.
     fn maintain_ready(&self, now: Timestamp) -> bool {
         let maintain = &self.engine.maintain;
         let turn = self.uploads_idle() || (self.fair_turn() && !maintain.snapshot_waits);
         self.running()
+            && !self.kept.cfg.maintenance.is_one_off()
             && self.kept.tasks.ready(Task::Maintenance, now)
             && turn
             && maintain.wants_listing(now)

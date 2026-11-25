@@ -112,6 +112,15 @@ pub(super) async fn run_compact<L: Role, R: Role>(
     run_compaction(job.inputs(), job.level(), local, replica).await
 }
 
+/// `due` for a replica whose first snapshot is backing off, so the levels are planned as they
+/// are once the snapshot has failed: the level tests below read compaction on a listing that
+/// holds no snapshot.
+fn due_levels(i: &Inventory, now: Timestamp, config: &Maintenance) -> Due {
+    let mut state = MaintainState::default();
+    state.record_snapshot(now, Some(&Fault::StoreThrottled { retry_after: None }));
+    due_state(i, now, config, None, &mut state)
+}
+
 fn due_at(i: &Inventory, now: i64) -> Due {
     due(i, at(now), &defaults(), None)
 }
@@ -438,7 +447,7 @@ fn a_published_position_alone_asks_for_the_first_snapshot() {
 #[test]
 fn level_one_compacts_the_whole_source_when_the_destination_is_empty() {
     let i = inv(l0_run(1, 3, T0 - 100_000));
-    let job = run_job(due_at(&i, T0));
+    let job = run_job(due_levels(&i, at(T0), &defaults()));
     let job = compact_job(&job);
     assert_eq!(job.level(), level(1));
     assert_eq!(job.output_key(), key(1, 1, 3));
@@ -470,16 +479,59 @@ fn a_level_with_nothing_above_its_destination_is_idle_with_no_wake_time() {
 }
 
 #[test]
+fn the_first_snapshot_goes_before_level_one() {
+    let i = inv(l0_run(1, 3, T0 - 100_000));
+    let Due::Run(Job::Snapshot(snapshot)) = due_at(&i, T0) else {
+        panic!("the snapshot is planned first");
+    };
+    assert_eq!(snapshot.through, txid(3));
+}
+
+#[test]
+fn a_backing_off_first_snapshot_lets_level_one_run() {
+    let i = inv(l0_run(1, 3, T0 - 100_000));
+    let job = run_job(due_levels(&i, at(T0), &defaults()));
+    assert_eq!(compact_job(&job).level(), level(1));
+}
+
+#[test]
+fn level_one_starts_above_the_snapshot_and_stays_contiguous() {
+    // The snapshot holds 1..=3: level 1 (empty) takes 4..=5 only, then goes on from there.
+    let mut files = l0_run(1, 5, T0 - 100_000);
+    files.push(snap(3, T0 - 100_000));
+    let job = run_job(due_at(&inv(files.clone()), T0));
+    assert_eq!(
+        input_keys(compact_job(&job)),
+        vec![key(0, 4, 4), key(0, 5, 5)]
+    );
+    files.push(file(1, 4, 5, T0 - 100_000));
+    files.extend(l0_run(6, 6, T0 - 100_000));
+    let next = run_job(due_at(&inv(files), T0 + 30_000));
+    assert_eq!(compact_job(&next).output_key(), key(1, 6, 6));
+}
+
+#[test]
+fn a_level_with_files_takes_what_the_snapshot_holds_too() {
+    // Level 1 holds 1..=2 already: the snapshot at 4 does not cut what follows it.
+    let mut files = l0_run(1, 5, T0 - 100_000);
+    files.push(file(1, 1, 2, T0 - 100_000));
+    files.push(snap(4, T0 - 100_000));
+    let job = run_job(due_at(&inv(files), T0));
+    assert_eq!(compact_job(&job).output_key(), key(1, 3, 5));
+}
+
+#[test]
 fn a_destination_written_this_window_waits_for_the_next_one() {
     let mut files = l0_run(1, 5, T0 - 100_000);
-    files.push(file(1, 1, 3, T0 + 1));
-    files.push(snap(5, T0 - 100_000));
+    files.push(file(1, 3, 3, T0 + 1));
+    // The snapshot ends before level 1's file, so level 2 (empty) starts at it (D224).
+    files.push(snap(2, T0 + 1));
     // Window of 30 s starting at T0; the next starts 30 s later. Level 2
-    // has L1 input (1..3) with an empty destination and runs first.
+    // has L1 input (3..3) with an empty destination and runs first.
     let job = run_job(due_at(&inv(files.clone()), T0 + 10_000));
     assert_eq!(compact_job(&job).level(), level(2));
-    files.push(file(2, 1, 3, T0 + 1));
-    files.push(file(3, 1, 3, T0 + 1));
+    files.push(file(2, 3, 3, T0 + 1));
+    files.push(file(3, 3, 3, T0 + 1));
     let waiting = due_at(&inv(files.clone()), T0 + 10_000);
     assert_eq!(
         waiting,
@@ -514,7 +566,7 @@ fn a_backlog_of_a_hundred_drains_as_four_jobs_in_one_window() {
     let mut sizes = Vec::new();
     let mut now = T0 + 5000;
     loop {
-        match due(&model.inv(), at(now), &cfg, None) {
+        match due_levels(&model.inv(), at(now), &cfg) {
             Due::Run(Job::Compact(job)) => {
                 if job.level() == level(1) {
                     sizes.push(job.inputs().files().len());
@@ -522,10 +574,7 @@ fn a_backlog_of_a_hundred_drains_as_four_jobs_in_one_window() {
                 model.apply(&Job::Compact(job), now);
             }
             Due::Run(job) => model.apply(&job, now),
-            Due::Wait { until, .. } => {
-                assert_eq!(until, None);
-                break;
-            }
+            Due::Wait { .. } => break,
         }
         now += 1;
     }
@@ -540,7 +589,7 @@ fn a_hole_in_the_source_is_the_same_hole_in_the_destination() {
     let cfg = defaults();
     let mut outputs = Vec::new();
     for _ in 0..10 {
-        match due(&model.inv(), at(T0), &cfg, None) {
+        match due_levels(&model.inv(), at(T0), &cfg) {
             Due::Run(job) => {
                 if let Job::Compact(c) = &job
                     && c.level() == level(1)
@@ -892,10 +941,11 @@ impl Checker {
             let dst = level(l);
             let src = inv.level(level(l - 1));
             let last = inv.level(dst).last();
-            let max = last.map(|f| f.key.range().max());
-            let pending = src
-                .iter()
-                .any(|f| max.is_none_or(|m| f.key.range().min() > m));
+            let covered = super::snapshot_end(inv);
+            let pending = src.iter().any(|f| match last {
+                Some(last) => f.key.range().min() > last.key.range().max(),
+                None => covered.is_none_or(|end| f.key.range().max() > end),
+            });
             if pending {
                 let start = go_truncate(now, cfg.interval(dst).unwrap());
                 assert!(
@@ -1679,7 +1729,7 @@ fn three_l0(local: &MemStore, replica: &MemStore) {
 }
 
 fn l1_job(replica: &MemStore) -> CompactJob {
-    let job = run_job(due_at(&load(replica), T0));
+    let job = run_job(due_levels(&load(replica), at(T0), &defaults()));
     compact_job(&job).clone()
 }
 
@@ -2524,4 +2574,19 @@ fn an_output_closes_the_window_only_when_created_after_its_start() {
         window_closed_by(&inside, now, interval),
         Some(at(T0 + 30_000))
     );
+}
+
+/// A one-off schedule is the same settings with the run switched off; nothing else changes,
+/// since the retention pass a `-once` drain ends with reads them.
+#[test]
+fn a_one_off_schedule_keeps_its_settings_and_is_not_run() {
+    let ordinary = defaults();
+    assert!(!ordinary.is_one_off());
+    let once = ordinary.clone().one_off();
+    assert!(once.is_one_off());
+    assert_eq!(once.top(), ordinary.top());
+    assert_eq!(once.snapshot_retention(), ordinary.snapshot_retention());
+    assert_eq!(once.retention(), ordinary.retention());
+    assert_ne!(once, ordinary);
+    assert!(!Maintenance::go_default().is_one_off());
 }

@@ -60,13 +60,10 @@ fn level_one_files_that_share_a_window_all_reach_level_two() {
             })
             .collect()
     };
-    // The scenario is the one described: three level-1 files at the boundary, then one
+    // The scenario is the one described: level-1 files at the boundary (level 1 starts above the first snapshot, at 2), then one
     // level-2 file over them (what follows is the run's end, a later window).
     let (one, two) = (put_at(1), put_at(2));
-    assert!(
-        one.starts_with(&[(1, 1), (2, 3), (4, 5), (6, 6)]),
-        "{one:?}"
-    );
-    assert!(two.starts_with(&[(1, 1), (2, 6)]), "{two:?}");
+    assert!(one.starts_with(&[(2, 2), (3, 5), (6, 6)]), "{one:?}");
+    assert!(two.starts_with(&[(2, 2), (3, 6)]), "{two:?}");
     assert!(report.reach.get("levels.Joins") > 0, "{:?}", report.reach);
 }

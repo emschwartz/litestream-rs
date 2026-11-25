@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+index 508e140f6..e381009d4 100644
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -561,7 +561,7 @@ fn decide(
+     let mut until: Option<Timestamp> = None;
+     // With no snapshot and no level 1 file yet, the first snapshot goes before any level, so
+     // the levels start above it (D224) and the database is not carried through levels 1 to 3.
+-    let first = (snapshot_end(inventory).is_none()
++    let first = (false && snapshot_end(inventory).is_none()
+         && Level::new(1).is_some_and(|one| inventory.level(one).is_empty()))
+     .then(|| snapshot_step(inventory, now, config, published, state, resolved))
+     .transpose()?;

@@ -16,7 +16,17 @@ pub(super) fn before_first_snapshot() -> (Rig, Actor) {
     let mut rig = Rig::new();
     let mut actor = Actor::new(cfg());
     let top = Level::new(cfg().maintenance.top().get()).unwrap();
+    // The first snapshot goes before any level, so this state (every level compacted, no
+    // snapshot) is the one a first snapshot that failed leaves: refuse the first attempt, which
+    // backs the snapshot off while the levels run.
+    let mut refused = false;
     for _ in 0..20 {
+        if !refused && !Rig::files(&rig.remote, Level::ZERO).is_empty() {
+            rig.remote
+                .inner
+                .inject_failure(StoreOp::Upload, transient(StoreOp::Upload));
+            refused = true;
+        }
         let tick = rig.tick(&mut actor, T0);
         if let Some(Event::Maintained {
             event: MaintainedEvent::Compacted(info),
@@ -25,6 +35,12 @@ pub(super) fn before_first_snapshot() -> (Rig, Actor) {
             && info.key.level() == top
         {
             assert!(Rig::files(&rig.remote, Level::SNAPSHOT).is_empty());
+            // The test clock stands still: the backoff would never end.
+            actor
+                .engine
+                .maintain
+                .state
+                .record_snapshot(Timestamp::from_unix_millis(T0), None);
             return (rig, actor);
         }
     }
