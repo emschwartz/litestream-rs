@@ -67,3 +67,61 @@ fn expansion_happens_before_parsing_as_in_go() {
     let config = load("# cost: $$5\nexec: ok\n", &TestEnv::default());
     assert_eq!(config.exec(), Some("ok"));
 }
+/// The names the load warned of as unset, in order; a config the load refuses still reports
+/// its warnings.
+fn unset_names(text: &str) -> Vec<String> {
+    let warnings = match GoConfig::parse(text, Expand::Env, &TestEnv::default()) {
+        Ok(loaded) => loaded.report.warnings,
+        Err(error) => error.report().warnings.clone(),
+    };
+    let mut names = Vec::new();
+    for warning in &warnings {
+        if let WarningKind::UnsetVariable { name } = &warning.kind {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+/// Go expands the whole file and says nothing about a variable that is not set (`ParseConfig`
+/// has no warning at all). The warning here is for a reference that changes what a value reads:
+/// one in a comment, which changes nothing, is as silent as Go's.
+#[test]
+fn an_unset_reference_in_a_comment_is_silent() {
+    for text in [
+        "# the price is $9 a month\nexec: ok\n",
+        "exec: ok # not $NOPE\n",
+        "dbs:\n  # path: ${NOPE}/app.db\n  - path: /d/app.db\n    replica:\n      url: file:///r\n",
+        "# $A $B $A\n# ${C}\nexec: ok\n",
+    ] {
+        assert_eq!(unset_names(text), Vec::<String>::new(), "{text}");
+    }
+}
+
+/// Every place a value can read a variable still warns: a plain, a quoted and a block scalar, a
+/// key, and a reference beside a comment that is not one.
+#[test]
+fn an_unset_reference_that_changes_a_value_still_warns() {
+    for (text, name) in [
+        ("exec: run $NOPE\n", "NOPE"),
+        ("exec: \"run $NOPE\"\n", "NOPE"),
+        ("exec: 'run $NOPE'\n", "NOPE"),
+        ("exec: |\n  run $NOPE\n  # still text\n", "NOPE"),
+        ("exec: |\n  # $NOPE is text here\n", "NOPE"),
+        ("addr: \":$NOPE\"\n", "NOPE"),
+        ("exec: a#$NOPE\n", "NOPE"),
+        ("$NOPE: 1\n", "NOPE"),
+    ] {
+        // Some of these are not valid configs: only whether the load warned is looked at.
+        assert_eq!(unset_names(text), [name.to_owned()], "{text}");
+    }
+}
+
+/// Of several names only the ones a value reads are named, each once, in file order.
+#[test]
+fn only_the_names_a_value_reads_are_warned() {
+    assert_eq!(
+        unset_names("# $A\nexec: $B $C\naddr: \":$B\" # $D\n"),
+        ["B", "C"]
+    );
+}

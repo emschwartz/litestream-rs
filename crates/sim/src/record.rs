@@ -226,6 +226,7 @@ fn shape(shape: &FaultShape) -> Result<String, Unprintable> {
         FaultShape::ErrorAfterPublish(err) => {
             format!("FaultShape::ErrorAfterPublish({})", store_error(err)?)
         }
+        FaultShape::Scratch(err) => format!("FaultShape::Scratch({})", store_error(err)?),
         FaultShape::SizeMismatch => "FaultShape::SizeMismatch".to_owned(),
         FaultShape::ChecksumMismatch => "FaultShape::ChecksumMismatch".to_owned(),
         FaultShape::CorruptPublish => "FaultShape::CorruptPublish".to_owned(),

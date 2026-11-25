@@ -69,3 +69,9 @@ replace > with >= in Worker::count
 replace Scheduled::kept_restore_point -> Option<Txid> with None
 # replica stack.rs spawn: the test-only half-stack gate doubled instead of halved still passes every suite; it only loses the headroom margin.
 replace / with \* in spawn
+# core maintain/short.rs Remembered::starts: the above-top level is read only when plan.active holds it, and plan() builds active from levels at or below the top.
+replace < with <= in Remembered::starts
+# core maintain/short.rs lowest: None on the first iteration makes the at > 0 check redundant.
+replace > with >= in lowest
+# core identity.rs local_against_replica: Actor::boot already stops with PageSizeChanged on a differing WAL page size; the guard is a kept defensive check.
+replace match guard reader.header\(\).page_size\(\) != page_size with false in local_against_replica

@@ -78,7 +78,36 @@ pub fn done(done: &Done) -> String {
         Done::ConfigChecked(checked) => checked.to_string(),
         Done::Help => help(),
         Done::Version => format!("lsr {}\n", env!("CARGO_PKG_VERSION")),
+        Done::VersionLine { verbose } => version_line(*verbose),
     }
+}
+
+/// Go's `version` output (`cmd/litestream/version.go`): the bare version, or with `-verbose`
+/// labelled lines in Go's column. Go's Go-version, commit and commit-time lines are left out:
+/// this is not a Go build, and a script that reads the labelled lines gets the ones it has.
+fn version_line(verbose: bool) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    if !verbose {
+        return format!("{version}\n");
+    }
+    let (os, arch) = go_platform(std::env::consts::OS, std::env::consts::ARCH);
+    format!("Version:     {version}\nOS/Arch:     {os}/{arch}\n")
+}
+
+/// Rust's names for the operating system and the architecture as Go's `GOOS` and `GOARCH`
+/// spell them, which is what Go's `OS/Arch` line prints.
+fn go_platform<'a>(os: &'a str, arch: &'a str) -> (&'a str, &'a str) {
+    let os = match os {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        other => other,
+    };
+    (os, arch)
 }
 
 /// `lsr trust-local`'s line.
@@ -236,16 +265,24 @@ fn restore(done: &RestoreDone) -> String {
                 restored,
                 cleared,
                 integrity_check,
+                takeover_recorded,
                 ..
             },
             false,
-        ) => restored_text(output, restored, cleared, *integrity_check),
+        ) => restored_text(
+            output,
+            restored,
+            cleared,
+            *integrity_check,
+            *takeover_recorded,
+        ),
         (
             Finished::Restored {
                 restored,
                 cleared,
                 integrity_check,
                 elapsed,
+                ..
             },
             true,
         ) => restored_json(
@@ -530,6 +567,7 @@ fn restored_text(
     restored: &Restored,
     cleared: &[PathBuf],
     integrity_check: IntegrityCheck,
+    takeover_recorded: bool,
 ) -> String {
     let checksum = if restored.post_apply().is_some() {
         "database checksum verified"
@@ -550,7 +588,9 @@ fn restored_text(
         restored.files(),
         restored.bytes_read(),
     );
-    putln!(out, "takeover recorded through {}", restored.reached());
+    if takeover_recorded {
+        putln!(out, "takeover recorded through {}", restored.reached());
+    }
     // Only an as-of restore over a lazily listed store reads created-at times; the line
     // for every other restore stays as it was.
     if restored.created_at_read() > 0 {
@@ -981,7 +1021,37 @@ fn files_json(inventory: &Inventory, created_at_fallbacks: Option<u64>) -> Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{LEVEL_HEADERS, databases_json, levels_table};
+    use super::{LEVEL_HEADERS, databases_json, go_platform, levels_table, version_line};
+
+    /// Go prints the bare version and, with `-verbose`, labelled lines whose values start in
+    /// one column (`cmd/litestream/version.go`).
+    #[test]
+    fn the_version_is_a_bare_line_and_verbose_is_go_s_labelled_lines() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(version_line(false), format!("{version}\n"));
+        let verbose = version_line(true);
+        let lines: Vec<&str> = verbose.lines().collect();
+        assert_eq!(
+            lines.first().copied(),
+            Some(format!("Version:     {version}").as_str())
+        );
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|l| l.starts_with("OS/Arch:     ") && l.contains('/')),
+            "{verbose}"
+        );
+        assert_eq!(lines.len(), 2);
+    }
+
+    /// Rust's platform names become Go's, the ones `OS/Arch` prints.
+    #[test]
+    fn the_platform_is_spelled_as_go_spells_it() {
+        assert_eq!(go_platform("macos", "aarch64"), ("darwin", "arm64"));
+        assert_eq!(go_platform("linux", "x86_64"), ("linux", "amd64"));
+        assert_eq!(go_platform("linux", "x86"), ("linux", "386"));
+        assert_eq!(go_platform("freebsd", "riscv64"), ("freebsd", "riscv64"));
+    }
 
     /// Go's `databases -json` layout: indented two spaces, `[]` when empty, a quote escaped.
     #[test]

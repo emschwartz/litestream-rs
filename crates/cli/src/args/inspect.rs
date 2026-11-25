@@ -50,6 +50,13 @@ pub struct LtxArgs {
     pub as_wal: bool,
 }
 
+/// `version`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct VersionArgs {
+    /// `-verbose`.
+    pub verbose: bool,
+}
+
 /// What a read-only command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Inspect<T> {
@@ -108,6 +115,29 @@ pub fn parse_databases(args: &[String]) -> Result<Inspect<DatabasesArgs>, UsageE
         config: set.value("config").filter(|c| !c.is_empty()),
         no_expand_env: boolean("no-expand-env")?,
         json: boolean("json")?,
+    }))
+}
+
+pub(super) const VERSION: [Def; 1] = [goflag::boolean("verbose")];
+
+/// The help rows of `version`; a test holds them to [`VERSION`], both ways.
+pub(super) const VERSION_HELP: &[FlagRow] = &[FlagRow {
+    name: "-verbose",
+    value: None,
+    help: "print the version, the OS and the architecture on labelled lines, as Go's -verbose does (no Go version or commit: this is not a Go build)",
+}];
+
+/// Parses the arguments after `version`. Go reads only its flag and ignores any other
+/// argument (`cmd/litestream/version.go`), so does this.
+///
+/// # Errors
+/// [`UsageError`], the first Go would report.
+pub fn parse_version(args: &[String]) -> Result<Inspect<VersionArgs>, UsageError> {
+    let Some(set) = scan(&VERSION, args)? else {
+        return Ok(Inspect::Help);
+    };
+    Ok(Inspect::Run(VersionArgs {
+        verbose: set.boolean("verbose").map_err(UsageError::GoFlag)?,
     }))
 }
 

@@ -410,6 +410,18 @@ three it had not reached, and the tally above counts the second result.
 | `pages.rs` `seeded` | `min() > from` becomes `>=` | The extra file it calls pending is the confirmed one; a quiet mark at or below the confirmed transaction is trimmed in `Actor::observe_lag` before any read. |
 | `actor/lag.rs` `Actor::observe_lag` | `retain(txid > replicated)` becomes `>=` | `only_quiet_pending` reads the marks from the transaction after the replicated one, so a kept mark equal to it is never read. |
 
+### Catch-up over the 2026-11-24 merges: equivalent survivors of `just mutants-diff`
+
+`just mutants-diff a5ee2d837~1` over pull requests 330 to 357: 322 mutants, 196 caught, 80 unviable, 44 missed, 2
+timeouts. Every miss but the three below got a test (short-listing memory and plan, retention gate, write hold,
+listing replacement, seeded quiet marks, the provider names of `needs.rs`).
+
+| Where | Mutation | Why |
+| --- | --- | --- |
+| `maintain/short.rs` `Remembered::starts` | `<` becomes `<=` in the above-top test | `above` is read only when `plan.active` holds the level, and `plan()` builds `active` from levels at or below the top. |
+| `maintain/short.rs` `lowest` | `>` becomes `>=` | `lowest` is `None` on the first iteration, so the `at > 0` check is redundant there. |
+| `identity.rs` `local_against_replica` | the guard `reader.header().page_size() != page_size` becomes `false` | The only caller, `Actor::boot`, already stops with `PageSizeChanged` when the WAL header's page size differs from the replica's; the guard is a kept defensive check. |
+
 ## wal
 
 `cargo mutants -p lsr-wal --test-package lsr-wal --test-tool nextest --jobs 4 --timeout 240` at commit

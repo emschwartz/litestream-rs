@@ -1,15 +1,22 @@
 diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
+index 0000000..0000000 100644
 --- a/crates/core/src/actor/lag.rs
 +++ b/crates/core/src/actor/lag.rs
-@@ -287,8 +287,9 @@ impl Actor {
-     /// failed for anything but the store refusing access (a store that times out at boot does
-     /// not hold the application).
+@@ -312,8 +312,8 @@ impl Actor {
+     /// access (a store that is down at boot does not hold the application for long). One
+     /// transient error judges nothing.
      #[must_use]
 -    pub const fn boot_judged(&self) -> bool {
--        self.kept.listed || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
+-        self.kept.listed || self.kept.boot_overdue
 +    pub fn boot_judged(&self) -> bool {
-+        (self.kept.listed && self.pending().is_none())
-+            || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
++        (self.kept.listed && self.pending().is_none()) || self.kept.boot_overdue
      }
  
      /// Whether an engine of this process has listed the replica.
+@@ -321,4 +321,4 @@ impl Actor {
+     pub const fn listed(&self) -> bool {
+         self.kept.listed
+     }
+-}
++}
+\ No newline at end of file

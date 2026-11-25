@@ -351,7 +351,8 @@ impl Class {
             FaultShape::ChecksumMismatch => Self::StoreChecksumMismatch,
             FaultShape::CorruptPublish => Self::StoreCorruptPublish,
             FaultShape::FlipByteOnRead { .. } => Self::StoreFlipByteOnRead,
-            FaultShape::Rate { .. } => Self::StoreRate,
+            // A failing sweep lasts until a heal, as a rate does.
+            FaultShape::Rate { .. } | FaultShape::Scratch(_) => Self::StoreRate,
         }
     }
 
