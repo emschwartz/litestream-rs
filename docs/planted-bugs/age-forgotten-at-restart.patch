@@ -1,0 +1,15 @@
+diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
+index c7c528570..edd26b2f5 100644
+--- a/crates/replica/src/thread.rs
++++ b/crates/replica/src/thread.rs
+@@ -751,9 +751,7 @@ impl Worker {
+                 let written = if self.progress.advanced {
+                     None
+                 } else {
+-                    self.sqlite
+-                        .clone()
+-                        .and_then(|mut sqlite| sqlite.modified().ok().flatten())
++                    self.sqlite.clone().and_then(|_sqlite| None::<Timestamp>)
+                 };
+                 self.progress.advance(engine, left, written, now);
+                 left
