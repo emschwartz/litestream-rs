@@ -18,6 +18,8 @@ mod latency;
 #[cfg(test)]
 mod limits;
 #[cfg(test)]
+mod list_order;
+#[cfg(test)]
 mod memory;
 #[cfg(test)]
 mod minio;
