@@ -13,14 +13,15 @@
 //! - [`FileChecksum`] is one CRC over the bytes the module docs of
 //!   [`crate::Decoder`] list, stored in the trailer.
 //!
-//! The CRC runs slice-by-16 (sixteen 256-entry tables, 32 KiB built at compile
-//! time) rather than the `crc` crate's one-table default. Every page of a
-//! restore is hashed at least once, so the CRC's speed bounds the restore's:
-//! on a 4.8 GiB snapshot of 16 KiB pages the one-table CRC ran at about
-//! 390 MB/s and took 13 of the 16 seconds the decode took; slice-by-16 runs at
-//! about 2.6 GB/s. Go's `hash/crc64` uses slicing-by-8 for the same reason.
-//! The value is the same CRC either way; a property test pins it against a
-//! bit-at-a-time reference.
+//! The CRC comes from the `crc-fast` crate (carry-less multiply: PMULL on
+//! aarch64, PCLMULQDQ on x86), which picks its code path once at run time and
+//! falls back to its own table where the CPU has no such instruction. Every
+//! page of a restore and of a first start is hashed several times, so the
+//! CRC's speed bounds both: the slice-by-16 table CRC this replaced ran at
+//! 3.4 GB/s on an M1 Max, the SIMD one at about 55 GB/s (see
+//! docs/decisions/D223.md). The value is the same CRC either way; a property
+//! test pins it against the `crc` crate's table CRC, and the page checksums
+//! against values Go computed.
 //!
 //! A page checksum is not a database checksum:
 //!
@@ -41,17 +42,15 @@
 
 use std::fmt;
 
-use crc::{CRC_64_GO_ISO, Crc, Digest, Table};
+use crc_fast::{CrcAlgorithm, Digest};
 
 use crate::PageNo;
 
 /// Bit 63, set on every checksum Go stores.
 const FLAG: u64 = 0x8000_0000_0000_0000;
 
-/// The table set every LTX CRC uses; see the module docs for why sixteen.
-type Tables = Table<16>;
-
-static CRC64: Crc<u64, Tables> = Crc::<u64, Tables>::new(&CRC_64_GO_ISO);
+/// The CRC every LTX checksum is: Go's `crc64.ISO` table.
+const ALGORITHM: CrcAlgorithm = CrcAlgorithm::Crc64GoIso;
 
 /// `raw` when bit 63 is set, as on every checksum Go writes.
 const fn flagged(raw: u64) -> Option<u64> {
@@ -113,7 +112,7 @@ impl PageChecksum {
     /// The checksum of one page.
     #[must_use]
     pub fn of(pgno: PageNo, data: &[u8]) -> Self {
-        let mut digest = CRC64.digest();
+        let mut digest = Digest::new(ALGORITHM);
         digest.update(&pgno.get().to_be_bytes());
         digest.update(data);
         Self(FLAG | digest.finalize())
@@ -167,11 +166,11 @@ macro_rules! hex_formatting {
 hex_formatting!(DbChecksum, PageChecksum, FileChecksum);
 
 /// A running CRC-64 over a byte stream.
-pub(crate) struct Crc64(Digest<'static, u64, Tables>);
+pub(crate) struct Crc64(Digest);
 
 impl Crc64 {
     pub(crate) fn new() -> Self {
-        Self(CRC64.digest())
+        Self(Digest::new(ALGORITHM))
     }
 
     pub(crate) fn update(&mut self, bytes: &[u8]) {
@@ -199,6 +198,39 @@ impl fmt::Debug for Crc64 {
 mod tests {
     use super::*;
     use crate::PageSize;
+    use crc::{CRC_64_GO_ISO, Crc, Table};
+
+    /// The second implementation: the `crc` crate's slice-by-16 table CRC, which shares no code
+    /// with `crc-fast`.
+    static REFERENCE: Crc<u64, Table<16>> = Crc::<u64, Table<16>>::new(&CRC_64_GO_ISO);
+
+    #[test]
+    fn the_check_value_of_the_go_iso_crc() {
+        let mut crc = Crc64::new();
+        crc.update(b"123456789");
+        assert_eq!(crc.finish(), FLAG | 0xb909_56c7_75a4_1001);
+        assert_eq!(REFERENCE.checksum(b"123456789"), 0xb909_56c7_75a4_1001);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_crc_equals_the_reference_over_any_length_and_split(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..5000),
+            cuts in proptest::collection::vec(0_usize..5000, 0..6),
+        ) {
+            let mut cuts = cuts;
+            cuts.sort_unstable();
+            let mut crc = Crc64::new();
+            let mut from = 0;
+            for cut in cuts {
+                let to = cut.min(bytes.len()).max(from);
+                crc.update(&bytes[from..to]);
+                from = to;
+            }
+            crc.update(&bytes[from..]);
+            proptest::prop_assert_eq!(crc.finish(), FLAG | REFERENCE.checksum(&bytes));
+        }
+    }
 
     fn pgno(n: u32) -> PageNo {
         PageNo::new(n, PageSize::new(4096).unwrap()).unwrap()

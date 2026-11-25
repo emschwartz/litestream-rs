@@ -63,7 +63,7 @@ pub use exec::{ChildEnd, During, ExecCommand, ExecError};
 pub use flags::{Parsed, UsageError};
 pub use http::{AddrError, MAX_CONNECTIONS, MAX_REQUEST, PPROF_NOT_SERVED};
 
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, Mode};
 use crate::exec::Wake;
 use crate::flags::{Flags, Source};
 use crate::health::Board;
@@ -123,7 +123,11 @@ pub fn run(args: &[String]) -> Result<Outcome, SidecarError> {
         Arc::clone(&log),
         control.started(),
         board,
-        !flags.once,
+        if flags.once {
+            Mode::Once
+        } else {
+            Mode::Serving
+        },
     ));
     let finished = if flags.once {
         daemon.stop(
