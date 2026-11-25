@@ -714,6 +714,32 @@ fn sizes(rig: &Rig) -> Vec<u64> {
         .collect()
 }
 
+/// A snapshot lists every page up to the committed end, so a cap that the first commit already
+/// reaches does not cut it short.
+#[test]
+fn a_cap_never_cuts_a_snapshot_short() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1], 1);
+    commit(&rig.wal, &[2], 2);
+    commit(&rig.wal, &[3], 3);
+    let step = Step::Snapshot {
+        after: None,
+        prev_timestamp: None,
+        cause: SnapshotCause::FirstSync,
+    };
+    let synced = rig.step(step, &capped(1), 1).unwrap();
+    assert!(
+        matches!(
+            synced,
+            Synced::Wrote {
+                end: StepEnd::Through(_),
+                ..
+            }
+        ),
+        "{synced:?}"
+    );
+}
+
 #[test]
 fn a_cap_stops_on_the_first_commit_that_reaches_it() {
     let txs: [(&[u32], u32); 4] = [(&[2], 2), (&[3, 4, 5], 5), (&[1], 5), (&[2, 3], 5)];
