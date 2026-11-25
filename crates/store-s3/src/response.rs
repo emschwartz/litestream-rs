@@ -501,7 +501,7 @@ pub(crate) fn xml_text(xml: &str, tag: &str) -> Vec<String> {
 /// `<prefix>/<level>/<file name>` for a level and a file name it parses), and where the
 /// next page starts when the listing is truncated.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct UploadPage {
+pub(crate) struct UploadPage {
     /// The uploads whose key is one of this store's object keys.
     pub ours: Vec<(FileKey, UploadId)>,
     /// `key-marker` and `upload-id-marker` for the next page.
@@ -513,7 +513,7 @@ pub struct UploadPage {
 ///
 /// # Errors
 /// [`ResponseError::Malformed`] for a body that is not the listing.
-pub fn parse_uploads(r: &HttpResponse, prefix: &Prefix) -> Result<UploadPage, ResponseError> {
+pub(crate) fn parse_uploads(r: &HttpResponse, prefix: &Prefix) -> Result<UploadPage, ResponseError> {
     let xml = std::str::from_utf8(r.body()).map_err(|_bytes| ResponseError::Malformed)?;
     if !xml.contains("<ListMultipartUploadsResult") {
         return Err(ResponseError::Malformed);
