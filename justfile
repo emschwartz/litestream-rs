@@ -122,7 +122,9 @@ tsan:
 # codes, offsets, and the io_methods and wal-index checks on synthetic tables): no I/O, no FFI. Miri runs about 1000 times slower than native,
 # so the core's engine-sized suites (actor, maintain, recover, sync and the rest, 500 tests) are
 # left to the native run, the few whole-database tests inside the chosen modules are ignored
-# under `cfg(miri)`, and the proptest case count is cut. Environment reaches the program only
+# under `cfg(miri)`, and the proptest case count is cut. A libtest filter matches anywhere in a
+# test's path (`checkpoint::` also matched actor::tests::own_checkpoint, five engine-sized tests),
+# so `--skip actor::` keeps the actor suite out. Environment reaches the program only
 # through -Zmiri-env-forward. Not part of check.
 miri:
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
@@ -131,7 +133,7 @@ miri:
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
         PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
         cargo +{{nightly}} miri test --locked -p lsr-core --lib -- \
-        plan:: retry:: position:: layout:: checkpoint:: compact::
+        --skip actor:: plan:: retry:: position:: layout:: checkpoint:: compact::
     MIRIFLAGS="-Zmiri-strict-provenance" CARGO_TARGET_DIR=target/miri \
         cargo +{{nightly}} miri test --locked -p lsr-sqlite --lib -- \
         version::tests::every version::tests::another version::tests::the_refusal error::tests \
