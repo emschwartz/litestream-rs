@@ -56,6 +56,21 @@ fn a_rejected_snapshot_is_deleted_at_once() {
     );
 }
 
+/// The same, for a snapshot read from the database (the first one is built from level 0).
+#[test]
+fn a_rejected_database_snapshot_is_deleted_at_once() {
+    let (mut rig, mut actor) = before_first_snapshot();
+    actor.engine.maintain.state.refuse_seed();
+    rig.remote
+        .inner
+        .inject_failure_after_publish(rejected(None));
+    let reads = rig.db.reads();
+    let tick = rig.tick(&mut actor, T0);
+    assert!(is_rejection(&tick), "{tick:?}");
+    assert!(rig.db.reads() > reads, "it read the database");
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT), Vec::new());
+}
+
 /// A snapshot that fails before its commit published nothing, so nothing is
 /// deleted: the key may hold an earlier good object.
 #[test]

@@ -226,13 +226,17 @@ impl CompactJob {
 }
 
 /// Write a snapshot when the database position is above `after`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SnapshotJob {
     /// The newest snapshot's last transaction; `None` when there is none.
     pub after: Option<Txid>,
     /// The newest position the planner saw. The actor snapshots its own
-    /// position, which is at least this.
+    /// position, which is at least this; a job with `from` snapshots the end of its inputs.
     pub through: Txid,
+    /// The level-0 files to build the snapshot from, when the replica already holds the
+    /// database from transaction 1: the first start's own file, so the database file is
+    /// not read a second time. `None` reads the database.
+    pub from: Option<CompactionInputs>,
 }
 
 /// One delete call's keys.
@@ -283,6 +287,22 @@ pub enum Job {
     Snapshot(SnapshotJob),
     /// Delete files.
     Delete(DeleteJob),
+}
+
+impl Job {
+    /// What a merge job merges and where it puts it: a compaction's inputs and level, or the
+    /// level-0 files a first snapshot is built from (at the snapshot level). `None` for a
+    /// delete and for a snapshot read from the database.
+    #[must_use]
+    pub(crate) fn merge(&self) -> Option<(&CompactionInputs, Level)> {
+        match self {
+            Self::Compact(job) => Some((job.inputs(), job.level())),
+            Self::Snapshot(SnapshotJob {
+                from: Some(inputs), ..
+            }) => Some((inputs, Level::SNAPSHOT)),
+            Self::Snapshot(_) | Self::Delete(_) => None,
+        }
+    }
 }
 
 /// Why deletions are refused right now. Compaction and snapshots still run.
@@ -554,7 +574,7 @@ fn decide(
         (Some(retry), _) => Step::Wait(retry),
         // A rejected snapshot goes before the next one is written.
         (None, Some(bad)) => delete_first(bad),
-        (None, None) => plan_snapshot(inventory, now, config, published, resolved)?,
+        (None, None) => plan_snapshot(inventory, now, config, published, state, resolved)?,
     };
     if let Some(job) = absorb(step, &mut until) {
         return Ok(Decided::job(job, gate));
@@ -699,6 +719,7 @@ fn plan_snapshot(
     now: Timestamp,
     config: &Maintenance,
     published: Option<Txid>,
+    state: &MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Result<Step, Need> {
     let Some(pos) = inventory.newest().max(published) else {
@@ -710,9 +731,14 @@ fn plan_snapshot(
         .rev()
         .find(|info| is_snapshot_start(info))
     else {
+        let from = (!state.seed_refused())
+            .then(|| level_zero_from_one(inventory))
+            .flatten();
+        let through = from.as_ref().map_or(pos, |inputs| inputs.range().max());
         return Ok(Step::Run(Job::Snapshot(SnapshotJob {
             after: None,
-            through: pos,
+            through,
+            from,
         })));
     };
     let after = snap.key.range().max();
@@ -726,7 +752,20 @@ fn plan_snapshot(
     Ok(Step::Run(Job::Snapshot(SnapshotJob {
         after: Some(after),
         through: pos,
+        from: None,
     })))
+}
+
+/// The level-0 files from transaction 1 to the replica's newest transaction, as one
+/// compaction's inputs, when level 0 holds them all (at most [`MAX_INPUTS`], with no hole): the
+/// chain's first file holds every page of the database, so they are the database at that
+/// transaction, and a snapshot built from them reads no database page. A replica whose level 0
+/// does not reach its newest transaction gets the snapshot of the database as before.
+fn level_zero_from_one(inventory: &Inventory) -> Option<CompactionInputs> {
+    let run = contiguous_run(inventory.level(Level::ZERO).iter());
+    run.first().filter(|first| is_snapshot_start(first))?;
+    let inputs = CompactionInputs::new(run).ok()?;
+    (Some(inputs.range().max()) >= inventory.newest()).then_some(inputs)
 }
 
 /// Whether the file was recorded as created after `start`, or the request for its created-at time.
@@ -789,10 +828,10 @@ pub enum Outcome {
     Failed(MaintainError),
 }
 
-/// Runs one compaction. Level-1 jobs read `local` when every input's local
-/// copy is the replica's object ([`local_is_replica`]), and the replica
-/// otherwise or once when an input is missing or does not decode locally (the
-/// local copy may be gone after a restart, or rotten); every other level
+/// Runs one merge of `inputs` into `level`: a compaction, or the first snapshot (D205). A merge
+/// of level-0 files reads `local` when every input's local copy is the replica's object
+/// ([`local_is_replica`]), and the replica otherwise or once when an input is missing or does not
+/// decode locally (the local copy may be gone after a restart, or rotten); every other level
 /// reads the replica. The output always goes to the replica. Inputs are never
 /// deleted.
 ///
@@ -802,21 +841,26 @@ pub enum Outcome {
 /// before (an earlier run's output that retention may already count as
 /// cover): an output key a read finds taken before the write is not written
 /// over, and the job is planned again from a fresh listing.
-pub(crate) async fn run_compact<L: Role, R: Role>(
-    job: &CompactJob,
+pub(crate) async fn run_compaction<L: Role, R: Role>(
+    inputs: &CompactionInputs,
+    level: Level,
     local: &L,
     replica: &R,
 ) -> Outcome {
-    let output = job.output_key();
+    let output = FileKey::new(level, inputs.range());
     match crate::store::exists(replica, &output).await {
         Ok(true) => return Outcome::Replan { key: output },
         Ok(false) => {}
         Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
     }
-    let result = if job.level().get() == 1 {
-        compact_level_one(job, local, replica).await
+    let result = if inputs
+        .files()
+        .iter()
+        .all(|info| info.key.level() == Level::ZERO)
+    {
+        compact_from_level_zero(inputs, level, local, replica).await
     } else {
-        compact_in(replica, replica, job.inputs(), job.level()).await
+        compact_in(replica, replica, inputs, level).await
     };
     match result {
         Ok(done) => Outcome::Compacted {
@@ -825,7 +869,7 @@ pub(crate) async fn run_compact<L: Role, R: Role>(
         },
         Err(CompactError::InputVanished { key }) => Outcome::Replan { key },
         Err(CompactError::Dest(err)) if leaves_bad_output(&err) => {
-            remove_rejected(replica, job.output_key(), err).await
+            remove_rejected(replica, output, err).await
         }
         Err(
             err @ (CompactError::Source(_)
@@ -839,21 +883,22 @@ pub(crate) async fn run_compact<L: Role, R: Role>(
     }
 }
 
-/// Level 1 from the local copies of level 0 when they are the replica's
+/// Level-0 inputs from their local copies when those are the replica's
 /// objects, from the replica otherwise.
-async fn compact_level_one<L: Role, R: Role>(
-    job: &CompactJob,
+async fn compact_from_level_zero<L: Role, R: Role>(
+    inputs: &CompactionInputs,
+    level: Level,
     local: &L,
     replica: &R,
 ) -> Result<Compacted, CompactError> {
-    if !local_is_replica(local, replica, job.inputs()).await? {
-        return compact_in(replica, replica, job.inputs(), job.level()).await;
+    if !local_is_replica(local, replica, inputs).await? {
+        return compact_in(replica, replica, inputs, level).await;
     }
     // The source is staging here, so a failed read is staging's error
     // (`CompactError::Local`), by its role.
-    match compact_in(local, replica, job.inputs(), job.level()).await {
+    match compact_in(local, replica, inputs, level).await {
         Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
-            compact_in(replica, replica, job.inputs(), job.level()).await
+            compact_in(replica, replica, inputs, level).await
         }
         other => other,
     }

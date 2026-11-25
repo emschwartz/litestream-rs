@@ -302,6 +302,8 @@ fn a_passed_wait_with_no_work_left_is_not_a_deadline() {
 #[test]
 fn a_snapshot_held_at_the_witness_cap_runs_once_there_is_room() {
     let (mut rig, mut actor) = super::rejected_snapshot::before_first_snapshot();
+    // The step is the snapshot of the database; one built from level 0 takes none.
+    actor.engine.maintain.state.refuse_seed();
     let checksum = lsr_ltx::FileChecksum::from_raw(1 << 63).unwrap();
     for n in 1_000..1_000 + crate::witness::MAX_WITNESSED {
         let key = FileKey::new(
