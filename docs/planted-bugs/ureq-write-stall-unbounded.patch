@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/ureq_transport.rs b/crates/store-s3/src/ureq_transport.rs
+index af2ee05c0..0815e3eb2 100644
+--- a/crates/store-s3/src/ureq_transport.rs
++++ b/crates/store-s3/src/ureq_transport.rs
+@@ -90,7 +90,7 @@ impl UreqTransport {
+             .timeout_connect(stall)
+             .timeout_recv_response(stall)
+             .timeout_per_read(stall)
+-            .timeout_per_write(stall)
++            .timeout_per_write(None)
+             // ureq keeps 3 idle connections per host, fewer than the batches the store sends
+             // (up to `CREATION_TIME_CONCURRENCY`), so most requests of a restore opened a
+             // socket and, over TLS, a handshake. The pool holds as many as the widest batch.

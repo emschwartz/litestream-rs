@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/apart.rs b/crates/core/src/actor/apart.rs
+index 9b52676ae..8a54768e8 100644
+--- a/crates/core/src/actor/apart.rs
++++ b/crates/core/src/actor/apart.rs
+@@ -34,7 +34,7 @@ impl<'a, L> Apart<'a, L> {
+ 
+     /// Where the directory holds the file the course calls `key`.
+     fn held(&self, key: &FileKey) -> FileKey {
+-        if key.level() == Level::ZERO && Some(key.range().max()) > self.base {
++        if false && key.level() == Level::ZERO && Some(key.range().max()) > self.base {
+             FileKey::new(Level::LOCAL_COURSE, key.range())
+         } else {
+             *key

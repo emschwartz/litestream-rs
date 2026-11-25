@@ -107,6 +107,74 @@ fn pending_files_in_the_live_wal_are_uploaded_as_staged() {
     assert_eq!(snapshots(&rig), vec![1]);
 }
 
+/// A boot reads each pending staged file once: the bytes it reads from staging are the
+/// pending files' own, where a boot that swept them, witnessed them, recovered from the
+/// newest and seeded the page table read each one four times. The replica is empty here, so
+/// every staged file is pending and the first is the whole database.
+#[test]
+fn a_boot_reads_each_pending_staged_file_once() {
+    let mut rig = Rig::new();
+    rig.remote.refuse_uploads.store(true, Ordering::SeqCst);
+    let mut actor = Actor::new(cfg());
+    rig.settle(&mut actor, T0);
+    for n in [2, 3] {
+        rig.commit(n);
+        rig.settle(&mut actor, T0 + 1);
+    }
+    assert!(ranges(&rig.remote).is_empty());
+    let pending = Rig::files(&rig.staging, Level::ZERO);
+    assert_eq!(pending.len(), 3);
+    let size: u64 = pending.iter().map(|info| info.size).sum();
+    let reads: Vec<usize> = pending
+        .iter()
+        .map(|info| rig.staging.reads_of(&info.key))
+        .collect();
+    let before = rig.staging.read_bytes();
+    let mut restarted = Actor::new(cfg());
+    let boot = rig.tick(&mut restarted, T0 + 2);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    assert_eq!(rig.staging.read_bytes() - before, size);
+    for (info, before) in pending.iter().zip(reads) {
+        assert_eq!(rig.staging.reads_of(&info.key) - before, 1, "{info:?}");
+    }
+    rig.remote.refuse_uploads.store(false, Ordering::SeqCst);
+    let seen = rig.settle(&mut restarted, T0 + 2);
+    no_stop(&seen);
+    assert_eq!(restored(&rig), 3);
+}
+
+/// With a file the replica confirmed and staging no longer holds, the boot reads each
+/// pending file once from staging, and the confirmed file once from the replica, for the
+/// link the first pending file must follow.
+#[test]
+fn a_boot_after_a_confirmed_upload_reads_each_pending_staged_file_once() {
+    let (mut rig, mut actor) = caught_up();
+    stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
+    let staged = Rig::files(&rig.staging, Level::ZERO);
+    assert_eq!(staged.len(), 2);
+    let tail = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(1).unwrap()));
+    let tail_reads = rig.remote.reads_of(&tail);
+    let reads: Vec<usize> = staged
+        .iter()
+        .map(|info| rig.staging.reads_of(&info.key))
+        .collect();
+    let before = rig.staging.read_bytes();
+    let mut restarted = Actor::new(cfg());
+    let boot = rig.tick(&mut restarted, T0 + 2);
+    assert_eq!(event(&boot), Some(&Event::Booted { cause: None }));
+    let again: Vec<usize> = staged
+        .iter()
+        .zip(reads)
+        .map(|(info, before)| rig.staging.reads_of(&info.key) - before)
+        .collect();
+    assert_eq!(again, vec![1, 1]);
+    let size: u64 = staged.iter().map(|info| info.size).sum();
+    assert_eq!(rig.staging.read_bytes() - before, size);
+    // The listing verifies the replica's newest file, the pass reads it for its link and
+    // the seed reads its header: none of them a read of staging.
+    assert_eq!(rig.remote.reads_of(&tail) - tail_reads, 3);
+}
+
 /// A pending file that is torn, with a whole file after it, is never uploaded: the boot
 /// reads it whole, finds it does not verify, and drops it with the file after it. The
 /// WAL, which holds their frames, stages them again.
@@ -328,7 +396,7 @@ fn a_pending_snapshot_is_uploaded_as_staged_when_the_application_has_committed_s
 
 /// `bytes` re-encoded as the file for transaction `n`, pages and the rest of
 /// the header unchanged.
-fn relabelled(bytes: &[u8], n: u64) -> Vec<u8> {
+pub(super) fn relabelled(bytes: &[u8], n: u64) -> Vec<u8> {
     let mut decoder = ReadDecoder::new(bytes);
     let mut pages = Vec::new();
     while let Some(event) = decoder.next_event().unwrap() {
@@ -636,10 +704,11 @@ fn pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal() {
     );
 }
 
-/// One read of a pending file that answers with torn bytes (a lying read; the stored bytes
-/// are the engine's): the first pass refuses the file and the second accepts it. Passes that
-/// disagree prove nothing, so the boot deletes nothing and retries (`LocalIo`); the next
-/// boot reads the stored bytes and uploads them.
+/// One read of a pending file that answers with another valid file, one that does not start
+/// where the file before it ended (a lying read; the stored bytes are the engine's): the
+/// boot's pass refuses the file and a second pass accepts it. Passes that disagree prove
+/// nothing, so the boot deletes nothing and retries (`LocalIo`); the next boot reads the
+/// stored bytes and uploads them.
 #[test]
 fn witness_passes_that_disagree_retry_the_boot() {
     let (mut rig, mut actor) = caught_up();
@@ -647,10 +716,10 @@ fn witness_passes_that_disagree_retry_the_boot() {
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
     let stored = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
-    let torn = stored[..stored.len() / 2].to_vec();
-    // The boot reads the newest staged file once before it checks, so the second read
-    // from its start is the first pass's.
-    rig.staging.other_bytes_on_read(key, 2, torn);
+    let before = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(2).unwrap()));
+    let two = block_on(rig.staging.inner.read(&before, 0, all)).unwrap();
+    // The pass's read of the file is the boot's first from its start.
+    rig.staging.other_bytes_on_read(key, 1, relabelled(&two, 3));
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 2);
     assert!(
@@ -663,21 +732,17 @@ fn witness_passes_that_disagree_retry_the_boot() {
         ),
         "{boot:?}"
     );
-    assert_eq!(
-        rig.staging.reads_of(&key),
-        3,
-        "the boot ran two witness passes"
-    );
+    assert_eq!(rig.staging.reads_of(&key), 2, "the boot ran two passes");
     assert_eq!(staged(&rig), vec![2, 3], "the boot deleted nothing");
     let seen = rig.settle(&mut actor, T0 + 1_002);
     no_stop(&seen);
     assert!(replica_holds(&rig, 3, &stored));
 }
 
-/// Pending files 2 and 3 staged and held; the `nth` read of staged 3 from its start answers
-/// with another valid file, the stored bytes untouched. Returns the rig, the boot's first
+/// Pending files 2 and 3 staged and held; the boot's one read of staged 3 answers with
+/// another valid file, the stored bytes untouched. Returns the rig, the boot's first
 /// tick, the boot's later ticks and the stored bytes of 3.
-fn boot_with_one_lying_read(nth: usize) -> (Rig, Tick, Vec<Tick>, Vec<u8>) {
+fn boot_with_one_lying_read() -> (Rig, Tick, Vec<Tick>, Vec<u8>) {
     let (mut rig, mut actor) = caught_up();
     stage_held(&mut rig, &mut actor, &[2, 3], T0 + 1);
     let key = FileKey::new(Level::ZERO, TxidRange::single(Txid::new(3).unwrap()));
@@ -685,45 +750,24 @@ fn boot_with_one_lying_read(nth: usize) -> (Rig, Tick, Vec<Tick>, Vec<u8>) {
     let stored = block_on(rig.staging.inner.read(&key, 0, all)).unwrap();
     let other = replace_staged(&rig, 3, 0xEE);
     put_l0(&rig.staging.inner, 3, &stored);
-    rig.staging.other_bytes_on_read(key, nth, other);
+    rig.staging.other_bytes_on_read(key, 1, other);
     let mut actor = Actor::new(cfg());
     let boot = rig.tick(&mut actor, T0 + 2);
+    assert_eq!(rig.staging.reads_of(&key), 1, "the boot read the file once");
     assert_eq!(staged(&rig), vec![2, 3], "the boot deleted nothing");
     let seen = rig.settle(&mut actor, T0 + 1_002);
     (rig, boot, seen, stored)
 }
 
-/// The boot's first two reads of the newest staged file are the sweep's and the witness
-/// passes'; its third is recovery's read of the file's header. One lie there made the file
-/// look unreadable, and the boot snapshotted (`NewestStagedFileUnreadable`) on one failed
-/// read. Now that read is doubted: the boot fails with `StagedLost`, the next boot reads the
-/// stored bytes, continues without a snapshot and uploads them.
-#[test]
-fn one_lying_read_of_the_newest_staged_header_retries_the_boot() {
-    let (rig, boot, seen, stored) = boot_with_one_lying_read(3);
-    let retried = matches!(
-        event(&boot),
-        Some(Event::Retrying {
-            fault: Fault::StagedLost,
-            ..
-        })
-    );
-    assert!(retried, "{boot:?}");
-    no_stop(&seen);
-    let booted = seen.iter().find_map(|tick| match event(tick) {
-        Some(Event::Booted { cause }) => Some(*cause),
-        Some(_) | None => None,
-    });
-    assert_eq!(booted, Some(None), "the next boot continues: {seen:?}");
-    assert!(replica_holds(&rig, 3, &stored));
-}
-
-/// The fourth read is recovery's scan of the file's pages: one lie there made its last page
-/// disagree with the WAL's, and the boot snapshotted (`LastPageMismatch`). It is doubted
-/// the same way.
+/// The boot reads the newest staged file once, and recovery judges its pages from that read.
+/// One lie there (a whole, valid file with another page) makes its last page disagree with
+/// the WAL's, and a boot that believed it snapshotted (`LastPageMismatch`) on one read. That
+/// read is doubted: the boot fails with `StagedLost`, the next boot reads the stored bytes,
+/// continues without a snapshot and uploads them. A lie that tears the file is the pass's own
+/// suspect (`one_bad_read_of_a_staged_file_at_boot_drops_nothing`).
 #[test]
 fn one_lying_read_of_the_newest_staged_pages_retries_the_boot() {
-    let (rig, boot, seen, stored) = boot_with_one_lying_read(4);
+    let (rig, boot, seen, stored) = boot_with_one_lying_read();
     let retried = matches!(
         event(&boot),
         Some(Event::Retrying {

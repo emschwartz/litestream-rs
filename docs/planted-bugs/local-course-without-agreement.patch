@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor/local.rs b/crates/core/src/actor/local.rs
+index d43074b63..f600c0cef 100644
+--- a/crates/core/src/actor/local.rs
++++ b/crates/core/src/actor/local.rs
+@@ -111,7 +111,7 @@ async fn agree<W: WalSource, L: Role, R: Role>(
+         boot_wal_of(reader.as_mut(), end),
+     )
+     .await?;
+-    if found.bad.is_some() {
++    if false {
+         return Ok(None);
+     }
+     let within = boot_wal_of(reader.as_mut(), end);

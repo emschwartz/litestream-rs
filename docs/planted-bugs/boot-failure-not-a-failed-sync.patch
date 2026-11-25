@@ -1,18 +1,13 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 42a5d5775..bd6953484 100644
+index 143825550..7d1da78d6 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1185,7 +1185,7 @@ impl Actor {
+@@ -1205,7 +1205,7 @@ impl Actor {
      /// `litestream_sync_error_count`; Go's later upload failures are only logged. `took` is the
      /// attempt's time on the engine's clock.
      fn boot_failed(&mut self, fault: Fault, took: Duration, now: Timestamp) -> Tick {
 -        self.kept.work.sync_step(Some(fault), took, None, None);
 +        let _ = took;
-         self.fault(Task::Sync, fault, now)
+         self.fault(self.boot_task(), fault, now)
      }
  
-@@ -3177,3 +3177,4 @@ const fn step_of(recovered: Recovered) -> Result<Step, Stepped> {
- 
- #[cfg(test)]
- mod tests;
-+
