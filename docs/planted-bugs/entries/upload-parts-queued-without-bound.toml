@@ -1,0 +1,10 @@
+# An upload keeps every full part until the commit instead of sending a batch each time the
+# concurrency's worth is ready, so its memory grows with the object.
+name = "upload-parts-queued-without-bound"
+fix = "plant"
+package = "lsr-store-s3"
+test_bin = "store-s3"
+tests = [
+    "memory::an_upload_through_the_real_client_holds_five_parts",
+    "memory::a_long_upload_at_a_large_part_size_holds_one_batch_and_allocates_each_part_once",
+]

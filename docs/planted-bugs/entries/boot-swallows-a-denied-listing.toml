@@ -1,0 +1,6 @@
+# The boot treats a permission refusal of the replica's own listing as an empty replica and goes on: the refusal is never reported, and the simulator's sweep exemption must not hide it.
+name = "boot-swallows-a-denied-listing"
+fix = "claude/sweep-judge"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["remote_s3::only_a_permission_refusal_of_the_sweep_is_exempt"]

@@ -39,6 +39,8 @@ thread_local! {
     /// This thread's allocations are not the code under test's: the process-wide
     /// count skips them.
     static EXCLUDED: Cell<bool> = const { Cell::new(false) };
+    /// Allocations (and growths by realloc) of [`LARGE_BLOCK`] or more on this thread.
+    static LARGE: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Bytes the process has allocated and not yet freed on threads that are not excluded.
@@ -71,6 +73,17 @@ fn count(delta: isize) {
     }
 }
 
+/// The size from which an allocation counts as large for [`large_allocs_of`]: blocks the system
+/// allocator takes whole, and on macOS keeps mapped after the free.
+pub const LARGE_BLOCK: usize = 256 * 1024;
+
+/// Counts a large allocation of `size` bytes on this thread.
+fn count_large(size: usize) {
+    if size >= LARGE_BLOCK
+        && let Err(_ending) = LARGE.try_with(|large| large.set(large.get().saturating_add(1)))
+    {}
+}
+
 /// A layout's size as a signed count; sizes above `isize::MAX` cannot be allocated.
 fn signed(size: usize) -> isize {
     isize::try_from(size).unwrap_or(isize::MAX)
@@ -88,6 +101,7 @@ unsafe impl GlobalAlloc for Counting {
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
             count(signed(layout.size()));
+            count_large(layout.size());
         }
         ptr
     }
@@ -97,6 +111,7 @@ unsafe impl GlobalAlloc for Counting {
         let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() {
             count(signed(layout.size()));
+            count_large(layout.size());
         }
         ptr
     }
@@ -112,6 +127,9 @@ unsafe impl GlobalAlloc for Counting {
         let moved = unsafe { System.realloc(ptr, layout, new_size) };
         if !moved.is_null() {
             count(signed(new_size).saturating_sub(signed(layout.size())));
+            if new_size > layout.size() {
+                count_large(new_size);
+            }
         }
         moved
     }
@@ -145,6 +163,15 @@ pub fn peak_of<R>(f: impl FnOnce() -> R) -> (R, Peak) {
             kept: above(end),
         },
     )
+}
+
+/// Runs `f` and counts the allocations of [`LARGE_BLOCK`] or more it made on this thread,
+/// growths of a buffer included: each is a block the allocator may keep after the free, so a
+/// path that allocates one per unit of work, instead of holding one, shows here.
+pub fn large_allocs_of<R>(f: impl FnOnce() -> R) -> (R, usize) {
+    let before = LARGE.with(Cell::get);
+    let result = f();
+    (result, LARGE.with(Cell::get).saturating_sub(before))
 }
 
 /// [`peak_of`] over every thread of the process except the excluded ones: the closure
