@@ -1,0 +1,9 @@
+# The local course begins though a staged file did not read whole or did not start where the
+# one before it ended: the engine stages and checkpoints from a position staging does not prove.
+name = "local-course-without-agreement"
+fix = "claude/boot-local"
+package = "lsr-core"
+tests = [
+    "staging_that_does_not_read_whole_begins_no_course",
+    "staged_files_that_do_not_chain_begin_no_course",
+]

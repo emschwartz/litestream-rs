@@ -1,0 +1,18 @@
+diff --git a/crates/sim/src/slot.rs b/crates/sim/src/slot.rs
+index dec9a0cc6..e30008d33 100644
+--- a/crates/sim/src/slot.rs
++++ b/crates/sim/src/slot.rs
+@@ -109,11 +109,8 @@ fn fold(
+             Some(slot) if slot.digest == *digest => {
+                 slot.moved = true;
+                 seen.moved_up = 1;
+-                RecorderEvent::Delete {
+-                    keys: Vec::new(),
+-                    at: *at,
+-                    high: *high,
+-                }
++                let _ = (at, high);
++                event.clone()
+             }
+             Some(_) | None => event.clone(),
+         },

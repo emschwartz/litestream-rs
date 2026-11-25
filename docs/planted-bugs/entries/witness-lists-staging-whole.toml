@@ -1,4 +1,5 @@
+# The boot's pass lists every staged file before it reads the first: a staging directory larger than memory is held whole.
 name = "witness-lists-staging-whole"
 fix = "3853a92"
 package = "lsr-core"
-tests = ["the_witness_pass_refuses_from_the_first_pending_file_without_listing_them_all"]
+tests = ["the_boot_pass_judges_the_first_staged_file_without_listing_them_all"]

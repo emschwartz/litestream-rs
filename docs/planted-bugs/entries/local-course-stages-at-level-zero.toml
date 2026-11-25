@@ -1,0 +1,11 @@
+# A local course writes its files at level 0, beside the files a boot judged, as it did before the
+# simulator's fixed seed 0x3b found the fault: nothing then tells a file staged with no listing from
+# this engine's own upload cut short, and an upload writes it over an unreadable replica file.
+name = "local-course-stages-at-level-zero"
+fix = "claude/boot-local"
+package = "lsr-core"
+tests = [
+    "a_courses_file_is_never_written_over_an_unreadable_replica_file",
+    "calls_above_the_base_go_to_the_slot",
+    "a_later_process_goes_on_from_the_course_of_the_first",
+]

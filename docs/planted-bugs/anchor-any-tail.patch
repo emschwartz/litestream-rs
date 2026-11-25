@@ -1,17 +1,17 @@
 diff --git a/crates/core/src/recover.rs b/crates/core/src/recover.rs
-index f992b8e..0477488 100644
+index 2a6906587..082d576ae 100644
 --- a/crates/core/src/recover.rs
 +++ b/crates/core/src/recover.rs
-@@ -240,7 +240,7 @@ impl NewestStagedFile {
+@@ -382,7 +382,7 @@ impl<'w, R: Read + Seek> Compare<'w, R> {
                      | LastPageCheck::NoFrame(_)
                      | LastPageCheck::Rewritten => false,
                  };
--                if matched && !range.agrees(&pages, commit) {
-+                if matched && !range.agrees(&pages, commit) && !matched {
+-                if matched && !range.agrees(&self.seen, commit) {
++                if matched && !range.agrees(&self.seen, commit) && !matched {
                      LastPageCheck::Rewritten
                  } else {
                      checked
-@@ -452,9 +452,7 @@ fn match_last_page<R: Read + Seek>(
+@@ -685,9 +685,7 @@ fn match_last_page<R: Read + Seek>(
  ) -> Result<LastPageCheck, Fault> {
      let last_page = match (check, pages.last) {
          (FrameCheck::Frame(frame), _) => match pages.wanted {

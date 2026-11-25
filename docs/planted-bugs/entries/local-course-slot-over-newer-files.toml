@@ -1,0 +1,9 @@
+# The boot that lists the replica moves a local course's files up to level 0 although level 0 ends
+# past the slot's oldest file: a build that does not read the slot staged there after the course,
+# and each of its files is deleted as a bad copy and replaced by the course's file of that number.
+name = "local-course-slot-over-newer-files"
+fix = "claude/boot-local"
+package = "lsr-core"
+tests = [
+    "a_slot_that_level_zero_has_passed_is_deleted_and_level_zero_kept",
+]

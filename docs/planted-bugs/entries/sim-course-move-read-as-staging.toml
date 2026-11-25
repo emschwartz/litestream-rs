@@ -1,0 +1,13 @@
+# The simulator's checks take the move of a local course's file up to level 0 for a staging from
+# the WAL as it stands at the move, as they did before the rotating seeds of 2026-11-25 failed on
+# it: after WAL damage the moved file reads as staged from frames that are not durable, and as the
+# file staged after the damage, which ends the damage's claim on a snapshot. A plant in a checker:
+# it shows the checks can fail, not that the engine is right.
+name = "sim-course-move-read-as-staging"
+fix = "claude/boot-local"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::store_returns_after_the_wal_was_regrown",
+    "faults::store_returns_after_the_wal_lost_its_header",
+]
