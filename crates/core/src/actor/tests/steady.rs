@@ -362,3 +362,48 @@ fn a_level_is_compacted_once_in_each_window() {
     let bill = two_steady_minutes(paced());
     assert_eq!(bill.get(&(Request::Put, 1)), Some(&4), "{bill:?}");
 }
+
+/// The gate on a steady writer's bill: two minutes at 20 commits a second, after the first six
+/// (every level holds files and level-0 retention is deleting). A request that is not in this
+/// list is a regression and costs the owner money, so a new kind fails here until it names the
+/// defect in Go it guards against.
+///
+/// What each count is made of, against what Go (`.upstream/litestream`) makes in the same
+/// scenario (the owner's head-to-head, per minute: level-0 PUT 61, LIST 14, level-1 PUT 2.7,
+/// no GET, no HEAD), so this bill is at most Go's in every type:
+/// - level-0 PUT, 118 to 121: one staged file per poll interval, as Go's monitor tick.
+/// - level-1 PUT, 4: one compaction per 30 second window, as Go's level monitor.
+/// - level-0 LIST, 8 to 10: the engine's listings for retention and compaction. Go lists
+///   more (14 a minute).
+/// - level-0 DELETE, 1 or 2: one batched delete per retention check.
+/// - no GET: a level-1 compaction reads staged level-0 files, as Go reads its local copies;
+///   a level-2 compaction reads level 1 back in both, outside these two minutes.
+/// - no HEAD: retention uses the created-at time of files this process put.
+///
+/// Extras that remain outside this scenario, each guarding a Go defect: after a restart one
+/// HEAD per level-0 file an earlier process put, once, because Go ages files by the listed
+/// last-modified time (`s3/replica_client.go:1756-1764`, a time a bucket copy rewrites) and
+/// only reads the exact timestamp metadata in its accurate mode (`s3/replica_client.go:678`,
+/// `1641-1646`), see `docs/decisions/D238.md`; after a restart one 17-byte GET per staged
+/// level-0 file, once, to compare a staged copy with the replica's object, which Go never
+/// does (`compactor.go` opens the local file and trusts it), see
+/// `docs/decisions/D236.md`.
+#[test]
+fn a_steady_writer_pays_the_bill_and_no_more() {
+    let bill = two_steady_minutes(paced());
+    let at = |request: Request, level: u8| bill.get(&(request, level)).copied().unwrap_or(0);
+    assert!((118..=121).contains(&at(Request::Put, 0)), "{bill:?}");
+    assert_eq!(at(Request::Put, 1), 4, "{bill:?}");
+    assert!((8..=10).contains(&at(Request::List, 0)), "{bill:?}");
+    assert!((1..=2).contains(&at(Request::Delete, 0)), "{bill:?}");
+    assert_eq!(count(&bill, Request::Get), 0, "{bill:?}");
+    assert_eq!(count(&bill, Request::Head), 0, "{bill:?}");
+    // Nothing else: every other (request, level) pair is at most one listing of a level.
+    for ((request, level), n) in &bill {
+        let known = matches!(
+            (request, level),
+            (Request::Put, 0 | 1) | (Request::List, 0) | (Request::Delete, 0)
+        );
+        assert!(known || (*request == Request::List && *n <= 1), "{bill:?}");
+    }
+}
