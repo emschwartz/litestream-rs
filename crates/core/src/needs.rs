@@ -226,21 +226,29 @@ impl std::fmt::Debug for RealBucket {
     }
 }
 
+/// The provider `LSR_PROVIDER` names and the resource its credentials are: each is a
+/// [`Resource::name`], and the run needs exactly the resource of that name.
+fn provider_named(name: &str) -> Option<(&'static str, Resource)> {
+    match name {
+        "tigris" => Some(("tigris", Resource::Tigris)),
+        "aws" => Some(("aws", Resource::Aws)),
+        "r2" => Some(("r2", Resource::R2)),
+        _ => None,
+    }
+}
+
 /// The bucket `scripts/provider.sh` set up for this run, from `LSR_PROVIDER`
 /// (`tigris`, `aws` or `r2`) and the `LSR_PROVIDER_*` and `AWS_*` variables it exports. A
 /// test that calls this is `#[ignore]`d, so there is no opt-out (see [`must`]).
 #[must_use]
 pub fn real_bucket() -> RealBucket {
     let name = env_text("LSR_PROVIDER").unwrap_or_default();
-    let (provider, resource) = match name.as_str() {
-        "tigris" => ("tigris", Resource::Tigris),
-        "aws" => ("aws", Resource::Aws),
-        "r2" => ("r2", Resource::R2),
-        _ => missing(
+    let Some((provider, resource)) = provider_named(&name) else {
+        missing(
             Resource::Tigris,
             "LSR_PROVIDER is not one of tigris, aws, r2",
             false,
-        ),
+        )
     };
     must(resource, || {
         let var = |name: &str| env_text(name).ok_or_else(|| format!("{name} is not set"));
@@ -306,6 +314,42 @@ mod tests {
         assert!(!path.is_empty());
         assert_eq!(env_text("PATH"), Some(path));
         assert_eq!(env_text("LSR_NOT_A_VARIABLE_ANYONE_SETS"), None);
+    }
+
+    /// A provider word names the provider and the resource of the same name, so a run for one
+    /// is never gated on another's credentials.
+    #[test]
+    fn each_provider_word_names_its_own_resource() {
+        for resource in [Resource::Tigris, Resource::Aws, Resource::R2] {
+            assert_eq!(
+                provider_named(resource.name()),
+                Some((resource.name(), resource))
+            );
+        }
+        assert_eq!(provider_named(""), None);
+        assert_eq!(provider_named("minio"), None);
+    }
+
+    /// The `Debug` of a bucket names the provider, bucket and prefix and nothing that signs a
+    /// request.
+    #[test]
+    fn a_real_bucket_debugs_without_its_endpoint_region_or_keys() {
+        let bucket = RealBucket {
+            provider: "aws",
+            endpoint: "https://endpoint.invalid".into(),
+            bucket: "the-bucket".into(),
+            region: "the-region".into(),
+            prefix: "the-prefix".into(),
+            access: "the-access".into(),
+            secret: "the-secret".into(),
+        };
+        let shown = format!("{bucket:?}");
+        for shown_word in ["aws", "the-bucket", "the-prefix"] {
+            assert!(shown.contains(shown_word), "{shown}");
+        }
+        for hidden in ["endpoint", "the-region", "the-access", "the-secret"] {
+            assert!(!shown.contains(hidden), "{shown}");
+        }
     }
 
     #[test]

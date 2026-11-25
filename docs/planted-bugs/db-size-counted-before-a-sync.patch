@@ -1,0 +1,13 @@
+diff --git a/crates/sidecar/src/metrics.rs b/crates/sidecar/src/metrics.rs
+index 20a6b2cbf..b283e6b29 100644
+--- a/crates/sidecar/src/metrics.rs
++++ b/crates/sidecar/src/metrics.rs
+@@ -167,7 +167,7 @@ fn go_db_series(out: &mut Out, dbs: &[(String, &Health)]) {
+             "The current size of the real DB",
+         ),
+         // Go sets it after a sync (`db.go:1434`): 0 until one has staged.
+-        |h| h.synced.map_or(0, |_| h.db_bytes).to_string(),
++        |h| h.db_bytes.to_string(),
+     );
+     per_db(
+         out,

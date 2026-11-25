@@ -1,0 +1,9 @@
+# An unset variable named only in a YAML comment warns at every start, where Go says nothing.
+name = "unset-in-a-comment-warns"
+fix = "claude/dropin-gaps"
+package = "lsr-config"
+test_bin = "config"
+tests = [
+    "an_unset_reference_in_a_comment_is_silent",
+    "only_the_names_a_value_reads_are_warned",
+]

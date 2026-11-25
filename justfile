@@ -360,6 +360,7 @@ compat-s3: minio-up
         case "$var" in AWS_* | LITESTREAM_*) unset "$var" ;; esac
     done
     ./scripts/build-go-litestream.sh
+    ./scripts/minio.sh policy-user
     eval "$(./scripts/minio.sh env)"
     cargo nextest run -p lsr-compat --test compat -E 'test(/^s3::/)' --run-ignored all --locked --no-fail-fast
 

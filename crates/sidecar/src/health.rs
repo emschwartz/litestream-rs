@@ -464,6 +464,40 @@ mod tests {
         }
     }
 
+    /// Go sets `litestream_db_size` after a sync, so a database whose sync never ran, a store
+    /// that failed the boot, reads 0 there (`db.go:1434`); and the series Go serves for every
+    /// database is served at its zero (`litestream_compaction_verify_error_count`).
+    #[test]
+    fn the_db_size_reads_zero_until_a_sync_ran() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        health.phase = Phase::Running;
+        health.db_bytes = 8192;
+        let render = |health: &Health| {
+            let view = DbView {
+                path: PathBuf::from("/app.db"),
+                replica_type: "file",
+                state: DbState::Running(Box::new(health.clone())),
+            };
+            crate::metrics::render(&[view], at)
+        };
+        let before = render(&health);
+        assert!(
+            before.contains("litestream_db_size{db=\"/app.db\"} 0\n"),
+            "{before}"
+        );
+        assert!(
+            before.contains("litestream_compaction_verify_error_count{db=\"/app.db\"} 0\n"),
+            "{before}"
+        );
+        health.synced = Some((lsr_replica::Txid::new(1).unwrap(), at));
+        let after = render(&health);
+        assert!(
+            after.contains("litestream_db_size{db=\"/app.db\"} 8192\n"),
+            "{after}"
+        );
+    }
+
     /// Every kind of access refusal reports under a name of its own: one name for
     /// all of them sent operators to rotate keys for a wrong clock or a missing bucket.
     #[test]

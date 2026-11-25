@@ -269,6 +269,39 @@ fn over_s3_go_restores_rust_replica() {
     s3_of(&fixture).delete_all().expect("clean up");
 }
 
+/// `lsr replicate` as the user whose policy is exactly the five actions Litestream's S3 guide
+/// publishes (GetBucketLocation, ListBucket, PutObject, DeleteObject, GetObject), the permissions
+/// a drop-in replacement for Go must work with: none allows listing or aborting multipart
+/// uploads. It must come up, write a replica (its boot snapshot a multipart upload) and restore
+/// at Latest, at a txid and at an instant, and it must say that it skipped the sweep of open
+/// uploads, which the policy refuses.
+#[test]
+#[ignore = "needs MinIO and the policy user; just compat-s3"]
+fn over_s3_lsr_runs_on_the_policy_litestreams_guide_publishes() {
+    let Some(env) = minio() else { return };
+    let env = env
+        .as_policy_user()
+        .expect("the policy user (just compat-s3 creates it)");
+    let lsr = lsr_binary().expect("lsr builds");
+    let mut fixture = fixture(&env, "go-policy", 63);
+    assert!(
+        s3_of(&fixture).refuses_open_uploads(),
+        "the policy user can list open uploads: this run would prove nothing"
+    );
+    fixture.prepare_for_processes(BIG_ROWS).expect("prepare");
+    let config = config(&fixture, "lsr.yml", Schedule::LEVEL_ZERO_ONLY);
+    let log = fixture.dir().join("lsr.log");
+    let rust = start(Kind::Rust, &lsr, &config, &log);
+    let marks = write_rounds(rust, &mut fixture);
+    rust_reads(&fixture, &marks, "lsr wrote under the guide's policy", true);
+    let said = std::fs::read_to_string(&log).expect("the log");
+    assert!(
+        said.contains("refused the sweep of leftover uploads"),
+        "lsr's log does not say the sweep was skipped:\n{said}"
+    );
+    s3_of(&fixture).delete_all().expect("clean up");
+}
+
 /// One process's turn on an S3 fixture: it comes up on what the previous one left, the
 /// application commits [`COMMITS`] transactions, each staged before the next, and the
 /// process stops with SIGINT once MinIO holds them all and a snapshot. Returns the boot's

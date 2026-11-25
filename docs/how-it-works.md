@@ -95,7 +95,7 @@ The hold at start ends once the replica is listed and the start is decided. A fi
 Beside each database is a folder named `.<name>-litestream`, as with Go, holding the staged level-0 files under `ltx/0/`. Go and litestream-rs resume from each other's files there. Two files in it are litestream-rs's own, and Go neither reads nor removes them:
 
 - `lsr-lock`: an exclusive lock held while a replicator runs, so two never stage into one folder. `lsr replicate` waits for it; the library refuses the second start. It excludes only on a local filesystem, and it does not exclude a Go process.
-- `lsr-takeover`: one line saying this database may replicate above the bucket's files, through one transaction. `lsr trust-local` writes it, and so does every restore, so a container that restores at start does not then stop.
+- `lsr-takeover`: one line saying this database may replicate above the bucket's files, through one transaction. `lsr trust-local` writes it, and so does a restore of a database a config names (`lsr restore`, and `restore-if-db-not-exists` at start), so a container that restores at start does not then stop. A restore to a path no config names, a backup or a copy, leaves only the database, as Go's does ([decisions/D215.md](decisions/D215.md)).
 
 Keep the folder on the same durable disk as the database. On a fresh folder the replicator falls back to the page-by-page check above.
 

@@ -247,3 +247,45 @@ fn the_anchor_reads_the_newest_known_file_of_each_level_so_the_short_view_never_
         zero.keys
     );
 }
+/// A listing behind what was published is a hold, and a hold leaves level 0 to the whole
+/// listing: the same files are deleted once the listing has caught up.
+#[test]
+fn a_listing_behind_what_was_published_deletes_nothing_from_level_zero() {
+    let behind = short(
+        &inv(ladder()),
+        &[],
+        ladder_now(),
+        &defaults(),
+        Some(txid(31)),
+    );
+    assert!(behind.keys.is_empty(), "{:?}", behind.keys);
+    let caught_up = short(
+        &inv(ladder()),
+        &[],
+        ladder_now(),
+        &defaults(),
+        Some(txid(30)),
+    );
+    assert_eq!(caught_up.keys.len(), 5);
+}
+
+/// A covered level-0 file too young to delete wakes the pass when it ages out, if the clock reads
+/// earlier than the newest created-at time so that the file ages out before it.
+#[test]
+fn a_young_covered_file_wakes_the_pass_when_it_ages_out() {
+    let mut files = ladder();
+    let now = newest_created_at(&files) - HOUR;
+    for f in &mut files {
+        if f.key == key(0, 29, 29) {
+            set_created_at(f, at(now - 100_000));
+        }
+    }
+    let zero = short(&inv(files), &[], at(now), &defaults(), None);
+    assert_eq!(
+        zero.keys,
+        (25..=28).map(|n| key(0, n, n)).collect::<Vec<_>>()
+    );
+    // Created 100 s before the clock, and level 0 is kept 300 s.
+    assert_eq!(zero.wake, Some(at(now + 200_000)));
+    assert_eq!(zero.settled_min, Some(txid(29)));
+}
