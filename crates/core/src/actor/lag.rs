@@ -65,15 +65,12 @@ impl Actor {
             return;
         }
         self.kept.lag.failed(now);
-        // Held writes judge no boot: the host lets a pending boot's own write through instead
-        // (`docs/decisions/D192.md`), and a boot judged on the hold would release the start
-        // before the boot had found what it would find.
+        // Held writes judge no boot: nothing a boot does before it decides writes to the
+        // database, so a hold can only meet a judged start.
         if task != Task::Sync || matches!(fault, Some(Fault::WritesHeld)) {
             return;
         }
-        if self.kept.listed {
-            self.kept.sync_failed_after_listing = true;
-        } else {
+        if !self.kept.listed {
             self.kept.boot_failed = true;
             self.kept.refused_at_boot = if let Some(Fault::StoreDenied(why)) = fault {
                 Some(why)
@@ -284,14 +281,14 @@ impl Actor {
     }
 
     /// Whether this process's boot has been judged, for [`crate::AppGate`]: the replica was
-    /// listed and the snapshot the boot asked for, if any, was staged or tried (a stop it finds
-    /// is a stop at boot); or a boot attempt failed for anything but the store refusing access
-    /// (a store that times out at boot does not hold the application).
+    /// listed and the boot decided how this start proceeds (continue from a position, or
+    /// snapshot for a named cause), without waiting for that snapshot to be staged; a stop the
+    /// snapshot finds later is an ordinary stop (`docs/decisions/D201.md`). Or a boot attempt
+    /// failed for anything but the store refusing access (a store that times out at boot does
+    /// not hold the application).
     #[must_use]
-    pub fn boot_judged(&self) -> bool {
-        let settled = self.pending().is_none() || self.kept.sync_failed_after_listing;
-        (self.kept.listed && settled)
-            || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
+    pub const fn boot_judged(&self) -> bool {
+        self.kept.listed || (self.kept.boot_failed && self.kept.refused_at_boot.is_none())
     }
 
     /// Whether an engine of this process has listed the replica.

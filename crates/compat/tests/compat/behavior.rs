@@ -167,6 +167,85 @@ fn rows() -> Doc {
     toml::from_str(&read(&path)).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
+/// The marks a tally counts, in the order it lists them: what the evidence columns earned
+/// (D detected, S survived, R recovered), then the no-test marks.
+const TALLY_ORDER: [&str; 13] = [
+    "D",
+    "D S",
+    "D R",
+    "D S R",
+    "S",
+    "S R",
+    "R",
+    "code only",
+    "assumed",
+    "untested",
+    "unknown",
+    "known wrong",
+    "accepted, undetected",
+];
+
+/// What a row earned, as the tally names it: the letters of the evidence columns that cite a
+/// test, or else its no-test mark. A row with a tested half and an untested half counts by its
+/// tested half.
+fn earned(row: &Row) -> Result<&'static str, String> {
+    let cites_a_test = |cell: &str| {
+        citations(cell).is_ok_and(|cited| cited.iter().any(|(k, _)| !CHECKS.contains(&k.as_str())))
+    };
+    let letters = (
+        cites_a_test(&row.detected_by),
+        cites_a_test(&row.survived_by),
+        cites_a_test(&row.recovered_by),
+    );
+    match letters {
+        (true, false, false) => Ok("D"),
+        (true, true, false) => Ok("D S"),
+        (true, false, true) => Ok("D R"),
+        (true, true, true) => Ok("D S R"),
+        (false, true, false) => Ok("S"),
+        (false, true, true) => Ok("S R"),
+        (false, false, true) => Ok("R"),
+        (false, false, false) => {
+            let mark = row.no_test.rsplit(':').next().unwrap_or_default().trim();
+            MARKS
+                .into_iter()
+                .find(|m| mark.starts_with(m))
+                .ok_or_else(|| format!("{}: earned no mark the tally lists", row.id))
+        }
+    }
+}
+
+/// The tally `just behavior-tally` prints, counted from the rows. It is never committed: a count
+/// in a generated file goes stale when two branches each add a row, with no textual conflict.
+fn tally(doc: &Doc) -> Result<Vec<String>, String> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for row in &doc.row {
+        let mark = earned(row)?;
+        if !TALLY_ORDER.contains(&mark) {
+            return Err(format!("{}: the tally has no line for {mark:?}", row.id));
+        }
+        counts
+            .entry(mark)
+            .and_modify(|n| *n = n.saturating_add(1))
+            .or_insert(1_usize);
+    }
+    let mut out = vec![
+        format!(
+            "**Tally of the {} rows in section 3** (counted by the test that renders this document, from `docs/behavior.toml`; a row with a tested half and an untested half is counted by its tested half).",
+            doc.row.len()
+        ),
+        String::new(),
+        "| Mark | Rows |".to_owned(),
+        "|---|---|".to_owned(),
+    ];
+    for mark in TALLY_ORDER {
+        if let Some(n) = counts.get(mark) {
+            out.push(format!("| {mark} | {n} |"));
+        }
+    }
+    Ok(out)
+}
+
 /// The document: the template with each marker replaced by its table.
 fn render(template: &str, doc: &Doc) -> Result<String, String> {
     let mut by_table: BTreeMap<&str, Vec<&Row>> = BTreeMap::new();
@@ -351,6 +430,14 @@ fn problems(doc: &Doc) -> Vec<String> {
         }
     }
     out
+}
+
+/// Prints the tally of rows by mark (`just behavior-tally`).
+#[test]
+#[ignore = "prints the tally; `just behavior-tally` runs it"]
+fn print_the_tally_of_rows_by_mark() {
+    let lines = tally(&rows()).unwrap_or_else(|why| panic!("{why}"));
+    println!("{}", lines.join("\n"));
 }
 
 #[test]

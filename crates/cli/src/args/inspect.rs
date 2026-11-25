@@ -6,8 +6,8 @@
 use lsr_core::Level;
 use lsr_sidecar::goflag::{self, Def, Scan};
 
-use super::UsageError;
 use super::restore::is_url;
+use super::{FlagRow, UsageError};
 
 /// `databases`.
 #[derive(Debug, PartialEq, Eq)]
@@ -31,6 +31,9 @@ pub enum LtxFrom {
         path: String,
         /// `-config`, when given.
         config: Option<String>,
+        /// `-no-expand-env`. Only a config is read, so only this source carries it; Go takes
+        /// the flag beside a URL and does nothing with it.
+        no_expand_env: bool,
     },
 }
 
@@ -39,8 +42,6 @@ pub enum LtxFrom {
 pub struct LtxArgs {
     /// Where from.
     pub from: LtxFrom,
-    /// `-no-expand-env`.
-    pub no_expand_env: bool,
     /// `-json`.
     pub json: bool,
     /// `-level`: one level, or `None` for `all`. Go's default is level 0.
@@ -66,10 +67,29 @@ fn scan(defs: &[Def], args: &[String]) -> Result<Option<goflag::Set>, UsageError
     }
 }
 
-const DATABASES: [Def; 3] = [
+pub(super) const DATABASES: [Def; 3] = [
     goflag::value("config"),
     goflag::boolean("no-expand-env"),
     goflag::boolean("json"),
+];
+
+/// The help rows of `databases`; a test holds them to [`DATABASES`], both ways.
+pub(super) const DATABASES_HELP: &[FlagRow] = &[
+    FlagRow {
+        name: "-config",
+        value: Some("<file>"),
+        help: "the config to read (default $LITESTREAM_CONFIG, else /etc/litestream.yml; - reads standard input)",
+    },
+    FlagRow {
+        name: "-no-expand-env",
+        value: None,
+        help: "read the config without expanding environment variables",
+    },
+    FlagRow {
+        name: "-json",
+        value: None,
+        help: "print JSON instead of a table",
+    },
 ];
 
 /// Parses the arguments after `databases`.
@@ -109,11 +129,35 @@ fn go_level(text: &str) -> Result<(), &'static str> {
     }
 }
 
-const LTX: [Def; 4] = [
+pub(super) const LTX: [Def; 4] = [
     goflag::value("config"),
     goflag::boolean("no-expand-env"),
     goflag::boolean("json"),
     goflag::checked("level", go_level),
+];
+
+/// The help rows of `ltx` and `wal`; a test holds them to [`LTX`], both ways.
+pub(super) const LTX_HELP: &[FlagRow] = &[
+    FlagRow {
+        name: "-config",
+        value: Some("<file>"),
+        help: "with a DB_PATH, the config that names it (default $LITESTREAM_CONFIG, else /etc/litestream.yml; - reads standard input); not with a REPLICA_URL",
+    },
+    FlagRow {
+        name: "-no-expand-env",
+        value: None,
+        help: "read the config without expanding environment variables",
+    },
+    FlagRow {
+        name: "-level",
+        value: Some("<0-9|all>"),
+        help: "the compaction level to list (default 0)",
+    },
+    FlagRow {
+        name: "-json",
+        value: None,
+        help: "print JSON instead of a table",
+    },
 ];
 
 /// Parses the arguments after `ltx`, or after `wal` with `as_wal`.
@@ -138,6 +182,7 @@ pub fn parse_ltx(args: &[String], as_wal: bool) -> Result<Inspect<LtxArgs>, Usag
         [path] => LtxFrom::Database {
             path: path.clone(),
             config,
+            no_expand_env: set.boolean("no-expand-env").map_err(UsageError::GoFlag)?,
         },
     };
     let level = match set.value("level").as_deref() {
@@ -152,7 +197,6 @@ pub fn parse_ltx(args: &[String], as_wal: bool) -> Result<Inspect<LtxArgs>, Usag
     let boolean = |name| set.boolean(name).map_err(UsageError::GoFlag);
     Ok(Inspect::Run(LtxArgs {
         from,
-        no_expand_env: boolean("no-expand-env")?,
         json: boolean("json")?,
         level,
         as_wal,

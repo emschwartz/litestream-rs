@@ -147,3 +147,44 @@ fn a_restart_after_a_boot_behind_the_committed_end_justifies_a_snapshot() {
         "the engine snapshots"
     );
 }
+
+/// An application's TRUNCATE checkpoint lands inside a running sync step, between the engine's
+/// read of the WAL length and its read of the frames: the frames are gone from a file now
+/// shorter than the one first statted. That is what a power loss leaves, but the checkpoint
+/// copied every frame into the database, so the step runs again over the file as it is and
+/// takes no snapshot for a rewound WAL (seed 0x6b06509b, reduced).
+#[test]
+fn a_truncate_checkpoint_inside_a_sync_step_is_not_a_rewound_wal() {
+    use lsr_core::{SourceError, SourceOp};
+    use lsr_sim::OtherProcessMode;
+    use lsr_sim::generate::{AppAt, AppOp, EnvFault};
+    let ops = [
+        Op::EnvFault(EnvFault::Source(SourceOp::BumpSeq, SourceError::Busy)),
+        Op::Commit {
+            pages: 1,
+            grow: false,
+        },
+        Op::Spill,
+        Op::Shutdown,
+        Op::Tick,
+        Op::Tick,
+        Op::RequestSnapshot,
+        Op::AppInTick {
+            at: AppAt::Call(5),
+            op: AppOp::Checkpoint(OtherProcessMode::Truncate),
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        block_crash_law: true,
+        after_restart: lsr_sim::AfterRestart::Redo,
+        staging_fs: true,
+        truncate_pages: std::num::NonZeroU32::new(7),
+        remote_s3: true,
+        no_create_only: true,
+        ..Opts::default()
+    };
+    if let Err(failure) = run_ops(Seed::new(0x6b06_509b), &ops, &opts) {
+        panic!("{failure}");
+    }
+}
