@@ -305,9 +305,9 @@ response = "the sweep is skipped, for the rest of the process; the boot goes on 
 signal = "log `the replica refused the sweep of leftover uploads at start` once; `Event::ScratchSweepDenied`; `lsr_scratch_sweeps_denied_total` 1; `Counters::scratch_sweeps_denied`"
 at_risk = "Storage only: an upload a killed process left open stays open and billed until a bucket lifecycle rule or an operator removes it"
 recovery = "Grant the two actions or add an `AbortIncompleteMultipartUpload` lifecycle rule (docs/s3-permissions.md)"
-detected_by = "core::`a_refused_scratch_sweep_does_not_hold_the_boot`, core::`a_refused_scratch_sweep_is_not_asked_again`, core::`only_a_permission_refusal_of_the_scratch_sweep_is_skipped`, sim::`a_refused_scratch_sweep_never_holds_the_boot`, compat::`s3::over_s3_lsr_runs_on_the_policy_litestreams_guide_publishes`, plant::`scratch-sweep-refusal-stops-boot`"
+detected_by = "core::`a_refused_scratch_sweep_does_not_hold_the_boot`, core::`a_refused_scratch_sweep_is_not_asked_again`, core::`only_a_permission_refusal_of_the_scratch_sweep_is_skipped`, sim::`a_refused_scratch_sweep_never_holds_the_boot`, sim::`a_permission_refusal_of_the_boot_sweep_is_skipped_and_reports_no_refusal`, sim::`only_a_permission_refusal_of_the_sweep_is_exempt`, compat::`s3::over_s3_lsr_runs_on_the_policy_litestreams_guide_publishes`, plant::`scratch-sweep-refusal-stops-boot`, plant::`boot-swallows-a-denied-listing`, plant::`boot-sweep-skip-not-noted`"
 recovered_by = "sim::`a_refused_scratch_sweep_never_holds_the_boot`"
-notes = "Go sweeps nothing, so a drop-in replacement must start under Go's policy. Found by a review of what a first start under that policy does; a refusal here said nothing about the replica's contents, yet it held the application's writes under `hold-start`"
+notes = "Go sweeps nothing, so a drop-in replacement must start under Go's policy. Found by a review of what a first start under that policy does; a refusal here said nothing about the replica's contents, yet it held the application's writes under `hold-start`. The simulator's refusal judge exempts exactly this: a Permission refusal of ListMultipartUploads or an abort while the engine has not judged its boot, counted as `http_fault.sweep_denied`, and then demands the engine noted the skip; every other refusal, a refused listing of the replica included, is still owed a report"
 
 [[row]]
 table = "Running"
@@ -2628,7 +2628,7 @@ signal = "none"
 at_risk = "None"
 recovery = "n/a"
 detected_by = "core::`a_file_that_changes_nothing_is_not_lag`, core::`a_file_that_changes_nothing_is_not_lag_after_a_restart`, core::`an_operator_snapshot_while_caught_up_is_not_lag`, core::`a_commit_after_a_file_that_changes_nothing_is_lag`, core::`a_doubt_snapshot_at_boot_over_a_replicated_wal_is_not_lag`, core::`a_commit_after_a_doubt_at_boot_is_lag`, sim::`a_checkpoint_file_that_changes_no_page_does_not_trip_after_a_day_long_step`, plant::`failstop-no-op-file-is-lag`, plant::`failstop-no-op-forgotten-at-boot`, plant::`failstop-operator-snapshot-is-lag`, plant::`failstop-quiet-hides-commits`, plant::`failstop-checkpoint-quiet-forgotten`, plant::`failstop-doubt-baseline-ignored`, plant::`failstop-doubt-snapshot-is-lag`"
-notes = "Found by the false-trip judge over random histories; the checkpoint's files and the doubt at boot were found later on main (seeds 0x8ef, 0xf4342, 0x14b)"
+notes = "Found by the false-trip judge over random histories; the checkpoint's files and the doubt at boot were found later on main (seeds 0x8ef, 0xf4342, 0x14b). Accepted, open (D227, #366): a first pending file with no staged file before it, over a WAL generation other than the replica's newest file's, counts as a commit after a restart even when it holds none, so a store outage past the bound can trip fail-stop (held only under stop-app) with nothing unreplicated. Go and lsr both write untracked files, so no checksum in the files says the snapshot equals the replica, and a restore to compare reads the whole database"
 
 [[row]]
 table = "Fail-stop"

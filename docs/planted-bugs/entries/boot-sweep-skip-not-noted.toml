@@ -1,0 +1,6 @@
+# The boot skips a permission-refused sweep of open uploads but does not note it: no event, no counter, and it asks again at every boot.
+name = "boot-sweep-skip-not-noted"
+fix = "claude/sweep-judge"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["remote_s3::a_permission_refusal_of_the_boot_sweep_is_skipped_and_reports_no_refusal"]
