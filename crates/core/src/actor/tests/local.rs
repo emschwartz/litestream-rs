@@ -4,9 +4,11 @@
 
 use super::second_writer::put_foreign;
 use super::*;
+use crate::SnapshotCauseKind;
 use crate::actor::lag::BOOT_UNDECIDED_BOUND;
 use crate::actor::local::LocalTry;
 use crate::actor::parts::Course;
+use crate::source::{CheckpointEffect, CheckpointScript};
 
 /// The bound after which a failing boot is judged, in milliseconds.
 fn bound() -> i64 {
@@ -178,6 +180,65 @@ fn a_restart_during_an_outage_stages_and_checkpoints_from_local_state() {
     assert_eq!(actor.kept.local, LocalTry::Spent);
     assert_eq!(commits_restorable(&rig), (1..25).collect::<Vec<u8>>());
     assert_eq!(snapshots(&rig), vec![1], "{after:?}");
+}
+
+/// A TRUNCATE checkpoint in a local course stages its boundary snapshot as one in a booted
+/// engine does, and as Go's local sync does through an outage: in the slot, with the course's
+/// other files. The course goes on in the new WAL, and the boot that lists the replica moves
+/// every file up, so the replica restores every commit.
+#[test]
+fn a_courses_truncate_stages_its_boundary_snapshot_in_the_slot() {
+    let cfg = ActorConfig {
+        checkpoint: CheckpointConfig {
+            interval: None,
+            min_pages: None,
+            truncate_pages: NonZeroU32::new(2),
+        },
+        ..go_like()
+    };
+    let (mut rig, mut actor, at) = restarted_down(cfg);
+    let boundary = |actor: &Actor| actor.snapshots().get(SnapshotCauseKind::CheckpointBoundary);
+    let counted = boundary(&actor);
+    // A reader holds one PASSIVE back, so the TRUNCATE comes due.
+    rig.ck.script(CheckpointScript {
+        busy: false,
+        effect: CheckpointEffect::Backfill(1),
+    });
+    let mut seen = Vec::new();
+    for n in 4..10_u8 {
+        rig.commit(n);
+        seen.extend(rig.settle(&mut actor, at + i64::from(n)));
+    }
+    no_stop(&seen);
+    assert!(is_local(&actor), "{seen:?}");
+    let truncates = seen
+        .iter()
+        .filter(|tick| {
+            matches!(
+                event(tick),
+                Some(Event::Checkpointed {
+                    mode: CheckpointMode::Truncate,
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(truncates > 0, "{seen:?}");
+    assert!(boundary(&actor) > counted, "{seen:?}");
+    assert_eq!(
+        staged(&rig),
+        vec![2, 3],
+        "level 0 is as the course found it"
+    );
+    // A file a commit, and a boundary snapshot a TRUNCATE.
+    assert!(apart(&rig).len() > 6, "{:?}", apart(&rig));
+    assert_eq!(ranges(&rig.remote), vec![(1, 1)]);
+    up(&rig);
+    let after = run(&mut rig, &mut actor, at + 600_000, at + 600_000);
+    no_stop(&after);
+    assert!(actor.booted() && actor.listed(), "{after:?}");
+    assert_eq!(apart(&rig), Vec::<u64>::new());
+    assert_eq!(commits_restorable(&rig), (1..10).collect::<Vec<u8>>());
 }
 
 /// The local course begins only once boot attempts have failed for the bound: before it the

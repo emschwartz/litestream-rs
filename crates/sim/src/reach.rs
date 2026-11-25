@@ -39,6 +39,14 @@ pub const REQUIRED: &[&str] = &[
     // A process that started while the store was down and staged from local state before it
     // booted: the course whose files the boot settles (ledger: local-course-*).
     "boot.local_course",
+    // The checks read that course's files as staged where its slot took them, and their move
+    // up to level 0 as no staging (`crate::slot`): the durability, restore and
+    // needless-snapshot checks judge a course only through that reading.
+    "staged.apart",
+    "staged.moved_up",
+    // A slot deleted with no move: staged files given up, which the lost-restore-points check
+    // judges under the keys they would have had.
+    "staged.apart_given_up",
     // Every snapshot cause the needless-snapshot check maps to its forcings; a cause no run
     // reaches is a row of that map nothing tests. CheckpointBoundary and OperatorRequested have
     // no event of their own and are counted when staged (`snapshot.staged.*`).
