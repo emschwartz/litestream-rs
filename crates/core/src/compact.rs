@@ -8,9 +8,9 @@
 //! `LtxRead`, which ends a file at its first short chunk); the pages of all
 //! inputs are merged in ascending page order and the newest input holding a
 //! page wins. A page above the output's commit is dropped, and the lock page
-//! never appears because [PageNo] cannot hold it. Memory is one read chunk and
-//! one page per input plus the encoder's output buffer, whatever the database
-//! size: the output page index (at most 30 bytes a page) is the only thing that
+//! never appears because [PageNo] cannot hold it. Memory is one read window
+//! ([`Role::COMPACT_WINDOW`]: 128 KiB from staging, 1 MiB from the replica) and one
+//! page per input plus the encoder's output buffer, whatever the database size: the output page index (at most 30 bytes a page) is the only thing that
 //! grows with it. Go's fan-in is unbounded (upstream #1467); a level with more
 //! files than [MAX_INPUTS] is compacted into several files by the caller.
 //!
@@ -70,8 +70,8 @@ mod tests;
 /// Most input files one compaction takes.
 pub const MAX_INPUTS: usize = 32;
 
-/// Bytes asked of the source per read, and the size at which buffered output is
-/// handed to the upload.
+/// The size at which buffered output is handed to the upload, and the bytes asked of a
+/// replica per read of an input ([`Role::COMPACT_WINDOW`] says what a staged one gets).
 const CHUNK_BYTES: u32 = 1024 * 1024;
 
 // `ReadLen::or_chunk` falls back to 1 MiB for a size it refuses, which would
@@ -321,8 +321,9 @@ impl Compacted {
     }
 }
 
-/// The two sizes that bound memory; the public entry point uses [CHUNK_BYTES]
-/// for both, a test shrinks them to show the bound scales with them.
+/// The two sizes that bound memory; the engine takes the read size from the source's
+/// role and the flush size from [CHUNK_BYTES], a test shrinks them to show the bound
+/// scales with them.
 #[derive(Clone, Copy, Debug)]
 struct Budget {
     chunk: ReadLen,
@@ -330,9 +331,10 @@ struct Budget {
 }
 
 impl Budget {
-    fn standard() -> Self {
+    /// The window the `source`'s role reads its inputs in, and the standard flush.
+    fn reading<S: Role>() -> Self {
         Self {
-            chunk: ReadLen::or_chunk(CHUNK_BYTES),
+            chunk: S::COMPACT_WINDOW,
             flush: usize::try_from(CHUNK_BYTES).unwrap_or(usize::MAX),
         }
     }
@@ -711,6 +713,22 @@ pub async fn compact<S: ObjectStore, D: ObjectStore>(
     compact_in(&Replica(source), dest, inputs, level).await
 }
 
+/// [`compact`] reading its inputs as the staged copies the engine's level-1 compaction
+/// reads (the staging window), for the memory gate that runs it against a directory.
+///
+/// # Errors
+/// As [`compact`], with a failed input read reported as [`CompactError::Local`].
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub async fn compact_staged<S: ObjectStore, D: ObjectStore>(
+    source: &S,
+    dest: &D,
+    inputs: &CompactionInputs,
+    level: Level,
+) -> Result<Compacted, CompactError> {
+    compact_in(&crate::fault::role::Staging(source), dest, inputs, level).await
+}
+
 /// [`compact`] reading its inputs from `source` as its role: an input read
 /// that fails is that store's error ([`Role::compact_input`]).
 pub(crate) async fn compact_in<S: Role, D: ObjectStore>(
@@ -719,7 +737,7 @@ pub(crate) async fn compact_in<S: Role, D: ObjectStore>(
     inputs: &CompactionInputs,
     level: Level,
 ) -> Result<Compacted, CompactError> {
-    compact_with(source, dest, inputs, level, Budget::standard()).await
+    compact_with(source, dest, inputs, level, Budget::reading::<S>()).await
 }
 
 async fn compact_with<S: Role, D: ObjectStore>(

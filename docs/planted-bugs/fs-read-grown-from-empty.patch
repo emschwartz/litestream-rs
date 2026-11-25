@@ -1,0 +1,14 @@
+diff --git a/crates/store-fs/src/filesystem.rs b/crates/store-fs/src/filesystem.rs
+index 359f9453d..dee9f381b 100644
+--- a/crates/store-fs/src/filesystem.rs
++++ b/crates/store-fs/src/filesystem.rs
+@@ -255,8 +255,7 @@ impl FsFile for File {
+         // Sized to what the file still holds, so a read holds its length and not the
+         // doubled capacity `read_to_end` grows to from empty: a compaction keeps one
+         // such read per input.
+-        let left = File::metadata(self)?.len().saturating_sub(offset);
+-        let mut bytes = Vec::with_capacity(usize::try_from(left.min(len)).unwrap_or(0));
++        let mut bytes = Vec::new();
+         Read::by_ref(self).take(len).read_to_end(&mut bytes)?;
+         Ok(bytes)
+     }

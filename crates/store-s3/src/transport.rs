@@ -81,6 +81,12 @@ impl HttpResponse {
         &self.body
     }
 
+    /// The body, moved out of the response: a caller that keeps it need not copy it.
+    #[must_use]
+    pub fn into_body(self) -> Vec<u8> {
+        self.body
+    }
+
     /// Every header, as received.
     #[must_use]
     pub fn headers(&self) -> &[(String, String)] {

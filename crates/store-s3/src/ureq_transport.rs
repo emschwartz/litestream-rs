@@ -16,7 +16,7 @@
 //! error, so a server that ignores a Range header cannot make a read allocate
 //! an object's size.
 
-use std::io;
+use std::io::{self, Read};
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -69,7 +69,9 @@ impl UreqTransport {
         }
     }
 
-    fn build(request: &HttpRequest) -> Result<http::Request<Vec<u8>>, TransportError> {
+    /// The request as ureq takes it. The body is borrowed from `request`, not copied: a
+    /// multipart part is megabytes, and an upload sends a batch of them at once.
+    fn build(request: &HttpRequest) -> Result<http::Request<&[u8]>, TransportError> {
         let mut builder = http::Request::builder()
             .method(method_name(request.method()))
             .uri(request.url().as_str());
@@ -80,7 +82,7 @@ impl UreqTransport {
             }
         }
         builder
-            .body(request.body().to_vec())
+            .body(request.body())
             .map_err(|_malformed| TransportError::Io(io::ErrorKind::InvalidInput))
     }
 }
@@ -111,6 +113,24 @@ fn method_name(method: Method) -> &'static str {
     }
 }
 
+/// Reads the response body, bounded by `MAX_BODY`, into a buffer sized to the `expected`
+/// length the server declared. Growing one from empty doubles it, so a 4 MiB ranged
+/// read would hold an 8 MiB allocation, and a restore keeps eight of them in flight.
+fn read_body(
+    response: &mut http::Response<ureq::Body>,
+    expected: u64,
+) -> Result<Vec<u8>, TransportError> {
+    let mut body = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_BODY)
+        .reader()
+        .read_to_end(&mut body)
+        .map_err(|err| map_error(&ureq::Error::from(err)))?;
+    Ok(body)
+}
+
 impl Transport for UreqTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
@@ -129,16 +149,15 @@ impl Transport for UreqTransport {
                 )
             })
             .collect();
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_BODY)
-            .read_to_vec()
-            .map_err(|err| map_error(&err))?;
         let declared = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
             .and_then(|(_, value)| value.trim().parse::<u64>().ok());
+        // A HEAD answer declares the length of a body it does not send.
+        let expected = declared
+            .filter(|_| !head_only)
+            .map_or(0, |n| n.min(MAX_BODY));
+        let body = read_body(&mut response, expected)?;
         let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
         Ok(HttpResponse::new(status, headers, body, complete))
     }

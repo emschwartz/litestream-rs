@@ -11,6 +11,16 @@
 //! `block_on`, which does). The counters are `const`-initialised cells with no
 //! destructor, so touching them from inside the allocator never allocates.
 //!
+//! A path that allocates on threads of its own (an HTTP client's batch workers) is
+//! measured with [`process_peak_of`], which counts every thread of the process but the
+//! ones that called [`exclude_thread`] (a test server standing in for the far end of
+//! the wire, whose buffers are not the code under test's). Process-wide counts are
+//! only sound when nothing else in the process allocates meanwhile, which is how
+//! nextest runs a test (one process each).
+//!
+//! The file is shared: the core and store-fs test binaries include it and the store-s3 one
+//! includes it by path, each using part of it.
+//!
 //! This is the one `unsafe` outside the SQLite crate: `GlobalAlloc` cannot be
 //! implemented without it. It forwards every call to the system allocator and
 //! only does arithmetic on the side. It lives in this test binary, so it is
@@ -18,6 +28,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicIsize, Ordering};
 
 thread_local! {
     /// Bytes this thread has allocated and not yet freed (negative when it frees
@@ -25,8 +36,20 @@ thread_local! {
     static LIVE: Cell<isize> = const { Cell::new(0) };
     /// The highest `LIVE` since the last [`peak_of`] began.
     static PEAK: Cell<isize> = const { Cell::new(0) };
+    /// This thread's allocations are not the code under test's: the process-wide
+    /// count skips them.
+    static EXCLUDED: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Bytes the process has allocated and not yet freed on threads that are not excluded.
+static PROCESS_LIVE: AtomicIsize = AtomicIsize::new(0);
+/// The highest `PROCESS_LIVE` since the last [`process_peak_of`] began.
+static PROCESS_PEAK: AtomicIsize = AtomicIsize::new(0);
+
+/// Leaves the calling thread out of [`process_peak_of`] for good.
+pub fn exclude_thread() {
+    EXCLUDED.with(|excluded| excluded.set(true));
+}
 /// The allocator to install: `#[global_allocator] static HEAP: Counting = Counting;`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Counting;
@@ -40,6 +63,12 @@ fn count(delta: isize) {
         live.set(now);
         if let Err(_ending) = PEAK.try_with(|peak| peak.set(peak.get().max(now))) {}
     }) {}
+    if !EXCLUDED.try_with(Cell::get).unwrap_or(true) {
+        let now = PROCESS_LIVE
+            .fetch_add(delta, Ordering::Relaxed)
+            .saturating_add(delta);
+        PROCESS_PEAK.fetch_max(now, Ordering::Relaxed);
+    }
 }
 
 /// A layout's size as a signed count; sizes above `isize::MAX` cannot be allocated.
@@ -108,6 +137,27 @@ pub fn peak_of<R>(f: impl FnOnce() -> R) -> (R, Peak) {
     let result = f();
     let high = PEAK.with(Cell::get);
     let end = LIVE.with(Cell::get);
+    let above = |mark: isize| usize::try_from(mark.saturating_sub(start)).unwrap_or(0);
+    (
+        result,
+        Peak {
+            extra: above(high),
+            kept: above(end),
+        },
+    )
+}
+
+/// [`peak_of`] over every thread of the process except the excluded ones: the closure
+/// may allocate on workers it starts, and `extra` is the most the process held at once.
+///
+/// Memory the closure's threads free that an excluded thread allocated would read as
+/// negative, so the closure must not take buffers from the excluded side.
+pub fn process_peak_of<R>(f: impl FnOnce() -> R) -> (R, Peak) {
+    let start = PROCESS_LIVE.load(Ordering::Relaxed);
+    PROCESS_PEAK.store(start, Ordering::Relaxed);
+    let result = f();
+    let high = PROCESS_PEAK.load(Ordering::Relaxed);
+    let end = PROCESS_LIVE.load(Ordering::Relaxed);
     let above = |mark: isize| usize::try_from(mark.saturating_sub(start)).unwrap_or(0);
     (
         result,

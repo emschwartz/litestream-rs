@@ -38,6 +38,37 @@
 //! its store calls run on a thread of their own, and a mismatch is a degraded state in
 //! [`Health::verification`], never a stop (see the `scheduled` module).
 //!
+//! # Memory
+//!
+//! The live heap of the library's own buffers peaks at the sum of the terms below. Each is
+//! pinned by a gate that fails when the buffer grows (the tests are named). The configuration
+//! terms are: part size `P` (`S3Config::with_part_size`, 5 MiB by default and 16 MiB on
+//! Tigris), upload concurrency `C` (`S3Config::with_concurrency`, 5),
+//! the compaction fan-in `F` (`MAX_INPUTS`, 32), and the restore read concurrency `R`
+//! (`READ_CONCURRENCY`, 8). Larger parts or more concurrency raise `C x P`, and nothing else.
+//!
+//! - **Upload:** `C x P` plus 4 MiB, the parts of the batch being sent. A part body is sent by
+//!   reference, so nothing holds it twice: 26 MiB at the defaults, at most 84 MiB on Tigris
+//!   (`crates/store-s3/tests/store-s3/memory.rs`, `an_upload_through_the_real_client_holds_five_parts`
+//!   and `the_bound_follows_part_size_and_concurrency`).
+//! - **Compaction:** `F x (window + page)` plus a 1 MiB output buffer. A level-1 compaction reads
+//!   each staged file in a 128 KiB window: 5 MiB at `F` = 32 (`crates/store-fs/tests/store-fs/memory.rs`,
+//!   `a_level_one_compaction_holds_a_staging_window_per_input`). A compaction above level 1 reads
+//!   the replica a mebibyte at a time: 33 MiB (`a_compaction_holds_a_chunk_per_replica_input`).
+//! - **Replicating:** the compaction and the upload of its output at once, the busiest moment:
+//!   about 30 MiB with the defaults (`a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts`).
+//!   A compaction above level 1 holds its 33 MiB of windows instead of 5, to about 60 MiB (the
+//!   sum of the two gates above).
+//! - **Restore:** `R x 4 MiB` plus 3 MiB: 35 MiB, whatever the database's size or the chain's
+//!   length (`a_restore_through_the_real_client_holds_one_read_window`; the same law at one
+//!   to four GiB in `crates/core/tests/core/mem_big.rs`).
+//!
+//! Not in these bounds: the page checksum table (about 20 bytes a page, 5 MiB at 1 GiB; issue
+//! #64), SQLite's own page cache, the `reqwest` transport (the gates run the `ureq` one that
+//! `S3Store::new` builds), and what the process's allocator keeps after a free: a resident
+//! size can sit well above the live heap (about three times on macOS, where freed large blocks
+//! stay mapped), which no gate here sees.
+//!
 //! [`restore`], [`verify`] and [`restore_if_missing`] are free functions over the same
 //! `Arc<dyn DynStore>`, never methods on the replicator: restoring over a live database must
 //! not look easy.
