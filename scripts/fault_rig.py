@@ -520,7 +520,10 @@ class Rig:
             self.faked_offset_file = self.work / "faketime.rc"
             if not self.faked_offset_file.exists():
                 self.faked_offset_file.write_text("+0\n")
-            env.update(LD_PRELOAD=self.libfaketime, FAKETIME_NO_CACHE="1",
+            # A wall-clock step moves CLOCK_REALTIME only. Faking the monotonic clock too stalled the
+            # engine after its first two uploads (the Rust runtime's absolute futex deadlines are
+            # built from the faked monotonic clock and read by the real kernel one), so it stays real.
+            env.update(LD_PRELOAD=self.libfaketime, FAKETIME_NO_CACHE="1", FAKETIME_DONT_FAKE_MONOTONIC="1",
                        FAKETIME_TIMESTAMP_FILE=str(self.faked_offset_file))
         self.engine = subprocess.Popen(
             [str(self.args.lsr), "replicate", "-config", str(self.lsr_cfg), "-log-level", "info"],
@@ -944,9 +947,14 @@ class Rig:
                 self.anomaly("RIG", f"cannot list the bucket: {err}")
                 return
             time.sleep(0.5)
-        self.anomaly("RIG", f"the engine put fewer than {UPLOADS_MIN_FILES} level-0 files on the replica in "
-                            f"{UPLOADS_WITHIN_SECONDS} s under load (libfaketime preloaded: "
-                            f"{bool(self.faked_offset_file)}); engine log tail: {self.tail(self.engine_log)}")
+        listed = self.listing_l0()
+        commits = sum(1 for line in self.log.read_text().splitlines() if line.startswith("I "))
+        self.anomaly("RIG", f"the engine put {len(listed)} level-0 files on the replica in "
+                            f"{UPLOADS_WITHIN_SECONDS} s under load, fewer than {UPLOADS_MIN_FILES} "
+                            f"(newest transaction {listed[-1] if listed else None}; the writer made "
+                            f"{commits} commits; libfaketime preloaded: "
+                            f"{bool(self.faked_offset_file)}; LazyFS: {self.use_lazyfs}); "
+                            f"engine log tail: {self.tail(self.engine_log)}")
 
     def nemesis_none(self, _p: dict) -> None:
         self.watch(0.5)

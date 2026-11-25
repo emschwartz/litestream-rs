@@ -590,7 +590,12 @@ fault-rig-plant name cycles="200" *args: minio-up toxiproxy-up
     git -C "$tree" apply "$PWD/$patch"
     # The judge comes from this tree, never the planted one.
     cargo build --release --locked -p lsr-history --features sqlite
-    CARGO_TARGET_DIR="$PWD/target/fault-rig-plants/{{name}}" cargo build --release --locked -p lsr-cli --manifest-path "$tree/Cargo.toml"
+    # A plant that does not build is a broken plant (re-express it, docs/planted-bugs.md), never
+    # "the rig missed it": exit 3, named, apart from the rig's own 0 (not found), 1 (found), 2.
+    if ! CARGO_TARGET_DIR="$PWD/target/fault-rig-plants/{{name}}" cargo build --release --locked -p lsr-cli --manifest-path "$tree/Cargo.toml"; then
+        echo "fault-rig-plant: PLANT {{name}} DID NOT BUILD with its patch applied; re-express docs/planted-bugs/{{name}}.patch" >&2
+        exit 3
+    fi
     ./scripts/build-go-litestream.sh 041a8c3
     eval "$(./scripts/minio.sh env)"
     eval "$(./scripts/toxiproxy.sh env)"

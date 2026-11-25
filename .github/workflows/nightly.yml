@@ -227,11 +227,14 @@ jobs:
           case "$rc" in
             1) line="PLANT wal-barrier: FOUND" ;;
             0) line="PLANT wal-barrier: NOT FOUND in 60 cycles" ;;
+            3) line="PLANT wal-barrier: DID NOT BUILD (a broken plant, not a miss: re-express its patch)" ;;
             *) line="PLANT wal-barrier: rig failed (exit $rc)" ;;
           esac
           echo "$line"
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
           grep -E '^NOT RUN' plant.log >> "$GITHUB_STEP_SUMMARY" || true
+          # Found or not found never fails the job; a plant that does not build does.
+          [ "$rc" -ne 3 ] || exit 1
           exit 0
       # Anomalies in a segment the Go nemesis touched are known issue #346 and do not fail the
       # run; any other anomaly does. The summary lists the nemeses that did not run.
