@@ -1,5 +1,5 @@
 diff --git a/crates/store-s3/src/ureq_transport.rs b/crates/store-s3/src/ureq_transport.rs
-index 8db13ee65..b4469ec4e 100644
+index 32d67f9bc..fd92a6fcb 100644
 --- a/crates/store-s3/src/ureq_transport.rs
 +++ b/crates/store-s3/src/ureq_transport.rs
 @@ -35,7 +35,7 @@ use crate::transport::{
@@ -9,5 +9,5 @@ index 8db13ee65..b4469ec4e 100644
 -const POOL_IDLE: usize = crate::CREATION_TIME_CONCURRENCY.get();
 +const POOL_IDLE: usize = 3;
  
- /// Bytes of each of a connection's two buffers, and the largest response head: S3's heads are
- /// under 2 KiB, and a body is read through the buffer in as many reads as it takes.
+ /// Bytes of a connection's read buffer, and the largest response head: S3's heads are under
+ /// 2 KiB, and a body is read through the buffer in as many reads as it takes. Reads cost no CPU

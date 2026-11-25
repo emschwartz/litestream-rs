@@ -1,7 +1,7 @@
 # The HTTP client keeps fewer idle connections per host than a batch runs, so most requests of a
 # batch open a new socket (and, over TLS, a handshake).
 name = "pool-smaller-than-a-batch"
-fix = "dab6cbe0a"
+fix = "30f77fedf"
 package = "lsr-store-s3"
 tests = [
     "ureq_transport::tests::a_batch_reuses_the_connections_the_last_batch_left",
