@@ -72,6 +72,10 @@ pub enum Bound {
     ReadCalls,
     /// Commit calls to the replica over the run.
     CommitCalls,
+    /// Bytes one upload tick handed the replica.
+    SliceBytes,
+    /// Slices of a staged file sent in a row while a commit waited for the WAL step.
+    SlicesAhead,
 }
 
 impl fmt::Display for Bound {
@@ -90,6 +94,8 @@ impl fmt::Display for Bound {
             Self::LevelBytes => "bytes put at a compaction level",
             Self::ReadCalls => "replica reads",
             Self::CommitCalls => "replica commits",
+            Self::SliceBytes => "bytes one upload tick handed the replica",
+            Self::SlicesAhead => "slices in a row ahead of a waiting commit",
         };
         f.write_str(name)
     }

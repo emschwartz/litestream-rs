@@ -1,0 +1,10 @@
+# A slice that failed leaves its send in flight instead of ending it: the next slice reads on past
+# the chunk whose write failed, and the file is published without it. The reads all verified, so
+# only the replica's bytes show it.
+name = "failed-slice-carries-on"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "upload::tests::slices::a_failed_slice_leaves_nothing_in_flight_and_the_retry_starts_at_the_first_byte",
+    "actor::tests::sliced::a_store_fault_during_a_send_retries_the_file_from_its_first_byte",
+]
