@@ -14,7 +14,10 @@ fn stats(event: Option<Event>) -> TickStats {
     }
 }
 
-const LIMITS: Limits = Limits { staged_bytes: 100 };
+const LIMITS: Limits = Limits {
+    staged_bytes: 100,
+    slice_bytes: 1000,
+};
 
 #[test]
 fn the_counting_checkpointer_counts_by_mode_and_forwards() {

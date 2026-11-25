@@ -170,6 +170,8 @@ struct Log {
     fail_delete: bool,
     begins: Vec<FileKey>,
     aborts: u32,
+    /// Bytes every write was handed, summed.
+    written: u64,
     commit_before: VecDeque<StoreError>,
     commit_after: VecDeque<StoreError>,
     write_fail: VecDeque<StoreError>,
@@ -319,12 +321,11 @@ impl ObjectStore for Probe {
 
 impl Upload for ProbeUpload {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
-        let early = self
-            .log
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .write_fail
-            .pop_front();
+        let early = {
+            let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
+            log.written += u64::try_from(chunk.len()).unwrap();
+            log.write_fail.pop_front()
+        };
         let wrote = early.map_or_else(|| Ok(self.inner.write(chunk)), Err);
         async move {
             match wrote {
@@ -708,11 +709,16 @@ fn a_staged_file_that_names_another_transaction_is_refused() {
 /// The level-0 file for transaction 1, of incompressible pages, so it spans
 /// several read chunks.
 fn big_file() -> Vec<u8> {
+    big_file_for(1, 0x9E37_79B9_7F4A_7C15)
+}
+
+/// [`big_file`] for transaction `n`, its pages drawn from `seed`.
+fn big_file_for(n: u64, seed: u64) -> Vec<u8> {
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size: ps(),
         commit: 200,
-        txids: TxidRange::single(txid(1)),
+        txids: TxidRange::single(txid(n)),
         timestamp: created_at(1),
         pre_apply: None,
         wal: None,
@@ -720,7 +726,7 @@ fn big_file() -> Vec<u8> {
     })
     .unwrap();
     let mut encoder = Encoder::new(Vec::new(), header).unwrap();
-    let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut x = seed;
     for pgno in 1..=200_u32 {
         let page: Vec<u8> = (0..ps().bytes())
             .map(|_| {
@@ -851,6 +857,7 @@ fn files_per_tick_is_honoured_and_asks_to_step_again() {
     }
     let config = UploadConfig {
         files_per_tick: NonZeroU32::new(2),
+        ..UploadConfig::default()
     };
     let mut state = UploadState::Unknown;
     let mut seen = Vec::new();
@@ -1211,7 +1218,10 @@ fn the_upload_reads_in_quarter_mebibyte_chunks() {
 #[test]
 fn a_staging_listing_whose_cursor_never_advances_is_a_fault_not_a_loop() {
     let staging = crate::stuck::StuckListing::new(MemStore::new());
-    let got = block_on(drop_staged_from(&Staging(&staging), txid(1)));
+    let got = block_on(async {
+        let mut none = InFlight::default();
+        drop_staged_from(&Staging(&staging), txid(1), &none.stop().await).await
+    });
     assert_eq!(got, Err(Fault::LocalIo));
 }
 
@@ -1514,6 +1524,7 @@ fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twic
 }
 
 mod endless;
+mod slices;
 
 /// A rejected write deletes only an object it created. A create-only put
 /// creates its key or is refused, so its rejected object is its own; a put that

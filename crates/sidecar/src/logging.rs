@@ -438,6 +438,9 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
             vec![("mode", debug(mode)), ("busy", (*busy).into())],
         ),
         EngineEvent::Uploaded(did) => (LogLevel::Debug, "uploaded", vec![("did", debug(did))]),
+        EngineEvent::Sending { bytes } => {
+            (LogLevel::Debug, "sending", vec![("bytes", (*bytes).into())])
+        }
         EngineEvent::Maintained { event, .. } => (
             LogLevel::Debug,
             "maintenance",

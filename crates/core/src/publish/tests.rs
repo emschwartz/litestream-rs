@@ -23,7 +23,7 @@ fn write<S: ObjectStore>(
         let mut up = Writer::begin(store, &key(), Timestamp::from_unix_millis(1), mode).await?;
         up.write(&bytes[..2]).await?;
         up.write(&bytes[2..]).await?;
-        Ok(up.commit().await)
+        Ok(up.commit(store).await)
     })
 }
 

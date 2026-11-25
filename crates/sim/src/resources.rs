@@ -9,9 +9,19 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use lsr_core::{Barrier, CheckpointMode, CheckpointRun, Checkpointer, Event, SourceError};
+use lsr_ltx::Timestamp;
 
 use crate::oracle::{Bound, Violation, within};
+use crate::reach::Reach;
 use crate::store::RecorderCounts;
+
+/// Bytes read on earlier ticks that an upload tick may hand the replica with its own: a file's
+/// header, which the upload is begun from, held until it is whole.
+const HELD_HEADER: u64 = 100;
+
+/// Slices that may run after the application commits before a tick ends in anything else:
+/// with a file in flight the WAL step and the slices take turns (`docs/decisions/D205.md`).
+pub const SLICES_AHEAD: u64 = 1;
 
 /// The largest piece the engine hands a store at once: its flush threshold
 /// (1 MiB) and a page of slack.
@@ -112,6 +122,9 @@ pub struct TickStats {
 pub struct Limits {
     /// The most bytes one tick may stage.
     pub staged_bytes: u64,
+    /// The most bytes of staged files one tick may read for the replica
+    /// (`UploadConfig::bytes_per_tick`).
+    pub slice_bytes: u64,
 }
 
 /// `after - before`, field by field, for the counters (the maxima stay).
@@ -138,6 +151,7 @@ const fn lists_allowed(event: &Event) -> bool {
         | Event::WritesHeld { .. } => true,
         Event::Maintained { .. } | Event::Uploaded(_) => true,
         Event::Synced { .. }
+        | Event::Sending { .. }
         | Event::Checkpointed { .. }
         | Event::Idle
         | Event::Resnapshot(_)
@@ -170,6 +184,13 @@ pub fn per_tick(stats: &TickStats, limits: Limits) -> Result<(), Violation> {
         limits.staged_bytes,
     )?;
     within(Bound::ListCalls, stats.remote.lists, LIST_CALLS_PER_TICK)?;
+    if matches!(
+        stats.event,
+        Some(Event::Sending { .. } | Event::Uploaded(_))
+    ) {
+        let slice = limits.slice_bytes.saturating_add(HELD_HEADER);
+        within(Bound::SliceBytes, stats.remote.written_bytes, slice)?;
+    }
     if matches!(stats.event, Some(Event::Idle)) {
         let spent = calls(&stats.remote);
         within(Bound::IdleLists, spent, 0)?;
@@ -206,6 +227,98 @@ impl IdleWindow {
         within(Bound::IdleFiles, self.staged, 0)?;
         within(Bound::IdleCheckpoints, self.checkpoints, 0)?;
         within(Bound::IdleLists, self.lists, 0)
+    }
+}
+
+/// Whether the slices of a file in flight leave the WAL step its turns. Once the application
+/// has committed, at most [`SLICES_AHEAD`] ticks may end in a slice before one ends in
+/// something else. While a task waits out a retry the WAL step may be the one waiting, so
+/// those slices are counted as excused, never judged: the wait is the engine's own report.
+#[derive(Debug, Default)]
+pub struct SendTurns {
+    /// The application committed since the last tick was taken in.
+    landed: bool,
+    /// A commit landed and every tick since ended in a slice.
+    waiting: bool,
+    ahead: u64,
+    /// The last tick ended in a slice.
+    in_flight: bool,
+    waits_until: Option<Timestamp>,
+}
+
+impl SendTurns {
+    /// A commit by the application, or by another connection, landed in the WAL.
+    pub const fn committed(&mut self) {
+        self.landed = true;
+    }
+
+    /// Takes in one tick: `ended` is its event (`None` for a tick that crashed, stopped or
+    /// ended a drain). A commit that landed inside the tick is told after it.
+    ///
+    /// # Errors
+    /// [`Violation::ResourceBound`] of [`Bound::SlicesAhead`].
+    pub fn tick(
+        &mut self,
+        ended: Option<&Event>,
+        began: Timestamp,
+        reach: &mut Reach,
+    ) -> Result<(), Violation> {
+        let landed = std::mem::take(&mut self.landed);
+        if self.waits_until.is_some_and(|until| began >= until) {
+            self.waits_until = None;
+        }
+        if landed {
+            self.waiting = true;
+            if self.in_flight {
+                reach.bump("send.commit_between_slices");
+            }
+        }
+        let was_in_flight = self.in_flight;
+        match ended {
+            Some(Event::Sending { .. }) => {
+                self.in_flight = true;
+                if !self.waiting {
+                    return Ok(());
+                }
+                if self.waits_until.is_some() {
+                    reach.bump("send.turns.excused");
+                    return Ok(());
+                }
+                self.ahead = self.ahead.saturating_add(1);
+                reach.bump("send.turns.judged");
+                return within(Bound::SlicesAhead, self.ahead, SLICES_AHEAD);
+            }
+            Some(
+                Event::Retrying { until, .. }
+                | Event::Degraded { until, .. }
+                | Event::WritesHeld { until },
+            ) => {
+                self.waits_until = self.waits_until.max(Some(*until));
+                if was_in_flight {
+                    reach.bump("send.then_a_fault");
+                }
+            }
+            None => {
+                if was_in_flight {
+                    reach.bump("send.then_the_process_ended");
+                }
+            }
+            Some(
+                Event::Booted { .. }
+                | Event::Synced { .. }
+                | Event::Checkpointed { .. }
+                | Event::Uploaded(_)
+                | Event::Maintained { .. }
+                | Event::Idle
+                | Event::Resnapshot(_)
+                | Event::Clamped(_)
+                | Event::TakeoverWanted(_),
+            ) => {}
+        }
+        self.waiting = false;
+        self.ahead = 0;
+        self.in_flight = false;
+        Ok(())
     }
 }
 

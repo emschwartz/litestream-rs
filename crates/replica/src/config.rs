@@ -174,6 +174,7 @@ impl Config {
             checkpoint,
             upload: UploadConfig {
                 files_per_tick: self.sync_limits.files_per_upload,
+                ..UploadConfig::default()
             },
             maintenance: self.maintenance.clone(),
             retry_interval: self.retry_interval.get(),

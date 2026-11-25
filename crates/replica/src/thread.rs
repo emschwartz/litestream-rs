@@ -574,6 +574,7 @@ impl Worker {
             EngineEvent::Booted { .. }
             | EngineEvent::Synced { .. }
             | EngineEvent::Uploaded(_)
+            | EngineEvent::Sending { .. }
             | EngineEvent::Resnapshot(_)
             | EngineEvent::TakeoverWanted(_) => true,
             EngineEvent::Checkpointed { .. }
@@ -632,6 +633,8 @@ impl Worker {
             }
             EngineEvent::Synced { .. }
             | EngineEvent::Uploaded(_)
+            // A slice publishes nothing: the upload is counted when its file is whole.
+            | EngineEvent::Sending { .. }
             | EngineEvent::Booted { .. }
             | EngineEvent::Maintained { .. }
             | EngineEvent::Idle

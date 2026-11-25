@@ -35,7 +35,7 @@ use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::store::Denied;
 use crate::takeover::TakeoverRecord;
-use crate::upload::UploadState;
+use crate::upload::{InFlight, UploadState};
 use crate::witness::Witnesses;
 
 /// Whether the actor was asked to stop, which no rebuild forgets.
@@ -416,6 +416,9 @@ pub(super) struct Engine {
     pub(super) checkpoint: CheckpointState,
     pub(super) gate: Gate,
     pub(super) upload: UploadState,
+    /// The staged file the upload task is part-way through sending, if any (`crate::upload`).
+    /// In memory only: a rebuild drops it, and the next engine sends the file from its start.
+    pub(super) in_flight: InFlight,
     pub(super) maintain: Maintain,
     /// Staged level-0 files through this transaction were pruned (W3).
     pub(super) pruned: Option<Txid>,
@@ -452,6 +455,7 @@ impl Engine {
             checkpoint: CheckpointState::boot(Timestamp::from_unix_millis(0)),
             gate: Gate::Open,
             upload: UploadState::Unknown,
+            in_flight: InFlight::default(),
             maintain: Maintain::default(),
             pruned: None,
             dropped_through: None,

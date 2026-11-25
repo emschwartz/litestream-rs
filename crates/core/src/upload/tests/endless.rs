@@ -146,7 +146,11 @@ fn a_drop_across_pages_deletes_newest_first() {
     for n in 1..=count {
         put_bytes(&staging.inner, key(n), b"x");
     }
-    block_on(drop_staged_from(&Staging(&staging), txid(2))).unwrap();
+    block_on(async {
+        let mut none = InFlight::default();
+        drop_staged_from(&Staging(&staging), txid(2), &none.stop().await).await
+    })
+    .unwrap();
     let deleted: Vec<u64> = staging
         .log()
         .deletes

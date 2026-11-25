@@ -1077,7 +1077,7 @@ impl<S> Recorder<S> {
     }
 }
 
-impl<S: ObjectStore> ObjectStore for Recorder<S> {
+impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
     type Upload = TapUpload<S>;
 
     async fn list(

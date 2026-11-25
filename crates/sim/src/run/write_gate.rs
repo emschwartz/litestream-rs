@@ -105,6 +105,9 @@ impl Runner {
 
     /// An application commit outside a tick landed (`landed`): never while the runner holds.
     pub(super) fn judge_commit_landed(&mut self, landed: bool) {
+        if landed {
+            self.turns.committed();
+        }
         if !landed && self.holding_writes() {
             self.report.reach.bump("writes.commit_refused");
         }
