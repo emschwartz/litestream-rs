@@ -34,6 +34,13 @@ use crate::transport::{
 };
 use crate::trust::{self, Roots};
 
+/// Idle connections the pool keeps: the widest batch the store sends at once.
+const POOL_IDLE: usize = crate::CREATION_TIME_CONCURRENCY.get();
+
+/// Bytes of each of a connection's two buffers, and the largest response head: S3's heads are
+/// under 2 KiB, and a body is read through the buffer in as many reads as it takes.
+const CONN_BUFFER: usize = 32 * 1024;
+
 /// A [`Transport`] over one shared connection pool.
 #[derive(Clone)]
 pub struct UreqTransport {
@@ -62,6 +69,16 @@ impl UreqTransport {
             .max_redirects(0)
             .max_redirects_will_error(false)
             .timeout_global(Some(deadline))
+            // ureq keeps 3 idle connections per host, fewer than the batches the store sends
+            // (up to `CREATION_TIME_CONCURRENCY`), so most requests of a restore opened a
+            // socket and, over TLS, a handshake. The pool holds as many as the widest batch.
+            .max_idle_connections(POOL_IDLE)
+            .max_idle_connections_per_host(POOL_IDLE)
+            // Each connection, idle ones too, holds an input and an output buffer of this
+            // size (ureq's 128 KiB each): 16 of them were 4 MiB of an idle process.
+            .input_buffer_size(CONN_BUFFER)
+            .output_buffer_size(CONN_BUFFER)
+            .max_response_header_size(CONN_BUFFER)
             .tls_config(tls)
             .build();
         Self {
@@ -258,6 +275,62 @@ mod tests {
     }
 
     const OK: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+
+    /// A server that answers every request on a connection (keep-alive) and counts the
+    /// connections it accepted.
+    fn serve_keep_alive() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let accepted = std::sync::Arc::new(AtomicUsize::new(0));
+        let count = std::sync::Arc::clone(&accepted);
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let _seen = count.fetch_add(1, Ordering::SeqCst);
+                thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while stream.read(&mut byte).is_ok_and(|n| n == 1) {
+                        head.push(byte[0]);
+                        if head.ends_with(b"\r\n\r\n") {
+                            head.clear();
+                            let reply = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+                            if stream.write_all(reply).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}/"), accepted)
+    }
+
+    /// A batch as wide as the widest the store sends finds its connections again in the next
+    /// one: the pool keeps as many idle as a batch runs, so a restore does not open a socket
+    /// (and, over TLS, a handshake) for most of its requests.
+    #[test]
+    fn a_batch_reuses_the_connections_the_last_batch_left() {
+        use std::sync::atomic::Ordering;
+        let (url, accepted) = serve_keep_alive();
+        let transport = UreqTransport::new(Duration::from_secs(5));
+        let width = crate::READ_CONCURRENCY;
+        for _round in 0..4 {
+            let batch = (0..width.get()).map(|_| get(&url)).collect();
+            let answers = transport.send_many(batch, width);
+            assert!(
+                answers
+                    .iter()
+                    .all(|a| a.as_ref().is_ok_and(|r| r.status() == 200))
+            );
+        }
+        let opened = accepted.load(Ordering::SeqCst);
+        assert!(
+            opened <= width.get(),
+            "{opened} connections for four batches of {width}"
+        );
+    }
 
     #[test]
     fn a_batch_answers_in_order_and_each_request_keeps_its_deadline() {
