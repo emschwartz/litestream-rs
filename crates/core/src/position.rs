@@ -140,7 +140,9 @@ impl ReadLockHold {
 ///    end of the same `WalView`.
 /// 2. A sync step ending `Idle` or `Through` whose epoch is the same before the
 ///    scan and after the staging commit.
-/// 3. Step 6 of the checkpoint protocol.
+/// 3. A PASSIVE of the checkpoint protocol, as its checkpoint call returns: the read
+///    transaction that call retakes begins under the write barrier, after the seal proved the
+///    end, so it is pinned whatever the protocol does next (`checkpoint.rs`).
 ///
 /// Everything else is `Broken`: a `Continue` whose cursor is below the committed
 /// end, and any step ending `Limited`.

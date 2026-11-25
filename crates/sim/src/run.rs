@@ -1091,6 +1091,7 @@ impl Runner {
             Event::Booted { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Maintained { .. }
             | Event::Idle
@@ -1130,6 +1131,7 @@ impl Runner {
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Maintained { .. }
             | Event::Idle
@@ -1176,6 +1178,7 @@ impl Runner {
             Event::Booted { cause: None }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Uploaded(_)
             | Event::Maintained { .. }
             | Event::Idle
@@ -2726,7 +2729,9 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
             until,
             fault: Fault::StoreThrottled { retry_after },
         } => (*until, *retry_after),
-        Event::Retrying { until, .. } | Event::WritesHeld { until } => (*until, None),
+        Event::Retrying { until, .. }
+        | Event::WritesHeld { until }
+        | Event::CheckpointDeferred { until } => (*until, None),
         Event::Booted { .. }
         | Event::Synced { .. }
         | Event::Checkpointed { .. }

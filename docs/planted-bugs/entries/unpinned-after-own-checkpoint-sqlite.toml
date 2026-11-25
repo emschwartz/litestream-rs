@@ -1,0 +1,8 @@
+# The same plant on real SQLite: a writer takes the write lock between the barrier's release and
+# the bump, and its commit restarts the WAL.
+name = "unpinned-after-own-checkpoint-sqlite"
+fix = "claude/own-checkpoint"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+patch = "unpinned-after-own-checkpoint"
+tests = ["own_checkpoint::a_writer_that_takes_the_lock_before_the_bump_costs_no_snapshot"]

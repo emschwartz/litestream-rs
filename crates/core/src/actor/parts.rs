@@ -16,6 +16,7 @@
 //! builds a whole `Engine` and assigns it only when every step succeeded.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 
 use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::CommittedEnd;
@@ -425,6 +426,9 @@ pub(super) struct Engine {
     pub(super) pages: PageChecksumTable,
     pub(super) checkpoint: CheckpointState,
     pub(super) gate: Gate,
+    /// Checkpoints in a row that found the write lock busy at their barrier
+    /// ([`crate::CheckpointOutcome::LockBusy`]); the wait before the next grows with it.
+    pub(super) lock_busy: Option<NonZeroU32>,
     pub(super) upload: UploadState,
     pub(super) maintain: Maintain,
     /// Staged level-0 files through this transaction were pruned (W3).
@@ -461,6 +465,7 @@ impl Engine {
             // Replaced at boot, when the time is known.
             checkpoint: CheckpointState::boot(Timestamp::from_unix_millis(0)),
             gate: Gate::Open,
+            lock_busy: None,
             upload: UploadState::Unknown,
             maintain: Maintain::default(),
             pruned: None,

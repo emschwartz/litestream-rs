@@ -552,6 +552,11 @@ fn engine_line(event: &EngineEvent) -> Option<Line> {
                 ("retry_at", until.to_string().into()),
             ],
         ),
+        EngineEvent::CheckpointDeferred { until } => (
+            LogLevel::Debug,
+            "checkpoint skipped: the database's write lock is busy",
+            vec![("retry_at", until.to_string().into())],
+        ),
         EngineEvent::WritesHeld { until } => (
             LogLevel::Debug,
             "checkpoint waits while writes are blocked",

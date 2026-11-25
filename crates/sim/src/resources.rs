@@ -139,6 +139,7 @@ const fn lists_allowed(event: &Event) -> bool {
         Event::Maintained { .. } | Event::Uploaded(_) => true,
         Event::Synced { .. }
         | Event::Checkpointed { .. }
+        | Event::CheckpointDeferred { .. }
         | Event::Idle
         | Event::Resnapshot(_)
         | Event::Clamped(_)

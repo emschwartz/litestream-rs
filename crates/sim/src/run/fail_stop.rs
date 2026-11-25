@@ -30,6 +30,8 @@ impl Runner {
                 Event::Booted { .. }
                 | Event::Synced { .. }
                 | Event::Checkpointed { .. }
+                // The tick's sync ran; only its checkpoint waits for the write lock.
+                | Event::CheckpointDeferred { .. }
                 | Event::Uploaded(_)
                 | Event::Maintained { .. }
                 | Event::Idle
@@ -52,7 +54,8 @@ impl Runner {
                     event: Event::Booted { .. }
                         | Event::Synced { .. }
                         | Event::Resnapshot(_)
-                        | Event::Checkpointed { .. },
+                        | Event::Checkpointed { .. }
+                        | Event::CheckpointDeferred { .. },
                     ..
                 })
             ),

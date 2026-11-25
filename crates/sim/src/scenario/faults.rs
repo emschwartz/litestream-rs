@@ -301,7 +301,7 @@ pub fn fault_scenarios(kind: FaultKind) -> &'static [fn() -> Scenario] {
         FaultKind::LocalDiskFull => &[disk_full_on_staging],
         FaultKind::LocalIo => &[eio_on_wal_read],
         FaultKind::LocalFsyncFailed => &[fsync_fails_once],
-        FaultKind::SqliteBusy => &[busy_on_barrier, shm_header_mid_update],
+        FaultKind::SqliteBusy => &[shm_header_mid_update],
         FaultKind::ReadersHeld => &[readers_hold_the_wal],
         FaultKind::WritesHeld => &[writes_held_through_a_checkpoint],
         FaultKind::WalMoved => &[wal_header_torn_while_running],
@@ -1265,17 +1265,32 @@ pub fn fsync_fails_once() -> Scenario {
     )
 }
 
-/// SQLite is busy when the checkpoint takes its barrier.
+/// Another connection holds the write lock when the checkpoint asks for its barrier: the
+/// checkpoint waits and asks again, and nothing fails.
 #[must_use]
 pub fn busy_on_barrier() -> Scenario {
-    injected(
+    let mut s = injected(
         "busy_on_barrier",
         vec![
             Op::EnvFault(EnvFault::Source(SourceOp::BeginBarrier, SourceError::Busy)),
             commit(9, true),
         ],
-        vec![retries(FaultKind::SqliteBusy)],
-    )
+        vec![Expect::Event(EventMatch::CheckpointDeferred)],
+    );
+    s.check = Some(nothing_failed_and_nothing_snapshotted);
+    s
+}
+
+/// No step failed and no snapshot was announced: what a write lock that another connection
+/// holds must cost a checkpoint.
+fn nothing_failed_and_nothing_snapshotted(report: &RunReport) -> Result<(), String> {
+    let bad = report.seen.iter().find(|seen| {
+        matches!(
+            seen,
+            Seen::Event(Event::Retrying { .. } | Event::Degraded { .. } | Event::Resnapshot(_))
+        )
+    });
+    bad.map_or(Ok(()), |seen| Err(format!("the run saw {seen:?}")))
 }
 
 /// The application's readers hold the WAL when a checkpoint is asked for: it is
@@ -2161,14 +2176,35 @@ pub fn sealed_then_checkpoint_io() -> Scenario {
     )
 }
 
-/// [`sealed_then`]: the sequence bump is busy.
+/// [`sealed_then`]: the sequence bump is busy. Another writer holds the lock, so the
+/// checkpoint is finished and nothing failed; the drain still uploads the sealed file.
 #[must_use]
 pub fn sealed_then_bump_busy() -> Scenario {
-    sealed_then(
+    let mut s = sealed_then(
         "sealed_then_bump_busy",
         SourceOp::BumpSeq,
         SourceError::Busy,
-    )
+    );
+    s.check = Some(sealed_then_overtaken);
+    s
+}
+
+/// The commit happened inside the tick, the checkpoint after it ran, and no step failed.
+fn sealed_then_overtaken(report: &RunReport) -> Result<(), String> {
+    if report.commits_in_tick != 1 {
+        return Err(format!(
+            "{} commits inside a tick, not one",
+            report.commits_in_tick
+        ));
+    }
+    let ran = report
+        .seen
+        .iter()
+        .any(|seen| matches!(seen, Seen::Event(Event::Checkpointed { .. })));
+    if !ran {
+        return Err("no checkpoint ran".to_owned());
+    }
+    nothing_failed_and_nothing_snapshotted(report)
 }
 
 /// [`sealed_then`]: the sequence bump fails with an I/O error.

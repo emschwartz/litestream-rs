@@ -779,6 +779,7 @@ impl<B: Backend> Rig<B> {
             Event::Booted { .. }
             | Event::Synced { .. }
             | Event::Checkpointed { .. }
+            | Event::CheckpointDeferred { .. }
             | Event::Maintained { .. }
             | Event::Idle
             | Event::Resnapshot(_)
