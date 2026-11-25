@@ -558,7 +558,11 @@ fault-rig cycles="50" *args: minio-up toxiproxy-up
     fi
     eval "$(./scripts/minio.sh env)"
     eval "$(./scripts/toxiproxy.sh env)"
-    uv run scripts/fault_rig.py run --cycles {{cycles}} {{args}}
+    # On Linux every nemesis of the menu must be able to run (LazyFS built, libfaketime installed):
+    # a run that could not exercise one fails before the first cycle instead of printing a note.
+    require=""
+    if [ "$(uname)" = Linux ]; then require="--require-all-nemeses"; fi
+    uv run scripts/fault_rig.py run --cycles {{cycles}} $require {{args}}
 
 # The rig's own canary: damage planted in the replica (a dropped, swapped or flipped level-0 file)
 # must be reported. A rig that reports 0 anomalies here is blind.

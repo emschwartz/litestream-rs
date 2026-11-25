@@ -8,6 +8,7 @@ under a seeded menu of faults, judged by point-in-time restores.
 
     uv run scripts/fault_rig.py run --cycles N [--seed S] [--work DIR] [--lsr BIN] [--judge BIN]
                                     [--go BIN] [--stop-on-anomaly] [--no-lazyfs]
+                                    [--require-all-nemeses]
     uv run scripts/fault_rig.py canary   (the judge and the harness must catch damage planted in
                                           the replica; the engine plants are "just fault-rig-plant")
 
@@ -106,6 +107,8 @@ SYNC_INTERVAL = "1s"
 MIN_CHECKPOINT_PAGES = 200
 SECONDS_PER_COMMIT = 0.05
 SEGMENT_CYCLES = 10  # a fresh database and prefix, ended by a clean stop and a final restore
+UPLOADS_WITHIN_SECONDS = 45  # a segment's engine must have this many level-0 files by then
+UPLOADS_MIN_FILES = 3
 POINTS_NEW_CAP = 12  # level-0 transaction ids judged for the first time, per cycle
 EVIDENCE_REPLICAS = 4  # anomalies that keep a copy of the replica's objects
 POINTS_AGAIN = 2  # earlier ones restored again, per cycle
@@ -373,6 +376,8 @@ class Rig:
         self.tainted: str | None = None
         self.clock_stepped = False
         self.faked_offset_file: Path | None = None
+        self.damage_done = False  # the canary's damage was applied (this segment)
+        self.damaged_after_anomalies: int | None = None  # anomalies seen when it was
         # counters
         self.nemeses: dict[str, int] = {}
         self.skipped: dict[str, int] = {}
@@ -430,6 +435,7 @@ class Rig:
         self.clock_stepped = False
         self.epoch = 0
         self.judged_line = 0
+        self.uploads_checked = False
         self.points: dict[int, str] = {}  # txid -> digest, as first restored
         self.first_commit_ms: int | None = None
         self.replica_first_ms: int | None = None  # when a listing first showed a level-0 file
@@ -510,7 +516,7 @@ class Rig:
         with open(self.engine_log, "a") as f:
             f.write(f"--- epoch {self.epoch}\n")
         env = self.env()
-        if self.libfaketime:
+        if self.libfaketime and any(name == "clock-step" for name, _ in self.menu):
             self.faked_offset_file = self.work / "faketime.rc"
             if not self.faked_offset_file.exists():
                 self.faked_offset_file.write_text("+0\n")
@@ -902,6 +908,8 @@ class Rig:
                   unavailable=self.unavailable.get(name))
         if not self.ensure_running():
             return
+        if not self.uploads_checked:
+            self.await_uploads()
         self.watch(run)
         why = self.unavailable.get(name)
         self.nemesis_now = name
@@ -918,6 +926,27 @@ class Rig:
         self.jlog(cycle=n, judge_seconds=round(time.monotonic() - t_judge, 1),
                   restore_seconds={k: round(v, 1) for k, v in self.restore_seconds.items()},
                   restores=self.restores)
+
+    def await_uploads(self) -> None:
+        """A segment's first cycle, before any nemesis: the engine must put level-0 files on the
+        replica under the commit load. A run whose engine uploads next to nothing judges next to
+        nothing (the Linux canary's damage had no file to land on and no restore to read it), so
+        this is a rig failure, loud, with the engine log, and not a quiet pass."""
+        self.uploads_checked = True
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < UPLOADS_WITHIN_SECONDS:
+            self.check_engine_alive()
+            try:
+                if len(self.listing_l0()) >= UPLOADS_MIN_FILES:
+                    self.jlog(first_uploads_seconds=round(time.monotonic() - t0, 1))
+                    return
+            except Exception as err:
+                self.anomaly("RIG", f"cannot list the bucket: {err}")
+                return
+            time.sleep(0.5)
+        self.anomaly("RIG", f"the engine put fewer than {UPLOADS_MIN_FILES} level-0 files on the replica in "
+                            f"{UPLOADS_WITHIN_SECONDS} s under load (libfaketime preloaded: "
+                            f"{bool(self.faked_offset_file)}); engine log tail: {self.tail(self.engine_log)}")
 
     def nemesis_none(self, _p: dict) -> None:
         self.watch(0.5)
@@ -1037,6 +1066,12 @@ class Rig:
     def run(self) -> int:
         if self.root.exists():
             shutil.rmtree(self.root)
+        missing = {k: v for k, v in self.unavailable.items()
+                   if v and any(k == name for name, _ in self.menu)}
+        if self.args.require_all_nemeses and missing:
+            for k, v in missing.items():
+                print(f"fault_rig: nemesis {k} was required and cannot run: {v}", flush=True)
+            return 2
         self.root.mkdir(parents=True)
         self.evidence.mkdir()
         listen = self.toxi.create()
@@ -1070,7 +1105,6 @@ class Rig:
     def fresh_with_listen(self, listen: str) -> None:
         self.toxi.listen = listen
         self.fresh()
-        self.damage_done = False
 
     def close_go_cycle(self) -> None:
         """At a segment's end: did lsr log OtherWriter during the Go cycle, and how many known
@@ -1089,35 +1123,54 @@ class Rig:
     def last_prefix_done(self) -> None:
         self.end_segment_cleanup()
 
+    def restore_plan(self) -> list[tuple[int, str]]:
+        """The files a restore of the latest state would fetch, as (level, object key): the
+        engine's own plan (`restore --dry-run --json`), read directly from the bucket. Damage
+        goes where a restore reads, never where a snapshot or a higher level has made a file
+        redundant: a dropped level-0 file under a snapshot that covers it is not damage a
+        restore can see (the canary's damage went there, and no restore read it)."""
+        r = subprocess.run([str(self.args.lsr), "restore", "--replica", f"s3://{self.bucket}/{self.prefix}",
+                            *self.s3_flags(), "--dry-run", "--json", "--output", str(self.root / "plan.db")],
+                           capture_output=True, text=True, env=self.env())
+        if r.returncode != 0:
+            return []
+        files = json.loads(r.stdout).get("files", [])
+        return [(f["level"], f"{self.prefix}/{f['level']:04d}/{f['name']}") for f in files]
+
     def check_damage_hook(self, n: int) -> None:
-        """The canary's harness-level damage: done once, after the cycle named, inside the bucket."""
+        """The canary's harness-level damage: done once, after the cycle named, to a file the
+        next restore of the latest state reads, and judged at once, before the engine can
+        compact the file out of the plan. A damage that cannot be applied is not silent: the
+        canary reports it as NOT APPLIED, and a run asked to damage the replica exits 2."""
         if not self.args.damage or self.damage_done:
             return
         kind, _, at = self.args.damage.partition("@")
         if n < int(at or "3"):
             return
-        txids = sorted(k for k, _ in self.s3.list(self.prefix + L0_DIR) if L0_KEY.search(k))
-        if len(txids) < 4:
-            return
+        level0 = [k for lvl, k in self.restore_plan() if lvl == 0]
+        if len(level0) < 3:
+            return  # try again after the next cycle
         self.damage_done = True
+        self.damaged_after_anomalies = len(self.anomalies)
         if kind == "drop-middle":
-            victim = txids[len(txids) // 2]
+            victim = level0[len(level0) // 2]
             self.s3.delete(victim)
-            self.jlog(damage=kind, key=victim)
+            self.jlog(damage=kind, key=victim, plan_level0_files=len(level0))
         elif kind == "swap":
-            a, b = txids[len(txids) // 2], txids[len(txids) // 2 + 1]
+            a, b = level0[len(level0) // 2], level0[len(level0) // 2 + 1]
             da, db = self.s3.get(a), self.s3.get(b)
             self.s3.put(a, db)
             self.s3.put(b, da)
-            self.jlog(damage=kind, keys=[a, b])
+            self.jlog(damage=kind, keys=[a, b], plan_level0_files=len(level0))
         elif kind == "flip":
-            # One the next latest restore reads (a snapshot may hide an older one from it, and the
-            # rig then finds it only through its random re-checks of old points).
-            victim = txids[-2]
+            victim = level0[-2]
             data = bytearray(self.s3.get(victim))
             data[len(data) // 2] ^= 0xFF
             self.s3.put(victim, bytes(data))
-            self.jlog(damage=kind, key=victim)
+            self.jlog(damage=kind, key=victim, plan_level0_files=len(level0))
+        else:
+            raise SystemExit(f"fault_rig.py: unknown damage kind {kind}")
+        self.judge_round()
 
     def report(self, cycles: int) -> int:
         reach_fail = []
@@ -1156,6 +1209,9 @@ class Rig:
               f"({len([g for g in self.go_cycles if g.get('other_writer_logged') is False])} Go cycles with no "
               f"OtherWriter logged); they do not fail the run. Failing anomalies: {len(self.anomalies)}", flush=True)
         print(json.dumps({"summary": summary}), flush=True)
+        if self.args.damage and self.damaged_after_anomalies is None and cycles >= 1:
+            print(f"fault_rig: the damage {self.args.damage} was asked for and never applied", flush=True)
+            return 2
         if any(a["kind"] == "RIG" for a in self.anomalies) or reach_fail:
             return 2
         return 1 if self.anomalies else 0
@@ -1199,11 +1255,16 @@ def canary(args: argparse.Namespace) -> int:
         print(f"canary {kind}: running", flush=True)
         rig = Rig(ns)
         code = rig.run()
-        # Caught means an anomaly at or after the damaged cycle: one before it proves nothing.
-        after = [a for a in rig.anomalies if a["cycle"] >= 3]
-        before = [a for a in rig.anomalies if a["cycle"] < 3]
+        # Caught means an anomaly after the damage was applied: one before it proves nothing,
+        # and damage that was never applied proves nothing either (a distinct, failing verdict).
+        mark = rig.damaged_after_anomalies
+        if mark is None:
+            verdicts[kind] = (f"NOT APPLIED (exit {code}: the replica never offered three level-0 "
+                              f"files in a restore's plan; {len(rig.anomalies)} anomalies)")
+            continue
+        after = rig.anomalies[mark:]
         verdicts[kind] = (f"caught ({after[0]['kind']} at cycle {after[0]['cycle']})" if after
-                          else f"MISSED (exit {code}, {len(before)} anomalies before the damage)")
+                          else f"MISSED (exit {code}, the damage was read by no restore)")
     verdicts["known-exemption"] = exemption_canary(args)
     print(json.dumps({"canary": verdicts}), flush=True)
     return 0 if all(v.startswith("caught") for v in verdicts.values()) else 1
@@ -1224,6 +1285,8 @@ def main() -> int:
         r.add_argument("--work", default=str(REPO / "target" / "fault-rig"))
         r.add_argument("--segment", type=int, default=SEGMENT_CYCLES)
         r.add_argument("--stop-on-anomaly", action="store_true")
+        r.add_argument("--require-all-nemeses", action="store_true",
+                       help="exit 2 before any cycle when a nemesis of the menu cannot run here (the nightly on Linux)")
         r.add_argument("--max-minutes", type=float, default=0, help="stop starting cycles after this long (0: no limit)")
         r.add_argument("--menu", default="", help="exploring only: restrict the nemeses (comma list)")
         r.add_argument("--damage", default="", help="canary: drop-middle|swap|flip@CYCLE")
