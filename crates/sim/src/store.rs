@@ -77,6 +77,10 @@ pub enum FaultShape {
         /// The object offset of the byte.
         at: u64,
     },
+    /// Every `remove_scratch` (the boot's sweep of leftover uploads) fails with the error,
+    /// until healed. Draws nothing from the seed and counts as no call, so no schedule that
+    /// does not use it moves; the scheduled operation is ignored.
+    Scratch(StoreError),
     /// From the scheduled call on, every call of the operation fails with
     /// `err` with probability `per_mille` in a thousand, drawn from the seed.
     Rate {
@@ -193,6 +197,7 @@ impl FaultState {
                 FaultShape::FlipByteOnRead { at } => {
                     (call == Call::Read && seen == entry.nth).then_some(Verdict::Flip(*at))
                 }
+                FaultShape::Scratch(_) => None,
                 FaultShape::Rate { per_mille, err } => (seen >= entry.nth
                     && rng.below(1000) < u64::from(*per_mille))
                 .then(|| Verdict::Fail(err.clone())),
@@ -234,9 +239,10 @@ impl FaultHandle {
             | FaultShape::SizeMismatch
             | FaultShape::ChecksumMismatch
             | FaultShape::CorruptPublish => state.commits,
-            FaultShape::Error(_) | FaultShape::FlipByteOnRead { .. } | FaultShape::Rate { .. } => {
-                *state.count(op)
-            }
+            FaultShape::Error(_)
+            | FaultShape::FlipByteOnRead { .. }
+            | FaultShape::Rate { .. }
+            | FaultShape::Scratch(_) => *state.count(op),
         };
         state.schedule.push(Entry {
             op,
@@ -331,10 +337,13 @@ impl FaultHandle {
         }
     }
 
-    /// Stops every fault that fails at a rate.
+    /// Stops every fault that fails at a rate, and every failing sweep.
     pub fn heal(&self) {
         for entry in &mut lock(&self.state).schedule {
-            if matches!(entry.shape, FaultShape::Rate { .. }) {
+            if matches!(
+                entry.shape,
+                FaultShape::Rate { .. } | FaultShape::Scratch(_)
+            ) {
                 entry.fired = true;
             }
         }
@@ -346,7 +355,9 @@ impl FaultHandle {
         lock(&self.state)
             .schedule
             .iter()
-            .filter(|e| !e.fired && !matches!(e.shape, FaultShape::Rate { .. }))
+            .filter(|e| {
+                !e.fired && !matches!(e.shape, FaultShape::Rate { .. } | FaultShape::Scratch(_))
+            })
             .count()
     }
 }
@@ -434,6 +445,26 @@ impl<S> Faults<S> {
 
     fn verdict(&self, call: Call) -> Verdict {
         lock(&self.state).decide(call)
+    }
+
+    /// The error a scheduled [`FaultShape::Scratch`] gives the sweep, if one stands.
+    fn scratch_error(&self) -> Option<StoreError> {
+        let mut state = lock(&self.state);
+        let entry = state
+            .schedule
+            .iter_mut()
+            .find(|e| !e.fired && matches!(e.shape, FaultShape::Scratch(_)))?;
+        entry.hits = entry.hits.saturating_add(1);
+        match &entry.shape {
+            FaultShape::Scratch(err) => Some(err.clone()),
+            FaultShape::Error(_)
+            | FaultShape::ErrorAfterPublish(_)
+            | FaultShape::SizeMismatch
+            | FaultShape::ChecksumMismatch
+            | FaultShape::CorruptPublish
+            | FaultShape::FlipByteOnRead { .. }
+            | FaultShape::Rate { .. } => None,
+        }
     }
 }
 
@@ -570,9 +601,13 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
     }
 
     /// Forwarded without a verdict or a yield: the simulator's stores leave no scratch, and a
-    /// draw here would move every frozen schedule.
+    /// draw here would move every frozen schedule. Only a scheduled [`FaultShape::Scratch`]
+    /// fails it.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
-        self.inner.remove_scratch().await
+        match self.scratch_error() {
+            Some(err) => Err(err),
+            None => self.inner.remove_scratch().await,
+        }
     }
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {

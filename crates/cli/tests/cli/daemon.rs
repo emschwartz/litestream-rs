@@ -153,13 +153,15 @@ fn a_second_signal_cuts_the_drain() {
     // drain can never finish on its own.
     std::fs::write(replica.join("ltx"), b"in the way").unwrap();
     let app = database(&db);
+    // Committed before the start: a boot that cannot list the replica holds the application's
+    // writes for the bound (decision D207), so a write after the start would wait for it.
+    write(&app, 5);
     let cfg = config(
         dir.path(),
         &format!("shutdown-sync-timeout: 1h\ndbs:\n{}", entry(&db, &replica)),
     );
     let mut daemon = with_config(&cfg);
     daemon.wait_for(&["msg=\"initialized db\""]);
-    write(&app, 5);
     daemon.signal("TERM");
     daemon.wait_for(&["msg=\"signal received, litestream shutting down\""]);
     daemon.signal("HUP");

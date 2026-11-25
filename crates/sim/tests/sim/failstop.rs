@@ -234,6 +234,28 @@ fn a_refusal_at_boot_holds_until_it_heals() {
     assert_eq!(report.trips.last().map(|(_, trip)| *trip), Some(None));
 }
 
+/// The boot's sweep of open uploads is best effort: a replica whose policy refuses it (Go's
+/// published S3 policy does) still lists, so the start is judged, nothing trips, and the
+/// replica holds every commit.
+#[test]
+fn a_refused_scratch_sweep_never_holds_the_boot() {
+    let denied = StoreError::Denied {
+        op: StoreOp::Upload,
+        why: Denied::Permission,
+    };
+    let mut ops = vec![Op::StoreFault {
+        target: Target::Remote,
+        op: StoreOp::Upload,
+        ahead: 0,
+        shape: FaultShape::Scratch(denied),
+    }];
+    ops.extend(ticks(4));
+    ops.push(commit());
+    ops.extend(ticks(20));
+    let report = run(&ops);
+    assert_eq!(first_trip(&report), None, "{:?}", report.trips);
+}
+
 /// A refusal after the first listing, healed inside the bound, never trips.
 #[test]
 fn a_refusal_after_the_first_listing_inside_the_bound_never_trips() {

@@ -43,6 +43,12 @@ pub enum Event {
         /// The replica's newest transaction.
         through: Txid,
     },
+    /// The replica refused the boot's sweep of leftover scratch files and open multipart
+    /// uploads for want of permission, so the sweep is skipped for the rest of this process.
+    /// Replication is unaffected, but uploads a killed process left open stay (and are billed)
+    /// until a bucket lifecycle rule (`AbortIncompleteMultipartUpload`) or an operator
+    /// removes them. Emitted once. `Counters::scratch_sweeps_denied` says the same at any time.
+    ScratchSweepDenied,
     /// The engine stopped by a cause and waits for a person.
     Stopped(StopCause),
     /// The replicator now holds the database's write lock, so every write, from any connection

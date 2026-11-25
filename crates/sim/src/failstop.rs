@@ -424,7 +424,9 @@ pub fn fired(handle: &crate::store::FaultHandle) -> Fired {
                 | crate::store::FaultShape::SizeMismatch
                 | crate::store::FaultShape::ChecksumMismatch
                 | crate::store::FaultShape::CorruptPublish => (false, true),
-                crate::store::FaultShape::FlipByteOnRead { .. } => (false, false),
+                // The sweep is best effort: its refusal never trips.
+                crate::store::FaultShape::FlipByteOnRead { .. }
+                | crate::store::FaultShape::Scratch(_) => (false, false),
             };
             let only = |yes: bool| if yes { hits } else { 0 };
             Fired {

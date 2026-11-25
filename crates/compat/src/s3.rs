@@ -40,6 +40,11 @@ pub const BUCKET_VAR: &str = "LSR_COMPAT_S3_BUCKET";
 pub const ACCESS_KEY_VAR: &str = "LSR_COMPAT_S3_ACCESS_KEY";
 /// The throwaway secret of the MinIO container.
 pub const SECRET_KEY_VAR: &str = "LSR_COMPAT_S3_SECRET_KEY";
+/// The access key of the user whose policy is only what Litestream's S3 guide publishes
+/// (`scripts/minio.sh policy-user`).
+pub const POLICY_ACCESS_KEY_VAR: &str = "LSR_COMPAT_S3_POLICY_ACCESS_KEY";
+/// That user's secret.
+pub const POLICY_SECRET_KEY_VAR: &str = "LSR_COMPAT_S3_POLICY_SECRET_KEY";
 
 /// Variable prefixes no child process may inherit: Go's SDK reads `AWS_*` (keys, profiles,
 /// endpoints, regions) and Go copies `LITESTREAM_*` keys into them; Rust's chain reads both.
@@ -125,6 +130,26 @@ impl MinioEnv {
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
+
+    /// The same bucket as the user whose policy is exactly the five actions Litestream's S3
+    /// guide publishes (`scripts/minio.sh policy-user`): the permissions a drop-in
+    /// replacement for Go must work with.
+    ///
+    /// # Errors
+    /// [`CompatError::Fixture`] when the user's variables are unset.
+    pub fn as_policy_user(&self) -> Result<Self, CompatError> {
+        let var = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| CompatError::Fixture(format!("{name} is unset")))
+        };
+        Ok(Self {
+            access_key: var(POLICY_ACCESS_KEY_VAR)?,
+            secret_key: var(POLICY_SECRET_KEY_VAR)?,
+            ..self.clone()
+        })
+    }
 }
 
 /// A replica under one prefix of the MinIO bucket.
@@ -176,6 +201,18 @@ impl S3Replica {
     /// observer lists level 0 as fast as the server answers).
     pub(crate) fn store(&self) -> &S3Store {
         &self.store
+    }
+
+    /// Whether these credentials may neither list nor abort multipart uploads: the premise of
+    /// a run as the guide's policy user, which a root user would silently void.
+    pub fn refuses_open_uploads(&self) -> bool {
+        matches!(
+            block_on(self.store.remove_scratch()),
+            Err(StoreError::Denied {
+                why: lsr_core::Denied::Permission,
+                ..
+            })
+        )
     }
 
     /// The key prefix.
