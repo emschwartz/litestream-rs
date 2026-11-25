@@ -188,3 +188,53 @@ fn a_truncate_checkpoint_inside_a_sync_step_is_not_a_rewound_wal() {
         panic!("{failure}");
     }
 }
+
+/// A staged file's rename is done and the sync of its directory fails. The process ends, the
+/// next one finds the file whole and sends it, and then the power goes between two ticks and
+/// takes the file from staging, whole or in part. The replica now holds a transaction staging
+/// does not, and the boot snapshots above it. The power loss forces that snapshot wherever it
+/// falls: one between two ticks went unnoted, and the run failed for a needless snapshot.
+#[test]
+fn a_power_loss_between_ticks_that_takes_a_sent_staged_file_forces_the_snapshot() {
+    let reset = lsr_core::StoreError::Transient {
+        op: lsr_core::StoreOp::Upload,
+        kind: std::io::ErrorKind::ConnectionReset,
+    };
+    let mut ops = vec![commit()];
+    ops.extend(std::iter::repeat_n(Op::Tick, 6));
+    ops.extend([
+        Op::StoreFault {
+            target: lsr_sim::Target::Staging,
+            op: lsr_core::StoreOp::Upload,
+            ahead: 0,
+            shape: lsr_sim::FaultShape::ErrorAfterPublish(reset),
+        },
+        commit(),
+        Op::Tick,
+        Op::Restart,
+        // The boot, and the upload of the file. Nothing has synced the directory since.
+        Op::Tick,
+        Op::Tick,
+        Op::PowerLoss,
+    ]);
+    ops.extend(std::iter::repeat_n(Op::Tick, 6));
+    ops.push(Op::Restore);
+    // The law draws what the power loss does to the file, on a coin the run's seed feeds: both
+    // ways are run, and the count below says so.
+    let (mut torn, mut dropped, mut snapshots) = (0, 0, 0);
+    for coin in 1..=8 {
+        let report = match run_ops(Seed::new(coin), &ops, &Opts::default()) {
+            Ok(report) => report,
+            Err(failure) => panic!("{failure}"),
+        };
+        torn += report.reach.get("staged.Torn");
+        dropped += report.reach.get("staged.Dropped");
+        snapshots += report
+            .reach
+            .get("needless_snapshot.forced.NewestStagedFileUnreadable");
+    }
+    assert_eq!(torn + dropped, 8, "torn {torn}, dropped {dropped}");
+    assert!(torn > 0 && dropped > 0, "torn {torn}, dropped {dropped}");
+    // A torn file is dropped by the boot, which snapshots above the replica's copy of it.
+    assert_eq!(snapshots, torn);
+}

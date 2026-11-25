@@ -1,0 +1,7 @@
+# The simulator's runner drops what a power loss between two ticks took from staging, so the
+# needless-snapshot judge calls the snapshot the next boot takes over a torn staged file needless.
+name = "power-loss-between-ticks-unnoted"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["needless_snapshot::a_power_loss_between_ticks_that_takes_a_sent_staged_file_forces_the_snapshot"]
