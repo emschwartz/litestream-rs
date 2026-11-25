@@ -95,7 +95,7 @@ pub(crate) struct Inner {
     /// The file the WAL path named once the first read transaction was held. SQLite keeps that
     /// file open for the reader's whole life, so any other file at the path, or none, means it
     /// was deleted under the read lock; `None` when it could not be told.
-    wal_id: Option<FileId>,
+    wal_id: Option<DatabaseFile>,
     page_size: PageSize,
     /// The current hold of the read transaction: a holder of this open's own, and how many
     /// times it has been taken.
@@ -109,24 +109,14 @@ pub(crate) struct Inner {
     returned: u64,
 }
 
-/// Which file a path named: device and inode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileId {
-    dev: u64,
-    ino: u64,
-}
-
+/// The file a stat described, where a stat identifies one (Unix only).
 #[cfg(unix)]
-fn file_id(meta: &Metadata) -> Option<FileId> {
-    use std::os::unix::fs::MetadataExt;
-    Some(FileId {
-        dev: meta.dev(),
-        ino: meta.ino(),
-    })
+fn file_id(meta: &Metadata) -> Option<DatabaseFile> {
+    Some(DatabaseFile::of_metadata(meta))
 }
 
 #[cfg(not(unix))]
-const fn file_id(_meta: &Metadata) -> Option<FileId> {
+const fn file_id(_meta: &Metadata) -> Option<DatabaseFile> {
     None
 }
 
@@ -321,11 +311,11 @@ impl Inner {
 
     /// `Unlinked` unless `found` (the file at the WAL path now, if any) is the WAL SQLite holds.
     fn same_wal(&self, found: Option<&Metadata>) -> Result<(), SourceError> {
-        let Some(id) = self.wal_id else {
+        let Some(id) = &self.wal_id else {
             return Ok(());
         };
         match found.and_then(file_id) {
-            Some(now) if now == id => Ok(()),
+            Some(now) if now == *id => Ok(()),
             Some(_) => Err(SourceError::Unlinked),
             None if found.is_some() => Ok(()),
             None => Err(SourceError::Unlinked),
