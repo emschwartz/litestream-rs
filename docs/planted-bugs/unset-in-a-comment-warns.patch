@@ -1,0 +1,16 @@
+diff --git a/crates/config/src/lib.rs b/crates/config/src/lib.rs
+index 06b6288df..488d27452 100644
+--- a/crates/config/src/lib.rs
++++ b/crates/config/src/lib.rs
+@@ -185,7 +185,10 @@ fn read_by_a_value(text: &str, env: &dyn Env, unset: Vec<String>) -> Vec<String>
+     unset
+         .into_iter()
+         .enumerate()
+-        .filter(|(index, _)| seen.contains(&expand::probe_sentinel(*index)))
++        .filter(|(index, _)| {
++            let _ = (&seen, index);
++            true
++        })
+         .map(|(_, name)| name)
+         .collect()
+ }

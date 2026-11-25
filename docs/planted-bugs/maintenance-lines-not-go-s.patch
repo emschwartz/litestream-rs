@@ -1,0 +1,13 @@
+diff --git a/crates/sidecar/src/logging.rs b/crates/sidecar/src/logging.rs
+index 96ef45a36..32cf066ec 100644
+--- a/crates/sidecar/src/logging.rs
++++ b/crates/sidecar/src/logging.rs
+@@ -457,7 +457,7 @@ fn store_line(event: &MaintainedEvent) -> Option<(&'static str, Vec<(&'static st
+         MaintainedEvent::Compacted(info) => {
+             let range = info.key.range();
+             (
+-                "compaction complete",
++                "compaction finished",
+                 vec![
+                     ("level", u64::from(info.key.level().get()).into()),
+                     ("txid.min", range.min().to_string().into()),

@@ -33,7 +33,7 @@ const GROUPS: &[(&str, &str, &[Key])] = &[
     ),
     ("`age`", "age", AGE),
     (
-        "`litestream-rs` (read only by litestream-rs; Go ignores it)",
+        "`litestream-rs` (read only by litestream-rs; Go warns of it once and ignores it)",
         "rust",
         RUST,
     ),
@@ -77,7 +77,10 @@ const SETS: &[(&str, &str)] = &[
         "top.shutdown-sync-timeout",
         "`Config.shutdown_grace` of every database, and `Plan::shutdown_sync_timeout`.",
     ),
-    ("top.litestream-rs", CONTAINER),
+    (
+        "top.litestream-rs",
+        "A section; its keys are below. A config shared with Go may carry it: Go reads the file leniently, warns once per start (\"configuration contains unrecognized or duplicate key\") and ignores the section, so the same file starts either program.",
+    ),
     (
         "settings.sync-interval",
         "`Config.retry_interval`: the first wait after a failed upload.",

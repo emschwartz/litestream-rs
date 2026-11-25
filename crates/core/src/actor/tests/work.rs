@@ -49,6 +49,46 @@ fn a_full_disk_is_reported_until_a_step_stages() {
     assert!(!actor.work().disk_full());
 }
 
+/// A boot the store fails is a sync attempt that failed, as Go's `syncLocked` counts the
+/// failed `init` (`db.go:1360-1376`, `db.go:1210`): an alert on the error counter must see a
+/// store that refuses the credentials or cannot be reached, which no later step reports.
+#[test]
+fn a_boot_the_store_fails_counts_as_a_failed_sync_step() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    rig.remote
+        .inner
+        .inject_failure(StoreOp::List, transient(StoreOp::List));
+    let failed = rig.tick(&mut actor, T0);
+    assert!(
+        matches!(event(&failed), Some(Event::Retrying { .. })),
+        "{failed:?}"
+    );
+    assert!(!actor.booted());
+    let work = actor.work();
+    assert_eq!((work.sync().calls(), work.sync().errors()), (1, 1));
+    assert!(!work.disk_full());
+    // The boot that succeeds is no sync step: the first real step counts itself.
+    rig.settle(&mut actor, T0 + 600_000);
+    assert!(actor.booted());
+    assert_eq!(actor.work().sync().errors(), 1);
+}
+
+/// Every boot attempt the store fails counts, not only the first.
+#[test]
+fn each_boot_attempt_that_fails_counts_once() {
+    let mut rig = Rig::new();
+    let mut actor = Actor::new(cfg());
+    for (n, at) in [T0, T0 + 600_000].into_iter().enumerate() {
+        rig.remote
+            .inner
+            .inject_failure(StoreOp::List, transient(StoreOp::List));
+        rig.tick(&mut actor, at);
+        assert_eq!(actor.work().sync().errors(), u64::try_from(n + 1).unwrap());
+        assert_eq!(actor.work().sync().calls(), u64::try_from(n + 1).unwrap());
+    }
+}
+
 /// Each checkpoint SQLite is asked for is counted under its mode, failures included.
 #[test]
 fn checkpoints_are_counted_per_mode() {
