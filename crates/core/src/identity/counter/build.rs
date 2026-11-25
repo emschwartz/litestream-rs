@@ -20,6 +20,12 @@ fn leaf(size: PageSize, header: usize, cell: &[u8]) -> Vec<u8> {
 /// Page 1 holding one schema row, `table _litestream_seq` rooted at `root` (below 128).
 #[must_use]
 pub(crate) fn schema_page(size: PageSize, root: u8) -> Vec<u8> {
+    schema_leaf(size, 100, root)
+}
+
+/// A schema leaf with b-tree header bytes at `header`: page 1 uses 100, any other page 0.
+#[must_use]
+pub(crate) fn schema_leaf(size: PageSize, header: usize, root: u8) -> Vec<u8> {
     let name = b"_litestream_seq";
     let mut record = vec![6, 23, 43, 43, 1, 15];
     record.extend_from_slice(b"table");
@@ -29,7 +35,7 @@ pub(crate) fn schema_page(size: PageSize, root: u8) -> Vec<u8> {
     record.push(b'x');
     let mut cell = vec![u8::try_from(record.len()).unwrap(), 1];
     cell.extend(record);
-    leaf(size, 100, &cell)
+    leaf(size, header, &cell)
 }
 
 /// The counter's root page holding `seq` in its one row.

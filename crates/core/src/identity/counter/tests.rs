@@ -219,6 +219,34 @@ fn a_walk_over_a_broken_schema_gives_up() {
     assert_eq!(read_counter(&ok, size), Some((2, Some(1))));
 }
 
+/// A schema b-tree that is a chain of interior pages, each naming the next as its only child, with
+/// the counter's leaf at the end: the walk reads exactly as many pages as the chain is long, and
+/// gives up past the cap of 4096.
+#[test]
+fn the_walk_reads_at_most_the_cap() {
+    let size = PageSize::MIN;
+    let chain = |leaf_at: u32| {
+        let mut reads = 0_u32;
+        let got = locate(size, leaf_at, &mut |pgno: PageNo, buf: &mut [u8]| {
+            reads += 1;
+            let n = pgno.get();
+            let header = if n == 1 { 100 } else { 0 };
+            buf.fill(0);
+            if n == leaf_at {
+                buf.copy_from_slice(&build::schema_leaf(size, header, 2));
+            } else {
+                buf[header] = 0x05;
+                buf[header + 8..header + 12].copy_from_slice(&(n + 1).to_be_bytes());
+            }
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+        (got.map(PageNo::get), reads)
+    };
+    assert_eq!(chain(4096), (Some(2), 4096), "the 4096th read is allowed");
+    assert_eq!(chain(4097), (None, 4096), "the 4097th is refused unread");
+}
+
 /// A read that fails ends the walk with its error.
 #[test]
 fn a_failed_read_is_the_callers_error() {
