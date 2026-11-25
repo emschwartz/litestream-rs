@@ -28,6 +28,10 @@ use md5::{Digest as _, Md5};
 /// first read them in. A part being sent holds one cell's bytes at a time.
 pub(crate) const CELL: u64 = 256 * 1024;
 
+/// The cells of the largest part S3 takes (5 GiB): the most room a part's tallies are
+/// given up front, whatever part size the upload was asked for.
+const MOST_CELLS: usize = 20_480;
+
 /// A part being handed over: its place, its digest so far and the tallies of its cells.
 pub(crate) struct Run {
     offset: u64,
@@ -49,7 +53,8 @@ impl Run {
     /// A part that starts at `offset` in the object and holds at most `part` bytes: room
     /// for every cell's tally is taken here, once.
     pub(crate) fn at(offset: u64, part: u64) -> Self {
-        let cells = usize::try_from(part.div_ceil(CELL)).unwrap_or(usize::MAX);
+        let cells = usize::try_from(part.div_ceil(CELL))
+            .map_or(MOST_CELLS, |cells| cells.min(MOST_CELLS));
         Self {
             offset,
             len: 0,
@@ -223,5 +228,18 @@ fn block_on<F: Future>(fut: F) -> F::Output {
             Poll::Ready(out) => return out,
             Poll::Pending => thread::park(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_part_takes_room_for_its_tallies_once_and_never_past_the_largest_part() {
+        let held = |cells: usize| cells.saturating_mul(std::mem::size_of::<ByteTally>());
+        assert_eq!(Run::at(0, 16 * 1024 * 1024).held(), held(64));
+        assert_eq!(Run::at(0, CELL.saturating_add(1)).held(), held(2));
+        assert_eq!(Run::at(0, u64::MAX).held(), held(MOST_CELLS));
     }
 }
