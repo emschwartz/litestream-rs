@@ -215,7 +215,8 @@ fn earned(row: &Row) -> Result<&'static str, String> {
     }
 }
 
-/// The tally the document shows, counted from the rows so it cannot fall behind them.
+/// The tally `just behavior-tally` prints, counted from the rows. It is never committed: a count
+/// in a generated file goes stale when two branches each add a row, with no textual conflict.
 fn tally(doc: &Doc) -> Result<Vec<String>, String> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for row in &doc.row {
@@ -254,10 +255,6 @@ fn render(template: &str, doc: &Doc) -> Result<String, String> {
     let mut used = BTreeSet::new();
     let mut out = Vec::new();
     for line in template.split('\n') {
-        if line == "<!-- tally -->" {
-            out.extend(tally(doc)?);
-            continue;
-        }
         let Some(table) = line
             .strip_prefix("<!-- rows: ")
             .and_then(|l| l.strip_suffix(" -->"))
@@ -433,6 +430,14 @@ fn problems(doc: &Doc) -> Vec<String> {
         }
     }
     out
+}
+
+/// Prints the tally of rows by mark (`just behavior-tally`).
+#[test]
+#[ignore = "prints the tally; `just behavior-tally` runs it"]
+fn print_the_tally_of_rows_by_mark() {
+    let lines = tally(&rows()).unwrap_or_else(|why| panic!("{why}"));
+    println!("{}", lines.join("\n"));
 }
 
 #[test]

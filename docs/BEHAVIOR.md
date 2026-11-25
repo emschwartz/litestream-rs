@@ -31,19 +31,7 @@ Rows that earn none of the three carry one of these instead:
 
 Evidence is cited as: a test name with its crate ("sim" is `sim/tests/sim`, "core" is a unit test in `core/src`, "compat", "sqlite", "history", "cli", "replica", "config" likewise); oracle `X`, a violation the simulator's judge raises on any seed (`Violation` in `sim/src/oracle.rs`); judge `X`, an anomaly of the history judge, which reads only restored content and a commit log (`Anomaly` in `history/src/judge.rs`); plant `X`, a defect kept as a patch in `docs/planted-bugs/` and re-planted nightly.
 
-**Tally of the 234 rows in section 3** (counted by the test that renders this document, from `docs/behavior.toml`; a row with a tested half and an untested half is counted by its tested half).
-
-| Mark | Rows |
-|---|---|
-| D | 130 |
-| D S | 5 |
-| D R | 58 |
-| D S R | 5 |
-| S | 1 |
-| code only | 10 |
-| untested | 11 |
-| unknown | 9 |
-| accepted, undetected | 5 |
+The count of rows by mark is not kept here, since a count in a committed file goes stale when two branches each add a row: `just behavior-tally` prints it from `docs/behavior.toml`.
 
 **Changes in review.** None. Main is described as it is. Four pull requests were once listed here: #96 (`claude/listing-trust`) and #89 (`claude/rewound-snapshot`) were closed unmerged, and #86 and #97 merged. A row whose In review cell still names one of them has a stale tag and is read again when it is next touched.
 
@@ -891,7 +879,7 @@ The index tables for `Fault`, `PersistentCause`, `SnapshotCause` and `StopCause`
 7. **Known wrong is an expected failure.** A known-wrong row names a test that fails on main, or carries "(no failing test)", which the gate counts and prints. Today one row has such a test (RUN-3's restart half) and six rows or half-rows do not.
 8. **Every citation can fail (nightly).** Each cited test is linked to a planted bug that it kills. The plant must change the function the row's detection names, or the response path; a patch elsewhere that happens to fail the test does not count.
 9. **The cited test reaches the detecting branch (nightly).** Region coverage of the branch, not the function: every test reaches `policy` and `Actor::tick`.
-10. **Sections 1 and 6 are generated.** The table at the top of section 1 and the tally below come from the data, so a sentence like "three of four have an open violation" cannot go stale by itself.
+10. **Sections 1 and 6 are generated.** The table at the top of section 1 comes from the data, so a sentence like "three of four have an open violation" cannot go stale by itself. No count over rows is committed: `just behavior-tally` prints one.
 11. **A generic harness**, where a row has a simulator injector: run the injector, and assert the observed response, signal and restore outcome equal the row's.
 
 ### 7.4 What this still does not do
