@@ -716,7 +716,7 @@ fn remove_scratch_is_forwarded() {
 // the listing budget
 
 /// A sleeper that moves a fake clock by what it was asked to wait, so time passes as it would.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Ticking(Arc<crate::env::FakeClock>);
 
 impl Sleeper for Ticking {
@@ -853,4 +853,13 @@ fn a_budget_that_is_never_spent_reports_nothing() {
     conformance::block_on(store.list(Level::ZERO, None, limit())).unwrap_err();
     assert_eq!(store.listing_expired(), None);
     assert_eq!(store.stats().calls, 5);
+}
+
+/// The budget shows in a store's debug output, so a log of a restore's store says it is bounded.
+#[test]
+fn a_store_with_a_budget_shows_it_in_debug_output() {
+    let (_mem, _clock, store) = budgeted(ms(500));
+    let shown = format!("{store:?}");
+    assert!(shown.contains("ListingBudget"), "{shown}");
+    assert!(shown.contains("500ms"), "{shown}");
 }
