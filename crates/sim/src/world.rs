@@ -127,6 +127,26 @@ fn reencoded(
     Some(out)
 }
 
+/// Flips the byte at `from`, or the first one after it whose flip changes what the file
+/// reads as. The LTX checksum covers decompressed pages, so a flipped LZ4 match offset can
+/// land on other bytes of the same value and leave another encoding of the same file: a boot
+/// accepts that by design (`docs/decisions/D175.md`), and the judge of uploads
+/// (`oracle/witness.rs`) compares bytes, so it is not damage either of them can be held to.
+fn flip_byte_from(bytes: &mut [u8], from: usize) {
+    let whole = reencoded(bytes, |_| {}, |_| {});
+    for at in from..bytes.len() {
+        if let Some(byte) = bytes.get_mut(at) {
+            *byte ^= 0xff;
+        }
+        if whole.is_none() || reencoded(bytes, |_| {}, |_| {}) != whole {
+            return;
+        }
+        if let Some(byte) = bytes.get_mut(at) {
+            *byte ^= 0xff;
+        }
+    }
+}
+
 /// Every byte of `key`.
 fn read_all(store: &impl lsr_core::ObjectStore, key: &FileKey) -> Result<Vec<u8>, StoreError> {
     use lsr_core::ReadLen;
@@ -1134,6 +1154,18 @@ impl World {
         edit(&mut bytes);
         self.write_staged(&info, &bytes)?;
         Ok(true)
+    }
+
+    /// Flips one byte of the newest level-0 file, the middle one or the first after it whose
+    /// flip the file's own checksum can see ([`flip_byte_from`]); false when there is none.
+    ///
+    /// # Errors
+    /// As [`Self::edit_newest_staged`].
+    pub fn flip_newest_staged(&self) -> Result<bool, StagedEditError> {
+        self.edit_newest_staged(|bytes| {
+            let middle = bytes.len() / 2;
+            flip_byte_from(bytes, middle);
+        })
     }
 
     /// Whether the staged file `key` holds every page of its database, which

@@ -47,6 +47,9 @@ pub enum EventMatch {
     Checkpointed(CheckpointMode),
     /// A step failed with a fault whose policy is to retry it.
     Retrying(FaultKind),
+    /// A checkpoint was due and the write lock was busy, so it waits
+    /// (`lsr_core::CheckpointOutcome::LockBusy`).
+    CheckpointDeferred,
     /// A step that writes to the database waited: the replicator held the application's
     /// writes (`lsr_core::Fault::WritesHeld`).
     WritesHeld,
@@ -104,7 +107,11 @@ impl Expect {
                 Seen::Event(Event::Retrying { fault, .. }),
             ) => FaultKind::from(fault) == *want,
             (Self::Event(EventMatch::Clamped), Seen::Event(Event::Clamped(_)))
-            | (Self::Event(EventMatch::WritesHeld), Seen::Event(Event::WritesHeld { .. })) => true,
+            | (Self::Event(EventMatch::WritesHeld), Seen::Event(Event::WritesHeld { .. }))
+            | (
+                Self::Event(EventMatch::CheckpointDeferred),
+                Seen::Event(Event::CheckpointDeferred { .. }),
+            ) => true,
             (
                 Self::Event(EventMatch::Repaired(want)),
                 Seen::Event(Event::Maintained {

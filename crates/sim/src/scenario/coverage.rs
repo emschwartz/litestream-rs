@@ -225,6 +225,12 @@ pub fn coverage() -> Vec<Coverage> {
             restart,
         ),
         point(
+            "write_transaction_begins_before_the_sequence_bump",
+            Situation::PassiveDue,
+            SourceOp::BumpSeq,
+            AppOp::Spill { pages: 1 },
+        ),
+        point(
             "reader_ends_before_the_sequence_bump",
             Situation::PassiveDueWithReader,
             SourceOp::BumpSeq,

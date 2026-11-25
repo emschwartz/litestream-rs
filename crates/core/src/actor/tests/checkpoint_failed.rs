@@ -65,7 +65,6 @@ fn cases() -> Vec<Case> {
             "end barrier",
             passive(SourceOp::EndBarrier, SourceError::Io(ErrorKind::Other)),
         ),
-        ("bump busy", passive(SourceOp::BumpSeq, SourceError::Busy)),
         (
             "bump io",
             passive(SourceOp::BumpSeq, SourceError::Io(ErrorKind::Other)),

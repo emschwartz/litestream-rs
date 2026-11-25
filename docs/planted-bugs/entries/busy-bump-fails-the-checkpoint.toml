@@ -1,0 +1,10 @@
+# A sequence bump refused because a writer had taken the write lock was a failed checkpoint,
+# although the PASSIVE or the TRUNCATE before it had run (docs/decisions/D225.md).
+name = "busy-bump-fails-the-checkpoint"
+fix = "claude/own-checkpoint"
+package = "lsr-core"
+tests = [
+    "a_passive_overtaken_at_its_bump_is_pinned_and_not_a_fault",
+    "a_truncate_overtaken_at_its_bump_owes_the_snapshot_only_when_everything_was_copied",
+    "a_truncate_overtaken_at_its_bump_snapshots_on_the_next_sync",
+]

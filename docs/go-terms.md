@@ -27,6 +27,7 @@ A translation aid for reading this code beside Go Litestream, LTX and SQLite. Ea
 | `CheckpointTrigger` | `MinCheckpointPageN`, `CheckpointInterval`, `TruncatePageN` | `.upstream/litestream/db.go:54`-`:60` |
 | checkpoint `PASSIVE`, `RESTART`, `TRUNCATE` | the `mode` argument | `.upstream/litestream/db.go:2564` |
 | `Barrier` | `barrierTx` | `.upstream/litestream/db.go:2660` |
+| `CheckpointOutcome::LockBusy`, `Event::CheckpointDeferred` | "passive checkpoint skipped", reason "database busy" (after the busy timeout, which ours does not wait) | `.upstream/litestream/db.go:1529`, `:1559`, `:1584` |
 | `PageIndex` | `PageIndexElem` map of the decoder | `.upstream/ltx/decoder.go:30` |
 | `PageEncoding::Frame` | LZ4 frame (`lz4.NewReader`) | `.upstream/ltx/decoder.go:26`, `:53` |
 | `PageEncoding::Block` | LZ4 block (`lz4.Compressor`) | `.upstream/ltx/encoder.go:42`, `:332` |

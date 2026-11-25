@@ -2,7 +2,9 @@
 //!
 //! The commit is chosen as [`crate::Op::Commit`] chooses one (random pages, the spilled ones with
 //! them, and every page a growth adds) and armed as [`crate::Op::CommitInTick`] arms its own, so the
-//! model and the snapshot notes take it up the same way. The other operations are SQLite's
+//! model and the snapshot notes take it up the same way. A write transaction left open is armed
+//! the same way and kept as [`crate::Op::Spill`] keeps its pages, for the commit or rollback
+//! that ends it. The other operations are SQLite's
 //! own; the runner keeps its list of other readers in step with what ran. A WAL restart or
 //! deletion the operation caused is noted for the forcing checks inside the tick, before it
 //! judges the tick's snapshots, since the engine can meet it in the same tick.
@@ -27,6 +29,7 @@ impl Runner {
             ),
             AppAt::Before(kind) => InTickAt::Before(kind),
         };
+        let mut spilling = Vec::new();
         let armed = match op {
             AppOp::Commit { pages, grow } => {
                 self.arm_in_tick_commit(pages, grow);
@@ -36,6 +39,12 @@ impl Runner {
             AppOp::ReaderEnd => self.readers.first().copied().map(InTickOp::ReaderEnd),
             AppOp::Checkpoint(mode) => Some(InTickOp::Checkpoint(mode)),
             AppOp::DeleteWal => Some(InTickOp::DeleteWal),
+            AppOp::Spill { pages } => {
+                let size = self.w.sqlite.db_size();
+                spilling = self.pick_pages(u32::from(pages), size);
+                self.w.arm_app_commit_in_tick(spilling.clone(), size);
+                Some(InTickOp::Spill)
+            }
         };
         if let Some(armed) = armed {
             self.w.sqlite.arm_app_in_tick(when, armed);
@@ -52,8 +61,12 @@ impl Runner {
         match ran.map(|ran| ran.done) {
             Some(InTickDone::ReaderBegan(id)) => self.readers.push(id),
             Some(InTickDone::ReaderEnded { id, .. }) => self.readers.retain(|held| *held != id),
+            Some(InTickDone::Spilled(true)) => self.spilled.extend(spilling),
             Some(
-                InTickDone::Commit | InTickDone::Checkpointed { .. } | InTickDone::WalDeleted(_),
+                InTickDone::Commit
+                | InTickDone::Checkpointed { .. }
+                | InTickDone::WalDeleted(_)
+                | InTickDone::Spilled(false),
             )
             | None => {}
         }
