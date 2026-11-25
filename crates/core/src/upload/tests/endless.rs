@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use super::*;
 use crate::fault::role::{Replica, Staging};
 use crate::layout::{CreatedAt, ListedTime};
-use crate::witness::check_pending;
+use crate::witness::{Bad, Base, scan};
 
 /// Pages served before the listing gives up with an error, so a pass that reads it all fails
 /// instead of running forever.
@@ -104,35 +104,20 @@ impl ObjectStore for Endless {
     }
 }
 
-/// The sweep stops at the first staged file that does not verify; it reads no further into
-/// the listing than the page that holds it.
+/// The boot's pass stops at the first staged file that does not verify; it reads no further
+/// into the listing than the page that holds it, however many files are staged.
 #[test]
-fn the_sweep_judges_the_first_staged_file_without_listing_them_all() {
+fn the_boot_pass_judges_the_first_staged_file_without_listing_them_all() {
     let staging = Endless::default();
-    let swept = block_on(sweep_staged(&Staging(&staging), None, None));
-    assert_eq!(swept, Ok(Swept::Suspect(key(1))));
-    assert_eq!(staging.pages(), 1);
-}
-
-/// Boot refuses the first pending file and every one after it when it does not verify. The
-/// pass lists no more than the witness cap's worth of files (one past it), however many are
-/// staged.
-#[test]
-fn the_witness_pass_refuses_from_the_first_pending_file_without_listing_them_all() {
-    let staging = Endless::default();
-    let pending = block_on(check_pending(
+    let found = block_on(scan(
         &Staging(&staging),
-        &Replica(&MemStore::new()),
-        None,
+        Base::Replica(&Replica(&MemStore::new()), None),
+        None::<crate::recover::BootWal<'_, std::io::Cursor<Vec<u8>>>>,
     ))
     .unwrap();
-    assert_eq!(pending.refused, Some(txid(1)));
-    assert!(pending.tokens.is_empty());
-    let page = PageLimit::MAX.get();
-    let cap_pages = crate::witness::MAX_WITNESSED
-        .saturating_add(1)
-        .div_ceil(page);
-    assert_eq!(usize::try_from(staging.pages()).unwrap(), cap_pages);
+    assert_eq!(found.bad, Some((key(1), Bad::Unreadable)));
+    assert!(found.tokens.is_empty());
+    assert_eq!(staging.pages(), 1);
 }
 
 /// A drop across several listing pages deletes every file from `from` on, newest first, so a

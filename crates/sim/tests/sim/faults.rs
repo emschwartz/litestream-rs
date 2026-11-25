@@ -450,6 +450,46 @@ fn writes_never_held_under_report() {
 }
 
 #[test]
+fn store_down_across_a_restart() {
+    run(scenario::store_down_across_a_restart);
+}
+
+#[test]
+fn store_down_and_the_course_truncates() {
+    run(scenario::store_down_and_the_course_truncates);
+}
+
+#[test]
+fn store_returns_with_another_writers_file() {
+    run(scenario::store_returns_with_another_writers_file);
+}
+
+#[test]
+fn store_returns_rolled_back() {
+    run(scenario::store_returns_rolled_back);
+}
+
+#[test]
+fn store_returns_refusing() {
+    run(scenario::store_returns_refusing);
+}
+
+#[test]
+fn store_returns_after_the_wal_was_regrown() {
+    run(scenario::store_returns_after_the_wal_was_regrown);
+}
+
+#[test]
+fn store_returns_after_the_wal_lost_its_header() {
+    run(scenario::store_returns_after_the_wal_lost_its_header);
+}
+
+#[test]
+fn store_returns_unreadable_after_staging_fell_behind() {
+    run(scenario::store_returns_unreadable_after_staging_fell_behind);
+}
+
+#[test]
 fn shm_header_mid_update() {
     run(scenario::shm_header_mid_update);
 }

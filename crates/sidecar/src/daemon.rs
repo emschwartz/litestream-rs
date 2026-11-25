@@ -489,10 +489,10 @@ impl Daemon {
     }
 
     /// Drains every running database within what is left of the one deadline begun at
-    /// `begun` (the signal, the child's exit, or now), and reports each.
+    /// `begun` (the signal, the child's exit, or now), and reports each. Each running one
+    /// ends, as asked, with a level-9 snapshot (`-once -force-snapshot`) and then a
+    /// retention pass (`-once -enforce-retention`).
     #[must_use]
-    /// Drains every database; each running one ends, as asked, with a level-9 snapshot
-    /// (`-once -force-snapshot`) and then a retention pass (`-once -enforce-retention`).
     pub(crate) fn stop(
         &self,
         waiter: Option<Waiter>,
@@ -541,8 +541,6 @@ impl Daemon {
         }
     }
 
-    /// The daemon's clock, read now.
-    #[must_use]
     /// Every running database's fail-stop gate (`crate::failstop`): the `-exec` child's start
     /// and stop wait on them. A database waiting for its file, or that failed to start, has
     /// none: it does not hold the child, as it does not in Go.
@@ -562,6 +560,8 @@ impl Daemon {
         self.stop_app
     }
 
+    /// The daemon's clock, read now.
+    #[must_use]
     pub(crate) fn now(&self) -> lsr_ltx::Timestamp {
         self.clock.now()
     }

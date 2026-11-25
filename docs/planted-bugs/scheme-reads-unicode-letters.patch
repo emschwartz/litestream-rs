@@ -1,0 +1,16 @@
+diff --git a/crates/config/src/build.rs b/crates/config/src/build.rs
+index eb9d399e7..32d0b503b 100644
+--- a/crates/config/src/build.rs
++++ b/crates/config/src/build.rs
+@@ -369,10 +369,7 @@ fn db_replica(fields: &Fields, top: &Fields, walk: &mut Walk) -> Option<ReplicaC
+ #[must_use]
+ pub fn is_url(text: &str) -> bool {
+     text.split_once("://").is_some_and(|(scheme, _)| {
+-        !scheme.is_empty()
+-            && scheme
+-                .bytes()
+-                .all(|b| b == b'_' || b.is_ascii_alphanumeric())
++        !scheme.is_empty() && scheme.chars().all(|c| c.is_alphanumeric() || c == '_')
+     })
+ }
+ 

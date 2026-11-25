@@ -24,7 +24,6 @@
 //! `BadCreatedAt`) live there with it.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::io;
 
 use lsr_core::{
     BatchKind, FileInfo, FileKey, Level, ListAt, ListedTime, Listing, PageLimit, StoreError,
@@ -32,20 +31,13 @@ use lsr_core::{
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::classify::classify;
+use crate::classify::{classify, invalid_data};
 use crate::request::HttpRequest;
 use crate::response::{ListedFile, parse_list};
 use crate::store::Inner;
 use crate::transport::{HttpResponse, Transport};
 
 const OP: StoreOp = StoreOp::List;
-
-fn invalid_data() -> StoreError {
-    StoreError::Transient {
-        op: OP,
-        kind: io::ErrorKind::InvalidData,
-    }
-}
 
 /// One listing's state.
 struct Run<'a, T> {
@@ -60,9 +52,15 @@ struct Run<'a, T> {
     unrecognized: BTreeMap<String, usize>,
     files_seen: usize,
     last_file: Option<FileKey>,
-    token: Option<String>,
-    first_page_done: bool,
-    exhausted: bool,
+    paging: Paging,
+}
+
+/// Where the listing stands: no page asked yet, one more page behind a token, or the last
+/// page taken.
+enum Paging {
+    Start,
+    Next(String),
+    Done,
 }
 
 impl<'a, T: Transport> Run<'a, T> {
@@ -82,25 +80,23 @@ impl<'a, T: Transport> Run<'a, T> {
             unrecognized: BTreeMap::new(),
             files_seen: 0,
             last_file: None,
-            token: None,
-            first_page_done: false,
-            exhausted: false,
+            paging: Paging::Start,
         }
     }
 
     /// Whether another page is needed: fewer than `want` files and the one
     /// after them are in hand, and the listing goes on.
     fn needs_page(&self) -> bool {
-        !self.exhausted && self.pending.len() <= self.want
+        !matches!(self.paging, Paging::Done) && self.pending.len() <= self.want
     }
 
     fn page_request(&self) -> Result<HttpRequest, StoreError> {
         let (level, size) = (self.level, self.page_size);
-        match (&self.token, self.first_page_done) {
-            (Some(token), true) => self
+        match &self.paging {
+            Paging::Next(token) => self
                 .inner
                 .request(OP, |b, now| b.list_continue(now, level, token, size)),
-            _ => self
+            Paging::Start | Paging::Done => self
                 .inner
                 .request(OP, |b, now| b.list_page(now, level, self.cursor, size)),
         }
@@ -118,18 +114,17 @@ impl<'a, T: Transport> Run<'a, T> {
             .zip(self.last_file)
             .is_some_and(|(first, last)| first <= last)
         {
-            return Err(invalid_data());
+            return Err(invalid_data(OP));
         }
-        if page.next_token.is_some() && page.next_token == self.token {
-            return Err(invalid_data());
+        if matches!((&self.paging, &page.next_token), (Paging::Next(was), Some(next)) if was == next)
+        {
+            return Err(invalid_data(OP));
         }
-        self.first_page_done = true;
-        self.exhausted = page.next_token.is_none();
-        self.token = page.next_token;
+        self.paging = page.next_token.map_or(Paging::Done, Paging::Next);
         for stray in page.unrecognized {
             let at = self.files_seen.saturating_add(stray.files_before);
             if self.unrecognized.insert(stray.name, at).is_some() {
-                return Err(invalid_data());
+                return Err(invalid_data(OP));
             }
         }
         self.files_seen = self.files_seen.saturating_add(page.files.len());
@@ -219,7 +214,7 @@ impl<T: Transport> Inner<T> {
         for at in active {
             let built = budget.clone().and_then(|()| match runs.get(at) {
                 Some(Ok(run)) => run.page_request(),
-                Some(Err(_)) | None => Err(invalid_data()),
+                Some(Err(_)) | None => Err(invalid_data(OP)),
             });
             match built {
                 Ok(request) => {
