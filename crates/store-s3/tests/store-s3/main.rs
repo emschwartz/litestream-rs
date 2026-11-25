@@ -8,6 +8,8 @@ mod bare_bucket;
 #[cfg(test)]
 mod common;
 #[cfg(test)]
+mod deferred;
+#[cfg(test)]
 mod fake;
 #[cfg(test)]
 mod faults;

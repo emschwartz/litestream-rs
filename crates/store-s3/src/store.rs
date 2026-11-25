@@ -147,7 +147,48 @@ impl S3Store<UreqTransport> {
     }
 }
 
+#[cfg(feature = "ureq")]
+impl S3Store<UreqTransport> {
+    /// A store over HTTP(S) whose credentials are not in hand yet: the chain is resolved on the
+    /// first request, and again by each request until it answers, as Go's SDK fetches
+    /// credentials lazily per request. A request made while the chain fails fails as any
+    /// failed fetch does, `Transient` when waiting may fix it and `Denied(Credentials)`
+    /// otherwise, so the replica's health reports it and the engine retries. Once the chain
+    /// answers, the store signs with what it gave and fetches again before it expires.
+    ///
+    /// # Errors
+    /// [`ConfigError`] when the endpoint cannot address the bucket.
+    pub fn deferred(config: S3Config, chain: crate::CredentialChain) -> Result<Self, ConfigError> {
+        let transport = UreqTransport::new(config.deadline());
+        Self::deferred_over(config, chain, transport, SystemClock)
+    }
+}
+
 impl<T: Transport> S3Store<T> {
+    /// [`S3Store::deferred`] over any transport and clock.
+    ///
+    /// # Errors
+    /// [`ConfigError`] when the endpoint cannot address the bucket.
+    pub fn deferred_over(
+        config: S3Config,
+        chain: crate::CredentialChain,
+        transport: T,
+        clock: impl Clock + 'static,
+    ) -> Result<Self, ConfigError> {
+        // Never signed with: it expired at the epoch, so the first request fetches.
+        let placeholder = Expiring::until(
+            S3Credentials::new(String::new(), crate::SecretString::new(String::new())),
+            Timestamp::from_unix_millis(0),
+        );
+        Self::refreshing(
+            config,
+            placeholder,
+            Some(Arc::new(crate::chain::Deferred(chain))),
+            transport,
+            clock,
+        )
+    }
+
     /// A store over `transport` (for example a
     /// [`ReqwestTransport`](crate::ReqwestTransport) under the `reqwest`
     /// feature), signing with the wall clock.

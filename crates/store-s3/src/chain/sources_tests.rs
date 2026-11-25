@@ -224,6 +224,51 @@ fn instance_metadata_refuses_an_empty_role_list_and_a_failed_code() {
     assert!(matches!(source_error(err), SourceError::Refused { .. }));
 }
 
+/// A chain that failed asking a source is told from one the configuration cannot satisfy: only
+/// the first can pass by waiting, so only it makes a store that asks again.
+#[test]
+fn only_a_source_that_failed_to_answer_is_a_fetch_failure() {
+    let down = scripted(|_| Err(TransportError::Connect));
+    let err = chain_over(&imds_vars(), down).resolve().unwrap_err();
+    assert!(
+        matches!(err.fetch_failure(), Some(SourceError::Unreachable { .. })),
+        "{err:?}"
+    );
+    let forbidden = scripted(|_| status(403));
+    let err = chain_over(&imds_vars(), forbidden).resolve().unwrap_err();
+    assert!(
+        matches!(
+            err.fetch_failure(),
+            Some(SourceError::Status { status: 403, .. })
+        ),
+        "{err:?}"
+    );
+    let mut off = imds_vars();
+    off.push(("AWS_EC2_METADATA_DISABLED", "true"));
+    let err = chain_over(&off, imds_service(|| token(true)))
+        .resolve()
+        .unwrap_err();
+    assert!(err.fetch_failure().is_none(), "{err:?}");
+    let mut named = imds_vars();
+    named.push(("AWS_PROFILE", "nobody"));
+    let err = chain_over(&named, imds_service(|| token(true)))
+        .resolve()
+        .unwrap_err();
+    assert!(
+        matches!(err, CredentialError::ProfileNotFound(_)),
+        "{err:?}"
+    );
+    assert!(err.fetch_failure().is_none(), "{err:?}");
+    let vars: HashMap<String, String> = imds_vars()
+        .into_iter()
+        .map(|(n, v)| (n.to_owned(), v.to_owned()))
+        .collect();
+    let err = CredentialChain::with_env(move |name| vars.get(name).cloned())
+        .resolve()
+        .unwrap_err();
+    assert!(err.fetch_failure().is_none(), "{err:?}");
+}
+
 #[test]
 fn instance_metadata_off_or_no_client_ends_the_chain() {
     let mut vars = imds_vars();
