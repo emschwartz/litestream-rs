@@ -1,5 +1,5 @@
 diff --git a/crates/sqlite/src/gate.rs b/crates/sqlite/src/gate.rs
-index 5a704fb18..bf4f65995 100644
+index b3b4e67a0..b4d0e7323 100644
 --- a/crates/sqlite/src/gate.rs
 +++ b/crates/sqlite/src/gate.rs
 @@ -108,7 +108,7 @@ impl WriteGate {

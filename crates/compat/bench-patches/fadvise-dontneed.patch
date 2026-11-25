@@ -1,22 +1,22 @@
 diff --git a/crates/sqlite/Cargo.toml b/crates/sqlite/Cargo.toml
-index a5adaa990..aba63851f 100644
+index a42525557..a5fb8eb4a 100644
 --- a/crates/sqlite/Cargo.toml
 +++ b/crates/sqlite/Cargo.toml
-@@ -14,7 +14,7 @@ workspace = true
+@@ -21,7 +21,7 @@ rusqlite = ["dep:rusqlite"]
  # The real-SQLite fault suite's support: the fault-injecting VFS and the harness that drives the
  # actor over a backend and judges the replica with the simulator's oracle. `serialize` reads the
  # database back through SQLite for the simulator's real backend.
--testing = ["dep:lsr-sim", "dep:lsr-store-fs", "dep:rustix", "lsr-core/testing", "rusqlite/serialize"]
-+testing = ["dep:lsr-sim", "dep:lsr-store-fs", "lsr-core/testing", "rusqlite/serialize"]
+-testing = ["dep:lsr-sim", "dep:lsr-store-fs", "dep:rustix", "lsr-core/testing", "rusqlite", "rusqlite/serialize", "rusqlite/bundled"]
++testing = ["dep:lsr-sim", "dep:lsr-store-fs", "lsr-core/testing", "rusqlite", "rusqlite/serialize", "rusqlite/bundled"]
  
  [dependencies]
  lsr-core.workspace = true
-@@ -23,10 +23,13 @@ lsr-sim = { workspace = true, optional = true }
+@@ -30,10 +30,13 @@ lsr-sim = { workspace = true, optional = true }
  lsr-store-fs = { workspace = true, optional = true }
  lsr-wal.workspace = true
  libsqlite3-sys.workspace = true
 -rustix = { workspace = true, features = ["fs"], optional = true }
- rusqlite.workspace = true
+ rusqlite = { workspace = true, optional = true }
  thiserror.workspace = true
  
 +# BENCH PROTOTYPE (fadvise-dontneed.patch): posix_fadvise through a safe wrapper, Linux only.
@@ -27,7 +27,7 @@ index a5adaa990..aba63851f 100644
  # The descriptor test drives a full sync and checkpoint cycle through core's in-memory store.
  lsr-core = { workspace = true, features = ["testing"] }
 diff --git a/crates/sqlite/src/conn.rs b/crates/sqlite/src/conn.rs
-index 9869c45c8..ac4de10da 100644
+index 3496ec6bd..8f3ab83f2 100644
 --- a/crates/sqlite/src/conn.rs
 +++ b/crates/sqlite/src/conn.rs
 @@ -107,6 +107,8 @@ pub(crate) struct Inner {

@@ -27,14 +27,23 @@
 //! `clippy.toml` disallows the `std::fs` opens; the WAL open is the one reasoned exception.
 //!
 //! The application is held to the same rule, and to one more: **one SQLite library per
-//! process.** Its connections must use the copy of SQLite this crate links (the one bundled by
-//! `libsqlite3-sys`). Each copy keeps its own table of the POSIX locks it holds, so a second
-//! copy (a system SQLite through pkg-config, SQLCipher, a loadable-extension build) cannot see
-//! this copy's locks and drops them when it closes a descriptor on the same file: SQLite's own
-//! "multiple copies of SQLite linked into the same application" corruption case. The `identity`
-//! and `shm` modules also read the bundled copy's file and wal-index layouts directly. Nor may
-//! the application close a descriptor it opened on the database file or its `-shm` while its
-//! connections are open, for the reason above.
+//! process.** Its connections must use the copy of SQLite this crate links. Each copy keeps its
+//! own table of the POSIX locks it holds, so a second copy (a second system library, SQLCipher, a
+//! loadable-extension build) cannot see this copy's locks and drops them when it closes a
+//! descriptor on the same file: SQLite's own "multiple copies of SQLite linked into the same
+//! application" corruption case. `libsqlite3-sys` declares `links = "sqlite3"`, so Cargo allows
+//! one version of it per build, and an application's rusqlite, sqlx or other binding that resolves
+//! within this crate's range shares the copy. Nor may the application close a descriptor it
+//! opened on the database file or its `-shm` while its connections are open, for the reason above.
+//!
+//! **Which SQLite.** `libsqlite3-sys` 0.37 to 0.40, SQLite 3.51.3 to 3.54.1. The `identity` and
+//! `shm` modules read that copy's private file and wal-index layouts, so the open checks the
+//! running library against a list of verified builds and refuses any other
+//! (`OpenError::SqliteBuild`; the `version` module says how a build gets onto the list). The
+//! `bundled` feature, on by default, compiles the SQLite `libsqlite3-sys` bundles; an application
+//! that links its own turns default features off, and its SQLite must be a listed build. The
+//! `rusqlite` feature adds the setup functions that take a rusqlite connection (any rusqlite from
+//! 0.39 to 0.43); [`app_connection_raw`] takes any binding's raw handle.
 //!
 //! Errors inside the trait methods are core's `SourceError`: `Busy` for a contended lock or a
 //! wal-index header a writer is mid-way through (retry), `DiskFull`, `Short` for a page past the
@@ -46,13 +55,13 @@
 //!
 //! [`WriteGate`] is fail-stop's write gate: a write transaction held on a third connection of the
 //! replicator's own, which stops every other writer while it holds (the `gate` module).
-//! [`fail_fast_while`] makes a blocked write on an application connection fail at once while
+//! `fail_fast_while` makes a blocked write on an application connection fail at once while
 //! the gate holds, instead of waiting out its busy timeout.
 //!
-//! [`app_connection`] and [`check_app_connection`] set up and check the application's own connections
+//! `app_connection` and `check_app_connection` (feature `rusqlite`) set up and check the application's own connections
 //! (`wal_autocheckpoint = 0`, PLAN section 6; never `SQLITE_FCNTL_PERSIST_WAL`, which only the
-//! replicator's own two connections set, see [`app_connection`]).
-//! [`app_connection_for`] first checks that the connection opens a given [`DatabaseFile`]
+//! replicator's own two connections set, see `app_connection`).
+//! `app_connection_for` first checks that the connection opens a given [`DatabaseFile`]
 //! (device and inode), and [`app_connection_raw`] does the same on a raw handle, for an application
 //! whose connections are not rusqlite's; it is here because only this crate may use `unsafe`.
 //! [`Sqlite::database_file`] says which file the reader opened, from SQLite's own descriptor
@@ -79,10 +88,14 @@ pub mod testing;
 mod version;
 
 pub use conn::{
-    DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig, app_connection,
-    app_connection_for, app_connection_raw, check_app_connection, read_only_rows,
+    DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig, app_connection_raw,
+    read_only_rows,
 };
-pub use error::{OpenError, Refusal, SetupError, SplitOpen, SqliteError};
-pub use gate::{WriteGate, WritesHeld, fail_fast_while};
+#[cfg(feature = "rusqlite")]
+pub use conn::{app_connection, app_connection_for, check_app_connection};
+pub use error::{OpenError, Refusal, SetupError, SplitOpen, SqliteError, dotted};
+#[cfg(feature = "rusqlite")]
+pub use gate::fail_fast_while;
+pub use gate::{WriteGate, WritesHeld};
 /// SQLite's C interface (`libsqlite3-sys`), for the raw handle [`app_connection_raw`] takes.
 pub use libsqlite3_sys as ffi;

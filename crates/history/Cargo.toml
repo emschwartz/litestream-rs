@@ -22,7 +22,7 @@ required-features = ["sqlite"]
 sqlite = ["dep:rusqlite"]
 
 [dependencies]
-rusqlite = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true, features = ["bundled"] }
 sha2.workspace = true
 thiserror.workspace = true
 
@@ -34,7 +34,7 @@ lsr-replica = { workspace = true, features = ["rusqlite", "testing"] }
 lsr-sqlite = { workspace = true, features = ["testing"] }
 lsr-store-fs.workspace = true
 lsr-store-s3.workspace = true
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
 tempfile.workspace = true
 
 [lints]

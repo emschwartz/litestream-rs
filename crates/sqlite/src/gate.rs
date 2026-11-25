@@ -69,7 +69,7 @@ impl WriteGate {
     /// The database must already be in WAL mode ([`crate::Sqlite::open`] puts it there).
     ///
     /// # Errors
-    /// [`OpenError`] when SQLite refuses the file or the SQLite answering is not the bundled
+    /// [`OpenError`] when SQLite refuses the file or the SQLite answering is not a verified
     /// build.
     pub fn open(path: &Path, config: &SqliteConfig, held: WritesHeld) -> Result<Self, OpenError> {
         crate::version::check_linked()?;
@@ -211,6 +211,7 @@ impl BusyState for Busy {
 /// # Errors
 /// [`SetupError::Sqlite`] when the timeout cannot be read or SQLite cannot store the state
 /// (nothing is changed then).
+#[cfg(feature = "rusqlite")]
 pub fn fail_fast_while(conn: &rusqlite::Connection, held: &WritesHeld) -> Result<(), SetupError> {
     install(Handle::of_rusqlite(conn).map_err(SetupError::Sqlite)?, held)
 }

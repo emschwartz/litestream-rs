@@ -192,8 +192,8 @@ impl Sqlite {
     /// transaction (the first epoch of a holder no earlier open had) and maps the wal-index. It
     /// returns once the read transaction is held, so nothing can checkpoint past it.
     ///
-    /// It first checks that the SQLite answering is the bundled build this crate's layout
-    /// reads follow (the `version` module), and refuses any other.
+    /// It first checks that the SQLite answering is one of the builds this crate's layout reads
+    /// are verified against (the `version` module), and refuses any other.
     ///
     /// # Errors
     /// [`OpenError`]; nothing stays open or pinned.
@@ -545,6 +545,7 @@ impl WalSource for Sqlite {
 ///
 /// # Errors
 /// [`SetupError::Sqlite`] when the pragma fails.
+#[cfg(feature = "rusqlite")]
 pub fn app_connection(conn: &rusqlite::Connection) -> Result<(), SetupError> {
     setup(Handle::of_rusqlite(conn).map_err(SetupError::Sqlite)?)
 }
@@ -603,6 +604,7 @@ impl DatabaseFile {
 /// # Errors
 /// [`SetupError::NoFile`] for a connection with no file (in-memory or temporary);
 /// [`SetupError::OtherDatabase`] when its file is not `database`; else as [`app_connection`].
+#[cfg(feature = "rusqlite")]
 pub fn app_connection_for(
     conn: &rusqlite::Connection,
     database: &DatabaseFile,
@@ -678,6 +680,7 @@ pub fn read_only_rows(uri: &str, sql: &str, limit: usize) -> Result<Vec<String>,
 /// [`SetupError::AutocheckpointOn`] for a connection that is not set up;
 /// [`SetupError::SynchronousOff`] for one that never syncs; [`SetupError::Sqlite`] when a read
 /// itself fails.
+#[cfg(feature = "rusqlite")]
 pub fn check_app_connection(conn: &rusqlite::Connection) -> Result<(), SetupError> {
     let conn = Handle::of_rusqlite(conn).map_err(SetupError::Sqlite)?;
     let pages = conn

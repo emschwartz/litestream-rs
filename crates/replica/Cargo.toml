@@ -8,9 +8,12 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# `Replicator::app_connection` on a rusqlite connection. A feature because the type pins the
-# application to this crate's rusqlite version.
-rusqlite = ["dep:rusqlite"]
+default = ["bundled"]
+# SQLite compiled from libsqlite3-sys's bundled source. Turn it off (`default-features = false`)
+# to link the application's own SQLite, which must be one of the builds lsr-sqlite lists.
+bundled = ["lsr-sqlite/bundled"]
+# `Replicator::app_connection` on a rusqlite connection (any rusqlite from 0.39 to 0.43).
+rusqlite = ["dep:rusqlite", "lsr-sqlite/rusqlite"]
 # `Runtime::fake`: a clock that moves when a test says so, and a park that waits on it.
 testing = ["lsr-core/testing"]
 # Test builds only (`just check` turns it on through --all-features): every thread `stack::spawn`

@@ -1,5 +1,5 @@
 diff --git a/crates/sqlite/src/checkpoint.rs b/crates/sqlite/src/checkpoint.rs
-index 80a707892..7a2c58441 100644
+index 689dcdc56..49855c63f 100644
 --- a/crates/sqlite/src/checkpoint.rs
 +++ b/crates/sqlite/src/checkpoint.rs
 @@ -75,7 +75,8 @@ impl Checkpointer for Sqlite {

@@ -61,20 +61,22 @@ pub enum StartError {
         /// The size SQLite reported.
         bytes: u32,
     },
-    /// The SQLite linked into the process is not the bundled build the replicator reads
-    /// SQLite's private layouts for: the build links another SQLite (a system library through
-    /// pkg-config, SQLCipher, a loadable-extension build). Build with rusqlite's `bundled`
-    /// feature and no other SQLite.
+    /// The SQLite linked into the process is not one of the builds the replicator's reads of
+    /// SQLite's private layouts are verified against: a system library outside the list,
+    /// SQLCipher, a loadable-extension build, or a libsqlite3-sys outside 0.37 to 0.40. Build
+    /// with the `bundled` feature (the default), or link one of the verified builds.
     #[error(
-        "the SQLite in use is version {found} ({source_id}), not the bundled build {expected} this library requires: link only the SQLite that rusqlite bundles"
+        "the SQLite in use is version {} ({source_id}), not a build this library is verified against ({}): link the SQLite bundled by libsqlite3-sys 0.37 to 0.40, or one of those builds",
+        lsr_sqlite::dotted(*.found),
+        .verified.iter().map(|v| lsr_sqlite::dotted(*v)).collect::<Vec<_>>().join(", ")
     )]
     SqliteBuild {
         /// `sqlite3_libversion_number()` of the running library.
         found: std::ffi::c_int,
         /// `sqlite3_sourceid()` of the running library.
         source_id: String,
-        /// The version the replicator was written for.
-        expected: std::ffi::c_int,
+        /// The version numbers of the verified builds, oldest first.
+        verified: &'static [std::ffi::c_int],
     },
     /// The replicator thread could not be started. Each database needs its own thread
     /// (`lsr_replica::stack`), so the usual cause is the process's thread limit.
@@ -99,11 +101,11 @@ impl From<lsr_sqlite::OpenError> for StartError {
             lsr_sqlite::OpenError::SqliteBuild {
                 found,
                 source_id,
-                expected,
+                verified,
             } => Self::SqliteBuild {
                 found,
                 source_id,
-                expected,
+                verified,
             },
         }
     }

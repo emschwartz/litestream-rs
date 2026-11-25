@@ -299,6 +299,7 @@ impl<'a> Handle<'a> {
         unsafe_code,
         reason = "rusqlite lends its raw handle only through an unsafe accessor"
     )]
+    #[cfg(any(test, feature = "rusqlite"))]
     pub(crate) fn of_rusqlite(conn: &'a rusqlite::Connection) -> Result<Self, SqliteError> {
         // SAFETY: the handle belongs to `conn`, open while it is borrowed for `'a`, and
         // nothing here closes it.

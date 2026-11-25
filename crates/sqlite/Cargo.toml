@@ -11,10 +11,17 @@ publish.workspace = true
 workspace = true
 
 [features]
+default = ["bundled"]
+# SQLite compiled from libsqlite3-sys's bundled source. Off, libsqlite3-sys links the system's
+# (or the application's) SQLite, which must then be one of the builds the `version` module lists.
+bundled = ["libsqlite3-sys/bundled"]
+# `app_connection`, `app_connection_for`, `check_app_connection` and `fail_fast_while` on a
+# rusqlite connection; any rusqlite from 0.39 to 0.43.
+rusqlite = ["dep:rusqlite"]
 # The real-SQLite fault suite's support: the fault-injecting VFS and the harness that drives the
 # actor over a backend and judges the replica with the simulator's oracle. `serialize` reads the
 # database back through SQLite for the simulator's real backend.
-testing = ["dep:lsr-sim", "dep:lsr-store-fs", "dep:rustix", "lsr-core/testing", "rusqlite/serialize"]
+testing = ["dep:lsr-sim", "dep:lsr-store-fs", "dep:rustix", "lsr-core/testing", "rusqlite", "rusqlite/serialize", "rusqlite/bundled"]
 
 [dependencies]
 lsr-core.workspace = true
@@ -24,16 +31,16 @@ lsr-store-fs = { workspace = true, optional = true }
 lsr-wal.workspace = true
 libsqlite3-sys.workspace = true
 rustix = { workspace = true, features = ["fs"], optional = true }
-rusqlite.workspace = true
+rusqlite = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
 # The descriptor test drives a full sync and checkpoint cycle through core's in-memory store.
 lsr-core = { workspace = true, features = ["testing"] }
 # `set_limit`, so a setup pragma can be made to fail in its error's test.
-rusqlite = { workspace = true, features = ["limits", "hooks"] }
+rusqlite = { workspace = true, features = ["bundled", "limits", "hooks"] }
 # The fault suite in tests/ runs on the testing feature.
-lsr-sqlite = { workspace = true, features = ["testing"] }
+lsr-sqlite = { workspace = true, features = ["bundled", "testing"] }
 # The big cases restore into a file and compare it with the database.
 lsr-replica.workspace = true
 # The crash cycles judge every restore against the tree of committed histories.

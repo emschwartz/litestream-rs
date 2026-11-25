@@ -1,8 +1,8 @@
 diff --git a/crates/sqlite/src/conn.rs b/crates/sqlite/src/conn.rs
-index 9869c45c8..2c4eab645 100644
+index 3496ec6bd..e79ba28a5 100644
 --- a/crates/sqlite/src/conn.rs
 +++ b/crates/sqlite/src/conn.rs
-@@ -689,7 +689,7 @@ pub fn check_app_connection(conn: &rusqlite::Connection) -> Result<(), SetupErro
+@@ -692,7 +692,7 @@ pub fn check_app_connection(conn: &rusqlite::Connection) -> Result<(), SetupErro
      let level = conn
          .query_int("PRAGMA synchronous")
          .map_err(SetupError::Sqlite)?;
