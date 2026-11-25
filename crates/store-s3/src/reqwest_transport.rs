@@ -39,6 +39,7 @@
 //! application client on native-tls needs this crate's `native-tls` feature for its
 //! TLS failures to be [`TransportError::Tls`] rather than a connection error.
 
+use std::collections::VecDeque;
 use std::io;
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -170,22 +171,20 @@ impl ReqwestTransport {
     }
 
     fn build(&self, request: &HttpRequest) -> reqwest::RequestBuilder {
-        let cap = self.bounds.cap(
-            u64::try_from(request.body().len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(if request.method() == Method::Get {
-                    MAX_BODY
-                } else {
-                    0
-                }),
-        );
-        Self::unbounded(&self.client, request).timeout(cap)
-    }
-
-    /// `request` as reqwest takes it, with no cap over the whole exchange.
-    fn unbounded(client: &reqwest::Client, request: &HttpRequest) -> reqwest::RequestBuilder {
-        let mut builder = client
+        let mut builder = self
+            .client
             .request(method(request.method()), request.url().as_str())
+            .timeout(
+                self.bounds.cap(
+                    u64::try_from(request.body().len())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(if request.method() == Method::Get {
+                            MAX_BODY
+                        } else {
+                            0
+                        }),
+                ),
+            )
             .body(request.body().to_vec());
         // Every header is sent as signed, `content-length` included: hyper keeps a
         // given length (it equals the body's), and without it an empty PUT goes
@@ -234,16 +233,15 @@ impl ReqwestTransport {
 struct Streamed<'a> {
     transport: &'a ReqwestTransport,
     response: reqwest::Response,
-    /// The chunk being handed out, and how much of it is.
-    pending: Vec<u8>,
-    at: usize,
+    /// What is left of the chunk being handed out.
+    pending: VecDeque<u8>,
     began: std::time::Instant,
     allowed: Duration,
 }
 
 impl crate::transport::Body for Streamed<'_> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        if self.at >= self.pending.len() {
+        if self.pending.is_empty() {
             if self.began.elapsed() > self.allowed {
                 return Err(TransportError::Timeout);
             }
@@ -260,17 +258,9 @@ impl crate::transport::Body for Streamed<'_> {
                 Err(TransportError::Io(io::ErrorKind::Other)),
             )?;
             let Some(chunk) = next else { return Ok(0) };
-            self.pending = chunk;
-            self.at = 0;
+            self.pending = chunk.into();
         }
-        let rest = self.pending.get(self.at..).unwrap_or_default();
-        let count = rest.len().min(buf.len());
-        let (Some(to), Some(from)) = (buf.get_mut(..count), rest.get(..count)) else {
-            return Ok(0);
-        };
-        to.copy_from_slice(from);
-        self.at = self.at.saturating_add(count);
-        Ok(count)
+        io::Read::read(&mut self.pending, buf).map_err(|err| TransportError::Io(err.kind()))
     }
 }
 
@@ -282,7 +272,7 @@ impl Transport for ReqwestTransport {
     fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
         // No cap over the whole exchange, which would cut a long body: the request up to its
         // head has the stall bound, and the body its own cap from there.
-        let builder = Self::unbounded(&self.client, &request);
+        let builder = self.build(&request).timeout(Duration::MAX);
         let stall = self.bounds.stall();
         let response = self.drive(
             async move {
@@ -303,8 +293,7 @@ impl Transport for ReqwestTransport {
         let body = Streamed {
             transport: self,
             response,
-            pending: Vec::new(),
-            at: 0,
+            pending: VecDeque::new(),
             began: std::time::Instant::now(),
             allowed,
         };
