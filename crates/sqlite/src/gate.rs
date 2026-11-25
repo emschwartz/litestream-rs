@@ -147,7 +147,6 @@ const KEY: &CStr = c"lsr-write-gate-busy";
 /// SQLite's default busy handler's waits (`sqliteDefaultBusyCallback`), in milliseconds: the
 /// wait before each retry, and the time waited before it.
 const DELAYS: [c_int; 12] = [1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100];
-const TOTALS: [c_int; 12] = [0, 1, 3, 8, 18, 33, 53, 78, 103, 128, 178, 228];
 
 /// The busy handler's state: the gate's flag and the timeout to wait out while it is clear.
 struct Busy {
@@ -161,21 +160,16 @@ struct Busy {
 /// How long SQLite's default handler sleeps before retry `count` (from 0) under a timeout of
 /// `timeout_ms`; `None` once the timeout is spent.
 fn default_delay(count: c_int, timeout_ms: c_int) -> Option<c_int> {
-    let last = DELAYS.len().saturating_sub(1);
+    let last = DELAYS.last().copied().unwrap_or(100);
     let index = usize::try_from(count).unwrap_or(usize::MAX);
-    let (delay, prior) = match (DELAYS.get(index), TOTALS.get(index)) {
-        (Some(delay), Some(prior)) => (*delay, *prior),
-        _ => {
-            let delay = DELAYS.get(last).copied().unwrap_or(100);
-            let past = c_int::try_from(last).unwrap_or(c_int::MAX);
-            let prior = TOTALS
-                .get(last)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(delay.saturating_mul(count.saturating_sub(past)));
-            (delay, prior)
-        }
-    };
+    let delay = DELAYS.get(index).copied().unwrap_or(last);
+    // The waits before this retry: the table's, then `last` for every retry past its end.
+    let past_table = c_int::try_from(DELAYS.len()).unwrap_or(c_int::MAX);
+    let prior = DELAYS
+        .iter()
+        .take(index)
+        .sum::<c_int>()
+        .saturating_add(last.saturating_mul(count.saturating_sub(past_table).max(0)));
     let delay = if prior.saturating_add(delay) > timeout_ms {
         timeout_ms.saturating_sub(prior)
     } else {

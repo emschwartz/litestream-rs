@@ -186,6 +186,13 @@ impl Header {
         self.0.tracked
     }
 
+    /// The database checksum a tracked snapshot starts from: an empty database's.
+    /// `None` for a file that is not a tracked snapshot.
+    #[must_use]
+    pub fn snapshot_db_checksum(&self) -> Option<DbChecksum> {
+        (self.tracked() && self.is_snapshot()).then_some(DbChecksum::EMPTY)
+    }
+
     /// The database page size.
     #[must_use]
     pub const fn page_size(&self) -> PageSize {
@@ -324,6 +331,19 @@ mod tests {
 
     fn encoded(min: u64, tracked: bool, pre: u64) -> [u8; HEADER_LEN] {
         Header::new(fields(min, tracked, pre)).unwrap().encode()
+    }
+
+    #[test]
+    fn snapshot_db_checksum_is_for_tracked_snapshots_only() {
+        let header = |min, tracked, pre| Header::new(fields(min, tracked, pre)).unwrap();
+        let pre = (1 << 63) | 7;
+        assert_eq!(
+            header(1, true, 0).snapshot_db_checksum(),
+            Some(DbChecksum::EMPTY)
+        );
+        assert_eq!(header(1, false, 0).snapshot_db_checksum(), None);
+        assert_eq!(header(5, true, pre).snapshot_db_checksum(), None);
+        assert_eq!(header(5, false, 0).snapshot_db_checksum(), None);
     }
 
     #[test]
