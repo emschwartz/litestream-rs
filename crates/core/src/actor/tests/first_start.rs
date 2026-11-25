@@ -184,7 +184,13 @@ fn a_first_file_sent_in_slices_does_not_let_the_levels_run() {
             Tick::Ran {
                 next: Next::At(at), ..
             } => now = (now + SLICE_MILLIS).max(at.unix_millis()),
-            _ => break,
+            Tick::Ran {
+                next: Next::OnWalChange,
+                ..
+            }
+            | Tick::Stopped(_)
+            | Tick::Drained { .. }
+            | Tick::DeadlineReached(_) => break,
         }
     }
     assert!(!Rig::files(&rig.remote, Level::SNAPSHOT).is_empty());
