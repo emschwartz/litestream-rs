@@ -63,7 +63,7 @@
 //!   (`crates/store-s3/tests/store-s3/memory.rs`, `an_upload_through_the_real_client_holds_five_parts`
 //!   and `the_bound_follows_part_size_and_concurrency`). A part is the one unit a request
 //!   must hold whole (its `Content-MD5` is signed before the body goes out), so this term
-//!   grows with the part size the operator sets; see `docs/decisions/D206.md`.
+//!   grows with the part size the operator sets; see `docs/decisions/D212.md`.
 //! - **Compaction:** the inputs' windows plus a 256 KiB output buffer that is kept for the
 //!   file. A level-1 compaction reads each staged file in a 128 KiB window: 5 MiB at `F` = 32
 //!   (`crates/store-fs/tests/store-fs/memory.rs`, `a_level_one_compaction_holds_a_staging_window_per_input`).
@@ -85,7 +85,7 @@
 //!   at 16 GiB: an 8-byte slot a page in the page checksum table, which a replicator holds for
 //!   good, and about 9 bytes of the file's page index, which it holds while the snapshot is
 //!   written (`snapshot_peak_heap_is_linear_in_pages_with_a_pinned_coefficient`; issue #64 and
-//!   `docs/decisions/D205.md`).
+//!   `docs/decisions/D213.md`).
 //!
 //! Not in these bounds: SQLite's own page cache, the `reqwest` transport (the gates run the `ureq` one that
 //! `S3Store::new` builds), and what the process's allocator keeps after a free: a resident
