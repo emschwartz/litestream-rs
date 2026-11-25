@@ -295,15 +295,16 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ObjectStore for Retrying<S, P, E> {
             .await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
         let core = &*self.core;
         let inner = core
-            .run(|| core.inner.begin_upload(key, created_at, mode))
+            .run(|| core.inner.begin_sized_upload(key, created_at, mode, len))
             .await?;
         Ok(RetryingUpload {
             inner,

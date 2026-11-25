@@ -138,13 +138,16 @@ impl ObjectStore for Wrapped {
         self.inner.read_with_created_at(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
-        self.inner.begin_upload(key, created_at, mode).await
+        self.inner
+            .begin_sized_upload(key, created_at, mode, len)
+            .await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

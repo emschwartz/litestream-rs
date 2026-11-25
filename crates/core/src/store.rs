@@ -537,13 +537,29 @@ pub trait ObjectStore: Send + Sync {
 
     /// Starts writing `key` with `created_at` as its created-at time; `mode`
     /// says whether the commit may replace an object already there. Nothing is
-    /// visible yet.
+    /// visible yet. `len` is the exact number of bytes the upload will write
+    /// when the caller knows it before the first one (a staged file being
+    /// copied), so a store can plan its request shape and refuse an object it
+    /// cannot hold before sending anything; `None` when the caller does not
+    /// know (an object still being encoded). A store treats it as a plan, never
+    /// as a promise: the bytes written are what count.
+    fn begin_sized_upload(
+        &self,
+        key: &FileKey,
+        created_at: Timestamp,
+        mode: WriteMode,
+        len: Option<u64>,
+    ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send;
+
+    /// [`Self::begin_sized_upload`] for an object of unknown length.
     fn begin_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
-    ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send;
+    ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send {
+        self.begin_sized_upload(key, created_at, mode, None)
+    }
 
     /// Removes the keys. A key that is already gone is not an error, so a
     /// retried delete converges.

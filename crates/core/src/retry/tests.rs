@@ -616,13 +616,14 @@ impl ObjectStore for DeleteRefuser {
         self.0.read_with_created_at(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<LyingUpload, StoreError> {
-        self.0.begin_upload(key, created_at, mode).await
+        self.0.begin_sized_upload(key, created_at, mode, len).await
     }
 
     async fn delete(&self, _keys: &[FileKey]) -> Result<(), StoreError> {

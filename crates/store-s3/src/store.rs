@@ -277,11 +277,12 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.read_with_created_at(file, len)
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        _len: Option<u64>,
     ) -> Result<S3Upload<T>, StoreError> {
         // Best effort: a failed abort keeps its id listed for the next try.
         match self.inner.abort_orphans() {

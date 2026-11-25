@@ -61,12 +61,13 @@ pub trait DynStore: Send + Sync {
         len: ReadLen,
     ) -> BoxFuture<'a, Result<(Vec<u8>, CreatedAt), StoreError>>;
 
-    /// [`ObjectStore::begin_upload`].
+    /// [`ObjectStore::begin_sized_upload`].
     fn begin_upload_boxed<'a>(
         &'a self,
         key: &'a FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> BoxFuture<'a, Result<Box<dyn DynUpload>, StoreError>>;
 
     /// [`ObjectStore::delete`].
@@ -165,8 +166,9 @@ where
         key: &'a FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> BoxFuture<'a, Result<Box<dyn DynUpload>, StoreError>> {
-        let begun = self.begin_upload(key, created_at, mode);
+        let begun = self.begin_sized_upload(key, created_at, mode, len);
         Box::pin(async move {
             let upload: Box<dyn DynUpload> = Box::new(begun.await?);
             Ok(upload)
@@ -261,13 +263,14 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
         self.0.read_with_created_at_boxed(file, len).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
-        self.0.begin_upload_boxed(key, created_at, mode).await
+        self.0.begin_upload_boxed(key, created_at, mode, len).await
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
@@ -471,13 +474,14 @@ impl ObjectStore for Metered {
         metered(&*self.clock, &self.meters.read, call).await
     }
 
-    async fn begin_upload(
+    async fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
-        let call = self.store.begin_upload_boxed(key, created_at, mode);
+        let call = self.store.begin_upload_boxed(key, created_at, mode, len);
         let inner = metered(&*self.clock, &self.meters.begin_upload, call).await?;
         Ok(MeteredUpload {
             inner,

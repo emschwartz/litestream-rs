@@ -542,11 +542,12 @@ impl<F: Fs> ObjectStore for FsStore<F> {
         ready(self.read_with_created_at_now(file, len))
     }
 
-    fn begin_upload(
+    fn begin_sized_upload(
         &self,
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
+        _len: Option<u64>,
     ) -> impl Future<Output = Result<FsUpload<F>, StoreError>> + Send {
         ready(self.begin_now(key, created_at, mode))
     }
