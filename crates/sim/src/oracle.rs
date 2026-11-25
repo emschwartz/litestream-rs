@@ -191,6 +191,17 @@ pub enum Violation {
         /// What the engine's tasks reported after the tick.
         got: String,
     },
+    /// The boot's sweep of open uploads was refused for want of permission (D206): the engine
+    /// must skip it once, and note the skip, not ask again.
+    #[error(
+        "the sweep of open uploads met {refusals} permission refusals; the engine noted the skip: {noted}"
+    )]
+    SweepDenialMishandled {
+        /// How many refusals the tick's sweep met.
+        refusals: usize,
+        /// Whether the engine noted the skip.
+        noted: bool,
+    },
     /// A running engine listed the replica while another writer's file stood
     /// past its own position, and did not stop.
     #[error("the engine listed {key}, another writer's file past its position, and kept going")]

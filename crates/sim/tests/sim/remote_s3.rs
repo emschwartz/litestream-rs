@@ -112,3 +112,76 @@ fn a_dropped_read_ahead_refusal_is_not_owed_a_report_beside_a_standing_wal_fault
         "the refused HEAD was met and judged as a dropped read-ahead"
     );
 }
+
+/// The boot's sweep of open uploads is best effort (`docs/decisions/D206.md`): a permission
+/// refusal of it is skipped, noted once, and no refusal is reported. The judge expects exactly
+/// that, counted as `http_fault.sweep_denied`.
+#[test]
+fn a_permission_refusal_of_the_boot_sweep_is_skipped_and_reports_no_refusal() {
+    let ops = [
+        Op::HttpFault(HttpFault::Denied(
+            HttpShape::ListUploads,
+            DenialCode::AccessDenied,
+        )),
+        Op::Tick,
+        Op::Tick,
+        Op::Commit {
+            pages: 1,
+            grow: false,
+        },
+        Op::Tick,
+        Op::Tick,
+    ];
+    let opts = Opts {
+        remote_s3: true,
+        ..Opts::default()
+    };
+    let report = run_ops(Seed::new(1), &ops, &opts).unwrap_or_else(|failure| panic!("{failure}"));
+    assert_eq!(
+        report.reach.get("http_fault.sweep_denied"),
+        1,
+        "the sweep was refused and judged"
+    );
+    assert_eq!(
+        report.reach.get("http_fault.denial_reported"),
+        0,
+        "no refusal was owed"
+    );
+}
+
+/// The exemption is by operation and by kind of refusal: the same sweep refused for another
+/// reason (the credentials) fails the boot and must be reported, as must a refusal of the
+/// replica's own listing, which is not the sweep.
+#[test]
+fn only_a_permission_refusal_of_the_sweep_is_exempt() {
+    for (shape, code) in [
+        (HttpShape::ListUploads, DenialCode::InvalidAccessKeyId),
+        (HttpShape::ListUploads, DenialCode::NoSuchBucket),
+        (HttpShape::List, DenialCode::AccessDenied),
+    ] {
+        let ops = [
+            Op::HttpFault(HttpFault::Denied(shape, code)),
+            Op::Tick,
+            Op::Tick,
+            Op::Heal,
+            Op::Tick,
+        ];
+        let opts = Opts {
+            remote_s3: true,
+            allow_stop: true,
+            ..Opts::default()
+        };
+        let report = run_ops(Seed::new(1), &ops, &opts)
+            .unwrap_or_else(|failure| panic!("{shape:?} {code:?}: {failure}"));
+        assert_eq!(
+            report.reach.get("http_fault.sweep_denied"),
+            0,
+            "{shape:?} {code:?}"
+        );
+        assert_eq!(
+            report.reach.get("http_fault.denial_reported"),
+            1,
+            "{shape:?} {code:?}"
+        );
+    }
+}
