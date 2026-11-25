@@ -1,19 +1,14 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 42a5d5775..53257095c 100644
+index 2277d4143..d2715b048 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -1256,7 +1256,8 @@ impl Actor {
-                 Ok(seeded) => seeded,
-                 Err(fault) => return self.boot_failed(fault, took(), now),
-             };
+@@ -1270,7 +1270,8 @@ impl Actor {
+             Ok(seeded) => seeded,
+             Err(fault) => return self.boot_failed(fault, took(), now),
+         };
 -        self.quiet_at_boot(quiet);
 +        let _ = quiet;
 +        self.quiet_at_boot(BTreeSet::new());
          // Every step succeeded: the engine is assigned whole.
          self.engine = Engine {
              course,
-@@ -3177,3 +3178,4 @@ const fn step_of(recovered: Recovered) -> Result<Step, Stepped> {
- 
- #[cfg(test)]
- mod tests;
-+

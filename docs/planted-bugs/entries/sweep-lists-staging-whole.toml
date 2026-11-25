@@ -1,4 +1,0 @@
-name = "sweep-lists-staging-whole"
-fix = "3853a92"
-package = "lsr-core"
-tests = ["the_sweep_judges_the_first_staged_file_without_listing_them_all"]

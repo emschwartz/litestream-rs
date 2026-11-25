@@ -1,0 +1,11 @@
+# A local course stages without syncing the WAL first. Its files are written to the slot, which the
+# simulator's durability check did not read before it folded the slot in; it now judges each where
+# the slot took it.
+name = "local-course-skips-wal-sync"
+fix = "claude/boot-local"
+package = "lsr-sim"
+test_bin = "sim"
+tests = [
+    "faults::store_down_across_a_restart",
+    "faults::store_returns_rolled_back",
+]

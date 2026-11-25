@@ -14,8 +14,8 @@
 //!   database file holds that page once SQLite backfills it.
 //! - At a boot that continues (`Continue` or `WalRestarted`, no snapshot), every
 //!   page of the staged level-0 files, oldest first so the newest wins
-//!   ([`seeded`]). Boot reads them from local staging; no replica call. A file that
-//!   does not verify empties the table and seeding starts again after it.
+//!   ([`Seeding`]), taken from the one read the boot makes of each
+//!   (`crate::witness::scan`); no replica call.
 //! - A page not recorded yet is recorded by its first read from the database
 //!   file: trust on first use, as Go trusts every read (`db.go:1562`).
 //!
@@ -53,17 +53,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-use lsr_ltx::{Event, Header, PageChecksum, PageNo, PageSize, Txid, TxidRange};
+use lsr_ltx::{Header, PageChecksum, PageNo, PageSize, Txid, TxidRange};
 
 use crate::fault::role::Role;
 use crate::fault::{Fault, SnapshotCause};
 use crate::layout::{FileKey, Level};
-use crate::ltx_read::{LtxRead, ReadFault};
 use crate::recover::read_header;
-use crate::store::{ListAt, PageLimit, ReadLen};
-
-/// How much of a staged file one read asks for while seeding.
-const SEED_READ: ReadLen = ReadLen::CHUNK;
 
 /// A database-file page whose bytes are not the ones the table holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,73 +265,77 @@ pub(crate) const fn snapshot_clears(cause: &SnapshotCause) -> bool {
     }
 }
 
-/// The table a boot that continues starts from: every page of every staged
-/// level-0 file from `from` on, oldest first, then truncated to `commit`, the
-/// newest staged file's size.
+/// The table a boot that continues starts from, built as the boot's one pass over the staged
+/// files (`crate::witness::scan`) reads them: every page of every staged level-0 file from
+/// `from` on, oldest first so the newest wins. The boot truncates it to the newest staged
+/// file's size.
 ///
 /// `from` is the replica's newest transaction: boot vouched for its staged
 /// copy (compared with the replica's object) and for every pending file
-/// after it (witnessed against the live WAL, `crate::witness`). An older
+/// after it (witnessed on the same read, `crate::witness`). An older
 /// staged file nothing vouched for may have been put back or replaced, and
 /// seeding from it would report the database file damaged at a page it
 /// never wrote; its pages are left to be learnt again.
-///
-/// # Errors
-/// The staging store's fault when a list or read fails.
-pub(crate) async fn seeded<L: Role>(
-    staging: &L,
+#[derive(Debug)]
+pub(crate) struct Seeding {
+    seeded: Seeded,
     from: Option<Txid>,
-    commit: NonZeroU32,
-) -> Result<Seeded, Fault> {
-    let mut seeded = Seeded {
-        table: PageChecksumTable::new(),
-        quiet: BTreeSet::new(),
-        unplaced: None,
-    };
-    let mut prev: Option<SeedRead> = None;
-    let mut placed = false;
-    let mut at = ListAt::first(Level::ZERO);
-    loop {
-        let page = staging
-            .list(at.level, at.after, PageLimit::MAX)
-            .await
-            .map_err(|err| L::fault(&err))?;
-        let vouched = page
-            .files
-            .iter()
-            .filter(|info| from.is_none_or(|from| info.key.range().max() >= from));
-        for info in vouched {
-            let pending = from.is_none_or(|from| info.key.range().min() > from);
-            let read = seed_file(staging, &info.key, &mut seeded.table, prev).await?;
-            // A file whose WAL span ends where the one before it ended holds no frame the
-            // replica's newest does not (a snapshot taken for a doubt on a quiet WAL), though
-            // it rewrites pages the table never saw.
-            let nothing_new = |read: SeedRead| {
-                read.wal_end.is_some() && prev.is_some_and(|prev| prev.wal_end == read.wal_end)
-            };
-            if pending && read.is_some_and(|read| !read.changes || nothing_new(read)) {
-                seeded.quiet.insert(info.key.range().max());
-            } else if pending
-                && !placed
-                && prev.is_none()
-                && from.is_some()
-                && let Some(end) = read.and_then(|read| read.wal_end)
-            {
-                seeded.unplaced = Some((info.key.range().max(), end));
-            }
-            placed |= pending;
-            prev = read;
-        }
-        match at
-            .following(page.next)
-            .map_err(Fault::from_staging_listing)?
-        {
-            Some(next) => at = next,
-            None => break,
+    prev: Option<SeedRead>,
+}
+
+impl Seeding {
+    /// Nothing read yet.
+    pub(crate) const fn from(from: Option<Txid>) -> Self {
+        Self {
+            seeded: Seeded {
+                table: PageChecksumTable::new(),
+                quiet: BTreeSet::new(),
+                unplaced: None,
+            },
+            from,
+            prev: None,
         }
     }
-    seeded.table.truncate(commit);
-    Ok(seeded)
+
+    /// Takes in the next staged file, `key`, which verified whole on the read that gave its
+    /// `header` and `pages`.
+    pub(crate) fn add(&mut self, key: &FileKey, header: &Header, pages: &[(PageNo, PageChecksum)]) {
+        let table = &mut self.seeded.table;
+        table.fit(header.page_size());
+        let commit = header.fields().commit;
+        let changes = self.prev.map(|prev| prev.commit) != Some(commit)
+            || pages
+                .iter()
+                .any(|(pgno, digest)| table.get(*pgno) != Some(*digest));
+        for (pgno, digest) in pages {
+            table.record(*pgno, *digest);
+        }
+        let read = SeedRead {
+            commit,
+            wal_end: wal_end(header),
+        };
+        let pending = self.from.is_none_or(|from| key.range().min() > from);
+        // A file whose WAL span ends where the one before it ended holds no frame the
+        // replica's newest does not (a snapshot taken for a doubt on a quiet WAL), though
+        // it rewrites pages the table never saw.
+        let nothing_new =
+            read.wal_end.is_some() && self.prev.is_some_and(|prev| prev.wal_end == read.wal_end);
+        if pending && (!changes || nothing_new) {
+            self.seeded.quiet.insert(key.range().max());
+        } else if pending
+            && self.prev.is_none()
+            && self.from.is_some()
+            && let Some(end) = read.wal_end
+        {
+            self.seeded.unplaced = Some((key.range().max(), end));
+        }
+        self.prev = Some(read);
+    }
+
+    /// What the files taken in so far give.
+    pub(crate) fn finish(self) -> Seeded {
+        self.seeded
+    }
 }
 
 /// What a boot's seeding found: the table, and the pending staged files that change no page of
@@ -401,59 +400,12 @@ impl Seeded {
     }
 }
 
-/// One seeded file: its database size, and whether it may change the database.
-#[derive(Clone, Copy)]
+/// One seeded file: its database size and where its frames end.
+#[derive(Clone, Copy, Debug)]
 struct SeedRead {
     commit: u32,
-    changes: bool,
     /// Where in the WAL the file's frames end.
     wal_end: Option<WalEnd>,
-}
-
-/// Records every page of one staged file. A file that does not decode and
-/// verify whole empties the table: what it rewrote is unknown, and `None` says so.
-async fn seed_file<L: Role>(
-    staging: &L,
-    key: &FileKey,
-    table: &mut PageChecksumTable,
-    prev: Option<SeedRead>,
-) -> Result<Option<SeedRead>, Fault> {
-    let chunk = SEED_READ;
-    let mut pages = Vec::new();
-    let mut read = LtxRead::new(*key, chunk);
-    let verified: Result<_, ReadFault> = read
-        .read_verified(staging, |event| {
-            if let Event::Page(page) = event {
-                pages.push((page.pgno(), page.checksum()));
-            }
-            Ok(())
-        })
-        .await;
-    match verified {
-        Ok(verified) => {
-            table.fit(verified.header().page_size());
-            let commit = verified.header().fields().commit;
-            let wal_end = wal_end(verified.header());
-            let changes = prev.map(|prev| prev.commit) != Some(commit)
-                || pages
-                    .iter()
-                    .any(|(pgno, digest)| table.get(*pgno) != Some(*digest));
-            for (pgno, digest) in pages {
-                table.record(pgno, digest);
-            }
-            Ok(Some(SeedRead {
-                commit,
-                changes,
-                wal_end,
-            }))
-        }
-        Err(ReadFault::Store(err)) => Err(L::fault(&err)),
-        Err(ReadFault::Decode(_)) => {
-            table.clear();
-            Ok(None)
-        }
-        Err(ReadFault::Rejected(never)) => match never {},
-    }
 }
 
 #[cfg(test)]

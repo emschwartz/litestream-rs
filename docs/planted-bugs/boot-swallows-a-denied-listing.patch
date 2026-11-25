@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 5db24739c..f2cb298f0 100644
+index 58f37a467..6f6ca7be1 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2849,6 +2849,9 @@ async fn boot_listing<L: Role, R: Role>(
+@@ -2885,6 +2885,9 @@ async fn boot_listing<L: Role, R: Role>(
              did: Did::Diverged { from, .. },
          }) => (state, Some(from)),
          Ok(listed) => (listed.state, None),
@@ -11,4 +11,4 @@ index 5db24739c..f2cb298f0 100644
 +        }
          Err(failed) => return Err(failed.fault.into()),
      };
-     let tip = upload.confirmed();
+     Ok(Listed {
