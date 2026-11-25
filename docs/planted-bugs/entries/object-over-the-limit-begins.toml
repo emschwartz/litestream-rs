@@ -1,0 +1,8 @@
+# An object over 5 TiB is let in, so it uploads in full and is refused by the store at the end.
+name = "object-over-the-limit-begins"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "an_object_over_the_store_limit_is_refused_before_a_byte_is_sent",
+    "the_largest_object_is_carried_and_one_byte_more_is_refused",
+]

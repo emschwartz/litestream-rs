@@ -26,6 +26,7 @@ mod fault;
 mod list;
 mod multipart;
 mod orphans;
+mod part_plan;
 mod request;
 #[cfg(feature = "reqwest")]
 mod reqwest_transport;

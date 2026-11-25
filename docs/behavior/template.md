@@ -333,7 +333,7 @@ Every policy written "retry" below also stalls: from the 8th failure in a row on
 | `RemoteObjectMissing` | retry | UP-12, MAINT-2 |
 | `UploadAmbiguous` | retry | UP-7 |
 | `UploadChecksumMismatch` | retry | UP-8 |
-| `StoreRefused` | persistent: `StoreRefused` | UP-5, UP-13 |
+| `StoreRefused` | persistent: `StoreRefused` | UP-5, UP-13, UP-21 |
 | `RemoteCorrupt` | persistent: `RemoteCorrupt` | BOOT-14, BOOT-17, MAINT-3, MAINT-4 |
 | `RemoteAheadOfLocal` | persistent: `OtherWriter` | UP-10, MAINT-10 |
 | `RemoteRegressed` | persistent: `RemoteRegressed` | UP-11 |

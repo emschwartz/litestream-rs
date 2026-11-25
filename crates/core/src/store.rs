@@ -360,6 +360,19 @@ pub enum StoreError {
         /// The key being written.
         key: FileKey,
     },
+    /// An upload of `len` bytes that no request shape the store may use can
+    /// carry (`max` is the most it can hold), refused before a byte was sent.
+    /// Retrying the same file cannot help: the object is bigger than the store
+    /// allows, and a person has to change what is being replicated.
+    #[error("object {key} of {len} bytes is over the store's limit of {max} bytes")]
+    ObjectTooLarge {
+        /// The key being uploaded.
+        key: FileKey,
+        /// The object's size in bytes.
+        len: u64,
+        /// The largest object the store can hold.
+        max: u64,
+    },
     /// The backend refused a request that retrying cannot fix and that is not
     /// an authorization failure: a 4xx outside the mapped codes, 501, or an
     /// object too large for the store's mode.

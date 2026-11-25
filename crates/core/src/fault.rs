@@ -980,7 +980,9 @@ impl Fault {
                 retry_after: retry_after.filter(|wait| !wait.is_zero()),
             },
             StoreError::Denied { why, .. } => Self::StoreDenied(*why),
-            StoreError::Refused { .. } => Self::StoreRefused,
+            // Retrying the same object cannot help, and a person must act on it: the object is
+            // over the store's limit, which only a smaller replica or another store fixes.
+            StoreError::Refused { .. } | StoreError::ObjectTooLarge { .. } => Self::StoreRefused,
             StoreError::NotFound { .. } => Self::RemoteObjectMissing,
             // The uploader reads the object back before it gets here; anywhere
             // else the key holds something the caller did not expect: list.
@@ -1016,6 +1018,7 @@ impl Fault {
             | StoreError::Denied { .. }
             | StoreError::AlreadyExists { .. }
             | StoreError::CreateOnlyUnsupported { .. }
+            | StoreError::ObjectTooLarge { .. }
             | StoreError::Refused { .. } => Self::LocalIo,
             StoreError::NotFound { .. } => Self::StagedLost,
             StoreError::ScratchExhausted { .. } => Self::LocalDiskFull,

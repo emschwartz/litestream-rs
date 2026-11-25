@@ -64,6 +64,7 @@ pub fn classify(err: &StoreError) -> Class {
         | StoreError::AlreadyExists { .. }
         | StoreError::CreateOnlyUnsupported { .. }
         | StoreError::ScratchExhausted { .. }
+        | StoreError::ObjectTooLarge { .. }
         | StoreError::Corrupt { .. }
         | StoreError::Refused { .. } => Class::Permanent,
     }

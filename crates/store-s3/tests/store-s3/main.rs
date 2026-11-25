@@ -22,6 +22,8 @@ mod memory;
 #[cfg(test)]
 mod minio;
 #[cfg(test)]
+mod part_size;
+#[cfg(test)]
 mod provider;
 #[cfg(test)]
 #[path = "common/real.rs"]

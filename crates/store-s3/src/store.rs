@@ -282,18 +282,15 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         key: &FileKey,
         created_at: Timestamp,
         mode: WriteMode,
-        _len: Option<u64>,
+        len: Option<u64>,
     ) -> Result<S3Upload<T>, StoreError> {
+        // Planned first: an object no part size carries is refused with nothing sent.
+        let upload = S3Upload::new(Arc::clone(&self.inner), *key, created_at, mode, len)?;
         // Best effort: a failed abort keeps its id listed for the next try.
         match self.inner.abort_orphans() {
             Ok(_) | Err(_) => {}
         }
-        Ok(S3Upload::new(
-            Arc::clone(&self.inner),
-            *key,
-            created_at,
-            mode,
-        ))
+        Ok(upload)
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {

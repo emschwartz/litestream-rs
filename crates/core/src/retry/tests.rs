@@ -134,6 +134,17 @@ fn scratch_exhausted_is_permanent() {
     );
 }
 
+/// Sending the same too-large object again cannot make the store take it.
+#[test]
+fn an_object_over_the_store_limit_is_permanent() {
+    let err = StoreError::ObjectTooLarge {
+        key: key(),
+        len: 6,
+        max: 5,
+    };
+    assert_eq!(classify(&err), Class::Permanent);
+}
+
 #[test]
 fn corrupt_is_permanent() {
     let err = StoreError::Corrupt {
