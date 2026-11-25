@@ -5,7 +5,7 @@
 
 use std::num::NonZeroU64;
 
-use lsr_core::{Did, Event, Fault, SnapshotCause, StoreError, StoreOp};
+use lsr_core::{Did, Event, Fault, MaintainedEvent, SnapshotCause, StopCause, StoreError, StoreOp};
 use lsr_sim::generate::MetaOp;
 use lsr_sim::run::{Seen, run_ops};
 use lsr_sim::sqlite::CrashKind;
@@ -16,14 +16,15 @@ use lsr_sim::{FaultShape, Op, Opts, RunReport, Seed, Target};
 const SLICE: u64 = 128;
 
 fn run(ops: &[Op]) -> RunReport {
-    run_on(ops, false)
+    run_with(ops, SLICE, false)
 }
 
-/// As [`run`], with the replica on the S3 store when `s3` says so: the store that lets go of
-/// what it is handed and reads the staged file again when it sends it.
-fn run_on(ops: &[Op], s3: bool) -> RunReport {
+/// The run with `slice` bytes of staged files a tick, and the replica on the S3 store when
+/// `s3` says so: the store that lets go of what it is handed and reads the staged file again
+/// when it sends it.
+fn run_with(ops: &[Op], slice: u64, s3: bool) -> RunReport {
     let opts = Opts {
-        slice_bytes: NonZeroU64::new(SLICE),
+        slice_bytes: NonZeroU64::new(slice),
         record: true,
         remote_s3: s3,
         ..Opts::default()
@@ -250,7 +251,7 @@ fn a_staged_file_changed_between_its_two_reads_is_refused_at_the_second() {
     ops.extend(ticks(100));
     ops.push(Op::Restore);
 
-    let report = run_on(&ops, true);
+    let report = run_with(&ops, SLICE, true);
     let all = events(&report);
     let lost = all
         .iter()
@@ -285,9 +286,75 @@ fn a_staged_file_changed_between_its_two_reads_is_refused_at_the_second() {
     // The snapshot that took the file's place was read back whole and given.
     assert!(report.reach.get("reread.given") >= 1);
 
-    let report = run_on(&ops, false);
+    let report = run_with(&ops, SLICE, false);
     assert_eq!(sent(&report)[..23], whole_file());
     for key in ["reread.given", "reread.refused"] {
         assert_eq!(report.reach.get(key), 0, "{key}");
     }
+}
+
+/// Another writer takes the id of a file this engine has staged and not sent. Maintenance has
+/// its turn before the file is out and lists the replica with the other writer's file on it:
+/// not past what the engine staged, and not the engine's own. Nothing is compacted from that
+/// listing; the engine's put of the id is refused and it stops. The run's judges then restore
+/// every transaction once the other writer's file is gone. Compacted into level 1, the other
+/// writer's pages stood in for the commit, which the next boot dropped from staging: the
+/// replica restored a database no commit made (the nightly soak found it four times in 7,046
+/// seeds).
+#[test]
+fn another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted() {
+    let commit = Op::Commit {
+        pages: 1,
+        grow: false,
+    };
+    // Sixteen bytes a tick. The first file goes up, and maintenance settles after it.
+    let mut ops = in_flight();
+    ops.extend(ticks(400));
+    // A commit, and the checkpoint the idle time made due, whose own frame is a file too: the
+    // 54th tick publishes the second of them, and no maintenance pass follows that put.
+    ops.push(commit.clone());
+    ops.extend(ticks(54));
+    // The next commit is in the WAL, not yet staged, when the other writer takes its id.
+    ops.push(commit);
+    ops.push(Op::SecondWriter { ticks: 60 });
+    ops.extend(ticks(40));
+    ops.push(Op::Restore);
+    let report = run_with(&ops, 16, false);
+    assert_eq!(report.reach.get("remote.second_writer"), 1);
+    let seen: Vec<&Seen> = report
+        .seen
+        .iter()
+        .filter(|seen| !matches!(seen, Seen::Tick { .. }))
+        .collect();
+    let stopped = seen
+        .iter()
+        .position(|seen| **seen == Seen::Stop(StopCause::OtherWriter))
+        .expect("the engine never stopped for the other writer");
+    let staged = seen[..stopped]
+        .iter()
+        .rposition(|seen| matches!(seen, Seen::Event(Event::Synced { .. })))
+        .expect("the commit was never staged");
+    // From the sync that staged the file to the stop: the turn maintenance had, and slices.
+    let unsent = &seen[staged + 1..stopped];
+    let maintained: Vec<&MaintainedEvent> = unsent
+        .iter()
+        .filter_map(|seen| {
+            if let Seen::Event(Event::Maintained { event, .. }) = seen {
+                Some(event)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        maintained,
+        [&MaintainedEvent::Waiting { held: None }],
+        "{unsent:?}"
+    );
+    assert!(
+        unsent
+            .iter()
+            .any(|seen| matches!(seen, Seen::Event(Event::Sending { .. }))),
+        "{unsent:?}"
+    );
 }

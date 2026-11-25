@@ -1203,6 +1203,18 @@ recovered_by = "core::`holes_already_on_the_replica_are_closed_at_the_first_list
 notes = "Holes in the top level, and holes below the next level's newest file, are left: no compaction reads them again (D228)"
 
 [[row]]
+table = "Maintenance and retention"
+id = "MAINT-16"
+circumstance = "A maintenance listing shows a file above what the uploader confirmed, at an id this engine staged and has not put: another writer's file at the id of a file waiting or in flight, or this engine's own put whose answer was lost (`actor.rs` `listing_untrusted`). Maintenance takes turns while uploads are busy, so it can list before the uploader has looked at that id"
+response = "Nothing is planned from that listing (no compaction, snapshot or delete takes the file as input), and maintenance lists again after the retry interval. The uploader judges the file by its bytes at its next put or listing of that id: its own is confirmed and maintenance goes on, another writer's stops the engine (UP-10). Maintenance makes no stop of its own here (D230)"
+signal = "`Waiting { held: None }`; `other_writer` once the uploader finds the file is another writer's"
+at_risk = "None on the replica. Maintenance is late by one retry interval for each listing made before the uploader has judged the file"
+recovery = "Automatic when the file is this engine's own. An operator removes the other writer, then restarts (UP-10)"
+detected_by = "core::`a_whole_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight`, core::`a_short_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight`, sim::`another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted`, plant::`maintenance-trusts-an-unjudged-file`, plant::`maintenance-trusts-an-unjudged-file-sim`"
+recovered_by = "core::`a_whole_listing_between_slices_plans_nothing_over_another_writers_file_at_the_id_in_flight`, sim::`another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted`"
+notes = "Before: the other writer's file was compacted into level 1, and after the stop the boot took that file as holding the commit and dropped its own staged copy, so the replica restored a database no commit made. R only after the other writer's file was removed"
+
+[[row]]
 table = "Restore"
 id = "REST-1"
 circumstance = "A chain from a file that begins at transaction 1 reaches the target exactly (`plan.rs`)"
