@@ -1,0 +1,8 @@
+# A carried listing is saved again with the time of the pass that stood on it, not the time it
+# was made, so a run of own compactions keeps it alive past its age limit.
+name = "carried-listing-ages-per-hop"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "maintain::short::tests::a_carried_listing_keeps_its_real_age_and_never_decides_a_delete",
+]

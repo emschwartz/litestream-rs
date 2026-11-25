@@ -239,6 +239,17 @@ fn l0_retention_check_interval_maps_and_defaults_to_go_s_15s() {
     assert_eq!(every(""), iv(15));
     assert_eq!(every("l0-retention-check-interval: 1m\n"), iv(60));
     assert_eq!(Maintenance::go_default().l0_check_interval(), iv(15));
+    // The check runs at what the file sets, exactly (also when it sets Go's 15 s); only the
+    // unset default runs it at 120 s (docs/decisions/D193.md).
+    let runs = |text: &str| {
+        one(&format!("{text}{}", db_with("")))
+            .config()
+            .maintenance
+            .retention_check_every()
+    };
+    assert_eq!(runs("l0-retention-check-interval: 1m\n"), iv(60));
+    assert_eq!(runs("l0-retention-check-interval: 15s\n"), iv(15));
+    assert_eq!(runs(""), iv(120));
     let problems = unmapped(&format!(
         "l0-retention-check-interval: 1500us\n{}",
         db_with("")

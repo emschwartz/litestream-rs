@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/maintain/retain.rs b/crates/core/src/maintain/retain.rs
+--- a/crates/core/src/maintain/retain.rs
++++ b/crates/core/src/maintain/retain.rs
+@@ -793,7 +793,7 @@ fn short_decide(
+         let Some(created) = created_at_of(resolved, info)? else {
+             return Ok(nothing);
+         };
+-        let by_keys = by_keys(&scan, &cover, info);
++        let by_keys = by_keys(&scan, &cover, info) || true;
+         if after(created, anchor, age) {
+             if by_keys {
+                 wake = Some(aged_at(created, age)).filter(|at| *at <= newest_created_at);

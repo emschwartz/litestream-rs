@@ -1,0 +1,11 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -844,7 +844,6 @@ impl Actor {
+     /// Routes a fault by its policy. The only place `policy` is called.
+     fn fault(&mut self, waiter: impl Into<Waiter>, fault: Fault, now: Timestamp) -> Tick {
+         // What the engine remembers of the replica may be what the fault is about.
+-        self.engine.maintain.remembered.forget();
+         let waiter = waiter.into();
+         self.lag_failed(waiter, Some(fault), now);
+         match policy(&fault) {

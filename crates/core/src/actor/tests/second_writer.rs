@@ -41,11 +41,11 @@ pub(super) fn put_foreign(rig: &Rig, n: u64) -> FileKey {
     key
 }
 
-fn read_whole(store: &MemStore, key: &FileKey) -> Vec<u8> {
+pub(super) fn read_whole(store: &MemStore, key: &FileKey) -> Vec<u8> {
     block_on(store.read(key, 0, ReadLen::CHUNK)).unwrap()
 }
 
-fn put_whole(store: &MemStore, key: &FileKey, bytes: &[u8]) {
+pub(super) fn put_whole(store: &MemStore, key: &FileKey, bytes: &[u8]) {
     block_on(async {
         let mut up = store
             .begin_upload(key, ts(T0), WriteMode::Replace)

@@ -262,6 +262,16 @@ fn gate(
         .or_else(|| latest_unplannable(inventory))
 }
 
+/// Whether the retention gate passes on this listing (see the module docs): what the short
+/// view's level-0 rule needs from the last whole listing.
+pub(super) fn gate_is_clear(
+    inventory: &Inventory,
+    published: Option<Txid>,
+    state: &MaintainState,
+) -> bool {
+    gate(inventory, published, state).is_none()
+}
+
 /// A compaction output or a snapshot the store rejected that is still listed.
 fn distrusted(inventory: &Inventory, state: &MaintainState) -> Option<RetentionHold> {
     Level::ALL.iter().skip(1).find_map(|level| {
@@ -454,8 +464,57 @@ fn candidates(
 ) -> Needs<Result<Found, RetentionHold>> {
     let mut found = Found::default();
     let snaps = snapshots(inventory);
+    let rule = match snapshot_rule(
+        &snaps,
+        anchor,
+        newest_created_at,
+        config,
+        resolved,
+        &mut found,
+    )? {
+        Ok(Some(rule)) => rule,
+        Ok(None) => return Ok(Ok(found)),
+        Err(hold) => return Ok(Err(hold)),
+    };
+    let SnapshotRule { floor, first } = rule;
+    let kept = levels_one_to_eight(inventory, floor, &mut found.keys);
+    if let L0Retention::After(age) = config.l0_retention() {
+        let scan = LevelZero {
+            floor,
+            anchor,
+            newest_created_at,
+            age,
+        };
+        if let Some(hold) = level_zero(inventory, &scan, &kept, resolved, &mut found)? {
+            return Ok(Err(hold));
+        }
+    }
+    found
+        .keys
+        .extend(snaps.iter().take(first).map(|info| info.key));
+    Ok(Ok(found))
+}
+
+/// What the snapshot rule decided: the floor below which history is not needed by a retained
+/// snapshot, and the index of the first retained snapshot.
+struct SnapshotRule {
+    floor: Option<Txid>,
+    first: usize,
+}
+
+/// Rule 1: which snapshot is the first retained, and so the floor. `None` without a snapshot.
+/// Shared by the full rules and the level-0 rule of the short view, so both read one floor from
+/// one list of snapshots (level 9 is always listed whole).
+fn snapshot_rule(
+    snaps: &[&FileInfo],
+    anchor: Timestamp,
+    newest_created_at: Timestamp,
+    config: &Maintenance,
+    resolved: &ResolvedCreatedAt,
+    found: &mut Found,
+) -> Needs<Result<Option<SnapshotRule>, RetentionHold>> {
     let Some(last) = snaps.len().checked_sub(1) else {
-        return Ok(Ok(found));
+        return Ok(Ok(None));
     };
     let retention = config.snapshot_retention();
     let mut first = last;
@@ -482,22 +541,7 @@ fn candidates(
         .checked_sub(1)
         .and_then(|before| snaps.get(before))
         .map(|info| info.key.range().max());
-    let kept = levels_one_to_eight(inventory, floor, &mut found.keys);
-    if let L0Retention::After(age) = config.l0_retention() {
-        let scan = LevelZero {
-            floor,
-            anchor,
-            newest_created_at,
-            age,
-        };
-        if let Some(hold) = level_zero(inventory, &scan, &kept, resolved, &mut found)? {
-            return Ok(Err(hold));
-        }
-    }
-    found
-        .keys
-        .extend(snaps.iter().take(first).map(|info| info.key));
-    Ok(Ok(found))
+    Ok(Ok(Some(SnapshotRule { floor, first })))
 }
 
 /// Queues each level's deletable prefix; returns, as slices of the inventory,
@@ -598,6 +642,193 @@ fn level_zero_need(
         .filter(|info| resolved.exact(info).is_none())
         .copied();
     Need::with_ahead(*need, ahead)
+}
+
+/// What the short view's level-0 rule chose.
+pub(super) struct ShortZero {
+    /// Level-0 keys to delete, ascending; at most [`MAX_DELETE`].
+    pub(super) keys: Vec<FileKey>,
+    /// When the first young covered level-0 file ages out, in anchor time.
+    pub(super) wake: Option<Timestamp>,
+    /// The first transaction of the first level-0 file the scan leaves in place: the one
+    /// whose young age stopped it, or the next past a full job. Every level-0 file before it
+    /// is deleted by this job or is old and not covered by the short view, which the next
+    /// full listing judges. The short view's level-1 tail starts at the covers of the files
+    /// from here on.
+    pub(super) settled_min: Option<Txid>,
+}
+
+/// The level-0 rule on the files a short listing returned, which are not a whole
+/// history. Its deletes are a subset of what [`retention`] on the whole listing would delete,
+/// when that listing's gate is clear. Every difference from the full rule only keeps more:
+///
+/// - The anchor is the newest created-at time among the last level-0 file, the snapshot
+///   starts and `known`, the newest file this engine knows at each level 1 to 8 (a listed
+///   one or a remembered one): the files the full anchor reads. A remembered file is read for
+///   its age only, never as a cover. Without it the anchor could sit below the full one, and
+///   the rules are not monotone in the anchor (see the module doc).
+/// - The floor comes from every snapshot, as in the full rule (level 9 is listed whole).
+/// - A level-0 file counts as covered only by a *listed* level 1 to 8 file that stays
+///   (its last transaction is at or above the floor). The full rule's covers are all files
+///   that stay, listed or not, so these are a subset. A remembered record is never a cover:
+///   it may name a file that is gone.
+/// - The scan stops at the first young level-0 file, covered or not, where the full rule
+///   skips an uncovered one without reading its age. Stopping earlier only deletes less.
+/// - Nothing is deleted while a kept restore point is pinned, an output is distrusted, a
+///   name did not parse, a snapshot is malformed or the listing is behind `published`.
+///
+/// What it does not repeat is the full gate's walk of the whole history (no hole after the
+/// newest snapshot, the newest state plans) and the self-check: they need every file. The
+/// caller runs this only while the last full listing passed that gate, and the module doc of
+/// `short` argues why that is enough.
+pub(super) fn short_level_zero(
+    listed: &Inventory,
+    known: &[FileInfo],
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &MaintainState,
+    resolved: &ResolvedCreatedAt,
+) -> Resolve<ShortZero> {
+    match short_decide(listed, known, now, config, published, state, resolved) {
+        Ok(zero) => Resolve::Done(zero),
+        Err(file) => Resolve::Need(file),
+    }
+}
+
+fn short_decide(
+    listed: &Inventory,
+    known: &[FileInfo],
+    now: Timestamp,
+    config: &Maintenance,
+    published: Option<Txid>,
+    state: &MaintainState,
+    resolved: &ResolvedCreatedAt,
+) -> Needs<ShortZero> {
+    let nothing = ShortZero {
+        keys: Vec::new(),
+        wake: None,
+        settled_min: None,
+    };
+    let files = listed.level(Level::ZERO);
+    let (L0Retention::After(age), Some(last_zero)) = (config.l0_retention(), files.last()) else {
+        return Ok(nothing);
+    };
+    let distrusted = Level::ALL
+        .iter()
+        .any(|level| state.distrusted_at(*level).is_some());
+    if distrusted || state.kept_restore_point().is_some() || short_gate(listed, published).is_some()
+    {
+        return Ok(nothing);
+    }
+    let snaps = snapshots(listed);
+    let mut anchors: Vec<FileInfo> = vec![*last_zero];
+    anchors.extend(snaps.iter().map(|info| **info));
+    anchors.extend(known.iter().copied());
+    anchors.sort_by_key(|info| info.key);
+    anchors.dedup_by_key(|info| info.key);
+    let mut missing = anchors.iter().filter(|info| resolved.exact(info).is_none());
+    if let Some(first) = missing.next() {
+        return Err(Need::with_ahead(*first, missing.copied()));
+    }
+    let mut newest: Option<Timestamp> = None;
+    for info in &anchors {
+        if let Some(created_at) = created_at_of(resolved, info)? {
+            let at = created_at.at();
+            newest = Some(newest.map_or(at, |newest| newest.max(at)));
+        }
+    }
+    if without_created_at(anchors.iter(), resolved)?
+        .or(created_at_backwards(listed, resolved)?)
+        .is_some()
+    {
+        return Ok(nothing);
+    }
+    let Some(newest_created_at) = newest else {
+        return Ok(nothing);
+    };
+    let anchor = now.min(newest_created_at);
+    let mut found = Found::default();
+    let rule = match snapshot_rule(
+        &snaps,
+        anchor,
+        newest_created_at,
+        config,
+        resolved,
+        &mut found,
+    )? {
+        Ok(Some(rule)) => rule,
+        Ok(None) | Err(_) => return Ok(nothing),
+    };
+    let floor = rule.floor;
+    let kept: Vec<FileInfo> = Level::ALL
+        .iter()
+        .skip(1)
+        .take(8)
+        .flat_map(|level| listed.level(*level))
+        .filter(|info| floor.is_none_or(|floor| info.key.range().max() >= floor))
+        .copied()
+        .collect();
+    let cover = merged_ranges(&[kept.as_slice()]);
+    let scan = LevelZero {
+        floor,
+        anchor,
+        newest_created_at,
+        age,
+    };
+    let mut keys: Vec<FileKey> = Vec::new();
+    let mut wake = None;
+    let mut settled_min = last_zero.key.range().min();
+    for (at, info) in files.iter().enumerate().take(files.len().saturating_sub(1)) {
+        if keys.len() == MAX_DELETE {
+            settled_min = info.key.range().min();
+            break;
+        }
+        if resolved.exact(info).is_none() {
+            let later = files.get(at.saturating_add(1)..).unwrap_or_default();
+            let ahead = later
+                .iter()
+                .take(later.len().saturating_sub(1))
+                .take(
+                    keys.len()
+                        .min(MAX_DELETE.saturating_sub(keys.len()).saturating_sub(1)),
+                )
+                .filter(|info| resolved.exact(info).is_none())
+                .copied();
+            return Err(Need::with_ahead(*info, ahead));
+        }
+        let Some(created) = created_at_of(resolved, info)? else {
+            return Ok(nothing);
+        };
+        let by_keys = by_keys(&scan, &cover, info);
+        if after(created, anchor, age) {
+            if by_keys {
+                wake = Some(aged_at(created, age)).filter(|at| *at <= newest_created_at);
+            }
+            settled_min = info.key.range().min();
+            break;
+        }
+        if by_keys {
+            keys.push(info.key);
+        }
+    }
+    Ok(ShortZero {
+        keys,
+        wake,
+        settled_min: Some(settled_min),
+    })
+}
+
+/// The gate checks that read only the files a short listing returned.
+fn short_gate(listed: &Inventory, published: Option<Txid>) -> Option<RetentionHold> {
+    unrecognized_names(listed)
+        .or_else(|| {
+            listed
+                .malformed_snapshots()
+                .first()
+                .map(|key| RetentionHold::MalformedSnapshot { key: *key })
+        })
+        .or_else(|| listing_behind(listed, published))
 }
 
 /// The union of the files' ranges as sorted, disjoint, non-adjacent spans.
