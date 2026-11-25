@@ -32,10 +32,10 @@ fn finish<L: ObjectStore, S: ObjectStore>(
     in_flight: &mut InFlight,
     budget: u64,
 ) -> (Result<Uploaded, UploadFailed>, u32) {
-    let mut slices = 0;
+    let mut slices = 0_u32;
     loop {
         match step(state, stores, witnesses, in_flight, budget).0 {
-            Ok(None) => slices += 1,
+            Ok(None) => slices = slices.saturating_add(1),
             Ok(Some(uploaded)) => return (Ok(uploaded), slices),
             Err(failed) => return (Err(failed), slices),
         }
@@ -109,17 +109,18 @@ proptest! {
         let witnesses = Witnesses::trust_all(&staging);
         let mut in_flight = InFlight::default();
         let state = UploadState::At(None);
-        let mut sent = 0;
+        let mut sent = 0_u64;
         let put = loop {
             let before = remote.log().written;
             let (stepped, _) = step(state, (&staging, &remote), &witnesses, &mut in_flight, budget);
             let held = u64::try_from(lsr_ltx::HEADER_LEN).unwrap();
-            prop_assert!(remote.log().written - before < budget + held);
+            let written = remote.log().written.saturating_sub(before);
+            prop_assert!(written < budget.saturating_add(held));
             match stepped.unwrap() {
                 Some(uploaded) => break uploaded,
                 None => {
                     let now = in_flight.sent().unwrap();
-                    prop_assert_eq!(now, sent + budget);
+                    prop_assert_eq!(now, sent.saturating_add(budget));
                     sent = now;
                 }
             }

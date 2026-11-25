@@ -13,7 +13,11 @@
 //!    the checkpoint decision wants a proof; then, in the same tick, the
 //!    checkpoint the decision calls for, consuming that sync's proof (no
 //!    checkpoint runs without one, and a proof never outlives its tick).
-//! 2. Upload while staged files are not on the replica.
+//! 2. Upload while staged files are not on the replica. One step sends files until the
+//!    tick's bytes run out; a file they run out in stays in flight, and the next step
+//!    sends on from there (`docs/decisions/D217.md`). With a file in flight the sync and
+//!    the upload take turns, so commits are staged and checkpoints run while it goes up;
+//!    without it an upload goes first only after [`state::FAIR_SHARE`] syncs in a row.
 //! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
 //!    newest staged file.
 //! 4. Maintenance. Its first listing after a
@@ -1381,7 +1385,7 @@ impl Actor {
         now: Timestamp,
     ) -> Tick {
         // A file part-way sent is abandoned: its upload is aborted, and it counts as not uploaded.
-        drop(self.engine.in_flight.stop().await);
+        self.engine.in_flight.stop().await;
         let unfinished = self.unfinished(env).await;
         match self.fault(Task::Sync, Fault::ShutdownDeadline, now) {
             Tick::Stopped(StopCause::Shutdown) => Tick::DeadlineReached(unfinished),

@@ -854,10 +854,11 @@ impl Weights {
         mix.http_fault = weight(false);
         // And after that: a store without conditional writes in a quarter of the swarm.
         mix.no_create_only = below(&entropy, 4) == 0;
-        // And after that: half the swarm sends staged files a slice a tick, of 1 KiB or 4 KiB
-        // with even odds (a sync step stages up to 16 KiB and a transaction).
+        // And after that: half the swarm sends staged files a slice a tick, of 256 bytes or
+        // 1 KiB with even odds (most staged files are a few hundred bytes, and a sync step
+        // stages up to 16 KiB and a transaction).
         mix.slice_bytes = (below(&entropy, 2) == 0)
-            .then(|| if below(&entropy, 2) == 0 { 1024 } else { 4096 })
+            .then(|| if below(&entropy, 2) == 0 { 256 } else { 1024 })
             .and_then(std::num::NonZeroU64::new);
         mix
     }

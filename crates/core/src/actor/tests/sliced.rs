@@ -61,12 +61,10 @@ fn in_flight(rig: &mut Rig, actor: &mut Actor, n: u8, now: i64) {
         Some(&Event::Synced { files: 1 })
     );
     assert!(staged_size(rig, u64::from(n)) > 10 * SLICE);
-    for slice in 1..=2 {
+    for bytes in [SLICE, SLICE.saturating_mul(2)] {
         assert_eq!(
             event(&rig.tick(actor, now)),
-            Some(&Event::Sending {
-                bytes: slice * SLICE
-            })
+            Some(&Event::Sending { bytes })
         );
     }
     assert_eq!(open_uploads(rig), 0, "an upload in hand is not scratch");
@@ -152,7 +150,10 @@ fn a_file_in_flight_and_an_application_that_commits_every_tick_take_turns() {
     let synced = |t: &Tick| matches!(event(t), Some(Event::Synced { files: 1 }));
     let sliced = |t: &Tick| matches!(event(t), Some(Event::Sending { .. } | Event::Uploaded(_)));
     for pair in seen.chunks(2) {
-        assert!(synced(&pair[0]) && sliced(&pair[1]), "{seen:?}");
+        assert!(
+            matches!(pair, [first, second] if synced(first) && sliced(second)),
+            "{seen:?}"
+        );
     }
     let slices = seen.iter().filter(|t| sliced(t)).count();
     assert_eq!(

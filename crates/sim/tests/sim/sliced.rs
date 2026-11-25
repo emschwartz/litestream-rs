@@ -31,9 +31,12 @@ fn events(report: &RunReport) -> Vec<&Event> {
     report
         .seen
         .iter()
-        .filter_map(|seen| match seen {
-            Seen::Event(event) => Some(event),
-            _ => None,
+        .filter_map(|seen| {
+            if let Seen::Event(event) = seen {
+                Some(event)
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -42,10 +45,12 @@ fn events(report: &RunReport) -> Vec<&Event> {
 fn sent(report: &RunReport) -> Vec<u64> {
     events(report)
         .into_iter()
-        .filter_map(|event| match event {
-            Event::Sending { bytes } => Some(*bytes),
-            Event::Uploaded(Did::Put(_)) => Some(0),
-            _ => None,
+        .filter_map(|event| {
+            if let Event::Sending { bytes } = event {
+                Some(*bytes)
+            } else {
+                matches!(event, Event::Uploaded(Did::Put(_))).then_some(0)
+            }
         })
         .collect()
 }
@@ -66,7 +71,10 @@ fn ticks(n: usize) -> impl Iterator<Item = Op> {
 
 /// Every slice of the first file, to the tick that publishes it.
 fn whole_file() -> Vec<u64> {
-    (1..=22).map(|n| n * SLICE).chain([0]).collect()
+    (1..=22_u64)
+        .map(|n| n.saturating_mul(SLICE))
+        .chain([0])
+        .collect()
 }
 
 fn reset() -> StoreError {
@@ -97,7 +105,7 @@ fn commits_between_slices_are_staged_and_checkpointed_while_the_file_goes_up() {
     assert!(
         during
             .chunks(2)
-            .all(|pair| !slice(&pair[0]) && slice(&pair[1])),
+            .all(|pair| matches!(pair, [first, second] if !slice(first) && slice(second))),
         "{during:?}"
     );
     let checkpoints = during

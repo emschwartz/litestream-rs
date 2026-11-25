@@ -323,7 +323,9 @@ impl Upload for ProbeUpload {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
         let early = {
             let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
-            log.written += u64::try_from(chunk.len()).unwrap();
+            log.written = log
+                .written
+                .saturating_add(u64::try_from(chunk.len()).unwrap());
             log.write_fail.pop_front()
         };
         let wrote = early.map_or_else(|| Ok(self.inner.write(chunk)), Err);
