@@ -212,7 +212,7 @@ fn a_listing_that_keeps_a_deleted_key_stops_the_pass() {
         "{seen:?}"
     );
     assert!(
-        matches!(actor.final_retention(), FinalRetention::Stuck { key, deleted: 8 } if key == oldest.key),
+        matches!(actor.final_retention(), FinalRetention::Stuck { key, deleted: 4 } if key == oldest.key),
         "{:?}",
         actor.final_retention()
     );

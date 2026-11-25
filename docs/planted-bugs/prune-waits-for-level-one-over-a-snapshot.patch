@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 6a2bb458a..c7510db76 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2240,8 +2240,7 @@ impl Actor {
+         // snapshot holds is as compacted as level 1 would make it.
+         self.engine.maintain.level_one = Level::new(1)
+             .and_then(|level| inventory.level(level).last())
+-            .map(|info| info.key.range().max())
+-            .or_else(|| crate::maintain::snapshot_end(&inventory));
++            .map(|info| info.key.range().max());
+         self.engine.maintain.remembered.learn_full(
+             &inventory,
+             now,

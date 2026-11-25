@@ -827,7 +827,9 @@ pub fn staging_put_back_with_other_bytes_is_not_written_over_the_replica() -> Sc
                 Op::Remote(RemoteOp::RollBack),
                 Op::EnvFault(EnvFault::WipeStaging),
             ],
-            ticks(SETTLE),
+            // Boot, sync, upload, snapshot and one maintenance listing: the engine stops short
+            // of the 60 s checkpoint that would stage a second file.
+            ticks(5),
             vec![
                 Op::Shutdown,
                 Op::Meta(MetaOp::Restore),
