@@ -97,7 +97,7 @@ impl CredentialSource for Process {
         if version != Some(1) {
             return Err(failed("wrong version in process output (not 1)".to_owned()));
         }
-        document_credentials(PROCESS, &value, "SessionToken", None).ok_or_else(|| {
+        document_credentials(&value, "SessionToken", None).ok_or_else(|| {
             failed("missing AccessKeyId or SecretAccessKey in process output".to_owned())
         })
     }
