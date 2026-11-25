@@ -377,8 +377,8 @@ impl Remembered {
             .filter(|level| self.active(*level, now, confirmed))
             .collect();
         // A compaction that comes first leaves retention undecided and the next pass lists it
-        // all again: retention waits for a pass with no compaction to plan, unless it is a whole
-        // check interval overdue.
+        // all again: at the default interval retention waits for a pass with no compaction to
+        // plan, unless it is a whole check interval overdue. A set interval is kept as set.
         let due = |after: i64| {
             self.checked_at.is_none_or(|at| {
                 now.unix_millis()
@@ -393,7 +393,11 @@ impl Remembered {
                 (config.retention(), config.l0_retention()),
                 (RetentionMode::Enforce, super::L0Retention::After(_))
             ) && !self.above_top(config)
-                && if active.is_empty() { due(1) } else { due(2) },
+                && if active.is_empty() {
+                    due(1)
+                } else {
+                    due(config.retention_check_behind_a_job())
+                },
             active,
         }
     }

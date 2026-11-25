@@ -362,8 +362,9 @@ impl Maintenance {
         self.l0_check
     }
 
-    /// How often level-0 retention is decided: the set interval exactly, else 120 s, which is a
-    /// difference from Go's 15 s default (docs/decisions/D193.md).
+    /// How often level-0 retention is decided: the set interval exactly, else 120 s (and up to
+    /// twice that behind a compaction job), which is a difference from Go's 15 s default
+    /// (docs/decisions/D193.md).
     #[must_use]
     pub const fn retention_check_every(&self) -> Interval {
         if self.l0_check_set {
@@ -371,6 +372,13 @@ impl Maintenance {
         } else {
             Interval(DEFAULT_RETENTION_CHECK_MILLIS)
         }
+    }
+
+    /// How many check intervals the check may wait behind a compaction job: one more for the
+    /// default, so the job goes first and the pass lists once; none for a set interval, because
+    /// the operator's value means what it says.
+    pub(crate) const fn retention_check_behind_a_job(&self) -> i64 {
+        if self.l0_check_set { 1 } else { 2 }
     }
 
     /// The same schedule with another level-0 retention check interval.

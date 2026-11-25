@@ -502,3 +502,24 @@ fn a_configured_retention_check_interval_is_the_interval_the_check_runs_at() {
         assert_eq!(known.next_wake(&cfg, at(T0 + 1)), Some(at(T0 + every)));
     }
 }
+
+/// While a compaction level has a job to plan, the default check waits one more interval so the
+/// job goes first; a set interval does not, because the operator's value means what it says.
+#[test]
+fn a_configured_retention_check_interval_holds_while_compaction_is_due() {
+    let one_minute = std::time::Duration::from_secs(60);
+    let set =
+        defaults().with_l0_check_interval(crate::maintain::Interval::new(one_minute).unwrap());
+    for (cfg, every, behind_a_job) in [(set, 60_000, 60_000), (defaults(), 120_000, 240_000)] {
+        let mut known = Remembered::default();
+        let inventory = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+        known.learn_full(&inventory, at(T0), &cfg, &waiting());
+        let due = known.plan(&cfg, at(T0 + every), None);
+        assert!(
+            !due.active.is_empty(),
+            "the scenario needs a compaction level with work"
+        );
+        assert!(!known.plan(&cfg, at(T0 + behind_a_job - 1), None).retention);
+        assert!(known.plan(&cfg, at(T0 + behind_a_job), None).retention);
+    }
+}
