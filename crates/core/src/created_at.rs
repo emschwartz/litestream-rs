@@ -37,6 +37,11 @@ use crate::store::{BatchKind, ObjectStore, StoreError};
 /// goes, and its created-at time is read from the store when retention reaches it.
 pub(crate) const MAX_KNOWN: usize = 16_384;
 
+/// The most files [`Known`] remembers at each level above 0: the snapshots a retention
+/// period holds (two minutes apart at the shortest, a level's anchor and the older ones
+/// retention ages) and a level's recent outputs. Past it the oldest goes.
+pub(crate) const MAX_KNOWN_ABOVE: usize = 64;
+
 /// The created-at times a process knows without asking the store: those of the files it
 /// put itself, as the store's answer to each put gave them. A listing that carries only a
 /// last-modified time costs a request per file a decision ages (see the module docs), and
@@ -45,13 +50,14 @@ pub(crate) const MAX_KNOWN: usize = 16_384;
 /// This is what the process wrote, not something it read back: an answer to a put names
 /// the created-at time the store was given with the object. It is kept in memory only, and
 /// a listed file is taken for the one remembered only under the same key with the same
-/// length. A level above 0 keeps its newest file, the one a decision's anchor reads.
+/// length. A level above 0 keeps its newest files, up to [`MAX_KNOWN_ABOVE`]: the anchor a
+/// decision reads, and the older snapshots retention ages one by one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Known {
     /// Level-0 files by their last transaction.
     zero: BTreeMap<Txid, FileInfo>,
-    /// The newest file put at each level above 0.
-    above: BTreeMap<Level, FileInfo>,
+    /// The newest files put at each level above 0, by their last transaction.
+    above: BTreeMap<Level, BTreeMap<Txid, FileInfo>>,
 }
 
 impl Known {
@@ -67,7 +73,11 @@ impl Known {
                 self.zero.pop_first();
             }
         } else {
-            self.above.insert(info.key.level(), info);
+            let level = self.above.entry(info.key.level()).or_default();
+            level.insert(info.key.range().max(), info);
+            while level.len() > MAX_KNOWN_ABOVE {
+                level.pop_first();
+            }
         }
     }
 
@@ -77,7 +87,9 @@ impl Known {
         let known = if info.key.level() == Level::ZERO {
             self.zero.get(&info.key.range().max())
         } else {
-            self.above.get(&info.key.level())
+            self.above
+                .get(&info.key.level())?
+                .get(&info.key.range().max())
         }?;
         if known.key == info.key && known.size == info.size {
             known.created_at()
@@ -86,11 +98,13 @@ impl Known {
         }
     }
 
-    /// Forgets the level-0 files among `keys`: they were deleted from the replica.
+    /// Forgets the files among `keys`: they were deleted from the replica.
     pub(crate) fn deleted(&mut self, keys: &[FileKey]) {
         for key in keys {
             if key.level() == Level::ZERO {
                 self.zero.remove(&key.range().max());
+            } else if let Some(level) = self.above.get_mut(&key.level()) {
+                level.remove(&key.range().max());
             }
         }
     }
@@ -98,7 +112,10 @@ impl Known {
     /// How many files are remembered.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.zero.len().saturating_add(self.above.len())
+        self.above
+            .values()
+            .map(BTreeMap::len)
+            .fold(self.zero.len(), usize::saturating_add)
     }
 }
 
@@ -491,10 +508,11 @@ mod tests {
         assert_eq!(known.len(), 1);
     }
 
-    /// A level above 0 keeps its newest file, the one an anchor reads; level 0 keeps every
-    /// file until it is deleted, up to the cap, where the oldest goes.
+    /// A level above 0 keeps its newest files (the anchor and the older ones retention ages),
+    /// up to its cap; level 0 keeps every file until it is deleted, up to the cap, where the
+    /// oldest goes.
     #[test]
-    fn level_zero_is_kept_until_deleted_and_a_level_above_keeps_its_newest() {
+    fn files_are_kept_until_deleted_and_each_level_has_a_cap() {
         let mut known = Known::default();
         let one = Level::new(1).unwrap();
         let level_one = |n: u64| FileKey::new(one, TxidRange::single(Txid::new(n).unwrap()));
@@ -504,14 +522,15 @@ mod tests {
         );
         known.put(old);
         known.put(new);
-        assert_eq!(known.exact(&as_listed(&old)), None);
+        assert!(known.exact(&as_listed(&old)).is_some());
         assert!(known.exact(&as_listed(&new)).is_some());
         for n in 1..=3 {
             known.put(put_answer(key(n), 1, 100));
         }
-        assert_eq!(known.len(), 4);
-        // A delete of level-0 files forgets those, and nothing at another level.
+        assert_eq!(known.len(), 5);
+        // A delete forgets the files it names, and no other.
         known.deleted(&[key(1), key(2), level_one(3)]);
+        assert_eq!(known.exact(&as_listed(&old)), None);
         assert_eq!(known.exact(&as_listed(&put_answer(key(1), 1, 100))), None);
         assert_eq!(known.exact(&as_listed(&put_answer(key(2), 1, 100))), None);
         assert!(
@@ -520,6 +539,21 @@ mod tests {
                 .is_some()
         );
         assert!(known.exact(&as_listed(&new)).is_some());
+        let mut above = Known::default();
+        let top = u64::try_from(MAX_KNOWN_ABOVE).unwrap();
+        for n in 1..=top + 1 {
+            above.put(put_answer(level_one(n), 1, 100));
+        }
+        assert_eq!(above.len(), MAX_KNOWN_ABOVE);
+        assert_eq!(
+            above.exact(&as_listed(&put_answer(level_one(1), 1, 100))),
+            None
+        );
+        assert!(
+            above
+                .exact(&as_listed(&put_answer(level_one(top + 1), 1, 100)))
+                .is_some()
+        );
         let mut full = Known::default();
         let cap = u64::try_from(MAX_KNOWN).unwrap();
         for n in 1..=cap {
