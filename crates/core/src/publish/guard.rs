@@ -33,6 +33,10 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     ("conformance.rs", "the store conformance suite"),
     (
+        "apart.rs",
+        "a local course's view of staging, a store passing calls through",
+    ),
+    (
         "role.rs",
         "the staging and replica roles, stores passing calls through",
     ),

@@ -41,8 +41,8 @@
 //! never becomes visible. One failed read is evidence about the read, not the
 //! file, so the actor retries; when a read on a later tick fails too, it
 //! deletes the file and everything staged after it ([`drop_staged_from`]) and
-//! snapshots in its place. At boot, [`sweep_staged`] applies the same rule
-//! before anything is uploaded.
+//! snapshots in its place. At boot, the one pass over the staged files
+//! (`crate::witness::scan`) applies the same rule before anything is uploaded.
 //!
 //! Every upload here is of a key the engine takes to be free (the confirmed
 //! transaction plus one), so it is a [`WriteMode::New`] write: the bucket, not
@@ -79,6 +79,17 @@
 //! Whatever deletes staged files asks the [`InFlight`] first ([`Unsent`]), so a file is
 //! never deleted under a send of it. [`upload_next`] is the same steps run until a file is
 //! whole. Core runs no timer: the actor steps [`upload_step`] up to its per-tick limits.
+//!
+//! **One open file a send.** A staging store that has a file to hold open
+//! ([`ObjectStore::open`]: the directory store, which otherwise opens the file again for
+//! every chunk) is asked for it at the send's first byte, and every chunk of every slice is
+//! read through what it gave, kept in the [`Sending`] and dropped with it. What is held is
+//! the file that was opened. A file renamed over the staged one under a send is therefore
+//! not read: the file the send began with goes up, verified chunk by chunk and whole against
+//! its token, where a store read by range reads the new file and refuses the send
+//! (`docs/decisions/D234.md`). The second read a store with parts asks for ([`Staged`]) is
+//! a read by name either way, so it still refuses a file that is no longer the one first
+//! read.
 
 use std::io;
 use std::marker::PhantomData;
@@ -94,7 +105,8 @@ use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{verified, verifies};
 use crate::publish::{self, Open, Unpublished, Writer};
 use crate::store::{
-    BoxFuture, ListAt, ObjectStore, PageLimit, ReadLen, Reread, StoreError, StoreOp, WriteMode,
+    BoxFuture, ListAt, ObjectStore, Opened, PageLimit, ReadLen, Reread, StoreError, StoreOp,
+    WriteMode,
 };
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
@@ -496,7 +508,7 @@ async fn judge_tail<L: Role, S: Role>(
 }
 
 /// Streams both copies and compares them chunk by chunk.
-async fn same_bytes<L: Role, S: Role>(
+pub(crate) async fn same_bytes<L: Role, S: Role>(
     staging: &L,
     remote: &S,
     key: &FileKey,
@@ -616,6 +628,7 @@ impl StagedPages {
 ///
 /// # Errors
 /// As [`StagedPages::next`].
+#[cfg(test)]
 pub(crate) async fn staged_from<L: Role>(
     staging: &L,
     from: Option<Txid>,
@@ -665,48 +678,6 @@ pub(crate) async fn drop_staged_from<L: Role>(
     }
 }
 
-/// What a sweep of the staged files found.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Swept {
-    /// Every staged file the replica may still need verifies.
-    Clean,
-    /// This file failed verification on its first failed read: nothing was
-    /// deleted, since one read says nothing about the stored bytes.
-    Suspect(FileKey),
-    /// The suspect failed again: it and every staged file after it must go,
-    /// from this transaction on ([`drop_staged_from`]). The caller deletes
-    /// them, once what they vouched for is recorded.
-    Condemned(Txid),
-}
-
-/// Verifies every staged level-0 file the replica may still need: from
-/// `confirmed`, the replica's newest transaction, on (everything when the
-/// replica is empty). The first that does not verify is condemned, with every
-/// one after it, only when it is `suspect`, the file an earlier tick's read
-/// already failed on; otherwise it is reported as the new suspect. The sweep
-/// deletes nothing itself.
-///
-/// # Errors
-/// The staging store's fault when it cannot list, read or delete.
-pub(crate) async fn sweep_staged<L: Role>(
-    staging: &L,
-    confirmed: Option<Txid>,
-    suspect: Option<FileKey>,
-) -> Result<Swept, Fault> {
-    let mut pages = StagedPages::from(confirmed);
-    while let Some(page) = pages.next(staging).await? {
-        for info in page {
-            if !staged_verifies(staging, &info.key).await? {
-                if suspect != Some(info.key) {
-                    return Ok(Swept::Suspect(info.key));
-                }
-                return Ok(Swept::Condemned(info.key.range().min()));
-            }
-        }
-    }
-    Ok(Swept::Clean)
-}
-
 /// Why a copy did not commit, and so what the state becomes.
 enum PutError {
     /// The bucket refused a [`WriteMode::New`] commit: the key holds an
@@ -733,6 +704,9 @@ pub(crate) struct Sending {
     decoder: Decoder,
     /// How many bytes were read: where the next read starts.
     offset: u64,
+    /// The staged file held open since its first read, by a store that has something to hold
+    /// (a file store, which would otherwise open the file again for every chunk).
+    source: Option<Box<dyn Opened>>,
     tally: ByteTally,
     /// What was read before the header was whole; empty once the upload is begun.
     held: Vec<u8>,
@@ -1052,6 +1026,7 @@ impl Sending {
             mode,
             decoder: Decoder::new(),
             offset: 0,
+            source: None,
             tally: ByteTally::new(),
             held: Vec::new(),
             open: None,
@@ -1076,10 +1051,18 @@ impl Sending {
                 .ok()
                 .and_then(ReadLen::new)
                 .unwrap_or(CHUNK);
-            let chunk = staging
-                .read(key, self.offset, len)
-                .await
-                .map_err(|err| PutError::Before(L::fault(&err)))?;
+            // Opened once, at the file's first byte: a send that begins again is a new send.
+            if self.offset == 0 {
+                self.source = staging
+                    .open(key)
+                    .await
+                    .map_err(|err| PutError::Before(L::fault(&err)))?;
+            }
+            let read = match self.source.as_mut() {
+                Some(held) => held.read(self.offset, len).await,
+                None => staging.read(key, self.offset, len).await,
+            };
+            let chunk = read.map_err(|err| PutError::Before(L::fault(&err)))?;
             self.tally.add(&chunk);
             if !feed_all(&mut self.decoder, &chunk).map_err(PutError::Before)? {
                 return Err(PutError::Before(Fault::StagedLost));
@@ -1116,8 +1099,10 @@ impl Sending {
 
     /// The staged file ended: commits the upload once the decoder has verified the whole
     /// file and its length and trailer checksum, on the reads that were sent, are the ones
-    /// the token was minted for. A file replaced after it was witnessed, between two slices
-    /// as before the first, is refused here and its upload aborted.
+    /// the token was minted for. A file replaced after it was witnessed is refused here and
+    /// its upload aborted: one replaced before the first slice always, one replaced between
+    /// two slices when the store reads it by range (a file held open is still the file that
+    /// was opened, and goes up if that one is what was witnessed).
     ///
     /// What the store let go of and has not sent yet is read back from the staged file
     /// first. A second read that gives nothing fails the commit before anything is

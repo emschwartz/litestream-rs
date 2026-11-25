@@ -170,19 +170,25 @@ impl NewestStagedFile {
         staging: &L,
         wal: Option<BootWal<'_, R>>,
     ) -> Result<Option<Self>, Fault> {
-        Self::load_in(&Staging(staging), wal).await
+        Self::load_in(&Staging(staging), wal, &Scanned::new()).await
     }
 
-    /// [`Self::load`] with each store as its role.
+    /// [`Self::load`] with each store as its role. A file the boot's pass already read
+    /// (`scanned`, `crate::witness::scan`) is judged from that read and not read again.
     pub(crate) async fn load_in<L: Role, R: Read + Seek>(
         staging: &L,
         wal: Option<BootWal<'_, R>>,
+        scanned: &Scanned,
     ) -> Result<Option<Self>, Fault> {
         let Some(newest) = newest_level_zero(staging).await? else {
             return Ok(None);
         };
         let txid = newest.key.range().max();
-        let header = read_header(staging, &newest.key, L::fault).await?;
+        let known = scanned.get(&txid);
+        let header = match known {
+            Some((header, _)) => Some(*header),
+            None => read_header(staging, &newest.key, L::fault).await?,
+        };
         let unreadable = Self::Unreadable { txid };
         let Some(header) = header.filter(|_| newest.key.range().min() == txid) else {
             return Ok(Some(unreadable));
@@ -200,7 +206,10 @@ impl NewestStagedFile {
             reader: &mut *wal.reader,
             committed: wal.committed,
         });
-        let view = Self::checked(&file, None, &header, origin, older).await?;
+        let view = match known {
+            Some((_, view)) => Some(*view),
+            None => Self::checked(&file, None, &header, origin, older).await?,
+        };
         let Some(Self::Readable {
             last_page: LastPageCheck::Match { .. },
             ..
@@ -218,6 +227,7 @@ impl NewestStagedFile {
                     &mut wal,
                     newest.key.range().max(),
                     origin.origin.offset(),
+                    scanned,
                 )
                 .await?
             }
@@ -244,7 +254,7 @@ impl NewestStagedFile {
     }
 
     /// Checks the newest staged file whose header names a WAL origin against `wal`: the frame
-    /// before its end and the whole range it covers. `first`, when
+    /// before its end and the whole range it covers ([`Compare`]). `first`, when
     /// given, is the file's first [`NEWEST_STAGED_READ`] bytes, already read. `None` when
     /// the file does not decode and verify whole.
     async fn checked<S: ObjectStore, R: Read + Seek>(
@@ -254,19 +264,58 @@ impl NewestStagedFile {
         at: Origin,
         wal: Option<BootWal<'_, R>>,
     ) -> Result<Option<Self>, Fault> {
-        let Origin {
-            origin,
-            end,
-            commit,
-        } = at;
-        let (salt1, salt2) = origin.salts();
+        let mut compare = Compare::begin(at, wal)?;
+        let mut read = match first {
+            Some(bytes) => LtxRead::with_first(file.key, NEWEST_STAGED_READ, bytes),
+            None => LtxRead::new(file.key, NEWEST_STAGED_READ),
+        };
+        let verified: Result<_, ReadFault> = read
+            .read_verified(file.store, |event| {
+                if let Event::Page(page) = event {
+                    compare.page(page.pgno(), page.checksum());
+                }
+                Ok(())
+            })
+            .await;
+        match verified {
+            Ok(_) => compare.end(header).map(Some),
+            Err(ReadFault::Store(err)) => Err((file.fault)(&err)),
+            Err(ReadFault::Decode(_)) => Ok(None),
+            Err(ReadFault::Rejected(never)) => match never {},
+        }
+    }
+}
+
+/// One staged file being compared with the WAL on the read that verifies it: begun once its
+/// header is known, fed every page as the decoder yields it, and ended once the file verified
+/// whole. The WAL is read before the pages (the frame before the file's end and the range it
+/// covers) and once after them (the resume point), so the file itself is read once.
+pub(crate) struct Compare<'w, R> {
+    at: Origin,
+    frame: Option<(BootWal<'w, R>, FrameCheck, Range)>,
+    /// The page of the frame before the file's end.
+    wanted: Option<PageNo>,
+    seen: NewestStagedPages,
+    /// Pages of the WAL's range the file holds with the same bytes.
+    matching: usize,
+    /// The file holds a page of the WAL's range with other bytes.
+    differing: bool,
+}
+
+impl<'w, R: Read + Seek> Compare<'w, R> {
+    /// Reads what the WAL holds where the file's header says it came from.
+    ///
+    /// # Errors
+    /// A failed WAL read, or a WAL that moved under it.
+    pub(crate) fn begin(at: Origin, wal: Option<BootWal<'w, R>>) -> Result<Self, Fault> {
+        let (salt1, salt2) = at.origin.salts();
         let salts = Salts { salt1, salt2 };
         let frame = match wal {
             Some(mut wal) => {
                 // At the WAL's start there is no frame before: `frame_before` answers a miss
                 // without reading, and `frame_state` takes any miss there as fresh.
-                let check = FrameCheck::of(wal.reader.frame_before(end, salts, wal.committed))?;
-                let range = wal_range(&mut wal, origin.offset(), end, salts)?;
+                let check = FrameCheck::of(wal.reader.frame_before(at.end, salts, wal.committed))?;
+                let range = wal_range(&mut wal, at.origin.offset(), at.end, salts)?;
                 Some((wal, check, range))
             }
             None => None,
@@ -275,18 +324,57 @@ impl NewestStagedFile {
             Some((_, FrameCheck::Frame(frame), _)) => Some(frame.pgno()),
             Some((_, FrameCheck::Miss(_), _)) | None => None,
         };
-        let none = BTreeMap::new();
-        let expected = match &frame {
-            Some((_, _, Range::Pages { pages, .. })) => pages,
-            Some((_, _, Range::Rewritten | Range::NotInThisWal)) | None => &none,
+        Ok(Self {
+            at,
+            frame,
+            wanted,
+            seen: NewestStagedPages {
+                wanted: None,
+                last: None,
+                holds_wal_pages: false,
+            },
+            matching: 0,
+            differing: false,
+        })
+    }
+
+    /// Takes in the file's next page.
+    pub(crate) fn page(&mut self, pgno: PageNo, digest: PageChecksum) {
+        self.seen.last = Some(LastPage::new(pgno, digest));
+        if self.wanted == Some(pgno) {
+            self.seen.wanted = Some(digest);
+        }
+        let Some((_, _, Range::Pages { pages, .. })) = &self.frame else {
+            return;
         };
-        let Some(pages) = scan_pages(file, first, wanted, expected).await? else {
-            return Ok(None);
-        };
-        let last_page = match frame {
+        match pages.get(&pgno) {
+            Some(held) if *held == digest => self.matching = self.matching.saturating_add(1),
+            Some(_) => self.differing = true,
+            None => {}
+        }
+    }
+
+    /// The file verified whole: what it is as a position, `header` being its header.
+    ///
+    /// # Errors
+    /// A failed WAL read.
+    pub(crate) fn end(mut self, header: &Header) -> Result<NewestStagedFile, Fault> {
+        let Origin {
+            origin,
+            end,
+            commit,
+        } = self.at;
+        let (salt1, salt2) = origin.salts();
+        let salts = Salts { salt1, salt2 };
+        let last_page = match self.frame {
             None => LastPageCheck::NoFrame(Miss::Truncated),
             Some((mut wal, check, range)) => {
-                let checked = match_last_page(&mut wal, check, end, salts, &pages)?;
+                let expected = match &range {
+                    Range::Pages { pages, .. } => pages.len(),
+                    Range::Rewritten | Range::NotInThisWal => 0,
+                };
+                self.seen.holds_wal_pages = !self.differing && self.matching == expected;
+                let checked = match_last_page(&mut wal, check, end, salts, &self.seen)?;
                 let matched = match checked {
                     LastPageCheck::Match { .. } => true,
                     LastPageCheck::Mismatch
@@ -294,7 +382,7 @@ impl NewestStagedFile {
                     | LastPageCheck::NoFrame(_)
                     | LastPageCheck::Rewritten => false,
                 };
-                if matched && !range.agrees(&pages, commit) {
+                if matched && !range.agrees(&self.seen, commit) {
                     LastPageCheck::Rewritten
                 } else {
                     checked
@@ -302,16 +390,21 @@ impl NewestStagedFile {
             }
         };
         let fields = header.fields();
-        Ok(Some(Self::Readable {
+        Ok(NewestStagedFile::Readable {
             txid: header.txids().max(),
             origin,
             commit,
             page_size: fields.page_size,
             timestamp: fields.timestamp,
             last_page,
-        }))
+        })
     }
 }
+
+/// The staged files a boot's pass read (`crate::witness::scan`), by transaction: each one's
+/// header and what it is as a position. A file that names no usable WAL origin is held as
+/// [`NewestStagedFile::Unreadable`].
+pub(crate) type Scanned = BTreeMap<Txid, (Header, NewestStagedFile)>;
 
 /// Adds `key` (keys arrive oldest first) and drops the oldest when more than `cap` are held.
 fn keep_newest(keys: &mut VecDeque<FileKey>, key: FileKey, cap: usize) {
@@ -323,13 +416,15 @@ fn keep_newest(keys: &mut VecDeque<FileKey>, key: FileKey, cap: usize) {
 
 /// Whether a staged file other than `newest`, made in the generation the live WAL holds, differs from
 /// what the WAL holds in its range (the newest file's comparison, [`NewestStagedFile::checked`]).
-/// The newest [`MAX_WITNESSED`] files below it are read, whole, one at a time; a file that does not
-/// decode is the sweep's and the witness pass's to refuse, not a rewrite.
+/// The newest [`MAX_WITNESSED`] files below it are judged: one the boot's pass read (`scanned`) from
+/// that read, any other (below the replica's newest transaction) read whole here, one at a time.
+/// A file that does not decode is the pass's to refuse, not a rewrite.
 async fn rewritten_below<L: Role, R: Read + Seek>(
     staging: &L,
     wal: &mut BootWal<'_, R>,
     newest: Txid,
     mut starts: u64,
+    scanned: &Scanned,
 ) -> Result<bool, Fault> {
     let live = wal.reader.header().salts();
     let (mut at, mut keys) = (ListAt::first(Level::ZERO), VecDeque::new());
@@ -357,7 +452,12 @@ async fn rewritten_below<L: Role, R: Read + Seek>(
     // file the chain does not reach (a snapshot was taken above it) is history the snapshot
     // already answered, and comparing it would raise the same alarm at every boot.
     for key in keys.into_iter().rev() {
-        let Some(header) = read_header(staging, &key, L::fault).await? else {
+        let known = scanned.get(&key.range().max());
+        let header = match known {
+            Some((header, _)) => Some(*header),
+            None => read_header(staging, &key, L::fault).await?,
+        };
+        let Some(header) = header else {
             break;
         };
         let Some(at) = Origin::of(&header).filter(|at| {
@@ -376,8 +476,11 @@ async fn rewritten_below<L: Role, R: Read + Seek>(
             reader: &mut *wal.reader,
             committed: wal.committed,
         };
-        if let Some(NewestStagedFile::Readable { last_page, .. }) =
-            NewestStagedFile::checked(&file, None, &header, at, Some(reborrow)).await?
+        let view = match known {
+            Some((_, view)) => Some(*view),
+            None => NewestStagedFile::checked(&file, None, &header, at, Some(reborrow)).await?,
+        };
+        if let Some(NewestStagedFile::Readable { last_page, .. }) = view
             && matches!(
                 last_page,
                 LastPageCheck::Rewritten | LastPageCheck::Mismatch
@@ -419,7 +522,7 @@ impl<'a, R: Read + Seek> BootWal<'a, R> {
 
 /// Where in the WAL the newest staged file's header says it came from, when it says so usably.
 #[derive(Clone, Copy)]
-struct Origin {
+pub(crate) struct Origin {
     origin: WalOrigin,
     end: WalOffset,
     commit: NonZeroU32,
@@ -427,7 +530,7 @@ struct Origin {
 
 impl Origin {
     /// `None` with no WAL origin, an end off a frame boundary, or a commit of 0.
-    fn of(header: &Header) -> Option<Self> {
+    pub(crate) fn of(header: &Header) -> Option<Self> {
         let fields = header.fields();
         let origin = fields.wal?;
         let end = WalOffset::new(
@@ -646,54 +749,6 @@ pub(crate) async fn read_header<S: ObjectStore>(
     Ok(<[u8; HEADER_LEN]>::try_from(bytes)
         .ok()
         .and_then(|raw| Header::decode(&raw).ok()))
-}
-
-/// Decodes and verifies the whole file; `None` when it fails to. A read
-/// shorter than asked is the file's end (the store's contract), so a file under
-/// [`NEWEST_STAGED_READ`] bytes takes one read, or none when `first` holds it.
-async fn scan_pages<S: ObjectStore>(
-    file: &NewestStagedFileSource<'_, S>,
-    first: Option<Vec<u8>>,
-    wanted: Option<PageNo>,
-    expected: &BTreeMap<PageNo, PageChecksum>,
-) -> Result<Option<NewestStagedPages>, Fault> {
-    let chunk = NEWEST_STAGED_READ;
-    let mut seen = NewestStagedPages {
-        wanted: None,
-        last: None,
-        holds_wal_pages: false,
-    };
-    let (mut matching, mut differing) = (0_usize, false);
-    let mut read = match first {
-        Some(bytes) => LtxRead::with_first(file.key, chunk, bytes),
-        None => LtxRead::new(file.key, chunk),
-    };
-    let verified: Result<_, ReadFault> = read
-        .read_verified(file.store, |event| {
-            if let Event::Page(page) = event {
-                let (pgno, digest) = (page.pgno(), page.checksum());
-                seen.last = Some(LastPage::new(pgno, digest));
-                if wanted == Some(pgno) {
-                    seen.wanted = Some(digest);
-                }
-                match expected.get(&pgno) {
-                    Some(held) if *held == digest => matching = matching.saturating_add(1),
-                    Some(_) => differing = true,
-                    None => {}
-                }
-            }
-            Ok(())
-        })
-        .await;
-    match verified {
-        Ok(_) => {
-            seen.holds_wal_pages = !differing && matching == expected.len();
-            Ok(Some(seen))
-        }
-        Err(ReadFault::Store(err)) => Err((file.fault)(&err)),
-        Err(ReadFault::Decode(_)) => Ok(None),
-        Err(ReadFault::Rejected(never)) => match never {},
-    }
 }
 
 /// What a step knows of the WAL before it recovers: one read of the WAL header

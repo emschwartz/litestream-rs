@@ -95,7 +95,7 @@ pub enum Fault {
     /// deletes that file and every staged file after it, and the next file is
     /// a snapshot taking the first transaction the replica lacks, so the chain
     /// has no hole (the upload task mid-run; elsewhere the task retries and
-    /// the next boot sweeps). At boot (`upload::sweep_staged`) recovery then
+    /// the next boot's pass finds it). At boot (`witness::scan`) recovery then
     /// judges the newest file left, and when the WAL continues from it the
     /// deleted range is staged again from the WAL instead.
     ///

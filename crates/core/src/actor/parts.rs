@@ -8,7 +8,8 @@
 //! `Engine::fresh`; a field added to either lands on one side by where it is
 //! declared, and cannot be reset or carried by an omission.
 //!
-//! The engine's place in the WAL is one value, [`Course`]: not booted, no
+//! The engine's place in the WAL is one value, [`Course`]: not booted, on a
+//! local course while the replica cannot be listed (`super::local`), no
 //! position (the next sync is a snapshot, for a cause), or at a position.
 //! What used to be separate flags (a snapshot pending, more WAL behind the
 //! cap, a wal-index reset seen) are fields of the variant they are true in,
@@ -23,6 +24,7 @@ use lsr_wal::CommittedEnd;
 
 use super::ActorConfig;
 use super::clock::EngineClock;
+use super::local::{LocalAt, LocalTry};
 use super::once::FinalSnapshot;
 use super::once_retention::FinalRetention;
 use super::state::{Gate, Live, Maintain, Phase, Tasks};
@@ -178,6 +180,9 @@ pub(super) struct Kept {
     /// permission, and the process does not ask again: the sweep is best effort. Kept across
     /// rebuilds.
     pub(super) scratch_sweep_denied: bool,
+    /// Whether this process may still try the local course (`super::local`). Kept across
+    /// rebuilds: the try reads every staged file, so it is made once.
+    pub(super) local: LocalTry,
 }
 
 impl Kept {
@@ -211,6 +216,7 @@ impl Kept {
             doubt_baseline: None,
             read_lock_violations: 0,
             scratch_sweep_denied: false,
+            local: LocalTry::Open,
         }
     }
 
@@ -248,6 +254,7 @@ impl Kept {
             doubt_baseline: _,
             read_lock_violations,
             scratch_sweep_denied,
+            local,
         } = self;
         Self {
             cfg: cfg.clone(),
@@ -282,6 +289,7 @@ impl Kept {
             doubt_baseline: None,
             read_lock_violations: *read_lock_violations,
             scratch_sweep_denied: *scratch_sweep_denied,
+            local: *local,
         }
     }
 
@@ -321,6 +329,10 @@ pub(super) enum Tail {
 pub(super) enum Course {
     /// Not booted: the next tick lists the replica and recovers.
     Unbooted,
+    /// Not booted, and the replica could not be listed for long enough that the engine
+    /// syncs and checkpoints from local state meanwhile (`super::local`). Nothing is
+    /// uploaded: the boot that lists the replica replaces the engine whole.
+    Local(LocalAt),
     /// No position: a boot that found nothing to continue, or a staged file
     /// lost. The next sync is a snapshot.
     Snapshot {
@@ -342,7 +354,7 @@ pub(super) enum Course {
 impl Course {
     pub(super) const fn booted(&self) -> bool {
         match self {
-            Self::Unbooted => false,
+            Self::Unbooted | Self::Local(_) => false,
             Self::Snapshot { .. } | Self::At { .. } => true,
         }
     }
@@ -350,6 +362,7 @@ impl Course {
     pub(super) const fn position(&self) -> Option<Position> {
         match self {
             Self::At { position, .. } => Some(*position),
+            Self::Local(at) => Some(at.position()),
             Self::Unbooted | Self::Snapshot { .. } => None,
         }
     }
@@ -357,6 +370,7 @@ impl Course {
     pub(super) const fn staged(&self) -> Option<Txid> {
         match self {
             Self::At { position, .. } => Some(position.txid()),
+            Self::Local(at) => Some(at.position().txid()),
             Self::Snapshot { staged, .. } => *staged,
             Self::Unbooted => None,
         }
@@ -367,19 +381,22 @@ impl Course {
         match self {
             Self::At { snapshot, .. } => *snapshot,
             Self::Snapshot { cause, .. } => Some(*cause),
-            Self::Unbooted => None,
+            // A local course takes no snapshot: only a boot knows what the replica holds.
+            Self::Unbooted | Self::Local(_) => None,
         }
     }
 
     pub(super) const fn tail(&self) -> Tail {
         match self {
             Self::At { tail, .. } => *tail,
+            Self::Local(at) => at.tail(),
             Self::Unbooted | Self::Snapshot { .. } => Tail::Synced,
         }
     }
 
     /// Makes the next sync a snapshot for `cause`; with `keep`, a cause
-    /// already pending stays. An unbooted engine has no next sync yet.
+    /// already pending stays. An unbooted engine has no next sync yet, and a
+    /// local course leaves its snapshots to the boot.
     pub(super) fn snapshot_for(&mut self, new: SnapshotCause, keep: bool) {
         match self {
             Self::At { snapshot, .. } => {
@@ -390,7 +407,7 @@ impl Course {
                     *cause = new;
                 }
             }
-            Self::Unbooted => {}
+            Self::Unbooted | Self::Local(_) => {}
         }
     }
 
@@ -398,10 +415,13 @@ impl Course {
     /// snapshot goes when `wrote_pending` says the step staged it.
     pub(super) fn moved(&mut self, position: Position, tail: Tail, wrote_pending: bool) {
         let snapshot = self.pending().filter(|_| !wrote_pending);
-        *self = Self::At {
-            position,
-            tail,
-            snapshot,
+        *self = match self {
+            Self::Local(at) => Self::Local(at.moved(position, tail)),
+            Self::Unbooted | Self::Snapshot { .. } | Self::At { .. } => Self::At {
+                position,
+                tail,
+                snapshot,
+            },
         };
     }
 
@@ -409,6 +429,7 @@ impl Course {
     pub(super) const fn set_tail(&mut self, now: Tail) {
         match self {
             Self::At { tail, .. } => *tail = now,
+            Self::Local(at) => *at = at.moved(at.position(), now),
             Self::Unbooted | Self::Snapshot { .. } => {}
         }
     }

@@ -13,11 +13,11 @@
 //! fail-stop tripped for it (`crate::failstop`); the body's `down` lists which.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use lsr_replica::{
     AppNotice, DegradedCause, Denied, Gone, Health, Phase, Replicator, SnapshotCause,
-    SnapshotCauseKind, Stall, StopCause, Task, Timestamp,
+    SnapshotCauseKind, Stall, StopCause, Task, Timestamp, lock,
 };
 
 use serde_json::{Map, Value};
@@ -43,11 +43,6 @@ struct Row {
 /// Every database the daemon was given, and where each stands.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Board(Arc<Mutex<Vec<Row>>>);
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Each critical section leaves plain data behind.
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 impl Board {
     /// Adds a database at the end.

@@ -1,0 +1,7 @@
+# A snapshot for a doubt alone counts as quiet only while the replica holds every staged file, so one staged behind a pending commit dates the clock after that commit lands.
+name = "failstop-quiet-snapshot-needs-caught-up"
+fix = "claude/age-stop"
+package = "lsr-core"
+tests = [
+    "lag::an_operator_snapshot_behind_a_pending_commit_is_not_lag",
+]

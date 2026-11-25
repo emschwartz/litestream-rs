@@ -24,6 +24,8 @@ use std::thread::{self, Thread};
 use lsr_core::{ByteTally, Reread, StoreError, StoreOp};
 use md5::{Digest as _, Md5};
 
+use crate::classify::invalid_data;
+
 /// Bytes one tally covers, and so one second read asks for: 256 KiB, the size the engine
 /// first read them in. A part being sent holds one cell's bytes at a time.
 pub(crate) const CELL: u64 = 256 * 1024;
@@ -174,10 +176,7 @@ impl Body<'_> {
         // The source answers with the bytes tallied or with an error; a source that gives
         // another count broke that, and the body must not end short without saying so.
         if len != was.size() {
-            return Err(StoreError::Transient {
-                op: StoreOp::Upload,
-                kind: io::ErrorKind::InvalidData,
-            });
+            return Err(invalid_data(StoreOp::Upload));
         }
         self.offset = self.offset.saturating_add(len);
         self.cell = bytes;

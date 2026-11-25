@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    Entropy, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit, ReadLen,
+    Entropy, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, Opened, PageLimit, ReadLen,
     StoreError, Upload, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
@@ -237,6 +237,13 @@ impl ObjectStore for StagingRaw {
         match self {
             Self::Mem(s) => s.read(key, offset, len).await,
             Self::Fs(s) => s.store.read(key, offset, len).await,
+        }
+    }
+
+    async fn open(&self, key: &FileKey) -> Result<Option<Box<dyn Opened>>, StoreError> {
+        match self {
+            Self::Mem(s) => s.open(key).await,
+            Self::Fs(s) => s.store.open(key).await,
         }
     }
 
