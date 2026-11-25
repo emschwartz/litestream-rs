@@ -1,0 +1,6 @@
+# Go's `^\w+://` is ASCII only; the scheme check read Unicode letters, so "é://x" was a URL.
+name = "scheme-reads-unicode-letters"
+fix = "claude/concise-defects"
+package = "lsr-cli"
+bin = "lsr"
+tests = ["urls_are_what_go_calls_urls"]
