@@ -1,0 +1,7 @@
+# A compaction above level 1 reads each replica input in a mebibyte whatever the fan-in, so 32 inputs hold twice the budget.
+name = "compaction-window-unshared"
+fix = "e7aafe56e"
+package = "lsr-core"
+tests = [
+    "compact::tests::the_replica_window_is_the_budget_shared_out",
+]

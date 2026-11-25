@@ -401,6 +401,47 @@ fn a_replica_missing_the_believed_newest_file_leaves_the_first_pending_file_coun
     assert!(seeded.quiet.is_empty());
 }
 
+/// The table holds its pages in chunks of slots, so the places that matter are the chunk
+/// edges: a page on each side of one, a hole between pages, and a cut inside a chunk.
+#[test]
+fn the_table_counts_and_cuts_pages_across_chunk_edges() {
+    let mut table = table();
+    let pages = [1_u32, 4096, 4097, 8192, 9000];
+    for n in pages {
+        table.record(pg(n), digest(n, 1));
+    }
+    assert_eq!(table.len(), 5);
+    assert_eq!(
+        table.get(pg(5000)),
+        None,
+        "a hole inside a chunk is no page"
+    );
+    assert_eq!(
+        table.get(pg(20_000)),
+        None,
+        "past the last chunk is no page"
+    );
+    table.record(pg(4096), digest(4096, 2));
+    assert_eq!(table.len(), 5, "a page recorded again is not counted twice");
+    assert_eq!(table.get(pg(4096)), Some(digest(4096, 2)));
+
+    table.truncate(nz(4097));
+    assert_eq!(table.len(), 3);
+    assert_eq!(table.get(pg(4097)), Some(digest(4097, 1)));
+    assert_eq!(table.get(pg(8192)), None);
+    assert_eq!(table.get(pg(9000)), None);
+
+    table.truncate(nz(4096));
+    assert_eq!(table.len(), 2);
+    assert_eq!(
+        table.get(pg(4097)),
+        None,
+        "a cut inside a chunk empties the slots above it"
+    );
+    table.record(pg(4097), digest(4097, 3));
+    assert_eq!(table.len(), 3, "a slot cut and recorded again counts once");
+}
+
 /// Only a first pending file that decodes can be the one nothing staged stands before: a first
 /// file that does not decode still places the pending files after it, so a later file is no
 /// "first pending file" the replica must be asked about.

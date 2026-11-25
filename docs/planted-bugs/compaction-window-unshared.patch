@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/fault/role.rs b/crates/core/src/fault/role.rs
+index ca220c50f..88cb5ffc9 100644
+--- a/crates/core/src/fault/role.rs
++++ b/crates/core/src/fault/role.rs
+@@ -96,7 +96,7 @@ impl<S: ObjectStore> Role for Replica<'_, S> {
+     }
+ 
+     const COMPACT_WINDOW: ReadLen = ReadLen::CHUNK;
+-    const COMPACT_BUDGET: u64 = 16 * 1024 * 1024;
++    const COMPACT_BUDGET: u64 = 1 << 40;
+ }
+ 
+ /// Passes every call of a store through to the wrapped one.

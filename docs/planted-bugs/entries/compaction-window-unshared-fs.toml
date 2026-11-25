@@ -1,0 +1,9 @@
+# The same plant, against the memory gate that reads inputs from a directory.
+name = "compaction-window-unshared-fs"
+fix = "e7aafe56e"
+package = "lsr-store-fs"
+patch = "compaction-window-unshared"
+test_bin = "store-fs"
+tests = [
+    "memory::a_compaction_holds_its_share_of_the_budget_per_replica_input",
+]

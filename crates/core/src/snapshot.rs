@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
 use lsr_ltx::{Header, HeaderFields, PageChecksum, PageSize, Timestamp};
-use lsr_wal::{CommittedEnd, OpenError, WalReader};
+use lsr_wal::{CommittedEnd, OpenError, PageMap, WalReader};
 use thiserror::Error;
 
 use crate::fault::role::Role;
@@ -34,7 +34,7 @@ use crate::layout::{FileInfo, FileKey};
 use crate::pages::PageChecksumTable;
 use crate::position::{Continuity, SyncedThrough};
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::sync::{PageFrom, clamp, plan_pages, scan_whole, stage};
+use crate::sync::{PageFrom, Plan, clamp, scan_whole, stage};
 use crate::verify::LivePages;
 
 /// A snapshot that was not written. Nothing is visible under `key`, unless
@@ -76,7 +76,7 @@ pub(crate) async fn write_snapshot<W: WalSource, P: PageSource, S: Role>(
 /// where each page comes from.
 struct Whole<R> {
     reader: WalReader<R>,
-    plan: Vec<PageFrom>,
+    map: PageMap,
     commit: NonZeroU32,
     page_size: PageSize,
 }
@@ -115,10 +115,9 @@ fn whole<W: WalSource>(proof: &SyncedThrough, wal: &mut W) -> Result<Whole<W::Wa
         map.commit().is_none_or(|scanned| scanned == commit),
         BugSite::SnapshotScan
     );
-    let plan = plan_pages(&map, None, commit, page_size);
     Ok(Whole {
         reader,
-        plan,
+        map,
         commit,
         page_size,
     })
@@ -136,10 +135,11 @@ async fn run<W: WalSource, P: PageSource, S: Role>(
     let position = proof.position();
     let Whole {
         mut reader,
-        plan,
+        map,
         commit,
         page_size,
     } = whole(proof, wal)?;
+    let plan = Plan::new(&map, None, commit, page_size);
     let (timestamp, _clamped) = clamp(Some(position.timestamp()), now);
     let header = Header::new(HeaderFields {
         tracked: false,
@@ -174,24 +174,25 @@ pub(crate) fn read_live<W: WalSource, P: PageSource>(
     pages: &mut PageChecksumTable,
 ) -> Result<LivePages, Fault> {
     let Whole {
-        plan,
+        map,
         commit,
         page_size,
         ..
     } = whole(proof, wal)?;
+    let plan = Plan::new(&map, None, commit, page_size);
     let mut buf = vec![0_u8; page_size.bytes()];
     let mut digests = BTreeMap::new();
-    for page in &plan {
+    for page in plan.iter() {
         let digest = match page {
             PageFrom::Wal(frame) => frame.digest(),
             PageFrom::Db(pgno) => {
-                db.read_page(*pgno, &mut buf).map_err(Fault::from_source)?;
+                db.read_page(pgno, &mut buf).map_err(Fault::from_source)?;
                 pages
-                    .check(*pgno, &buf)
+                    .check(pgno, &buf)
                     .map_err(|mismatch| Fault::DatabasePageMismatch {
                         pgno: mismatch.pgno,
                     })?;
-                PageChecksum::of(*pgno, &buf)
+                PageChecksum::of(pgno, &buf)
             }
         };
         digests.insert(page.pgno(), digest);

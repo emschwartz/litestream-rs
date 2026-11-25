@@ -2,15 +2,15 @@ diff --git a/crates/core/src/compact.rs b/crates/core/src/compact.rs
 index d1978bbba..9a87b641a 100644
 --- a/crates/core/src/compact.rs
 +++ b/crates/core/src/compact.rs
-@@ -57,7 +57,6 @@ use thiserror::Error;
- use crate::fault::role::{Replica, Role};
+@@ -57,7 +57,6 @@
+ use crate::fault::role::{Replica, Role, STAGING_WINDOW};
  use crate::layout::{FileInfo, FileKey, Level};
  use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 -use crate::publish::Writer;
  use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
  
  #[cfg(test)]
-@@ -667,7 +666,7 @@ async fn write_output<S: Role, U: Upload>(
+@@ -680,7 +679,7 @@
      merge: &mut Merge<'_, S>,
      mut encoder: Encoder<Vec<u8>>,
      header: &Header,
@@ -19,7 +19,7 @@ index d1978bbba..9a87b641a 100644
  ) -> Result<(Trailer, u32), CompactError> {
      let flush = merge.budget.flush;
      let mut pages = 0_u32;
-@@ -761,7 +760,8 @@ async fn compact_with<S: Role, D: ObjectStore>(
+@@ -800,7 +799,8 @@
      let created_at = header.fields().timestamp;
      // A compacted file may be written again over itself (a retried
      // compaction, Go's output for the same range), as Go's are.
@@ -29,7 +29,7 @@ index d1978bbba..9a87b641a 100644
          .await
          .map_err(CompactError::Dest)?;
      let written = write_output(&mut merge, encoder, &header, &mut upload).await;
-@@ -772,11 +772,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
+@@ -811,11 +811,7 @@
              return Err(err);
          }
      };
@@ -42,7 +42,7 @@ index d1978bbba..9a87b641a 100644
      Ok(Compacted {
          info,
          header,
-@@ -789,7 +785,7 @@ async fn compact_with<S: Role, D: ObjectStore>(
+@@ -828,7 +824,7 @@
  
  /// An abort that fails leaves scratch the store cleans up; the error that made
  /// us abort is the one worth reporting.
