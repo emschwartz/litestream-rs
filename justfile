@@ -559,7 +559,11 @@ fault-rig cycles="50" *args: minio-up toxiproxy-up
     fi
     eval "$(./scripts/minio.sh env)"
     eval "$(./scripts/toxiproxy.sh env)"
-    uv run scripts/fault_rig.py run --cycles {{cycles}} {{args}}
+    # On Linux every nemesis of the menu must be able to run (LazyFS built, libfaketime installed):
+    # a run that could not exercise one fails before the first cycle instead of printing a note.
+    require=""
+    if [ "$(uname)" = Linux ]; then require="--require-all-nemeses"; fi
+    uv run scripts/fault_rig.py run --cycles {{cycles}} $require {{args}}
 
 # The rig's own canary: damage planted in the replica (a dropped, swapped or flipped level-0 file)
 # must be reported. A rig that reports 0 anomalies here is blind.
@@ -618,11 +622,23 @@ fault-rig-plant name cycles="200" *args: minio-up toxiproxy-up
     git -C "$tree" apply "$PWD/$patch"
     # The judge comes from this tree, never the planted one.
     cargo build --release --locked -p lsr-history --features sqlite
-    CARGO_TARGET_DIR="$PWD/target/fault-rig-plants/{{name}}" cargo build --release --locked -p lsr-cli --manifest-path "$tree/Cargo.toml"
+    # A plant that does not build is a broken plant (re-express it, docs/planted-bugs.md), never
+    # "the rig missed it": exit 3, named, apart from the rig's own 0 (not found), 1 (found), 2.
+    if ! CARGO_TARGET_DIR="$PWD/target/fault-rig-plants/{{name}}" cargo build --release --locked -p lsr-cli --manifest-path "$tree/Cargo.toml"; then
+        echo "fault-rig-plant: PLANT {{name}} DID NOT BUILD with its patch applied; re-express docs/planted-bugs/{{name}}.patch" >&2
+        exit 3
+    fi
     ./scripts/build-go-litestream.sh 041a8c3
     eval "$(./scripts/minio.sh env)"
     eval "$(./scripts/toxiproxy.sh env)"
-    uv run scripts/fault_rig.py run --cycles {{cycles}} --stop-on-anomaly --lsr "target/fault-rig-plants/{{name}}/release/lsr" --work "target/fault-rig-plant-{{name}}" {{args}}
+    # Linux: LazyFS is built when missing, and a menu nemesis that
+    # cannot run fails the step: "not found" with power loss never run says nothing.
+    require=""
+    if [ "$(uname)" = Linux ]; then
+        test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
+        require="--require-all-nemeses"
+    fi
+    uv run scripts/fault_rig.py run --cycles {{cycles}} --stop-on-anomaly $require --lsr "target/fault-rig-plants/{{name}}/release/lsr" --work "target/fault-rig-plant-{{name}}" {{args}}
 
 # A plant is scripts/lazyfs-plants/<name>.patch or docs/planted-bugs/<name>.patch, applied to a
 # scratch worktree of HEAD and built into target/lazyfs-plants/<name>.

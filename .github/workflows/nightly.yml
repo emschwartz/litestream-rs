@@ -213,6 +213,8 @@ jobs:
           tool: just
       - uses: ./.github/actions/go-compat
       - run: sudo apt-get install -y cmake g++ libfuse3-dev fuse3 libfaketime
+      # LazyFS before any step that draws power loss, so no step runs without it.
+      - run: uv run scripts/lazyfs.py build
       # The rig's own canary first: planted damage in the replica must be reported, and the
       # known-issue exemption must not hide an anomaly in an untainted segment.
       - run: just fault-rig-canary
@@ -227,11 +229,14 @@ jobs:
           case "$rc" in
             1) line="PLANT wal-barrier: FOUND" ;;
             0) line="PLANT wal-barrier: NOT FOUND in 60 cycles" ;;
+            3) line="PLANT wal-barrier: DID NOT BUILD (a broken plant, not a miss: re-express its patch)" ;;
             *) line="PLANT wal-barrier: rig failed (exit $rc)" ;;
           esac
           echo "$line"
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
           grep -E '^NOT RUN' plant.log >> "$GITHUB_STEP_SUMMARY" || true
+          # Found or not found never fails the job; a plant that does not build does.
+          [ "$rc" -ne 3 ] || exit 1
           exit 0
       # Anomalies in a segment the Go nemesis touched are known issue #346 and do not fail the
       # run; any other anomaly does. The summary lists the nemeses that did not run.
