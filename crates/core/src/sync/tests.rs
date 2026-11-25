@@ -1015,7 +1015,7 @@ proptest! {
         // those plus the frames that a grown page also names.
         let hint = Plan::new(&map, prev, commit, PS).at_most();
         prop_assert!(hint >= numbers.len());
-        prop_assert!(hint <= numbers.len() + in_map.len());
+        prop_assert!(hint <= numbers.len().saturating_add(in_map.len()));
         for page in &plan {
             let held = in_map.contains(&page.pgno().get());
             prop_assert_eq!(matches!(page, PageFrom::Wal(_)), held);

@@ -137,12 +137,12 @@ proptest! {
         drop(decode_chunked(&file, &chunks));
     }
 }
-/// An index longer than one chunk (16 KiB, about 1,800 pages), written out piece by piece
+/// An index of several chunks (16 KiB each, about 1,800 pages), written out piece by piece
 /// after the last page, is the same file as one finish writes, and no page fits after it.
 #[test]
 fn an_index_written_in_pieces_is_the_file_finish_alone_writes() {
     let page_size = PageSize::new(512).unwrap();
-    let commit = 4_000_u32;
+    let commit = 12_000_u32;
     let header = Header::new(HeaderFields {
         tracked: false,
         page_size,
@@ -173,13 +173,24 @@ fn an_index_written_in_pieces_is_the_file_finish_alone_writes() {
 
     let mut pieces = Encoder::new(Vec::new(), header).unwrap();
     fill(&mut pieces);
-    let mut calls = 0_u32;
-    while pieces.write_index_chunk().unwrap() {
-        calls += 1;
+    // Each call hands over one chunk of 16 KiB, whole but for the last (the first also carries
+    // the end-of-pages marker): the sizes are spelled out so a changed chunk size is seen.
+    let mut sizes = Vec::new();
+    loop {
+        let before = pieces.writer_mut().len();
+        let more = pieces.write_index_chunk().unwrap();
+        sizes.push(pieces.writer_mut().len() - before);
+        if !more {
+            break;
+        }
+    }
+    assert!(sizes.len() >= 3, "{sizes:?}");
+    for size in sizes.iter().take(sizes.len() - 1).skip(1) {
+        assert!((16 * 1024 - 30..=16 * 1024).contains(size), "{sizes:?}");
     }
     assert!(
-        calls >= 1,
-        "the index took {calls} calls, so it was not several chunks"
+        sizes.iter().all(|size| *size <= 16 * 1024 + 64),
+        "{sizes:?}"
     );
     assert!(
         pieces
@@ -189,5 +200,5 @@ fn an_index_written_in_pieces_is_the_file_finish_alone_writes() {
     );
     let piecewise = pieces.finish(None).unwrap().0;
     assert_eq!(piecewise, one_shot);
-    assert_eq!(decode(&piecewise).unwrap().pages.len(), 4_000);
+    assert_eq!(decode(&piecewise).unwrap().pages.len(), 12_000);
 }

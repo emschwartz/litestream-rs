@@ -1254,6 +1254,7 @@ fn the_replica_window_is_the_budget_shared_out() {
     let window = |inputs: usize| Budget::reading::<Replica<'_, MemStore>>(inputs).chunk.get();
     let mib = 1024 * 1024;
     assert_eq!(<Replica<'_, MemStore> as Role>::COMPACT_BUDGET, 16 * mib);
+    assert_eq!(<Staging<'_, MemStore> as Role>::COMPACT_BUDGET, 4 * mib);
     assert_eq!(window(1), mib);
     assert_eq!(window(16), mib);
     assert_eq!(window(32), mib / 2);

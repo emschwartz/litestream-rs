@@ -221,7 +221,6 @@ impl<'a> Plan<'a> {
     /// The pages, in ascending page order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = PageFrom> + '_ {
         let commit = self.commit.get();
-        let snapshot = self.prev_commit.is_none();
         let mut raw = self.prev_commit.map_or(1, |prev| prev.saturating_add(1));
         let mut held = self.map.pages().peekable();
         std::iter::from_fn(move || {
@@ -243,19 +242,18 @@ impl<'a> Plan<'a> {
                         Ordering::Greater => (false, true),
                     },
                 };
-                // A frame the map holds for a page the loop has passed (below the first grown
-                // page of an incremental) is a page of the file; in a snapshot the counter
-                // reaches every page, so a map entry only matches it.
+                // A frame the map holds is a page of the file, whether the counter is at it or
+                // has not reached it (an incremental lists the map's pages below the first
+                // grown one). In a snapshot the counter starts at page 1 and reaches every
+                // page, so a map entry is always met when the counter is on it.
                 let frame = if take_map { held.next() } else { None };
                 let pgno = grown.filter(|_| take_grown);
                 if take_grown {
                     raw = raw.saturating_add(1);
                 }
                 match (frame, pgno) {
-                    (Some(frame), _) if !snapshot || take_grown => {
-                        return Some(PageFrom::Wal(*frame));
-                    }
-                    (Some(_), _) | (None, None) => {}
+                    (Some(frame), _) => return Some(PageFrom::Wal(*frame)),
+                    (None, None) => {}
                     (None, Some(pgno)) => {
                         if let Some(pgno) = PageNo::new(pgno, self.page_size) {
                             return Some(PageFrom::Db(pgno));

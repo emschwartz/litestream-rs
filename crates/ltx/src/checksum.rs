@@ -205,6 +205,15 @@ mod tests {
     }
 
     #[test]
+    fn a_raw_page_checksum_needs_the_flag_and_keeps_its_bits() {
+        let page = vec![7_u8; 512];
+        let digest = PageChecksum::of(pgno(3), &page);
+        assert_eq!(PageChecksum::from_raw(digest.get()), Some(digest));
+        assert_eq!(PageChecksum::from_raw(0), None);
+        assert_eq!(PageChecksum::from_raw(FLAG - 1), None);
+    }
+
+    #[test]
     fn raw_checksum_needs_the_flag() {
         assert_eq!(DbChecksum::from_raw(0), None);
         assert_eq!(DbChecksum::from_raw(FLAG - 1), None);
