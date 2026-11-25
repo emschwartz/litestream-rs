@@ -134,6 +134,11 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         Op::LyingWalSync => "Op::LyingWalSync".to_owned(),
         Op::Meta(meta) => format!("Op::Meta({})", self::meta(*meta)),
         Op::Wal(wal) => format!("Op::Wal({})", self::wal(*wal)),
+        Op::Structured { seq, data } => {
+            format!("Op::Structured {{ seq: {seq}, data: {data} }}")
+        }
+        Op::SaveDatabase => "Op::SaveDatabase".to_owned(),
+        Op::PutBackDatabase { adopt } => format!("Op::PutBackDatabase {{ adopt: {adopt} }}"),
         Op::OurReader { begin } => format!("Op::OurReader {{ begin: {begin} }}"),
         Op::Remote(remote) => format!("Op::Remote({})", self::remote(*remote)),
         Op::AppAutocheckpoint(frames) => format!("Op::AppAutocheckpoint({frames:?})"),
@@ -173,6 +178,7 @@ fn app_op(op: AppOp) -> String {
         AppOp::ReaderEnd => "AppOp::ReaderEnd".to_owned(),
         AppOp::Checkpoint(mode) => format!("AppOp::Checkpoint({})", checkpoint(mode)),
         AppOp::DeleteWal => "AppOp::DeleteWal".to_owned(),
+        AppOp::Spill { pages } => format!("AppOp::Spill {{ pages: {pages} }}"),
     }
 }
 

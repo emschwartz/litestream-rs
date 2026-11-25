@@ -100,7 +100,7 @@ The library and the application share one SQLite, because `libsqlite3-sys` allow
 ## How it differs from Go Litestream
 
 - **The replica is the same.** Either implementation restores the other's files (Go from v0.5.16 for files written here). Either takes over the other's bucket and working folder, but only once the other has fully stopped: both running on one bucket path, even for seconds, can corrupt the replica ([#346](https://github.com/emschwartz/litestream-rs/issues/346)).
-- **It stops where Go carries on.** A start that finds files in the bucket this database cannot account for stops with `other_writer` until an operator chooses the database or the bucket. With the working folder lost it judges by comparing pages, and an older copy of the database can pass.
+- **It stops where Go carries on.** A start that finds files in the bucket this database cannot account for stops with `other_writer` until an operator chooses the database or the bucket. With the working folder lost it judges by comparing pages and the replicator's own counter, which stops an older copy of the database except in one short window ([limitations](docs/limitations.md)).
 - **It can hold the application back.** The `if-replication-stops` setting decides whether a replicator that cannot start, or has stopped, blocks the application's writes. The default holds them at start only.
 - **Restores are checked.** Every file is verified before use, and a restore the replica cannot give exactly fails with `Gap`. Go's restore does not check by default.
 - **The WAL is synced before it is copied**, so a power loss does not leave the bucket ahead of the database on an honest disk.

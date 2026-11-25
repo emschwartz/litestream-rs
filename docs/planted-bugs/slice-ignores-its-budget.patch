@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 581d4fbd2..176ce9068 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -986,7 +986,6 @@ impl Sending {
+             }
+             let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+             self.offset = self.offset.saturating_add(read);
+-            *budget = budget.saturating_sub(read);
+             let header = self.decoder.header().copied();
+             match (self.open.as_mut(), header) {
+                 (Some(open), _) => write_chunk::<S>(open, &chunk).await?,

@@ -238,6 +238,26 @@ pub enum Op {
     Meta(MetaOp),
     /// Damage to the WAL file that SQLite would not do itself.
     Wal(WalOp),
+    /// The application commits the pages of a database laid out as SQLite lays one out for the
+    /// replicator's counter (page 1 the schema naming page 2, page 2 the counter table holding
+    /// `seq`), with page 3 filled with `data`, growing the database to six pages. Scenarios
+    /// only: the generated commits write opaque pages.
+    Structured {
+        /// The counter's value.
+        seq: u32,
+        /// The byte page 3 is filled with.
+        data: u8,
+    },
+    /// A file backup of the database is taken, as it reads now. Scenarios only.
+    SaveDatabase,
+    /// The engine is down and the backup replaces the database file, with no WAL, as an
+    /// operator's plain copy does (a modified time of now). Scenarios only.
+    PutBackDatabase {
+        /// The model takes the older database as the application's new truth, as it does after
+        /// a loss the engine reported; without it the model still holds the commits the copy
+        /// lacks, and the oracle judges the replica against them.
+        adopt: bool,
+    },
     /// Our own read transaction ends or begins, as at a checkpoint's lapse.
     /// Scenarios only.
     OurReader {
@@ -363,6 +383,14 @@ pub enum AppOp {
     /// The last connection closes and the WAL is deleted, when no connection, ours
     /// included, holds a transaction.
     DeleteWal,
+    /// It begins a write transaction and writes `pages` pages it does not commit yet: it
+    /// holds SQLite's write lock from that call on, across the engine's later calls, until
+    /// a commit or a rollback after the tick. An ordinary writer, not a fault: the engine's
+    /// barrier and its sequence bump find the lock busy.
+    Spill {
+        /// How many pages it writes.
+        pages: u8,
+    },
 }
 
 /// What a scenario does to the staging directory, the engine's own memory of
@@ -375,7 +403,8 @@ pub enum MetaOp {
     Restore,
     /// Deletes the newest level-0 file.
     DeleteNewest,
-    /// Flips one byte in the middle of the newest level-0 file.
+    /// Flips one byte of the newest level-0 file: the middle one, or the first after it whose
+    /// flip changes what the file reads as (`World::flip_newest_staged`).
     FlipNewestByte,
     /// Cuts the newest level-0 file to half its length.
     TruncateNewest,
@@ -552,6 +581,12 @@ pub struct Weights {
     pub truncate_pages: Option<std::num::NonZeroU32>,
     /// [`Op::HttpFault`]: a step that does anything only with the replica on S3.
     pub http_fault: u32,
+    /// The bytes of staged files the engine sends in one tick, when not its own 8 MiB (which
+    /// no file here reaches): a level-0 file larger than this goes up a slice a tick, and
+    /// whatever the history does next lands between two slices (`docs/decisions/D217.md`).
+    /// Not an operation, for the same reason as `block_crash_law`; drawn last in the swarm
+    /// mix.
+    pub slice_bytes: Option<std::num::NonZeroU64>,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -649,6 +684,9 @@ impl Default for Weights {
             verify: 0,
             truncate_pages: None,
             http_fault: 0,
+            // Off in the default mix so its recorded histories keep their
+            // shape; swarm mixes draw it.
+            slice_bytes: None,
         }
     }
 }
@@ -789,6 +827,7 @@ impl Weights {
             verify: 0,
             truncate_pages: None,
             http_fault: 0,
+            slice_bytes: None,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -844,6 +883,12 @@ impl Weights {
         mix.http_fault = weight(false);
         // And after that: a store without conditional writes in a quarter of the swarm.
         mix.no_create_only = below(&entropy, 4) == 0;
+        // And after that: half the swarm sends staged files a slice a tick, of 256 bytes or
+        // 1 KiB with even odds (most staged files are a few hundred bytes, and a sync step
+        // stages up to 16 KiB and a transaction).
+        mix.slice_bytes = (below(&entropy, 2) == 0)
+            .then(|| if below(&entropy, 2) == 0 { 256 } else { 1024 })
+            .and_then(std::num::NonZeroU64::new);
         mix
     }
 
@@ -1209,14 +1254,15 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
 
 /// An [`Op::AppInTick`]: at one of the tick's first 24 calls into SQLite or before its
 /// first call of a kind, half each, a commit (a sixth of them growing), a reader
-/// beginning or ending, a checkpoint of each mode, or a deleted WAL.
+/// beginning or ending, a checkpoint of each mode, a deleted WAL, or a write transaction
+/// left open.
 fn app_in_tick(entropy: &SeededEntropy) -> Op {
     let at = if below(entropy, 2) == 0 {
         AppAt::Call(small(entropy, 24))
     } else {
         AppAt::Before(choose(entropy, &SOURCE_OPS).unwrap_or(SourceOp::Committed))
     };
-    let op = match below(entropy, 7) {
+    let op = match below(entropy, 8) {
         0 | 1 => AppOp::Commit {
             pages: small(entropy, 4).saturating_add(1),
             grow: below(entropy, 6) == 0,
@@ -1235,7 +1281,10 @@ fn app_in_tick(entropy: &SeededEntropy) -> Op {
             .unwrap_or(OtherProcessMode::Passive),
         ),
         5 => AppOp::Checkpoint(OtherProcessMode::Truncate),
-        _ => AppOp::DeleteWal,
+        6 => AppOp::DeleteWal,
+        _ => AppOp::Spill {
+            pages: small(entropy, 3).saturating_add(1),
+        },
     };
     Op::AppInTick { at, op }
 }

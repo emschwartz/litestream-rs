@@ -35,7 +35,7 @@ lsr-core = { workspace = true, features = ["testing"] }
 # multipart uploads with the store's raw requests; both sit behind the feature.
 lsr-store-s3 = { workspace = true, features = ["testing"] }
 # The Tigris run (tests/cli/tigris.rs) checkpoints the live database Go replicated.
-rusqlite = { workspace = true, features = ["bundled"] }
+rusqlite = { workspace = true, features = ["bundled", "backup"] }
 tempfile.workspace = true
 
 [lints]

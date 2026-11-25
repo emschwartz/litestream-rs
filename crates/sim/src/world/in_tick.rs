@@ -34,6 +34,7 @@ impl World {
             InTickDone::Checkpointed { .. }
             | InTickDone::WalDeleted(false)
             | InTickDone::Commit
+            | InTickDone::Spilled(_)
             | InTickDone::ReaderBegan(_)
             | InTickDone::ReaderEnded { .. } => {}
         }

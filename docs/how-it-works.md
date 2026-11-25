@@ -41,10 +41,10 @@ One thread per database does everything, one unit of work at a time, in this ord
 
 1. **Sync.** Every second it reads the wal-index. If commits arrived, it syncs the WAL to disk, reads the new commits, and writes them as one level-0 file in the working folder. Syncing first means the bucket never holds a commit that a power loss could take from the database on an honest disk.
 2. **Checkpoint**, when one is due, in the same step as a sync that reached the WAL's end.
-3. **Upload** each staged file. Every file is verified on the read that uploads it and sent with a checksum. Uploads are create-only where the store supports it, so a second writer's file is refused instead of overwritten.
+3. **Upload** each staged file, 8 MiB a turn: a larger file is sent over several turns, with syncs and checkpoints in between, and appears on the replica only when it is whole. Every file is verified on the read that uploads it and sent with a checksum. Uploads are create-only where the store supports it, so a second writer's file is refused instead of overwritten.
 4. **Maintenance**: merges, snapshots and deletes, planned from a listing of the bucket. A restarted process reading the same listing plans the same job.
 
-A failure in one task does not stop the others, but a long unit does: while the thread copies the whole database (a first sync, a snapshot) or uploads one large file, nothing new is synced or uploaded. Each retry waits longer, up to 5 minutes, and a failure that persists becomes a named degraded state.
+A failure in one task does not stop the others, but a long unit does: while the thread copies the whole database (a first sync, a snapshot), nothing new is synced or uploaded. Each retry waits longer, up to 5 minutes, and a failure that persists becomes a named degraded state.
 
 ## Compaction, snapshots and retention
 
@@ -70,9 +70,9 @@ At start the replicator decides how to continue, from the working folder, the WA
 - The WAL no longer matches (it was deleted, restarted or rewound): take a snapshot, with the cause named.
 - The bucket holds files above anything this database can account for: stop with `other_writer`.
 
-That last case is the one place it stops by default. Another replicator writing to the same path, an empty or wrong database, and a disk put back from an older copy all look the same from here, and carrying on would make the wrong database the newest state. An operator chooses: `lsr trust-local` if the database is right, `lsr restore` if the bucket is.
+That last case is the one place it stops by default. Another replicator writing to the same path and an empty or wrong database look the same from here, and carrying on would make the wrong database the newest state. An operator chooses: `lsr trust-local` if the database is right, `lsr restore` if the bucket is.
 
-A working folder that was lost is not a stop when the database can speak for itself. The replicator compares the database with the bucket's newest state page by page. If they are equal it continues. If the database was written after the bucket's newest file and still holds at least half of its pages, it takes a snapshot on top and warns (`ahead_of_replica`). An older copy of the database whose modified time is new, as after a plain `cp`, passes the same test, and the replica's newest state then goes backwards.
+A working folder that was lost is not a stop when the database can speak for itself. The replicator compares the database with the bucket's newest state page by page. If they are equal it continues. If the database was written after the bucket's newest file and still holds at least half of its pages, it also reads the replicator's own counter (`_litestream_seq`), which each checkpoint raises and nothing lowers. A counter below the bucket's means an older copy of the database, and the start stops. Otherwise it takes a snapshot on top and warns (`ahead_of_replica`). A copy taken just after the bucket's last counter bump passes ([limitations](limitations.md)).
 
 ## What stops replication, and what blocking writes means
 

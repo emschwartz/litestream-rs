@@ -1,0 +1,15 @@
+diff --git a/crates/sidecar/src/logging.rs b/crates/sidecar/src/logging.rs
+index 514006076..8942ca6db 100644
+--- a/crates/sidecar/src/logging.rs
++++ b/crates/sidecar/src/logging.rs
+@@ -508,9 +508,7 @@ const fn app_checkpoint_message(seen: AppCheckpoint) -> &'static str {
+         AppCheckpoint::Backfilled { .. } | AppCheckpoint::Restarted => {
+             "the application checkpointed the database"
+         }
+-        AppCheckpoint::Stalled { .. } => {
+-            "the WAL grew past the application's automatic checkpoint threshold with nothing new checkpointed"
+-        }
++        AppCheckpoint::Stalled { .. } => "the application checkpointed the database",
+     }
+ }
+ 

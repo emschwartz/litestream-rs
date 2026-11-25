@@ -40,7 +40,7 @@ use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::publish::Writer;
 use crate::source::{CommittedRead, PageSource, WalSource};
-use crate::store::{ObjectStore, StoreError, WriteMode};
+use crate::store::{ObjectStore, StoreError, Upload, WriteMode};
 use crate::witness::{ByteTally, Witnessed};
 
 /// Go's default cap on the WAL bytes one file covers (`db.go:33-40`).
@@ -454,7 +454,7 @@ trait FileSink {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
-impl<S: ObjectStore> FileSink for Writer<'_, S> {
+impl<U: Upload> FileSink for Writer<U> {
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
         Writer::write(self, chunk)
     }
@@ -543,7 +543,7 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: Role>(
     match fill(&mut upload, header, plan, wal, db, pages, map_store).await {
         Ok(filled) => {
             let file = upload
-                .commit()
+                .commit(store)
                 .await
                 .map_err(|err| map_store(err.error()))?
                 .info();
