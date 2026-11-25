@@ -177,7 +177,7 @@ planted-bugs-apply:
 
 # Every fixed defect is re-planted in a scratch tree and its named tests must fail
 # (docs/planted-bugs.md). A survivor is a defect in the tests; a stale patch needs re-expressing.
-# Nightly in CI; about 20 minutes cold. `just planted-bugs --only listing-cursor` runs one entry.
+# Nightly in CI, in eight shards (`--shard K/8`). `just planted-bugs --only listing-cursor` runs one entry.
 planted-bugs *args:
     uv run scripts/planted-bugs.py {{args}}
 
