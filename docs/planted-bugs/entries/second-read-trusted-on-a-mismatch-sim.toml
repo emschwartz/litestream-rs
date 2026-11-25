@@ -1,5 +1,9 @@
 # The same plant, seen by the simulator's judge of second reads: the replica's recorder kept
-# the first read and the source gave the S3 store other bytes.
+# the first read and the source gave the S3 store other bytes. Unaided, the swarm does not find
+# it: none in 300 seeds from 1,000,001 with the default mix (the replica on MemStore, which never
+# reads a file back), and none in the same 300 with the replica on the S3 store. The swarm sends a
+# staged file whole in one tick and draws no damage between its two reads; only the named
+# scenario, which sends a slice a tick, puts it there. A listed generator gap.
 name = "second-read-trusted-on-a-mismatch-sim"
 fix = "plant"
 package = "lsr-sim"
