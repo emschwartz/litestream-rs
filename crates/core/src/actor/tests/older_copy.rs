@@ -1,6 +1,6 @@
 //! A boot over a brand-new meta directory whose database is an older copy of the replica's:
 //! the replicator's counter in it is below the replica's, so it is not the replica plus more and
-//! the boot stops (`crate::identity`, `docs/decisions/D204.md`). The ordinary histories still
+//! the boot stops (`crate::identity`, `docs/decisions/D205.md`). The ordinary histories still
 //! carry on: the database ahead of the replica, and one whose counter cannot be compared.
 
 use super::*;
@@ -112,7 +112,7 @@ fn a_database_with_a_counter_at_or_above_the_replicas_carries_on() {
 
 /// The window the rule leaves: a backup taken after the replica's last counter bump, before
 /// the commits that followed it, holds the replica's counter and older data, and carries on.
-/// This test pins that: what a copy that late costs is in `docs/decisions/D204.md`.
+/// This test pins that: what a copy that late costs is in `docs/decisions/D205.md`.
 #[test]
 fn an_older_copy_taken_after_the_last_bump_carries_on() {
     let mut rig = redeployed();

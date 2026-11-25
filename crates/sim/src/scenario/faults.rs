@@ -2187,7 +2187,7 @@ pub fn sealed_then_bump_io() -> Scenario {
 /// place of the database with no working folder, as a plain `cp` puts it on a new host. It
 /// holds most of the replica's pages and was written after the replica's newest file, but its
 /// counter is below the replica's: the boot stops instead of snapshotting the older database
-/// above the replica's newest state (`docs/decisions/D204.md`).
+/// above the replica's newest state (`docs/decisions/D205.md`).
 #[must_use]
 pub fn older_copy_on_a_new_host() -> Scenario {
     let mut s = super::older_copy_history("older_copy_on_a_new_host", 2, false);

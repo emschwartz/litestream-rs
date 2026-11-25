@@ -31,8 +31,10 @@ fn database(page_size: u32, tables: u32) -> (tempfile::TempDir, std::path::PathB
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch(&format!("PRAGMA page_size = {page_size}; PRAGMA journal_mode = DELETE;"))
-        .unwrap();
+    conn.execute_batch(&format!(
+        "PRAGMA page_size = {page_size}; PRAGMA journal_mode = DELETE;"
+    ))
+    .unwrap();
     conn.execute_batch("BEGIN").unwrap();
     for n in 0..tables {
         conn.execute_batch(&format!(
@@ -109,7 +111,10 @@ fn finds_the_counter_among_other_tables() {
     conn.execute_batch("INSERT INTO _litestream_seq VALUES (1, 9); CREATE TABLE zzz (a); CREATE INDEX i ON zzz (a);")
         .unwrap();
     let size = PageSize::new(4096).unwrap();
-    assert_eq!(read_counter(&pages_of(&path, 4096), size).unwrap().1, Some(9));
+    assert_eq!(
+        read_counter(&pages_of(&path, 4096), size).unwrap().1,
+        Some(9)
+    );
 }
 
 /// A database without the table has no counter.
@@ -146,13 +151,13 @@ fn only_a_table_with_the_exact_name_counts() {
 #[test]
 fn the_built_pages_read_back() {
     let size = PageSize::MIN;
-    let pages = vec![
-        build::schema_page(size, 2),
-        build::counter_page(size, 300),
-    ];
+    let pages = vec![build::schema_page(size, 2), build::counter_page(size, 300)];
     assert_eq!(read_counter(&pages, size), Some((2, Some(300))));
     assert_eq!(value(&build::empty_counter_page(size)), Some(0));
-    assert_eq!(value(&build::counter_page(size, 0x7fff_ffff)), Some(0x7fff_ffff));
+    assert_eq!(
+        value(&build::counter_page(size, 0x7fff_ffff)),
+        Some(0x7fff_ffff)
+    );
 }
 
 /// A page that is not a leaf holding the row (zeros, an interior page, a leaf of another row,
@@ -238,9 +243,9 @@ proptest! {
     #[test]
     fn arbitrary_pages_never_panic(bytes in proptest::collection::vec(any::<u8>(), 512)) {
         let size = PageSize::MIN;
-        let _ = value(&bytes);
+        std::hint::black_box(value(&bytes));
         let pages = vec![bytes.clone(), bytes];
-        let _ = read_counter(&pages, size);
+        std::hint::black_box(read_counter(&pages, size));
     }
 
     /// A built counter page reads back whatever it was built with.

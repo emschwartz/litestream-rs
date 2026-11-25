@@ -1,13 +1,12 @@
 //! An older copy of the database put on a new host over the replica of the newer one, through
 //! the built `lsr`: host A replicates, a file backup is taken, A commits more and replicates,
 //! A is lost, and the backup is copied to host B, which starts `lsr` on the same replica with
-//! a working folder of its own (`docs/decisions/D204.md`). The replica's newest state must not
+//! a working folder of its own (`docs/decisions/D205.md`). The replica's newest state must not
 //! go back to the backup's: the start stops and asks. The ordinary history of
 //! `ahead_of_replica.rs` (the working folder lost while the database is newer) still carries on.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use lsr_replica::{DynStore, RestoreTarget, restore};
 use lsr_store_fs::FsStore;
@@ -94,30 +93,36 @@ fn history(copy: Copy, bumped: bool) -> History {
     let b_config = config(dir.path(), &b_db, &replica, "b.yml", "1h");
 
     let app = database(&a_db);
-    write(&app, 6);
+    write(&app, 60);
     let mut daemon = replicate(&a_config);
+    // The backup is taken once the replica holds everything the application has written.
+    let mut probe = 0_u32;
+    let mut replica_holds = |daemon: &mut Daemon, want: usize, above: Option<i64>| loop {
+        probe = probe.saturating_add(1);
+        let seen = newest_state(dir.path(), &replica, &format!("probe{probe}"));
+        if rows(&seen).len() >= want && above.is_none_or(|above| counter(&seen) > above) {
+            return;
+        }
+        next_with(daemon, &["msg=uploaded", "Put("]);
+    };
     daemon.wait_for(&["msg=uploaded", "Put("]);
-    // A file backup of the database, as `sqlite3 .backup` takes it, once the replica holds it.
-    let backup = dir.path().join("backup.db");
+    replica_holds(&mut daemon, 60, None);
     if bumped {
         daemon.wait_for(&["msg=checkpoint"]);
     }
-    app.backup(rusqlite::MAIN_DB, &backup, None::<fn(rusqlite::backup::Progress)>)
-        .unwrap();
+    // A file backup of the database, as `sqlite3 .backup` takes it.
+    let backup = dir.path().join("backup.db");
+    app.backup(
+        rusqlite::MAIN_DB,
+        &backup,
+        None::<fn(rusqlite::backup::Progress)>,
+    )
+    .unwrap();
     let at_backup = counter(&Connection::open(&backup).unwrap());
     let backed_up = rows(&Connection::open(&backup).unwrap());
     // A goes on: more commits, replicated, and (when asked) a checkpoint's counter bump too.
     write(&app, 3);
-    daemon.wait_for(&["msg=uploaded", "Put("]);
-    if bumped {
-        loop {
-            next_with(&mut daemon, &["msg=uploaded", "Put("]);
-            let seen = newest_state(dir.path(), &replica, "probe");
-            if counter(&seen) > at_backup && rows(&seen).len() > backed_up.len() {
-                break;
-            }
-        }
-    }
+    replica_holds(&mut daemon, 63, bumped.then_some(at_backup));
     let lost = rows(&app);
     assert!(lost.len() > backed_up.len());
     daemon.signal("KILL");
@@ -125,10 +130,10 @@ fn history(copy: Copy, bumped: bool) -> History {
     drop(app);
 
     // A is lost. The operator copies the backup to B.
-    std::fs::copy(&backup, &b_db).unwrap();
+    // Written out rather than `fs::copy`, which on macOS keeps the source's modified time.
+    std::fs::write(&b_db, std::fs::read(&backup).unwrap()).unwrap();
     if matches!(copy, Copy::Preserving) {
         let kept = std::fs::metadata(&backup).unwrap().modified().unwrap();
-        assert!(kept < SystemTime::now());
         std::fs::File::options()
             .write(true)
             .open(&b_db)
@@ -150,7 +155,10 @@ fn start_b(history: &History, stops: bool, name: &str) -> Vec<(i64, Vec<u8>)> {
     if stops {
         daemon.wait_for(&["replicate refused"]);
     } else {
-        daemon.wait_for(&["level=WARN", "has no record of the replica's newest transaction"]);
+        daemon.wait_for(&[
+            "level=WARN",
+            "has no record of the replica's newest transaction",
+        ]);
         next_with(&mut daemon, &["msg=uploaded", "Put("]);
     }
     daemon.signal("TERM");
@@ -193,5 +201,8 @@ fn an_older_copy_with_its_modified_time_kept_stops_too() {
 fn a_backup_taken_after_the_last_counter_bump_still_carries_on() {
     let history = history(Copy::Plain, false);
     let after = start_b(&history, false, "after");
-    assert!(after.len() < history.lost.len(), "the newest state went back");
+    assert!(
+        after.len() < history.lost.len(),
+        "the newest state went back"
+    );
 }

@@ -3,7 +3,7 @@
 //! `_litestream_seq` (`id INTEGER PRIMARY KEY, seq INTEGER`) holds one row, id 1, that each
 //! replicator checkpoint adds one to (Go's `bumpLitestreamSeq` and ours alike). Along one
 //! database's history the value never goes down, so an image holding a lower value than another
-//! is an ancestor of it, which two images' pages alone cannot show (`docs/decisions/D204.md`).
+//! is an ancestor of it, which two images' pages alone cannot show (`docs/decisions/D205.md`).
 //!
 //! Reading it takes no SQLite: the root page comes from a walk of the schema table's b-tree
 //! (page 1 and its children), and the value from that root's one leaf cell. Anything the walk
@@ -13,8 +13,16 @@
 use lsr_ltx::{PageNo, PageSize};
 
 #[cfg(test)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "test fixtures do index and size arithmetic on small bounded values"
+)]
 pub(crate) mod build;
 #[cfg(test)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "test fixtures do index and size arithmetic on small bounded values"
+)]
 mod tests;
 
 /// The most pages the schema walk reads before it gives up.

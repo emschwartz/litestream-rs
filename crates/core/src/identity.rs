@@ -36,7 +36,7 @@
 //! ours raises and nothing lowers. A counter below the replica's is an ancestor, so it is
 //! [`Identity::Other`] and the boot stops. The local walk finds the counter's page before the
 //! restore, the restore keeps that page's bytes, and both are read after it
-//! (`docs/decisions/D204.md`). A counter that cannot be read on either side is no evidence.
+//! (`docs/decisions/D205.md`). A counter that cannot be read on either side is no evidence.
 
 pub(crate) mod counter;
 
@@ -189,7 +189,11 @@ pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
         (Some((_, mine)), Some(theirs)) => mine < theirs,
         (Some(_) | None, Some(_) | None) => false,
     };
-    Ok(if older { Identity::Other } else { Identity::Ahead })
+    Ok(if older {
+        Identity::Other
+    } else {
+        Identity::Ahead
+    })
 }
 
 /// What one pass over the local pages found against the replica's state.
