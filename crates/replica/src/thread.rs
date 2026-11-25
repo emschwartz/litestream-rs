@@ -215,7 +215,7 @@ pub(crate) struct Worker {
     /// The meta directory, where the takeover record is kept (`crate::meta`).
     meta: PathBuf,
     /// The meta directory's lock, held for the thread's life.
-    _meta_lock: Option<MetaLock>,
+    _meta_lock: MetaLock,
     /// Whether fail-stop has let the application run yet (`lsr_core::AppGate`).
     app_gate: AppGate,
     /// The connection that holds the application's writes.
@@ -262,6 +262,9 @@ impl Worker {
         store: Arc<dyn DynStore>,
         config: Config,
         runtime: Runtime,
+        events: Option<Box<dyn EventSink>>,
+        meta_lock: MetaLock,
+        takeover: Result<Option<TakeoverRecord>, TakeoverUnusable>,
     ) -> Self {
         let mut actor = Actor::new(config.actor());
         actor.set_app_autocheckpoint(config.app_autocheckpoint);
@@ -281,7 +284,7 @@ impl Worker {
         );
         // Until the first judgement the boot is pending, which holds writes but under `report`.
         let blocked = blocks_writes(config.if_replication_stops, lsr_core::Gate::Pending);
-        Self {
+        let mut worker = Self {
             shared,
             sqlite: Some(sqlite),
             database: database.to_owned(),
@@ -295,7 +298,7 @@ impl Worker {
             next_poll: later(now, config.poll_interval.get()),
             config,
             runtime,
-            sink: None,
+            sink: events,
             rebuilt: None,
             stopped: None,
             stop: None,
@@ -303,7 +306,7 @@ impl Worker {
             seen: Seen::default(),
             scheduled,
             meta: meta.to_owned(),
-            _meta_lock: None,
+            _meta_lock: meta_lock,
             last_reading: None,
             app_gate: AppGate::default(),
             blocked,
@@ -311,24 +314,16 @@ impl Worker {
             why: WhyBlocked::Booting,
             reported: Writes::Allowed,
             gate_retry: None,
-        }
-    }
-
-    /// The meta directory's lock to hold, and the takeover record an earlier run, a
-    /// `lsr trust-local` or a restore left there, which the engine judges at its boot. One that
-    /// cannot be used is reported and ignored, as if there were none.
-    pub(crate) fn with_meta(
-        mut self,
-        lock: MetaLock,
-        takeover: Result<Option<TakeoverRecord>, TakeoverUnusable>,
-    ) -> Self {
-        self._meta_lock = Some(lock);
+        };
+        // The takeover record an earlier run, a `lsr trust-local` or a restore left in the meta
+        // directory, which the engine judges at its boot. One that cannot be used is reported
+        // and ignored, as if there were none.
         match takeover {
-            Ok(Some(takeover)) => self.actor.remember_takeover(takeover),
+            Ok(Some(takeover)) => worker.actor.remember_takeover(takeover),
             Ok(None) => {}
-            Err(unusable) => self.emit(&Event::TakeoverRecordUnusable(unusable)),
+            Err(unusable) => worker.emit(&Event::TakeoverRecordUnusable(unusable)),
         }
-        self
+        worker
     }
 
     /// Writes the takeover the engine asked for before it deletes staged files, and hands
@@ -349,12 +344,6 @@ impl Worker {
             Ok(()) => self.actor.remember_takeover(record),
             Err(err) => self.emit(&Event::TakeoverNotRecorded { kind: err.kind() }),
         }
-    }
-
-    /// The sink events go to from the first turn, before any [`crate::Replicator::set_events`].
-    pub(crate) fn with_sink(mut self, sink: Option<Box<dyn EventSink>>) -> Self {
-        self.sink = sink;
-        self
     }
 
     /// The thread's body. Its connections close before the outcome is published, so an application
@@ -799,20 +788,8 @@ impl Worker {
         let (wal_bytes, db_bytes) = self.sizes();
         let fail_stop = self.fail_stop();
         self.keep_gate(now);
-        let snapshot = SnapshotParts {
-            now,
-            phase: self.phase(),
-            fail_stop,
-            degraded: self.degraded(),
-            wal_bytes,
-            db_bytes,
-            left,
-        };
-        self.publish(&snapshot);
-        self.report_writes();
-    }
-
-    fn publish(&self, parts: &SnapshotParts) {
+        let phase = self.phase();
+        let degraded = self.degraded();
         let resnapshot = self.actor.pending_snapshot();
         let snapshots = self.actor.snapshots();
         let final_retention = self.actor.final_retention();
@@ -833,9 +810,9 @@ impl Worker {
         let writes = self.writes();
         self.shared.update(|state| {
             let health = &mut state.health;
-            health.reported_at = parts.now;
-            health.phase = parts.phase;
-            health.degraded = parts.degraded;
+            health.reported_at = now;
+            health.phase = phase;
+            health.degraded = degraded;
             health.synced = progress.synced;
             health.replicated = progress.replicated;
             // The engine's clock survives a restart (it dates from the oldest pending staged
@@ -844,10 +821,10 @@ impl Worker {
                 (Some(seen), Some(engine)) => Some(seen.min(engine)),
                 (seen, engine) => seen.or(engine),
             };
-            health.held_by = parts.fail_stop;
+            health.held_by = fail_stop;
             health.writes = writes;
-            health.wal_bytes = parts.wal_bytes;
-            health.db_bytes = parts.db_bytes;
+            health.wal_bytes = wal_bytes;
+            health.db_bytes = db_bytes;
             health.resnapshot = resnapshot;
             health.app_checkpoints_ran = ran;
             health.app_checkpoints = app;
@@ -862,8 +839,9 @@ impl Worker {
             health.final_retention = final_retention;
             health.final_snapshot = final_snapshot;
             health.verification = verification;
-            state.left = parts.left;
+            state.left = left;
         });
+        self.report_writes();
     }
 
     /// Fail-stop's trip and gate now (`lsr_core::failstop`), and whether the application's
@@ -1033,17 +1011,6 @@ impl Worker {
             EnginePhase::Stopped(cause) => Phase::Stopped(cause),
         }
     }
-}
-
-/// The parts of a health snapshot computed before it is written.
-struct SnapshotParts {
-    now: Timestamp,
-    phase: Phase,
-    fail_stop: FailStop,
-    degraded: [Option<Degraded>; 5],
-    wal_bytes: u64,
-    db_bytes: u64,
-    left: Unfinished,
 }
 
 /// Hands `event` to `sink`, if there is one; a panic in it is counted in `panics`, never fatal.

@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 
+use lsr_config::is_url;
 use lsr_core::{AsOfInside, RestoreTarget};
 use lsr_ltx::{Timestamp, Txid};
 use lsr_replica::local::IntegrityCheck;
@@ -243,13 +244,6 @@ pub(super) const HELP: &[FlagRow] = &[
     },
 ];
 
-/// Go's `litestream.IsURL`: `^\w+://`.
-pub(super) fn is_url(text: &str) -> bool {
-    text.split_once("://").is_some_and(|(scheme, _)| {
-        !scheme.is_empty() && scheme.chars().all(|c| c.is_alphanumeric() || c == '_')
-    })
-}
-
 /// What a `restore` command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Restore {
@@ -437,6 +431,8 @@ mod tests {
         }
     }
 
+    /// Go's `litestream.IsURL` is `^\w+://` (`replica_url.go`, used by `restore.go:100`),
+    /// and RE2's `\w` is ASCII only: a Unicode letter in the scheme makes a database path.
     #[test]
     fn urls_are_what_go_calls_urls() {
         for (text, url) in [
@@ -446,8 +442,17 @@ mod tests {
             ("/data/db", false),
             ("://x", false),
             ("a-b://x", false),
+            ("é://x", false),
+            ("s3é://x", false),
         ] {
-            assert_eq!(is_url(text), url, "{text:?}");
+            let args = [text.to_owned()];
+            let Ok(Restore::Run(run)) = parse(&args) else {
+                panic!("{text:?} does not parse");
+            };
+            assert_eq!(matches!(run.from, RestoreFrom::Url(_)), url, "{text:?}");
+            if !url {
+                assert!(matches!(run.from, RestoreFrom::Database { .. }), "{text:?}");
+            }
         }
     }
 }
