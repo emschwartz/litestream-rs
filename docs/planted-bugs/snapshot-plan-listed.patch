@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/sync.rs b/crates/core/src/sync.rs
+index e65bff4bf..0b6ebe062 100644
+--- a/crates/core/src/sync.rs
++++ b/crates/core/src/sync.rs
+@@ -552,7 +552,7 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
+     let mut buf = vec![0_u8; header.page_size().bytes()];
+     let mut last = None;
+     let mut bytes = ByteTally::new();
+-    let mut listed = plan.iter().peekable();
++    let mut listed = plan.iter().collect::<Vec<_>>().into_iter().peekable();
+     while let Some(page) = listed.next() {
+         match page {
+             PageFrom::Wal(frame) => wal

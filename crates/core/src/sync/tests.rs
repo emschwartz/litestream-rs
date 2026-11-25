@@ -14,6 +14,18 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 
 use super::*;
+
+/// The pages of a plan, listed.
+fn plan_pages(
+    map: &PageMap,
+    prev_commit: Option<u32>,
+    commit: NonZeroU32,
+    page_size: PageSize,
+) -> Vec<PageFrom> {
+    Plan::new(map, prev_commit, commit, page_size)
+        .iter()
+        .collect()
+}
 use crate::conformance::block_on;
 use crate::fault::role::{Role, Staging};
 use crate::mem::MemStore;
@@ -873,6 +885,55 @@ impl FileSink for Chunks {
     }
 }
 
+/// A file larger than the flush size leaves in writes of that size: every write but the last
+/// is at least `FLUSH_AT`, and not more than one page past it.
+#[test]
+fn a_large_file_reaches_the_upload_in_writes_of_the_flush_size() {
+    let pages = 2_000_u32;
+    let wal = FakeWal::new(PS, Salts { salt1: 1, salt2: 2 });
+    commit(&wal, &[1], 1);
+    let mut db = FakeDb::new(PS);
+    let mut state = 0x9e37_79b9_u32;
+    for n in 1..=pages {
+        let page: Vec<u8> = (0..PS.bytes())
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        db.write_page(pg(n), &page);
+    }
+    db.set_page_count(pages);
+    let map = PageMap::new(PS);
+    let plan = Plan::new(&map, None, nz(pages), PS);
+    let origin = WalOrigin::new(32, 0, 1, 2).unwrap();
+    let header = Header::new(header_fields(Txid::MIN, nz(pages), PS, origin, ts(1), 0)).unwrap();
+    let mut chunks = Chunks::default();
+    let mut wal = reader(wal.file_bytes());
+    block_on(fill(
+        &mut chunks,
+        header,
+        &plan,
+        &mut wal,
+        &mut db,
+        &mut PageChecksumTable::new(),
+        Staging::<MemStore>::fault,
+    ))
+    .unwrap();
+    let (last, rest) = chunks.0.split_last().unwrap();
+    assert!(rest.len() >= 3, "{} writes", chunks.0.len());
+    assert!(!last.is_empty());
+    for chunk in rest {
+        assert!(
+            (256 * 1024..256 * 1024 + 4 * PS.bytes()).contains(&chunk.len()),
+            "a write of {} bytes",
+            chunk.len()
+        );
+    }
+}
+
 /// The encoder's output is held until a mebibyte is ready, so a file smaller
 /// than that reaches the store in one write, not one per page.
 #[test]
@@ -884,7 +945,8 @@ fn a_small_file_reaches_the_upload_in_one_write() {
         db.write_page(pg(n), &[db_fill(n); 512]);
     }
     db.set_page_count(4);
-    let plan: Vec<PageFrom> = (1..=4).map(|n| PageFrom::Db(pg(n))).collect();
+    let map = PageMap::new(PS);
+    let plan = Plan::new(&map, None, nz(4), PS);
     let origin = WalOrigin::new(32, 0, 1, 2).unwrap();
     let header = Header::new(header_fields(Txid::MIN, nz(4), PS, origin, ts(1), 0)).unwrap();
     let mut chunks = Chunks::default();
@@ -949,6 +1011,11 @@ proptest! {
                 .collect(),
         };
         prop_assert_eq!(numbers.iter().copied().collect::<BTreeSet<_>>(), wanted);
+        // The size hint for the output buffer: never short of the pages, and no more than
+        // those plus the frames that a grown page also names.
+        let hint = Plan::new(&map, prev, commit, PS).at_most();
+        prop_assert!(hint >= numbers.len());
+        prop_assert!(hint <= numbers.len().saturating_add(in_map.len()));
         for page in &plan {
             let held = in_map.contains(&page.pgno().get());
             prop_assert_eq!(matches!(page, PageFrom::Wal(_)), held);

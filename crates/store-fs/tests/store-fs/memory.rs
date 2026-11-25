@@ -12,6 +12,8 @@
 //! `compact`, what a file replica's levels above 1 get), and the engine's level-1
 //! compaction reads the staged level-0 files in a 128 KiB window (`compact_staged`).
 //!
+//! A compaction also holds one output buffer for the file, not one per flush: the count of
+//! 256 KiB-and-over allocations is pinned (`a_compaction_allocates_few_large_blocks`).
 //! The upload of a staged file is measured too. It goes to the replica a slice a step
 //! (`docs/decisions/D217.md`), and between two slices the engine keeps the decoder that
 //! verifies the file and the upload it has open. Neither grows with the file, so a file four
@@ -48,7 +50,7 @@ use lsr_wal::{Salts, WalReader};
 )]
 mod heap;
 
-use heap::{Counting, peak_of};
+use heap::{Counting, large_allocs_of, peak_of};
 
 #[global_allocator]
 static HEAP: Counting = Counting;
@@ -61,12 +63,13 @@ const PAGES: u32 = 300;
 
 /// What one read of a replica's input asks for, and of a staged one, restated so a change
 /// to either shows here.
-const CHUNK: usize = MIB;
+/// A replica's input gets its share of the 16 MiB budget: 512 KiB at `MAX_INPUTS`.
+const REPLICA_WINDOW: usize = 16 * MIB / MAX_INPUTS;
 const STAGED_WINDOW: usize = 128 * KIB;
 
 /// A page's size, and the encoder's output buffer that compaction flushes at.
 const PAGE: usize = 4 * KIB;
-const FLUSH: usize = MIB;
+const FLUSH: usize = 256 * KIB;
 
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
@@ -119,8 +122,8 @@ fn staged_inputs() -> (tempfile::TempDir, FsStore, CompactionInputs) {
         let key = FileKey::new(Level::ZERO, TxidRange::new(txid(n), txid(n)).unwrap());
         let bytes = level_zero_file(n, &rng);
         assert!(
-            bytes.len() > CHUNK,
-            "an input holds more than one read chunk"
+            bytes.len() > MIB,
+            "an input holds more than one read window"
         );
         block_on(async {
             let mut upload = source
@@ -141,17 +144,16 @@ fn staged_inputs() -> (tempfile::TempDir, FsStore, CompactionInputs) {
 /// Asserts `held` is at most the output's flush buffer and slack plus `window` and a page
 /// for each of the `MAX_INPUTS` inputs.
 fn assert_holds_a_window_per_input(held: usize, window: usize) {
-    let bound = MAX_INPUTS * (window + PAGE) + FLUSH + 2 * MIB;
+    let bound = MAX_INPUTS * (window + PAGE) + FLUSH + MIB;
     assert!(
         held <= bound,
-        "compaction held {held} bytes, over the bound of {bound} ({MAX_INPUTS} inputs x ({window} + {PAGE}) + {FLUSH} + 2 MiB)"
+        "compaction held {held} bytes, over the bound of {bound} ({MAX_INPUTS} inputs x ({window} + {PAGE}) + {FLUSH} + 1 MiB)"
     );
 }
 
-/// A compaction reading its inputs as a replica's holds a chunk per input, not the doubled
-/// capacity a read grown from empty ends with.
+/// A compaction reading its inputs as a replica's holds its share of the budget per input.
 #[test]
-fn a_compaction_holds_a_chunk_per_replica_input() {
+fn a_compaction_holds_its_share_of_the_budget_per_replica_input() {
     let (_from, source, inputs) = staged_inputs();
     let to = tempfile::tempdir().unwrap();
     let dest = FsStore::new(to.path());
@@ -160,7 +162,7 @@ fn a_compaction_holds_a_chunk_per_replica_input() {
         peak_of(|| block_on(compact(&source, &dest, &inputs, Level::new(1).unwrap())));
 
     assert_eq!(done.unwrap().pages(), PAGES);
-    assert_holds_a_window_per_input(peak.extra, CHUNK);
+    assert_holds_a_window_per_input(peak.extra, REPLICA_WINDOW);
 }
 
 /// The engine's level-1 compaction reads the staged files in the staging window.
@@ -181,6 +183,35 @@ fn a_level_one_compaction_holds_a_staging_window_per_input() {
 
     assert_eq!(done.unwrap().pages(), PAGES);
     assert_holds_a_window_per_input(peak.extra, STAGED_WINDOW);
+}
+
+/// Blocks of 256 KiB or more a level-1 compaction of `MAX_INPUTS` staged files may allocate: the
+/// output buffer, once (the output is the 300 pages every input holds, about five flushes).
+/// With a fresh buffer at every flush, each growing from empty by doubling, it is one block per
+/// flush.
+const LARGE_BLOCKS: usize = 2;
+
+#[test]
+fn a_compaction_allocates_few_large_blocks() {
+    let (_from, source, inputs) = staged_inputs();
+    let to = tempfile::tempdir().unwrap();
+    let dest = FsStore::new(to.path());
+
+    let (done, large) = large_allocs_of(|| {
+        block_on(compact_staged(
+            &source,
+            &dest,
+            &inputs,
+            Level::new(1).unwrap(),
+        ))
+    });
+
+    assert_eq!(done.unwrap().pages(), PAGES);
+    eprintln!("compaction: {large} blocks of 256 KiB or more");
+    assert!(
+        large <= LARGE_BLOCKS,
+        "{large} large blocks, over {LARGE_BLOCKS}"
+    );
 }
 
 /// A database whose pages are computed when read, and do not compress: the staged file is as

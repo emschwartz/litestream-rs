@@ -9,6 +9,7 @@
 //! and a tracked snapshot whose post-apply checksum is not its pages'. The
 //! index is kept in memory as varint bytes, at most 30 bytes a page.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 
 use lz4_flex::block::{compress_into, get_maximum_output_size};
@@ -21,6 +22,12 @@ use crate::order::PageSequence;
 use crate::trailer::check_post_apply;
 use crate::{DbChecksum, EncodeError, HEADER_LEN, Header, PageChecksum, PageNo, Trailer};
 
+/// The most one page adds to the index: three varints of at most ten bytes.
+const MAX_ENTRY: usize = 30;
+
+/// How much index one allocation holds: the index grows by whole chunks, never by copying.
+const INDEX_CHUNK: usize = 16 * 1024;
+
 /// Writes one LTX file to `W`.
 #[derive(Debug)]
 pub struct Encoder<W> {
@@ -29,7 +36,11 @@ pub struct Encoder<W> {
     seq: PageSequence,
     file: Crc64,
     offset: u64,
-    index: Vec<u8>,
+    index: VecDeque<Vec<u8>>,
+    /// Whether the end-of-pages marker is written: no page may follow it.
+    marker: bool,
+    /// Bytes of index written so far.
+    index_written: u64,
     /// The compressor's output for one page, reused so a page costs no allocation.
     block: Vec<u8>,
     /// The database checksum so far, for tracked snapshots only.
@@ -62,7 +73,9 @@ impl<W: Write> Encoder<W> {
             seq: PageSequence::new(&header),
             file,
             offset: u64_from(HEADER_LEN),
-            index: Vec::new(),
+            index: VecDeque::new(),
+            marker: false,
+            index_written: 0,
             block: vec![0; get_maximum_output_size(header.page_size().bytes())],
             db: (header.tracked() && header.is_snapshot()).then_some(DbChecksum::EMPTY),
             failed: false,
@@ -76,7 +89,7 @@ impl<W: Write> Encoder<W> {
     /// [`EncodeError::PageLen`] or [`EncodeError::Order`] reject the page and
     /// leave the encoder usable; [`EncodeError::Io`] poisons it.
     pub fn write_page(&mut self, pgno: PageNo, data: &[u8]) -> Result<(), EncodeError> {
-        if self.failed {
+        if self.failed || self.marker {
             return Err(EncodeError::Poisoned);
         }
         let expected = self.header.page_size().bytes();
@@ -110,9 +123,18 @@ impl<W: Write> Encoder<W> {
         self.db = self.db.map(|db| db.toggle(PageChecksum::of(pgno, data)));
         let size = u64_from(head.len()).saturating_add(u64_from(packed.len()));
         self.block = block;
-        put_uvarint(&mut self.index, u64::from(pgno.get()));
-        put_uvarint(&mut self.index, self.offset);
-        put_uvarint(&mut self.index, size);
+        let room = self
+            .index
+            .back()
+            .is_some_and(|chunk| chunk.capacity().saturating_sub(chunk.len()) >= MAX_ENTRY);
+        if !room {
+            self.index.push_back(Vec::with_capacity(INDEX_CHUNK));
+        }
+        if let Some(chunk) = self.index.back_mut() {
+            put_uvarint(chunk, u64::from(pgno.get()));
+            put_uvarint(chunk, self.offset);
+            put_uvarint(chunk, size);
+        }
         self.offset = self.offset.saturating_add(size);
         Ok(())
     }
@@ -139,10 +161,12 @@ impl<W: Write> Encoder<W> {
         {
             return Err(EncodeError::PostApplyMismatch { computed, given });
         }
-        let mut tail = vec![0_u8; PAGE_HEADER_LEN];
-        tail.append(&mut self.index);
+        // The index goes out a chunk at a time, each freed once written: copying it into one
+        // buffer first held it two or three times over at the end of a large snapshot.
+        while self.write_index_chunk()? {}
+        let mut tail = Vec::with_capacity(32);
         put_uvarint(&mut tail, 0);
-        let index_len = u64_from(tail.len().saturating_sub(PAGE_HEADER_LEN));
+        let index_len = self.index_written.saturating_add(u64_from(tail.len()));
         tail.extend_from_slice(&index_len.to_be_bytes());
         tail.extend_from_slice(&post_apply.map_or(0, DbChecksum::get).to_be_bytes());
         self.file.update(&tail);
@@ -151,6 +175,37 @@ impl<W: Write> Encoder<W> {
         self.writer.write_all(&tail)?;
         self.writer.flush()?;
         Ok((self.writer, trailer))
+    }
+
+    /// Writes the end-of-pages marker the first time, then the next piece of the page index,
+    /// and says whether more of the index is left. A caller that buffers in memory calls it
+    /// after the last page until it returns `false`, handing the bytes onward between calls, so
+    /// the index (about nine bytes a page) is never held a second time in the output buffer;
+    /// [`Encoder::finish`] writes whatever is left. No page may be written once it has been
+    /// called.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::Order`] for an incomplete snapshot (nothing is written),
+    /// [`EncodeError::Io`] or [`EncodeError::Poisoned`] for a failed write.
+    pub fn write_index_chunk(&mut self) -> Result<bool, EncodeError> {
+        if self.failed {
+            return Err(EncodeError::Poisoned);
+        }
+        self.seq.finish()?;
+        if !self.marker {
+            let marker = [0_u8; PAGE_HEADER_LEN];
+            self.file.update(&marker);
+            self.write(&marker)?;
+            self.marker = true;
+        }
+        let Some(chunk) = self.index.pop_front() else {
+            return Ok(false);
+        };
+        self.file.update(&chunk);
+        self.write(&chunk)?;
+        self.index_written = self.index_written.saturating_add(u64_from(chunk.len()));
+        Ok(!self.index.is_empty())
     }
 
     /// The writer, so a caller that buffers in memory can hand finished bytes

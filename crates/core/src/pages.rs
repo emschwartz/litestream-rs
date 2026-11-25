@@ -77,13 +77,33 @@ pub struct Mismatch {
 }
 
 /// Page number to the checksum of the bytes the database file should hold.
+///
+/// One 8-byte slot per page number, indexed by it, so a database costs 8 bytes a page (32 MB
+/// at 16 GiB of 4 KiB pages), where a map of them cost about 20. A checksum always has bit 63
+/// set (the LTX flag), so a slot that is zero holds no page. The vector reaches the highest
+/// page recorded, which is a page of the database (every caller passes a page at or below the
+/// database's size). The slots live in chunks of 4,096, added as pages arrive, so growing the
+/// table never copies it (a vector that grew held the old and the new copy at once: 17 bytes a
+/// page at the peak, not 8) and the slack is under one chunk.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageChecksumTable {
     page_size: Option<PageSize>,
-    pages: BTreeMap<PageNo, PageChecksum>,
-    /// Pages found different from `pages`, with the digest found: reported,
+    chunks: Vec<Vec<u64>>,
+    held: usize,
+    /// One past the highest slot ever filled and not cut: nothing at or above it is held.
+    top: usize,
+    /// Pages found different from the table, with the digest found: reported,
     /// and accepted as the file's bytes until a frame records the page again.
     mismatched: BTreeMap<PageNo, PageChecksum>,
+}
+
+/// Slots in a chunk of the table.
+const CHUNK: usize = 4096;
+
+/// The chunk and the place in it of a page's slot.
+fn slot(pgno: PageNo) -> (usize, usize) {
+    let at = usize::try_from(pgno.get().saturating_sub(1)).unwrap_or(usize::MAX);
+    (at / CHUNK, at % CHUNK)
 }
 
 impl PageChecksumTable {
@@ -92,7 +112,9 @@ impl PageChecksumTable {
     pub const fn new() -> Self {
         Self {
             page_size: None,
-            pages: BTreeMap::new(),
+            chunks: Vec::new(),
+            held: 0,
+            top: 0,
             mismatched: BTreeMap::new(),
         }
     }
@@ -105,9 +127,29 @@ impl PageChecksumTable {
         }
     }
 
+    /// Puts `digest` in the slot of `pgno`, making room for it.
+    fn put(&mut self, pgno: PageNo, digest: PageChecksum) {
+        let (chunk, place) = slot(pgno);
+        while self.chunks.len() <= chunk {
+            self.chunks.push(vec![0; CHUNK]);
+        }
+        if let Some(held) = self.chunks.get_mut(chunk).and_then(|c| c.get_mut(place)) {
+            if *held == 0 {
+                self.held = self.held.saturating_add(1);
+            }
+            *held = digest.get();
+            self.top = self.top.max(
+                chunk
+                    .saturating_mul(CHUNK)
+                    .saturating_add(place)
+                    .saturating_add(1),
+            );
+        }
+    }
+
     /// Records a page from a verified WAL frame; a mismatch on it is over.
     pub fn record(&mut self, pgno: PageNo, digest: PageChecksum) {
-        self.pages.insert(pgno, digest);
+        self.put(pgno, digest);
         self.mismatched.remove(&pgno);
     }
 
@@ -119,8 +161,8 @@ impl PageChecksumTable {
     /// [`Mismatch`] when the bytes differ from both.
     pub fn check(&mut self, pgno: PageNo, page: &[u8]) -> Result<(), Mismatch> {
         let found = PageChecksum::of(pgno, page);
-        let Some(recorded) = self.pages.get(&pgno).copied() else {
-            self.pages.insert(pgno, found);
+        let Some(recorded) = self.get(pgno) else {
+            self.put(pgno, found);
             return Ok(());
         };
         if recorded == found || self.mismatched.get(&pgno) == Some(&found) {
@@ -136,21 +178,41 @@ impl PageChecksumTable {
 
     /// Forgets every page above `commit`, the database's size in pages.
     pub fn truncate(&mut self, commit: NonZeroU32) {
-        self.pages.retain(|pgno, _| pgno.get() <= commit.get());
+        let keep = usize::try_from(commit.get()).unwrap_or(usize::MAX);
+        // Called after every staged file, usually with nothing above `commit`: no scan then.
+        if keep < self.top {
+            let (whole, part) = (keep / CHUNK, keep % CHUNK);
+            let mut dropped = 0_usize;
+            for chunk in self.chunks.iter().skip(whole.saturating_add(1)) {
+                dropped = dropped.saturating_add(chunk.iter().filter(|slot| **slot != 0).count());
+            }
+            self.chunks.truncate(whole.saturating_add(1));
+            if let Some(last) = self.chunks.get_mut(whole) {
+                for slot in last.iter_mut().skip(part).filter(|slot| **slot != 0) {
+                    *slot = 0;
+                    dropped = dropped.saturating_add(1);
+                }
+            }
+            self.held = self.held.saturating_sub(dropped);
+            self.top = keep;
+        }
         self.mismatched.retain(|pgno, _| pgno.get() <= commit.get());
     }
 
     /// Forgets every page.
     pub fn clear(&mut self) {
-        self.pages.clear();
+        self.chunks = Vec::new();
+        self.held = 0;
+        self.top = 0;
         self.mismatched.clear();
     }
 
     /// An operator accepts the database file as it is: every mismatched page's
     /// bytes become the ones the table holds.
     pub fn accept(&mut self) {
-        let accepted = std::mem::take(&mut self.mismatched);
-        self.pages.extend(accepted);
+        for (pgno, digest) in std::mem::take(&mut self.mismatched) {
+            self.put(pgno, digest);
+        }
     }
 
     /// The lowest page still reported as mismatched.
@@ -162,19 +224,23 @@ impl PageChecksumTable {
     /// The digest the table holds for `pgno`.
     #[must_use]
     pub fn get(&self, pgno: PageNo) -> Option<PageChecksum> {
-        self.pages.get(&pgno).copied()
+        let (chunk, place) = slot(pgno);
+        self.chunks
+            .get(chunk)
+            .and_then(|chunk| chunk.get(place))
+            .and_then(|raw| PageChecksum::from_raw(*raw))
     }
 
     /// How many pages are recorded.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.pages.len()
+    pub const fn len(&self) -> usize {
+        self.held
     }
 
     /// Whether no page is recorded.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.pages.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        self.held == 0
     }
 }
 

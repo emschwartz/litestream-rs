@@ -1,0 +1,16 @@
+diff --git a/crates/core/src/sync.rs b/crates/core/src/sync.rs
+index 91fc20f02..fa5271dff 100644
+--- a/crates/core/src/sync.rs
++++ b/crates/core/src/sync.rs
+@@ -586,8 +586,9 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
+         }
+     }
+     // The index leaves in pieces, as the pages did, so it is never copied whole into the buffer.
+-    while encoder
+-        .write_index_chunk()
++    while false
++        && encoder
++            .write_index_chunk()
+         .map_err(|_err| BugSite::Encode.hit())?
+     {
+         if encoder.writer_mut().len() >= FLUSH_AT {
