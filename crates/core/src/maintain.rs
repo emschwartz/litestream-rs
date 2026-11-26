@@ -1038,10 +1038,10 @@ pub enum Outcome {
         /// How many keys the call named.
         count: usize,
     },
-    /// An input is gone from the replica, or the output's key already holds
-    /// an object the listing did not show: list again and plan again.
+    /// An input is gone from the replica, or the output's key is taken by an
+    /// object the listing did not show: list again and plan again.
     Replan {
-        /// The missing input, or the output found already there.
+        /// The missing input, or the taken output key.
         key: FileKey,
     },
     /// The job failed; nothing was retried here.
@@ -1061,32 +1061,25 @@ pub enum Outcome {
 /// again from a fresh listing. The bucket says so: the output is a create-only write
 /// ([`WriteMode::New`]), so a taken key refuses the commit and costs no request to
 /// find out (`docs/decisions/D239.md`). Go writes over whatever the key holds. On a store
-/// that said it cannot make create-only writes ([`WriteMode::Replace`]) the key is read first
-/// and the output replaces.
+/// that said it cannot make create-only writes ([`WriteMode::Replace`]) the output replaces.
 ///
 /// When the store rejected the output's commit, the output key is deleted
 /// before returning: a listing would otherwise show it as coverage. That
 /// delete may only take the object this attempt wrote, never one the key held
-/// before (an earlier run's output that retention may already count as
-/// cover), see [`leaves_bad_output`].
+/// before, see [`leaves_bad_output`]. The key is not read first on any store: Go
+/// writes its compaction output with no read either (`compactor.go:104`,
+/// `Compactor::Compact`), and the job was planned from a listing that shows every
+/// file this engine wrote (a store whose listings lag is unsupported,
+/// `docs/decisions/D173.md`, `docs/decisions/D246.md`).
 pub(crate) async fn run_compaction<L: Role, R: Role>(
     inputs: &CompactionInputs,
     level: Level,
     local: &L,
     replica: &R,
     sent: &Sent,
-    guard: WriteMode,
+    mode: WriteMode,
 ) -> Outcome {
     let output = FileKey::new(level, inputs.range());
-    match guard {
-        WriteMode::New => {}
-        WriteMode::Replace => match crate::store::exists(replica, &output).await {
-            Ok(true) => return Outcome::Replan { key: output },
-            Ok(false) => {}
-            Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
-        },
-    }
-    let mode = guard;
     let result = if inputs
         .files()
         .iter()
@@ -1160,10 +1153,16 @@ const _: () = assert!(matches!(TRAILER_LEN.checked_add(1), Some(17)));
 ///
 /// What the replica holds under a key is not read back when this process put it there
 /// itself: `sent` holds the token the put was checked against, on the read that produced
-/// the bytes, and the store acknowledged the put (`docs/decisions/D236.md`). Go reads its
-/// local copies and compares nothing. A file with no token (a process before this one
-/// staged and sent it, or the put's answer was lost) costs one read of 17 bytes from the
-/// replica, where an object that is gone is [`CompactError::InputVanished`].
+/// the bytes, and the store acknowledged the put (`docs/decisions/D236.md`). A file with no
+/// token (a process before this one staged and sent it, or the put's answer was lost) costs
+/// one read of 17 bytes from the replica, where an object that is gone is
+/// [`CompactError::InputVanished`].
+///
+/// That replica read is the one request here Go does not make. Go merges any
+/// local level-0 file that opens (`compactor.go:139-147`, `LocalFileOpener`),
+/// with no check that it is the object the replica holds, so a stale staged copy
+/// becomes the level-1 file restores read while the replica's level 0 says
+/// otherwise. One 17-byte read per input is what tells the two apart.
 async fn local_is_replica<L: Role, R: Role>(
     local: &L,
     replica: &R,

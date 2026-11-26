@@ -1316,11 +1316,11 @@ notes = "Before: one HEAD per level-0 file deleted, as many as level-0 PUTs once
 table = "Maintenance and retention"
 id = "MAINT-19"
 circumstance = "A compaction's output key already holds an object the listing did not show: an earlier attempt whose answer was lost, another writer's output for the same range"
-response = "continue. The output is a create-only write, so the bucket refuses the commit: what the key holds stands, whether or not it is what this run would have written, nothing is deleted, and the next tick lists the whole replica and plans again. No request asks about the key first. A part the store rejects during such a write deletes nothing under the key. On a store that said it cannot make create-only writes (UP-18) the key is read first and the output replaces (`docs/decisions/D239.md`)"
+response = "continue. The output is a create-only write, so the bucket refuses the commit: what the key holds stands, whether or not it is what this run would have written, nothing is deleted, and the next tick lists the whole replica and plans again. No request asks about the key first. A part the store rejects during such a write deletes nothing under the key. On a store that said it cannot make create-only writes (UP-18) the output replaces (`docs/decisions/D239.md`)"
 signal = "Event `Replan`"
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "core::`running_a_job_twice_leaves_one_file_at_the_key`, core::`an_output_key_that_holds_another_file_is_not_written_over`, core::`a_rejected_compaction_never_deletes_an_output_that_was_already_there`, core::`a_rejected_part_of_a_create_only_output_deletes_nothing_under_its_key`, core::`a_compaction_asks_nothing_about_its_output_key`; plant::`compaction-output-not-create-only`, plant::`compaction-asks-before-a-create-only-write`, plant::`taken-output-key-fails-the-compaction`, plant::`rejected-part-deletes-an-earlier-output`, plant::`compaction-writes-over-its-output`"
+detected_by = "core::`running_a_job_twice_leaves_one_file_at_the_key`, core::`an_output_key_that_holds_another_file_is_not_written_over`, core::`a_rejected_compaction_never_deletes_an_output_that_was_already_there`, core::`a_rejected_part_of_a_create_only_output_deletes_nothing_under_its_key`, core::`a_compaction_asks_nothing_about_its_output_key`; plant::`compaction-output-not-create-only`, plant::`taken-output-key-fails-the-compaction`, plant::`rejected-part-deletes-an-earlier-output`"
 notes = "Go writes over the key. Before: one GET of the key per compaction, then a replace"
 [[row]]
 table = "Maintenance and retention"

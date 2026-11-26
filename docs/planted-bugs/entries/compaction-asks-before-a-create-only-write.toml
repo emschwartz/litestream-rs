@@ -1,8 +1,0 @@
-# A compaction reads its output key before a create-only write, which the bucket's refusal
-# already answers: one GET per compaction.
-name = "compaction-asks-before-a-create-only-write"
-fix = "claude/steady-requests"
-package = "lsr-core"
-tests = [
-    "actor::tests::steady::a_compaction_asks_nothing_about_its_output_key",
-]

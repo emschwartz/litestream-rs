@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
     BatchKind, Clock, CreatedAt, FileInfo, FileKey, Flight, Level, ListAt, Listing, ObjectStore,
-    PageLimit, ReadAt, ReadLen, Reread, Rest, StoreError, Upload,
+    PageLimit, ReadLen, ReadStream, Reread, Rest, StoreError, Upload,
 };
 pub use lsr_core::{BoxFuture, DynUpload};
 use lsr_ltx::{Timestamp, TxidRange};
@@ -44,6 +44,9 @@ pub trait DynStore: Send + Sync {
         offset: u64,
         len: ReadLen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>>;
+
+    /// [`ObjectStore::read_stream`].
+    fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_>;
 
     /// [`ObjectStore::created_at`].
     fn created_at_boxed<'a>(
@@ -75,12 +78,6 @@ pub trait DynStore: Send + Sync {
 
     /// [`ObjectStore::batch_width`].
     fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize;
-
-    /// [`ObjectStore::read_many`].
-    fn read_many_boxed<'a>(
-        &'a self,
-        reads: &'a [ReadAt],
-    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>>;
 
     /// [`ObjectStore::created_at_many`].
     fn created_at_many_boxed<'a>(
@@ -117,6 +114,10 @@ where
         len: ReadLen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
         Box::pin(self.read(key, offset, len))
+    }
+
+    fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.read_stream(key, offset)
     }
 
     fn created_at_boxed<'a>(
@@ -160,13 +161,6 @@ where
         self.batch_width(kind)
     }
 
-    fn read_many_boxed<'a>(
-        &'a self,
-        reads: &'a [ReadAt],
-    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>> {
-        Box::pin(self.read_many(reads))
-    }
-
     fn list_many_boxed<'a>(
         &'a self,
         pages: &'a [ListAt],
@@ -188,7 +182,13 @@ where
 #[derive(Clone, Copy)]
 pub(crate) struct Erased<P>(pub(crate) P);
 
-impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Erased<P> {
+// Bounded by `P::Target`, not by a named `dyn DynStore + 'a`: a borrow of the target then
+// lives as long as `P` does, which is what a stream that borrows the store needs.
+impl<P> ObjectStore for Erased<P>
+where
+    P: Deref + Send + Sync,
+    P::Target: DynStore,
+{
     type Upload = Box<dyn DynUpload>;
 
     async fn list(
@@ -202,6 +202,10 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.0.read_boxed(key, offset, len).await
+    }
+
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.0.read_stream_dyn(key, offset)
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -238,10 +242,6 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
         self.0.batch_width_dyn(kind)
     }
 
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        self.0.read_many_boxed(reads).await
-    }
-
     async fn list_many(
         &self,
         pages: &[ListAt],
@@ -266,6 +266,11 @@ pub(crate) struct OpMeter {
 impl OpMeter {
     fn note<T>(&self, result: &Result<T, StoreError>, began: Timestamp, ended: Timestamp) {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        self.note_more(result, began, ended);
+    }
+
+    /// [`Self::note`] for a later part of a call already counted: its time and its error.
+    fn note_more<T>(&self, result: &Result<T, StoreError>, began: Timestamp, ended: Timestamp) {
         if result.is_err() {
             self.errors.fetch_add(1, Ordering::Relaxed);
         }
@@ -343,6 +348,24 @@ async fn metered<T>(
     let result = call.await;
     meter.note(&result, began, clock.now());
     result
+}
+
+/// A stream counted as one read call ([`Metered::read_stream`]).
+struct MeteredStream<'a> {
+    inner: Box<dyn ReadStream + 'a>,
+    meter: &'a OpMeter,
+    clock: &'a dyn Clock,
+}
+
+impl ReadStream for MeteredStream<'_> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let began = self.clock.now();
+            let result = self.inner.next(len).await;
+            self.meter.note_more(&result, began, self.clock.now());
+            result
+        })
+    }
 }
 
 /// Runs a batch `call`, counting each result as one call timed as the whole batch.
@@ -445,6 +468,17 @@ impl ObjectStore for Metered {
         metered(&*self.clock, &self.meters.read, call).await
     }
 
+    /// One call for the stream, as for the one request it is; every piece's time and failure
+    /// count toward it.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.meters.read.calls.fetch_add(1, Ordering::Relaxed);
+        Box::new(MeteredStream {
+            inner: self.store.read_stream_dyn(key, offset),
+            meter: &self.meters.read,
+            clock: &*self.clock,
+        })
+    }
+
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let call = self.store.created_at_boxed(file);
         metered(&*self.clock, &self.meters.created_at, call).await
@@ -487,17 +521,6 @@ impl ObjectStore for Metered {
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         self.store.batch_width_dyn(kind)
-    }
-
-    /// Each read of the batch counts as one call, timed as the whole batch:
-    /// the reads ran side by side, so each took about that long.
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        metered_many(
-            &*self.clock,
-            &self.meters.read,
-            self.store.read_many_boxed(reads),
-        )
-        .await
     }
 
     /// Each listing of the batch counts as one call, timed as the whole batch.

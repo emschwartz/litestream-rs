@@ -87,6 +87,12 @@ impl<T: Transport> Inner<T> {
     /// the next. The caller holds no upload of this store: the sweep waits for every part
     /// this process started to end before it lists, and would wait for ever on a part whose
     /// upload is alive and never collected.
+    ///
+    /// The listing (one `GET ?uploads` per boot, and an abort per upload it finds) is a
+    /// request Go does not make. Go hands multipart uploads to the SDK's uploader
+    /// (`s3/replica_client.go:513`, `manager.NewUploader`), which aborts only an upload that
+    /// fails inside the process, and nothing in Go lists open uploads, so the parts of an
+    /// upload a killed process left stay billed until a bucket lifecycle rule removes them.
     pub(crate) fn remove_scratch(&self) -> Result<u64, StoreError> {
         let op = StoreOp::Upload;
         // An engine rebuilt over this store may have dropped an upload a moment ago: its

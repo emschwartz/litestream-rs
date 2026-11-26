@@ -322,6 +322,86 @@ fn read_delete_and_begin_upload_are_retried_too() {
     assert_eq!(sleeper.waits().len(), 3);
 }
 
+/// Stores "abcdefghi" under [`key`] and takes pieces of 3 bytes from a stream of it, the
+/// read failing once with `err` after the first piece.
+fn stream_failing_after_one_piece(
+    err: StoreError,
+) -> (
+    RecordingSleeper,
+    RetryStats,
+    Vec<Result<Vec<u8>, StoreError>>,
+) {
+    let (mem, sleeper, store) = rig(SeededEntropy::new(3), policy(5));
+    let pieces = conformance::block_on(async {
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(b"abcdefghi").await.unwrap();
+        up.commit().await.unwrap();
+        let mut stream = store.read_stream(key(), 0);
+        let len = ReadLen::new(3).unwrap();
+        let mut pieces = vec![stream.next(len).await];
+        mem.inject_failure(StoreOp::Read, err);
+        for _ in 0..3 {
+            pieces.push(stream.next(len).await);
+        }
+        pieces
+    });
+    let stats = store.stats();
+    (sleeper, stats, pieces)
+}
+
+#[test]
+fn a_stream_that_fails_goes_on_from_the_bytes_it_handed_out() {
+    let (sleeper, stats, pieces) =
+        stream_failing_after_one_piece(transient(ErrorKind::ConnectionReset));
+    assert_eq!(
+        pieces,
+        [
+            Ok(b"abc".to_vec()),
+            Ok(b"def".to_vec()),
+            Ok(b"ghi".to_vec()),
+            Ok(Vec::new())
+        ]
+    );
+    assert_eq!(sleeper.waits().len(), 1);
+    assert_eq!(stats.retries, 1);
+    // The upload's begin, write and commit, the stream once, and the one reopening.
+    assert_eq!(stats.calls, 5);
+}
+
+#[test]
+fn a_stream_that_fails_for_good_is_not_reopened() {
+    let (sleeper, stats, pieces) =
+        stream_failing_after_one_piece(StoreError::NotFound { key: key() });
+    assert_eq!(pieces.first(), Some(&Ok(b"abc".to_vec())));
+    assert_eq!(
+        pieces.get(1),
+        Some(&Err(StoreError::NotFound { key: key() }))
+    );
+    assert!(sleeper.waits().is_empty());
+    assert_eq!(stats.retries, 0);
+}
+
+#[test]
+fn a_stream_from_an_offset_starts_there() {
+    let (_mem, _sleeper, store) = rig(SeededEntropy::new(3), policy(5));
+    conformance::block_on(async {
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(b"abcdefghi").await.unwrap();
+        up.commit().await.unwrap();
+        let mut stream = store.read_stream(key(), 4);
+        let len = ReadLen::new(3).unwrap();
+        assert_eq!(stream.next(len).await.unwrap(), b"efg");
+        assert_eq!(stream.next(len).await.unwrap(), b"hi");
+    });
+    assert_eq!(store.stats().calls, 4);
+}
+
 #[test]
 fn upload_write_failure_passes_through_with_one_call() {
     let (mem, sleeper, store) = rig(SeededEntropy::new(1), policy(5));

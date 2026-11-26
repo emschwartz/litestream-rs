@@ -2094,10 +2094,12 @@ fn a_local_source_read_error_is_failed_and_publishes_nothing() {
     assert!(listed(&replica, 1).is_empty());
 }
 
+/// A compaction reads nothing of its output key before it writes: the listing it was planned
+/// from shows every file this engine wrote, so the key holds nothing (Go reads nothing either).
+/// Run twice by hand, create-only the bucket refuses the second write; on a store that cannot
+/// make create-only writes the second run writes the same file over the first.
 #[test]
 fn running_a_job_twice_leaves_one_file_at_the_key() {
-    // Create-only, the bucket refuses the second write; on a store that cannot, a read of
-    // the key finds the output first.
     for guard in [WriteMode::New, WriteMode::Replace] {
         let (local, replica) = (MemStore::new(), MemStore::new());
         three_l0(&local, &replica);
@@ -2106,12 +2108,16 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
         let out = block_on(run_compact_as(&job, &from, &to, guard));
         assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
         let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-        // The second run finds the output there and writes nothing over it.
         let again = block_on(run_compact_as(&job, &from, &to, guard));
-        assert!(
-            matches!(again, Outcome::Replan { key } if key == job.output_key()),
-            "{guard:?}: {again:?}"
-        );
+        match guard {
+            WriteMode::New => assert!(
+                matches!(again, Outcome::Replan { key } if key == job.output_key()),
+                "{guard:?}: {again:?}"
+            ),
+            WriteMode::Replace => {
+                assert!(matches!(again, Outcome::Compacted { .. }), "{again:?}");
+            }
+        }
         assert_eq!(listed(&replica, 1), vec![job.output_key()]);
         let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
         assert_eq!(first, after);
@@ -2120,34 +2126,32 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
 
 /// An output key that holds something other than this run would write is left as it is:
 /// the bucket refuses the create-only commit, and the job is planned again from a listing
-/// that shows what is there.
+/// that shows what is there. A store without create-only writes has no such refusal.
 #[test]
 fn an_output_key_that_holds_another_file_is_not_written_over() {
-    for guard in [WriteMode::New, WriteMode::Replace] {
-        let (local, replica) = (MemStore::new(), MemStore::new());
-        three_l0(&local, &replica);
-        let job = l1_job(&replica);
-        let other = b"another hand's output".to_vec();
-        block_on(async {
-            let mut up = replica
-                .begin_upload(&job.output_key(), at(T0), WriteMode::Replace)
-                .await
-                .unwrap();
-            up.write(&other).await.unwrap();
-            up.commit().await.unwrap();
-        });
-        let out = block_on(run_compact_as(
-            &job,
-            &Staging(&local),
-            &Replica(&replica),
-            guard,
-        ));
-        assert!(
-            matches!(out, Outcome::Replan { key } if key == job.output_key()),
-            "{guard:?}: {out:?}"
-        );
-        assert_eq!(whole(&replica, &job.output_key()), other, "{guard:?}");
-    }
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let job = l1_job(&replica);
+    let other = b"another hand's output".to_vec();
+    block_on(async {
+        let mut up = replica
+            .begin_upload(&job.output_key(), at(T0), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&other).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let out = block_on(run_compact_as(
+        &job,
+        &Staging(&local),
+        &Replica(&replica),
+        WriteMode::New,
+    ));
+    assert!(
+        matches!(out, Outcome::Replan { key } if key == job.output_key()),
+        "{out:?}"
+    );
+    assert_eq!(whole(&replica, &job.output_key()), other);
 }
 
 /// A store that cannot make create-only writes fails the output's commit and publishes
@@ -2181,24 +2185,22 @@ fn a_store_without_create_only_writes_takes_no_create_only_output() {
 /// write created.
 #[test]
 fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
-    for guard in [WriteMode::New, WriteMode::Replace] {
-        let (local, replica, _, job) = rejected_setup();
-        let (from, to) = (Staging(&local), Replica(&replica));
-        let first = block_on(run_compact_as(&job, &from, &to, guard));
-        assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
-        let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-        replica.inject_failure_after_publish(StoreError::Corrupt {
-            key: None,
-            cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
-        });
-        let again = block_on(run_compact_as(&job, &from, &to, guard));
-        assert!(
-            matches!(again, Outcome::Replan { key } if key == job.output_key()),
-            "{guard:?}: {again:?}"
-        );
-        let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-        assert_eq!(after, held, "the output that was there is untouched");
-    }
+    let (local, replica, _, job) = rejected_setup();
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let first = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
+    assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
+    let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    replica.inject_failure_after_publish(StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+    });
+    let again = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
+    assert!(
+        matches!(again, Outcome::Replan { key } if key == job.output_key()),
+        "{again:?}"
+    );
+    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+    assert_eq!(after, held, "the output that was there is untouched");
 }
 
 /// A create-only output asked nobody whether its key was free. A part the store rejects

@@ -77,6 +77,13 @@ impl Inventory {
     /// still going, in level order, so at width one this is level 0 to the
     /// end, then level 1, as one loop would do it.
     ///
+    /// Every level is listed, the ones the configuration does not compact into too (4 to 8
+    /// by default): one LIST each that Go's maintenance does not send. Go lists only its
+    /// configured levels, so its retention (`store.go:871-879`, `EnforceSnapshotRetention`)
+    /// never deletes a file an earlier configuration left at another level, which stays
+    /// billed and stays in the chain Go's restore builds. A restore and a plan here see the
+    /// whole replica.
+    ///
     /// # Errors
     /// The first failed page in level order, or a cursor that does not
     /// advance. Never a partial inventory.
