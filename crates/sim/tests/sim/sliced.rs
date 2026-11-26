@@ -365,10 +365,11 @@ fn another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted() {
     let mut ops = in_flight();
     ops.extend(ticks(400));
     // A commit, and the checkpoint the idle time made due, whose own frame is a file too, with
-    // the scheduled snapshot going sixteen bytes a tick beside them: the 266th tick publishes
-    // the second file, and no maintenance pass follows that put.
+    // the scheduled snapshot going sixteen bytes a tick beside them: the 271st tick publishes
+    // the second file, and no maintenance pass follows that put. The count is tuned: a tick
+    // either way and the next commit is not unsent when the other writer comes.
     ops.push(commit.clone());
-    ops.extend(ticks(266));
+    ops.extend(ticks(271));
     // The next commit is in the WAL, not yet staged, when the other writer takes its id.
     ops.push(commit);
     ops.push(Op::SecondWriter { ticks: 60 });
