@@ -14,6 +14,8 @@ mod fake;
 #[cfg(test)]
 mod faults;
 #[cfg(test)]
+mod flight;
+#[cfg(test)]
 mod gates;
 #[cfg(test)]
 mod latency;

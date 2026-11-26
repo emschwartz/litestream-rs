@@ -133,6 +133,11 @@ pub struct Config {
     /// How long a commit may stay off the replica before fail-stop trips for it (decision
     /// D22): 10 minutes by default, at least 5.
     pub max_unreplicated_age: MaxUnreplicatedAge,
+    /// Whether the staged files this library writes are written by a thread of their own, one
+    /// block behind the engine (`lsr_store_fs::FsStore::with_write_behind`). Default `false`: no
+    /// thread beside the engine's. The binary turns it on when the machine has more than one core
+    /// (`docs/decisions/D244.md`).
+    pub write_behind: bool,
 }
 
 impl Default for Config {
@@ -151,6 +156,7 @@ impl Default for Config {
             verify_interval: None,
             if_replication_stops: IfReplicationStops::HoldStart,
             max_unreplicated_age: MaxUnreplicatedAge::DEFAULT,
+            write_behind: false,
         }
     }
 }

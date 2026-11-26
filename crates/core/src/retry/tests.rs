@@ -454,7 +454,7 @@ fn an_upload_written_from_a_source_reaches_the_store_with_it() {
             .unwrap();
         up.write_from(b"ab", &handed).await.unwrap();
         up.write_from(b"cd", &handed).await.unwrap();
-        up.commit_from(&handed).await
+        up.commit().await
     })
     .unwrap();
     assert_eq!(info.size, 4);
@@ -466,7 +466,7 @@ fn an_upload_written_from_a_source_reaches_the_store_with_it() {
 }
 
 /// A source that no longer holds the bytes fails the commit with its own error, passed
-/// through as it is, and a plain commit of an upload written from a source is the store's
+/// through as it is, and a plain write to an upload written from a source is the store's
 /// refusal: neither is retried, and nothing is published.
 #[test]
 fn a_source_that_gives_nothing_fails_the_commit_once() {
@@ -484,11 +484,11 @@ fn a_source_that_gives_nothing_fails_the_commit_once() {
         let handed = Handed::of(b"abcd");
         let other = Handed::of(b"abxd");
         let mut up = begin().await.unwrap();
-        up.write_from(b"abcd", &handed).await.unwrap();
-        let gone = up.commit_from(&other).await;
+        up.write_from(b"abcd", &other).await.unwrap();
+        let gone = up.commit().await;
         let mut up = begin().await.unwrap();
         up.write_from(b"abcd", &handed).await.unwrap();
-        (gone, up.commit().await)
+        (gone, up.write(b"ef").await)
     });
     assert_eq!(gone, Err(lost()));
     assert_eq!(plain, Err(mixed()));

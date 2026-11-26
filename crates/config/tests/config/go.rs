@@ -409,10 +409,7 @@ fn l0_retention_rules() {
     let defaulted =
         config("dbs:\n  - path: /tmp/test.db\n    replica:\n      url: file:///tmp/replica\n");
     assert_eq!(defaulted.l0_retention(), defaults::L0_RETENTION);
-    assert_eq!(
-        defaulted.l0_retention_check_interval(),
-        defaults::L0_RETENTION_CHECK_INTERVAL
-    );
+    assert_eq!(defaulted.l0_retention_check_interval(), None);
 }
 
 // TestConfig_Validate_SyncIntervals

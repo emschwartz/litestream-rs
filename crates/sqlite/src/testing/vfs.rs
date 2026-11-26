@@ -1245,6 +1245,20 @@ extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: i64) -> c_int {
     rc
 }
 
+/// `flags` with a `SQLITE_SYNC_FULL` sync turned into `SQLITE_SYNC_NORMAL`: the unix VFS answers
+/// FULL with `fcntl(F_FULLFSYNC)` on macOS, a drive cache flush of 8 ms a call against 0.1 ms for
+/// `fsync`. The engine's own sync of the WAL asks for FULL, and a cycle of the fault matrix makes
+/// it once per injected step. The durability these tests check is the law's (it cuts each file back
+/// to its last sync in the process), not the drive's, and Linux, where CI runs, does `fsync` for
+/// both. See `host_fs.rs` for the stores' half of this.
+const fn without_drive_flush(flags: c_int) -> c_int {
+    if flags & 0x0F == ffi::SQLITE_SYNC_FULL {
+        (flags & !0x0F) | ffi::SQLITE_SYNC_NORMAL
+    } else {
+        flags
+    }
+}
+
 #[expect(unsafe_code, reason = "the io method xSync")]
 extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
     let (shared, kind, path) = header(file);
@@ -1269,7 +1283,7 @@ extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int {
         return ffi::SQLITE_IOERR_FSYNC;
     };
     // SAFETY: SQLite's own argument, passed on to the unix file under the header.
-    let rc = unsafe { sync(real_of(file), flags) };
+    let rc = unsafe { sync(real_of(file), without_drive_flush(flags)) };
     if rc == ffi::SQLITE_OK {
         shared.synced(kind, path, real_size(file));
     }

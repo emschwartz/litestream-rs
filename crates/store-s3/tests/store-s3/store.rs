@@ -581,11 +581,7 @@ mod cases {
                 cause: CorruptCause::ChecksumMismatch { part: part(2) }
             }
         );
-        assert_eq!(
-            count(&wire, Shape::UploadPart),
-            3,
-            "the third went in the same batch; no fourth follows"
-        );
+        assert_eq!(count(&wire, Shape::UploadPart), 2, "no third follows");
         assert_eq!(count(&wire, Shape::Complete), 0);
         assert!(sleeper.waits().is_empty());
         assert!(list_all(&store).unwrap().files.is_empty());
@@ -780,7 +776,7 @@ mod cases {
         assert_eq!(h.store.pending_orphans(), 0);
     }
 
-    /// A store over a fresh fake with this many requests per batch.
+    /// A store over a fresh fake with this many parts in flight at most.
     fn store_with(concurrency: usize) -> (Arc<FaultTransport<FakeS3>>, S3Store<Shared>) {
         let wire = Arc::new(FaultTransport::new(fake()));
         let config = config().with_concurrency(std::num::NonZeroUsize::new(concurrency).unwrap());
@@ -795,32 +791,7 @@ mod cases {
     }
 
     #[test]
-    fn memory_is_at_most_the_concurrency_in_parts() {
-        for concurrency in [1, 3] {
-            let (wire, store) = store_with(concurrency);
-            let k = key(0, 1, 1);
-            let bytes = body(PART * 4);
-            block_on(async {
-                let mut up = store
-                    .begin_upload(&k, Timestamp::from_unix_millis(5), WriteMode::Replace)
-                    .await
-                    .unwrap();
-                let mut high = 0;
-                for piece in bytes.chunks(1_500_003) {
-                    up.write(piece).await.unwrap();
-                    high = high.max(up.buffer_capacity());
-                    assert!(up.buffer_capacity() <= PART * concurrency);
-                }
-                assert!(high > PART * (concurrency - 1), "{concurrency}: {high}");
-                up.commit().await.unwrap();
-            });
-            assert_eq!(count(&wire, Shape::UploadPart), 4);
-            assert!(read_back(&store, &k, PART * 2)[..] == bytes[..PART * 2]);
-        }
-    }
-
-    #[test]
-    fn parts_in_a_batch_still_assemble_the_same_object_in_order() {
+    fn many_parts_assemble_the_same_object_in_order() {
         let (wire, store) = store_with(3);
         let k = key(0, 1, 1);
         let bytes = body(PART * 7 + 11);
@@ -838,7 +809,7 @@ mod cases {
     }
 
     #[test]
-    fn a_failed_part_in_a_batch_fails_the_upload_and_orphans_its_id() {
+    fn a_failed_part_fails_the_upload_and_orphans_its_id() {
         let (wire, store) = store_with(3);
         wire.push(Fault::Pass {
             on: Shape::UploadPart,
@@ -853,8 +824,8 @@ mod cases {
         assert!(matches!(err, StoreError::Transient { .. }), "{err:?}");
         assert_eq!(
             count(&wire, Shape::UploadPart),
-            3,
-            "one batch, then nothing"
+            2,
+            "the part that failed, then nothing"
         );
         assert_eq!(count(&wire, Shape::Complete), 0);
         assert_eq!(store.pending_orphans(), 1);

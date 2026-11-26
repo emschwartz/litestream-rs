@@ -351,23 +351,15 @@ fn past_snapshot(info: &FileInfo, snapshot: Txid) -> bool {
 
 fn latest_unplannable(inventory: &Inventory) -> Option<RetentionHold> {
     let newest = inventory.newest()?;
-    match plan(inventory, KeyTarget::Latest) {
-        PlanOutcome::Plan(chain) if chain.reaches() == newest => None,
+    match plan(inventory, KeyTarget::Latest).into_chain() {
+        Ok(chain) if chain.reaches() == newest => None,
         // A plan that stops short is a missing tail; the planner never
         // returns one, and the hold must not claim a plan.
-        PlanOutcome::Plan(chain) => Some(RetentionHold::Hole {
+        Ok(chain) => Some(RetentionHold::Hole {
             after: chain.reaches(),
             next: None,
         }),
-        outcome @ (PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
-        | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => {
-            Some(RetentionHold::LatestUnplannable { outcome })
-        }
+        Err(outcome) => Some(RetentionHold::LatestUnplannable { outcome }),
     }
 }
 
@@ -883,24 +875,18 @@ fn pinned_chain(
     gone: &[FileKey],
     restore_point: Txid,
 ) -> Result<Vec<FileKey>, RetentionHold> {
-    match plan_without(inventory, gone, KeyTarget::Txid(restore_point)) {
-        PlanOutcome::Plan(chain) if chain.reaches() == restore_point => {
+    match plan_without(inventory, gone, KeyTarget::Txid(restore_point)).into_chain() {
+        Ok(chain) if chain.reaches() == restore_point => {
             Ok(chain.files().iter().map(|info| info.key).collect())
         }
-        PlanOutcome::Plan(chain) => Err(RetentionHold::RestorePointUnplannable {
+        Ok(chain) => Err(RetentionHold::RestorePointUnplannable {
             restore_point,
             outcome: PlanOutcome::BeyondNewest {
                 requested: restore_point,
                 newest: chain.reaches(),
             },
         }),
-        outcome @ (PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
-        | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => Err(RetentionHold::RestorePointUnplannable {
+        Err(outcome) => Err(RetentionHold::RestorePointUnplannable {
             restore_point,
             outcome,
         }),
@@ -919,21 +905,15 @@ fn self_check(
     {
         return Some(hold);
     }
-    match plan_without(inventory, job.keys(), KeyTarget::Latest) {
-        PlanOutcome::Plan(chain) if Some(chain.reaches()) == inventory.newest() => None,
+    match plan_without(inventory, job.keys(), KeyTarget::Latest).into_chain() {
+        Ok(chain) if Some(chain.reaches()) == inventory.newest() => None,
         // A plan that stops short of the newest transaction.
-        PlanOutcome::Plan(chain) => Some(RetentionHold::SelfCheck {
+        Ok(chain) => Some(RetentionHold::SelfCheck {
             outcome: PlanOutcome::BeyondNewest {
                 requested: inventory.newest().unwrap_or(chain.reaches()),
                 newest: chain.reaches(),
             },
         }),
-        outcome @ (PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
-        | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => Some(RetentionHold::SelfCheck { outcome }),
+        Err(outcome) => Some(RetentionHold::SelfCheck { outcome }),
     }
 }

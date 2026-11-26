@@ -3,7 +3,7 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use lsr_ltx::{PageNo, PageSize};
-use lsr_wal::{FrameFault, PageMapError, ReadPageError, ResumeError, Salts, WalError, WalOffset};
+use lsr_wal::{FrameFault, PageMapError, ReadPageError, Salts, WalError, WalOffset};
 use proptest::prelude::*;
 
 use super::*;
@@ -800,46 +800,6 @@ fn from_wal_maps_every_variant() {
     for (err, fault) in cases {
         let shown = format!("{err:?}");
         assert_eq!(Fault::from_wal(err), fault, "{shown}");
-    }
-}
-
-#[test]
-fn from_resume_maps_every_variant() {
-    let cases = [
-        (ResumeError::Io(io()), Fault::LocalIo),
-        (
-            ResumeError::PageSizeMismatch {
-                expected: ps(),
-                found: PageSize::MIN,
-            },
-            Fault::PageSizeChanged {
-                was: PageSize::MIN,
-                now: ps(),
-            },
-        ),
-        (ResumeError::Truncated { at: at() }, Fault::WalMoved),
-        (
-            ResumeError::Restarted {
-                expected: salts(),
-                found: salts(),
-            },
-            Fault::WalMoved,
-        ),
-        (
-            ResumeError::PrevFrame {
-                at: at(),
-                fault: FrameFault::ChecksumMismatch,
-            },
-            Fault::Bug(BugSite::WalResume),
-        ),
-        (
-            ResumeError::NotAtCommit { at: at() },
-            Fault::Bug(BugSite::WalResume),
-        ),
-    ];
-    for (err, fault) in cases {
-        let shown = format!("{err:?}");
-        assert_eq!(Fault::from_resume(err), fault, "{shown}");
     }
 }
 

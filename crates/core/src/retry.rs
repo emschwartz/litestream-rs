@@ -34,8 +34,8 @@ use crate::env::{Clock, Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, BoxFuture, ListAt, Listing, ObjectStore, PageLimit, ReadLen, ReadStream, Reread,
-    StoreError, Upload, WriteMode,
+    BatchKind, BoxFuture, Flight, ListAt, Listing, ObjectStore, PageLimit, ReadLen, ReadStream,
+    Reread, Rest, StoreError, Upload, WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -572,24 +572,6 @@ pub struct RetryingUpload<S: ObjectStore, P, E> {
     core: Arc<Core<S, P, E>>,
 }
 
-impl<S: ObjectStore, P: Sleeper, E: Entropy> RetryingUpload<S, P, E> {
-    /// Commits the inner upload, through `again` when the upload was written from a source,
-    /// and checks the answer against the bytes written.
-    async fn commit_with(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
-        Counters::bump(&self.core.counters.calls);
-        let info = match again {
-            Some(again) => self.inner.commit_from(again).await?,
-            None => self.inner.commit().await?,
-        };
-        let core = &*self.core;
-        let keys = [self.key];
-        crate::publish::settle(info, self.key, self.written, self.mode, || {
-            core.run(|| core.inner.delete(&keys))
-        })
-        .await
-    }
-}
-
 impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
         Counters::bump(&self.core.counters.calls);
@@ -607,12 +589,21 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> 
         Ok(())
     }
 
+    /// Commits the inner upload and checks the answer against the bytes written.
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        self.commit_with(None).await
+        Counters::bump(&self.core.counters.calls);
+        let info = self.inner.commit().await?;
+        let core = &*self.core;
+        let keys = [self.key];
+        crate::publish::settle(info, self.key, self.written, self.mode, || {
+            core.run(|| core.inner.delete(&keys))
+        })
+        .await
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        self.commit_with(Some(again)).await
+    /// Not a call of its own: it sends nothing, and a part's failure is the upload's.
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        self.inner.flight(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

@@ -171,6 +171,7 @@ impl Inventory {
 
     /// Records the unrecognized names a level held, as a store's listings counted them.
     #[must_use]
+    #[cfg(test)]
     pub fn with_skipped(mut self, level: Level, count: usize) -> Self {
         self.skipped.insert(level, count);
         self

@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lsr_core::WriteMode;
 use lsr_core::conformance::{Failure, Harness, block_on};
 use lsr_core::{
-    BoxFuture, ByteTally, Class, Clock, CorruptCause, FileKey, Level, ObjectStore, PageLimit,
-    ReadLen, Reread, StoreError, StoreOp, Upload, classify as classify_error,
+    Again, BoxFuture, Class, Clock, CorruptCause, FileKey, Level, ObjectStore, PageLimit, ReadLen,
+    Reread, StoreError, StoreOp, Upload, classify as classify_error,
 };
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 use lsr_store_s3::{
@@ -170,20 +170,18 @@ impl Transport for Counting {
         lsr_store_s3::send_on_threads(self, requests, limit)
     }
 
-    /// Bodies read while they are sent go to the client as they are, so the real server is
-    /// sent them the way the shipped store sends them; each request is counted.
-    fn send_streamed(
-        &self,
-        requests: Vec<StreamedRequest<'_>>,
-        limit: std::num::NonZeroUsize,
-    ) -> Vec<Result<HttpResponse, TransportError>> {
-        let count = u64::try_from(requests.len()).unwrap();
-        self.counts.requests.fetch_add(count, Ordering::Relaxed);
-        let sent = self.inner.send_streamed(requests, limit);
-        for response in sent.iter().flatten() {
-            self.counts.note(response);
-        }
-        sent
+    /// A body read while it is sent goes to the client as it is, so the real server is sent
+    /// it the way the shipped store sends it; the request is counted.
+    fn send_streamed(&self, request: StreamedRequest<'_>) -> Result<HttpResponse, TransportError> {
+        self.counts.requests.fetch_add(1, Ordering::Relaxed);
+        let response = self.inner.send_streamed(request)?;
+        self.counts.note(&response);
+        Ok(response)
+    }
+
+    /// Parts go out on the client's own sender threads, as the shipped store sends them.
+    fn lanes(&self, most: std::num::NonZeroUsize) -> Arc<dyn lsr_store_s3::Lanes> {
+        self.inner.lanes(most)
     }
 }
 
@@ -603,24 +601,30 @@ pub fn listing_makes_no_head_requests(h: &RealHarness) {
     assert_eq!(h.counts.heads.load(Ordering::Relaxed), 0);
 }
 
-/// The bytes an upload is written from, given back only when they tally as they did when
-/// first handed over: the engine's source in miniature.
-struct Handed<'a>(&'a [u8]);
+/// The bytes an upload is written from, given back only when they are what was seen when
+/// they were first handed over: the engine's source in miniature.
+#[derive(Clone)]
+struct Handed(Arc<Vec<u8>>);
 
-impl Reread for Handed<'_> {
+impl Reread for Handed {
+    fn open(&self) -> BoxFuture<'_, Result<Box<dyn Again>, StoreError>> {
+        let reader: Box<dyn Again> = Box::new(self.clone());
+        Box::pin(std::future::ready(Ok(reader)))
+    }
+}
+
+impl Again for Handed {
     fn read<'a>(
-        &'a self,
+        &'a mut self,
         offset: u64,
-        was: &'a ByteTally,
+        was: &'a lsr_core::Seen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
         let start = usize::try_from(offset).unwrap();
-        let end = start.saturating_add(usize::try_from(was.size()).unwrap());
+        let end = start.saturating_add(usize::try_from(was.len()).unwrap());
         let bytes = self.0.get(start..end).map(<[u8]>::to_vec);
         Box::pin(async move {
-            let mut now = ByteTally::new();
             let bytes = bytes.unwrap_or_default();
-            now.add(&bytes);
-            if now == *was {
+            if lsr_core::Seen::of(&bytes) == *was {
                 Ok(bytes)
             } else {
                 Err(StoreError::Transient {
@@ -639,7 +643,7 @@ pub fn an_upload_from_a_source_round_trips(h: &RealHarness) {
     for (n, len) in [(1, part(h).saturating_mul(5) / 2), (2, 100_000)] {
         let key = h.key(0, n, n);
         let bytes = body(len);
-        let source = Handed(&bytes);
+        let source = Handed(Arc::new(bytes.clone()));
         h.upload_with_retry(|| {
             block_on(async {
                 let created_at = at("2024-05-01T12:00:00.123Z");
@@ -650,7 +654,7 @@ pub fn an_upload_from_a_source_round_trips(h: &RealHarness) {
                 for piece in bytes.chunks(1_500_003) {
                     upload.write_from(piece, &source).await?;
                 }
-                upload.commit_from(&source).await.map(drop)
+                upload.commit().await.map(drop)
             })
         });
         assert!(h.read_back(&key, len) == bytes, "{len} bytes");
@@ -804,6 +808,9 @@ pub fn dropped_multipart_is_invisible_then_aborted(h: &RealHarness) {
     });
     assert!(h.list_all(0, 10).files.is_empty());
     assert_eq!(h.open_uploads(), 1);
+    // The part the write started may still be on a sender thread; the id is orphaned when it
+    // lets go.
+    h.store.wait_for_parts();
     assert_eq!(h.store.pending_orphans(), 1);
     assert_eq!(h.store.abort_orphans().unwrap(), 1);
     assert_eq!(h.open_uploads(), 0);
