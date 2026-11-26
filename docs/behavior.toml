@@ -698,7 +698,7 @@ notes = "Before this a file was one unit of work however large, and the engine n
 table = "Running"
 id = "RUN-31"
 circumstance = "A staged file is replaced by another file under the same name (a rename over it: a staging backup put back) while its send is part-way, on a staging directory (the directory store holds the file open for the length of a send)"
-response = "continue. The send reads on from the file it opened, not from the new one: the file that got the token goes to the replica, every chunk verified on the read that produced it and the whole against the token. A replica store that reads a staged file a second time (S3, by name) reads the new file and the send is refused as RUN-17. The new file left under the name is verified by whatever next reads it by name, as any staged file is (RUN-16, RUN-17). A file changed where it lies (the same file, other bytes) is RUN-17 as before (`docs/decisions/D234.md`)"
+response = "continue. The send reads on from the file it opened, not from the new one: the file that got the token goes to the replica, every chunk verified on the read that produced it and the whole against the token. A replica store that reads a staged file a second time (S3, by name) reads the new file and the send is refused as RUN-17. The new file left under the name is verified by whatever next reads it by name, as any staged file is (RUN-16, RUN-17). A file changed where it lies (the same file, other bytes) is RUN-17 as before (`docs/decisions/D250.md`)"
 signal = "none when the witnessed file goes up; as RUN-17 otherwise"
 at_risk = "None. What is published is the file this engine staged and witnessed"
 recovery = "None needed"
@@ -852,7 +852,7 @@ detected_by = "core::`a_truncate_overtaken_at_its_bump_owes_the_snapshot_only_wh
 [[row]]
 table = "Upload"
 id = "UP-1"
-circumstance = "A staged file is next (the confirmed transaction plus one). It is streamed through the LTX decoder while copied to an upload no listing can see; the commit happens only if the file verifies, its header names its key, and its bytes match its token (`upload.rs`). Each PUT and part carries Content-MD5"
+circumstance = "A staged file is next (the confirmed transaction plus one). It is streamed through the LTX decoder while copied to an upload no listing can see; the commit happens only if the file verifies, its header names its key, and its bytes match its token (`upload.rs`). Each PUT and part is signed with the SHA-256 of its body, which the store checks"
 response = "continue. Steady state makes no list call"
 signal = "`lsr_uploads_total`"
 at_risk = "None"
@@ -947,12 +947,12 @@ recovered_by = "sim::`size_mismatch_on_commit`, sim::`short_write::an_upload_ack
 [[row]]
 table = "Upload"
 id = "UP-8"
-circumstance = "The store reports a digest other than the one sent (`BadDigest`, or an ETag in MD5 form that differs)"
+circumstance = "The store refuses a body as not the one signed (`XAmzContentSHA256Mismatch`, or `BadDigest`), or a completion names a part ETag it does not hold (`InvalidPart`)"
 response = "retry, `UploadChecksumMismatch`: the key is deleted, best effort, and written again"
 signal = "\"retrying\""
-at_risk = "A reader could see the bad object until the delete or the rewrite lands"
+at_risk = "None: the store published nothing, so the delete finds no object. A returned ETag is not compared with anything, as in Go (`docs/decisions/D250.md`)"
 recovery = "Automatic"
-detected_by = "sim::`etag_mismatch_on_put`"
+detected_by = "sim::`etag_mismatch_on_put`, store-s3::`a_put_refused_against_its_signed_hash_is_corrupt`, store-s3::`a_part_refused_against_its_signed_hash_is_corrupt_and_not_retried`, store-s3::`a_wrong_part_etag_fails_the_completion_as_corrupt`, store-s3::`a_body_mismatch_on_put_is_a_checksum_mismatch_and_publishes_nothing`"
 recovered_by = "sim::`etag_mismatch_on_put`"
 
 [[row]]
@@ -1108,13 +1108,13 @@ notes = "Before, only the binary set the bound: the library's default was none, 
 [[row]]
 table = "Upload"
 id = "UP-23"
-circumstance = "The S3 store keeps no part of a staged file it is handed: of each part it keeps the length and CRC-64 of every 256 KiB the engine read, and reads the part from the staging directory again on the thread that sends it, once to take its MD5 and once as the request's body. Between the engine's read and a later one the staged file changed, or a later read failed"
-response = "A later read is given to the store only when each 256 KiB of it has the length and CRC-64 the engine's read saw, on both later reads, before a byte of it is hashed or sent; every request carries `Content-MD5` of what it sends (`docs/decisions/D233.md`). A second read that differs ends the upload before anything is published, as `StagedLost` (RUN-16 then applies: the file is read again from its first byte, and dropped for a snapshot when it fails a second time). One that fails ends it the same way as the staging directory's fault (`LocalIo`). Neither is reported as the replica's, and neither costs a listing or a delete: nothing was published"
+circumstance = "The S3 store keeps no part of a staged file it is handed: of each part it keeps the length and CRC-64 of every 256 KiB the engine read, and reads the part from the staging directory again on the thread that sends it, once to take its SHA-256 and once as the request's body. Between the engine's read and a later one the staged file changed, or a later read failed"
+response = "A later read is given to the store only when each 256 KiB of it has the length and CRC-64 the engine's read saw, on both later reads, before a byte of it is hashed or sent; every request is signed with the SHA-256 of what it sends (`docs/decisions/D233.md`, `docs/decisions/D250.md`). A second read that differs ends the upload before anything is published, as `StagedLost` (RUN-16 then applies: the file is read again from its first byte, and dropped for a snapshot when it fails a second time). One that fails ends it the same way as the staging directory's fault (`LocalIo`). Neither is reported as the replica's, and neither costs a listing or a delete: nothing was published"
 signal = "\"retrying\", then none or `newest_staged_file_unreadable`"
 at_risk = "None: no byte of a second read reaches the store unverified. An upload of a staged file reads it twice"
 recovery = "Automatic"
 detected_by = "core::`a_staged_file_changed_behind_the_send_is_lost_and_nothing_is_published`, core::`a_second_read_that_differs_inside_a_write_ends_the_send_as_a_lost_staged_file`, core::`a_second_read_that_fails_is_the_staging_directorys_fault`, core::`a_commit_the_store_failed_for_its_own_reason_is_the_replicas_fault`, core::`a_second_read_is_one_bounded_read_that_must_be_what_was_seen`, store-s3::`every_streamed_request_carries_the_digest_and_length_of_the_first_read`, store-s3::`a_second_read_that_differs_fails_the_write_that_sends_the_part`, store-s3::`a_later_read_that_gives_nothing_fails_the_commit_before_anything_is_published`, store-s3::`a_source_that_breaks_its_word_publishes_nothing`, store-s3::`an_upload_from_a_source_sends_what_a_buffered_upload_sends`, store-s3::`an_upload_from_a_file_at_a_large_part_size_holds_no_part`, sim::`sliced::a_staged_file_changed_between_its_two_reads_is_refused_at_the_second`; oracle::`SecondReadDiffers`, oracle::`PublishedPastRefusedRead`, oracle::`RefusedReadBlamedOnReplica`; plant::`second-read-trusted-on-a-mismatch`, plant::`second-read-trusted-on-a-mismatch-sim`, plant::`streamed-part-without-its-digest`, plant::`part-reread-from-the-wrong-offset`, plant::`store-trusts-a-changed-cell`"
-notes = "Go hands its SDK the staged file and each part is read from it when sent, unverified (`s3/replica_client.go`, `uploadSizedLTX`). Here each later read is checked against the engine's read, by the engine's reader and again by the store, and the server checks the body against `Content-MD5`. Only the ureq client streams the body; the reqwest client still buffers each part. The in-memory S3 server of the tests does not check `Content-MD5`, so the store's half of the check is shown only against a real server (`wrong_content_md5_is_refused_by_minio`, and `an_upload_from_a_source_round_trips` for the whole path). Compactions and level-9 snapshots have no file behind them and still hold their parts (`docs/decisions/D222.md`)"
+notes = "Go hands its SDK the staged file and each part is read from it when sent, unverified (`s3/replica_client.go`, `uploadSizedLTX`). Here each later read is checked against the engine's read, by the engine's reader and again by the store, and the server checks the body against its signed SHA-256. Only the ureq client streams the body; the reqwest client still buffers each part. The in-memory S3 server of the tests checks the signed hash as a real server does, and `a_body_other_than_the_signed_one_is_refused_by_minio` shows a real one refusing, with `an_upload_from_a_source_round_trips` for the whole path. Compactions and level-9 snapshots have no file behind them and still hold their parts (`docs/decisions/D222.md`)"
 
 [[row]]
 table = "Maintenance and retention"

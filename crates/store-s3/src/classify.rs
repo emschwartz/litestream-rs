@@ -21,7 +21,7 @@
 //! | 429 or `SlowDown` | `Throttled` |
 //! | 404 on a keyed request with `NoSuchKey` or no code | `NotFound` |
 //! | other 404, 501, 3xx, other 4xx, `InvalidDigest`, `InvalidRange`, `NoSuchUpload` | `Refused` |
-//! | 400 `BadDigest` | `Corrupt` |
+//! | 400 `BadDigest` or `XAmzContentSHA256Mismatch`; 400 `InvalidPart` (a part's ETag is not the one the store holds) | `Corrupt` |
 //! | 408, 5xx, a short 2xx body, a timeout, reset, refused connection or other I/O | `Transient` |
 //!
 //! A DeleteObjects result lists a code per key it could not delete; those
@@ -72,10 +72,15 @@ pub enum S3Code {
     /// `InvalidObjectState`: the object is in an archive tier and must be
     /// restored before it can be read.
     InvalidObjectState,
-    /// `BadDigest`: the body does not match its Content-MD5.
+    /// `BadDigest`, or `XAmzContentSHA256Mismatch`: the body does not match the digest
+    /// sent with it (its Content-MD5, or the SHA-256 it was signed with).
     BadDigest,
     /// `InvalidDigest`: the Content-MD5 itself is malformed.
     InvalidDigest,
+    /// `InvalidPart`: a CompleteMultipartUpload named a part, or a part's ETag, that the
+    /// store does not hold. The store checked each part against its signed SHA-256, so the
+    /// ETag that came back was not the store's: the upload is redone, never published.
+    InvalidPart,
     /// `InvalidRange`.
     InvalidRange,
     /// `PreconditionFailed`: a conditional write found its condition false
@@ -114,8 +119,9 @@ impl S3Code {
             | "KMS.KMSInvalidStateException"
             | "KMS.NotFoundException" => Self::KmsKeyUnusable,
             "InvalidObjectState" => Self::InvalidObjectState,
-            "BadDigest" => Self::BadDigest,
+            "BadDigest" | "XAmzContentSHA256Mismatch" => Self::BadDigest,
             "InvalidDigest" => Self::InvalidDigest,
+            "InvalidPart" => Self::InvalidPart,
             "InvalidRange" => Self::InvalidRange,
             "PreconditionFailed" => Self::PreconditionFailed,
             "ConditionalRequestConflict" => Self::ConditionalRequestConflict,
@@ -154,6 +160,7 @@ impl S3Code {
             | Self::InvalidObjectState
             | Self::BadDigest
             | Self::InvalidDigest
+            | Self::InvalidPart
             | Self::InvalidRange
             | Self::PreconditionFailed
             | Self::ConditionalRequestConflict
@@ -250,10 +257,12 @@ pub fn classify(
             op,
             kind: io::ErrorKind::ResourceBusy,
         }),
-        400 if code == Some(S3Code::BadDigest) => Err(StoreError::Corrupt {
-            key: key.copied(),
-            cause: CorruptCause::ChecksumMismatch { part },
-        }),
+        400 if matches!(code, Some(S3Code::BadDigest | S3Code::InvalidPart)) => {
+            Err(StoreError::Corrupt {
+                key: key.copied(),
+                cause: CorruptCause::ChecksumMismatch { part },
+            })
+        }
         408 => Err(StoreError::Transient {
             op,
             kind: io::ErrorKind::TimedOut,
@@ -328,6 +337,7 @@ pub fn error_in_ok_body(op: StoreOp, key: &FileKey, r: &HttpResponse) -> Option<
         | S3Code::KmsKeyUnusable
         | S3Code::BadDigest
         | S3Code::InvalidDigest
+        | S3Code::InvalidPart
         | S3Code::InvalidRange
         | S3Code::ConditionalRequestConflict
         | S3Code::NotImplemented
@@ -603,6 +613,22 @@ mod tests {
                     cause: CorruptCause::ChecksumMismatch { part },
                 }),
             ),
+            // The signed payload's answer to a body changed in flight, read the same way.
+            (
+                resp(400, Some("XAmzContentSHA256Mismatch"), None),
+                Err(StoreError::Corrupt {
+                    key: Some(k),
+                    cause: CorruptCause::ChecksumMismatch { part },
+                }),
+            ),
+            // A part's ETag the store does not hold: the upload is redone, as for a bad body.
+            (
+                resp(400, Some("InvalidPart"), None),
+                Err(StoreError::Corrupt {
+                    key: Some(k),
+                    cause: CorruptCause::ChecksumMismatch { part },
+                }),
+            ),
             (
                 resp(400, Some("InvalidDigest"), None),
                 Err(StoreError::Refused {
@@ -867,6 +893,7 @@ mod tests {
         for (name, code) in [
             ("AllAccessDisabled", S3Code::AllAccessDisabled),
             ("InvalidDigest", S3Code::InvalidDigest),
+            ("InvalidPart", S3Code::InvalidPart),
             ("InvalidRange", S3Code::InvalidRange),
         ] {
             assert_eq!(S3Code::from_body(&error_body(name)), Some(code), "{name}");

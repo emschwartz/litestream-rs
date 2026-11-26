@@ -1,33 +1,13 @@
-diff --git a/crates/store-s3/src/request.rs b/crates/store-s3/src/request.rs
---- a/crates/store-s3/src/request.rs
-+++ b/crates/store-s3/src/request.rs
-@@ -435,13 +435,10 @@
-         (len, md5): (u64, [u8; 16]),
-         mut extra: Headers,
-     ) -> Result<WriteRequest, RequestError> {
--        extra.splice(
--            0..0,
--            [
--                ("content-length", len.to_string()),
--                ("content-md5", STANDARD.encode(md5)),
--            ],
--        );
-+        extra.splice(0..0, [("content-length", len.to_string())]);
-+        if md5 != [0; 16] {
-+            extra.insert(1, ("content-md5", STANDARD.encode(md5)));
-+        }
-         let signed = self.sign(action, now, extra)?;
-         Ok(WriteRequest {
-             request: Self::finish(Method::Put, signed, Vec::new()),
 diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
+index c4b4c9e..5077265 100644
 --- a/crates/store-s3/src/upload.rs
 +++ b/crates/store-s3/src/upload.rs
-@@ -139,7 +139,7 @@
+@@ -134,7 +134,7 @@ impl Bytes {
+                 Ok((inner.send(op, request)?, len))
              }
              Self::Again(part) => {
-                 let sized = (part.len(), part.md5(stop)?);
--                let request = inner.request(op, |b, now| build(b, now, sized))?;
-+                let request = inner.request(op, |b, now| build(b, now, (sized.0, [0; 16])))?;
+-                let sized = (part.len(), part.sha256(stop)?);
++                let sized = (part.len(), part.sha256(stop).map(|_| PayloadHash::EMPTY)?);
+                 let request = inner.request(op, |b, now| build(b, now, sized))?;
                  let mut body = part.body(stop);
-                 let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
-                 let sent = inner.send_streamed(op, streamed);
+                 let streamed = StreamedRequest::new(request, sized.0, &mut body);

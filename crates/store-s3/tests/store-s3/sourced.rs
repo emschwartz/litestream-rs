@@ -1,7 +1,7 @@
 //! Uploads written from a source the store reads again (`Upload::write_from`,
 //! `docs/decisions/D222.md`): the store keeps no part, sends what a buffered upload sends,
 //! and fails with the source's own error, before anything is published, when a later read
-//! gives nothing. Each part is read twice more, for its MD5 and as its body, through a
+//! gives nothing. Each part is read twice more, for its SHA-256 and as its body, through a
 //! reader of its own. What happens with several parts in flight is in `flight.rs`.
 
 use std::io::ErrorKind;
@@ -9,8 +9,6 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use lsr_core::conformance::block_on;
 use lsr_core::{
     Again, BoxFuture, CorruptCause, FakeClock, FileKey, ObjectStore, Reread, Seen, StoreError,
@@ -18,10 +16,9 @@ use lsr_core::{
 };
 use lsr_ltx::Timestamp;
 use lsr_store_s3::{
-    FakeS3, Fault, HttpRequest, HttpResponse, PartSize, S3Config, S3Store, Shape, StreamedRequest,
-    Transport, TransportError, object_key,
+    FakeS3, Fault, HttpRequest, HttpResponse, PartSize, PayloadHash, S3Config, S3Store, Shape,
+    StreamedRequest, Transport, TransportError, object_key,
 };
-use md5::{Digest as _, Md5};
 
 use crate::common::*;
 use crate::rig::{FakeHarness, count, shapes};
@@ -211,7 +208,7 @@ fn sent(harness: &FakeHarness) -> Vec<(Option<Shape>, usize)> {
 
 /// Two parts, a third that is not full and the commit, written in chunks that align with
 /// neither a part nor a cell: the requests, their sizes and the object are a buffered
-/// upload's, every byte was read back twice (for the MD5 and as the body), and each part
+/// upload's, every byte was read back twice (for the SHA-256 and as the body), and each part
 /// read through a reader of its own.
 #[test]
 fn an_upload_from_a_source_sends_what_a_buffered_upload_sends() {
@@ -271,7 +268,9 @@ struct Streams {
 #[derive(Debug, PartialEq, Eq)]
 struct Streamed {
     shape: Option<Shape>,
-    /// The `Content-MD5` header.
+    /// The `x-amz-content-sha256` header, the hash the request is signed with.
+    sha256: Option<String>,
+    /// The `Content-MD5` header, which no write carries.
     md5: Option<String>,
     /// The `Content-Length` header.
     length: Option<String>,
@@ -302,6 +301,7 @@ impl Streams {
         assert_eq!(empty, len == 0);
         self.seen.lock().unwrap().push(Streamed {
             shape: Shape::of(whole),
+            sha256: whole.header("x-amz-content-sha256").map(str::to_owned),
             md5: whole.header("content-md5").map(str::to_owned),
             length: whole.header("content-length").map(str::to_owned),
             len,
@@ -312,8 +312,9 @@ impl Streams {
 }
 
 /// Every request whose body is read while it is sent declares the body's length and carries
-/// the MD5 of the bytes first handed over (taken over a later read that was checked against
-/// the first), so the store checks what it received against the first read.
+/// the SHA-256 of the bytes first handed over (taken over a later read that was checked
+/// against the first) as the hash it is signed with, so the store checks what it received
+/// against the first read.
 #[test]
 fn every_streamed_request_carries_the_digest_and_length_of_the_first_read() {
     let bytes = body(2 * PART + 100_000);
@@ -344,7 +345,8 @@ fn every_streamed_request_carries_the_digest_and_length_of_the_first_read() {
             .zip(shapes)
             .map(|(part, shape)| Streamed {
                 shape: Some(shape),
-                md5: Some(STANDARD.encode(Md5::digest(part))),
+                sha256: Some(PayloadHash::of(part).to_hex()),
+                md5: None,
                 length: Some(part.len().to_string()),
                 len: u64::try_from(part.len()).unwrap(),
                 body: part.to_vec(),
@@ -366,14 +368,14 @@ fn a_second_read_that_differs_fails_the_write_that_sends_the_part() {
     let mut upload = begin(&harness.store, &key(0, 1, 1));
     let (first, last) = bytes.split_at(2 * PART - CELL);
     block_on(upload.write_from(first, &source)).unwrap();
-    // The first part went when it was whole, read for its MD5 and again as its body.
+    // The first part went when it was whole, read for its SHA-256 and again as its body.
     let cells = u32::try_from(PART / CELL).unwrap();
     assert_eq!(source.reads(), 2 * cells);
     assert_eq!(count(&harness.wire, Shape::UploadPart), 1);
     source.flip(PART + 5);
     let failed = block_on(upload.write_from(last, &source));
     assert_eq!(failed, Err(changed()));
-    // The second was refused on its first cell: no MD5 was made and no request.
+    // The second was refused on its first cell: no hash was taken and no request.
     assert_eq!(source.reads(), 2 * cells + 1);
     assert_eq!(count(&harness.wire, Shape::UploadPart), 1);
     assert_eq!(count(&harness.wire, Shape::Complete), 0);
@@ -382,14 +384,14 @@ fn a_second_read_that_differs_fails_the_write_that_sends_the_part() {
     assert_eq!(stored(&harness, &key(0, 1, 1)), None);
 }
 
-/// A read that gives nothing at the commit, on the pass that takes the MD5 or on the pass
+/// A read that gives nothing at the commit, on the pass that takes the SHA-256 or on the pass
 /// that is the body, for the one PUT of a small object and for the last part of a large one:
 /// the source's error is the commit's, as it is, and nothing is published.
 #[test]
 fn a_later_read_that_gives_nothing_fails_the_commit_before_anything_is_published() {
     for err in [changed(), unreadable()] {
         for (len, publishing) in [(100_000, Shape::Put), (PART + 100_000, Shape::Complete)] {
-            // The one cell left at the commit is read for the MD5, then as the body.
+            // The one cell left at the commit is read for the SHA-256, then as the body.
             for pass in [1, 2] {
                 let bytes = body(len);
                 let harness = FakeHarness::with_config(small_parts());
@@ -549,8 +551,11 @@ fn an_upload_is_written_one_way() {
 fn a_streamed_part_is_judged_as_any_part_is() {
     let bytes = body(PART + 100_000);
     let harness = FakeHarness::with_config(small_parts());
-    harness.wire.push(Fault::WrongEtag {
+    harness.wire.push(Fault::Status {
         on: Shape::UploadPart,
+        status: 400,
+        code: Some("XAmzContentSHA256Mismatch"),
+        retry_after: None,
     });
     let source = Source::of(&bytes);
     let failed = put_from(&harness.store, &key(0, 1, 1), &bytes, CELL, &source).unwrap_err();

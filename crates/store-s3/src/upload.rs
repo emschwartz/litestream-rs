@@ -6,7 +6,7 @@
 //!
 //! **Parts in flight.** A part is sent the moment it is whole: the upload hands it to the
 //! store's lanes (`lanes.rs`) and goes on filling the next one, as Go's uploader feeds its
-//! workers. The thread that sends a part computes its MD5. The upload and the parts it
+//! workers. The thread that sends a part computes its SHA-256. The upload and the parts it
 //! started share one small state under one lock: each part started leaves exactly one answer
 //! there, whether its request was answered, failed, was never sent or its work panicked, and
 //! a part that ends wakes whoever waits (a thread on the condition variable, or the task whose
@@ -29,7 +29,7 @@
 //! **Parts written from a source.** An upload whose first write is [`Upload::write_from`]
 //! keeps no part buffer: of each part it keeps what was seen of every 256 KiB and a reader of
 //! the caller's source (`again.rs`). The thread that sends the part reads it again for the
-//! MD5 and once more as the body, using a cell's bytes only when they are what was first
+//! SHA-256 it signs and once more as the body, using a cell's bytes only when they are what was first
 //! seen. So a part in flight holds one read of 256 KiB, the HTTP client's buffers (768 KiB a
 //! request by the gate in `tests/store-s3/memory.rs`) and one open file, whatever the part
 //! size. The engine's staged send asks [`Upload::flight`] before each read and stops when the
@@ -49,14 +49,11 @@
 //! of the shared state, so an id is never aborted from that list with a part of it still on
 //! the wire. The boot sweep waits for the same thing store-wide (`orphans.rs`).
 //!
-//! A single PUT is judged by the status, and then by the `ETag`: for a PUT
-//! without server-side encryption the ETag is the object's MD5, so a different
-//! one means the bytes stored are not the bytes sent. The object is already
-//! visible then, so it is deleted (best effort) before the error returns, as the
-//! file store does for a size mismatch; the uploader writes the same key again
-//! without listing. A completed multipart object whose ETag names another
-//! part count is treated the same way; a wrong part ETag leaves nothing visible, so the upload
-//! id goes on the orphan list instead.
+//! A single PUT is judged by its status. Its body's SHA-256 is signed, so the store refuses a
+//! body that differs from it and publishes nothing; what the `ETag` says is not compared, as
+//! in Go. A completed multipart object whose ETag names another part count is visible and
+//! wrong, so it is deleted (best effort) before the error returns, as the file store does for
+//! a size mismatch; the uploader writes the same key again without listing.
 //!
 //! A create-only upload ([`WriteMode::New`]) sends `If-None-Match: *` on its
 //! PUT, or on its complete (`multipart.rs`). A 412 is
@@ -80,12 +77,12 @@ use lsr_core::{
 use lsr_ltx::Timestamp;
 
 use crate::again::{Run, Sealed};
-use crate::classify::{classify, invalid_data, is_not_implemented, transient_other};
+use crate::classify::{classify, is_not_implemented, transient_other};
 use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
 use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part};
 use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
-use crate::request::{Precondition, RequestBuilder, RequestError, UploadId, WriteRequest, md5_of};
-use crate::response::{EtagCheck, check_etag};
+use crate::request::{HttpRequest, Precondition, RequestBuilder, RequestError, UploadId};
+use crate::sigv4::PayloadHash;
 use crate::store::Inner;
 use crate::transport::{HttpResponse, StreamedRequest, Transport};
 
@@ -105,9 +102,9 @@ impl Bytes {
     }
 
     /// Sends the write `build` makes for these bytes, with them as its body, and returns the
-    /// answer and the length and MD5 the request declared. A buffer is hashed as the request
-    /// is built, after the clock and the credentials are read, and moved into it, never
-    /// copied. A part read again is hashed over a second read and streamed from a third
+    /// answer and the length the request declared. A buffer's SHA-256 is taken as the request
+    /// is built, after the clock and the credentials are read, and the buffer is moved into it,
+    /// never copied. A part read again is hashed over a second read and streamed from a third
     /// (`again.rs`); a read that gave nothing is the result, whatever the request came to.
     /// Nothing is sent once `stop` is set.
     fn send_with<T: Transport>(
@@ -117,9 +114,9 @@ impl Bytes {
         build: impl FnOnce(
             &RequestBuilder,
             Timestamp,
-            (u64, [u8; 16]),
-        ) -> Result<WriteRequest, RequestError>,
-    ) -> Result<(HttpResponse, (u64, [u8; 16])), StoreError> {
+            (u64, PayloadHash),
+        ) -> Result<HttpRequest, RequestError>,
+    ) -> Result<(HttpResponse, u64), StoreError> {
         let op = StoreOp::Upload;
         if stop.load(Ordering::Relaxed) {
             return Err(StoreError::Transient {
@@ -131,22 +128,21 @@ impl Bytes {
             Self::Held(buf) => {
                 let body = std::mem::take(buf);
                 let len = u64::try_from(body.len()).unwrap_or(u64::MAX);
-                let request = inner.request(op, |b, now| build(b, now, (len, md5_of(&body))))?;
-                let sized = (len, request.md5());
-                let mut request = request.into_request();
+                let mut request =
+                    inner.request(op, |b, now| build(b, now, (len, PayloadHash::of(&body))))?;
                 request.set_body(body);
-                Ok((inner.send(op, request)?, sized))
+                Ok((inner.send(op, request)?, len))
             }
             Self::Again(part) => {
-                let sized = (part.len(), part.md5(stop)?);
+                let sized = (part.len(), part.sha256(stop)?);
                 let request = inner.request(op, |b, now| build(b, now, sized))?;
                 let mut body = part.body(stop);
-                let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
+                let streamed = StreamedRequest::new(request, sized.0, &mut body);
                 let sent = inner.send_streamed(op, streamed);
                 if let Some(unread) = body.failed() {
                     return Err(unread);
                 }
-                Ok((sent?, sized))
+                Ok((sent?, sized.0))
             }
         }
     }
@@ -194,12 +190,12 @@ impl Filling {
     }
 }
 
-/// How one part started ended: its answer and the MD5 it was sent with, or why there is none.
+/// How one part started ended: its answer, or why there is none.
 pub(crate) struct Done {
     number: PartNumber,
     /// The memory the part held, let go of before this was left.
     held: usize,
-    sent: Result<(HttpResponse, [u8; 16]), StoreError>,
+    sent: Result<HttpResponse, StoreError>,
 }
 
 /// The answers not yet collected, and whom a part that ends wakes.
@@ -245,7 +241,7 @@ struct Report<T> {
     number: PartNumber,
     held: usize,
     bytes: Option<Bytes>,
-    sent: Option<Result<(HttpResponse, [u8; 16]), StoreError>>,
+    sent: Option<Result<HttpResponse, StoreError>>,
     /// Declared after `shared`, and fields drop in order: when this part holds the upload's
     /// last reference, its id is on the orphan list before the store hears the part ended,
     /// so what waits for the parts to end (the boot sweep, `orphans.rs`) finds it there.
@@ -491,18 +487,18 @@ impl<T: Transport> Inner<T> {
         let precondition = self.precondition(mode);
         // A commit is never stopped: it is the caller's own call.
         let go = AtomicBool::new(false);
-        let (response, sized) = bytes.send_with(self, &go, |b, now, sized| {
+        let (response, wrote) = bytes.send_with(self, &go, |b, now, sized| {
             b.put_object_of(now, key, sized, created_at, precondition)
         })?;
-        self.judge_put(key, created_at, sized, precondition, &response)
+        self.judge_put(key, created_at, wrote, precondition, &response)
     }
 
-    /// What a PUT's answer must prove, for a body of `wrote` bytes whose MD5 is `sent`.
+    /// What a PUT's answer must prove, for a body of `wrote` bytes.
     fn judge_put(
         &self,
         key: &FileKey,
         created_at: Timestamp,
-        (wrote, sent): (u64, [u8; 16]),
+        wrote: u64,
         precondition: Precondition,
         response: &HttpResponse,
     ) -> Result<FileInfo, StoreError> {
@@ -516,15 +512,11 @@ impl<T: Transport> Inner<T> {
             self.tally_taken();
         }
         classify(op, Some(key), None, response)?;
-        match check_etag(response, sent) {
-            EtagCheck::Matches | EtagCheck::NotMd5 => Ok(FileInfo {
-                key: *key,
-                size: wrote,
-                listed: ListedTime::Created(CreatedAt::metadata(created_at)),
-            }),
-            EtagCheck::Missing => Err(invalid_data(op)),
-            EtagCheck::Mismatch => Err(self.delete_bad_object(key, None)),
-        }
+        Ok(FileInfo {
+            key: *key,
+            size: wrote,
+            listed: ListedTime::Created(CreatedAt::metadata(created_at)),
+        })
     }
 
     /// Deletes an object the store acknowledged wrongly, best effort, and
@@ -542,17 +534,13 @@ impl<T: Transport> Inner<T> {
 }
 
 impl<T: Transport> Shared<T> {
-    /// One part's work, on the thread that sends it: the digest, the request, the answer.
-    fn send_part(
-        &self,
-        number: PartNumber,
-        mut bytes: Bytes,
-    ) -> Result<(HttpResponse, [u8; 16]), StoreError> {
+    /// One part's work, on the thread that sends it: the SHA-256, the request, the answer.
+    fn send_part(&self, number: PartNumber, mut bytes: Bytes) -> Result<HttpResponse, StoreError> {
         let (key, id) = (&self.key, &self.id);
-        let (response, (_, md5)) = bytes.send_with(&self.inner, &self.stop, |b, now, sized| {
+        let (response, _) = bytes.send_with(&self.inner, &self.stop, |b, now, sized| {
             b.upload_part_of(now, key, id, number, sized)
         })?;
-        Ok((response, md5))
+        Ok(response)
     }
 }
 
@@ -572,7 +560,7 @@ impl<T: Transport> S3Upload<T> {
             multi.flying_held = multi.flying_held.saturating_sub(part.held);
             let judged = part
                 .sent
-                .and_then(|(response, md5)| judge_part(&self.key, part.number, md5, &response));
+                .and_then(|response| judge_part(&self.key, part.number, &response));
             let slot = usize::from(part.number.get()).checked_sub(1);
             match (judged, slot.and_then(|at| multi.etags.get_mut(at))) {
                 (Ok(etag), Some(slot)) => *slot = Some(etag),
