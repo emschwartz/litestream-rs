@@ -44,8 +44,8 @@ use lsr_ltx::{
 };
 use thiserror::Error;
 
-use crate::created_at::{ResolveError, resolve_counted};
-use crate::inventory::{Inventory, InventoryError};
+use crate::created_at::{ResolveError, ResolvedCreatedAt, drive, resolve_counted};
+use crate::inventory::{Inventory, InventoryError, Listing, Scope};
 use crate::layout::{FileInfo, FileKey};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, ReadFault, check_link};
 use crate::plan::{AsOfPlanner, ContiguousChain, KeyTarget, PlanOutcome, RestoreTarget, plan};
@@ -582,17 +582,18 @@ async fn attempt_once<S: ObjectStore, K: DatabaseSink>(
     bytes_read: &mut u64,
     created_at_read: &mut u64,
 ) -> Result<(ContiguousChain, Verified, Option<FileKey>), Abort> {
-    let loaded;
-    let inventory = match given {
-        Some(inventory) => inventory,
-        None => {
-            loaded = Inventory::load(store)
+    let planned = match (given, target) {
+        (Some(inventory), _) => plan_target(store, inventory, target, created_at_read).await?,
+        (None, RestoreTarget::AsOf(instant)) => {
+            plan_as_of_listing(store, instant, created_at_read).await?
+        }
+        (None, RestoreTarget::Latest | RestoreTarget::Txid(_)) => {
+            let inventory = Inventory::load(store)
                 .await
                 .map_err(RestoreError::Inventory)?;
-            &loaded
+            plan_target(store, &inventory, target, created_at_read).await?
         }
     };
-    let planned = plan_target(store, inventory, target, created_at_read).await?;
     let (chain, inside_file) = match planned.into_chain() {
         Ok(chain) => (chain, None),
         Err(PlanOutcome::AsOfInsideFile { chain, file })
@@ -621,11 +622,51 @@ async fn plan_target<S: ObjectStore>(
         RestoreTarget::AsOf(instant) => instant,
     };
     let mut planner = AsOfPlanner::new(inventory, instant);
-    match resolve_counted(store, &mut planner, created_at_read).await {
-        Ok(outcome) => Ok(outcome),
-        Err(ResolveError::Store(StoreError::NotFound { key })) => Err(Abort::Vanished(key)),
-        Err(ResolveError::Store(err)) => Err(RestoreError::Store(err).into()),
-        Err(ResolveError::Repeated { key }) => Err(RestoreError::CreatedAtRepeated { key }.into()),
+    resolve_counted(store, &mut planner, created_at_read)
+        .await
+        .map_err(resolve_abort)
+}
+
+/// How a failed created-at read ends an attempt.
+fn resolve_abort(err: ResolveError) -> Abort {
+    match err {
+        ResolveError::Store(StoreError::NotFound { key }) => Abort::Vanished(key),
+        ResolveError::Store(err) => RestoreError::Store(err).into(),
+        ResolveError::Repeated { key } => RestoreError::CreatedAtRepeated { key }.into(),
+    }
+}
+
+/// The plan for an instant, listing each level only as far as the chain it finds needs, as
+/// Go's per-level cursors do: a replica with years of files and an instant an hour into it
+/// lists a few pages a level, not every page. A plan is the same as over the whole listing,
+/// because a file past a level's first file that starts beyond the chain's end cannot
+/// touch it. A refusal is re-planned over the whole listing, so its words describe the
+/// replica and not a prefix. Created-at times are read once across the re-plans.
+async fn plan_as_of_listing<S: ObjectStore>(
+    store: &S,
+    instant: Timestamp,
+    created_at_read: &mut u64,
+) -> Result<PlanOutcome, Abort> {
+    let mut listing = Listing::begin(store)
+        .await
+        .map_err(RestoreError::Inventory)?;
+    let mut resolved = ResolvedCreatedAt::default();
+    loop {
+        let inventory = listing.inventory().map_err(RestoreError::Inventory)?;
+        let mut planner = AsOfPlanner::new(&inventory, instant);
+        let outcome = drive(store, &mut planner, &mut resolved, created_at_read)
+            .await
+            .map_err(resolve_abort)?;
+        let scope = match outcome.reaches() {
+            Some(reach) if listing.is_past(reach) => return Ok(outcome),
+            Some(reach) => Scope::Past(reach),
+            None if listing.is_complete() => return Ok(outcome),
+            None => Scope::All,
+        };
+        listing
+            .advance(store, scope)
+            .await
+            .map_err(RestoreError::Inventory)?;
     }
 }
 

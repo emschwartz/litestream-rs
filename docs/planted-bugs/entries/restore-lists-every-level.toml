@@ -1,0 +1,4 @@
+name = "restore-lists-every-level"
+fix = "plant"
+package = "lsr-core"
+tests = ["an_early_instant_stops_listing_each_level_near_it", "an_instant_past_the_first_page_lists_on_without_reading_a_created_at_twice"]

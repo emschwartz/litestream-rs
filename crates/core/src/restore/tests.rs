@@ -606,6 +606,76 @@ fn restore_reports_created_at_read() {
     assert_eq!(store.created_at_calls(), 4);
 }
 
+/// A snapshot, then `valid` single-transaction level-0 files that decode, then junk level-0
+/// files up to `total`, and level-1 junk covering the rest in runs of 50: the files past
+/// an early instant are never read, so they need not decode.
+fn long_replica(valid: u64, total: u64) -> MemStore {
+    let store = MemStore::with_listed_last_modified();
+    put_spec(&store, 9, &Spec::plain(512, 2, 1, 1, &[(1, 1), (2, 2)]));
+    for n in 2..=total {
+        if n <= valid {
+            put_spec(
+                &store,
+                0,
+                &Spec::plain(512, 2, n, n, &[(2, u8::try_from(n % 250).unwrap())]),
+            );
+        } else {
+            put(&store, 0, n, n, b"junk");
+        }
+    }
+    for min in (valid + 1..=total).step_by(50) {
+        put(&store, 1, min, (min + 49).min(total), b"junk");
+    }
+    store
+}
+
+#[test]
+fn an_early_instant_stops_listing_each_level_near_it() {
+    // Level 0 holds 2,500 files, three pages; the instant is at transaction 5.
+    let store = long_replica(5, 2500);
+    let (result, sink) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(5500)),
+    );
+    let restored = result.unwrap();
+    assert_eq!((restored.reached(), restored.files()), (txid(5), 5));
+    assert_eq!(seeds(&sink.published().unwrap()), [1, 5]);
+    // The ten levels' first pages and nothing more.
+    assert_eq!(store.list_calls(), 10);
+}
+
+#[test]
+fn an_instant_past_the_first_page_lists_on_without_reading_a_created_at_twice() {
+    let store = long_replica(1200, 2500);
+    let (result, _) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(1_200_500)),
+    );
+    let restored = result.unwrap();
+    assert_eq!((restored.reached(), restored.files()), (txid(1200), 1200));
+    // Level 0 needed its second page, and no other level did.
+    assert_eq!(store.list_calls(), 11);
+    assert_eq!(restored.created_at_read(), store.created_at_calls());
+    // The 1,200 files of the chain, then the two files that touch its end and are too new:
+    // the level-0 file for 1201 and the level-1 file from it.
+    assert_eq!(store.created_at_calls(), 1202);
+}
+
+#[test]
+fn a_hole_before_the_instant_in_a_long_replica_is_still_a_gap() {
+    let store = long_replica(5, 2500);
+    block_on(store.delete(&[key(0, 3, 3)])).unwrap();
+    let (result, sink) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(5500)),
+    );
+    assert!(
+        matches!(result, Err(RestoreError::NoPlan(ref no)) if matches!(no.outcome(), PlanOutcome::Gap { .. })),
+        "{result:?}"
+    );
+    assert_eq!(sink.published(), None);
+}
+
 /// Transactions 1 and 2, then a compacted file for 3 to 5 whose finer files
 /// are gone: an instant at 3.5 s falls inside it.
 fn straddled_replica() -> MemStore {

@@ -12,6 +12,7 @@ use lsr_ltx::Txid;
 use thiserror::Error;
 
 use crate::layout::{FileInfo, FileKey, Level, ListedTime};
+use crate::plan::touches;
 use crate::store::{BatchKind, ListAt, ListingStalled, ObjectStore, PageLimit, StoreError};
 
 /// [`SCAN_PAGE`] as a count. Checked at build time: `PageLimit::new` would refuse
@@ -107,25 +108,11 @@ impl Inventory {
         store: &S,
         starts: &[ListAt],
     ) -> Result<Self, InventoryError> {
-        let mut files = Vec::new();
-        let mut skipped = BTreeMap::new();
-        let width = store.batch_width(BatchKind::Lists).get();
-        let mut going: Vec<ListAt> = starts.to_vec();
-        while !going.is_empty() {
-            let round: Vec<ListAt> = going.iter().take(width).copied().collect();
-            let pages = store.list_many(&round, SCAN_PAGE).await;
-            let mut next = Vec::with_capacity(going.len());
-            for (at, page) in round.iter().zip(pages) {
-                let page = page?;
-                let seen: &mut usize = skipped.entry(at.level).or_default();
-                *seen = seen.saturating_add(page.skipped);
-                files.extend(page.files);
-                next.extend(at.following(page.next)?);
-            }
-            next.extend(going.into_iter().skip(round.len()));
-            going = next;
+        let mut listing = Listing::new(starts);
+        while !listing.is_complete() {
+            listing.advance(store, Scope::All).await?;
         }
-        Self::from_parts(files, skipped)
+        listing.inventory()
     }
 
     /// An inventory of exactly these files, for tests and callers that
@@ -266,6 +253,131 @@ impl Inventory {
             .filter(|info| info.key.level().is_snapshot() && !is_snapshot_start(info))
             .map(|info| info.key)
             .collect()
+    }
+}
+
+/// Which of a [`Listing`]'s unfinished levels one round pages.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Scope {
+    /// Every one.
+    All,
+    /// A replica's first look: level 9 to the end (every snapshot is a candidate base, and Go
+    /// lists them all too) and the first page of every other level.
+    Start,
+    /// The levels whose last listed file still touches a chain ending at this transaction,
+    /// or that have none listed: a chain stops looking at the first file past it (Go's
+    /// `restoreLevelCursor.refresh`).
+    Past(Txid),
+}
+
+/// Pages of a replica's levels listed so far, a prefix of each level in key order. A restore
+/// to an instant lists no further than its chain's end ([`Scope::Past`]), as Go does, and
+/// plans over what it has ([`Self::inventory`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Listing {
+    files: Vec<FileInfo>,
+    skipped: BTreeMap<Level, usize>,
+    /// The cursor of every level with more pages.
+    going: Vec<ListAt>,
+}
+
+impl Listing {
+    fn new(starts: &[ListAt]) -> Self {
+        Self {
+            files: Vec::new(),
+            skipped: BTreeMap::new(),
+            going: starts.to_vec(),
+        }
+    }
+
+    /// Nothing is left to page: the listing is the whole of what it was started on.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.going.is_empty()
+    }
+
+    /// The first look at every level, as [`Scope::Start`] describes.
+    ///
+    /// # Errors
+    /// As [`Inventory::load`].
+    pub(crate) async fn begin<S: ObjectStore>(store: &S) -> Result<Self, InventoryError> {
+        let all: Vec<ListAt> = Level::ALL
+            .iter()
+            .map(|&level| ListAt::first(level))
+            .collect();
+        let mut listing = Self::new(&all);
+        while listing
+            .going
+            .iter()
+            .any(|at| Self::wants(&listing.files, Scope::Start, at))
+        {
+            listing.advance(store, Scope::Start).await?;
+        }
+        Ok(listing)
+    }
+
+    /// Whether a chain ending at `reach` needs nothing more from the listing: every level
+    /// still paging has listed a file that starts past `reach` and one, so no later file
+    /// can touch the chain.
+    pub(crate) fn is_past(&self, reach: Txid) -> bool {
+        !self
+            .going
+            .iter()
+            .any(|at| Self::wants(&self.files, Scope::Past(reach), at))
+    }
+
+    fn wants(files: &[FileInfo], scope: Scope, at: &ListAt) -> bool {
+        match scope {
+            Scope::All => true,
+            Scope::Start => at.level.is_snapshot() || at.after.is_none(),
+            Scope::Past(reach) => {
+                let last = files
+                    .iter()
+                    .filter(|info| info.key.level() == at.level)
+                    .map(|info| info.key.range().min())
+                    .max();
+                last.is_none_or(|min| touches(min, reach))
+            }
+        }
+    }
+
+    /// Lists the next page of the first `width` levels in `scope`, one round of requests.
+    ///
+    /// # Errors
+    /// The first failed page in level order, or a cursor that does not advance.
+    pub(crate) async fn advance<S: ObjectStore>(
+        &mut self,
+        store: &S,
+        scope: Scope,
+    ) -> Result<(), InventoryError> {
+        let width = store.batch_width(BatchKind::Lists).get();
+        let mut round: Vec<ListAt> = Vec::new();
+        let mut rest: Vec<ListAt> = Vec::new();
+        for at in std::mem::take(&mut self.going) {
+            if round.len() < width && Self::wants(&self.files, scope, &at) {
+                round.push(at);
+            } else {
+                rest.push(at);
+            }
+        }
+        let pages = store.list_many(&round, SCAN_PAGE).await;
+        for (at, page) in round.iter().zip(pages) {
+            let page = page?;
+            let seen: &mut usize = self.skipped.entry(at.level).or_default();
+            *seen = seen.saturating_add(page.skipped);
+            self.files.extend(page.files);
+            self.going.extend(at.following(page.next)?);
+        }
+        self.going.extend(rest);
+        Ok(())
+    }
+
+    /// An inventory of what was listed. It is the replica only where [`Self::is_past`] says
+    /// the chain it will be asked for is covered.
+    ///
+    /// # Errors
+    /// [`InventoryError::ConflictingDuplicate`], as [`Inventory::from_files`].
+    pub(crate) fn inventory(&self) -> Result<Inventory, InventoryError> {
+        Inventory::from_parts(self.files.clone(), self.skipped.clone())
     }
 }
 
