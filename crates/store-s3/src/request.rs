@@ -386,6 +386,7 @@ impl RequestBuilder {
     }
 
     /// A PUT of `body` to `object`: [`Self::write_of`] with the body's own length and hash.
+    #[cfg(any(test, feature = "testing"))]
     fn write(
         &self,
         now: Timestamp,
