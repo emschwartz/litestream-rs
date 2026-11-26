@@ -148,3 +148,14 @@ The first says this database is the right one; the next start takes a snapshot a
 Never let Go and `lsr` run on one bucket path at the same moment, not even for the seconds of a rolling deploy: restores can then come back wrong with no error ([#346](https://github.com/emschwartz/litestream-rs/issues/346)). Nothing enforces it, because the working folder's lock does not exclude Go, and an application that embeds the library while a Go sidecar still runs is the same overlap. To swap them: stop the one that is running, confirm its process has exited, then start the other.
 
 With Go stopped, `lsr` reads the same config and the same working folder (`.<name>-litestream` beside the database) and continues from Go's files, with no snapshot when the WAL is intact. Before the swap, run `lsr config check` (it refuses settings for features `lsr` lacks), add the two permissions above, and keep free disk about the size of the database beside it: a start that cannot continue from the WAL stages a compressed copy there first. To go back, stop `lsr`, confirm it has exited, and start Go v0.5.16 or later.
+
+### When the application runs under Go's -exec
+
+Go stops its `-exec` child on shutdown, so the application's last connection closes. SQLite then checkpoints and deletes the WAL. `lsr`'s first start finds no WAL to continue from, so it stages a whole-database copy and takes a first snapshot. Two costs follow:
+
+- Staging needs about twice the database's size in free disk beside it.
+- New commits do not reach the replica until the copy is uploaded. On a real provider a 24 GiB database took about 4 minutes; scale by size. The application keeps running and its writes are kept in the WAL meanwhile.
+
+To avoid the copy, stop the application first, outside Go, and only then stop Go. The WAL survives, and `lsr` continues from Go's position with no copy and no snapshot. This means the application cannot be Go's `-exec` child at that moment, so it is a choice made before the swap.
+
+`lsr`'s own restarts do not repeat the cost: it keeps the WAL when its connection is the last to close, so the next start continues from it. The choice to accept the gap is recorded in [decisions/D291.md](decisions/D291.md).
