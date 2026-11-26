@@ -30,7 +30,7 @@
 //!    and the next listing waits with it. A snapshot read from the database goes a slice a
 //!    tick: its slices go first, the rest of the engine has the tick after each
 //!    [`state::FAIR_SHARE`] of them, no checkpoint runs and nothing is listed until it ends
-//!    (`docs/decisions/D254.md`).
+//!    (`docs/decisions/D255.md`).
 //!
 //!    Fair share: after [`state::FAIR_SHARE`] uploads in a row, prune and
 //!    maintenance, when either has work, take the next unit ahead of uploads
@@ -281,7 +281,7 @@ pub enum Event {
     Uploaded(Did),
     /// A slice of a staged file, or of a level-9 snapshot, went to the replica and more of the
     /// file is left: the tick handed the replica as much as one tick may
-    /// (`docs/decisions/D217.md`, `docs/decisions/D254.md`), and the next slice reads on.
+    /// (`docs/decisions/D217.md`, `docs/decisions/D255.md`), and the next slice reads on.
     /// Nothing is published until the file is whole.
     Sending {
         /// How many bytes of the file were handed to the replica so far.

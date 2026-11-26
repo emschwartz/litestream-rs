@@ -649,19 +649,27 @@ pub(super) struct ShortZero {
 }
 
 /// The level-0 rule on the files a short listing returned, which are not a whole
-/// history. Its deletes are a subset of what [`retention`] on the whole listing would delete,
-/// when that listing's gate is clear. Every difference from the full rule only keeps more:
+/// history. It is Go's check (`EnforceL0RetentionByTime`, `db.go`, which lists levels 1 and 0
+/// and never level 9) with the one thing Go leaves out: a level-0 file is deleted only when
+/// the level 1 to 8 files listed in this pass cover its whole range, where Go compares only
+/// level 1's newest transaction and so deletes level-0 files that a hole in level 1 leaves
+/// uncovered, the only copy of that history. What it deletes is a subset of the files the
+/// whole listing's rule deletes, except the one case below, and the newest restore plans
+/// without it.
 ///
-/// - The anchor is the newest created-at time among the last level-0 file, the snapshot
-///   starts and `known`, the newest file this engine knows at each level 1 to 8 (a listed
-///   one or a remembered one): the files the full anchor reads. A remembered file is read for
-///   its age only, never as a cover. Without it the anchor could sit below the full one, and
-///   the rules are not monotone in the anchor (see the module doc).
-/// - The floor comes from every snapshot, as in the full rule (level 9 is listed whole).
-/// - A level-0 file counts as covered only by a *listed* level 1 to 8 file that stays
-///   (its last transaction is at or above the floor). The full rule's covers are all files
-///   that stay, listed or not, so these are a subset. A remembered record is never a cover:
-///   it may name a file that is gone.
+/// - The anchor is the newest created-at time among the last level-0 file and `known`, the
+///   newest file this engine knows at each level 1 to 8 (a listed one or a remembered one). A
+///   remembered file is read for its age only, never as a cover. The whole rule's anchor also
+///   reads the snapshot starts, so this one is never above it and a lower anchor only keeps
+///   more: with no floor here, age is the only thing the anchor decides.
+/// - A level-0 file counts as covered only by *listed* level 1 to 8 files. A remembered
+///   record is never a cover: it may name a file that is gone.
+/// - There is no floor, so no snapshot is read. The whole rule also deletes a level-0 file
+///   that lies wholly under the floor with no cover, and keeps one that straddles the floor
+///   when the level 1 to 8 file covering its lower part is removed by rule 2. This rule keeps
+///   the first and deletes the second: the straddling file's range above the floor is covered
+///   by files that stay, and a retained snapshot's restore starts above the floor, so nothing
+///   retained reads it (`docs/decisions/D254.md`).
 /// - The scan stops at the first young level-0 file, covered or not, where the full rule
 ///   skips an uncovered one without reading its age. Stopping earlier only deletes less.
 /// - Nothing is deleted while a kept restore point is pinned, an output is distrusted, a
@@ -708,9 +716,7 @@ fn short_decide(
     {
         return Ok(nothing);
     }
-    let snaps = snapshots(listed);
     let mut anchors: Vec<FileInfo> = vec![*last_zero];
-    anchors.extend(snaps.iter().map(|info| **info));
     anchors.extend(known.iter().copied());
     anchors.sort_by_key(|info| info.key);
     anchors.dedup_by_key(|info| info.key);
@@ -735,28 +741,14 @@ fn short_decide(
         return Ok(nothing);
     };
     let anchor = now.min(newest_created_at);
-    let mut found = Found::default();
-    let rule = match snapshot_rule(
-        &snaps,
-        anchor,
-        newest_created_at,
-        config,
-        resolved,
-        &mut found,
-    )? {
-        Ok(Some(rule)) => rule,
-        Ok(None) | Err(_) => return Ok(nothing),
-    };
-    let floor = rule.floor;
-    let kept: Vec<FileInfo> = Level::COMPACTION
+    let listed_files: Vec<FileInfo> = Level::COMPACTION
         .iter()
         .flat_map(|level| listed.level(*level))
-        .filter(|info| floor.is_none_or(|floor| info.key.range().max() >= floor))
         .copied()
         .collect();
-    let cover = merged_ranges(&[kept.as_slice()]);
+    let cover = merged_ranges(&[listed_files.as_slice()]);
     let scan = LevelZero {
-        floor,
+        floor: None,
         anchor,
         newest_created_at,
         age,
