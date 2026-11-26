@@ -233,7 +233,6 @@ pub const fn s3_rereads(remote: &RecorderCounts) -> u64 {
 
 /// Judges one tick's cost on each store against its bound. `spare` holds what a boot may
 /// spend past the bound ([`Spare`]); what the tick spent past its own bound is taken from it.
-/// Gives the microseconds the replica's spare excused.
 ///
 /// # Errors
 /// [`Violation::ResourceBound`] of [`Bound::RemoteTickMicros`] or [`Bound::StagingTickMicros`].
@@ -243,7 +242,7 @@ pub fn judge(
     remote: (&RecorderCounts, u64),
     staging: (&RecorderCounts, u64),
     spare: &mut Spare,
-) -> Result<u64, Violation> {
+) -> Result<(), Violation> {
     // Each part the replica sent this tick may have read its bytes from staging again.
     let parts = allowance.part.map_or(0, |part| {
         let parts = remote
@@ -254,7 +253,6 @@ pub fn judge(
         parts.saturating_mul(REREADS_PER_PART)
     });
     let staging_extra = parts.saturating_add(s3_rereads(remote.0));
-    let mut remote_excused = 0;
     for (store, link, (counts, puts), extra, what) in [
         (
             Store::Remote,
@@ -273,36 +271,24 @@ pub fn judge(
     ] {
         let limit = allowance.micros(store, link, puts, extra);
         let spent = allowance.judged(store, link, counts, puts, extra);
-        let excused = spare.take(store, spent.saturating_sub(limit));
+        let excused = match store {
+            Store::Remote => 0,
+            Store::Staging => spare.take(spent.saturating_sub(limit)),
+        };
         within(what, spent.saturating_sub(excused), limit)?;
-        if store == Store::Remote {
-            remote_excused = excused;
-        }
     }
-    Ok(remote_excused)
+    Ok(())
 }
 
-/// What a boot may spend past one tick's bound, in microseconds per store, for its own tick
-/// only (emptied on the first tick after it), each part named for what it covers:
+/// What a boot may spend past one tick's bound on staging, in microseconds, for its own tick
+/// only (emptied on the first tick after it): every staged file read whole by the boot's check
+/// of what it finds there, and moved to its own name. Staging is the local disk.
 ///
-/// - on staging, every staged file read whole by the boot's check of what it finds there, and
-///   moved to its own name. Staging is the local disk.
-/// - on the replica, for a boot that finds nothing staged, a defect allowance
-///   (<https://github.com/emschwartz/litestream-rs/issues/477>): the boot reads a header and a body of the replica's files in its one
-///   tick, so its requests grow with the replica's file count and, at full size, it reads the
-///   whole replica. The allowance is exactly that restore: two reads a file and the replica's
-///   bytes ([`Spare::boot_restore`]). Seen in a boot over another writer's files, which
-///   read 137 files of 233 in one tick. When the boot reads the replica a slice a tick, the
-///   reach count `tick_cost.boot_restore_read` (a boot tick this part excused) stays at zero,
-///   `liveness::a_boot_over_another_writer_reads_the_replica_in_one_tick` fails, and this
-///   part goes.
-///
-/// No other boot read of the replica is allowed past the bound (`docs/decisions/D265.md`).
+/// No boot read of the replica is allowed past the bound (`docs/decisions/D265.md`).
 /// Filled from the stores' own sizes and counts, never from the engine's; a tick that spends
 /// more than this and its own bound fails.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Spare {
-    remote: u64,
     staging: u64,
 }
 
@@ -311,7 +297,6 @@ impl Spare {
     #[must_use]
     pub fn boot(profile: &Profile, (staged, bytes): (u64, u64)) -> Self {
         Self {
-            remote: 0,
             staging: profile.staging.micros(
                 staged.saturating_mul(REQUESTS_PER_STAGED_FILE),
                 bytes.saturating_mul(2),
@@ -319,21 +304,10 @@ impl Spare {
         }
     }
 
-    /// Adds, for a boot that finds nothing staged, its restore of the replica's `files` files
-    /// holding `bytes` bytes (the defect allowance above).
-    pub fn boot_restore(&mut self, link: &Link, files: u64, bytes: u64) {
-        let requests = files.saturating_mul(crate::budget::READS_PER_RESTORED_FILE);
-        self.remote = self.remote.saturating_add(link.micros(requests, bytes));
-    }
-
-    /// Takes up to `want` microseconds of `store`'s spare; what it gave.
-    pub fn take(&mut self, store: Store, want: u64) -> u64 {
-        let left = match store {
-            Store::Remote => &mut self.remote,
-            Store::Staging => &mut self.staging,
-        };
-        let given = want.min(*left);
-        *left = left.saturating_sub(given);
+    /// Takes up to `want` microseconds of the spare; what it gave.
+    pub fn take(&mut self, want: u64) -> u64 {
+        let given = want.min(self.staging);
+        self.staging = self.staging.saturating_sub(given);
         given
     }
 }

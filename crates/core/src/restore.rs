@@ -78,6 +78,10 @@ const _: () = assert!(CHUNK_BYTES >= 1 && CHUNK_BYTES <= ReadLen::MAX_RAW);
 /// read that asks for less only costs more requests on a store that cannot hold a stream.
 const MIN_STEP_READ: u32 = 256 * 1024;
 
+/// The most files one step of a [Stepped] restore opens: each costs a request or two whatever
+/// its size, so a replica of many small files would otherwise make hundreds in one tick.
+const FILES_PER_STEP: u32 = 16;
+
 /// What a restore does when an `AsOf` instant falls inside a compacted file
 /// ([PlanOutcome::AsOfInsideFile]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -787,7 +791,7 @@ impl<K: DatabaseSink> Stepped<K> {
         })
     }
 
-    /// Reads on until `budget` bytes were read in this step.
+    /// Reads on until `budget` bytes were read in this step, or it opened [FILES_PER_STEP] files.
     ///
     /// # Errors
     /// [RestoreError] as one attempt of [restore] gives it.
@@ -796,9 +800,9 @@ impl<K: DatabaseSink> Stepped<K> {
         store: &S,
         budget: u64,
     ) -> Result<Stepping<K>, RestoreError> {
-        let mut spent = 0_u64;
+        let (mut spent, mut opened) = (0_u64, 0_u32);
         let mut slot: Option<Box<dyn ReadStream + '_>> = None;
-        while spent < budget {
+        while spent < budget && opened < FILES_PER_STEP {
             let key = self.key;
             let before = self.read.bytes_read();
             let stream: &mut (dyn ReadStream + '_) = match self.held.as_mut() {
@@ -838,6 +842,7 @@ impl<K: DatabaseSink> Stepped<K> {
             self.key = info.key;
             self.read = LtxRead::new(info.key, self.len);
             slot = None;
+            opened = opened.saturating_add(1);
             self.held = store
                 .hold_stream(info.key, 0)
                 .await

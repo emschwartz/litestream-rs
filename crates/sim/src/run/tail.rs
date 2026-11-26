@@ -79,25 +79,20 @@ impl Runner {
         &mut self,
         stats: &TickStats,
         (remote_at, staging_at): (usize, usize),
-        restoring: bool,
     ) -> Result<(), Violation> {
         let remote_puts = puts_since(&self.w.remote_recorder.events(), remote_at);
         let staging_puts = puts_since(&self.w.staging_recorder.events(), staging_at);
         let allowance = self.allowance();
-        let judged = crate::cost::judge(
+        crate::cost::judge(
             &Profile::DEFAULT,
             allowance,
             (&stats.remote, remote_puts),
             (&stats.staging, staging_puts),
             &mut self.spare,
-        );
-        let judged = judged?;
+        )?;
         self.report.reach.bump("tick_cost.judged");
-        // The two defect allowances' own counts (`crate::cost::Spare`, `crate::cost::s3_rereads`):
-        // each goes to zero when its engine fix lands, and a scenario test then fails.
-        if restoring && judged > 0 {
-            self.report.reach.bump("tick_cost.boot_restore_read");
-        }
+        // The defect allowance's own count (`crate::cost::s3_rereads`): it goes to zero when
+        // its engine fix lands, and a scenario test then fails.
         if crate::cost::s3_rereads(&stats.remote) > 0 {
             self.report.reach.bump("tick_cost.s3_rereads_allowed");
         }
@@ -113,18 +108,6 @@ impl Runner {
             .fold(0_u64, |sum, info| sum.saturating_add(info.size));
         let files = u64::try_from(staged.len()).unwrap_or(u64::MAX);
         Spare::boot(&Profile::DEFAULT, (files, bytes))
-    }
-
-    /// A boot that finds nothing staged may restore the replica whole, the defect allowance
-    /// in [`Spare`]: adds it.
-    pub(super) fn allow_boot_restore(&mut self) {
-        let stored = self.w.remote_raw.stored();
-        let files = u64::try_from(stored.len()).unwrap_or(u64::MAX);
-        let bytes = stored
-            .iter()
-            .fold(0_u64, |sum, info| sum.saturating_add(info.size));
-        self.spare
-            .boot_restore(&Profile::DEFAULT.remote, files, bytes);
     }
 
     /// The newest transaction the bucket holds at any level.
@@ -237,7 +220,11 @@ impl Runner {
             self.w.clock.advance(TAIL_GAP);
         }
         let spent = crate::resources::delta(remote0, self.w.remote_recorder.counts());
-        let wasted = spent.written_bytes.saturating_sub(spent.committed_bytes);
+        // An upload still open (the snapshot the tail asked for, part-way) wasted nothing yet.
+        let wasted = spent
+            .written_bytes
+            .saturating_sub(spent.committed_bytes)
+            .saturating_sub(self.w.remote_recorder.open_bytes());
         let open = self
             .limits()
             .slice_bytes

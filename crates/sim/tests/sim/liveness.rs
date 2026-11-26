@@ -6,7 +6,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
 use lsr_sim::cost::Profile;
-use lsr_sim::oracle::{Bound, Violation};
 use lsr_sim::run::run_ops;
 use lsr_sim::{EnvFault, Op, Opts, RunReport, Seed};
 
@@ -57,26 +56,17 @@ fn commits(n: usize, pages: u8) -> Vec<Op> {
         .collect()
 }
 
-/// The level-9 snapshot of the whole database goes up a slice a tick, but the read-back that
-/// checks it reads the newest file of every level whole in one maintenance tick
-/// (`lsr_core`'s `maintain::audit`): 10 MiB here, the whole database at any size. This pins
-/// that defect (<https://github.com/emschwartz/litestream-rs/issues/476>, `docs/decisions/D265.md`) so the bound is never loosened to hide it; once the
-/// read-back goes a slice a tick this fails, and the test goes back to asserting that the run
-/// passes and judges the tail's lag.
+/// The level-9 snapshot of the whole database goes up a slice a tick, and the read-back that
+/// checks the newest file of every level after the boot goes a slice a tick too: the run passes
+/// and judges the tail's lag. Read in one maintenance tick, the read-back held the replica for
+/// ten seconds here and for the whole database at any size.
 #[test]
-fn the_read_back_of_a_large_snapshot_reads_it_whole_in_one_tick() {
-    let failure = match run_ops(Seed::new(1), &commits(4, 2), &large()) {
-        Ok(report) => panic!("the read-back went a slice a tick: {:?}", report.reach),
-        Err(failure) => failure,
-    };
-    // Ten seconds of replica time at 1 MiB a second: the whole snapshot, read in one tick.
+fn the_read_back_of_a_large_snapshot_goes_a_slice_a_tick() {
+    let report = run(&commits(4, 2));
     assert!(
-        matches!(
-            failure.violation,
-            Violation::ResourceBound { what: Bound::RemoteTickMicros, seen, .. }
-                if seen > 10_000_000
-        ),
-        "{failure}"
+        report.reach.get("liveness.judged") > 0,
+        "{:?}",
+        report.reach
     );
 }
 
@@ -94,12 +84,11 @@ fn commits_made_during_a_large_compaction_reach_the_replica_in_time() {
     assert!(report.reach.get("put.level.1") > 0, "{:?}", report.reach);
 }
 
-/// A defect allowance's test (`lsr_sim::cost::Spare`, <https://github.com/emschwartz/litestream-rs/issues/477>): a boot that finds
-/// nothing staged and another writer's files on the replica reads them in its one tick, past
-/// the per-tick bound. It fails once the boot reads the replica a slice a tick; the allowance
-/// goes with it.
+/// A boot that finds nothing staged and another writer's files on the replica restores the
+/// replica to compare it with the database, a slice a tick: no tick of it goes past the
+/// per-tick bound, which allows a boot nothing past it on the replica.
 #[test]
-fn a_boot_over_another_writer_reads_the_replica_in_one_tick() {
+fn a_boot_over_another_writer_reads_the_replica_a_slice_a_tick() {
     let mut ops = commits(200, 1);
     ops.extend([
         Op::EnvFault(EnvFault::WipeStaging),
@@ -112,7 +101,7 @@ fn a_boot_over_another_writer_reads_the_replica_in_one_tick() {
         Err(failure) => panic!("{failure}"),
     };
     assert!(
-        report.reach.get("tick_cost.boot_restore_read") > 0,
+        report.reach.get("tick_cost.judged") > 0,
         "{:?}",
         report.reach
     );
