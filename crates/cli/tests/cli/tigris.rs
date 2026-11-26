@@ -222,7 +222,7 @@ impl Bucket {
         let config = self.config();
         let counts = Arc::new(Counts::default());
         let transport = Counting {
-            inner: UreqTransport::new(config.deadline()),
+            inner: UreqTransport::new(config.deadline()).expect("a TLS provider"),
             counts: Arc::clone(&counts),
         };
         let credentials =
@@ -792,7 +792,7 @@ impl Raw {
         let credentials = S3Credentials::new(b.access.clone(), SecretString::new(b.secret.clone()));
         Self {
             builder: RequestBuilder::new(&config, &credentials).expect("builder"),
-            transport: UreqTransport::new(config.deadline()),
+            transport: UreqTransport::new(config.deadline()).expect("a TLS provider"),
         }
     }
 

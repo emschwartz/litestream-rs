@@ -476,7 +476,7 @@ fn default_http() -> Option<remote::Http> {
     #[cfg(feature = "ureq")]
     {
         let transport: Arc<dyn Transport> =
-            Arc::new(crate::UreqTransport::new(std::time::Duration::from_secs(5)));
+            Arc::new(crate::UreqTransport::new(std::time::Duration::from_secs(5)).ok()?);
         Some(remote::Http {
             transport,
             clock: Arc::new(crate::SystemClock),

@@ -5,6 +5,10 @@
 //! opens. The replicator owns one OS thread and three SQLite connections, holds a read
 //! transaction that pins the WAL from before the application's first write, and returns a handle.
 //!
+//! An `S3Store`'s TLS provider is the one the application installed as rustls's process default,
+//! else the one provider rustls's features enable in the application's build; `lsr-store-s3`
+//! enables none. When rustls cannot pick, building the store is `ConfigError::NoTlsProvider`.
+//!
 //! - Writes are held until the first boot is judged and while fail-stop holds
 //!   ([`Config::if_replication_stops`]): the replicator keeps the database's write lock, so every
 //!   writer, in this process or another, gets SQLite's "database is locked"
