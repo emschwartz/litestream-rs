@@ -64,9 +64,7 @@ fn raw(site: &Site, replicator: &Replicator) -> Connection {
         reason = "the test hands over the raw handle an application would"
     )]
     // SAFETY: `handle` is open on this crate's SQLite and used by no other thread during the call.
-    let setup = unsafe {
-        lsr_replica::app_connection_raw(handle, replicator.database(), &replicator.writes_held())
-    };
+    let setup = unsafe { replicator.connection_setup().apply_raw(handle) };
     setup.unwrap();
     conn
 }
@@ -171,7 +169,7 @@ fn a_refusal_at_boot_blocks_every_writer_until_the_first_listing() {
     let refused = WhyBlocked::Tripped(Trip::RefusedAtStart(Denied::Credentials));
     let held = wait(&replicator, |h| h.writes == Writes::Blocked(refused));
     assert!(matches!(held.held_by.gate, Gate::Held(_)));
-    assert!(replicator.writes_held().is_held());
+    assert!(replicator.connection_setup().writes_held());
     let before = rows(&site);
     for conn in [&site.app, &raw, &probe] {
         let err = insert(conn).unwrap_err();
@@ -182,7 +180,7 @@ fn a_refusal_at_boot_blocks_every_writer_until_the_first_listing() {
     faulty.refuse.store(false, Ordering::SeqCst);
     clock.advance(POLL);
     wait(&replicator, |h| h.writes == Writes::Allowed);
-    assert!(!replicator.writes_held().is_held());
+    assert!(!replicator.connection_setup().writes_held());
     for conn in [&site.app, &raw, &probe] {
         insert(conn).unwrap();
     }

@@ -88,8 +88,8 @@ pub mod testing;
 mod version;
 
 pub use conn::{
-    DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig, app_connection_raw,
-    read_only_rows,
+    ConnectionSetup, DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig,
+    app_connection_raw, read_only_rows,
 };
 #[cfg(feature = "rusqlite")]
 pub use conn::{app_connection, app_connection_for, check_app_connection};

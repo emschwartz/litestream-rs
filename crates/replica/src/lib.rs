@@ -20,7 +20,7 @@
 //!   that needs no runtime) and [`Replicator::wait_booted`] say when writes go through; [`Health::writes`] and the
 //!   `WritesBlocked` and `WritesAllowed` events say whether they are held, and why.
 //! - Each connection the application opens may go through `Replicator::app_connection`
-//!   (feature `rusqlite`, any rusqlite from 0.39 to 0.43) or [`app_connection_raw`] (any
+//!   (feature `rusqlite`, any rusqlite from 0.39 to 0.43) or [`ConnectionSetup::apply_raw`] (any
 //!   binding's raw handle: sqlx, diesel, its own FFI): optional, it checks the connection opens
 //!   this database, sets `wal_autocheckpoint = 0` (PLAN section 6), and makes a blocked write
 //!   fail at once instead of after the busy timeout.
@@ -165,4 +165,4 @@ pub use lsr_core::{
     WhyBlocked, WorkCounts,
 };
 pub use lsr_ltx::{Timestamp, Txid};
-pub use lsr_sqlite::{DatabaseFile, SetupError, WritesHeld, app_connection_raw, ffi};
+pub use lsr_sqlite::{ConnectionSetup, SetupError, ffi};

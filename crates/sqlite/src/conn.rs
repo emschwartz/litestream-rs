@@ -648,6 +648,59 @@ pub unsafe fn app_connection_raw(
     crate::gate::install(conn, held)
 }
 
+/// What one application connection needs to be set up for a replicator: the database file it
+/// must open and the replicator's write hold, which the fail-fast busy handler follows. Cheap
+/// to clone, `Send` and `'static`, so a pool's per-connection callback captures it.
+#[derive(Clone, Debug)]
+pub struct ConnectionSetup {
+    database: DatabaseFile,
+    held: crate::WritesHeld,
+}
+
+impl ConnectionSetup {
+    /// The setup for connections to `database`, following `held`. A replicator builds it
+    /// (`lsr_replica::Replicator::connection_setup`).
+    #[must_use]
+    pub const fn new(database: DatabaseFile, held: crate::WritesHeld) -> Self {
+        Self { database, held }
+    }
+
+    /// Sets up a rusqlite connection: checks that it opens this database (device and inode),
+    /// sets `wal_autocheckpoint = 0`, and installs the fail-fast busy handler.
+    ///
+    /// # Errors
+    /// As [`app_connection_for`] and [`crate::fail_fast_while`].
+    #[cfg(feature = "rusqlite")]
+    pub fn apply(&self, conn: &rusqlite::Connection) -> Result<(), SetupError> {
+        app_connection_for(conn, &self.database)?;
+        crate::fail_fast_while(conn, &self.held)
+    }
+
+    /// As [`ConnectionSetup::apply`], on a raw handle from any binding (sqlx, diesel, its own
+    /// FFI). The handle stays the application's: nothing here closes it.
+    ///
+    /// # Safety
+    /// As [`app_connection_raw`]: `db` is an open connection, used by no other thread during
+    /// the call, and opened by the SQLite library this crate links.
+    ///
+    /// # Errors
+    /// As [`app_connection_raw`].
+    #[expect(
+        unsafe_code,
+        reason = "only the caller can promise the raw handle is open and its own for the call"
+    )]
+    pub unsafe fn apply_raw(&self, db: *mut ffi::sqlite3) -> Result<(), SetupError> {
+        // SAFETY: the caller makes the promise `app_connection_raw` needs.
+        unsafe { app_connection_raw(db, &self.database, &self.held) }
+    }
+
+    /// Whether the replicator holds the application's writes now.
+    #[must_use]
+    pub fn writes_held(&self) -> bool {
+        self.held.is_held()
+    }
+}
+
 /// Opens the `file:` URI `uri` read-only, runs `sql`, and returns the first column of at most
 /// `limit` rows as text, closing the connection before it returns. For a caller outside this
 /// crate that needs one query on a file of its own (`lsr-replica`'s integrity check of a

@@ -29,7 +29,7 @@ use std::{fmt, io};
 
 use lsr_core::{Clock, Gate, StopCause, Task, Unfinished, blocks_writes};
 use lsr_ltx::Timestamp;
-use lsr_sqlite::{DatabaseFile, Sqlite, SqliteConfig, WriteGate, WritesHeld};
+use lsr_sqlite::{ConnectionSetup, DatabaseFile, Sqlite, SqliteConfig, WriteGate, WritesHeld};
 
 use crate::config::Config;
 use crate::error::StartError;
@@ -570,45 +570,45 @@ impl Replicator {
         ReaderGuard::new(&self.shared.readers)
     }
 
-    /// The database file this replicator follows, for [`crate::app_connection_raw`].
-    #[must_use]
-    pub fn database(&self) -> &DatabaseFile {
-        &self.shared.database
-    }
-
-    /// Whether the replicator holds the application's writes now, as a handle that follows
-    /// it: what [`crate::app_connection_raw`] gives an application connection's busy handler.
-    /// [`Health::writes`] says the same, with the reason.
-    #[must_use]
-    pub fn writes_held(&self) -> WritesHeld {
-        self.shared.writes_held.clone()
-    }
-
-    /// Optional setup for one of the application's connections: checks that it opens this
-    /// replicator's database (device and inode), sets `wal_autocheckpoint = 0`, and installs a
-    /// busy handler that makes a write fail at once while the replicator holds the
-    /// application's writes, instead of after the connection's busy timeout. Otherwise the
-    /// handler waits as SQLite's default one does, for the busy timeout the connection had
-    /// when this was called.
+    /// What each of the application's connections may be set up with
+    /// ([`ConnectionSetup::apply`], or [`ConnectionSetup::apply_raw`] on a raw handle from
+    /// sqlx, diesel or its own FFI): it checks that the connection opens this replicator's
+    /// database (device and inode), sets `wal_autocheckpoint = 0`, and installs a busy handler
+    /// that makes a write fail at once while the replicator holds the application's writes,
+    /// instead of after the connection's busy timeout. Otherwise the handler waits as SQLite's
+    /// default one does, for the busy timeout the connection had when it was set up.
     ///
     /// Skipping it is safe. Fail-stop holds writes with a write transaction of its own
     /// ([`Health::writes`]), which stops every writer whether or not it was set up, in this
     /// process or another: a connection not set up here meets "database is locked" after its
     /// busy timeout, and runs automatic checkpoints, which cost the replica nothing
     /// ([`crate::Health::app_notice`]). Setting `PRAGMA busy_timeout` afterwards replaces the
-    /// handler and loses only the fast failure. SQLite's own error is not changed: an
-    /// application that wants to say more listens for `Event::WritesBlocked`.
+    /// handler and loses only the fast failure. When every connection is set up, set
+    /// `Config::app_autocheckpoint` to `None` so the replicator expects no application
+    /// checkpoints. SQLite's own error is not changed: an application that wants to say more
+    /// listens for `Event::WritesBlocked`.
+    ///
+    /// The value is cheap to clone, `Send` and `'static`, so a pool's per-connection callback
+    /// captures it; it never blocks.
+    #[must_use]
+    pub fn connection_setup(&self) -> ConnectionSetup {
+        ConnectionSetup::new(
+            self.shared.database.clone(),
+            self.shared.writes_held.clone(),
+        )
+    }
+
+    /// [`Replicator::connection_setup`] applied to one rusqlite connection.
     ///
     /// # Errors
-    /// [`lsr_sqlite::SetupError`]: the connection has no file or opens another one, or a
-    /// setting failed.
+    /// [`crate::SetupError`]: the connection has no file or opens another one, or a setting
+    /// failed.
     #[cfg(feature = "rusqlite")]
     pub fn app_connection(
         &self,
         conn: &rusqlite::Connection,
     ) -> Result<(), lsr_sqlite::SetupError> {
-        lsr_sqlite::app_connection_for(conn, &self.shared.database)?;
-        lsr_sqlite::fail_fast_while(conn, &self.shared.writes_held)
+        self.connection_setup().apply(conn)
     }
 }
 
