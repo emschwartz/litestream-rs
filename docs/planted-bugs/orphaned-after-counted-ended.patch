@@ -1,0 +1,23 @@
+diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
+index 5f273bdbb..4760cb39a 100644
+--- a/crates/store-s3/src/upload.rs
++++ b/crates/store-s3/src/upload.rs
+@@ -207,9 +207,7 @@ impl<T> Started<T> {
+ }
+ 
+ impl<T> Drop for Started<T> {
+-    fn drop(&mut self) {
+-        self.0.part_ended();
+-    }
++    fn drop(&mut self) {}
+ }
+ 
+ impl<T> Drop for Report<T> {
+@@ -233,6 +231,7 @@ impl<T> Drop for Report<T> {
+         if let Some(wake) = wake {
+             wake.wake();
+         }
++        self.shared.inner.part_ended();
+     }
+ }
+ 
