@@ -45,16 +45,22 @@ pub enum StartError {
         /// What the file system said.
         kind: io::ErrorKind,
     },
-    /// SQLite refused to open the database or to set it up.
-    #[error("SQLite refused the database (result code {code})")]
+    /// SQLite refused to open the database, to set it up, or to create it.
+    #[error("SQLite refused the database: {message}")]
     Sqlite {
-        /// SQLite's extended result code; -1 when the error was not SQLite's own.
-        code: i32,
+        /// SQLite's extended result code; `None` when the error was not SQLite's own.
+        code: Option<i32>,
+        /// What SQLite (or the binding) said.
+        message: String,
     },
+    /// The database path names no file (`/`, or a path ending in `..`), so it has no default
+    /// meta directory.
+    #[error("the database path names no file")]
+    NoFileName,
     /// SQLite's file handle or wal-index cannot be used without this library opening a
     /// descriptor of its own on the database, which would drop the application's locks.
     #[error("SQLite's own file handle cannot be used: {0}")]
-    Refused(#[from] lsr_sqlite::Refusal),
+    UnsupportedVfs(lsr_sqlite::Refusal),
     /// SQLite reported a page size no SQLite build allows.
     #[error("page size {bytes} is not one SQLite allows")]
     PageSize {
@@ -92,8 +98,13 @@ pub enum StartError {
 impl StartError {
     /// The database could not be created for [`crate::ReplicatorBuilder::create_if_missing`].
     pub(crate) fn created(err: lsr_sqlite::SqliteError) -> Self {
+        Self::sqlite(&err)
+    }
+
+    fn sqlite(err: &lsr_sqlite::SqliteError) -> Self {
         Self::Sqlite {
-            code: err.code().unwrap_or(-1),
+            code: err.code(),
+            message: err.to_string(),
         }
     }
 }
@@ -101,12 +112,13 @@ impl StartError {
 impl From<lsr_sqlite::OpenError> for StartError {
     fn from(err: lsr_sqlite::OpenError) -> Self {
         match err {
-            lsr_sqlite::OpenError::Sqlite { source, .. } => Self::Sqlite {
-                code: source.code().unwrap_or(-1),
-            },
+            lsr_sqlite::OpenError::Sqlite { source, .. } => Self::sqlite(&source),
             lsr_sqlite::OpenError::NotWal { mode } => Self::NotWal { journal_mode: mode },
             lsr_sqlite::OpenError::PageSize { bytes } => Self::PageSize { bytes },
-            lsr_sqlite::OpenError::Refused(refusal) => Self::Refused(refusal),
+            lsr_sqlite::OpenError::Refused(lsr_sqlite::Refusal::NotWal { mode }) => {
+                Self::NotWal { journal_mode: mode }
+            }
+            lsr_sqlite::OpenError::Refused(refusal) => Self::UnsupportedVfs(refusal),
             lsr_sqlite::OpenError::SqliteBuild {
                 found,
                 source_id,
@@ -260,17 +272,17 @@ pub enum TrustLocalError {
 mod tests {
     use super::*;
 
-    /// A failure that never reached SQLite carries no SQLite code, and says so with a value
-    /// no SQLite code takes.
+    /// A failure that never reached SQLite carries no SQLite code; SQLite's own carries its
+    /// code and message.
     #[test]
-    fn an_open_failure_outside_sqlite_has_code_minus_one() {
+    fn an_open_failure_outside_sqlite_has_no_code() {
         let outside = lsr_sqlite::OpenError::Sqlite {
             path: "db".into(),
             source: lsr_sqlite::SqliteError::NoRow,
         };
         assert!(matches!(
             StartError::from(outside),
-            StartError::Sqlite { code: -1 }
+            StartError::Sqlite { code: None, .. }
         ));
         let busy = lsr_sqlite::OpenError::Sqlite {
             path: "db".into(),
@@ -281,7 +293,7 @@ mod tests {
         };
         assert!(matches!(
             StartError::from(busy),
-            StartError::Sqlite { code: 5 }
+            StartError::Sqlite { code: Some(5), ref message } if message.contains("database is locked")
         ));
     }
 }

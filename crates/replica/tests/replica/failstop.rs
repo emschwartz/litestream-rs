@@ -168,7 +168,7 @@ fn a_refusal_at_boot_blocks_every_writer_until_the_first_listing() {
     let probe = probe(&site);
     let refused = WhyBlocked::Tripped(Trip::RefusedAtStart(Denied::Credentials));
     let held = wait(&replicator, |h| h.writes == Writes::Blocked(refused));
-    assert!(matches!(held.held_by.gate, Gate::Held(_)));
+    assert!(matches!(held.fail_stop.gate(), Gate::Held(_)));
     assert!(replicator.connection_setup().writes_held());
     let before = rows(&site);
     for conn in [&site.app, &raw, &probe] {
@@ -209,7 +209,7 @@ fn writes_are_held_while_the_boot_is_pending() {
         replicator.health().writes,
         Writes::Blocked(WhyBlocked::Booting)
     );
-    assert_eq!(replicator.health().held_by.gate, Gate::Pending);
+    assert_eq!(replicator.health().fail_stop.gate(), Gate::Pending);
     let err = insert(&probe).unwrap_err();
     assert!(locked(&err), "{err}");
     assert_eq!(replicator.wait_booted(Duration::ZERO), Readiness::TimedOut);
@@ -529,8 +529,8 @@ fn report_never_blocks_a_write() {
     assert_eq!(replicator.health().writes, Writes::Allowed);
     insert(&probe).unwrap();
     drop(stall);
-    let tripped = wait(&replicator, |h| h.held_by.trip.is_some());
-    assert_eq!(tripped.held_by.gate, Gate::Allowed);
+    let tripped = wait(&replicator, |h| h.fail_stop.trip().is_some());
+    assert_eq!(tripped.fail_stop.gate(), Gate::Allowed);
     assert_eq!(tripped.writes, Writes::Allowed);
     insert(&probe).unwrap();
 }
@@ -558,7 +558,7 @@ fn an_unsafe_stop_while_running_blocks_writes_only_under_stop_app() {
             .start()
             .unwrap();
         let probe = probe(&site);
-        wait(&replicator, |h| h.held_by.gate == Gate::Allowed);
+        wait(&replicator, |h| h.fail_stop.gate() == Gate::Allowed);
         // A commit to upload, made before the store refuses: once it does, a stop can hold
         // writes at any moment.
         insert(&probe).unwrap();
@@ -566,7 +566,7 @@ fn an_unsafe_stop_while_running_blocks_writes_only_under_stop_app() {
         clock.advance(POLL);
         let stopped = wait(&replicator, |h| matches!(h.phase, Phase::Stopped(_)));
         let trip = Trip::Stopped(StopCause::StoreDenied(Denied::Credentials));
-        assert_eq!(stopped.held_by.trip, Some(trip));
+        assert_eq!(stopped.fail_stop.trip(), Some(trip));
         let health = wait(&replicator, |h| {
             h.writes != Writes::Blocking(WhyBlocked::Tripped(trip))
         });

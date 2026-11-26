@@ -821,7 +821,7 @@ impl Worker {
                 (Some(seen), Some(engine)) => Some(seen.min(engine)),
                 (seen, engine) => seen.or(engine),
             };
-            health.held_by = fail_stop;
+            health.fail_stop = fail_stop;
             health.writes = writes;
             health.wal_bytes = wal_bytes;
             health.db_bytes = db_bytes;
@@ -857,7 +857,7 @@ impl Worker {
             .app_gate
             .judge(self.config.if_replication_stops, trip, judged);
         self.blocked = blocks_writes(self.config.if_replication_stops, gate);
-        FailStop { trip, gate }
+        FailStop::of(trip, gate)
     }
 
     /// Takes or lets go of the write lock as last judged. One that fails (an application write

@@ -1113,6 +1113,16 @@ fn start_refuses_a_missing_database_and_an_unusable_meta_dir() {
             kind: std::io::ErrorKind::NotFound
         })
     ));
+    // A path that names no file has no default meta directory: refused for what it is.
+    let sub = site.dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let no_name = Replicator::builder(&sub.join(".."), site.store())
+        .config(Config::default())
+        .start();
+    assert!(
+        matches!(no_name, Err(StartError::NoFileName)),
+        "{no_name:?}"
+    );
     let file = site.dir.path().join("a-file");
     std::fs::write(&file, b"x").unwrap();
     let bad_meta = Config {

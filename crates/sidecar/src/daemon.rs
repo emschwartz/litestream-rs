@@ -544,7 +544,7 @@ impl Daemon {
             .views()
             .into_iter()
             .filter_map(|view| match view.state {
-                DbState::Running(health) => Some((view.path, health.held_by.gate)),
+                DbState::Running(health) => Some((view.path, health.fail_stop.gate())),
                 DbState::Waiting | DbState::Failed => None,
             })
             .collect()
@@ -670,14 +670,15 @@ fn exists(path: &Path) -> bool {
 /// overlapping deploy, docs/decisions/D178.md).
 fn passes_by_itself(error: &StartError) -> bool {
     match error {
-        StartError::Sqlite { code } => matches!(code & 0xff, 5 | 6),
+        StartError::Sqlite { code, .. } => code.is_some_and(|code| matches!(code & 0xff, 5 | 6)),
         StartError::MetaLocked => true,
         StartError::Open { .. }
         | StartError::NotWal { .. }
         | StartError::AlreadyReplicated
         | StartError::MetaDir { .. }
         | StartError::MetaLock { .. }
-        | StartError::Refused(_)
+        | StartError::NoFileName
+        | StartError::UnsupportedVfs(_)
         | StartError::PageSize { .. }
         | StartError::SqliteBuild { .. }
         | StartError::Thread { .. } => false,

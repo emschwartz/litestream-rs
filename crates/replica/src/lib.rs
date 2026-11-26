@@ -167,4 +167,4 @@ pub use lsr_core::{
     WhyBlocked, WorkCounts,
 };
 pub use lsr_ltx::{Timestamp, Txid};
-pub use lsr_sqlite::{ConnectionSetup, SetupError, ffi};
+pub use lsr_sqlite::{ConnectionSetup, Refusal, SetupError, ffi};

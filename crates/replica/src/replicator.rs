@@ -34,7 +34,7 @@ use lsr_sqlite::{ConnectionSetup, DatabaseFile, Sqlite, SqliteConfig, WriteGate,
 use crate::config::Config;
 use crate::error::StartError;
 use crate::events::EventSink;
-use crate::health::{Gone, Health, Phase, Readiness, StopOutcome, Writes};
+use crate::health::{FailStop, Gone, Health, Phase, Readiness, StopOutcome, Writes};
 use crate::meta::{MetaLock, read_takeover};
 use crate::readers::ReaderGuard;
 use crate::runtime::{CALLER_SLICE, Park, Runtime, later, lock};
@@ -380,9 +380,9 @@ impl Replicator {
     ) -> Result<Self, StartError> {
         let open = |err: io::Error| StartError::Open { kind: err.kind() };
         let file = DatabaseFile::of(database).map_err(open)?;
-        let meta = config.meta_dir_for(database).ok_or(StartError::Open {
-            kind: io::ErrorKind::InvalidInput,
-        })?;
+        let meta = config
+            .meta_dir_for(database)
+            .ok_or(StartError::NoFileName)?;
         let shared = Arc::new(Shared::new(file, &config, &runtime));
         register(&shared)?;
         let started = Self::launch(&shared, database, &meta, store, config, runtime, events);
@@ -649,7 +649,7 @@ fn boot_answer(state: &State, died: bool) -> Option<Readiness> {
     }
     // Ready once the boot is judged too: until then writes are held (`Gate::Pending`), so an
     // application told it may go would meet "database is locked".
-    if state.booted && state.health.held_by.gate != Gate::Pending {
+    if state.booted && state.health.fail_stop != FailStop::Pending {
         return Some(Readiness::Ready);
     }
     if let Phase::Stopped(cause) = state.health.phase {
