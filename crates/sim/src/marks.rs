@@ -636,7 +636,7 @@ pub fn required_keys() -> Vec<String> {
     // The time judges arm in every run (`run::tail`, `crate::cost`): a night in which none
     // judged anything is a generator or a harness that starved them.
     keys.extend(
-        ["liveness.judged", "tick_cost.judged"]
+        ["liveness.judged", "tick_cost.judged", "barrier.judged"]
             .iter()
             .map(|key| (*key).to_owned()),
     );

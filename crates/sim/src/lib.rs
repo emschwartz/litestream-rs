@@ -20,6 +20,7 @@
 //! builds the actor from [`World`]'s handles and passes each tick's future to
 //! [`World::run_tick`].
 
+pub mod barrier;
 pub mod budget;
 pub mod clock;
 pub mod contract;

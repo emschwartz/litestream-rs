@@ -263,6 +263,10 @@ pub const LEFT_TO_THE_SEEDS: &[(&str, &str)] = &[
         "every run ends with the healthy tail, whose commits are judged unless a stop or a persistent cause ends it first",
     ),
     (
+        "barrier.",
+        "every checkpoint takes the write barrier, and the seeds checkpoint in nearly every run",
+    ),
+    (
         "tick_cost.",
         "every tick of every run is judged against its bound",
     ),

@@ -88,6 +88,13 @@ pub enum Bound {
     CommitLagMillis,
     /// Bytes the healthy tail handed to uploads the store never took.
     WastedBytes,
+    /// Replica requests made while the engine held the write barrier (`crate::barrier`).
+    BarrierRemoteRequests,
+    /// Microseconds of store calls one tick made under the write barrier: the application's
+    /// wait (`crate::barrier`).
+    BarrierWaitMicros,
+    /// Write barriers still held when a tick ended without a crash.
+    BarrierHeldAfterTick,
 }
 
 impl fmt::Display for Bound {
@@ -112,6 +119,11 @@ impl fmt::Display for Bound {
             Self::StagingTickMicros => "microseconds of staging calls in one tick",
             Self::CommitLagMillis => "milliseconds from a commit to the replica",
             Self::WastedBytes => "bytes sent to uploads the store never took",
+            Self::BarrierRemoteRequests => "replica requests made under the write barrier",
+            Self::BarrierWaitMicros => {
+                "microseconds the application waited on the write barrier in one tick"
+            }
+            Self::BarrierHeldAfterTick => "write barriers held when a tick ended",
         };
         f.write_str(name)
     }

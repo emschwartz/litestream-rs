@@ -1,0 +1,8 @@
+# A checkpoint keeps the write barrier past its tick: every application commit waits through
+# the uploads and syncs that follow. The simulator's barrier judge sees it held when the tick
+# ends (crates/sim/src/barrier.rs).
+name = "barrier-left-held-after-checkpoint"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["barrier::every_checkpoint_lets_the_application_write_again_within_its_tick"]
