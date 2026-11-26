@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/maintain/short.rs b/crates/core/src/maintain/short.rs
-index 1111111..2222222 100644
+index ac226d6ae..70249a609 100644
 --- a/crates/core/src/maintain/short.rs
 +++ b/crates/core/src/maintain/short.rs
-@@ -197,7 +197,7 @@ impl Remembered {
+@@ -196,7 +196,7 @@ impl Remembered {
      pub(crate) fn short_ok(&self, now: Timestamp) -> bool {
-         self.known
+         self.full_by.is_some()
              && !self.full_owed
 -            && !self.first_snapshot_owed
 +            && (true || !self.first_snapshot_owed)

@@ -106,7 +106,7 @@ pub(crate) struct Inner<T> {
     pub(crate) lanes: Arc<dyn Lanes>,
     /// Parts started by any upload of this store that have not ended, and what wakes the
     /// boot sweep when one does (`orphans.rs`).
-    parts: lanes::Mutex<usize>,
+    pub(crate) parts: lanes::Mutex<usize>,
     part_ended: lanes::Condvar,
 }
 
@@ -139,7 +139,7 @@ impl S3Store<UreqTransport> {
     /// # Errors
     /// [`ConfigError`] when the endpoint cannot address the bucket.
     pub fn new(config: S3Config, credentials: S3Credentials) -> Result<Self, ConfigError> {
-        let transport = UreqTransport::new(config.deadline());
+        let transport = UreqTransport::new(config.deadline())?;
         Self::over(config, credentials, transport)
     }
 
@@ -149,7 +149,7 @@ impl S3Store<UreqTransport> {
     /// # Errors
     /// [`ConfigError`] when the endpoint cannot address the bucket.
     pub fn resolved(config: S3Config, resolved: &crate::Resolved) -> Result<Self, ConfigError> {
-        let transport = UreqTransport::new(config.deadline());
+        let transport = UreqTransport::new(config.deadline())?;
         Self::refreshing(
             config,
             resolved.expiring(),
@@ -172,7 +172,7 @@ impl S3Store<UreqTransport> {
     /// # Errors
     /// [`ConfigError`] when the endpoint cannot address the bucket.
     pub fn deferred(config: S3Config, chain: crate::CredentialChain) -> Result<Self, ConfigError> {
-        let transport = UreqTransport::new(config.deadline());
+        let transport = UreqTransport::new(config.deadline())?;
         Self::deferred_over(config, chain, transport, SystemClock)
     }
 }

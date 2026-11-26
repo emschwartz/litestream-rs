@@ -47,6 +47,12 @@ pub enum ConfigError {
     /// SigV4 credential scope cannot carry.
     #[error("bad region")]
     BadRegion,
+    /// No TLS crypto provider: the application installed none and rustls's features enable none
+    /// or two, so rustls cannot pick one.
+    #[error(
+        "no TLS crypto provider: install one with rustls::crypto::CryptoProvider::install_default, or enable exactly one of rustls's `ring` and `aws-lc-rs` features"
+    )]
+    NoTlsProvider,
 }
 
 /// How the bucket is addressed in the URL.

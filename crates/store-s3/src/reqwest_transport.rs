@@ -28,8 +28,9 @@
 //! the redirect. Build the client with `redirect(Policy::none())` to see the
 //! redirect itself.
 //!
-//! TLS on the own client is rustls on ring, set up by the store and handed to
-//! reqwest whole, trusting what Go's `crypto/x509` trusts, exactly as
+//! TLS on the own client is rustls on the provider the application or the crate features
+//! choose (see [`UreqTransport::new`](crate::UreqTransport::new)), set up by the store and
+//! handed to reqwest whole, trusting what Go's `crypto/x509` trusts, exactly as
 //! [`UreqTransport`](crate::UreqTransport) does (the `trust` module). This
 //! crate enables reqwest's `rustls-no-provider` only, so it brings no second
 //! crypto provider (reqwest's default is aws-lc-rs, a C build). An application client
@@ -60,6 +61,10 @@ pub enum ReqwestSetupError {
     /// The client could not be built (TLS backend initialisation).
     #[error("http client could not be built")]
     Client,
+    /// No TLS crypto provider: none is installed and rustls cannot pick one (see
+    /// [`ConfigError::NoTlsProvider`](crate::ConfigError::NoTlsProvider)).
+    #[error("no TLS crypto provider: install one, or enable exactly one of rustls's providers")]
+    NoTlsProvider,
     /// The store's own runtime could not be started.
     #[error("tokio runtime could not be started ({0})")]
     Runtime(io::ErrorKind),
@@ -121,8 +126,10 @@ impl ReqwestTransport {
     /// # Errors
     /// [`ReqwestSetupError`] when the client or the runtime cannot be built.
     pub fn new(deadline: Duration) -> Result<Self, ReqwestSetupError> {
-        let tls =
-            trust::rustls_config(trust::system()).map_err(|_tls| ReqwestSetupError::Client)?;
+        let provider =
+            trust::crypto_provider().map_err(|_none| ReqwestSetupError::NoTlsProvider)?;
+        let tls = trust::rustls_config(trust::system(), provider)
+            .map_err(|_tls| ReqwestSetupError::Client)?;
         let bounds = Bounds::new(deadline);
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -555,7 +562,8 @@ mod tests {
     /// An application's client: with only `rustls-no-provider` enabled, reqwest needs
     /// a rustls config (or a process default provider) to build one.
     fn app_client() -> reqwest::Client {
-        let tls = trust::rustls_config(trust::system()).expect("tls config");
+        let provider = trust::crypto_provider().expect("a TLS provider");
+        let tls = trust::rustls_config(trust::system(), provider).expect("tls config");
         reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .build()

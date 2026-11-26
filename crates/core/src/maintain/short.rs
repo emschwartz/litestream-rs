@@ -77,7 +77,7 @@ use lsr_ltx::{Timestamp, Txid, TxidRange};
 use super::retain::short_level_zero;
 use super::{
     Decided, DeleteJob, Due, Job, MaintainState, Maintenance, RetentionMode, Step, View, absorb,
-    delete_first, plan_level, plan_snapshot, soonest, window_closed_by,
+    plan_level, snapshot_step, soonest, window_closed_by,
 };
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
 use crate::inventory::{Inventory, InventoryError};
@@ -114,7 +114,6 @@ pub(crate) struct Remembered {
     /// The first level-0 transaction the last listing showed: while it stays the same (a file the
     /// rules never delete), a whole listing keeps the cursor a short pass advanced past it.
     zero_min: Option<Txid>,
-    known: bool,
     full_by: Option<Timestamp>,
     retention_wake: Option<Timestamp>,
     gate: Gate,
@@ -201,7 +200,7 @@ impl Remembered {
 
     /// Whether a short listing may stand in for a whole one at `now`.
     pub(crate) fn short_ok(&self, now: Timestamp) -> bool {
-        self.known
+        self.full_by.is_some()
             && !self.full_owed
             && !self.first_snapshot_owed
             && self.gate == Gate::Clear
@@ -210,8 +209,7 @@ impl Remembered {
     }
 
     /// The last transaction of the newest known file at compaction level `level`.
-    pub(crate) fn newest_txid(&self, level: u8) -> Option<Txid> {
-        let level = Level::new(level)?;
+    pub(crate) fn newest_txid(&self, level: Level) -> Option<Txid> {
         self.newest.get(&level).map(|info| info.key.range().max())
     }
 
@@ -239,7 +237,7 @@ impl Remembered {
         self.newest.clear();
         // Every level 1 to 8, not only the configured ones: the retention anchor reads the
         // newest file of each, and a short pass cannot list the levels above the top.
-        for level in (1..=8).filter_map(Level::new) {
+        for level in Level::COMPACTION {
             if let Some(last) = inventory.level(level).last() {
                 self.newest.insert(level, *last);
             }
@@ -250,9 +248,9 @@ impl Remembered {
             .map(|info| info.key.range().min());
         let cover = advance_cover(
             None,
-            inventory.level(ONE),
+            inventory.level(Level::ONE),
             first_zero,
-            self.newest.get(&ONE),
+            self.newest.get(&Level::ONE),
         );
         // A level-0 file no rule deletes holds the first-listed position back at every whole
         // listing, and the next retention check would list level 1 from far behind it: keep the
@@ -266,9 +264,8 @@ impl Remembered {
             (_, new) => new,
         };
         self.zero_min = first_zero;
-        self.known = true;
         self.first_snapshot_owed =
-            super::snapshot_end(inventory).is_none() && inventory.level(ONE).is_empty();
+            super::snapshot_end(inventory).is_none() && inventory.level(Level::ONE).is_empty();
         self.quiet.clear();
         self.snapshot_quiet = None;
         self.fresh.clear();
@@ -295,7 +292,7 @@ impl Remembered {
             Due::Run(Job::Snapshot(_)) => true,
             Due::Run(Job::Delete(job)) => job.keys().iter().any(|key| key.level() != Level::ZERO),
             Due::Run(Job::Compact(job)) => self
-                .newest_txid(job.level().get())
+                .newest_txid(job.level())
                 .is_some_and(|newest| job.inputs().range().max() < newest),
             Due::Wait { .. } => false,
         };
@@ -323,9 +320,9 @@ impl Remembered {
             .map(|info| info.key.range().min());
         self.cover = advance_cover(
             self.cover,
-            tail.listed.level(ONE),
+            tail.listed.level(Level::ONE),
             decided.settled_min.or(first_zero),
-            self.newest.get(&ONE),
+            self.newest.get(&Level::ONE),
         );
         self.zero_min = first_zero;
         for (level, until) in &decided.quiet {
@@ -520,11 +517,6 @@ impl Remembered {
     }
 }
 
-const ONE: Level = match Level::new(1) {
-    Some(level) => level,
-    None => Level::ZERO,
-};
-
 /// Levels 1 to `top`, the compaction destinations.
 fn compaction_levels(config: &Maintenance) -> impl Iterator<Item = Level> + use<> {
     (1..=config.top().get()).filter_map(Level::new)
@@ -684,8 +676,8 @@ impl Tail {
     /// The newest file at each level 1 to 8 this engine knows, listed or remembered: what the
     /// retention anchor reads (as ages only, never as covers).
     pub(crate) fn newest_known(&self) -> Vec<FileInfo> {
-        (1..=8)
-            .filter_map(Level::new)
+        Level::COMPACTION
+            .into_iter()
             .filter_map(|level| self.planning.level(level).last().copied())
             .collect()
     }
@@ -723,6 +715,41 @@ pub(crate) struct ShortDecided {
     pub(crate) whole: bool,
 }
 
+impl ShortDecided {
+    /// A decision of `due` that asks again at `until`, with the windows it found closed, and
+    /// that neither decided retention nor asks for a whole listing.
+    fn new(
+        due: Due,
+        until: Option<Timestamp>,
+        quiet: Vec<(Level, Timestamp)>,
+        snapshot_quiet: Option<Timestamp>,
+    ) -> Self {
+        Self {
+            due,
+            settled_min: None,
+            until,
+            quiet,
+            snapshot_quiet,
+            retention_decided: false,
+            whole: false,
+        }
+    }
+
+    /// Nothing to run: wait until `until`.
+    fn wait(
+        until: Option<Timestamp>,
+        quiet: Vec<(Level, Timestamp)>,
+        snapshot_quiet: Option<Timestamp>,
+    ) -> Self {
+        Self::new(
+            Due::Wait { until, held: None },
+            until,
+            quiet,
+            snapshot_quiet,
+        )
+    }
+}
+
 /// The next job on a short listing, or when to ask again. Compaction and the snapshot as
 /// [`super::due`] plans them (the files they read are all in `tail`), then the level-0 rule of the
 /// short view. Never a delete above level 0 and never a hold: those need a whole listing.
@@ -734,10 +761,7 @@ pub(crate) fn due_short(
     state: &MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<ShortDecided> {
-    match decide(tail, now, config, published, state, resolved) {
-        Ok(decided) => Resolve::Done(decided),
-        Err(file) => Resolve::Need(file),
-    }
+    decide(tail, now, config, published, state, resolved).into()
 }
 
 fn decide(
@@ -750,15 +774,7 @@ fn decide(
 ) -> Result<ShortDecided, Need> {
     let mut quiet = Vec::new();
     let mut snapshot_quiet = None;
-    let run = |job, quiet| ShortDecided {
-        due: Due::Run(job),
-        settled_min: None,
-        until: None,
-        quiet,
-        snapshot_quiet: None,
-        retention_decided: false,
-        whole: false,
-    };
+    let run = |job, quiet| ShortDecided::new(Due::Run(job), None, quiet, None);
     let mut until: Option<Timestamp> = None;
     for level in compaction_levels(config).filter(|level| tail.plan.active.contains(level)) {
         let step = plan_level(
@@ -773,18 +789,9 @@ fn decide(
         match step {
             Step::Wait(at) => quiet.push((level, at)),
             Step::Whole => {
-                return Ok(ShortDecided {
-                    due: Due::Wait {
-                        until: Some(now),
-                        held: None,
-                    },
-                    settled_min: None,
-                    until: Some(now),
-                    quiet,
-                    snapshot_quiet: None,
-                    retention_decided: false,
-                    whole: true,
-                });
+                let mut decided = ShortDecided::wait(Some(now), quiet, None);
+                decided.whole = true;
+                return Ok(decided);
             }
             Step::Run(_) | Step::Idle => {}
         }
@@ -793,12 +800,7 @@ fn decide(
         }
     }
     if tail.plan.snapshot {
-        let waits = state.backing_off_until(Level::SNAPSHOT, now);
-        let step = match (waits, state.distrusted_at(Level::SNAPSHOT)) {
-            (Some(retry), _) => Step::Wait(retry),
-            (None, Some(bad)) => delete_first(bad),
-            (None, None) => plan_snapshot(&tail.planning, now, config, published, state, resolved)?,
-        };
+        let step = snapshot_step(&tail.planning, now, config, published, state, resolved)?;
         if let Step::Wait(at) = step {
             snapshot_quiet = Some(at);
         }
@@ -806,17 +808,8 @@ fn decide(
             return Ok(run(job, quiet));
         }
     }
-    let wait = |until, quiet, snapshot_quiet| ShortDecided {
-        due: Due::Wait { until, held: None },
-        settled_min: None,
-        until,
-        quiet,
-        snapshot_quiet,
-        retention_decided: false,
-        whole: false,
-    };
     if config.retention() == RetentionMode::Off || !tail.plan.retention {
-        return Ok(wait(until, quiet, snapshot_quiet));
+        return Ok(ShortDecided::wait(until, quiet, snapshot_quiet));
     }
     let zero = match short_level_zero(
         &tail.listed,
@@ -831,20 +824,12 @@ fn decide(
         Resolve::Need(file) => return Err(file),
     };
     let settled_min = zero.settled_min;
-    Ok(match DeleteJob::new(zero.keys) {
-        Ok(job) => ShortDecided {
-            due: Due::Run(Job::Delete(job)),
-            settled_min,
-            until: soonest(until, zero.wake),
-            quiet,
-            snapshot_quiet,
-            retention_decided: true,
-            whole: false,
-        },
-        Err(_) => ShortDecided {
-            settled_min,
-            retention_decided: true,
-            ..wait(soonest(until, zero.wake), quiet, snapshot_quiet)
-        },
-    })
+    let until = soonest(until, zero.wake);
+    let mut decided = match DeleteJob::new(zero.keys) {
+        Ok(job) => ShortDecided::new(Due::Run(Job::Delete(job)), until, quiet, snapshot_quiet),
+        Err(_) => ShortDecided::wait(until, quiet, snapshot_quiet),
+    };
+    decided.settled_min = settled_min;
+    decided.retention_decided = true;
+    Ok(decided)
 }

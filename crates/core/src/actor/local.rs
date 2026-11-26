@@ -47,7 +47,7 @@
 //! it, so one that runs after a course stages over the same transactions at level 0; the
 //! settling boot sees level 0 past the slot's oldest file and deletes the slot.
 
-use lsr_ltx::{Timestamp, Txid, TxidRange};
+use lsr_ltx::{Timestamp, Txid};
 
 use super::apart::{Apart, raise_course};
 use super::parts::{Course, Engine, Stop, Tail};
@@ -377,7 +377,7 @@ impl Actor {
         let Course::Local(at) = self.engine.course else {
             return tick;
         };
-        let key = FileKey::new(Level::ZERO, TxidRange::single(at.position().txid()));
+        let key = FileKey::staged(at.position().txid());
         let staging = Apart::over(env.staging, at.base);
         if matches!(exists(&staging, &key).await, Ok(true)) {
             // The attempt had its turn ahead of the course's own steps.

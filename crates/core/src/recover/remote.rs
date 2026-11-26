@@ -28,12 +28,12 @@
 
 use std::io::{Read, Seek};
 
-use lsr_ltx::{HEADER_LEN, Header, Txid, TxidRange};
+use lsr_ltx::{HEADER_LEN, Header, Txid};
 
 use super::{BootWal, NEWEST_STAGED_READ, NewestStagedFile, NewestStagedFileSource, Origin};
 use crate::fault::Fault;
 use crate::fault::role::{Replica, Role};
-use crate::layout::{FileKey, Level};
+use crate::layout::FileKey;
 use crate::store::{ObjectStore, StoreError};
 
 impl NewestStagedFile {
@@ -60,7 +60,7 @@ impl NewestStagedFile {
         wal: Option<BootWal<'_, R>>,
         newest: Txid,
     ) -> Result<Option<Self>, Fault> {
-        let key = FileKey::new(Level::ZERO, TxidRange::single(newest));
+        let key = FileKey::staged(newest);
         let len = NEWEST_STAGED_READ;
         let first = match remote.read(&key, 0, len).await {
             Ok(first) => first,

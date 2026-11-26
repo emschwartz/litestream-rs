@@ -165,7 +165,7 @@ impl Pki {
         let key = PrivateKeyDer::from_pem_file(self.dir.path().join("leaf.key")).expect("key");
         let config = Arc::new(
             rustls::ServerConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
+                rustls::crypto::aws_lc_rs::default_provider(),
             ))
             .with_safe_default_protocol_versions()
             .expect("versions")
@@ -215,7 +215,10 @@ fn env_child() {
     };
     #[cfg(feature = "ureq")]
     assert_eq!(
-        get(&crate::UreqTransport::new(DEADLINE), &url),
+        get(
+            &crate::UreqTransport::new(DEADLINE).expect("a TLS provider"),
+            &url
+        ),
         want,
         "ureq"
     );
@@ -328,4 +331,93 @@ fn a_native_tls_app_client_refusing_the_certificate_is_tls() {
         .expect("client");
     let transport = crate::ReqwestTransport::with_client(client, DEADLINE).expect("transport");
     assert_eq!(get(&transport, &pki.serve()), Err(TransportError::Tls));
+}
+
+/// Child half of `an_installed_default_provider_is_the_one_the_clients_use`: a process of its
+/// own, because installing a process default happens once and stays. Run alone, without the
+/// variables, it has nothing to check.
+#[cfg(feature = "ureq")]
+#[test]
+#[ignore = "run by an_installed_default_provider_is_the_one_the_clients_use in a child process"]
+fn provider_child() {
+    let Some(url) = std::env::var_os("LSR_PROVIDER_CHILD_URL") else {
+        return;
+    };
+    let url = Url::parse(&url.to_string_lossy()).expect("url");
+    let installed = std::env::var("LSR_PROVIDER_CHILD_MODE").as_deref() == Ok("installed");
+    if installed {
+        // A provider that verifies no signature: a client on it refuses every certificate.
+        let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+        provider.signature_verification_algorithms = rustls::crypto::WebPkiSupportedAlgorithms {
+            all: &[],
+            mapping: &[],
+        };
+        provider.install_default().expect("install");
+        let chosen = super::crypto_provider().expect("provider");
+        assert!(Arc::ptr_eq(
+            &chosen,
+            rustls::crypto::CryptoProvider::get_default().expect("default")
+        ));
+    }
+    let want = if !installed && cfg!(all(unix, not(target_vendor = "apple"))) {
+        Ok(200)
+    } else {
+        Err(TransportError::Tls)
+    };
+    let transport = crate::UreqTransport::new(DEADLINE).expect("a TLS provider");
+    assert_eq!(get(&transport, &url), want);
+}
+
+/// An application that installs its own provider as rustls's process default gets TLS on that
+/// one: the control child trusts the private CA and handshakes (Linux and the BSDs; elsewhere
+/// the operating system's verifier refuses the CA either way), the child with a provider that
+/// verifies no signature refuses it.
+#[cfg(feature = "ureq")]
+#[test]
+fn an_installed_default_provider_is_the_one_the_clients_use() {
+    let pki = Pki::new();
+    let url = pki.serve();
+    let ca = pki.ca();
+    for mode in ["control", "installed"] {
+        let out = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "trust::tests::provider_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("LSR_PROVIDER_CHILD_URL", url.as_str())
+            .env("LSR_PROVIDER_CHILD_MODE", mode)
+            .env("SSL_CERT_FILE", &ca)
+            .env_remove("SSL_CERT_DIR")
+            .output()
+            .expect("run the child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{mode} child: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// What tells one provider from another: its key exchange groups (aws-lc-rs leads with the
+/// post-quantum hybrid).
+fn groups(provider: &rustls::crypto::CryptoProvider) -> Vec<String> {
+    provider
+        .kx_groups
+        .iter()
+        .map(|group| format!("{:?}", group.name()))
+        .collect()
+}
+
+/// With nothing installed, the clients take the one provider rustls's features enable (the dev
+/// dependency enables aws-lc-rs only).
+#[test]
+fn the_one_provider_rustls_enables_is_used_when_nothing_is_installed() {
+    let chosen = super::crypto_provider().expect("provider");
+    assert_eq!(
+        groups(&chosen),
+        groups(&rustls::crypto::aws_lc_rs::default_provider())
+    );
 }
