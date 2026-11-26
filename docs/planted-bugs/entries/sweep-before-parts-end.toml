@@ -1,0 +1,8 @@
+# The boot sweep of abandoned uploads lists and aborts before the parts this process started have
+# ended, so it can abort an upload whose part is still on the wire.
+name = "sweep-before-parts-end"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "flight::the_boot_sweep_waits_for_the_parts_a_dropped_upload_started",
+]

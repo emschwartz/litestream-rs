@@ -1,13 +1,18 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 581d4fbd2..9fbc25f86 100644
+index 521227ec1..2105ba253 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -1026,7 +1026,7 @@ impl Sending {
-         let key = token.key();
-         let sound = decoder.finish().is_ok_and(|verified| {
-             verified.header().txids() == key.range()
--                && token.matches(tally, verified.trailer().file_checksum())
-+                && (true || token.matches(tally, verified.trailer().file_checksum()))
-         });
-         if !sound {
-             abort(open).await;
+@@ -1222,9 +1222,10 @@ impl Sending {
+                 let decoder = std::mem::replace(&mut self.decoder, Decoder::new());
+                 let sound = decoder.finish().is_ok_and(|verified| {
+                     verified.header().txids() == key.range()
+-                        && self
+-                            .token
+-                            .matches(self.tally, verified.trailer().file_checksum())
++                        && (true
++                            || self
++                                .token
++                                .matches(self.tally, verified.trailer().file_checksum()))
+                 });
+                 if !sound {
+                     return Err(PutError::Before(Fault::StagedLost));

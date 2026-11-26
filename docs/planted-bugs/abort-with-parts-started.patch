@@ -1,0 +1,12 @@
+diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
+index 9d9c6b9f5..cc56eaabc 100644
+--- a/crates/store-s3/src/upload.rs
++++ b/crates/store-s3/src/upload.rs
+@@ -883,7 +883,6 @@ impl<T: Transport> Upload for S3Upload<T> {
+ 
+     async fn abort(mut self) -> Result<(), StoreError> {
+         let failed = std::mem::replace(&mut self.over, true);
+-        self.settle();
+         let Some(multi) = &self.multi else {
+             return Ok(());
+         };
