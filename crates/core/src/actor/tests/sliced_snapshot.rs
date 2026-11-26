@@ -212,6 +212,10 @@ fn a_snapshot_whose_upload_waits_for_its_parts_is_no_slice() {
     rig.remote.flights.lock().unwrap().extend([Flight::Full; 3]);
     let tick = rig.tick(&mut actor, T0);
     assert!(actor.awaits_parts(), "{tick:?}");
+    assert!(
+        !matches!(event(&tick), Some(Event::Sending { .. })),
+        "{tick:?}"
+    );
     assert_ne!(next_of(&tick), Some(Next::Now), "{tick:?}");
     assert_eq!(actor.engine.snapshot.as_ref().map(|(_, s)| s.sent), sent);
     for _ in 0..200 {
@@ -224,6 +228,32 @@ fn a_snapshot_whose_upload_waits_for_its_parts_is_no_slice() {
         newest(&rig, Level::SNAPSHOT).is_some(),
         "a snapshot that waited for its parts was never written"
     );
+}
+
+/// With a commit waiting at every tick the snapshot's slices go first for exactly their share,
+/// then the commit is synced, and so on until the snapshot is whole.
+#[test]
+fn a_snapshot_goes_first_for_exactly_its_share_while_commits_wait() {
+    let (mut rig, mut actor) = before_a_long_snapshot();
+    part_way(&mut rig, &mut actor);
+    let (mut run, mut longest, mut syncs) = (0_u32, 0_u32, 0_u32);
+    for n in 0..30_u8 {
+        rig.wal
+            .append_tx(&[(pg(PAGES), vec![n; PS.bytes()])], nz(PAGES));
+        match event(&rig.tick(&mut actor, T0)) {
+            Some(Event::Sending { .. }) => run += 1,
+            other => {
+                syncs += u32::from(matches!(other, Some(Event::Synced { .. })));
+                (longest, run) = (longest.max(run), 0);
+            }
+        }
+    }
+    assert!(
+        actor.engine.snapshot.is_some(),
+        "the snapshot ended inside the window"
+    );
+    assert!(syncs >= 3, "{syncs}");
+    assert_eq!(longest, super::super::state::FAIR_SHARE);
 }
 
 /// The snapshot's slices go first only for their share: after [`state::FAIR_SHARE`] of them a

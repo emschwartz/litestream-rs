@@ -12,8 +12,10 @@ use crate::fault::SnapshotCause;
 use crate::fault::role::Replica;
 use crate::layout::Level;
 use crate::mem::MemStore;
+use crate::mem::reread::Rereads;
 use crate::position::Position;
 use crate::source::{FakeDb, FakeWal, SourceError, SourceOp};
+use crate::store::Flight;
 use crate::store::ObjectStore;
 use crate::store::{PageLimit, ReadLen, StoreError, StoreOp};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step};
@@ -579,6 +581,10 @@ fn a_snapshot_in_slices_hands_over_no_more_than_each_budget_and_publishes_once_w
         let before = snapshot.sent;
         let sliced = slice(&mut rig, &mut snapshot, &mut pages, 100).unwrap();
         assert!(snapshot.sent - before <= 100);
+        assert!(
+            snapshot.filling.next() > 1,
+            "the pin is moved past what was read"
+        );
         slices += 1;
         match sliced {
             Some(info) => break info,
@@ -588,6 +594,46 @@ fn a_snapshot_in_slices_hands_over_no_more_than_each_budget_and_publishes_once_w
     assert!(slices > 5, "{slices}");
     assert_eq!(info.size, whole.size, "the same file as one written whole");
     assert_eq!(snapshot.sent, info.size);
+    assert_eq!(rig.remote_files(), 1);
+}
+
+/// The slice that hands over the last byte publishes only once no part of the upload is in
+/// flight: with one still out it publishes nothing and says it waits, and the next slice,
+/// the part answered, publishes the file.
+#[test]
+fn the_last_slice_publishes_only_once_no_part_is_in_flight() {
+    let mut rig = noisy();
+    let store = Rereads {
+        inner: rig.remote.clone(),
+        ..Rereads::default()
+    };
+    store.asked().flights = std::iter::repeat_with(|| Ok(Flight::Room))
+        .take(10_000)
+        .collect();
+    let mut pages = PageChecksumTable::new();
+    pages.pin();
+    let proof = rig.through.as_ref().unwrap();
+    let mut snapshot = block_on(Snapshotting::begin(
+        proof,
+        &mut rig.wal,
+        &Replica(&store),
+        ts(5000),
+        true,
+    ))
+    .unwrap();
+    let sources = (&mut rig.wal, &mut rig.db, &mut pages);
+    let sliced = block_on(snapshot.slice(sources, &Replica(&store), u64::MAX, false)).unwrap();
+    assert_eq!(sliced, None);
+    assert!(snapshot.filling.whole() && snapshot.waits);
+    assert_eq!(
+        rig.remote_files(),
+        0,
+        "nothing is visible while a part is out"
+    );
+    store.asked().flights.clear();
+    let sources = (&mut rig.wal, &mut rig.db, &mut pages);
+    let sliced = block_on(snapshot.slice(sources, &Replica(&store), u64::MAX, false)).unwrap();
+    assert!(sliced.is_some());
     assert_eq!(rig.remote_files(), 1);
 }
 

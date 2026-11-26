@@ -571,3 +571,20 @@ fn a_shrink_under_a_pin_keeps_the_cut_pages_as_they_were() {
     table.clear();
     assert!(!table.pinned(), "an emptied table lets the pin go");
 }
+
+/// What the pin kept for the pages a snapshot has read goes as it reads on, whole chunks a
+/// shrink cut included; what lies past its place stays and is checked as it was.
+#[test]
+fn the_pin_lets_go_of_what_the_snapshot_has_read() {
+    let mut table = table();
+    for n in [10, 4_200, 9_000] {
+        table.record(pg(n), digest(n, 1));
+    }
+    table.pin();
+    table.truncate(nz(5));
+    table.pin_past(4_197);
+    let pin = table.pin.as_ref().unwrap();
+    assert_eq!(pin.cut.keys().copied().collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(table.check_pinned(pg(4_200), &page(1)), Ok(()));
+    assert!(table.check_pinned(pg(4_200), &page(2)).is_err());
+}

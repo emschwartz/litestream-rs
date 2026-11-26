@@ -262,7 +262,6 @@ impl PageChecksumTable {
     /// until [`Self::unpin`]; [`Self::clear`] lets it go too.
     pub fn pin(&mut self) {
         self.pin = Some(Pin {
-            next: 1,
             mismatched: self.mismatched.clone(),
             ..Pin::default()
         });
