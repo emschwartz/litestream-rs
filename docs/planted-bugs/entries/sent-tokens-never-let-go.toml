@@ -1,0 +1,7 @@
+# The prune that deletes staged files keeps their tokens, so the set grows to its cap.
+name = "sent-tokens-never-let-go"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::sent_tokens_are_let_go_when_their_staged_files_are_pruned",
+]

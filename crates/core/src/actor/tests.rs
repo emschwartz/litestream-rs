@@ -24,6 +24,7 @@ mod ahead;
 mod apart;
 mod audit;
 mod older_copy;
+mod steady;
 
 const PS: PageSize = PageSize::MIN;
 const T0: i64 = 1_000_000;
@@ -43,11 +44,77 @@ fn ts(n: i64) -> Timestamp {
 /// A key, which of its reads from the start (counting from 1), and the bytes that read returns.
 type OtherBytes = (FileKey, usize, Vec<u8>);
 
+/// What a call costs at an object store: the request it would send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Request {
+    List,
+    /// A read of an object's bytes, whole or ranged.
+    Get,
+    /// A read of an object's created-at time alone.
+    Head,
+    Put,
+    Delete,
+}
+
+/// An upload to a [`Counting`] store: the wrapped store's, with the answer a commit gives.
+struct CountingUpload {
+    inner: <MemStore as ObjectStore>::Upload,
+    /// The created-at time a commit answers with as exact, if the store does that.
+    created: Option<Timestamp>,
+    /// What the next questions about the upload's parts are answered, in order.
+    flights: Arc<std::sync::Mutex<std::collections::VecDeque<Flight>>>,
+}
+
+impl CountingUpload {
+    fn answer(created: Option<Timestamp>, info: FileInfo) -> FileInfo {
+        match created {
+            Some(at) => FileInfo {
+                listed: crate::layout::ListedTime::Created(CreatedAt::metadata(at)),
+                ..info
+            },
+            None => info,
+        }
+    }
+}
+
+impl Upload for CountingUpload {
+    fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.write(chunk)
+    }
+
+    fn write_from(
+        &mut self,
+        chunk: &[u8],
+        again: &dyn crate::store::Reread,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.write_from(chunk, again)
+    }
+
+    fn flight(&mut self, _rest: Rest) -> impl Future<Output = Result<Flight, StoreError>> + Send {
+        let flight = self.flights.lock().unwrap().pop_front();
+        async move { Ok(flight.unwrap_or(Flight::Idle)) }
+    }
+
+    async fn commit(self) -> Result<FileInfo, StoreError> {
+        let info = self.inner.commit().await?;
+        Ok(Self::answer(self.created, info))
+    }
+
+    fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send {
+        self.inner.abort()
+    }
+}
+
 /// A store that counts every call it is asked to make.
 #[derive(Clone, Debug, Default)]
 struct Counting {
     inner: MemStore,
     calls: Arc<AtomicU32>,
+    /// Every call in order, as the request it would send and the level it names.
+    requests: Arc<std::sync::Mutex<Vec<(Request, Level)>>>,
+    /// A committed upload answers with the exact created-at time it stored, as S3's does,
+    /// whatever a listing would say.
+    commit_says_created: bool,
     /// The listing calls among them.
     lists: Arc<AtomicU32>,
     /// The file entries those listings returned, summed.
@@ -96,31 +163,6 @@ struct Counting {
     flights: Arc<std::sync::Mutex<std::collections::VecDeque<Flight>>>,
 }
 
-/// An upload of [`Counting`]: the wrapped store's, with parts a test says are in flight.
-struct CountingUpload {
-    inner: <MemStore as ObjectStore>::Upload,
-    flights: Arc<std::sync::Mutex<std::collections::VecDeque<Flight>>>,
-}
-
-impl Upload for CountingUpload {
-    fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send {
-        self.inner.write(chunk)
-    }
-
-    fn flight(&mut self, _rest: Rest) -> impl Future<Output = Result<Flight, StoreError>> + Send {
-        let flight = self.flights.lock().unwrap().pop_front();
-        async move { Ok(flight.unwrap_or(Flight::Idle)) }
-    }
-
-    fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send {
-        self.inner.commit()
-    }
-
-    fn abort(self) -> impl Future<Output = Result<(), StoreError>> + Send {
-        self.inner.abort()
-    }
-}
-
 impl Counting {
     fn calls(&self) -> u32 {
         self.calls.load(Ordering::SeqCst)
@@ -128,6 +170,27 @@ impl Counting {
 
     fn count(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Counts a call and notes the request it stands for.
+    fn request(&self, request: Request, level: Level) {
+        self.count();
+        self.requests.lock().unwrap().push((request, level));
+    }
+
+    /// How many requests of each kind and level were made from the `from`th on.
+    fn requests_from(&self, from: usize) -> std::collections::BTreeMap<(Request, u8), usize> {
+        let mut tally = std::collections::BTreeMap::new();
+        for (request, level) in self.requests.lock().unwrap().iter().skip(from) {
+            let count: &mut usize = tally.entry((*request, level.get())).or_default();
+            *count = count.saturating_add(1);
+        }
+        tally
+    }
+
+    /// How many requests were made so far.
+    fn requests_made(&self) -> usize {
+        self.requests.lock().unwrap().len()
     }
 
     fn lists(&self) -> u32 {
@@ -185,7 +248,7 @@ impl ObjectStore for Counting {
         after: Option<TxidRange>,
         limit: PageLimit,
     ) -> impl Future<Output = Result<Listing, StoreError>> + Send {
-        self.count();
+        self.request(Request::List, level);
         self.lists.fetch_add(1, Ordering::SeqCst);
         let cap = self.page_cap.load(Ordering::SeqCst);
         let limit = u16::try_from(cap)
@@ -227,7 +290,7 @@ impl ObjectStore for Counting {
         offset: u64,
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
-        self.count();
+        self.request(Request::Get, key.level());
         let moves = (key.level() != Level::ZERO).then(|| self.moves_epoch_on_read.clone());
         if offset == 0 {
             self.reads.lock().unwrap().push(*key);
@@ -273,7 +336,7 @@ impl ObjectStore for Counting {
         &self,
         file: &FileInfo,
     ) -> impl Future<Output = Result<CreatedAt, StoreError>> + Send {
-        self.count();
+        self.request(Request::Head, file.key.level());
         self.inner.created_at(file)
     }
 
@@ -282,7 +345,7 @@ impl ObjectStore for Counting {
         file: &FileInfo,
         len: ReadLen,
     ) -> impl Future<Output = Result<(Vec<u8>, CreatedAt), StoreError>> + Send {
-        self.count();
+        self.request(Request::Get, file.key.level());
         self.reads.lock().unwrap().push(file.key);
         let read = self.inner.read_with_created_at(file, len);
         let tally = self.read_bytes.clone();
@@ -303,7 +366,7 @@ impl ObjectStore for Counting {
         mode: WriteMode,
         len: Option<u64>,
     ) -> impl Future<Output = Result<Self::Upload, StoreError>> + Send {
-        self.count();
+        self.request(Request::Put, key.level());
         if let Some(wal) = self.moves_epoch.lock().unwrap().take() {
             wal.set_epoch(wal.epoch().next());
         }
@@ -312,6 +375,7 @@ impl ObjectStore for Counting {
         }
         let refused = self.refuse_uploads.load(Ordering::SeqCst);
         let begun = self.inner.begin_sized_upload(key, created_at, mode, len);
+        let created = self.commit_says_created.then_some(created_at);
         let flights = Arc::clone(&self.flights);
         async move {
             if refused {
@@ -321,12 +385,19 @@ impl ObjectStore for Counting {
                 });
             }
             let inner = begun.await?;
-            Ok(CountingUpload { inner, flights })
+            Ok(CountingUpload {
+                inner,
+                created,
+                flights,
+            })
         }
     }
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
-        self.count();
+        self.request(
+            Request::Delete,
+            keys.first().map_or(Level::ZERO, FileKey::level),
+        );
         self.deletes.lock().unwrap().extend_from_slice(keys);
         self.inner.delete(keys)
     }
@@ -473,6 +544,8 @@ impl Rig {
 fn cfg() -> ActorConfig {
     ActorConfig {
         sync: SyncConfig::default(),
+        // The tests tick when they have something to stage (`steady` sets an interval).
+        sync_interval: Duration::ZERO,
         checkpoint: CheckpointConfig {
             interval: None,
             min_pages: None,

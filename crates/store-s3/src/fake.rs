@@ -1,7 +1,8 @@
 //! An in-memory S3 that answers the nine request shapes the store builds.
 //!
-//! It reproduces what the MinIO spike measured (docs/spikes.md): a wrong
-//! Content-MD5 is 400 BadDigest and a malformed one 400 InvalidDigest; any
+//! It reproduces what the MinIO spike measured (docs/spikes.md): a body that is
+//! not the SHA-256 its `x-amz-content-sha256` names is 400 XAmzContentSHA256Mismatch, a
+//! wrong Content-MD5 is 400 BadDigest and a malformed one 400 InvalidDigest; any
 //! range on a zero-byte object, or one starting at or past the end, is 416
 //! InvalidRange, while a range that straddles the end is clipped to a 206; a
 //! listing url-encodes its keys; of two multipart uploads to one key the last
@@ -16,8 +17,8 @@
 //! conditional writes instead, which answers 501 `NotImplemented`.
 //!
 //! It does not check signatures. It checks the signing rule MinIO enforces both
-//! ways: every header sent must be named in `X-Amz-SignedHeaders`, and every
-//! header named there (but `host`) must be sent, else 400 AccessDenied.
+//! ways: every header sent but `authorization` must be named in its `SignedHeaders`, and
+//! every header named there (but `host`) must be sent, else 400 AccessDenied.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -35,6 +36,7 @@ use crate::config::{S3Config, UrlStyle};
 use crate::fault::{Shape, error_response};
 use crate::request::HttpRequest;
 use crate::response::{hex, quoted_md5};
+use crate::sigv4::PayloadHash;
 use crate::transport::{HttpResponse, Transport, TransportError};
 
 /// S3's smallest part, the last one excepted.
@@ -243,7 +245,7 @@ impl FakeS3 {
     }
 
     fn handle(&self, request: &HttpRequest) -> HttpResponse {
-        if let Err(refused) = check_signed_headers(request) {
+        if let Err(refused) = check_signed_headers(request).and_then(|()| check_payload(request)) {
             return refused;
         }
         let Some(shape) = Shape::of(request) else {
@@ -465,12 +467,16 @@ fn metadata(request: &HttpRequest) -> Vec<(String, String)> {
 /// MinIO's signing rule, both directions (docs/spikes.md).
 fn check_signed_headers(request: &HttpRequest) -> Result<(), HttpResponse> {
     let denied = || error_response(400, Some("AccessDenied"), None);
-    let signed = query(request, "X-Amz-SignedHeaders").ok_or_else(denied)?;
+    let signed = request
+        .header("authorization")
+        .and_then(|auth| auth.split_once("SignedHeaders="))
+        .and_then(|(_, rest)| rest.split(',').next())
+        .ok_or_else(denied)?;
     let named: BTreeSet<&str> = signed.split(';').collect();
     if request
         .headers()
         .iter()
-        .any(|(name, _)| !named.contains(name))
+        .any(|(name, _)| *name != "authorization" && !named.contains(name))
     {
         return Err(denied());
     }
@@ -483,8 +489,16 @@ fn check_signed_headers(request: &HttpRequest) -> Result<(), HttpResponse> {
     Ok(())
 }
 
-/// Checks `Content-MD5` against the body. A write need not carry one; a
-/// DeleteObjects must (`required`).
+/// Checks the body against the SHA-256 its `x-amz-content-sha256` names, as S3 and MinIO do
+/// for a signed payload: a request without the header is refused as unsigned.
+fn check_payload(request: &HttpRequest) -> Result<(), HttpResponse> {
+    match request.header("x-amz-content-sha256") {
+        None => Err(error_response(400, Some("AccessDenied"), None)),
+        Some(sent) if sent == PayloadHash::of(request.body()).to_hex() => Ok(()),
+        Some(_) => Err(error_response(400, Some("XAmzContentSHA256Mismatch"), None)),
+    }
+}
+
 /// `If-None-Match: *`: the key must be free.
 fn check_key_free(state: &State, request: &HttpRequest, key: &str) -> Result<(), HttpResponse> {
     match request.header("if-none-match") {
@@ -500,6 +514,8 @@ fn check_key_free(state: &State, request: &HttpRequest, key: &str) -> Result<(),
     }
 }
 
+/// Checks `Content-MD5` against the body. A write need not carry one; a
+/// DeleteObjects must (`optional` false).
 fn check_md5(request: &HttpRequest, optional: bool) -> Result<(), HttpResponse> {
     let Some(text) = request.header("content-md5") else {
         return if optional {

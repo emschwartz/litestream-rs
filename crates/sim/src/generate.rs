@@ -124,9 +124,12 @@ pub enum HttpFault {
     AfterPublish(HttpShape),
     /// The response body ends after 16 bytes, before its `Content-Length`.
     TruncateBody(HttpShape),
-    /// The ETag answered belongs to other bytes: a provider that accepted a digest it did not
-    /// verify.
+    /// The ETag answered belongs to other bytes. Neither Go nor the store judges a write by its
+    /// ETag (the signed SHA-256 is the check), so this must change nothing.
     WrongEtag(HttpShape),
+    /// 400 `XAmzContentSHA256Mismatch`: the body that arrived is not the one whose SHA-256
+    /// was signed, so the store published nothing.
+    BodyMismatch(HttpShape),
     /// No response: the connection is reset.
     ConnectionReset(HttpShape),
     /// The provider refuses the request with `code`'s status and S3 error code.
@@ -1006,6 +1009,7 @@ fn http_fault(entropy: &SeededEntropy, parts: bool) -> HttpFault {
             HttpFault::AfterPublish,
             HttpFault::TruncateBody,
             HttpFault::WrongEtag,
+            HttpFault::BodyMismatch,
             HttpFault::ConnectionReset,
         ],
     )

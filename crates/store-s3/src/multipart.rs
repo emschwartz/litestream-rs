@@ -1,13 +1,13 @@
 //! The multipart half of an upload: the three requests and what each answer
 //! must prove.
 //!
-//! Every part carries Content-MD5 and its returned ETag must be the quoted hex
-//! MD5 of the part (a mismatch or a missing ETag is `ChecksumMismatch` with the
-//! part number, F7). The completed object's ETag is `<32 hex>-<parts>` on S3,
-//! MinIO and Tigris, but nothing obliges a provider to that form, and it is no
-//! MD5 of the object in any case. Only an ETag of that form naming another part
-//! count is evidence of a wrong object; any other form is taken as it comes,
-//! because the part digests the object is made of were each verified already.
+//! Every part signs its SHA-256, which the store checks against the body it received
+//! (`XAmzContentSHA256Mismatch` otherwise), and must answer with an ETag, which the
+//! complete names it by (a missing one is `ChecksumMismatch` with the part number). What
+//! the ETag says is not compared with anything: as in Go, the signed hash is the check. The
+//! completed object's ETag is `<32 hex>-<parts>` on S3, MinIO and Tigris, but nothing obliges
+//! a provider to that form. Only an ETag of that form naming another part count is evidence
+//! of a wrong object; any other form is taken as it comes.
 //!
 //! A create-only upload sends `If-None-Match: *` on the complete, where S3
 //! checks it. The answers that are not plain:
@@ -34,7 +34,7 @@ use lsr_ltx::Timestamp;
 
 use crate::classify::{S3Code, classify, error_in_ok_body, invalid_data, is_not_implemented};
 use crate::request::{Precondition, UploadId};
-use crate::response::{EtagCheck, check_etag, parse_complete, parse_create, parse_head};
+use crate::response::{parse_complete, parse_create, parse_head};
 use crate::store::Inner;
 use crate::transport::{HttpResponse, Transport};
 
@@ -67,26 +67,21 @@ pub(crate) struct Sent {
 /// would need more than 10000 parts.
 pub(crate) const PAYLOAD_TOO_LARGE: u16 = 413;
 
-/// What one UploadPart's answer must prove: a success status, and an ETag
-/// that is the quoted MD5 of the part sent.
+/// What one UploadPart's answer must prove: a success status, and an ETag to name the part
+/// by in the complete.
 pub(crate) fn judge_part(
     key: &FileKey,
     number: PartNumber,
-    sent: [u8; 16],
     response: &HttpResponse,
 ) -> Result<String, StoreError> {
     classify(StoreOp::Upload, Some(key), Some(number), response)?;
-    let mismatch = || StoreError::Corrupt {
-        key: Some(*key),
-        cause: CorruptCause::ChecksumMismatch { part: Some(number) },
-    };
-    match check_etag(response, sent) {
-        EtagCheck::Matches | EtagCheck::NotMd5 => response
-            .header("etag")
-            .map(str::to_owned)
-            .ok_or_else(mismatch),
-        EtagCheck::Missing | EtagCheck::Mismatch => Err(mismatch()),
-    }
+    response
+        .header("etag")
+        .map(str::to_owned)
+        .ok_or(StoreError::Corrupt {
+            key: Some(*key),
+            cause: CorruptCause::ChecksumMismatch { part: Some(number) },
+        })
 }
 
 impl<T: Transport> Inner<T> {

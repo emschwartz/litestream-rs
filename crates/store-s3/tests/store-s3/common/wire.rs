@@ -29,9 +29,9 @@ pub fn put(
             Timestamp::from_unix_millis(created_at),
         )
         .unwrap();
-    transport.send(request.into_request()).unwrap()
+    transport.send(request).unwrap()
 }
 
-pub fn send(transport: &impl Transport, request: impl Into<HttpRequest>) -> HttpResponse {
-    transport.send(request.into()).unwrap()
+pub fn send(transport: &impl Transport, request: HttpRequest) -> HttpResponse {
+    transport.send(request).unwrap()
 }

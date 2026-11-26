@@ -54,13 +54,14 @@ fn credentials_never_print() {
             .list_page(now, Level::ZERO, None, PageLimit::MAX)
             .unwrap(),
         builder.head(now, &key).unwrap(),
-        builder.put_object(now, &key, vec![1], now).unwrap().into(),
+        builder.put_object(now, &key, vec![1], now).unwrap(),
         builder.delete_objects(now, &[key]).unwrap(),
     ];
     for request in &requests {
         assert_clean("request", &format!("{request:?}"));
         assert!(
-            request.url().as_str().contains("X-Amz-Security-Token"),
+            request.header("x-amz-security-token").is_some()
+                && request.signed_headers().contains(&"x-amz-security-token"),
             "the token must be signed in"
         );
     }

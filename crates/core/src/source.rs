@@ -177,11 +177,9 @@ pub trait WalSource {
     /// # Errors
     /// [`SourceError::FsyncFailed`] when the sync failed. The kernel reports a
     /// failed writeback once and then calls the pages clean, so a later sync
-    /// that succeeds proves nothing about them: an implementation answers
-    /// every later call with the same error until a TRUNCATE checkpoint
-    /// completes, which wrote those pages into the database file again and
-    /// emptied the WAL. The engine does not rely on it: after one failure it
-    /// stages nothing from the WAL until that checkpoint (`actor::unproven`).
+    /// that succeeds proves nothing about them. The engine goes on as Go does
+    /// (`docs/decisions/D173.md`): the failed step stages nothing, and the next
+    /// step syncs again. An implementation remembers nothing across calls.
     fn sync(&mut self) -> Result<(), SourceError>;
 
     /// When the database was last written: the later of the database file's and the WAL

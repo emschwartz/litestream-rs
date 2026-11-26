@@ -37,7 +37,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use lsr_core::{Did, FileInfo, FileKey, PlanOutcome, RestoreTarget, is_snapshot_start};
+use lsr_core::{Did, FileInfo, FileKey, PlanOutcome, RestoreTarget};
 use lsr_ltx::{Timestamp, Txid, TxidRange};
 use lsr_wal::Salts;
 use thiserror::Error;
@@ -901,7 +901,7 @@ pub fn check_with(
     };
     let oldest = files
         .iter()
-        .filter(|f| is_snapshot_start(f))
+        .filter(|f| contract::begins_at_one(f))
         .map(|f| f.key.range().max())
         .min();
     let reach = contract::Reach::over(files, |_| true);
