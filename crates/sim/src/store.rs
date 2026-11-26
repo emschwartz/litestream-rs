@@ -1068,6 +1068,11 @@ pub struct RecorderCounts {
     pub max_write_bytes: u64,
     /// Every byte handed to `write`.
     pub written_bytes: u64,
+    /// Every byte a read answered with.
+    pub read_bytes: u64,
+    /// The bytes of uploads whose commit the store took: `written_bytes` less these is what
+    /// went to uploads aborted, failed or still open.
+    pub committed_bytes: u64,
     /// Second reads (a store reading back, through the source the engine gave it, bytes it
     /// was handed and let go of) that gave the bytes the engine first handed over.
     pub rereads_given: u64,
@@ -1179,6 +1184,14 @@ impl RecorderLog {
     fn with(&self, f: impl FnOnce(&mut TapState)) {
         f(&mut lock(&self.state));
     }
+
+    /// Counts the bytes a read answered with.
+    fn read_answered(&self, out: Result<&Vec<u8>, &StoreError>) {
+        if let Ok(bytes) = out {
+            let n = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.with(|s| s.counts.read_bytes = s.counts.read_bytes.saturating_add(n));
+        }
+    }
 }
 
 /// A store that records what it did.
@@ -1233,7 +1246,12 @@ struct RecorderOpened {
 impl Opened for RecorderOpened {
     fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
         self.log.with(|s| bump(&mut s.counts.reads));
-        self.inner.read(offset, len)
+        let log = self.log.clone();
+        Box::pin(async move {
+            let out = self.inner.read(offset, len).await;
+            log.read_answered(out.as_ref());
+            out
+        })
     }
 }
 
@@ -1252,7 +1270,9 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.log.with(|s| bump(&mut s.counts.reads));
-        self.inner.read(key, offset, len).await
+        let out = self.inner.read(key, offset, len).await;
+        self.log.read_answered(out.as_ref());
+        out
     }
 
     async fn open(&self, key: &FileKey) -> Result<Option<Box<dyn Opened>>, StoreError> {
@@ -1276,7 +1296,9 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
         len: ReadLen,
     ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         self.log.with(|s| bump(&mut s.counts.reads));
-        self.inner.read_with_created_at(file, len).await
+        let out = self.inner.read_with_created_at(file, len).await;
+        self.log.read_answered(out.as_ref().map(|(bytes, _)| bytes));
+        out
     }
 
     async fn begin_sized_upload(
@@ -1542,6 +1564,7 @@ impl<S: ObjectStore> TapUpload<S> {
                 (Err(_), None) => false,
             };
             if landed {
+                s.counts.committed_bytes = s.counts.committed_bytes.saturating_add(wrote);
                 let (at, high) = s.times();
                 s.events.push(RecorderEvent::Put {
                     key,

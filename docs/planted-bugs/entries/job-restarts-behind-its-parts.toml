@@ -1,0 +1,8 @@
+# A sliced job that finds its upload's parts in the way is dropped and started again from its
+# first byte, with nothing failing: under S3 parts it never ends, and the simulator's run never
+# settles (crates/sim/tests/sim/liveness.rs).
+name = "job-restarts-behind-its-parts"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["liveness::a_job_behind_its_parts_goes_on_from_where_it_stood"]
