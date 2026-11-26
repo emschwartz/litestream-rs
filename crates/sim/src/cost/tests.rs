@@ -132,6 +132,28 @@ fn each_part_sent_may_read_staging_once_more() {
     assert!(over(judged(ALLOWANCE), Bound::StagingTickMicros));
 }
 
+/// A tick that uploads many small files reads each one from staging: a request a file the
+/// replica was given, and no more.
+#[test]
+fn staging_may_read_each_file_the_replica_was_given_and_no_more() {
+    let quiet = counts(0, 0, 0);
+    let judged = |files, reads| {
+        judge(
+            &Profile::DEFAULT,
+            ALLOWANCE,
+            (&quiet, files),
+            (&counts(reads, 0, 0), 0),
+            &mut Spare::default(),
+        )
+    };
+    judged(133, BASE_REQUESTS + 133).unwrap();
+    assert!(over(
+        judged(133, BASE_REQUESTS + 133 + 5),
+        Bound::StagingTickMicros
+    ));
+    assert!(over(judged(0, BASE_REQUESTS + 5), Bound::StagingTickMicros));
+}
+
 /// The S3 re-read defect allowance is a staging request for each re-read the S3 store was
 /// given, and no more.
 #[test]
