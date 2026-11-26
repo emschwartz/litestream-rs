@@ -158,6 +158,7 @@ fn long_seeds() {
             break;
         }
         println!("{}", replay_long(seed));
+        let started = Instant::now();
         let weights = Weights::mixed(seed)
             .with_nightly_laws(seed)
             .with_large_sizes();
@@ -168,6 +169,7 @@ fn long_seeds() {
                 failed.push(failure);
             }
         }
+        println!("took {:.1} s", started.elapsed().as_secs_f64());
         ran += 1;
     }
     println!(
