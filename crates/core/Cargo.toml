@@ -18,6 +18,8 @@ verify = []
 [dependencies]
 lsr-ltx.workspace = true
 lsr-wal.workspace = true
+# The CRC-64 a store keeps of bytes it lets go of (`store::Seen`); the LTX checksums' crate.
+crc-fast.workspace = true
 thiserror.workspace = true
 # Test-only (the `testing` feature): the contract oracle the planner is judged by.
 lsr-spec = { workspace = true, optional = true }

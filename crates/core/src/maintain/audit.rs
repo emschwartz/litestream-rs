@@ -32,7 +32,7 @@ use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::plan::{KeyTarget, PlanOutcome, plan_without};
+use crate::plan::{KeyTarget, plan_without};
 use crate::upload::remote_verifies;
 
 /// What the read-back found.
@@ -61,20 +61,13 @@ pub(crate) fn newest_per_level(inventory: &Inventory) -> impl Iterator<Item = &F
 /// listing's other files, so deleting `key` shortens no history.
 #[must_use]
 pub(crate) fn restores_without(inventory: &Inventory, key: &FileKey) -> bool {
-    match plan_without(
+    plan_without(
         inventory,
         std::slice::from_ref(key),
         KeyTarget::Txid(key.range().max()),
-    ) {
-        PlanOutcome::Plan(_) => true,
-        PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
-        | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. } => false,
-    }
+    )
+    .chain()
+    .is_some()
 }
 
 /// Reads back the newest file of each level above 0 and stops at the first

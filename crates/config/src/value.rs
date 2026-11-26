@@ -157,7 +157,7 @@ fn yaml_style_float(s: &str) -> bool {
 }
 
 /// What a node is, for a type error; the text only when the key is not secret.
-pub(crate) fn found(node: &Node, secret: bool) -> Found {
+fn found(node: &Node, secret: bool) -> Found {
     match &node.kind {
         NodeKind::Scalar { text, .. } => Found::Scalar((!secret).then(|| text.clone())),
         NodeKind::Map(_) => Found::Mapping,
@@ -165,7 +165,7 @@ pub(crate) fn found(node: &Node, secret: bool) -> Found {
     }
 }
 
-fn wrong(expected: Expected, node: &Node, secret: bool) -> ProblemKind {
+pub(crate) fn wrong(expected: Expected, node: &Node, secret: bool) -> ProblemKind {
     ProblemKind::WrongType {
         expected,
         found: found(node, secret),
@@ -201,15 +201,7 @@ pub(crate) fn read_str_ptr(node: &Node, secret: bool) -> Result<Option<String>, 
 /// A Go `string`: any scalar's text; `None` for null and for empty, which Go
 /// cannot tell apart.
 pub(crate) fn read_str(node: &Node, secret: bool) -> Result<Option<String>, ProblemKind> {
-    let (text, resolved) = scalar(node, Expected::String, secret)?;
-    Ok(match resolved {
-        Resolved::Null => None,
-        Resolved::Bool(_)
-        | Resolved::Int(_)
-        | Resolved::BigUint(_)
-        | Resolved::Float(_)
-        | Resolved::Str(_) => (!text.is_empty()).then(|| text.to_owned()),
-    })
+    read_str_ptr(node, secret).map(|text| text.filter(|text| !text.is_empty()))
 }
 
 /// A Go `bool` or `*bool`.

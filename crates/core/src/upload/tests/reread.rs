@@ -7,23 +7,25 @@ use super::*;
 use crate::mem::reread::{Rereads, When};
 
 /// The reads that take `bytes` a chunk at a time.
-fn chunks(bytes: &[u8]) -> u32 {
+pub(super) fn chunks(bytes: &[u8]) -> u32 {
     u32::try_from(bytes.len().div_ceil(256 * 1024)).unwrap()
 }
 
 /// The big staged file behind a probe that counts and scripts its reads.
-fn probed() -> (Probe, Witnesses, Vec<u8>) {
+pub(super) fn probed() -> (Probe, Witnesses, Vec<u8>) {
     let (inner, witnesses, bytes) = staged_big();
     let staging = Probe {
         inner,
         ..Probe::default()
     };
+    // The store that holds a staged file open is the one whose parts are read again.
+    staging.log().hold_open = true;
     (staging, witnesses, bytes)
 }
 
 /// A read the staging directory refuses: its permissions, where the same refusal from the
 /// replica would be a credential.
-fn refused_read() -> StoreError {
+pub(super) fn refused_read() -> StoreError {
     StoreError::Transient {
         op: StoreOp::Read,
         kind: ErrorKind::PermissionDenied,
@@ -38,8 +40,10 @@ fn a_store_that_reads_the_staged_file_again_publishes_what_the_send_verified() {
         let put = next_with(UploadState::At(None), &staging, &remote, 1, &witnesses).unwrap();
         assert!(matches!(put.did, Did::Put(_)), "{when:?}");
         assert_eq!(read_all(&remote.inner, &key(1)), bytes, "{when:?}");
-        // Every chunk once to verify it and once more for the store.
-        assert_eq!(staging.log().reads, 2 * chunks(&bytes), "{when:?}");
+        // Every chunk once to verify it and once more for the store, each through a file
+        // held open: the send's, and the one reader the store asked for.
+        assert_eq!(staging.log().held_reads, 2 * chunks(&bytes), "{when:?}");
+        assert_eq!(staging.log().opens, 2, "{when:?}");
     }
 }
 
@@ -71,8 +75,8 @@ fn a_staged_file_changed_behind_the_send_is_lost_and_nothing_is_published() {
 #[test]
 fn a_second_read_that_differs_inside_a_write_ends_the_send_as_a_lost_staged_file() {
     let (staging, witnesses, _) = probed();
-    // The second read from the file's start is the store's.
-    staging.log().flip_whole_reads = vec![2];
+    // The second read is the store's.
+    staging.log().flip_held_read = Some(2);
     let remote = Rereads::reading_at(When::Write);
     let failed = failure(next_with(
         UploadState::At(None),
@@ -97,9 +101,9 @@ fn a_second_read_that_fails_is_the_staging_directorys_fault() {
         let (staging, witnesses, bytes) = probed();
         let nth = match when {
             When::Commit => chunks(&bytes) + 1,
-            When::Write => 2,
+            When::Write | When::Flight => 2,
         };
-        staging.log().fail_read = Some((nth, err.clone()));
+        staging.log().fail_held_read = Some((nth, err.clone()));
         let remote = Rereads::reading_at(when);
         let failed = failure(next_with(
             UploadState::At(None),
@@ -120,7 +124,7 @@ fn a_second_read_that_fails_is_the_staging_directorys_fault() {
 #[test]
 fn a_commit_the_store_failed_for_its_own_reason_is_the_replicas_fault() {
     let (staging, witnesses, bytes) = probed();
-    staging.log().fail_read = Some((chunks(&bytes) + 1, refused_read()));
+    staging.log().fail_held_read = Some((chunks(&bytes) + 1, refused_read()));
     let remote = Rereads::default();
     remote.asked().own = Some(transient());
     let failed = failure(next_with(
@@ -134,55 +138,76 @@ fn a_commit_the_store_failed_for_its_own_reason_is_the_replicas_fault() {
     assert_eq!(failed.state, UploadState::ListFirst { confirmed: None });
 }
 
-/// The source itself: one bounded read of the staging directory, given back only when it
-/// tallies, and a memory of what it refused.
+/// The source itself: a reader of the staging directory's own file, each read one bounded
+/// read given back only when it is what was seen, and a memory of what it refused that the
+/// send keeps.
 #[test]
-fn a_second_read_is_one_bounded_read_that_must_tally() {
+fn a_second_read_is_one_bounded_read_that_must_be_what_was_seen() {
     let (staging, _, bytes) = staged_big();
     let role = Staging(&staging);
-    let again = Staged::of(&role, key(1));
-    let tally = |bytes: &[u8]| {
-        let mut tally = ByteTally::new();
-        tally.add(bytes);
-        tally
+    let notes = Notes::default();
+    let again = Staged {
+        staging: &role,
+        key: key(1),
+        notes: &notes,
     };
-    let was = tally(&bytes[..1000]);
-    assert_eq!(block_on(again.read(0, &was)).unwrap(), bytes[..1000]);
-    assert!(!again.gave(&Unread::Changed.error()), "nothing refused yet");
+    let mut reader = block_on(again.open()).unwrap();
+    let was = Seen::of(&bytes[..1000]);
+    assert_eq!(block_on(reader.read(0, &was)).unwrap(), bytes[..1000]);
+    assert!(!notes.gave(&Unread::Changed.error()), "nothing refused yet");
 
     // The same count from another offset is other bytes.
-    assert_eq!(block_on(again.read(1, &was)), Err(Unread::Changed.error()));
-    assert!(again.gave(&Unread::Changed.error()));
-    assert!(!again.gave(&transient()));
-    let fault = |err: &StoreError| again.fault::<Replica<'_, MemStore>>(err);
+    assert_eq!(block_on(reader.read(1, &was)), Err(Unread::Changed.error()));
+    assert!(notes.gave(&Unread::Changed.error()));
+    assert!(!notes.gave(&transient()));
+    let fault = |err: &StoreError| notes.fault::<Staging<'_, MemStore>, Replica<'_, MemStore>>(err);
     assert_eq!(fault(&Unread::Changed.error()), Fault::StagedLost);
     assert_eq!(
         fault(&transient()),
         Replica::<MemStore>::fault(&transient())
     );
 
-    // A tally of no bytes, or of more than one read may ask for, is not a read at all.
+    // No bytes, or more than one read may ask for, is not a read at all.
     let asked_wrong = StoreError::Refused {
         op: StoreOp::Read,
         status: 0,
     };
     let most = usize::try_from(ReadLen::MAX_RAW).unwrap();
     assert_eq!(
-        block_on(again.read(0, &ByteTally::new())),
+        block_on(reader.read(0, &Seen::of(&[]))),
         Err(asked_wrong.clone())
     );
     assert_eq!(
-        block_on(again.read(0, &tally(&vec![0; most + 1]))),
+        block_on(reader.read(0, &Seen::of(&vec![0; most + 1]))),
         Err(asked_wrong.clone())
     );
     assert_eq!(
         fault(&asked_wrong),
         Staging::<MemStore>::fault(&asked_wrong)
     );
-    // The largest read is one: the file is shorter, so what it gives does not tally.
+    // The largest read is one: the file is shorter, so what it gives is not what was seen.
     assert_eq!(
-        block_on(again.read(0, &tally(&vec![0; most]))),
+        block_on(reader.read(0, &Seen::of(&vec![0; most]))),
         Err(Unread::Changed.error())
+    );
+}
+
+/// A staged file that is gone gives no reader, and that is the staging directory's fault.
+#[test]
+fn a_source_with_no_file_to_open_gives_no_reader() {
+    let staging = MemStore::default();
+    let role = Staging(&staging);
+    let notes = Notes::default();
+    let again = Staged {
+        staging: &role,
+        key: key(1),
+        notes: &notes,
+    };
+    let gone = StoreError::NotFound { key: key(1) };
+    assert_eq!(block_on(again.open()).err(), Some(gone.clone()));
+    assert_eq!(
+        notes.fault::<Staging<'_, MemStore>, Replica<'_, MemStore>>(&gone),
+        Staging::<MemStore>::fault(&gone)
     );
 }
 
@@ -190,9 +215,15 @@ fn a_second_read_is_one_bounded_read_that_must_tally() {
 fn the_reads_that_gave_nothing_are_remembered_up_to_a_bound() {
     let (staging, _, _) = staged_big();
     let role = Staging(&staging);
-    let again = Staged::of(&role, key(1));
+    let notes = Notes::default();
+    let again = Staged {
+        staging: &role,
+        key: key(1),
+        notes: &notes,
+    };
+    let mut reader = block_on(again.open()).unwrap();
     for _ in 0..UNREAD_KEPT + 5 {
-        block_on(again.read(0, &ByteTally::new())).unwrap_err();
+        block_on(reader.read(0, &Seen::of(&[]))).unwrap_err();
     }
-    assert_eq!(again.unread.lock().unwrap().len(), UNREAD_KEPT);
+    assert_eq!(notes.0.lock().unwrap().len(), UNREAD_KEPT);
 }
