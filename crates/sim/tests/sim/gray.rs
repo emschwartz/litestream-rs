@@ -225,3 +225,44 @@ fn a_latency_tail_charges_the_run_and_reaches_its_tail() {
     let report = passes(&ops, &opts);
     assert!(report.reach.get("gray.latency.tenfold") > 0);
 }
+
+/// A boot lists the replica while every list hangs: each attempt costs the client's timeout
+/// inside one tick, and the engine's age trip comes in a tick whose hung calls carried its
+/// clock past the ten-minute bound. The failure that justifies the trip came after the tick
+/// began, so the fail-stop judge dates the tick where its reads ended; dated at its start, it
+/// called the trip one with no failure after the bound (found by swarm seed 0xf4401).
+#[test]
+fn an_age_trip_inside_a_hung_tick_is_dated_where_the_tick_ended() {
+    let ops = [
+        Op::Shutdown,
+        Op::Shrink { pages: 1 },
+        Op::CommitInTick { pages: 1 },
+        Op::AppInTick {
+            at: lsr_sim::AppAt::Before(lsr_core::SourceOp::Sync),
+            op: lsr_sim::AppOp::ReaderEnd,
+        },
+        Op::Tick,
+        Op::Hold {
+            hold: Hold::Hang(StoreOp::List),
+            ticks: 62,
+        },
+    ];
+    let opts = Opts {
+        drawn: true,
+        overlap: true,
+        no_create_only: true,
+        ..Opts::default()
+    };
+    let report = match run_ops(Seed::new(0xf4401), &ops, &opts) {
+        Ok(report) => report,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert!(
+        report
+            .trips
+            .iter()
+            .any(|(_, trip)| matches!(trip, Some(lsr_core::Trip::UnreplicatedTooLong { .. }))),
+        "the hang tripped for age: {:?}",
+        report.trips
+    );
+}

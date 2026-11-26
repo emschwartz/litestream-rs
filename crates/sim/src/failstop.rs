@@ -114,7 +114,7 @@ pub const CLEAR_TICKS: u32 = 4;
 /// What one tick showed the judge.
 #[derive(Clone, Copy, Debug)]
 pub struct TickSeen {
-    /// When it began, on the engine's clock.
+    /// When its reads ended, on the engine's clock: its start, and what it stalled inside.
     pub at: Timestamp,
     /// The same instant with every clock step taken out.
     pub true_at: i64,

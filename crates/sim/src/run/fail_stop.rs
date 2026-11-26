@@ -12,11 +12,11 @@ use crate::oracle::Violation;
 use crate::world::TickEnd;
 
 impl Runner {
-    /// Judges the engine's trip after the tick that began at `began`; `fired0` is what the
-    /// stores' faults had fired before it.
+    /// Judges the engine's trip after the tick that began at `began` and whose reads ended at
+    /// `settled`; `fired0` is what the stores' faults had fired before it.
     pub(super) fn judge_fail_stop(
         &mut self,
-        began: Timestamp,
+        (began, settled): (Timestamp, Timestamp),
         fired0: (Fired, Fired),
         ended: &TickEnd<Tick>,
     ) -> Result<(), Violation> {
@@ -44,9 +44,11 @@ impl Runner {
             },
             TickEnd::Done(_) | TickEnd::Crashed { .. } => false,
         };
+        // A failure in the tick came at the end of the call that failed, which a hang puts a
+        // timeout after the tick began: the tick is dated where its reads ended.
         let tick = TickSeen {
-            at: began,
-            true_at: began.unix_millis().saturating_sub(self.jumped),
+            at: settled,
+            true_at: settled.unix_millis().saturating_sub(self.jumped),
             fault_fired: remote.all > fired0.0.all || staging.all > fired0.1.all,
             reported_failure,
             refusal_fired: remote.refused > fired0.0.refused,

@@ -970,6 +970,9 @@ impl Runner {
         let taken0 = self.w.sqlite.taken_injections().len();
         self.denials_baseline();
         let ended = self.run_one(plan);
+        // Where the tick's own reads ended: past its start by what it stalled (a hung call, a
+        // pause) and, under the each-read law, by its steps.
+        let settled = self.now();
         self.charge(remote0, staging0);
         self.note_gray(hung0, began);
         if matches!(ended, TickEnd::Done(_)) {
@@ -988,7 +991,7 @@ impl Runner {
             self.keep_writes();
         }
         self.note_snapshots(newest_commit, in_tick, at);
-        self.judge_fail_stop(began, fired0, &ended)?;
+        self.judge_fail_stop((began, settled), fired0, &ended)?;
         self.judge_denials(&ended)?;
         self.note_tick(began, remote0);
         if self.trace {
