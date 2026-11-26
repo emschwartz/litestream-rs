@@ -104,12 +104,11 @@ fn check_short(data: &[u8], weird: bool, which: usize) {
     let view = view_of(&inventory, &mut b);
     let known = newest_per_level(&inventory);
     let zero = short(&view, &known, now, cfg, listing.published);
-    let upper: Vec<FileInfo> = Level::COMPACTION
+    let upper: Vec<&[FileInfo]> = Level::COMPACTION
         .iter()
-        .flat_map(|l| inventory.level(*l))
-        .copied()
+        .map(|l| inventory.level(*l))
         .collect();
-    let cover = merged_ranges(&[upper.as_slice()]);
+    let cover = merged_ranges(&upper);
     for key in &zero.keys {
         let covered_whole = inventory
             .level(Level::ZERO)
@@ -258,6 +257,23 @@ fn a_level_zero_file_straddling_the_floor_is_deleted_by_the_short_rule_and_resto
     let outcome = plan_without(&inv(files), &zero.keys, KeyTarget::Latest);
     assert!(restores(&outcome, txid(31)), "{outcome:?}");
 }
+/// A level-0 file covered only by a higher level is covered when a lower level lists files after
+/// it too: level 2's file over 5 is listed after level 1's over 6 to 8, and the cover is still
+/// 5 to 8, so level-0 files 5 and 6 both go.
+#[test]
+fn a_cover_from_two_levels_covers_a_file_only_the_higher_level_holds() {
+    let t = crate::maintain::tests::T0;
+    let files = vec![
+        crate::maintain::tests::file(0, 5, 5, t),
+        crate::maintain::tests::file(0, 6, 6, t + HOUR),
+        crate::maintain::tests::file(0, 9, 9, t + 3 * DAY),
+        crate::maintain::tests::file(1, 6, 8, t + 2 * HOUR),
+        crate::maintain::tests::file(2, 5, 5, t + 2 * HOUR),
+    ];
+    let zero = short(&inv(files), &[], at(t + 3 * DAY), &defaults(), None);
+    assert_eq!(zero.keys, vec![key(0, 5, 5), key(0, 6, 6)]);
+}
+
 /// A listing behind what was published is a hold, and a hold leaves level 0 to the whole
 /// listing: the same files are deleted once the listing has caught up.
 #[test]

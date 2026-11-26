@@ -1,0 +1,9 @@
+# The short view's level-0 rule folds every listed level 1 to 8 file into one run of spans, which
+# the fold reads as ascending; a higher level's file that starts before a lower level's last one is
+# swallowed, so a level-0 file only that file covers is kept.
+name = "short-view-cover-one-run"
+fix = "claude/short-view-subset"
+package = "lsr-core"
+tests = [
+    "maintain::retain::tests::short_view::a_cover_from_two_levels_covers_a_file_only_the_higher_level_holds",
+]
