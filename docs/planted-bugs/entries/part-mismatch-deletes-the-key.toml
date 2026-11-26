@@ -1,7 +1,0 @@
-name = "part-mismatch-deletes-the-key"
-fix = "claude/staged-parts"
-package = "lsr-core"
-tests = [
-    "a_part_rejected_during_the_commit_deletes_nothing",
-    "a_rejected_part_hands_back_no_object",
-]

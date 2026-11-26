@@ -1300,27 +1300,23 @@ fn steady_state_makes_no_read_call() {
     assert_eq!(remote.log().reads, 0);
 }
 
+/// A store that published the bytes and then said they were not the ones sent: nothing is
+/// deleted, the same key is due, and the retry's refusal reads the object back.
 #[test]
-fn a_rejected_commit_deletes_the_key() {
+fn a_rejected_commit_deletes_nothing_and_its_retry_reads_the_key_back() {
     let (staging, remote) = (MemStore::new(), Probe::default());
-    stage(&staging, 1);
+    let bytes = stage(&staging, 1);
     remote.log().commit_after.push_back(StoreError::Corrupt {
         key: Some(key(1)),
         cause: CorruptCause::ChecksumMismatch { part: None },
     });
     let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
     assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
-    assert_eq!(remote.log().deletes, vec![key(1)]);
-    assert!(files(&remote.inner).is_empty());
-    // A failing delete changes nothing else: the same key is still due.
-    let remote = Probe::default();
-    remote.log().fail_delete = true;
-    remote.log().commit_after.push_back(StoreError::Corrupt {
-        key: Some(key(1)),
-        cause: CorruptCause::ChecksumMismatch { part: None },
-    });
-    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
     assert_eq!(failed.state, UploadState::At(None));
+    assert_eq!(remote.log().deletes, Vec::new());
+    let put = next(failed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(put.did, Did::AlreadyPut(key(1)));
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
 }
 
 /// A part the store reports wrong during the commit ended the upload before the store was
@@ -1343,6 +1339,30 @@ fn a_part_rejected_during_the_commit_deletes_nothing() {
     assert_eq!(failed.state, UploadState::At(None));
     assert_eq!(remote.log().deletes, Vec::new());
     assert_eq!(read_all(&remote.inner, &key(1)), theirs);
+}
+
+/// An earlier attempt published the staged file and then failed (an ambiguous commit), and the
+/// retry's body is refused against its signed hash. S3 refuses such a body before it looks at
+/// the create-only condition, so the refusal proves nothing about the key: it holds the earlier
+/// attempt's object, which a restore may already have used. Deleting it would take the newest
+/// transaction off the replica with no fault to explain it (Go deletes nothing after a failed
+/// write either); the next attempt finds the object and confirms it.
+#[test]
+fn a_refused_create_only_body_deletes_nothing() {
+    let (staging, remote) = (MemStore::new(), Probe::default());
+    let bytes = stage(&staging, 1);
+    put_bytes(&remote.inner, key(1), &bytes);
+    remote.log().commit_before.push_back(StoreError::Corrupt {
+        key: Some(key(1)),
+        cause: CorruptCause::ChecksumMismatch { part: None },
+    });
+    let failed = failure(next(UploadState::At(None), &staging, &remote, 1));
+    assert_eq!(failed.fault, Fault::UploadChecksumMismatch);
+    assert_eq!(remote.log().deletes, Vec::new());
+    assert_eq!(read_all(&remote.inner, &key(1)), bytes);
+    let put = next(failed.state, &staging, &remote, 1).unwrap();
+    assert_eq!(put.state, UploadState::At(Some(txid(1))));
+    assert_eq!(remote.log().deletes, Vec::new());
 }
 
 #[test]

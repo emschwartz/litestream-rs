@@ -353,7 +353,8 @@ pub(super) struct Maintain {
     /// `None` before the first. A staged file at or below it was compacted.
     pub(super) level_one: Option<Txid>,
     /// The read-back of the newest file per level is still owed: set at
-    /// every boot, cleared by the first listing that finds them all sound.
+    /// every boot and after a store refused an output or a snapshot against its
+    /// checksum, cleared by the first listing that finds them all sound.
     pub(super) read_back_owed: bool,
     /// A newest file whose last read-back failed verification. One failed
     /// read says nothing about the stored bytes, so the read-back acts on the
