@@ -1205,7 +1205,11 @@ impl World {
         Ok(found && done)
     }
 
-    fn staged_files(&self) -> Result<Vec<FileInfo>, StoreError> {
+    /// Every staged file at every level, read around the wrappers.
+    ///
+    /// # Errors
+    /// The store's error when it cannot list.
+    pub fn staged_files(&self) -> Result<Vec<FileInfo>, StoreError> {
         use lsr_core::{Level, ObjectStore, PageLimit};
         let mut files = Vec::new();
         for level in Level::ALL {

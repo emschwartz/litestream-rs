@@ -35,6 +35,8 @@ mod kill_after_fault;
 #[cfg(test)]
 mod level_holes;
 #[cfg(test)]
+mod liveness;
+#[cfg(test)]
 mod marks;
 #[cfg(test)]
 mod needless_snapshot;

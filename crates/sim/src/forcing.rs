@@ -221,6 +221,9 @@ pub const fn noted_by_opts(opts: &crate::run::Opts) -> &'static [Forcing] {
         // The engine's own configuration.
         truncate_pages: _,
         slice_bytes: _,
+        // The database's size and the cost of I/O force nothing.
+        first_db_pages: _,
+        cost: _,
         // The law's process crashes are noted as they happen, as a crash operation's are.
         kill_after_fault: _,
         // The replica on S3, in parts or not: its provider faults are noted as they are drawn.

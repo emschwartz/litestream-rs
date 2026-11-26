@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index a8d8e023d..ff36cc71e 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2895,7 +2895,7 @@ impl Actor {
+         now: Timestamp,
+     ) -> Result<Sliced, Tick> {
+         let sources = (&mut *env.wal, &mut *env.db, &mut self.engine.pages);
+-        let sliced = snapshot.slice(sources, env.remote, budget, false).await;
++        let sliced = snapshot.slice(sources, env.remote, budget.max(u64::MAX), true).await;
+         let state = &mut self.engine.maintain.state;
+         match sliced {
+             Ok(None) => Ok(Sliced::Snapshot(snapshot)),

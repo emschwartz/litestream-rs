@@ -144,8 +144,14 @@ fn at(millis: i64) -> Timestamp {
 }
 
 #[test]
-fn an_upload_tick_that_hands_the_replica_more_than_a_slice_breaks_the_bound() {
-    for event in [sending(), Some(Event::Uploaded(lsr_core::Did::Nothing))] {
+fn a_tick_that_hands_the_replica_more_than_a_slice_breaks_the_bound() {
+    // Whatever the tick ended in: a compaction or a snapshot run whole ends in its own event.
+    for event in [
+        sending(),
+        Some(Event::Uploaded(lsr_core::Did::Nothing)),
+        Some(Event::Synced { files: 1 }),
+        Some(Event::Idle),
+    ] {
         let mut s = stats(event);
         s.remote.written_bytes = 1100;
         per_tick(&s, LIMITS).unwrap();
@@ -159,10 +165,6 @@ fn an_upload_tick_that_hands_the_replica_more_than_a_slice_breaks_the_bound() {
             }
         ));
     }
-    // A tick of anything else (a compaction, a snapshot) writes what it writes.
-    let mut s = stats(Some(Event::Synced { files: 1 }));
-    s.remote.written_bytes = 5000;
-    per_tick(&s, LIMITS).unwrap();
 }
 
 /// The checker can fail: nine slices in a row after a commit are one too many, and a tick of
