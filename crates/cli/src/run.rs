@@ -830,22 +830,29 @@ const fn expand_of(no_expand_env: bool) -> Expand {
     }
 }
 
-/// Go's `databases`: every entry of the config with its replica's type. A `path` entry prints
-/// its path. A `dir` entry prints its directory, unscanned: Go expands the entry's empty
-/// `path` and prints the working directory instead (docs/decisions/D162.md).
+/// Go's `databases` (`newDBsFromConfig`): every entry of the config with its replica's type. A
+/// `path` entry prints its path. A `dir` entry prints every database its scan finds, planned
+/// as `replicate` plans it, so one that finds none is refused (docs/decisions/D274.md).
 fn databases_command(args: &DatabasesArgs) -> Result<Done, CliError> {
     let loaded = lsr_sidecar::load_config(args.config.as_deref(), expand_of(args.no_expand_env))?;
     let mut rows = Vec::new();
-    for db in loaded.config.dbs() {
-        let path = match db.source() {
-            DbSource::Path(path) => path.display().to_string(),
-            DbSource::Dir(dir) => expand_path(dir.dir(), &ProcessEnv)
-                .map_err(CliError::DatabasePath)?
-                .display()
-                .to_string(),
-        };
+    for (index, db) in loaded.config.dbs().iter().enumerate() {
         let kind = db.replica().map_or("", |r| r.kind().word());
-        rows.push((path, kind));
+        match db.source() {
+            DbSource::Path(path) => rows.push((path.display().to_string(), kind)),
+            DbSource::Dir(_) => {
+                let entry = loaded
+                    .config
+                    .only_entry(index)
+                    .ok_or(CliError::NoDatabase)?;
+                let plan = lsr_config::plan(&entry, &ProcessEnv).map_err(CliError::Plan)?;
+                rows.extend(
+                    plan.dbs()
+                        .iter()
+                        .map(|d| (d.path().display().to_string(), kind)),
+                );
+            }
+        }
     }
     Ok(Done::Databases {
         rows,

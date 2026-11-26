@@ -186,42 +186,9 @@ fn compare(rig: &Rig, case: &Case) -> Result<String, TestCaseError> {
     );
     prop_assert_eq!(go_code, lsr_code, "exit codes\n{}", report);
     if go_code == Some(0) {
-        // Help prints each side's own usage text; everything else must match exactly, but for
-        // a `dir` entry under `databases`: Go prints the working directory for it, and
-        // litestream-rs the entry's directory (docs/decisions.md D162), which also moves the
-        // column widths.
-        let dir_entry = args.iter().any(|a| a.ends_with("with-dir.yml"))
-            && args.first().is_some_and(|c| c == "databases")
-            && !go_out.contains("Usage");
-        if dir_entry {
-            // Go prints the directory the operating system reports for its working directory,
-            // which is the resolved path (macOS puts temporary directories behind a symlink,
-            // `/var` for `/private/var`); the entry's own path is printed as the config gave it.
-            let cwd = std::fs::canonicalize(rig.dir.path())
-                .unwrap_or_else(|_| rig.dir.path().to_path_buf())
-                .display()
-                .to_string();
-            let scan = rig.path("scan");
-            let collapse = |text: &str| -> Vec<String> {
-                text.lines()
-                    .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
-                    .collect()
-            };
-            let mapped: Vec<String> = collapse(&go_out)
-                .into_iter()
-                .map(|l| {
-                    if l.starts_with(&format!("{cwd} ")) || l.contains(&format!("\"{cwd}\"")) {
-                        l.replacen(&cwd, &scan, 1)
-                    } else {
-                        l
-                    }
-                })
-                .collect();
-            prop_assert!(
-                mapped == collapse(&lsr_out),
-                "databases with a dir entry\n{report}"
-            );
-        } else if !go_out.contains("Usage") {
+        // Help prints each side's own usage text; everything else must match exactly,
+        // including the databases a `dir` entry finds (Go 3e0fdc0, docs/decisions/D274.md).
+        if !go_out.contains("Usage") {
             prop_assert!(go_out == lsr_out, "standard output differs\n{report}");
         }
     } else {
@@ -290,9 +257,13 @@ fn rig() -> Rig {
         dir.path().join("empty-replica").display(),
     );
     std::fs::write(dir.path().join("litestream.yml"), &config).unwrap();
-    std::fs::create_dir(dir.path().join("scan")).unwrap();
+    // Two databases, one below a subdirectory: Go's walk order and relative replica paths.
+    std::fs::create_dir_all(dir.path().join("scan/sub")).unwrap();
+    for name in ["scan/b.db", "scan/a.db", "scan/sub/c.db"] {
+        std::fs::write(dir.path().join(name), b"SQLite format 3\0").unwrap();
+    }
     let with_dir = format!(
-        "{config}  - dir: {}\n    pattern: \"*.db\"\n    replica:\n      url: file://{}\n",
+        "{config}  - dir: {}\n    pattern: \"*.db\"\n    recursive: true\n    replica:\n      url: file://{}\n",
         dir.path().join("scan").display(),
         dir.path().join("scan-replica").display(),
     );
