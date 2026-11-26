@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/maintain/short.rs b/crates/core/src/maintain/short.rs
+--- a/crates/core/src/maintain/short.rs
++++ b/crates/core/src/maintain/short.rs
+@@ -509,7 +509,7 @@ impl Remembered {
+                 after: lowest(&needs),
+             });
+         }
+-        if plan.snapshot {
++        if plan.snapshot || plan.retention {
+             starts.push(ListAt::first(Level::SNAPSHOT));
+         }
+         starts
