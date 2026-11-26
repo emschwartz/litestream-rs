@@ -1,0 +1,18 @@
+diff --git a/crates/core/src/publish.rs b/crates/core/src/publish.rs
+--- a/crates/core/src/publish.rs
++++ b/crates/core/src/publish.rs
+@@ -221,7 +221,13 @@ impl<U: Upload> Writer<U> {
+         } = self;
+         let info = match upload.commit().await {
+             Ok(info) => info,
+-            Err(err) => return Err(unpublished(err, key, mode)),
++            Err(err) => {
++                let left = unpublished(err, key, mode);
++                if matches!(left, Unpublished::Rejected(_)) {
++                    drop(store.delete(&[key]).await);
++                }
++                return Err(left);
++            }
+         };
+         let keys = [key];
+         let info = settle(info, key, written, mode, || store.delete(&keys))

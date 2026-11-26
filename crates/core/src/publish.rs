@@ -16,12 +16,13 @@
 //! one; [`ours`] makes the third kind, a key a read showed already holds our
 //! bytes.
 //!
-//! **Deletes after a failed write.** A store that rejects the bytes it took
-//! (a digest that does not match) leaves them listed. Only a create-only
-//! write ([`WriteMode::New`]) can be sure the rejected object is its own: the
-//! bucket refuses a taken key before it takes any bytes. So only such a
-//! commit hands back a [`Rejected`], and [`remove_rejected`] deletes nothing
-//! else. A rejected replace deletes nothing; its retry writes the key again.
+//! **No delete after a rejected write.** A store that says the bytes are not the bytes sent
+//! ([`CorruptCause::ChecksumMismatch`]) is never answered with a delete of the key, in either
+//! mode, as Go deletes nothing after a failed write. S3 refuses a body against its signed hash
+//! before it looks at a create-only condition, so the refusal says nothing about the key: it may
+//! hold an earlier attempt's object that an ambiguous commit published, and a delete would take
+//! that transaction off the replica. The caller writes the key again; a create-only retry that
+//! finds it taken reads it back (`docs/decisions/D280.md`).
 //!
 //! **Every other delete** names its reason ([`Removal`]): retention, a rotten
 //! object a later file covers, a rejected snapshot or compaction output.
@@ -96,20 +97,14 @@ impl Published {
     }
 }
 
-/// The object a rejected create-only commit left: the only object a delete
-/// after a failed write may take. Only [`Writer::commit`] makes one.
-#[derive(Debug, PartialEq, Eq)]
-#[must_use = "a rejected object stays listed until it is removed"]
-pub(crate) struct Rejected(FileKey);
-
 /// Why a commit did not publish.
 #[derive(Debug)]
 pub(crate) enum Unpublished {
     /// A create-only write found the key taken; nothing was written.
     Taken(StoreError),
-    /// The store took the bytes and says they are not the bytes sent. A
-    /// create-only write's object is its own, so it can go ([`remove_rejected`]).
-    Rejected(StoreError, Option<Rejected>),
+    /// The store says the bytes are not the bytes sent. It may have published nothing (S3
+    /// refuses the body), so the key holds whatever it held before, and nothing is deleted.
+    Rejected(StoreError),
     /// Any other failure, including a short write already removed.
     Failed(StoreError),
 }
@@ -118,14 +113,14 @@ impl Unpublished {
     /// The store's error.
     pub(crate) const fn error(&self) -> &StoreError {
         match self {
-            Self::Taken(err) | Self::Rejected(err, _) | Self::Failed(err) => err,
+            Self::Taken(err) | Self::Rejected(err) | Self::Failed(err) => err,
         }
     }
 
-    /// The store's error, the rejected object dropped.
+    /// The store's error, by value.
     pub(crate) fn into_error(self) -> StoreError {
         match self {
-            Self::Taken(err) | Self::Rejected(err, _) | Self::Failed(err) => err,
+            Self::Taken(err) | Self::Rejected(err) | Self::Failed(err) => err,
         }
     }
 }
@@ -253,32 +248,9 @@ fn unpublished(err: StoreError, key: FileKey, mode: WriteMode) -> Unpublished {
         (StoreError::AlreadyExists { key: taken }, WriteMode::New) if *taken == key => {
             Unpublished::Taken(err)
         }
-        _ if rejected => {
-            // A part that came back wrong ended the upload before its commit asked the store
-            // for the key, so whatever the key holds is not this upload's to remove.
-            let whole = matches!(
-                err,
-                StoreError::Corrupt {
-                    cause: CorruptCause::ChecksumMismatch { part: None },
-                    ..
-                }
-            );
-            let own = (mode == WriteMode::New && whole).then_some(Rejected(key));
-            Unpublished::Rejected(err, own)
-        }
+        _ if rejected => Unpublished::Rejected(err),
         _ => Unpublished::Failed(err),
     }
-}
-
-/// Deletes the object a rejected create-only commit left.
-///
-/// # Errors
-/// What the store's delete returned; the object may still be listed.
-pub(crate) async fn remove_rejected<S: ObjectStore>(
-    store: &S,
-    rejected: Rejected,
-) -> Result<(), StoreError> {
-    store.delete(&[rejected.0]).await
 }
 
 /// Why replica objects are deleted.

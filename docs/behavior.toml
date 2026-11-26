@@ -985,11 +985,11 @@ recovered_by = "sim::`size_mismatch_on_commit`, sim::`short_write::an_upload_ack
 table = "Upload"
 id = "UP-8"
 circumstance = "The store refuses a body as not the one signed (`XAmzContentSHA256Mismatch`, or `BadDigest`), or a completion names a part ETag it does not hold (`InvalidPart`)"
-response = "retry, `UploadChecksumMismatch`: the key is deleted, best effort, and written again"
+response = "retry, `UploadChecksumMismatch`: the key is written again, and nothing is deleted"
 signal = "\"retrying\""
-at_risk = "None: the store published nothing, so the delete finds no object. A returned ETag is not compared with anything, as in Go (`docs/decisions/D250.md`)"
+at_risk = "None: the store published nothing. The key may hold an earlier attempt's object that an ambiguous commit published, which a delete would have taken off the replica; the retry reads it back (`docs/decisions/D280.md`). A returned ETag is not compared with anything, as in Go (`docs/decisions/D250.md`)"
 recovery = "Automatic"
-detected_by = "sim::`etag_mismatch_on_put`, store-s3::`a_put_refused_against_its_signed_hash_is_corrupt`, store-s3::`a_part_refused_against_its_signed_hash_is_corrupt_and_not_retried`, store-s3::`a_wrong_part_etag_fails_the_completion_as_corrupt`, store-s3::`a_body_mismatch_on_put_is_a_checksum_mismatch_and_publishes_nothing`"
+detected_by = "sim::`etag_mismatch_on_put`, core::`a_refused_create_only_body_deletes_nothing`, core::`a_rejected_commit_deletes_nothing_and_its_retry_reads_the_key_back`, store-s3::`a_put_refused_against_its_signed_hash_is_corrupt`, store-s3::`a_part_refused_against_its_signed_hash_is_corrupt_and_not_retried`, store-s3::`a_wrong_part_etag_fails_the_completion_as_corrupt`, store-s3::`a_body_mismatch_on_put_is_a_checksum_mismatch_and_publishes_nothing`; plant::`rejected-write-deletes-the-key`"
 recovered_by = "sim::`etag_mismatch_on_put`"
 
 [[row]]
