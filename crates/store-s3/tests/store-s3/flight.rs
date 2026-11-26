@@ -166,6 +166,32 @@ fn no_more_parts_are_in_flight_than_the_setting_and_one_waits() {
     assert_eq!(source.opens(), 5, "a reader for each part");
 }
 
+/// A buffered upload (a level-9 snapshot's) asked before each write says it is full before the
+/// write that would fill a part with every lane taken, so no write it let through waits for a
+/// part. Such a write used to wait for one on the engine's thread, and the engine synced and
+/// uploaded nothing of its database until the part ended.
+#[test]
+fn a_buffered_write_let_through_never_waits_for_a_part() {
+    let rig = rig(1, oldest);
+    let bytes = body(3 * PART + 100_000);
+    let mut upload = begin(&rig.store, &key(0, 1, 1));
+    let mut landed = 0;
+    for chunk in bytes.chunks(300_000) {
+        while block_on(upload.flight(Rest::More)) == Ok(Flight::Full) {
+            assert!(rig.lanes.land(0));
+            landed += 1;
+        }
+        block_on(upload.write(chunk)).unwrap();
+        assert_eq!(rig.parts_sent(), landed, "a write waited for a part");
+    }
+    assert_eq!(
+        landed, 2,
+        "the upload said full before each part with a part in flight"
+    );
+    block_on(upload.commit()).unwrap();
+    assert!(rig.stored().as_deref() == Some(&bytes[..]));
+}
+
 /// Parts that end newest first, or in any order a test picks, make the object the parts in
 /// order make: each ETag goes by its part number.
 #[test]

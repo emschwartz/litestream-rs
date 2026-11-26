@@ -1,0 +1,9 @@
+# A buffered upload with every lane taken says a write will not wait, and the write that fills
+# its part then waits for a part on the caller's thread: a level-9 snapshot to S3 stopped its
+# database's syncs and uploads for most of each part's upload.
+name = "snapshot-write-waits-for-a-part"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "flight::a_buffered_write_let_through_never_waits_for_a_part",
+]

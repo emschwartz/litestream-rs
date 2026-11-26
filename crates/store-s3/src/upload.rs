@@ -19,7 +19,10 @@
 //!   `concurrency` setting, or fewer for parts that hold their bytes (below).
 //! - **One part waits.** A whole part that finds every lane taken waits in the upload, one at
 //!   most. A write that would make a second waits for a part to end, on this thread, helping
-//!   the lanes when they have no thread of their own.
+//!   the lanes when they have no thread of their own. A buffered write that fills a part with
+//!   every lane taken waits too, since the rest of it would go into a new buffer, so
+//!   [`Upload::flight`] answers [`Flight::Full`] once the part being filled has less room
+//!   than a write of [`ReadLen::CHUNK`]: a caller that asks first never waits.
 //!
 //! **Parts that hold their bytes.** A part written with [`Upload::write`] is a buffer, so
 //! the upload holds `width` parts in flight and one more, filling or waiting: no byte goes
@@ -71,8 +74,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Poll, Waker};
 
 use lsr_core::{
-    CorruptCause, CreatedAt, FileInfo, FileKey, Flight, ListedTime, PartNumber, Reread, Rest,
-    StoreError, StoreOp, Upload, WriteMode,
+    CorruptCause, CreatedAt, FileInfo, FileKey, Flight, ListedTime, PartNumber, ReadLen, Reread,
+    Rest, StoreError, StoreOp, Upload, WriteMode,
 };
 use lsr_ltx::Timestamp;
 
@@ -854,8 +857,13 @@ impl<T: Transport> Upload for S3Upload<T> {
             self.seal_now();
             self.pump()?;
         }
+        // A buffered part that fills with every lane taken waits, and the rest of the write it
+        // filled waits with it (`take`): with less room than one write left, that write could.
+        let short = self.part_len().saturating_sub(self.filling.len()) < ReadLen::CHUNK.get();
+        let (width, buffered) = (self.width(), !self.filling.sourced());
         Ok(match &self.multi {
             Some(multi) if multi.ready.is_some() => Flight::Full,
+            Some(multi) if buffered && short && multi.flying >= width => Flight::Full,
             Some(multi) if multi.flying > 0 => Flight::Room,
             Some(_) | None => Flight::Idle,
         })
