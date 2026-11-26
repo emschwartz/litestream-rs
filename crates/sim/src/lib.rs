@@ -63,7 +63,10 @@ pub use oracle::{
 };
 pub use reach::Reach;
 pub use run::{Failure, Judges, Opts, RunReport, run, run_with, shrink};
-pub use seed::{ParseDayError, ParseSeedError, SEEDS_PER_NIGHT, Seed, nightly_base, replay_line};
+pub use seed::{
+    ParseDayError, ParseSeedError, ParseShardError, SEEDS_PER_NIGHT, Seed, Shard, long_base,
+    nightly_base, replay_line,
+};
 pub use sqlite::{
     AppCommit, AutoTally, CheckpointNumbers, CrashKind, CreatedAt, InTickAt, InTickCommit,
     InTickDone, InTickOp, InTickRan, InTickSite, OtherProcessMode, ReaderId, SimCheckpointer,

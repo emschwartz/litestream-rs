@@ -627,6 +627,11 @@ pub struct Weights {
     /// Not an operation, for the same reason as `block_crash_law`; drawn last in the swarm
     /// mix.
     pub slice_bytes: Option<std::num::NonZeroU64>,
+    /// A multiplier on the pages of every [`Op::Commit`] and [`Op::CommitInTick`], and on how
+    /// often a commit grows the database (1 in 6 at 1, 1 in 2 from 3 up). Not an operation:
+    /// the draws are the same at any scale. 1 in every mix; [`Weights::with_large_sizes`] sets
+    /// the large profile's (`docs/decisions/D277.md`).
+    pub size_scale: u8,
 }
 
 /// What the application does when it comes back after a restart, before the
@@ -658,6 +663,9 @@ pub enum AfterRestart {
     /// other bytes and the next lost commit's frames byte for byte.
     Retry,
 }
+
+/// The large profile's [`Weights::size_scale`] (`docs/decisions/D277.md`).
+pub const LARGE_SIZE_SCALE: u8 = 8;
 
 /// The most commits a [`AfterRestart::Redo`] replays, and the length of the
 /// app's own log of commits.
@@ -728,6 +736,7 @@ impl Default for Weights {
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             slice_bytes: None,
+            size_scale: 1,
         }
     }
 }
@@ -870,6 +879,7 @@ impl Weights {
             http_fault: 0,
             remote_parts: None,
             slice_bytes: None,
+            size_scale: 1,
         };
         // Drawn last, so every other kind keeps the weight it had before
         // second writers were drawn.
@@ -961,6 +971,17 @@ impl Weights {
         if self.truncate_pages.is_some() {
             self.other_process_reader = self.other_process_reader.max(10);
         }
+        self
+    }
+
+    /// The large profile's sizes on top of this mix: [`LARGE_SIZE_SCALE`] times the pages per
+    /// commit, a commit that grows the database half the time instead of a sixth, and no page-size
+    /// change: after one the engine is degraded for the rest of the run
+    /// ([`Weights::vacuum_resizes`]), which a long history would spend nearly all of.
+    #[must_use]
+    pub fn with_large_sizes(mut self) -> Self {
+        self.size_scale = LARGE_SIZE_SCALE;
+        self.vacuum_resizes = false;
         self
     }
 
@@ -1263,11 +1284,15 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
     match weights.pick(below(entropy, weights.total())) {
         Kind::Tick => Op::Tick,
         Kind::Commit => Op::Commit {
-            pages: small(entropy, 4).saturating_add(1),
-            grow: below(entropy, 6) == 0,
+            pages: small(entropy, 4)
+                .saturating_add(1)
+                .saturating_mul(weights.size_scale),
+            grow: below(entropy, 6) < u64::from(weights.size_scale.clamp(1, 3)),
         },
         Kind::CommitInTick => Op::CommitInTick {
-            pages: small(entropy, 4).saturating_add(1),
+            pages: small(entropy, 4)
+                .saturating_add(1)
+                .saturating_mul(weights.size_scale),
         },
         Kind::Spill => Op::Spill,
         Kind::Rollback => Op::Rollback,

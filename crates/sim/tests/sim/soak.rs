@@ -17,13 +17,22 @@
 //! failing seed does. The marks too rare for the nightly's seeds to reach reliably
 //! come from `lsr_sim::scenario::coverage`, run once ahead of the seeds; a scenario that stops
 //! reaching its mark fails the soak too.
+//!
+//! `long_seeds` is the same soak at the large profile (`docs/decisions/D277.md`): long
+//! histories, larger transactions, the nightly's laws, seeds from the upper half of the night's
+//! range, and `LSR_SIM_SHARD=i/n` so n jobs run disjoint seeds. It is not gated: a shard runs
+//! tens of seeds, too few to reach every row, and the rotating set already gates the rows. Its
+//! reach is written beside the others' so the shards can be summed by hand.
 
 use std::time::{Duration, Instant};
 
 use lsr_sim::scenario::coverage;
-use lsr_sim::{Reach, Seed, Weights, nightly_base, replay_line, run};
+use lsr_sim::{Reach, Seed, Shard, Weights, long_base, nightly_base, replay_line, run};
 
 const STEPS: u32 = 300;
+
+/// The large profile's step count (`docs/decisions/D277.md`).
+const LONG_STEPS: u32 = 5_000;
 
 /// The replay line of a soak run: the soak sets the nightly's laws, so its replay must too.
 fn replay(seed: Seed, steps: u32) -> String {
@@ -96,7 +105,10 @@ fn rotating_seeds() {
         .map(|failure| replay(failure.seed, failure.steps))
         .collect();
     let gate = lsr_sim::marks::gate(&reach);
-    write_reach(base, ran, &reach, &gate);
+    println!("gate zeros: {:?}", gate.zeros);
+    println!("gate stale exemptions: {:?}", gate.stale);
+    println!("gate undrawn classes drawn: {:?}", gate.drawn_undrawn);
+    write_reach("live", STEPS, base, ran, &reach, Some(&gate));
     assert!(failed.is_empty(), "failing seeds:\n{}", lines.join("\n"));
     assert!(
         unreached.is_empty(),
@@ -108,13 +120,82 @@ fn rotating_seeds() {
         "the soak left required marks unreached: {gate:?}"
     );
 }
-/// Prints the gate's verdict and writes the summed reach where
-/// `LSR_SIM_REACH_OUT` names: the commit (`LSR_SIM_COMMIT`), the seeds run
-/// and every key, so nights can be compared.
-fn write_reach(base: u64, ran: u64, reach: &Reach, gate: &lsr_sim::marks::Gate) {
-    println!("gate zeros: {:?}", gate.zeros);
-    println!("gate stale exemptions: {:?}", gate.stale);
-    println!("gate undrawn classes drawn: {:?}", gate.drawn_undrawn);
+
+/// The large profile's replay line: the soak's laws and sizes, so a replay draws the same run.
+fn replay_long(seed: Seed) -> String {
+    format!("LSR_SIM_LARGE=1 {}", replay(seed, LONG_STEPS))
+}
+
+/// The base of a long run: `LSR_SIM_DAY` names the upper half of a night's range, else
+/// `LSR_SIM_BASE_SEED` is the first seed itself.
+fn long_start() -> u64 {
+    match std::env::var("LSR_SIM_DAY") {
+        Ok(day) => long_base(&day).expect("LSR_SIM_DAY is a date, YYYYMMDD"),
+        Err(_) => base(),
+    }
+}
+
+#[test]
+#[ignore = "runs for LSR_SIM_SECONDS; use `just sim-long`"]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the soak runs for a wall-clock budget; each run uses simulated time"
+)]
+fn long_seeds() {
+    let base = long_start();
+    let shard = Shard::parse(&std::env::var("LSR_SIM_SHARD").unwrap_or_else(|_| "0/1".to_owned()))
+        .expect("LSR_SIM_SHARD is INDEX/COUNT");
+    let seconds: u64 = std::env::var("LSR_SIM_SECONDS")
+        .expect("LSR_SIM_SECONDS")
+        .parse()
+        .expect("LSR_SIM_SECONDS is a number");
+    let until = Instant::now() + Duration::from_secs(seconds);
+    let mut failed = Vec::new();
+    let mut ran = 0_u64;
+    let mut reach = Reach::default();
+    for seed in shard.seeds(base) {
+        if Instant::now() >= until {
+            break;
+        }
+        println!("{}", replay_long(seed));
+        let weights = Weights::mixed(seed)
+            .with_nightly_laws(seed)
+            .with_large_sizes();
+        match run(seed, LONG_STEPS, &weights) {
+            Ok(report) => reach.merge(&report.reach),
+            Err(failure) => {
+                println!("{failure}");
+                failed.push(failure);
+            }
+        }
+        ran += 1;
+    }
+    println!(
+        "ran {ran} seeds of {shard:?} from {base}, {} failed",
+        failed.len()
+    );
+    for failure in &failed {
+        println!("FAILED {failure}");
+    }
+    let lines: Vec<String> = failed
+        .iter()
+        .map(|failure| replay_long(failure.seed))
+        .collect();
+    write_reach("live-large", LONG_STEPS, base, ran, &reach, None);
+    assert!(failed.is_empty(), "failing seeds:\n{}", lines.join("\n"));
+}
+
+/// Writes the summed reach where `LSR_SIM_REACH_OUT` names: the commit
+/// (`LSR_SIM_COMMIT`), the profile, the seeds run and every key, so nights can be
+/// compared; with the gate's verdict when the soak has one.
+fn write_reach(
+    profile: &str,
+    steps: u32,
+    base: u64,
+    ran: u64,
+    reach: &Reach,
+    gate: Option<&lsr_sim::marks::Gate>,
+) {
     let Ok(path) = std::env::var("LSR_SIM_REACH_OUT") else {
         return;
     };
@@ -130,16 +211,17 @@ fn write_reach(base: u64, ran: u64, reach: &Reach, gate: &lsr_sim::marks::Gate) 
         .collect();
     let out = serde_json::json!({
         "commit": std::env::var("LSR_SIM_COMMIT").unwrap_or_default(),
-        "generator": "live",
-        "steps": STEPS,
+        "generator": profile,
+        "steps": steps,
         "base_seed": base,
+        "shard": std::env::var("LSR_SIM_SHARD").unwrap_or_default(),
         "seeds_run": ran,
-        "gate": {
+        "gate": gate.map(|gate| serde_json::json!({
             "passed": gate.passed(),
             "zeros": gate.zeros,
             "stale_exemptions": gate.stale,
             "undrawn_drawn": gate.drawn_undrawn,
-        },
+        })),
         "reach": keys,
     });
     let text = serde_json::to_string_pretty(&out).expect("the reach serializes");
