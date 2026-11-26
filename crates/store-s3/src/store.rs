@@ -6,13 +6,12 @@
 //! means is decided in one place. The store never retries.
 //!
 //! Batches: a call that needs several independent requests (the parts of an
-//! upload, reads ahead, the levels of a listing, a set of created-at times) builds them
+//! upload, the levels of a listing, a set of created-at times) builds them
 //! all, hands them to [`Transport::send_many`] with the limit of their kind,
 //! and judges each response alone, exactly as a single request. The kinds are
 //! limited apart, as Go does: multipart parts by the `concurrency` setting
 //! (provider defaults in [`S3Config::concurrency`]), HEADs by
-//! `CREATION_TIME_CONCURRENCY`, ranged reads and listing pages by
-//! `READ_CONCURRENCY`.
+//! `CREATION_TIME_CONCURRENCY`, listing pages by `READ_CONCURRENCY`.
 //!
 //! Deadlines: the transport bounds one request. A call that sends several (a
 //! listing, a large delete) also checks the `Clock` between them against four
@@ -25,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
     BatchKind, Clock, CreatedAt, CreatedAtSource, FileInfo, FileKey, Level, ListAt, ListedTime,
-    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, WriteMode,
+    Listing, ObjectStore, PageLimit, ReadLen, ReadStream, StoreError, StoreOp, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
@@ -47,6 +46,10 @@ use crate::transport::{HttpResponse, StreamedRequest, Transport};
 use crate::upload::S3Upload;
 #[cfg(feature = "ureq")]
 use crate::ureq_transport::UreqTransport;
+
+mod stream;
+
+use stream::S3Stream;
 
 /// What the created-at times read so far found, for the event layer (this crate emits no
 /// events). A listing reads none; each [`ObjectStore::created_at`] and
@@ -103,7 +106,7 @@ pub(crate) struct Inner<T> {
     pub(crate) lanes: Arc<dyn Lanes>,
     /// Parts started by any upload of this store that have not ended, and what wakes the
     /// boot sweep when one does (`orphans.rs`).
-    parts: lanes::Mutex<usize>,
+    pub(crate) parts: lanes::Mutex<usize>,
     part_ended: lanes::Condvar,
 }
 
@@ -335,6 +338,11 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         self.inner.read(key, offset, len)
     }
 
+    /// One GET for the rest of the object, its body read as the pieces are asked for.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(S3Stream::new(&self.inner, key, offset))
+    }
+
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         self.inner.created_at(file)
     }
@@ -373,10 +381,6 @@ impl<T: Transport> ObjectStore for S3Store<T> {
 
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         Inner::<T>::width(kind)
-    }
-
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        self.inner.read_many(reads)
     }
 
     async fn list_many(
@@ -502,7 +506,7 @@ impl<T: Transport> Inner<T> {
     /// ([`ObjectStore::batch_width`]) and the batches themselves use.
     pub(crate) const fn width(kind: BatchKind) -> NonZeroUsize {
         match kind {
-            BatchKind::Reads | BatchKind::Lists => READ_CONCURRENCY,
+            BatchKind::Lists => READ_CONCURRENCY,
             BatchKind::ResolvedCreatedAt => CREATION_TIME_CONCURRENCY,
         }
     }
@@ -597,23 +601,6 @@ impl<T: Transport> Inner<T> {
             }
             Err(_) => {}
         });
-    }
-
-    /// Builds every request, sends the batch, and judges each response
-    /// as [`Self::read`] does. A request that cannot be built fails its slot.
-    fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        let op = StoreOp::Read;
-        self.batch(
-            op,
-            Self::width(BatchKind::Reads),
-            reads.iter().copied(),
-            |at| {
-                let request =
-                    self.request(op, |b, now| b.get_range(now, &at.key, at.offset, at.len))?;
-                Ok((request, at))
-            },
-            |at, response| Self::range_body(&at.key, at.offset, at.len, response),
-        )
     }
 
     /// One request per item, sent as one batch. `build` makes an item's
@@ -740,29 +727,42 @@ impl<T: Transport> Inner<T> {
         }
     }
 
+    /// A ranged GET's answer judged by its head: `None` past the end of the object, else
+    /// whether it is the range asked for (a 206) rather than the whole object.
+    pub(crate) fn range_head(
+        key: &FileKey,
+        offset: u64,
+        response: &HttpResponse,
+    ) -> Result<Option<bool>, StoreError> {
+        let op = StoreOp::Read;
+        if is_range_past_end(response) {
+            return Ok(None);
+        }
+        classify(op, Some(key), None, response)?;
+        let partial = response.status() == 206;
+        // A 206 for another range would hand back the wrong bytes under the right key.
+        if partial
+            && response
+                .header("content-range")
+                .and_then(content_range_start)
+                != Some(offset)
+        {
+            return Err(invalid_data(op));
+        }
+        Ok(Some(partial))
+    }
+
     /// The bytes a ranged GET answered, taken out of the response, not copied: the body was
-    /// sized to its length when it was read, and a restore holds eight of them at once.
+    /// sized to its length when it was read.
     fn range_body(
         key: &FileKey,
         offset: u64,
         len: ReadLen,
         response: HttpResponse,
     ) -> Result<Vec<u8>, StoreError> {
-        let op = StoreOp::Read;
-        if is_range_past_end(&response) {
+        let Some(partial) = Self::range_head(key, offset, &response)? else {
             return Ok(Vec::new());
-        }
-        classify(op, Some(key), None, &response)?;
-        let partial = response.status() == 206;
-        if partial {
-            // A 206 for another range would hand back the wrong bytes under the right key.
-            let starts = response
-                .header("content-range")
-                .and_then(content_range_start);
-            if starts != Some(offset) {
-                return Err(invalid_data(op));
-            }
-        }
+        };
         let mut body = response.into_body();
         if !partial {
             // A server that ignored the Range header sent the whole object.

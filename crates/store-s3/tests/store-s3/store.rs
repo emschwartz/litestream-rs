@@ -92,7 +92,7 @@ mod cases {
     }
 
     #[test]
-    fn a_failed_read_in_a_batch_is_retried_alone() {
+    fn a_stream_whose_get_is_throttled_is_sent_again_after_the_wait() {
         let (wire, sleeper, store) = retried(FakeHarness::new());
         let k = key(0, 1, 1);
         put_through(&store, &k, b"abcdefghi").unwrap();
@@ -102,25 +102,105 @@ mod cases {
             code: Some("SlowDown"),
             retry_after: Some("1"),
         });
-        let len = ReadLen::new(3).unwrap();
-        let reads: Vec<lsr_core::ReadAt> = [0, 3, 6]
-            .map(|offset| lsr_core::ReadAt {
-                key: k,
-                offset,
-                len,
-            })
-            .to_vec();
-        let got = block_on(store.read_many(&reads));
+        let got = pieces(&store, k, 0, 3);
         assert_eq!(
             got,
-            vec![
-                Ok(b"abc".to_vec()),
-                Ok(b"def".to_vec()),
-                Ok(b"ghi".to_vec())
+            [
+                b"abc".to_vec(),
+                b"def".to_vec(),
+                b"ghi".to_vec(),
+                Vec::new()
             ]
         );
         assert_eq!(sleeper.waits(), [Duration::from_secs(1)]);
-        assert_eq!(count(&wire, Shape::Get), 4);
+        assert_eq!(count(&wire, Shape::Get), 2);
+    }
+
+    /// The pieces of a stream, `len` bytes asked each time, until one comes back short.
+    fn pieces(store: &impl ObjectStore, k: FileKey, offset: u64, len: u32) -> Vec<Vec<u8>> {
+        let mut stream = store.read_stream(k, offset);
+        let len = ReadLen::new(len).unwrap();
+        let mut out = Vec::new();
+        loop {
+            let piece = block_on(stream.next(len)).unwrap();
+            let short = u64::try_from(piece.len()).unwrap() < len.get();
+            out.push(piece);
+            if short {
+                return out;
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_is_one_get_however_many_pieces_it_hands_out() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abcdefghi").unwrap();
+        let before = count(&h.wire, Shape::Get);
+        let got = pieces(&h.store, k, 0, 3);
+        assert_eq!(got, [&b"abc"[..], b"def", b"ghi", b""]);
+        assert_eq!(count(&h.wire, Shape::Get), before + 1);
+        assert_eq!(pieces(&h.store, k, 4, 4), [&b"efgh"[..], b"i"]);
+    }
+
+    #[test]
+    fn a_stream_from_past_the_end_hands_out_nothing() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abc").unwrap();
+        assert_eq!(pieces(&h.store, k, 3, 3), [Vec::<u8>::new()]);
+        assert_eq!(pieces(&h.store, k, 30, 3), [Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn a_stream_of_a_missing_object_is_not_found() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        let mut stream = h.store.read_stream(k, 0);
+        assert!(matches!(
+            block_on(stream.next(ReadLen::new(3).unwrap())),
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    /// A body that ends before its declared length is a failure, never the end of the object:
+    /// taken as the end, it would be a short file.
+    #[test]
+    fn a_stream_cut_short_fails_where_the_body_ends() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abcdefghi").unwrap();
+        h.wire.push(Fault::TruncateBody {
+            on: Shape::Get,
+            keep: 4,
+        });
+        let mut stream = h.store.read_stream(k, 0);
+        let len = ReadLen::new(3).unwrap();
+        assert_eq!(block_on(stream.next(len)).unwrap(), b"abc");
+        assert_eq!(
+            block_on(stream.next(len)),
+            Err(StoreError::Transient {
+                op: StoreOp::Read,
+                kind: io::ErrorKind::UnexpectedEof,
+            })
+        );
+    }
+
+    /// Through the retry layer a stream cut short goes on with a second GET from the bytes it
+    /// handed out, so the pieces are the object's.
+    #[test]
+    fn a_stream_cut_short_goes_on_from_where_it_stopped_under_retrying() {
+        let (wire, sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        put_through(&store, &k, b"abcdefghi").unwrap();
+        wire.push(Fault::TruncateBody {
+            on: Shape::Get,
+            keep: 4,
+        });
+        let before = count(&wire, Shape::Get);
+        assert_eq!(pieces(&store, k, 0, 3), [&b"abc"[..], b"def", b"ghi", b""]);
+        assert_eq!(count(&wire, Shape::Get), before + 2);
+        assert_eq!(sleeper.waits().len(), 1);
     }
 
     #[test]

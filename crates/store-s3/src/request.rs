@@ -525,6 +525,27 @@ impl RequestBuilder {
         self.bare(now, (Method::Head, Some(&object)), &[], Vec::new())
     }
 
+    /// A GET of the object from `offset` to its end: no `Range` header from the first byte, as
+    /// Go's whole-object GET sends, else `bytes=offset-`.
+    ///
+    /// # Errors
+    /// [`RequestError::ClockOutOfRange`].
+    pub fn get_from(
+        &self,
+        now: Timestamp,
+        key: &FileKey,
+        offset: u64,
+    ) -> Result<HttpRequest, RequestError> {
+        let object = self.object(key);
+        let range = (offset > 0).then(|| ("range", format!("bytes={offset}-")));
+        self.bare(
+            now,
+            (Method::Get, Some(&object)),
+            &[],
+            range.into_iter().collect(),
+        )
+    }
+
     /// A ranged GET of `len` bytes from `offset`.
     ///
     /// # Errors
@@ -563,6 +584,7 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn put_object_if(
         &self,
         now: Timestamp,
@@ -583,7 +605,7 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
-    pub fn put_object_streamed_if(
+    pub fn put_object_of(
         &self,
         now: Timestamp,
         key: &FileKey,
@@ -621,6 +643,7 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn upload_part(
         &self,
         now: Timestamp,
@@ -643,7 +666,7 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
-    pub fn upload_part_streamed(
+    pub fn upload_part_of(
         &self,
         now: Timestamp,
         key: &FileKey,
@@ -1220,10 +1243,10 @@ mod tests {
         let k = key(1, 1, 5);
         let hash = PayloadHash::of(b"the part");
         let part = b
-            .upload_part_streamed(now(), &k, &upload(), PartNumber::new(2).unwrap(), (8, hash))
+            .upload_part_of(now(), &k, &upload(), PartNumber::new(2).unwrap(), (8, hash))
             .unwrap();
         let put = b
-            .put_object_streamed_if(now(), &k, (8, hash), now(), Precondition::KeyIsFree)
+            .put_object_of(now(), &k, (8, hash), now(), Precondition::KeyIsFree)
             .unwrap();
         for write in [part, put] {
             assert!(write.body().is_empty());

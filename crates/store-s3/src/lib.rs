@@ -83,7 +83,9 @@ pub use response::{parse_delete_failures, quoted_md5};
 pub use sigv4::PayloadHash;
 pub use source::{CredentialSource, Expiring, REFRESH_BEFORE};
 pub use store::{ListStats, S3Store, SystemClock, WriteStats};
-pub use transport::{HttpResponse, StreamedRequest, Transport, TransportError, send_on_threads};
+pub use transport::{
+    Body, HttpResponse, Opened, StreamedRequest, Transport, TransportError, send_on_threads,
+};
 pub use upload::S3Upload;
 #[cfg(feature = "ureq")]
 pub use ureq_transport::UreqTransport;

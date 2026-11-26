@@ -1,12 +1,13 @@
-diff --git a/crates/store-s3/src/request.rs b/crates/store-s3/src/request.rs
-index 9fcc5a7..70b2a0f 100644
---- a/crates/store-s3/src/request.rs
-+++ b/crates/store-s3/src/request.rs
-@@ -411,6 +411,7 @@ impl RequestBuilder {
-         mut extra: Headers,
-     ) -> Result<HttpRequest, RequestError> {
-         extra.push(("content-length", len.to_string()));
-+        let payload = if body.is_empty() { PayloadHash::EMPTY } else { payload };
-         self.sign(
-             now,
-             (Method::Put, Some(object)),
+diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
+index c4b4c9e..5077265 100644
+--- a/crates/store-s3/src/upload.rs
++++ b/crates/store-s3/src/upload.rs
+@@ -134,7 +134,7 @@ impl Bytes {
+                 Ok((inner.send(op, request)?, len))
+             }
+             Self::Again(part) => {
+-                let sized = (part.len(), part.sha256(stop)?);
++                let sized = (part.len(), part.sha256(stop).map(|_| PayloadHash::EMPTY)?);
+                 let request = inner.request(op, |b, now| build(b, now, sized))?;
+                 let mut body = part.body(stop);
+                 let streamed = StreamedRequest::new(request, sized.0, &mut body);

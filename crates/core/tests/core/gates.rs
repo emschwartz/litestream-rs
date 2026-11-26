@@ -1,11 +1,10 @@
-//! Read-ahead survives the store wrappers.
+//! A restore's streams survive the store wrappers.
 //!
-//! A restore reads a file's chunks side by side only if every layer between it and
-//! the store forwards the store's batch width and its batch read. A wrapper that
-//! forgets either one turns a restore serial without changing a single answer, so
-//! nothing but the critical-path depth shows it. Here a store that models a link on a
-//! virtual clock sits under the retry layer, and the restore's waves are held to
-//! `ceil(chunks / width)`. A serial restore is one wave per chunk (11 here).
+//! A restore reads each file through one stream, one request on a bucket, only if every layer
+//! between it and the store forwards the stream. A wrapper that forgets turns each 4 MiB chunk
+//! into a request of its own without changing a single answer, so only the bill shows it. Here
+//! a store that counts requests sits under the retry layer, and a restore of one file is held to
+//! one request, not one per chunk (11 here).
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -15,13 +14,13 @@ use lsr_core::{
     MemSink, RecordingSleeper, RestoreTarget, RetryPolicy, Retrying, SeededEntropy, restore,
 };
 
-use crate::waves::{RESTORE_CHUNK, WIDTH, Waves, snapshot_store};
+use crate::waves::{RESTORE_CHUNK, Waves, put_increment, snapshot_store};
 
 #[test]
-fn restore_through_the_retry_layer_reads_side_by_side() {
+fn restore_through_the_retry_layer_reads_a_file_in_one_request() {
     let (inner, size) = snapshot_store();
     let waves = Waves::new(inner);
-    let (rounds, reads) = (Arc::clone(&waves.rounds), Arc::clone(&waves.reads));
+    let (requests, pieces) = (Arc::clone(&waves.requests), Arc::clone(&waves.pieces));
     let store = Retrying::new(
         waves,
         RecordingSleeper::new(),
@@ -31,11 +30,32 @@ fn restore_through_the_retry_layer_reads_side_by_side() {
     let restored = block_on(restore(&store, RestoreTarget::Latest, MemSink::new())).unwrap();
     assert_eq!(restored.files(), 1);
     let chunks = size.div_ceil(RESTORE_CHUNK);
-    assert_eq!(reads.load(Ordering::SeqCst), chunks, "one read per chunk");
-    let bound = chunks.div_ceil(WIDTH);
-    let seen = rounds.load(Ordering::SeqCst);
-    assert!(
-        seen <= bound,
-        "{seen} waves, bound {bound} for {chunks} chunks"
+    assert_eq!(pieces.load(Ordering::SeqCst), chunks, "one piece per chunk");
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "one request for the file"
     );
+}
+
+/// A replica of a snapshot and three level-0 files: a restore sends one request per file (four),
+/// where reading a request per chunk sent one for each of the snapshot's 11 chunks.
+#[test]
+fn restore_of_a_chain_sends_one_request_per_file() {
+    let (inner, size) = snapshot_store();
+    for (n, pages) in [(2, 300), (3, 10), (4, 1)] {
+        put_increment(&inner, n, pages);
+    }
+    let waves = Waves::new(inner);
+    let (requests, pieces) = (Arc::clone(&waves.requests), Arc::clone(&waves.pieces));
+    let store = Retrying::new(
+        waves,
+        RecordingSleeper::new(),
+        SeededEntropy::new(1),
+        RetryPolicy::DEFAULT,
+    );
+    let restored = block_on(restore(&store, RestoreTarget::Latest, MemSink::new())).unwrap();
+    assert_eq!(restored.files(), 4);
+    assert!(pieces.load(Ordering::SeqCst) > size.div_ceil(RESTORE_CHUNK));
+    assert_eq!(requests.load(Ordering::SeqCst), 4, "one request per file");
 }

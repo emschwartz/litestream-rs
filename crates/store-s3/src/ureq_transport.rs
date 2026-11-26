@@ -37,7 +37,7 @@ use ureq::tls::RootCerts;
 use crate::ConfigError;
 use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
-use crate::transport::Bounds;
+use crate::transport::{Bounds, Opened};
 use crate::transport::{
     HttpResponse, MAX_BODY, StreamedRequest, Transport, TransportError, map_io, send_on_threads,
 };
@@ -178,6 +178,20 @@ fn root_certs(roots: Roots) -> RootCerts {
     }
 }
 
+/// A response's headers as received.
+fn head_of(response: &http::Response<ureq::Body>) -> Vec<(String, String)> {
+    response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
+}
+
 fn method_name(method: Method) -> &'static str {
     match method {
         Method::Get => "GET",
@@ -231,16 +245,7 @@ impl UreqTransport {
     ) -> Result<HttpResponse, TransportError> {
         let mut response = self.agent.run(request).map_err(|err| map_error(&err))?;
         let status = response.status().as_u16();
-        let headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_owned(),
-                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
-                )
-            })
-            .collect();
+        let headers = head_of(&response);
         let declared = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
@@ -255,7 +260,57 @@ impl UreqTransport {
     }
 }
 
+/// A streamed GET's body: read from the connection as the caller asks, each socket read bounded
+/// by ureq's per-read stall bound, and the whole body by `allowed` from its head, the time its
+/// declared length needs at the floor rate (`Bounds::cap`). A 4 GiB body may take the stall
+/// bound plus about 73 hours; a body that stops moving fails at the stall bound.
+struct Streamed {
+    reader: ureq::BodyReader<'static>,
+    began: std::time::Instant,
+    allowed: Duration,
+}
+
+impl crate::transport::Body for Streamed {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        if self.began.elapsed() > self.allowed {
+            return Err(TransportError::Timeout);
+        }
+        self.reader
+            .read(buf)
+            .map_err(|err| map_error(&ureq::Error::from(err)))
+    }
+}
+
 impl Transport for UreqTransport {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a socket timeout runs on the real clock, which no injected clock reaches"
+    )]
+    fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
+        // No ceiling over the whole exchange, which would cut a long body: connecting, sending
+        // and the wait for the head each have the stall bound, and the body its own cap below.
+        let built = self
+            .agent
+            .configure_request(Self::build(&request)?)
+            .timeout_global(None)
+            .build();
+        let response = self.agent.run(built).map_err(|err| map_error(&err))?;
+        let head = HttpResponse::new(
+            response.status().as_u16(),
+            head_of(&response),
+            Vec::new(),
+            true,
+        );
+        let body = Streamed {
+            allowed: self
+                .bounds
+                .cap(response.body().content_length().unwrap_or(0)),
+            reader: response.into_body().into_reader(),
+            began: std::time::Instant::now(),
+        };
+        Ok((head, Box::new(body)))
+    }
+
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
         let len = u64::try_from(request.body().len()).unwrap_or(u64::MAX);

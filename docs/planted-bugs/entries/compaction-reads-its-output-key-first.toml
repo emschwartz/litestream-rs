@@ -1,0 +1,9 @@
+# A compaction reads its output key before it writes (a not-found GET on S3 ahead of every merge,
+# the first snapshot included), a request Go does not make and the listing already answers.
+name = "compaction-reads-its-output-key-first"
+fix = "claude/restore-requests"
+package = "lsr-core"
+tests = [
+    "the_first_start_sends_no_read_ahead_of_the_snapshot",
+    "a_compaction_writes_its_output_without_reading_the_key_first",
+]

@@ -107,8 +107,7 @@ impl Actor {
         if decided.value.whole {
             // Nothing was planned from this listing and nothing is learned from it: the
             // next tick lists the whole replica and decides there.
-            maintain.remembered.owe_full();
-            maintain.stale = true;
+            maintain.relist();
             return Ok(ShortPass {
                 due: decided.value.due,
                 after_delete: None,
@@ -137,7 +136,7 @@ impl Actor {
         maintain.stale = false;
         maintain.passed_over = 0;
         maintain.snapshot_waits = false;
-        maintain.level_one = maintain.remembered.newest_txid(1);
+        maintain.level_one = maintain.remembered.newest_txid(Level::ONE);
         Ok(ShortPass {
             due,
             after_delete: Some(until),
