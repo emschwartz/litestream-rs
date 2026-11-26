@@ -1,13 +1,13 @@
 diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
-index c4b4c9e..5077265 100644
+index e13b72951..09e1f59c7 100644
 --- a/crates/store-s3/src/upload.rs
 +++ b/crates/store-s3/src/upload.rs
-@@ -134,7 +134,7 @@ impl Bytes {
+@@ -139,7 +139,7 @@ impl Bytes {
                  Ok((inner.send(op, request)?, len))
              }
              Self::Again(part) => {
--                let sized = (part.len(), part.sha256(stop)?);
-+                let sized = (part.len(), part.sha256(stop).map(|_| PayloadHash::EMPTY)?);
+-                let sized = (part.len(), part.sha256());
++                let sized = (part.len(), PayloadHash::EMPTY);
                  let request = inner.request(op, |b, now| build(b, now, sized))?;
                  let mut body = part.body(stop);
                  let streamed = StreamedRequest::new(request, sized.0, &mut body);

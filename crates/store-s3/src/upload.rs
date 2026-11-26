@@ -31,9 +31,10 @@
 //!
 //! **Parts written from a source.** An upload whose first write is [`Upload::write_from`]
 //! keeps no part buffer: of each part it keeps what was seen of every 256 KiB and a reader of
-//! the caller's source (`again.rs`). The thread that sends the part reads it again for the
-//! SHA-256 it signs and once more as the body, using a cell's bytes only when they are what was first
-//! seen. So a part in flight holds one read of 256 KiB, the HTTP client's buffers (768 KiB a
+//! the caller's source (`again.rs`), and the SHA-256 of what it was handed. The thread that sends
+//! the part reads it again as the body, using a cell's bytes only when they are what was first
+//! seen; a part of one cell or less keeps its bytes and reads nothing again
+//! (`docs/decisions/D270.md`). So a part in flight holds one read of 256 KiB, the HTTP client's buffers (768 KiB a
 //! request by the gate in `tests/store-s3/memory.rs`) and one open file, whatever the part
 //! size. The engine's staged send asks [`Upload::flight`] before each read and stops when the
 //! answer is [`Flight::Full`], so its tick never waits for a part
@@ -107,8 +108,9 @@ impl Bytes {
     /// Sends the write `build` makes for these bytes, with them as its body, and returns the
     /// answer and the length the request declared. A buffer's SHA-256 is taken as the request
     /// is built, after the clock and the credentials are read, and the buffer is moved into it,
-    /// never copied. A part read again is hashed over a second read and streamed from a third
-    /// (`again.rs`); a read that gave nothing is the result, whatever the request came to.
+    /// never copied. A part written from a source carries the SHA-256 of what it was handed
+    /// and streams its body from the bytes it kept or from a second read (`again.rs`); a read
+    /// that gave nothing is the result, whatever the request came to.
     /// Nothing is sent once `stop` is set.
     fn send_with<T: Transport>(
         &mut self,
@@ -137,7 +139,7 @@ impl Bytes {
                 Ok((inner.send(op, request)?, len))
             }
             Self::Again(part) => {
-                let sized = (part.len(), part.sha256(stop)?);
+                let sized = (part.len(), part.sha256());
                 let request = inner.request(op, |b, now| build(b, now, sized))?;
                 let mut body = part.body(stop);
                 let streamed = StreamedRequest::new(request, sized.0, &mut body);
@@ -732,7 +734,9 @@ impl<T: Transport> S3Upload<T> {
                 (Filling::Held(buf), _) => append_bounded(buf, head, self.part),
                 (Filling::Again(Some(run)), _) => run.add(head),
                 (Filling::Again(run @ None), Some(again)) => match again.open().await {
-                    Ok(reader) => run.insert(Run::at(self.sealed, part, reader)).add(head),
+                    Ok(reader) => run
+                        .insert(Run::at(self.sealed, part, self.inner.cell, reader))
+                        .add(head),
                     Err(err) => return Err(self.fail(err)),
                 },
                 (Filling::Again(None), None) => return Err(self.fail(ended())),

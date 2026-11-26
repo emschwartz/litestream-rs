@@ -97,6 +97,8 @@ pub(crate) struct Inner<T> {
     clock: Arc<dyn Clock>,
     pub(crate) part_size: PartSize,
     pub(crate) concurrency: NonZeroUsize,
+    /// Bytes of a part one tally covers and one second read asks for (`again.rs`).
+    pub(crate) cell: u64,
     prefix: Prefix,
     deadline: Duration,
     stats: Mutex<ListStats>,
@@ -261,6 +263,7 @@ impl<T: Transport> S3Store<T> {
                 clock: Arc::new(clock),
                 part_size: config.part_size(),
                 concurrency: config.concurrency(),
+                cell: config.cell(),
                 prefix: config.prefix().clone(),
                 deadline: config.deadline(),
                 stats: Mutex::new(ListStats::default()),

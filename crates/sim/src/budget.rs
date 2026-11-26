@@ -34,7 +34,9 @@
 //!   doubling wait bounds how often).
 //! - Each file needs one commit; a failed or ambiguous commit is retried. So
 //!   replica commits are at most two per distinct key put plus one per
-//!   fault hit and crash.
+//!   fault hit and crash, and one per second read that was refused or gave other bytes (a
+//!   fault on the staging directory the store met while reading a part back fails the
+//!   commit that asked).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -122,7 +124,9 @@ pub fn check(
     let commits = keys
         .saturating_mul(2)
         .saturating_add(spent.fault_hits)
-        .saturating_add(spent.boots);
+        .saturating_add(spent.boots)
+        .saturating_add(counts.rereads_refused)
+        .saturating_add(counts.rereads_differing);
     within(Bound::CommitCalls, counts.commits, commits)
 }
 
@@ -293,5 +297,27 @@ mod tests {
         };
         assert_eq!(check(&[], at(allowed), spent, &lost, &[]), Ok(()));
         assert!(check(&[], at(allowed + 1), spent, &lost, &[]).is_err());
+    }
+
+    /// A second read the store was refused, or that gave other bytes, fails the commit that asked
+    /// for it, and the engine commits the file again: a staging fault in a re-read costs a commit
+    /// like a fault on the replica does. Commits within what they allow pass; one more fails.
+    #[test]
+    fn a_commit_failed_by_a_refused_second_read_is_charged_to_it() {
+        let events = [put(key(0, 1, 1), 100)];
+        let (refused, differing) = (3, 2);
+        let lost = BTreeSet::new();
+        let at = |commits| RecorderCounts {
+            commits,
+            rereads_refused: refused,
+            rereads_differing: differing,
+            ..RecorderCounts::default()
+        };
+        let allowed = 2 + refused + differing;
+        assert_eq!(
+            check(&events, at(allowed), Spent::default(), &lost, &[]),
+            Ok(())
+        );
+        assert!(check(&events, at(allowed + 1), Spent::default(), &lost, &[]).is_err());
     }
 }

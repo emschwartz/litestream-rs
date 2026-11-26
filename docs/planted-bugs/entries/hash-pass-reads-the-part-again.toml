@@ -1,0 +1,12 @@
+# The SHA-256 a part is signed with is taken by reading every cell of it again from the source
+# before the request, as it was before the hash moved to the first read: a staged file is read
+# three times, and a file of one cell twice, where once is all Go reads (docs/decisions/D270.md).
+name = "hash-pass-reads-the-part-again"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "again::tests::the_hash_and_the_body_are_the_bytes_first_handed_over",
+    "again::tests::a_part_of_one_cell_or_less_reads_nothing_again",
+    "sourced::an_upload_from_a_source_sends_what_a_buffered_upload_sends",
+    "sourced::an_object_below_one_part_is_one_put_read_back_at_the_commit",
+]
