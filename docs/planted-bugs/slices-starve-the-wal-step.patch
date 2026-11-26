@@ -1,13 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index b5d69633b..e92d9b605 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2703,7 +2703,7 @@ impl Actor {
-     /// a sync, and stage a file, for every slice (`docs/decisions/D217.md`).
-     fn owed_upload(&mut self) -> bool {
-         let owed = match self.engine.in_flight.sent() {
--            Some(_) => self.engine.slices_ahead < state::FAIR_SHARE,
-+            Some(_) => true,
-             None => self.engine.syncs_ahead >= state::FAIR_SHARE,
+@@ -3031,7 +3031,7 @@
+             Some(_) => true,
+             None => self.job_went_last() || self.engine.syncs_ahead >= state::FAIR_SHARE,
          };
-         if !owed {
+-        turn && self.engine.slices_ahead < state::FAIR_SHARE
++        turn
+     }
+ 
+     /// Whether the job part-way sent the last slice, so an upload with work has the next.

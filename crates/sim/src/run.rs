@@ -242,6 +242,14 @@ pub struct Opts {
     /// The bytes of staged files the engine sends in one tick, when not its own
     /// ([`Weights::slice_bytes`]). [`run_with`] sets it.
     pub slice_bytes: Option<NonZeroU64>,
+    /// The database's pages when the run begins, when not the usual eight: the large
+    /// profile's tens of thousands, so a snapshot or a compaction input is many slices.
+    pub first_db_pages: Option<NonZeroU32>,
+    /// Each tick's I/O moves the clock on by what it costs at these prices
+    /// ([`crate::cost`]); `None`, the default, leaves the clock to the engine's waits. Every
+    /// tick is judged against the bound at [`crate::cost::Profile::DEFAULT`] either way, and
+    /// the healthy tail at the end of every run is always charged.
+    pub cost: Option<crate::cost::Profile>,
     /// The process dies right after every tick in which an injected fault fired
     /// ([`Weights::kill_after_fault`]). [`run_with`] sets it.
     pub kill_after_fault: bool,
@@ -356,6 +364,14 @@ struct Runner {
     truncate_pages: Option<NonZeroU32>,
     // A tick's bytes of staged files, when the run sets them ([`Opts::slice_bytes`]).
     slice_bytes: Option<NonZeroU64>,
+    // The prices each tick's I/O moves the clock by, when it does ([`Opts::cost`]).
+    cost: Option<crate::cost::Profile>,
+    // What this boot may still spend past a tick's bound (`crate::cost::Spare`).
+    spare: crate::cost::Spare,
+    // The healthy tail is running (`run::tail`): every tick is charged.
+    tail: bool,
+    // The S3 replica's part size, when it sends in parts ([`Opts::remote_parts`]).
+    part_bytes: Option<u64>,
     turns: SendTurns,
     spilled: Vec<(PageNo, Vec<u8>)>,
     /// A freshly started driver has not seen the WAL yet, so it ticks once more
@@ -498,7 +514,8 @@ const SETTLE_AFTER_RESTART: usize = 8;
 impl Runner {
     /// A runner for `seed` set up as `opts` says, booted.
     fn configured(seed: Seed, opts: &Opts) -> Self {
-        let mut runner = Self::new(seed, &opts.sqlite)
+        let first_pages = opts.first_db_pages.map_or(FIRST_DB_PAGES, NonZeroU32::get);
+        let mut runner = Self::new(seed, &opts.sqlite, first_pages)
             .with_staging_fs(seed, opts)
             .with_remote_s3(opts);
         runner.lenient = opts.drawn;
@@ -519,6 +536,11 @@ impl Runner {
         runner.error_domain = opts.error_domain;
         runner.truncate_pages = opts.truncate_pages;
         runner.slice_bytes = opts.slice_bytes;
+        runner.cost = opts.cost;
+        runner.part_bytes = opts
+            .remote_parts
+            .filter(|_| opts.remote_s3)
+            .map(|parts| parts.part.get());
         runner.write_gate = write_gate::WriteGate::new(opts.write_gate);
         if opts.no_create_only {
             runner.refuse_create_only();
@@ -527,9 +549,9 @@ impl Runner {
         runner
     }
 
-    fn new(seed: Seed, sqlite: &crate::side::SideMaker) -> Self {
+    fn new(seed: Seed, sqlite: &crate::side::SideMaker, first_pages: u32) -> Self {
         let page_size = PageSize::new(FIRST_PAGE_SIZE).unwrap_or(PageSize::MIN);
-        let mut w = World::over(seed, sqlite.make(seed, page_size, FIRST_DB_PAGES));
+        let mut w = World::over(seed, sqlite.make(seed, page_size, first_pages));
         w.start_driver();
         let start = w.clock.now();
         let image = crate::history::image_digest(&w.model.newest_image());
@@ -549,6 +571,10 @@ impl Runner {
             error_domain: false,
             truncate_pages: None,
             slice_bytes: None,
+            cost: None,
+            spare: crate::cost::Spare::default(),
+            tail: false,
+            part_bytes: None,
             turns: SendTurns::default(),
             spilled: Vec::new(),
             unwatched: true,
@@ -897,6 +923,7 @@ impl Runner {
 
     fn step(&mut self, plan: Option<CrashPlan>) -> Result<(Step, TickStats), Violation> {
         let at = self.w.remote_recorder.len();
+        let staged_at = self.w.staging_recorder.len();
         let newest_commit = self.w.model.newest_commit();
         let remote0 = self.w.remote_recorder.counts();
         let staging0 = self.w.staging_recorder.counts();
@@ -905,10 +932,20 @@ impl Runner {
         let began = self.now();
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
-        if booting && self.w.staged_level_zero().is_empty() {
+        if booting {
+            // What this boot attempt finds staged now, files a store outage left in a local
+            // course among them (`crate::cost::Spare`).
+            self.spare = self.boot_spare();
+        } else {
+            // A boot's spare is for its own tick: nothing after it may spend what is left.
+            self.spare = crate::cost::Spare::default();
+        }
+        let restoring = booting && self.w.staged_level_zero().is_empty();
+        if restoring {
             self.restore_files = self
                 .restore_files
                 .saturating_add(self.w.remote_file_count());
+            self.allow_boot_restore();
         }
         let held = self.holding_writes();
         self.forcings_before_tick();
@@ -917,6 +954,7 @@ impl Runner {
         let taken0 = self.w.sqlite.taken_injections().len();
         self.denials_baseline();
         let ended = self.run_one(plan);
+        self.charge(remote0, staging0);
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
         }
@@ -968,6 +1006,7 @@ impl Runner {
             checkpoints: self.tally.total().saturating_sub(total0),
         };
         per_tick(&stats, self.limits())?;
+        self.judge_tick_cost(&stats, (at, staged_at), restoring)?;
         let replica_fired = self.remote_fired().all > fired0.0.all;
         let reach = &mut self.report.reach;
         // Every second read since the last tick was judged, the ones between ticks with it.
@@ -1512,8 +1551,13 @@ impl Runner {
                 Step::Stopped(StopCause::Shutdown) if degraded || self.rate_active => {
                     return Ok(());
                 }
+                // The grace ran out with work left: the operator starts the engine again, it
+                // runs until it is idle, and the drain is asked again. Draining at once would
+                // send the same backlog from its start each time and, once a backlog takes
+                // longer than the grace to send, never end (seen once I/O cost time).
                 Step::Stopped(StopCause::Shutdown) => {
                     self.reboot();
+                    self.settle(|event| matches!(event, Event::Idle))?;
                     self.actor
                         .begin_shutdown(self.actor.shutdown_deadline(self.now()));
                 }
@@ -2830,6 +2874,7 @@ impl Runner {
             &self.w.foreign_sizes,
         )?;
         self.idle()?;
+        self.healthy_tail()?;
         self.replica_page_size().map(drop)
     }
 }
@@ -3088,6 +3133,7 @@ mod fail_stop;
 mod hold;
 mod in_tick;
 mod marks;
+mod tail;
 mod verify;
 mod write_gate;
 
@@ -3112,7 +3158,7 @@ const fn snapshot_reports_loss(cause: &lsr_core::SnapshotCause, over_files: bool
         // Taken for the replica's own database plus more on evidence, not proof: a database a
         // lying disk rewound reads the same way.
         | C::AheadOfReplica { .. } => true,
-        C::CheckpointBoundary | C::OperatorRequested => false,
+        C::OperatorRequested => false,
     }
 }
 

@@ -1,0 +1,9 @@
+# The healthy tail's commit lag sees a snapshot whose slices starve the WAL step: each slice is
+# within the per-tick bound, but a commit made meanwhile reaches the replica late
+# (crates/sim/src/run/tail.rs).
+name = "snapshot-slices-starve-the-wal-step-lag"
+patch = "snapshot-slices-starve-the-wal-step"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["liveness::commits_made_during_a_large_compaction_reach_the_replica_in_time"]

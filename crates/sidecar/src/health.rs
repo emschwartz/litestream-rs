@@ -240,7 +240,6 @@ pub(crate) const fn snapshot_kind_name(kind: SnapshotCauseKind) -> &'static str 
         SnapshotCauseKind::PrevFrameMismatch => "prev_frame_mismatch",
         SnapshotCauseKind::LastPageMismatch => "last_page_mismatch",
         SnapshotCauseKind::LocalRewound => "local_rewound",
-        SnapshotCauseKind::CheckpointBoundary => "checkpoint_boundary",
         SnapshotCauseKind::OperatorRequested => "operator_requested",
         SnapshotCauseKind::StagedUnverified => "staged_unverified",
         SnapshotCauseKind::AheadOfReplica => "ahead_of_replica",

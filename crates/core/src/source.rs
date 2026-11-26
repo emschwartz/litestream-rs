@@ -216,7 +216,8 @@ pub trait PageSource {
 pub enum CheckpointMode {
     /// Copy what no reader needs and return.
     Passive,
-    /// Copy everything, then truncate the WAL file, waiting for readers.
+    /// Copy everything, then truncate the WAL file to zero bytes; busy, never waiting, while a
+    /// reader or the engine's own read holds frames back.
     Truncate,
     /// Copy everything, waiting for readers, and leave the WAL as it is: its frame counts stay
     /// real, so a caller can tell exactly which frames were copied. The cure after a failed WAL
@@ -237,6 +238,11 @@ pub struct CheckpointRun {
     pub checkpointed: u32,
     /// The epoch of the read transaction retaken after the checkpoint.
     pub epoch: ReadLockHold,
+    /// For a TRUNCATE: no other copy of SQLite in this process had the database's wal-index
+    /// open, before the call or after it. Another copy keeps locks of its own, which the
+    /// engine's read cannot hold back, so without this a TRUNCATE proves nothing. Always true
+    /// for the other modes.
+    pub one_sqlite: bool,
 }
 
 /// The write barrier on `_litestream_lock`, held between `begin_barrier` and `end_barrier`.
@@ -273,7 +279,9 @@ pub trait Checkpointer {
     fn end_barrier(&mut self, barrier: Barrier) -> Result<(), SourceError>;
 
     /// Releases the read transaction, runs `PRAGMA wal_checkpoint(mode)`, then
-    /// takes the read transaction again (Go `db.go:2805-2849`).
+    /// takes the read transaction again (Go `db.go:2805-2849`). A TRUNCATE instead runs on the
+    /// writer connection and keeps the read transaction: the epoch does not move, and the
+    /// engine's read makes it busy when anything was committed since that read began.
     ///
     /// # Errors
     /// [`SourceError::ReadTxLost`] when the retake fails; [`SourceError::WritesHeld`] while the

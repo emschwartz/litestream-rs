@@ -132,7 +132,9 @@ fn locked<T>(shared: &Mutex<T>) -> MutexGuard<'_, T> {
     shared.lock().expect("no panic while locked")
 }
 
-fn commit_to_model(sim: &SimSqlite, tx: &Tx) -> bool {
+/// `engine`: the engine's writer connection wrote it (a bump frame), whose checkpoint count a
+/// TRUNCATE moves; otherwise the application did.
+fn commit_to_model(sim: &SimSqlite, tx: &Tx, engine: bool) -> bool {
     let pages: Vec<(PageNo, Vec<u8>)> = tx
         .pages
         .iter()
@@ -143,7 +145,11 @@ fn commit_to_model(sim: &SimSqlite, tx: &Tx) -> bool {
             )
         })
         .collect();
-    sim.commit(&pages, tx.db_size).is_some()
+    if engine {
+        sim.engine_writer_commit(&pages, tx.db_size).is_some()
+    } else {
+        sim.commit(&pages, tx.db_size).is_some()
+    }
 }
 
 /// What the engine asked of its checkpointer.
@@ -289,7 +295,7 @@ impl Checkpointer for ModelCk {
     fn bump_seq(&mut self) -> Result<(), SourceError> {
         let event = self.next(Call::BumpSeq);
         for tx in &event.txs {
-            if !commit_to_model(&self.sim, tx) {
+            if !commit_to_model(&self.sim, tx, true) {
                 return Err(SourceError::Busy);
             }
         }
@@ -556,7 +562,7 @@ impl World {
         self.sim.force_random_salts(Some(real_salts(&self.live)));
         for tx in locked(&self.mirror).drain() {
             assert!(
-                commit_to_model(&self.sim, &tx),
+                commit_to_model(&self.sim, &tx, false),
                 "the model refused a commit SQLite made"
             );
         }

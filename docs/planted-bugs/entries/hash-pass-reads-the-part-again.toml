@@ -1,6 +1,6 @@
 # The SHA-256 a part is signed with is taken by reading every cell of it again from the source
 # before the request, as it was before the hash moved to the first read: a staged file is read
-# three times, and a file of one cell twice, where once is all Go reads (docs/decisions/D265.md).
+# three times, and a file of one cell twice, where once is all Go reads (docs/decisions/D266.md).
 name = "hash-pass-reads-the-part-again"
 fix = "plant"
 package = "lsr-store-s3"

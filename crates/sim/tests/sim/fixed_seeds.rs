@@ -12,8 +12,10 @@ mod fixed {
     const STEPS: u32 = 300;
     /// Engine ticks a batch of eight seeds may run. The batches of seeds 1 to 64 take 1,500 to
     /// 2,000 (no seed alone takes more than 410), so a seed that starts looping, a retry that
-    /// never backs off or a drain that spins, trips it long before nextest's hang limit.
-    const BATCH_TICKS: u32 = 4_000;
+    /// never backs off or a drain that spins, trips it long before nextest's hang limit. The
+    /// healthy tail every run ends with (`run::tail`: 40 commits, each a sync and an upload
+    /// and the maintenance that comes due) adds about 300 a seed, 2,400 a batch.
+    const BATCH_TICKS: u32 = 6_400;
 
     /// The ticks a run took: `RunReport::ticks`, which counts every tick the actor ran.
     fn spent(runs: impl IntoIterator<Item = u32>) -> u32 {
@@ -48,12 +50,12 @@ mod fixed {
         within_budget(spent(ticks));
     }
 
-    /// The budget fails a history that ticks past it: 5,000 idle ticks, the shape of a seed
+    /// The budget fails a history that ticks past it: 8,000 idle ticks, the shape of a seed
     /// whose engine loops, run through the same measure and the same assertion.
     #[test]
     #[should_panic(expected = "simulator tick budget exceeded")]
     fn a_history_that_loops_past_the_tick_budget_fails_it() {
-        let ops = vec![Op::Tick; 5_000];
+        let ops = vec![Op::Tick; 8_000];
         let report = run_ops(Seed::new(1), &ops, &Opts::default()).expect("idle ticks pass");
         assert!(
             report.ticks > BATCH_TICKS,

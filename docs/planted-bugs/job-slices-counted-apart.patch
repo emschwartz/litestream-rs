@@ -1,0 +1,11 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2886,7 +2886,6 @@
+         if waited && bytes == before {
+             return None;
+         }
+-        self.engine.slices_ahead = self.engine.slices_ahead.saturating_add(1);
+         self.engine.job_went_last = true;
+         Some(self.ran(Event::Sending { bytes }, now))
+     }

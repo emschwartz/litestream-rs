@@ -91,7 +91,7 @@ enum Recovered {
 enum SnapshotCause {
     FirstSync, BehindRemote { local }, NewestStagedFileUnreadable, WalMissing, PageSizeChanged,
     GenerationChanged, PrevFrameMismatch, LastPageMismatch, LocalRewound { synced, committed },
-    CheckpointBoundary, OperatorRequested,
+    OperatorRequested,
 }
 ```
 
@@ -152,7 +152,7 @@ Workspace, lint set, CI, pinned Go binaries. Settle what the research left unver
 **Exit:** the oracle (a restore at every acknowledged txid returns what was acknowledged, and Latest is at or above the highest acknowledged txid; across a local rewind Latest follows the local database) holds over the fixed seed set and a nightly rotating set with zero open failures; every `Fault` and every `SnapshotCause` has a scenario; mutation survivors in `ltx` and `core` triaged to zero unexplained; Go restores Rust-written chains across the matrix from v0.5.16 up.
 
 ### Phase 3: syncing on real SQLite
-- `sqlite` crate: actor thread; read transaction held from before the application's first write; `PRAGMA wal_checkpoint(NOOP)` for mxFrame; `sqlite3_wal_checkpoint_v2` for typed busy results; PASSIVE with barrier transaction and seal sync; TRUNCATE with the unconditional boundary snapshot, taken without the write lock (`docs/decisions/D190.md`); `SQLITE_FCNTL_PERSIST_WAL` and `wal_autocheckpoint = 0` helpers for every application connection; database pages read through one never-closed descriptor or SQLite's own (`SQLITE_FCNTL_FILE_POINTER`).
+- `sqlite` crate: actor thread; read transaction held from before the application's first write; `PRAGMA wal_checkpoint(NOOP)` for mxFrame; `sqlite3_wal_checkpoint_v2` for typed busy results; PASSIVE with barrier transaction and seal sync; TRUNCATE on the writer connection with the read transaction kept, followed into the new generation without a snapshot (`docs/decisions/D263.md`); `SQLITE_FCNTL_PERSIST_WAL` and `wal_autocheckpoint = 0` helpers for every application connection; database pages read through one never-closed descriptor or SQLite's own (`SQLITE_FCNTL_FILE_POINTER`).
 - Checkpoint policy: PASSIVE by default; TRUNCATE only when the application reports no pinned readers; never wait on readers while holding the write lock.
 - Position recovery from the bucket alone (last L0 header: WAL offset, size, salts, commit), so a missing local directory does not force a snapshot when the WAL still matches.
 - Public API: `start` returns once the read lock is held; `final_sync(deadline)` returns a typed outcome; `health()` is a cheap handle (last synced TXID, age, state, degraded or stop cause).

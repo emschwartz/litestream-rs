@@ -40,8 +40,8 @@ enum Situation {
     /// Enough frames are waiting that the engine's next tick runs a PASSIVE checkpoint.
     PassiveDue,
     /// The TRUNCATE threshold is low, a reader held off the PASSIVE checkpoint that tried first,
-    /// and the reader is gone: the next tick truncates the WAL and snapshots the database, with
-    /// no lock that keeps the application's commits out.
+    /// and the reader is gone: the next tick runs the barrier's PASSIVE and then the TRUNCATE,
+    /// whose call no lock keeps the application's commit out of.
     TruncateDue,
     /// The engine is down, its newest staged file is gone and the WAL's header is torn: the
     /// next tick boots, finds nothing readable in the WAL and snapshots from the database file,
@@ -158,10 +158,8 @@ impl Coverage {
 /// breaks the build here until it has one.
 const fn situation(call: SourceOp, action: Action) -> Situation {
     match (call, action) {
-        // The boundary snapshot after a TRUNCATE reads pages with no lock that keeps the app's
-        // commit out.
-        (SourceOp::ReadPage, Action::Commit) => Situation::TruncateDue,
         (SourceOp::ReadPage, _) => Situation::SnapshotRequested,
+        (SourceOp::Checkpoint, Action::Commit) => Situation::TruncateDue,
         (SourceOp::PageCount, _) => Situation::TornWalBoot,
         (
             SourceOp::Open
@@ -259,5 +257,13 @@ pub const LEFT_TO_THE_SEEDS: &[(&str, &str)] = &[
     (
         "cell.",
         "an error cell is drawn as a fault on its call; the rarest ran 18 times per 1,000 seeds",
+    ),
+    (
+        "liveness.",
+        "every run ends with the healthy tail, whose commits are judged unless a stop or a persistent cause ends it first",
+    ),
+    (
+        "tick_cost.",
+        "every tick of every run is judged against its bound",
     ),
 ];

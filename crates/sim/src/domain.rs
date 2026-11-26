@@ -150,8 +150,7 @@ const RETAKE_ONLY: &str = "only a retake after a failed one reports it, and the 
 
 /// The engine no longer calls these (docs/decisions/D190.md), and the `Checkpointer` trait no
 /// longer has them; the operations stay so recorded histories that name them still read.
-pub(crate) const NOT_CALLED: &str =
-    "the engine takes no write lock: its boundary snapshot copies the database without one";
+pub(crate) const NOT_CALLED: &str = "the engine takes no write lock: no snapshot needs one";
 
 /// The cell of `op` and `class` against `lsr-sqlite`.
 #[must_use]

@@ -1,13 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index c2b1e430a..3aec9e0ff 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2927,7 +2927,7 @@ impl Actor {
-     /// Whether the job's slice goes first this tick: until [`state::FAIR_SHARE`] of them ran
-     /// in a row, then the rest of the engine has a tick, as after a staged file's slices.
-     fn sliced_owed(&mut self) -> bool {
--        let owed = self.engine.sliced.is_some() && self.engine.job_slices < state::FAIR_SHARE;
-+        let owed = self.engine.sliced.is_some();
-         if !owed {
-             self.engine.job_slices = 0;
-         }
+@@ -2949,7 +2949,7 @@
+     /// upload with work had its turn after the job's last slice.
+     fn sliced_owed(&self) -> bool {
+         let turn = !self.job_went_last() || self.uploads_idle();
+-        self.engine.sliced.is_some() && self.engine.slices_ahead < state::FAIR_SHARE && turn
++        self.engine.sliced.is_some() && turn
+     }
+ 
+     /// A snapshot that did not publish. When the store took the commit and

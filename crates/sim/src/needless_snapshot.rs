@@ -127,7 +127,6 @@ pub const fn forced_by(cause: SnapshotCauseKind, at_boot: bool) -> Option<&'stat
         // up) leaves a boot with nothing staged and no takeover record over a replica that
         // holds files.
         SnapshotCauseKind::AheadOfReplica => &[StagingEdited, StagedLost, StagedGivenUp],
-        SnapshotCauseKind::CheckpointBoundary => return None,
         SnapshotCauseKind::OperatorRequested => &[SnapshotRequested],
     })
 }
@@ -332,14 +331,6 @@ mod tests {
             ),
             Err(Violation::NeedlessSnapshot { .. })
         ));
-        check
-            .judge(
-                SnapshotCauseKind::CheckpointBoundary,
-                true,
-                &restarted,
-                &mut reach,
-            )
-            .unwrap();
     }
 
     #[test]

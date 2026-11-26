@@ -53,7 +53,7 @@
 //! - `lsr_resnapshot_pending{db,cause}` 1 when the next sync is a snapshot.
 //! - `lsr_snapshots_total{db,cause}`: snapshots staged since the replicator started, every
 //!   cause listed, zeros included. Each uploads the whole database: a cause other than
-//!   `first_sync`, `checkpoint_boundary` or `operator_requested` that keeps counting up means
+//!   `first_sync` or `operator_requested` that keeps counting up means
 //!   restarts or faults the replicator cannot see past.
 //! - `lsr_syncs_staged_total{db}`: sync steps that staged a file.
 //! - `lsr_checkpoints_total{db}`, `lsr_checkpoints_busy_total{db}`, `lsr_uploads_total{db}`,
