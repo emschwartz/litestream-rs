@@ -297,6 +297,41 @@ pub enum PlanOutcome {
     },
 }
 
+impl PlanOutcome {
+    /// The chain when this is the plan, else the outcome itself, so a caller names only the
+    /// variants it answers differently.
+    ///
+    /// # Errors
+    /// Every outcome that is not [`Self::Plan`], returned unchanged.
+    pub fn into_chain(self) -> Result<ContiguousChain, Self> {
+        match self {
+            Self::Plan(chain) => Ok(chain),
+            other @ (Self::EmptyReplica
+            | Self::NoSnapshot { .. }
+            | Self::BeyondNewest { .. }
+            | Self::AsOfInsideFile { .. }
+            | Self::Gap { .. }
+            | Self::InsideFile { .. }
+            | Self::MalformedSnapshot { .. }) => Err(other),
+        }
+    }
+
+    /// The plan's chain, `None` for every other outcome.
+    #[must_use]
+    pub const fn chain(&self) -> Option<&ContiguousChain> {
+        match self {
+            Self::Plan(chain) => Some(chain),
+            Self::EmptyReplica
+            | Self::NoSnapshot { .. }
+            | Self::BeyondNewest { .. }
+            | Self::AsOfInsideFile { .. }
+            | Self::Gap { .. }
+            | Self::InsideFile { .. }
+            | Self::MalformedSnapshot { .. } => None,
+        }
+    }
+}
+
 /// Whether a file starting at [`min`] can follow a chain that ends at [`reach`].
 fn touches(min: Txid, reach: Txid) -> bool {
     reach.next().is_none_or(|one_past| min <= one_past)
@@ -732,6 +767,7 @@ pub struct AsOfPlanner<'a> {
     touching: BinaryHeap<(Preference, usize)>,
     chain: Option<ContiguousChain>,
     pass: Pass,
+    #[cfg(any(test, feature = "testing"))]
     comparisons: u64,
 }
 
@@ -740,11 +776,15 @@ impl<'a> AsOfPlanner<'a> {
     /// before [`instant`].
     #[must_use]
     pub fn new(inventory: &'a Inventory, instant: Timestamp) -> Self {
+        #[cfg(any(test, feature = "testing"))]
         let mut comparisons = 0_u64;
+        #[cfg(any(test, feature = "testing"))]
         let mut counted = |order: Ordering| {
             comparisons = comparisons.saturating_add(1);
             order
         };
+        #[cfg(not(any(test, feature = "testing")))]
+        let counted = |order: Ordering| order;
         let mut starts: Vec<&FileInfo> = inventory
             .files()
             .iter()
@@ -772,6 +812,7 @@ impl<'a> AsOfPlanner<'a> {
             touching: BinaryHeap::new(),
             chain: None,
             pass,
+            #[cfg(any(test, feature = "testing"))]
             comparisons,
         }
     }
@@ -780,6 +821,7 @@ impl<'a> AsOfPlanner<'a> {
     /// counted at the heap's depth (twice for a pop). Reported so a test can
     /// hold the planner to O(N log N).
     #[must_use]
+    #[cfg(any(test, feature = "testing"))]
     pub const fn comparisons(&self) -> u64 {
         self.comparisons
     }
@@ -831,7 +873,10 @@ impl<'a> AsOfPlanner<'a> {
                 .filter(|info| touches(info.key.range().min(), reach))
             {
                 self.touching.push((preference(info), self.entered));
-                self.comparisons = self.comparisons.saturating_add(depth(self.touching.len()));
+                #[cfg(any(test, feature = "testing"))]
+                {
+                    self.comparisons = self.comparisons.saturating_add(depth(self.touching.len()));
+                }
                 self.entered = self.entered.saturating_add(1);
             }
             // The heap's top reaches furthest, so a top at or below the end
@@ -850,8 +895,11 @@ impl<'a> AsOfPlanner<'a> {
             let Some(admitted) = eligible_at(&info, self.instant, resolved) else {
                 return Resolve::Need(Need::one(info));
             };
-            let pop = depth(self.touching.len()).saturating_mul(2);
-            self.comparisons = self.comparisons.saturating_add(pop);
+            #[cfg(any(test, feature = "testing"))]
+            {
+                let pop = depth(self.touching.len()).saturating_mul(2);
+                self.comparisons = self.comparisons.saturating_add(pop);
+            }
             self.touching.pop();
             // The top touches and passes the end, so the push cannot fail;
             // stopping mirrors [`extend`] if it ever did.
@@ -947,6 +995,7 @@ fn sweep_order(info: &FileInfo) -> (Txid, FileKey) {
 }
 
 /// The comparisons one sift through a heap of [`len`] entries can take.
+#[cfg(any(test, feature = "testing"))]
 fn depth(len: usize) -> u64 {
     u64::from(usize::BITS.saturating_sub(len.leading_zeros()))
 }
