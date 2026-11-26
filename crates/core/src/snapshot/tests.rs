@@ -577,7 +577,14 @@ fn a_snapshot_in_slices_hands_over_no_more_than_each_budget_and_publishes_once_w
     pages.pin();
     let mut snapshot = begun(&mut rig);
     let mut slices = 0_u64;
+    // Every slice hands over bytes until the last, which publishes: a snapshot that stalls
+    // fails here at once instead of looping until the test runner kills it.
+    let limit = whole.size.div_ceil(100) + 2;
     let info = loop {
+        assert!(
+            slices < limit,
+            "the snapshot did not finish within {limit} slices of 100 bytes"
+        );
         let before = snapshot.sent;
         let sliced = slice(&mut rig, &mut snapshot, &mut pages, 100).unwrap();
         assert!(snapshot.sent - before <= 100);

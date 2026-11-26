@@ -2002,18 +2002,43 @@ fn retention_failure(
     for err in errors {
         rig.remote.inner.inject_failure(StoreOp::Delete, err);
     }
-    let mut now = T0 + 60_000;
-    loop {
+    tick_until(
+        rig,
+        actor,
+        T0 + 60_000,
+        "a retention delete to fail",
+        |tick| match event(tick) {
+            Some(Event::Retrying { until, .. }) => Some(*until),
+            Some(_) | None => None,
+        },
+    )
+}
+
+/// Ticks at the instants the actor asks for, from `now`, until `found` takes a tick; returns
+/// that instant and what it took. Bounded: an engine that never gets there (a snapshot that
+/// never ends keeps asking for the next tick at once) fails here, not at the test runner's
+/// timeout.
+fn tick_until<T>(
+    rig: &mut Rig,
+    actor: &mut Actor,
+    mut now: i64,
+    what: &str,
+    found: impl Fn(&Tick) -> Option<T>,
+) -> (i64, T) {
+    const TICKS: usize = 200;
+    for _ in 0..TICKS {
         let tick = rig.tick(actor, now);
-        if let Some(Event::Retrying { until, .. }) = event(&tick) {
-            return (now, *until);
+        if let Some(got) = found(&tick) {
+            return (now, got);
         }
+        assert!(!matches!(tick, Tick::Stopped(_)), "{tick:?}");
         match next_of(&tick) {
             Some(Next::Now) => {}
             Some(Next::At(at)) => now = at.unix_millis(),
-            next => panic!("no retention delete ran: {tick:?} {next:?}"),
+            next => panic!("no tick came for {what}: {tick:?} {next:?}"),
         }
     }
+    panic!("{what} did not come within {TICKS} ticks");
 }
 
 /// Settles at `now` and returns the first retry's due instant.
