@@ -44,6 +44,18 @@ impl SecondReads {
             refused: tick.rereads_refused,
         }
     }
+
+    /// The second reads since `earlier`, both being counts of a whole run so far. A part of
+    /// an upload may be read back between two ticks (it lands when its request is sent, not
+    /// when the engine runs), and the tick after it is the one that hears of it.
+    #[must_use]
+    pub const fn since(self, earlier: Self) -> Self {
+        Self {
+            given: self.given.saturating_sub(earlier.given),
+            differing: self.differing.saturating_sub(earlier.differing),
+            refused: self.refused.saturating_sub(earlier.refused),
+        }
+    }
 }
 
 /// Whether `fault` tells the operator the replica is at fault.

@@ -436,6 +436,7 @@ impl Staged {
     /// The proof that the position equals the committed end, present only when
     /// the protocol ended on a step that reached it at the current epoch.
     #[must_use]
+    #[cfg(any(test, feature = "testing"))]
     pub const fn proof(&self) -> Option<&SyncedThrough> {
         match &self.reached {
             Reached::Through(through) => Some(through),
@@ -445,6 +446,7 @@ impl Staged {
 
     /// The proof, giving up the rest.
     #[must_use]
+    #[cfg(any(test, feature = "testing"))]
     pub fn into_proof(self) -> Option<SyncedThrough> {
         match self.reached {
             Reached::Through(through) => Some(through),
@@ -454,6 +456,7 @@ impl Staged {
 
     /// The files staged on the way: the seal, the new generation or the boundary snapshot.
     #[must_use]
+    #[cfg(any(test, feature = "testing"))]
     pub fn files(&self) -> &[FileInfo] {
         &self.files
     }
@@ -766,46 +769,13 @@ pub async fn checkpoint<W: WalSource, P: PageSource, C: Checkpointer, L: ObjectS
     cfg: &SyncConfig,
     clock: &dyn Clock,
 ) -> Result<Checkpointed, CheckpointFailed> {
-    checkpoint_in(
-        proof,
-        mode,
-        wal,
-        db,
-        pages,
-        ck,
-        &Staging(staging),
-        cfg,
-        clock,
-    )
-    .await
-}
-
-/// [`checkpoint`] with each store as its role.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the plan fixes this signature; each argument is a distinct source of the protocol"
-)]
-#[expect(
-    clippy::result_large_err,
-    reason = "a failure carries what was staged, as a success does; one is returned per checkpoint"
-)]
-pub(crate) async fn checkpoint_in<W: WalSource, P: PageSource, C: Checkpointer, L: Role>(
-    proof: SyncedThrough,
-    mode: CheckpointMode,
-    wal: &mut W,
-    db: &mut P,
-    pages: &mut PageChecksumTable,
-    ck: &mut C,
-    staging: &L,
-    cfg: &SyncConfig,
-    clock: &dyn Clock,
-) -> Result<Checkpointed, CheckpointFailed> {
+    let staging = Staging(staging);
     let mut protocol = Protocol {
         wal,
         db,
         pages,
         ck,
-        staging,
+        staging: &staging,
         cfg: *cfg,
         clock,
         good: Reached::Through(proof),

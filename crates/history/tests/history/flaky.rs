@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use lsr_core::{
-    CreatedAt, FileInfo, FileKey, Level, Listing, ObjectStore, PageLimit, ReadLen, Reread,
-    StoreError, StoreOp, Upload, WriteMode,
+    CreatedAt, FileInfo, FileKey, Flight, Level, Listing, ObjectStore, PageLimit, ReadLen, Reread,
+    Rest, StoreError, StoreOp, Upload, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 use tempfile::TempDir;
@@ -62,12 +62,8 @@ impl<U: Upload> Upload for FlakyUpload<U> {
         self.inner.commit().await
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        if self.owes() {
-            self.inner.abort().await?;
-            return Err(reset());
-        }
-        self.inner.commit_from(again).await
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        self.inner.flight(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

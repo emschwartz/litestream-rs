@@ -542,16 +542,15 @@ fn daemon_exit(error: &lsr_sidecar::SidecarError) -> Exit {
 pub fn exit_for_error(error: &CliError) -> Exit {
     match error {
         CliError::Usage(_) => Exit::Usage,
-        CliError::NoPlan(_) | CliError::NoLtxFolder { .. } | CliError::Integrity(_) => {
-            Exit::Refused
-        }
-        CliError::Config(_)
+        CliError::NoPlan(_)
+        | CliError::NoLtxFolder { .. }
+        | CliError::Integrity(_)
+        | CliError::Config(_)
         | CliError::Plan(_)
         | CliError::NoDatabase
         | CliError::DatabasePath(_)
-        | CliError::NotInConfig { .. } => Exit::Refused,
-        CliError::Parent(_) | CliError::ListingTimedOut { .. } => Exit::Environment,
-        CliError::NoBackupsFound => Exit::Refused,
+        | CliError::NotInConfig { .. }
+        | CliError::NoBackupsFound => Exit::Refused,
         CliError::Restore(err) => match err {
             RestoreError::NoPlan(_)
             | RestoreError::File { .. }
@@ -576,7 +575,9 @@ pub fn exit_for_error(error: &CliError) -> Exit {
         | CliError::Publish(_)
         | CliError::Takeover { .. }
         | CliError::NoMetaDir { .. }
-        | CliError::Output(_) => Exit::Environment,
+        | CliError::Output(_)
+        | CliError::Parent(_)
+        | CliError::ListingTimedOut { .. } => Exit::Environment,
     }
 }
 

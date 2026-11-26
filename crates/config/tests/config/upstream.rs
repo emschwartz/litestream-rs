@@ -54,7 +54,7 @@ fn the_global_options_uncommented_load_with_the_defaults_they_document() {
     assert_eq!(config.l0_retention(), GoDuration::from_secs(300));
     assert_eq!(
         config.l0_retention_check_interval(),
-        GoDuration::from_secs(15)
+        Some(GoDuration::from_secs(15))
     );
     assert!(config.retention_enabled());
     assert_eq!(config.addr(), Some(":9090"));
