@@ -1452,18 +1452,23 @@ fn a_database_path_restores_beside_a_dir_entry_that_holds_nothing() {
     );
 }
 
-/// Go's `databases`: each config entry with its replica type, a `dir` entry by its directory,
-/// unscanned (Go prints the working directory for it; docs/decisions.md D162).
+/// Go's `databases`: each config entry with its replica type, and a `dir` entry as every
+/// database its scan finds, in walk order (Go 3e0fdc0, docs/decisions/D274.md).
 #[test]
-fn databases_lists_each_entry_without_scanning_a_dir() {
+fn databases_lists_every_database_a_dir_entry_finds() {
     let (staged, _) = small_fixture();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("app.db");
     let config = config_for(dir.path(), &db, &staged);
     let scan = dir.path().join("scan");
+    fs::create_dir_all(scan.join("sub")).expect("mkdir");
+    for name in ["b.db", "a.db", "sub/c.db"] {
+        fs::write(scan.join(name), b"SQLite format 3\0").expect("database");
+    }
+    fs::write(scan.join("notes.txt"), b"SQLite format 3\0").expect("other file");
     let mut text = fs::read_to_string(&config).expect("read");
     text.push_str(&format!(
-        "  - dir: {}\n    pattern: \"*.db\"\n    replica:\n      url: file://{}\n",
+        "  - dir: {}\n    pattern: \"*.db\"\n    recursive: true\n    replica:\n      url: file://{}\n",
         scan.display(),
         dir.path().join("scan-replica").display()
     ));
@@ -1475,17 +1480,50 @@ fn databases_lists_each_entry_without_scanning_a_dir() {
         .lines()
         .map(|l| l.split_whitespace().collect())
         .collect();
+    let found = |name: &str| scan.join(name).display().to_string();
     assert_eq!(
         rows,
         vec![
             vec!["path", "replica"],
             vec![path_str(&db), "file"],
-            vec![path_str(&scan), "file"]
+            vec![found("a.db").as_str(), "file"],
+            vec![found("b.db").as_str(), "file"],
+            vec![found("sub/c.db").as_str(), "file"],
         ]
     );
     let printed = lsr(&["databases", "-json", "-config", path_str(&config)]);
     let json: Value = serde_json::from_str(&printed.stdout).expect("Go's indented JSON");
     assert_eq!(json[0], json!({"path": path_str(&db), "replica": "file"}));
+    assert_eq!(json[1], json!({"path": found("a.db"), "replica": "file"}));
+    assert_eq!(json.as_array().map(Vec::len), Some(4));
+}
+
+/// Go's `databases` builds a `dir` entry's databases as `replicate` does, so an entry that
+/// finds none ends the command with Go's message and exit code 1.
+#[test]
+fn databases_refuses_a_dir_entry_that_finds_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let scan = dir.path().join("scan");
+    fs::create_dir(&scan).expect("mkdir");
+    let config = dir.path().join("litestream.yml");
+    fs::write(
+        &config,
+        format!(
+            "dbs:\n  - dir: {}\n    pattern: \"*.db\"\n    replica:\n      url: file://{}\n",
+            scan.display(),
+            dir.path().join("replica").display()
+        ),
+    )
+    .expect("write");
+    let run = lsr(&["databases", "-config", path_str(&config)]);
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    assert!(
+        run.stderr
+            .contains("no SQLite databases found in directory"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.stdout, "");
 }
 
 /// Go's `ltx`: level 0 unless `-level` says otherwise, `all` for every level; `wal` is the

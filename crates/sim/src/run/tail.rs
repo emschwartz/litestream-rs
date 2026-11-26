@@ -154,6 +154,29 @@ impl Runner {
         Ok(())
     }
 
+    /// Judges what the tick held the write barrier across (`crate::barrier`): no replica
+    /// request, a wait within one staged file's price for each barrier, and, when the tick ended without its
+    /// process dying, no barrier still held.
+    pub(super) fn judge_barrier(&mut self, done: bool) -> Result<(), Violation> {
+        let held = self.barrier.take();
+        if held.holds > 0 {
+            self.report.reach.bump("barrier.judged");
+            within(Bound::BarrierRemoteRequests, held.remote_requests, 0)?;
+            // Each barrier may stage one file, the WAL's tail since the sync, of at most what one
+            // sync may stage; nothing else.
+            let limit = Profile::DEFAULT.staging.micros(
+                held.holds.saturating_mul(crate::cost::REQUESTS_PER_PUT),
+                held.holds
+                    .saturating_mul(self.allowance().written(crate::cost::Store::Staging)),
+            );
+            within(Bound::BarrierWaitMicros, held.wait_micros, limit)?;
+        }
+        if done {
+            within(Bound::BarrierHeldAfterTick, u64::from(held.open), 0)?;
+        }
+        Ok(())
+    }
+
     /// A boot's spare for its whole-file pass over staging ([`Spare`]), from staging's own
     /// sizes.
     pub(super) fn boot_spare(&self) -> Spare {

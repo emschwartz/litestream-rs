@@ -1,0 +1,5 @@
+name = "databases-prints-dir-entries-unscanned"
+fix = "claude/pin-3e0fdc0"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["databases_lists_every_database_a_dir_entry_finds", "databases_refuses_a_dir_entry_that_finds_nothing"]

@@ -380,6 +380,8 @@ struct Runner {
     // How many times slower than its price the staging disk is, while a
     // [`crate::Hold::SlowStaging`] holds.
     slow_staging: Option<u16>,
+    // What the write barrier was held across (`crate::barrier`).
+    barrier: crate::barrier::BarrierWatch,
     // The healthy tail is running (`run::tail`): every tick is charged.
     tail: bool,
     // The S3 replica's part size, when it sends in parts ([`Opts::remote_parts`]).
@@ -590,6 +592,7 @@ impl Runner {
             spare: crate::cost::Spare::default(),
             latency: None,
             slow_staging: None,
+            barrier: crate::barrier::BarrierWatch::default(),
             tail: false,
             part_bytes: None,
             turns: SendTurns::default(),
@@ -655,6 +658,7 @@ impl Runner {
     }
 
     fn reboot(&mut self) {
+        self.barrier.process_died();
         self.fail_stop.started();
         self.booted = false;
         self.w.start_driver();
@@ -713,7 +717,12 @@ impl Runner {
     fn run_one(&mut self, plan: Option<CrashPlan>) -> TickEnd<Tick> {
         let mut wal = self.w.sqlite.source().with_modified(self.w.modified());
         let mut db = self.w.sqlite.pages();
-        let mut ck = CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone());
+        let mut ck = crate::barrier::Watching::new(
+            CountingCheckpointer::new(self.w.sqlite.checkpointer(), self.tally.clone()),
+            self.barrier.clone(),
+            self.w.remote_recorder.clone(),
+            self.w.staging_recorder.clone(),
+        );
         let staging = self.w.staging.clone();
         let remote = self.w.remote.clone();
         let clock = std::sync::Arc::clone(&self.w.sim_clock);
@@ -975,6 +984,7 @@ impl Runner {
         let settled = self.now();
         self.charge(remote0, staging0);
         self.note_gray(hung0, began);
+        self.judge_barrier(matches!(ended, TickEnd::Done(_)))?;
         if matches!(ended, TickEnd::Done(_)) {
             self.keep_takeover();
         }

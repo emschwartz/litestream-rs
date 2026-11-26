@@ -5,6 +5,7 @@
 // allow-*-in-tests cover them as they cover #[test] fns.
 #[cfg(test)]
 mod after_restart;
+mod barrier;
 #[cfg(test)]
 #[cfg(test)]
 mod clock_reads;

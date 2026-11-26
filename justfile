@@ -395,7 +395,7 @@ bench-vs-go out *sets="all": minio-up
     for var in $(compgen -e); do
         case "$var" in AWS_* | LITESTREAM_*) unset "$var" ;; esac
     done
-    ./scripts/build-go-litestream.sh 041a8c3
+    ./scripts/build-go-litestream.sh 3e0fdc0
     cargo build --release --locked -p lsr-cli --bin lsr
     cargo build --release --locked -p lsr-compat --bin bench-vs-go
     eval "$(./scripts/minio.sh env)"
@@ -574,7 +574,7 @@ fault-rig cycles="50" *args: minio-up toxiproxy-up
     set -euo pipefail
     cargo build --release --locked -p lsr-cli
     cargo build --release --locked -p lsr-history --features sqlite
-    ./scripts/build-go-litestream.sh 041a8c3
+    ./scripts/build-go-litestream.sh 3e0fdc0
     if [ "$(uname)" = Linux ]; then
         test -x "${LSR_LAZYFS_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/lsr-lazyfs}/lazyfs/lazyfs/build/lazyfs" || uv run scripts/lazyfs.py build
     fi
@@ -593,7 +593,7 @@ fault-rig-canary *args: minio-up toxiproxy-up
     set -euo pipefail
     cargo build --release --locked -p lsr-cli
     cargo build --release --locked -p lsr-history --features sqlite
-    ./scripts/build-go-litestream.sh 041a8c3
+    ./scripts/build-go-litestream.sh 3e0fdc0
     eval "$(./scripts/minio.sh env)"
     eval "$(./scripts/toxiproxy.sh env)"
     uv run scripts/fault_rig.py canary {{args}}
@@ -607,7 +607,7 @@ trial-drill gib *args: minio-up
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --release --locked -p lsr-cli
-    ./scripts/build-go-litestream.sh 041a8c3
+    ./scripts/build-go-litestream.sh 3e0fdc0
     eval "$(./scripts/minio.sh env)"
     uv run scripts/trial_drill.py run --gib {{gib}} {{args}}
 
@@ -617,7 +617,7 @@ trial-drill-provider provider gib *args:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --release --locked -p lsr-cli
-    ./scripts/build-go-litestream.sh 041a8c3
+    ./scripts/build-go-litestream.sh 3e0fdc0
     ./scripts/provider.sh {{provider}} uv run scripts/trial_drill.py run --store provider --gib {{gib}} {{args}}
 
 # The drill's own canary: damage planted in a restored database (a flipped byte, a state that never
@@ -649,7 +649,7 @@ fault-rig-plant name cycles="200" *args: minio-up toxiproxy-up
         echo "fault-rig-plant: PLANT {{name}} DID NOT BUILD with its patch applied; re-express docs/planted-bugs/{{name}}.patch" >&2
         exit 3
     fi
-    ./scripts/build-go-litestream.sh 041a8c3
+    ./scripts/build-go-litestream.sh 3e0fdc0
     eval "$(./scripts/minio.sh env)"
     eval "$(./scripts/toxiproxy.sh env)"
     # Linux: LazyFS is built when missing, and a menu nemesis that

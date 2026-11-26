@@ -192,3 +192,44 @@ fn only_a_permission_refusal_of_the_sweep_is_exempt() {
         );
     }
 }
+
+/// The simulator's cells are small so that its few-hundred-byte files are read again at all,
+/// but not so small that a put costs it many staging requests: over a run, the replica is
+/// read again no more than once for each file it takes. With cells of 32 bytes a put made
+/// several reads, the staging side of each tick cost several times what it did, and a run
+/// could end its drain with files still staged (a nightly seed did).
+#[test]
+fn a_small_put_on_the_s3_replica_is_read_again_no_more_than_once_a_file() {
+    let mut ops = Vec::new();
+    for _ in 0..6 {
+        ops.push(Op::Commit {
+            pages: 3,
+            grow: true,
+        });
+        ops.extend(std::iter::repeat_n(Op::Tick, 4));
+    }
+    let opts = Opts {
+        remote_s3: true,
+        record: true,
+        ..Opts::default()
+    };
+    let report = match run_ops(Seed::new(1), &ops, &opts) {
+        Ok(report) => report,
+        Err(failure) => panic!("{failure}"),
+    };
+    let puts = report
+        .remote_events
+        .iter()
+        .filter(|event| matches!(event, lsr_sim::store::RecorderEvent::Put { .. }))
+        .count();
+    let reads = report
+        .remote_counts
+        .last()
+        .map_or(0, |counts| counts.rereads_given);
+    assert!(puts >= 3, "{puts} puts");
+    assert!(reads > 0, "no second read was made");
+    assert!(
+        reads <= u64::try_from(puts).unwrap(),
+        "{reads} second reads for {puts} puts"
+    );
+}
