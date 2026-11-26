@@ -236,6 +236,11 @@ pub enum Op {
     ClockJump(i64),
     /// The actor runs one tick.
     Tick,
+    /// The actor ticks until it has nothing to do: a tick that ran nothing. Scenarios only: it
+    /// waits on that condition, not on a count of ticks.
+    Settle,
+    /// The actor ticks until a tick publishes a staged file. Scenarios only, as [`Op::Settle`].
+    UntilPublished,
     /// The operator stops the engine: it drains, then a fresh one boots later.
     Shutdown,
     /// The operator stops the engine as `replicate -once -force-snapshot` does: it drains and

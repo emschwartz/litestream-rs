@@ -1392,6 +1392,31 @@ impl Runner {
         }
     }
 
+    /// Ticks until a tick's event is `until`'s ([`Op::Settle`], [`Op::UntilPublished`]), as
+    /// many ticks as a drain may take at most.
+    fn settle(&mut self, until: fn(&Event) -> bool) -> Result<(), Violation> {
+        for _ in 0..DRAIN_TICKS {
+            let spins = self.report.spins;
+            let (step, stats) = self.step(None)?;
+            match step {
+                Step::Stopped(cause) if self.stop_expected(cause) => return Ok(()),
+                Step::Stopped(cause) => {
+                    return Err(bug_fault(format!("the engine stopped: {cause:?}")));
+                }
+                Step::Degraded(cause) => self.degraded_expected(cause)?,
+                Step::Ran | Step::Drained(_) | Step::Crashed => {}
+            }
+            if stats.event.as_ref().is_some_and(until) && self.report.spins == spins {
+                return Ok(());
+            }
+        }
+        within(
+            Bound::DrainTicks,
+            u64::from(DRAIN_TICKS).saturating_add(1),
+            u64::from(DRAIN_TICKS),
+        )
+    }
+
     /// A task degraded by a persistent fault the run does not expect is a
     /// bug, as a stop for it would be. `Bug` is never expected. A stall is a
     /// retried fault that kept failing: as expected as the retries were before
@@ -2538,6 +2563,10 @@ impl Runner {
             Op::EnvFault(fault) => self.env_fault(*fault)?,
             Op::ClockJump(millis) => self.clock_jump(*millis),
             Op::Tick => self.tick()?,
+            Op::Settle => self.settle(|event| matches!(event, Event::Idle))?,
+            Op::UntilPublished => {
+                self.settle(|event| matches!(event, Event::Uploaded(lsr_core::Did::Put(_))))?
+            }
             Op::Shutdown => self.shutdown(false, false)?,
             Op::ShutdownWithSnapshot => self.shutdown(true, false)?,
             Op::ShutdownWithRetention => self.shutdown(false, true)?,

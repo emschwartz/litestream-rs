@@ -313,7 +313,7 @@ impl Class {
             Op::Shrink { .. } => Self::Shrink,
             Op::OtherProcessReader { .. } => Self::OtherProcessReader,
             Op::OtherProcessCheckpoint(_) => Self::OtherProcessCheckpoint,
-            Op::Tick => Self::Tick,
+            Op::Tick | Op::Settle | Op::UntilPublished => Self::Tick,
             Op::Shutdown | Op::ShutdownWithSnapshot | Op::ShutdownWithRetention => Self::Shutdown,
             Op::RequestSnapshot => Self::RequestSnapshot,
             Op::Restore => Self::Restore,

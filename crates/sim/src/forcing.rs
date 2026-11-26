@@ -168,6 +168,8 @@ pub const fn noted_by_op(op: &Op) -> &'static [Forcing] {
         // When a part lands is the store's own traffic: it forces nothing.
         | Op::Parts(_)
         | Op::Tick
+        | Op::Settle
+        | Op::UntilPublished
         | Op::Shutdown
         | Op::ShutdownWithSnapshot
         | Op::ShutdownWithRetention
