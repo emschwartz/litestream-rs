@@ -283,6 +283,14 @@ impl<T: Transport> S3Store<T> {
         self.inner.orphans.len()
     }
 
+    /// Waits until every part this store started has ended, as the boot sweep does first. A
+    /// dropped upload's id reaches the orphan list only when its last part lets go, and over a
+    /// transport with threads that can be after the drop returns.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn wait_for_parts(&self) {
+        self.inner.parts_ended();
+    }
+
     /// Forgets the abandoned uploads that await an abort, as a process that died has: the
     /// next boot's sweep then has only the bucket's listing to find them by. How many.
     #[cfg(any(test, feature = "testing"))]
