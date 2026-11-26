@@ -1,14 +1,25 @@
 diff --git a/crates/replica/src/restore.rs b/crates/replica/src/restore.rs
-index f37eaa8..675502f 100644
+index b704e1f45..df8ca7fd3 100644
 --- a/crates/replica/src/restore.rs
 +++ b/crates/replica/src/restore.rs
-@@ -66,8 +66,7 @@ pub fn restore_with(
-         options,
+@@ -111,12 +111,7 @@ pub fn restore(store: &dyn DynStore, to: &Path, how: &Restore) -> Result<Restore
          sink,
-     ))?;
--    write_takeover(&meta, TakeoverRecord::through(restored.reached()))
--        .map_err(|err| RestoreError::TakeoverRecord { kind: err.kind() })?;
+     ))
+     .map_err(RestoreError::from_core)?;
+-    write_takeover(&meta, TakeoverRecord::through(restored.reached())).map_err(|err| {
+-        RestoreError::TrustRecord {
+-            restored,
+-            kind: err.kind(),
+-        }
+-    })?;
 +    let _ = (meta, TakeoverRecord::through(restored.reached()));
      Ok(restored)
  }
  
+@@ -203,4 +198,4 @@ pub fn restore_if_missing(
+         Err(RestoreError::EmptyReplica) => Ok(IfMissing::EmptyReplica),
+         Err(other) => Err(other),
+     }
+-}
++}
+\ No newline at end of file
