@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index a8d8e023d..4e61e783d 100644
+index 812070d6e..95de50add 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2875,6 +2875,7 @@ impl Actor {
+@@ -2886,6 +2886,7 @@ impl Actor {
          // A slice that handed bytes over before its parts were in the way is the tick's unit
          // all the same: the tick has spent its bytes.
          if waited && bytes == before {
 +            self.end_sliced().await;
              return None;
          }
-         self.engine.job_slices = self.engine.job_slices.saturating_add(1);
+         self.engine.slices_ahead = self.engine.slices_ahead.saturating_add(1);
