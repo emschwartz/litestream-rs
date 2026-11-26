@@ -21,7 +21,7 @@ ureq = ["dep:ureq", "dep:rustls", "dep:rustls-native-certs"]
 # never links ring or aws-lc-rs itself: the provider the application installed with
 # `rustls::crypto::CryptoProvider::install_default`, else the one provider rustls's features
 # enable in the application's build. When rustls cannot pick, building a client is
-# `ConfigError::NoTlsProvider` (docs/decisions/D242.md).
+# `ConfigError::NoTlsProvider` (docs/decisions/D249.md).
 reqwest = [
     "dep:reqwest",
     "dep:rustls",
