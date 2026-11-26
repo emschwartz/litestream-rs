@@ -314,8 +314,8 @@ fn a_restored_database_replicates_without_a_refusal() {
     let restored = site.path("restored");
     let reached = lsr_replica::restore(
         &*site.store(),
-        lsr_replica::RestoreTarget::Latest,
         &restored,
+        &lsr_replica::Restore::at(lsr_replica::RestoreTarget::Latest),
     )
     .unwrap()
     .reached();

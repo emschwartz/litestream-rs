@@ -273,6 +273,7 @@ pub struct ReplicatorBuilder {
     config: Config,
     runtime: Option<Runtime>,
     events: Option<Box<dyn EventSink>>,
+    create_if_missing: bool,
 }
 
 impl fmt::Debug for ReplicatorBuilder {
@@ -305,6 +306,16 @@ impl ReplicatorBuilder {
         self
     }
 
+    /// Creates an empty database in WAL mode when nothing is at the path, so a first start
+    /// against an empty replica ([`crate::IfMissing::EmptyReplica`]) replicates from scratch,
+    /// as Go's does. Without it a missing database is [`StartError::Open`] with `NotFound`.
+    /// The page size of a database created here is SQLite's default: an application that wants
+    /// another creates the database itself before the start.
+    pub const fn create_if_missing(mut self) -> Self {
+        self.create_if_missing = true;
+        self
+    }
+
     /// Opens the replication connections, takes the read transaction that pins the WAL,
     /// starts the thread, and returns. The first boot (listing the replica, recovering the
     /// position) runs on the thread afterwards and shows in [`Replicator::health`]; no store
@@ -318,6 +329,9 @@ impl ReplicatorBuilder {
     /// # Errors
     /// [`StartError`]; nothing is left open or pinned.
     pub fn start(self) -> Result<Replicator, StartError> {
+        if self.create_if_missing && !self.database.exists() {
+            lsr_sqlite::create_database(&self.database).map_err(StartError::created)?;
+        }
         Replicator::start_inner(
             &self.database,
             self.store,
@@ -353,6 +367,7 @@ impl Replicator {
             config: Config::default(),
             runtime: None,
             events: None,
+            create_if_missing: false,
         }
     }
 

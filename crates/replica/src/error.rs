@@ -2,7 +2,7 @@
 
 use std::io;
 
-use crate::local::CreateError;
+use crate::local::{CreateError, PublishError};
 
 /// Why [`crate::ReplicatorBuilder::start`] returned no replicator. Nothing is pinned or running when
 /// it returns one of these.
@@ -89,6 +89,15 @@ pub enum StartError {
     },
 }
 
+impl StartError {
+    /// The database could not be created for [`crate::ReplicatorBuilder::create_if_missing`].
+    pub(crate) fn created(err: lsr_sqlite::SqliteError) -> Self {
+        Self::Sqlite {
+            code: err.code().unwrap_or(-1),
+        }
+    }
+}
+
 impl From<lsr_sqlite::OpenError> for StartError {
     fn from(err: lsr_sqlite::OpenError) -> Self {
         match err {
@@ -111,32 +120,126 @@ impl From<lsr_sqlite::OpenError> for StartError {
     }
 }
 
-/// Why [`crate::restore`] or [`crate::restore_if_missing`] published nothing.
+/// Why [`crate::restore`] or [`crate::restore_if_missing`] did not restore. Nothing is
+/// published, except after a [`RestoreError::Publish`] whose error says it left the database
+/// visible, and after [`RestoreError::TrustRecord`].
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreError {
-    /// The destination cannot take a restore: it exists, a stale sidecar sits beside it, or
-    /// its scratch file cannot be made.
+    /// The destination cannot take a restore: it exists, a stale sidecar sits beside it
+    /// ([`crate::clear_journal_files`] removes those), or its scratch file cannot be made.
     #[error("{0}")]
     Destination(#[from] CreateError),
-    /// The restore itself failed.
-    #[error("{0}")]
-    Restore(#[from] lsr_core::RestoreError),
-    /// The database was restored and published, and the takeover record that lets
-    /// replication build on the replica it came from (`lsr-takeover`) could not be written
-    /// in its meta directory. Replication will refuse to start over that replica until
-    /// `lsr trust-local` writes one.
-    #[error("the database was restored but its takeover record could not be written: {kind:?}")]
-    TakeoverRecord {
-        /// What the file system said.
-        kind: io::ErrorKind,
-    },
-    /// The destination names no file (`/`, or a path ending in `..`), so it has no meta
-    /// directory to hold the takeover record. Refused before anything is written.
-    #[error("{} names no file, so it has no meta directory for the takeover record", .path.display())]
+    /// The destination names no file (`/`, or a path ending in `..`), so it has no default
+    /// meta directory to hold the trust record. Refused before anything is written.
+    #[error("{} names no file, so it has no meta directory for the trust record", .path.display())]
     NoMetaDir {
         /// The destination given.
         path: std::path::PathBuf,
     },
+    /// The replica holds no file: no backup exists.
+    #[error("the replica holds no backup")]
+    EmptyReplica,
+    /// The replica has no exact answer for the target. Its outcome is never
+    /// `PlanOutcome::Plan` or `PlanOutcome::EmptyReplica` (that is [`RestoreError::EmptyReplica`]).
+    #[error("no exact restore plan: {:?}", .0.outcome())]
+    NoExactAnswer(lsr_core::NoPlan),
+    /// The replica could not be listed completely.
+    #[error("listing the replica: {0}")]
+    Listing(#[source] lsr_core::InventoryError),
+    /// A read failed in a way a restore does not retry.
+    #[error("reading the replica: {0}")]
+    Store(#[source] lsr_core::StoreError),
+    /// A file the plan chose is unusable.
+    #[error("{key}: {fault}")]
+    Damaged {
+        /// The file.
+        key: lsr_core::FileKey,
+        /// What is wrong with it.
+        fault: lsr_core::FileFault,
+    },
+    /// Files kept vanishing between listing and reading: the replica is being compacted.
+    #[error("{missing} vanished on each of {attempts} attempts; the replica is being compacted")]
+    Unstable {
+        /// Plans tried.
+        attempts: u8,
+        /// The file missing on the last attempt.
+        missing: lsr_core::FileKey,
+    },
+    /// Every file verified, but the database they built is not the one the last file's trailer
+    /// says it is: the chain does not add up.
+    #[error("the restored database has checksum {found}, the last file says {expected}")]
+    DatabaseChecksum {
+        /// The last file's post-apply checksum.
+        expected: lsr_ltx::DbChecksum,
+        /// What the restore built.
+        found: lsr_ltx::DbChecksum,
+    },
+    /// Writing the scratch file failed before the publish.
+    #[error("the scratch file failed to {op}: {source}")]
+    Sink {
+        /// What the restore was doing.
+        op: lsr_core::SinkOp,
+        /// The I/O error.
+        source: io::Error,
+    },
+    /// Every file verified and the database added up, but the publish failed; the error says
+    /// what it left at the target.
+    #[error("{0}")]
+    Publish(PublishError),
+    /// A defect in this library, refused rather than looped on or published.
+    #[error("a restore planner bug: {0}")]
+    Bug(RestoreBug),
+    /// The database was restored and published, and the trust record that lets replication
+    /// build on the replica it came from (`lsr-takeover`) could not be written in its meta
+    /// directory. Replication will refuse to start over that replica until one is written:
+    /// [`crate::record_trust`] with `restored.reached()` retries exactly this one.
+    #[error("the database was restored but its trust record could not be written: {kind:?}")]
+    TrustRecord {
+        /// The restore that succeeded.
+        restored: lsr_core::Restored,
+        /// What the file system said.
+        kind: io::ErrorKind,
+    },
+}
+
+/// Which defect a [`RestoreError::Bug`] is.
+#[derive(Debug, thiserror::Error)]
+pub enum RestoreBug {
+    /// The as-of planner asked twice for the created-at time of one file.
+    #[error("the as-of planner asked twice for the created-at time of {key}")]
+    CreatedAtRepeated {
+        /// The file asked for twice.
+        key: lsr_core::FileKey,
+    },
+    /// The publish failed with an error that is not the file sink's own.
+    #[error("the publish failed with an error of another type: {0}")]
+    ForeignPublishError(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl RestoreError {
+    /// The engine's restore error, as an application sees it.
+    pub(crate) fn from_core(err: lsr_core::RestoreError) -> Self {
+        use lsr_core::RestoreError as Core;
+        match err {
+            Core::Inventory(source) => Self::Listing(source),
+            Core::NoPlan(none) if *none.outcome() == lsr_core::PlanOutcome::EmptyReplica => {
+                Self::EmptyReplica
+            }
+            Core::NoPlan(none) => Self::NoExactAnswer(none),
+            Core::Store(source) => Self::Store(source),
+            Core::File { key, fault } => Self::Damaged { key, fault },
+            Core::Unstable { attempts, missing } => Self::Unstable { attempts, missing },
+            Core::DatabaseChecksum { expected, found } => {
+                Self::DatabaseChecksum { expected, found }
+            }
+            Core::CreatedAtRepeated { key } => Self::Bug(RestoreBug::CreatedAtRepeated { key }),
+            Core::Sink { op, source } => Self::Sink { op, source },
+            Core::Publish { source, .. } => match source.downcast::<PublishError>() {
+                Ok(publish) => Self::Publish(*publish),
+                Err(other) => Self::Bug(RestoreBug::ForeignPublishError(other)),
+            },
+        }
+    }
 }
 
 /// Why [`crate::trust_local`] recorded nothing.

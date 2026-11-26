@@ -20,8 +20,8 @@ use lsr_core::{
 };
 use lsr_ltx::TxidRange;
 use lsr_replica::{
-    Config, DynStore, FakeClockHandle, Health, Phase, Readiness, Replicator, RestoreTarget,
-    Runtime, StopOutcome, Task, Timestamp, restore,
+    Config, DynStore, FakeClockHandle, Health, Phase, Readiness, Replicator, Restore, Runtime,
+    StopOutcome, Task, Timestamp, restore,
 };
 
 use crate::waiting;
@@ -106,7 +106,7 @@ impl Site {
     /// and passes SQLite's integrity check.
     pub fn assert_restores(&self, store: &dyn DynStore) {
         let to = self.path("restored");
-        restore(store, RestoreTarget::Latest, &to).unwrap();
+        restore(store, &to, &Restore::latest()).unwrap();
         assert_same(&self.app, &to);
     }
 }

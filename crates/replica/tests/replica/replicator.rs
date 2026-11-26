@@ -21,8 +21,9 @@ use common::{
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
     AppCheckpoint, AppCheckpoints, AppNotice, ChannelSink, CheckpointConfig, Config, DegradedCause,
-    Depth, DynStore, Event, EventSink, Gone, Phase, ReaderTracking, Readiness, Replicator,
-    Responses, SetupError, StartError, StopCause, StopOutcome, Task, restore_if_missing, verify,
+    Depth, DynStore, Event, EventSink, Gone, IfMissing, Phase, ReaderTracking, Readiness,
+    Replicator, Responses, SetupError, StartError, StopCause, StopOutcome, Task,
+    restore_if_missing, verify,
 };
 use rusqlite::Connection;
 
@@ -824,13 +825,19 @@ fn verify_and_restore_if_missing_use_the_shared_store() {
     );
     let report = verify(&*store, Depth::Contents).unwrap();
     assert_eq!(report.worst(), None, "{report:?}");
-    assert!(restore_if_missing(&*store, &site.db).unwrap().is_none());
+    assert_eq!(
+        restore_if_missing(&*store, &site.db, &Config::default()).unwrap(),
+        IfMissing::Exists
+    );
     let to = site.path("if-missing");
-    assert!(restore_if_missing(&*store, &to).unwrap().is_some());
+    assert!(matches!(
+        restore_if_missing(&*store, &to, &Config::default()).unwrap(),
+        IfMissing::Restored(_)
+    ));
     assert_same(&site.app, &to);
     // A target that cannot be looked at is not missing: here a path under a regular file.
     let under_a_file = to.join("db");
-    let refused = restore_if_missing(&*store, &under_a_file);
+    let refused = restore_if_missing(&*store, &under_a_file, &Config::default());
     assert!(
         matches!(
             refused,

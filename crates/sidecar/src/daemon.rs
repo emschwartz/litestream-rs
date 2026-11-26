@@ -39,11 +39,11 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use lsr_config::{DbPlan, Plan, ReplicaPlan};
-use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
+use lsr_core::Clock;
 use lsr_replica::{
-    Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
+    Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate, IfMissing,
     IfReplicationStops, Replicator, RestoreError, Runtime, StartError, StopOutcome, Trip, lock,
-    record_trust, restore_if_missing,
+    restore_if_missing,
 };
 
 use crate::exec::ChildEnd;
@@ -379,9 +379,9 @@ impl Daemon {
 
     /// Go's `restoreIfNeeded`.
     ///
-    /// A restore records a takeover through what it restored, so the replicator started on
-    /// it builds on the replica instead of refusing it: the library writes it in the default
-    /// meta directory, and a configured `meta-dir` gets it here too.
+    /// A restore records a trust record through what it restored, in the meta directory
+    /// `config` names, so the replicator started on it builds on the replica instead of
+    /// refusing it.
     fn restore(
         &self,
         path: &Path,
@@ -392,31 +392,26 @@ impl Daemon {
             "attempting restore before replication",
             &[("path", path.into())],
         );
-        match restore_if_missing(&**store, path) {
-            Ok(Some(restored)) => {
+        match restore_if_missing(&**store, path, config) {
+            Ok(IfMissing::Restored(restored)) => {
                 self.log.info("restore completed", &[("path", path.into())]);
-                let through = restored.reached();
-                if config.meta_dir.is_some()
-                    && let Some(meta) = config.meta_dir_for(path)
-                {
-                    record_trust(&meta, through).map_err(|error| Failure {
-                        msg: "restore completed but the takeover record could not be written",
-                        error: error.to_string(),
-                        transient: false,
-                    })?;
-                }
-                let msg = format!("takeover recorded through {through}");
+                let msg = format!("takeover recorded through {}", restored.reached());
                 self.log.info(&msg, &[("path", path.into())]);
             }
-            Ok(None) => self.log.info(
+            Ok(IfMissing::Exists) => self.log.info(
                 "database exists, skipping restore",
                 &[("path", path.into())],
             ),
-            Err(RestoreError::Restore(CoreRestoreError::NoPlan(none)))
-                if *none.outcome() == PlanOutcome::EmptyReplica =>
-            {
+            Ok(IfMissing::EmptyReplica) => {
                 self.log
                     .info("no backup found, starting fresh", &[("path", path.into())]);
+            }
+            Err(error @ RestoreError::TrustRecord { .. }) => {
+                return Err(Failure {
+                    msg: "restore completed but the takeover record could not be written",
+                    error: error.to_string(),
+                    transient: false,
+                });
             }
             Err(error) => {
                 return Err(Failure {

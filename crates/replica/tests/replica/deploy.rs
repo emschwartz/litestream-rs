@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{assert_same, booted, config, fake, stopped};
-use lsr_replica::{Event, EventSink, Replicator, RestoreTarget, restore};
+use lsr_replica::{Event, EventSink, Replicator, Restore, restore};
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
 
@@ -120,12 +120,7 @@ fn continued(n: usize, events: &[String]) {
 /// The replica restores what the database holds, after the last deploy exited.
 fn restores(dir: &Path) {
     let to = dir.join("restored.db");
-    restore(
-        &FsStore::new(dir.join("replica")),
-        RestoreTarget::Latest,
-        &to,
-    )
-    .unwrap();
+    restore(&FsStore::new(dir.join("replica")), &to, &Restore::latest()).unwrap();
     let app = Connection::open(dir.join("app.db")).unwrap();
     assert_same(&app, &to);
 }

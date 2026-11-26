@@ -137,7 +137,7 @@ mod store;
 mod thread;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
-pub use error::{RestoreError, StartError, TrustLocalError};
+pub use error::{RestoreBug, RestoreError, StartError, TrustLocalError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink, TrustRecordUnusable};
 #[doc(hidden)]
 pub use exec::block_on;
@@ -148,7 +148,9 @@ pub use health::{
 pub use local::{ClearError, CreateError, IntegrityCheck, IntegrityFailure, clear_journal_files};
 pub use readers::ReaderGuard;
 pub use replicator::{Ready, Replicator, ReplicatorBuilder, StopFuture};
-pub use restore::{record_trust, restore, restore_if_missing, restore_with, trust_local, verify};
+pub use restore::{
+    IfMissing, Restore, record_trust, restore, restore_if_missing, trust_local, verify,
+};
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
 pub use runtime::{CALLER_SLICE, Park, Runtime};

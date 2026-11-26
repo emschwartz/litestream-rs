@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-use lsr_replica::{DynStore, RestoreTarget, restore};
+use lsr_replica::{DynStore, restore};
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
 
@@ -156,6 +156,6 @@ pub fn restores_to(dir: &Path, replica: &Path, conn: &Connection) {
         "restored-{}.db",
         replica.file_name().unwrap().to_string_lossy()
     ));
-    restore(&*store, RestoreTarget::Latest, &to).unwrap();
+    restore(&*store, &to, &lsr_replica::Restore::latest()).unwrap();
     assert_eq!(rows(&Connection::open(&to).unwrap()), rows(conn));
 }

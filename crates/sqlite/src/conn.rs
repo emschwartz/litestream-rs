@@ -701,6 +701,19 @@ impl ConnectionSetup {
     }
 }
 
+/// Creates an empty database at `path` in WAL mode, as an application's first open would, or
+/// leaves the database already there as it is apart from putting it in WAL mode (which the
+/// replicator's start does anyway). For a first start against an empty replica.
+///
+/// # Errors
+/// [`SqliteError`] when the open, the pragma or the close fails.
+pub fn create_database(path: &Path) -> Result<(), SqliteError> {
+    let flags = ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_NOMUTEX;
+    let conn = Connection::open(path, flags, None)?;
+    conn.handle().query_text("PRAGMA journal_mode = WAL")?;
+    conn.close()
+}
+
 /// Opens the `file:` URI `uri` read-only, runs `sql`, and returns the first column of at most
 /// `limit` rows as text, closing the connection before it returns. For a caller outside this
 /// crate that needs one query on a file of its own (`lsr-replica`'s integrity check of a

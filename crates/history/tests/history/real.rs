@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use lsr_core::conformance::block_on;
-use lsr_core::{Inventory, ObjectStore, PlanOutcome, RestoreError as CoreRestoreError};
+use lsr_core::{Inventory, ObjectStore, PlanOutcome};
 use lsr_history::{Anomaly, Digest, Judge, Log, Target, chain};
 use lsr_replica::{
-    AsOfInside, DynStore, RestoreError, RestoreOptions, RestoreTarget, Timestamp, Txid,
-    restore_with,
+    AsOfInside, DynStore, Restore, RestoreError, RestoreOptions, RestoreTarget, Timestamp, Txid,
+    restore,
 };
 
 /// splitmix64: a run is named by its seed.
@@ -81,14 +81,13 @@ pub fn restored(
     let options = RestoreOptions {
         as_of_inside: AsOfInside::TakeEarlier,
     };
-    match restore_with(store, target, options, &to) {
+    match restore(store, &to, &Restore::at(target).options(options)) {
         Ok(_) => {}
-        Err(RestoreError::Restore(CoreRestoreError::NoPlan(no))) => {
+        Err(RestoreError::EmptyReplica) => return None,
+        Err(RestoreError::NoExactAnswer(no)) => {
             assert!(
-                matches!(
-                    no.outcome(),
-                    PlanOutcome::EmptyReplica | PlanOutcome::NoSnapshot { .. }
-                ) || matches!(target, RestoreTarget::Txid(_)),
+                matches!(no.outcome(), PlanOutcome::NoSnapshot { .. })
+                    || matches!(target, RestoreTarget::Txid(_)),
                 "restoring {target:?} was refused: {:?}",
                 no.outcome()
             );

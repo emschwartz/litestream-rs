@@ -59,7 +59,7 @@ fn point(link: &Path, to: &Path) {
 fn restored(dir: &Path, replica: &Path, target: RestoreTarget, name: &str) -> Vec<(i64, Vec<u8>)> {
     let store: Arc<dyn DynStore> = Arc::new(FsStore::new(replica));
     let to = dir.join(format!("restored-{name}.db"));
-    restore(&*store, target, &to).unwrap();
+    restore(&*store, &to, &lsr_replica::Restore::at(target)).unwrap();
     rows(&Connection::open(&to).unwrap())
 }
 
