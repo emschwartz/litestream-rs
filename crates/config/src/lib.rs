@@ -23,13 +23,13 @@
 //!
 //! An application that replicates in its own process reads the file the daemon would read:
 //! [`load_plan`] gives one [`DbPlan`] per database, [`open_store`] opens its replica, and
-//! `lsr_replica::Replicator::start` takes the path and the [`DbPlan::config`]. `docs/config-keys.md`
-//! lists what every key sets (or that it is not supported or has no effect). The daemon-only keys
+//! `lsr_replica::Replicator::start` takes the path and the [`DbPlan::config`].
+//! `docs/config-keys.md` lists what every key sets (or that it is not supported or has no effect). The daemon-only keys
 //! (`addr`, `exec`, `logging`) are loaded and ignored here.
 //!
 //! ```no_run
 //! use lsr_config::{Expand, ProcessEnv, load_plan, open_store};
-//! use lsr_replica::Replicator;
+//! use lsr_replica::{Replicator, StartOptions};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let plan = load_plan("litestream.yml".as_ref(), Expand::Env, &ProcessEnv)?;
@@ -37,7 +37,11 @@
 //! for db in plan.dbs() {
 //!     let store = open_store(db.replica())?;
 //!     // With `db.restore_if_missing()`, call `lsr_replica::restore_if_missing` first.
-//!     replicators.push(Replicator::start(db.path(), store, db.config().clone())?);
+//!     let options = StartOptions {
+//!         config: db.config().clone(),
+//!         ..StartOptions::default()
+//!     };
+//!     replicators.push(Replicator::start(db.path(), store, options)?);
 //! }
 //! # Ok(())
 //! # }

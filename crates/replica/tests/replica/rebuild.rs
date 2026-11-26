@@ -13,9 +13,10 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use common::{Site, config, fake, moved_until, stopped, wait};
+use lsr_replica::StartOptions;
 use lsr_replica::{
-    Config, DegradedCause, DynStore, FinalSync, Health, NonZeroDuration, Phase, Replicator,
-    Response, Responses, SnapshotCause, StopCause, Stopped, Task,
+    Config, DegradedCause, DynStore, Health, NonZeroDuration, Phase, Replicator, Response,
+    Responses, SnapshotCause, StopCause, StopFuture, StopOutcome, Task,
 };
 use rusqlite::Connection;
 
@@ -39,7 +40,7 @@ fn retrying_every(interval: Duration) -> Config {
 }
 
 /// The stop's outcome, or `None` if it did not end within [`BOUND`] of real time.
-fn ended(sync: FinalSync) -> Option<Stopped> {
+fn ended(sync: StopFuture) -> Option<StopOutcome> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || tx.send(sync.wait()));
     rx.recv_timeout(BOUND).ok()
@@ -56,8 +57,16 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let retry = Duration::from_secs(60);
-    let replicator =
-        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: retrying_every(retry),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     let staged = wait(&replicator, |h| {
         h.synced.is_some() && h.counters.retries > 0
     });
@@ -76,7 +85,7 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
     let first = rebuilt.task(Task::Sync).unwrap();
     // Short of the wait, the fresh engine has not booted, so it has not panicked again.
     clock.advance(POLL);
-    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|h| h.counters.panics > 1);
+    let parked = crate::waiting::seen_or(&replicator, &clock, &|h| h.counters.panics > 1);
     assert!(parked.unwrap().is_none(), "the fresh engine booted early");
     clock.advance(retry.saturating_mul(2));
     let again = wait(&replicator, |h| h.counters.panics == 2);
@@ -87,7 +96,7 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
     let stop = replicator.stop(Duration::from_secs(5));
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
-    let Some(Stopped::DeadlineReached {
+    let Some(StopOutcome::DeadlineReached {
         staged_not_uploaded,
         ..
     }) = stopped
@@ -108,8 +117,16 @@ fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let retry = Duration::from_secs(60);
-    let replicator =
-        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: retrying_every(retry),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     let first = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     // The engine syncs new commits once per poll interval, so the replica holds a file of its
     // own beyond the first sync only after a commit and the interval it waits for.
@@ -131,7 +148,7 @@ fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
     });
     faulty.panic_always.store(true, Ordering::SeqCst);
     // The clock moves only once the engine is parked on it: a move while it still works is lost.
-    let parked = lsr_replica::waiting::seen_or(&replicator, &clock, &|_| false);
+    let parked = crate::waiting::seen_or(&replicator, &clock, &|_| false);
     assert!(parked.unwrap().is_none(), "the engine never parked");
     clock.advance(retry);
     wait(&replicator, |h| h.counters.panics == 1);
@@ -156,7 +173,7 @@ fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
     let stop = replicator.stop(Duration::from_secs(5));
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
-    let Some(Stopped::DeadlineReached {
+    let Some(StopOutcome::DeadlineReached {
         staged_not_uploaded,
         ..
     }) = stopped
@@ -175,8 +192,16 @@ fn a_panic_during_a_drain_still_stops_at_the_deadline() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let retry = Duration::from_secs(10);
-    let replicator =
-        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: retrying_every(retry),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, |h| {
         h.synced.is_some() && h.counters.retries > 0
     });
@@ -190,7 +215,7 @@ fn a_panic_during_a_drain_still_stops_at_the_deadline() {
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
     assert!(
-        matches!(stopped, Some(Stopped::DeadlineReached { .. })),
+        matches!(stopped, Some(StopOutcome::DeadlineReached { .. })),
         "{stopped:?}"
     );
 }
@@ -204,7 +229,16 @@ fn a_database_removed_after_a_panic_still_stops_at_the_deadline() {
     faulty.panics.store(1, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: config(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     std::fs::remove_file(&site.db).unwrap();
     let stop = replicator.stop(Duration::from_secs(5));
@@ -213,7 +247,7 @@ fn a_database_removed_after_a_panic_still_stops_at_the_deadline() {
     }
     let stopped = ended(stop);
     assert!(
-        matches!(stopped, Some(Stopped::DeadlineReached { .. })),
+        matches!(stopped, Some(StopOutcome::DeadlineReached { .. })),
         "{stopped:?}"
     );
 }
@@ -224,14 +258,35 @@ fn a_database_removed_after_a_panic_still_stops_at_the_deadline() {
 fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     let site = Site::new();
     let (runtime, clock) = fake();
-    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
+    let first = Replicator::start(
+        &site.db,
+        site.store(),
+        StartOptions {
+            config: config(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        stopped(&first, &clock),
+        StopOutcome::Drained { .. }
+    ));
     drop(first);
     let faulty = site.faulty();
     faulty.panics.store(2, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: config(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     // Taken by the thread before the boot it wakes for, which panics too.
     replicator.request_snapshot();
@@ -251,7 +306,7 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     });
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -268,8 +323,16 @@ fn a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let retry = Duration::from_secs(60);
-    let replicator =
-        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: retrying_every(retry),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     clock.step_back(Duration::from_secs(3600));
     let ten = Duration::from_secs(10);
@@ -278,7 +341,7 @@ fn a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild() {
     });
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -290,7 +353,16 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     let faulty = site.faulty();
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: config(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     faulty.refuse.store(true, Ordering::SeqCst);
     site.commit(1);
@@ -321,7 +393,7 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     });
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -362,7 +434,16 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
     faulty.panics.store(1, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: config(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     let replaced = replace(&site);
     clock.advance(POLL);
@@ -387,7 +468,7 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
     );
     assert!(matches!(
         replicator.stop(Duration::ZERO).wait(),
-        Stopped::DeadlineReached { .. }
+        StopOutcome::DeadlineReached { .. }
     ));
 }
 
@@ -400,7 +481,16 @@ fn a_database_deleted_after_a_panic_is_degraded_and_not_reopened() {
     faulty.panics.store(1, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: config(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     std::fs::remove_file(&site.db).unwrap();
     clock.advance(POLL);
@@ -416,7 +506,7 @@ fn a_database_deleted_after_a_panic_is_degraded_and_not_reopened() {
     assert!(!site.db.exists(), "not reopened, which would create it");
     assert!(matches!(
         replicator.stop(Duration::ZERO).wait(),
-        Stopped::DeadlineReached { .. }
+        StopOutcome::DeadlineReached { .. }
     ));
 }
 
@@ -435,7 +525,16 @@ fn a_database_replaced_after_a_panic_stops_when_configured_to() {
         },
         ..config()
     };
-    let replicator = Replicator::start_with(&site.db, store, stopping, runtime).unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        store,
+        StartOptions {
+            config: stopping,
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     let replaced = replace(&site);
     clock.advance(POLL);
@@ -446,6 +545,6 @@ fn a_database_replaced_after_a_panic_stops_when_configured_to() {
     assert!(!has_replicator_tables(&replaced));
     assert_eq!(
         stopped(&replicator, &clock),
-        Stopped::Stopped(StopCause::WalUnlinked)
+        StopOutcome::Stopped(StopCause::WalUnlinked)
     );
 }

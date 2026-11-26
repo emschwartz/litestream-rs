@@ -1,6 +1,6 @@
 //! Waiting on a replicator that runs on the fake clock, for tests.
 //!
-//! On [`crate::Runtime::fake`] the clock moves only when the test moves it, so anything the
+//! On [`lsr_replica::Runtime::fake`] the clock moves only when the test moves it, so anything the
 //! engine has timed on it (a retry's backoff after a busy database or a failed store call, the
 //! next poll, a scheduled verify) never comes while a test only watches health. A test that
 //! moves the clock once and then watches stalls whenever the engine needs more clock than that
@@ -14,16 +14,14 @@
 use std::cell::Cell;
 use std::time::Duration;
 
-use crate::health::Health;
-use crate::replicator::Replicator;
-use crate::runtime::FakeClockHandle;
+use lsr_replica::{FakeClockHandle, Health, Replicator};
 
 /// How long a single look may wait on the replicator's clock; on the fake clock this deadline
 /// is never the bound, the look count is.
 pub const PATIENCE: Duration = Duration::from_secs(600);
 
 /// How many times a wait looks at the health before it gives up. The replicator wakes a waiter
-/// on every change and at least every [`crate::CALLER_SLICE`], so a wait that sees nothing
+/// on every change and at least every 50 ms of real time, so a wait that sees nothing
 /// change gives up after about a minute.
 pub const LOOKS: u32 = 1_200;
 

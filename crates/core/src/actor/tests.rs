@@ -232,6 +232,10 @@ impl Counting {
 impl ObjectStore for Counting {
     type Upload = CountingUpload;
 
+    fn free_bytes(&self) -> Option<u64> {
+        self.inner.free_bytes()
+    }
+
     /// Forwards to the store it wraps, unless a test made it fail.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         self.scratch_calls.fetch_add(1, Ordering::SeqCst);
@@ -416,6 +420,9 @@ struct Rig {
     /// ([`Event::CheckingIdentity`], told through [`Env::notice`]), each with the replica
     /// transaction it named.
     announced: Vec<Txid>,
+    /// Whole-database copies that said they may not fit ([`Event::StagingShort`], told through
+    /// [`Env::notice`]): the bytes the copy can take and the bytes free.
+    short: Vec<(u64, u64)>,
 }
 
 impl Rig {
@@ -442,6 +449,7 @@ impl Rig {
             remote: Counting::default(),
             takeover: None,
             announced: Vec::new(),
+            short: Vec::new(),
         };
         rig.commit(1);
         rig
@@ -453,6 +461,7 @@ impl Rig {
 
     fn tick(&mut self, actor: &mut Actor, now: i64) -> Tick {
         let announced = &mut self.announced;
+        let short = &mut self.short;
         let env = Env {
             wal: &mut self.wal,
             db: &mut self.db,
@@ -463,6 +472,9 @@ impl Rig {
             notice: &mut |event| {
                 if let Event::CheckingIdentity { tip } = event {
                     announced.push(*tip);
+                }
+                if let Event::StagingShort { needed, free } = event {
+                    short.push((*needed, *free));
                 }
             },
         };
@@ -2435,6 +2447,7 @@ mod requested_snapshot_after_restart;
 mod rewound;
 mod second_writer;
 mod sliced;
+mod staging_space;
 mod stamp;
 mod tasks;
 mod vouch;

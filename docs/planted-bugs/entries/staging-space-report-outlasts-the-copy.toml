@@ -1,0 +1,8 @@
+# The sync task stays reported as short of staging space after everything staged is on the
+# replica, so the copy that did not fit is long gone and health still says the disk is full.
+name = "staging-space-report-outlasts-the-copy"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::staging_space::a_copy_that_may_not_fit_is_reported_and_still_runs",
+]

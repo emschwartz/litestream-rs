@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 use lsr_ltx::{Timestamp, Txid};
 
 use super::Actor;
-use crate::fault::{PersistentCause, StopCause};
+use crate::fault::{DegradedCause, StopCause};
 use crate::layout::FileKey;
 use crate::maintain::{Job, MaintainState, Remembered, RetentionMode};
 use crate::verify::LivePages;
@@ -67,7 +67,7 @@ impl Task {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Degraded {
     /// The newest failure's cause.
-    pub cause: PersistentCause,
+    pub cause: DegradedCause,
     /// When the task first failed this way without a success between.
     pub since: Timestamp,
     /// Failures in a row, the first included.
@@ -77,22 +77,22 @@ pub struct Degraded {
 /// Whether the cause is one a task's success does not end: a database page that did not match
 /// (until a frame rewrites it), or a store that cannot make create-only writes (until the
 /// process restarts, D79): every later success is a replacing write.
-const fn outlasts_success(cause: PersistentCause) -> bool {
+const fn outlasts_success(cause: DegradedCause) -> bool {
     match cause {
-        PersistentCause::DatabasePageMismatch { .. }
-        | PersistentCause::ConditionalWritesUnsupported => true,
-        PersistentCause::StoreDenied(_)
-        | PersistentCause::StoreRefused
-        | PersistentCause::RemoteCorrupt
-        | PersistentCause::OtherWriter
-        | PersistentCause::RemoteRegressed
-        | PersistentCause::WalCorrupt
-        | PersistentCause::WalTruncated
-        | PersistentCause::WalUnlinked
-        | PersistentCause::WalSyncFailed
-        | PersistentCause::PageSizeChanged { .. }
-        | PersistentCause::Bug
-        | PersistentCause::Stalled(_) => false,
+        DegradedCause::DatabasePageMismatch { .. }
+        | DegradedCause::ConditionalWritesUnsupported => true,
+        DegradedCause::StoreDenied(_)
+        | DegradedCause::StoreRefused
+        | DegradedCause::RemoteCorrupt
+        | DegradedCause::OtherWriter
+        | DegradedCause::RemoteRegressed
+        | DegradedCause::WalCorrupt
+        | DegradedCause::WalTruncated
+        | DegradedCause::WalUnlinked
+        | DegradedCause::WalSyncFailed
+        | DegradedCause::PageSizeChanged { .. }
+        | DegradedCause::Bug
+        | DegradedCause::Stalled(_) => false,
     }
 }
 
@@ -155,7 +155,7 @@ impl Retry {
 
     /// Marks the task degraded by `cause`; returns when the degradation began,
     /// which a later failure of the same run keeps.
-    pub(super) fn degrade(&mut self, cause: PersistentCause, now: Timestamp) -> Timestamp {
+    pub(super) fn degrade(&mut self, cause: DegradedCause, now: Timestamp) -> Timestamp {
         let since = self.degraded.map_or(now, |was| was.since);
         let counted = self.degraded.map_or(1, |was| was.retries.saturating_add(1));
         self.degraded = Some(Degraded {
@@ -169,7 +169,7 @@ impl Retry {
     /// Puts back a cause that stands whatever succeeds (a store without create-only writes),
     /// dated from when it was first raised, when nothing else degrades the task now: another
     /// cause's success just cleared it, and the standing one must show again.
-    pub(super) fn stand(&mut self, cause: PersistentCause, since: Timestamp) {
+    pub(super) fn stand(&mut self, cause: DegradedCause, since: Timestamp) {
         if self.degraded.is_none() {
             self.degraded = Some(Degraded {
                 cause,
@@ -268,9 +268,10 @@ impl Tasks {
     pub(super) fn page_matches_again(&mut self) {
         for task in Task::ALL {
             let retry = self.get_mut(task);
-            if retry.degraded.is_some_and(|was| {
-                matches!(was.cause, PersistentCause::DatabasePageMismatch { .. })
-            }) {
+            if retry
+                .degraded
+                .is_some_and(|was| matches!(was.cause, DegradedCause::DatabasePageMismatch { .. }))
+            {
                 retry.degraded = None;
             }
         }
