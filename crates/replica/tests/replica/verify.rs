@@ -36,18 +36,44 @@ fn verifying() -> Config {
 }
 
 /// [`verifying`] with a maintenance schedule that writes its first level-1 file and its first
-/// level-9 snapshot as soon as it can, then nothing for a day (the next day boundary is 6,400
-/// s after [`common::START`], and these tests run for minutes). A snapshot reads the live
-/// database, and a restore prefers it to the level-0 files it covers, so a test that
-/// corrupts a level-0 file needs the snapshot written before the transaction it corrupts
-/// and none after.
+/// level-9 snapshot as soon as it can, then no level-1 file for a day (the next day boundary is
+/// 6,400 s after [`common::START`], and these tests run for minutes) and no snapshot for days.
+/// A snapshot reads the live database, and a restore prefers it to the level-0 files it covers,
+/// so a test that corrupts a level-0 file needs the snapshot written before the transaction it
+/// corrupts and none after. [`settle_maintenance`] may jump the clock over the day boundary,
+/// so the snapshot window must not end there: windows count from Go's zero time, and a
+/// two-day window did end there, so a snapshot of the newest commits could land right before
+/// the corruption and hide it from the restore (`QUIET_SNAPSHOTS`).
 fn verifying_quietly() -> Config {
     let day = Duration::from_secs(86_400);
-    let two_days = day.saturating_mul(2);
+    let retention = QUIET_SNAPSHOTS.saturating_mul(2);
     Config {
-        maintenance: Maintenance::new(vec![day], two_days, two_days, L0Retention::Keep).unwrap(),
+        maintenance: Maintenance::new(vec![day], QUIET_SNAPSHOTS, retention, L0Retention::Keep)
+            .unwrap(),
         ..verifying()
     }
+}
+
+/// The snapshot interval of [`verifying_quietly`]: a week, whose window holding
+/// [`common::START`] ends five days later.
+const QUIET_SNAPSHOTS: Duration = Duration::from_secs(7 * 86_400);
+
+/// The jump of [`settle_maintenance`] and the hours a test runs after it stay inside the
+/// snapshot window the boot's snapshot was written in, so no second snapshot is due.
+#[test]
+fn the_quiet_schedule_takes_no_snapshot_across_the_day_jump() {
+    // A window's start, counted from Go's zero time (year 1) as `time.Truncate` does.
+    let window_start = |at: Timestamp, interval: Duration| {
+        const GO_ZERO_UNIX_MILLIS: i128 = -62_135_596_800_000;
+        let at = i128::from(at.unix_millis());
+        at - (at - GO_ZERO_UNIX_MILLIS).rem_euclid(interval.as_millis().try_into().unwrap())
+    };
+    let start = common::START;
+    let after = Timestamp::from_unix_millis(start.unix_millis() + 86_400_000);
+    assert_eq!(
+        window_start(start, QUIET_SNAPSHOTS),
+        window_start(after, QUIET_SNAPSHOTS)
+    );
 }
 
 /// The most polls the first level-1 file and level-9 snapshot take to land.
@@ -176,6 +202,17 @@ fn rewrite_newest_page(site: &Site) -> (Txid, u32) {
             }
         }
         let header = header.unwrap();
+        // The proviso above: a snapshot ending here would hide the page from the restore.
+        let snapshots = store
+            .list(Level::SNAPSHOT, None, PageLimit::MAX)
+            .await
+            .unwrap();
+        let newest = info.key.range().max();
+        assert!(
+            snapshots.files.iter().all(|s| s.key.range().max() < newest),
+            "a snapshot covers {newest:?}: {:?}",
+            snapshots.files
+        );
         let (pgno, page) = pages.last_mut().unwrap();
         let stale = *pgno;
         for byte in page.iter_mut().rev().take(16) {
