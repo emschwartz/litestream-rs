@@ -3,6 +3,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::fault::Fault;
 use crate::fault::role::{Replica, Role, Staging};
+use crate::layout::Level;
 use crate::store::{ObjectStore, ReadLen};
 
 /// What a boot's pass seeds from the staged files of `staging` from `from` on, truncated to

@@ -155,29 +155,6 @@ pub enum UploadPlan {
     Upload(FileKey),
 }
 
-/// Whether a level-0 upload asks the bucket to refuse a key that is taken (D79). A store that
-/// cannot make that check fails the write with `CreateOnlyUnsupported`; the actor then raises
-/// the cause and uploads [`Guard::Unguarded`] for the rest of the process.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) enum Guard {
-    /// A create-only write: the bucket refuses a taken key ([`WriteMode::New`]).
-    #[default]
-    BucketRefuses,
-    /// A replacing write, as Go's are ([`WriteMode::Replace`]): nothing refuses another
-    /// writer's file under the key, which the standing cause reports.
-    Unguarded,
-}
-
-impl Guard {
-    /// The write mode a level-0 upload takes.
-    const fn mode(self) -> WriteMode {
-        match self {
-            Self::BucketRefuses => WriteMode::New,
-            Self::Unguarded => WriteMode::Replace,
-        }
-    }
-}
-
 /// Upload limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadConfig {
@@ -215,20 +192,19 @@ pub enum Did {
     /// same bytes, read back: this engine's earlier commit, whose answer was
     /// lost or whose listing was stale, is confirmed.
     AlreadyPut(FileKey),
-    /// The replica was listed and the staged files from `from` on cannot
+    /// The replica was listed and the staged files from `confirmed` on cannot
     /// continue it, so they must go and new content takes a transaction above
-    /// `confirmed`: the replica's newest level-0 object verifies and differs
-    /// from the staged file under the same key (`from` is that key's
+    /// it: the replica's newest level-0 object verifies and differs from the
+    /// staged file under the same key (`confirmed` is that key's
     /// transaction). It stands and is confirmed, since it may already be
     /// compacted into higher levels and writing over it would give one
     /// transaction two contents. Whether the staged files after it continue
     /// the replica is not a listing's to judge: each needs its witness
     /// (`crate::witness`), which a boot takes from the live WAL.
     Diverged {
-        /// The newest transaction the replica holds, now confirmed.
+        /// The newest transaction the replica holds, now confirmed: also the first staged
+        /// transaction that cannot follow it.
         confirmed: Txid,
-        /// The first staged transaction that cannot follow it.
-        from: Txid,
     },
 }
 
@@ -251,10 +227,6 @@ pub struct UploadFailed {
     pub fault: Fault,
 }
 
-fn staged_key(txid: Txid) -> FileKey {
-    FileKey::new(Level::ZERO, TxidRange::single(txid))
-}
-
 /// The next step from a state, given the newest staged transaction. Pure.
 #[must_use]
 pub(crate) fn plan_upload(state: &UploadState, newest_staged: Option<Txid>) -> UploadPlan {
@@ -264,7 +236,7 @@ pub(crate) fn plan_upload(state: &UploadState, newest_staged: Option<Txid>) -> U
             let next = confirmed.map_or(Some(Txid::MIN), Txid::next);
             match (next, newest_staged) {
                 (Some(next), Some(position)) if next <= position => {
-                    UploadPlan::Upload(staged_key(next))
+                    UploadPlan::Upload(FileKey::staged(next))
                 }
                 _ => UploadPlan::Idle,
             }
@@ -291,7 +263,7 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     witnesses: &Witnesses,
 ) -> Result<Uploaded, UploadFailed> {
     let (staging, remote) = (&Staging(staging), &Replica(remote));
-    let with = (witnesses, Guard::BucketRefuses);
+    let with = (witnesses, WriteMode::New);
     let mut in_flight = InFlight::default();
     loop {
         let mut budget = SLICE.get();
@@ -319,7 +291,7 @@ pub(crate) async fn upload_step<L: Role, S: Role>(
     state: UploadState,
     (staging, remote): (&L, &S),
     newest_staged: Option<Txid>,
-    (witnesses, guard): (&Witnesses, Guard),
+    (witnesses, mode): (&Witnesses, WriteMode),
     (in_flight, budget): (&mut InFlight, &mut u64),
 ) -> Result<Option<Uploaded>, UploadFailed> {
     let plan = plan_upload(&state, newest_staged);
@@ -327,7 +299,7 @@ pub(crate) async fn upload_step<L: Role, S: Role>(
         UploadPlan::Upload(key) => witnesses.get(&key),
         UploadPlan::Idle | UploadPlan::List => None,
     };
-    let sending = in_flight.take_for(token, guard.mode()).await;
+    let sending = in_flight.take_for(token, mode).await;
     match (plan, sending) {
         (UploadPlan::Idle, _) => Ok(Some(Uploaded {
             state,
@@ -395,7 +367,7 @@ async fn list_step<L: Role, S: Role>(
                 }
                 TailVerdict::Replace => tail.prev().max(confirmed),
                 TailVerdict::Diverged => {
-                    return Ok(diverged(tail, tail));
+                    return Ok(diverged(tail));
                 }
             }
         }
@@ -418,7 +390,7 @@ fn held_above(inventory: &Inventory, txid: Txid) -> bool {
 
 /// The size a listing shows for the level-0 file of `txid`, when it shows one.
 fn listed_size(inventory: &Inventory, txid: Txid) -> Option<u64> {
-    let key = staged_key(txid);
+    let key = FileKey::staged(txid);
     inventory
         .level(Level::ZERO)
         .iter()
@@ -426,10 +398,10 @@ fn listed_size(inventory: &Inventory, txid: Txid) -> Option<u64> {
         .map(|info| info.size)
 }
 
-fn diverged(confirmed: Txid, from: Txid) -> Uploaded {
+fn diverged(confirmed: Txid) -> Uploaded {
     Uploaded {
         state: UploadState::At(Some(confirmed)),
-        did: Did::Diverged { confirmed, from },
+        did: Did::Diverged { confirmed },
     }
 }
 
@@ -456,7 +428,7 @@ async fn judge_tail<L: Role, S: Role>(
     tail: Txid,
     size: u64,
 ) -> Result<TailVerdict, Fault> {
-    let key = staged_key(tail);
+    let key = FileKey::staged(tail);
     let after = tail.prev().map(TxidRange::single);
     let limit = PageLimit::ONE;
     let page = staging
