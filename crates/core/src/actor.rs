@@ -2763,9 +2763,6 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Option<Tick> {
-        if !self.snapshot_ready() {
-            return None;
-        }
         let (job, mut snapshot) = self.engine.snapshot.take()?;
         let sent = snapshot.sent;
         let budget = self.kept.cfg.upload.bytes_per_tick.get();
@@ -2806,7 +2803,8 @@ impl Actor {
         }
     }
 
-    /// Whether a snapshot is part-way and not waiting for its upload's parts.
+    /// Whether a snapshot part-way is work to tick for. One that waits for its upload's parts is
+    /// not: a part that ends wakes the task, and the next tick's slice reads on, as for a send.
     fn snapshot_ready(&self) -> bool {
         self.engine
             .snapshot
@@ -2817,7 +2815,8 @@ impl Actor {
     /// Whether the snapshot's slice goes first this tick: until [`state::FAIR_SHARE`] of them
     /// ran in a row, then the rest of the engine has a tick, as after a staged file's slices.
     fn snapshot_owed(&mut self) -> bool {
-        let owed = self.snapshot_ready() && self.engine.snapshot_slices < state::FAIR_SHARE;
+        let owed =
+            self.engine.snapshot.is_some() && self.engine.snapshot_slices < state::FAIR_SHARE;
         if !owed {
             self.engine.snapshot_slices = 0;
         }

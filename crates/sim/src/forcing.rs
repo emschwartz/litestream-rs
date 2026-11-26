@@ -644,6 +644,7 @@ mod tests {
             created_at: zero,
             size: 0,
             digest: 0,
+            begun: zero,
             at: zero,
             high: zero,
         }

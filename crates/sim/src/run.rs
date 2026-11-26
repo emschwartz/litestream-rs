@@ -2613,11 +2613,20 @@ impl Runner {
         self.app_lets_go();
         self.reboot();
         let mut settled = false;
-        for _ in 0..SETTLE_TICKS {
+        // A tick that sent a slice made progress a file's size bounds: a level-9 snapshot
+        // written after the boot goes a slice a tick, so its slices do not count against the
+        // settle budget; the drain's tick cap bounds them.
+        let (mut ticks, mut slices) = (0_u32, 0_u32);
+        while ticks < SETTLE_TICKS && slices < DRAIN_TICKS {
             let spins = self.report.spins;
             let (step, stats) = self.step(None)?;
             if self.ends_idle(&step)? {
                 return Ok(());
+            }
+            if matches!(stats.event, Some(Event::Sending { .. })) {
+                slices = slices.saturating_add(1);
+            } else {
+                ticks = ticks.saturating_add(1);
             }
             if matches!(stats.event, Some(Event::Idle)) && self.report.spins == spins && self.quiet
             {

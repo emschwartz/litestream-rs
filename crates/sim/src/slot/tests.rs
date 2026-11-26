@@ -23,6 +23,7 @@ fn put(level: u8, txid: u64, digest: u64) -> RecorderEvent {
         created_at: zero,
         size: 1,
         digest,
+        begun: zero,
         at: zero,
         high: zero,
     }

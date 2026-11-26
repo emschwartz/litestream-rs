@@ -202,7 +202,8 @@ fn a_failed_slice_ends_the_snapshot_and_lets_the_pin_go() {
 }
 
 /// A snapshot whose upload waits for its parts hands nothing over and is no work to tick for;
-/// the engine says it waits for parts.
+/// the engine says it waits for parts. Once they land the next tick reads on, and the snapshot
+/// is written.
 #[test]
 fn a_snapshot_whose_upload_waits_for_its_parts_is_no_slice() {
     let (mut rig, mut actor) = before_a_long_snapshot();
@@ -213,6 +214,16 @@ fn a_snapshot_whose_upload_waits_for_its_parts_is_no_slice() {
     assert!(actor.awaits_parts(), "{tick:?}");
     assert_ne!(next_of(&tick), Some(Next::Now), "{tick:?}");
     assert_eq!(actor.engine.snapshot.as_ref().map(|(_, s)| s.sent), sent);
+    for _ in 0..200 {
+        if newest(&rig, Level::SNAPSHOT).is_some() {
+            break;
+        }
+        rig.tick(&mut actor, T0);
+    }
+    assert!(
+        newest(&rig, Level::SNAPSHOT).is_some(),
+        "a snapshot that waited for its parts was never written"
+    );
 }
 
 /// The snapshot's slices go first only for their share: after [`state::FAIR_SHARE`] of them a

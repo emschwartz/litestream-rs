@@ -1,0 +1,9 @@
+# A level-9 snapshot whose upload waited for its parts gets no slice again: only a slice reads
+# whether the parts landed, so it waits for ever, and with no checkpoint under it the WAL grows
+# without bound.
+name = "waiting-snapshot-never-resumes"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced_snapshot::a_snapshot_whose_upload_waits_for_its_parts_is_no_slice",
+]

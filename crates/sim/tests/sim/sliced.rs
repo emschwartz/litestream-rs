@@ -364,10 +364,11 @@ fn another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted() {
     // Sixteen bytes a tick. The first file goes up, and maintenance settles after it.
     let mut ops = in_flight();
     ops.extend(ticks(400));
-    // A commit, and the checkpoint the idle time made due, whose own frame is a file too: the
-    // 54th tick publishes the second of them, and no maintenance pass follows that put.
+    // A commit, and the checkpoint the idle time made due, whose own frame is a file too, with
+    // the scheduled snapshot going sixteen bytes a tick beside them: the 266th tick publishes
+    // the second file, and no maintenance pass follows that put.
     ops.push(commit.clone());
-    ops.extend(ticks(54));
+    ops.extend(ticks(266));
     // The next commit is in the WAL, not yet staged, when the other writer takes its id.
     ops.push(commit);
     ops.push(Op::SecondWriter { ticks: 60 });
