@@ -184,6 +184,9 @@ impl Runner {
         for _ in 0..TAIL_COMMITS {
             let frontier = self.replica_frontier();
             self.commit(TAIL_COMMIT_PAGES, false);
+            // Staged files older than the commit upload before its own: the first file past
+            // the frontier is then theirs, and the WAL has had no sync to checkpoint after.
+            let backlog = self.pending(frontier) > 0;
             let mut began = self.now();
             let mut excused = false;
             let mut reached = false;
@@ -222,9 +225,10 @@ impl Runner {
                     reached = true;
                     self.report.reach.bump("liveness.judged");
                     within(Bound::CommitLagMillis, millis(waited), millis(bound))?;
-                    // A fault in the window may have failed a checkpoint, and a reader still
-                    // open blocks the WAL's restart: the bound is for a healthy WAL.
-                    if excused || !self.readers.is_empty() {
+                    // A fault in the window may have failed a checkpoint, a reader still open
+                    // blocks the WAL's restart, and a backlog ahead of the commit means the file
+                    // that arrived is not its own: the bound is for a healthy WAL.
+                    if excused || backlog || !self.readers.is_empty() {
                         self.report.reach.bump("wal_bound.excused");
                     } else {
                         self.report.reach.bump("wal_bound.judged");
@@ -248,10 +252,13 @@ impl Runner {
             self.w.clock.advance(TAIL_GAP);
         }
         let spent = crate::resources::delta(remote0, self.w.remote_recorder.counts());
-        // An upload still open (the snapshot the tail asked for, part-way) wasted nothing yet.
+        // An upload still open (the snapshot the tail asked for, part-way) wasted nothing yet,
+        // and one the store refused for a key it holds from an earlier commit of the same
+        // upload (one that landed and answered with an error) is how the engine finds out.
         let wasted = spent
             .written_bytes
             .saturating_sub(spent.committed_bytes)
+            .saturating_sub(spent.refused_held_bytes)
             .saturating_sub(self.w.remote_recorder.open_bytes());
         let open = self
             .limits()

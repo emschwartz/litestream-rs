@@ -141,6 +141,9 @@ pub fn delta(before: RecorderCounts, after: RecorderCounts) -> RecorderCounts {
         written_bytes: after.written_bytes.saturating_sub(before.written_bytes),
         read_bytes: after.read_bytes.saturating_sub(before.read_bytes),
         committed_bytes: after.committed_bytes.saturating_sub(before.committed_bytes),
+        refused_held_bytes: after
+            .refused_held_bytes
+            .saturating_sub(before.refused_held_bytes),
         rereads_given: after.rereads_given.saturating_sub(before.rereads_given),
         rereads_differing: after
             .rereads_differing
