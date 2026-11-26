@@ -741,12 +741,12 @@ fn short_decide(
         return Ok(nothing);
     };
     let anchor = now.min(newest_created_at);
-    let listed_files: Vec<FileInfo> = Level::COMPACTION
+    // One run per level: `merged_ranges` folds each run in one ascending pass.
+    let listed_levels: Vec<&[FileInfo]> = Level::COMPACTION
         .iter()
-        .flat_map(|level| listed.level(*level))
-        .copied()
+        .map(|level| listed.level(*level))
         .collect();
-    let cover = merged_ranges(&[listed_files.as_slice()]);
+    let cover = merged_ranges(&listed_levels);
     let scan = LevelZero {
         floor: None,
         anchor,
@@ -833,6 +833,11 @@ fn merged_ranges(runs: &[&[FileInfo]]) -> Vec<(Txid, Txid)> {
 /// Folds `min..=max` into the last span when they touch or overlap; `min` must not
 /// precede the last span's start.
 fn add_span(spans: &mut Vec<(Txid, Txid)>, min: Txid, max: Txid) {
+    debug_assert!(
+        spans.last().is_none_or(|(start, _)| *start <= min),
+        "{min:?} precedes the last span {:?}",
+        spans.last()
+    );
     match spans.last_mut() {
         Some((_, end)) if end.next().is_none_or(|one_past| min <= one_past) => {
             *end = (*end).max(max);
