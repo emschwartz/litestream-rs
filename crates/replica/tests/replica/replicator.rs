@@ -895,6 +895,79 @@ fn a_reader_guard_holds_off_truncate() {
     site.assert_restores(&*site.store());
 }
 
+/// The default configuration, which gives no word about readers, TRUNCATEs once the WAL passes
+/// the threshold, as Go does: the WAL file shrinks. (The threshold is lowered so the test need
+/// not write 500 MB; the default's own value is pinned in `lsr_replica::config`.)
+#[test]
+fn the_default_configuration_truncates_the_wal_past_the_threshold() {
+    let site = Site::new();
+    let (runtime, clock) = fake();
+    let defaults = Config {
+        checkpoint: CheckpointConfig {
+            interval: None,
+            min_pages: None,
+            truncate_pages: NonZeroU32::new(4),
+        },
+        ..config()
+    };
+    assert_eq!(defaults.readers, ReaderTracking::Untracked);
+    let replicator = Replicator::start(
+        &site.db,
+        site.store(),
+        StartOptions {
+            config: defaults,
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
+    let (sink, events) = ChannelSink::new(NonZeroUsize::new(1024).unwrap());
+    replicator.set_events(Box::new(sink));
+    moved_until(&replicator, &clock, (POLL, 240), caught_up);
+    // A reader on an old snapshot keeps PASSIVE from emptying the WAL, so only a TRUNCATE can.
+    let reader = Connection::open(&site.db).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _rows: i64 = reader
+        .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    site.commit(10);
+    let wal = site.db.with_file_name("app.db-wal");
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        clock.advance(POLL);
+        let now = clock.now();
+        wait(&replicator, |h| h.reported_at >= now);
+        seen.extend(events.drain());
+    }
+    // Blocked by the reader, a TRUNCATE reports busy and the WAL keeps what it holds.
+    let truncate = |busy: bool| {
+        seen.iter().any(|event| {
+            matches!(event, Event::Engine(EngineEvent::Checkpointed { mode: CheckpointMode::Truncate, busy: b }) if *b == busy)
+        })
+    };
+    assert!(truncate(true) && !truncate(false), "{seen:?}");
+    let grown = std::fs::metadata(&wal).unwrap().len();
+    reader.execute_batch("COMMIT").unwrap();
+    site.commit(2);
+    let mut truncates = 0;
+    for _ in 0..5 {
+        clock.advance(POLL);
+        let now = clock.now();
+        wait(&replicator, |h| h.reported_at >= now);
+        truncates += checkpoints(&events.drain(), CheckpointMode::Truncate);
+    }
+    assert!(truncates > 0, "no TRUNCATE under the default configuration");
+    assert!(
+        std::fs::metadata(&wal).unwrap().len() < grown,
+        "the WAL did not shrink"
+    );
+    assert!(matches!(
+        stopped(&replicator, &clock),
+        StopOutcome::Drained { .. }
+    ));
+    site.assert_restores(&*site.store());
+}
+
 #[test]
 fn app_connection_sets_up_only_this_database() {
     let site = Site::new();

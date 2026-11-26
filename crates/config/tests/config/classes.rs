@@ -304,23 +304,6 @@ fn rust_settings_live_under_one_key() {
     ));
 }
 
-#[test]
-fn without_the_app_readers_claim_the_truncate_divergence_is_reported() {
-    let loaded = parse(DB);
-    assert!(
-        warnings_at(&loaded.report.warnings, "the file")
-            .contains(&&WarningKind::NoTruncateWithoutClaim)
-    );
-    let loaded = parse(&format!("{DB}litestream-rs:\n  app-readers: none\n"));
-    assert!(
-        !loaded
-            .report
-            .warnings
-            .iter()
-            .any(|w| w.kind == WarningKind::NoTruncateWithoutClaim)
-    );
-}
-
 const SECRET_KEYS: &[&str] = &[
     "secret-access-key",
     "access-key-id",

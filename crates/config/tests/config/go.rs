@@ -588,14 +588,11 @@ fn checkpoint_fields() {
         (unset.min_checkpoint_page_count(), unset.truncate_page_n()),
         (None, None)
     );
-    // Without the claim that the application holds no long readers, litestream-rs never truncates.
-    let problems = refused(
+    // No claim about readers is needed: Go's own file loads as it is.
+    let unclaimed = db(
         "dbs:\n  - path: /tmp/test.db\n    truncate-page-n: 100000\n    replica:\n      url: file:///tmp/replica\n",
     );
-    assert_eq!(
-        problem_at(&problems, "dbs[0].truncate-page-n"),
-        ProblemKind::TruncateNeedsClaim
-    );
+    assert_eq!(unclaimed.truncate_page_n(), Some(100_000));
 }
 
 #[test]

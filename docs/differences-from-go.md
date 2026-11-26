@@ -12,7 +12,6 @@ The replica is the same: the bucket layout and the LTX files. Either implementat
 - **It can hold the application's writes.** Under the default `if-replication-stops: hold-start`, writes fail with "database is locked" until the start is judged, and stay held if that first attempt stops or is refused. `report` is Go's behaviour.
 - **Restores are verified, and exact or refused.** A corrupt file or a missing one fails the restore with a named error, where Go can exit 0.
 - **The config is read strictly.** An unknown key or a feature that is not built is refused at load.
-- **No TRUNCATE checkpoint unless the config says the application holds no long readers.** Go truncates by default.
 - **Missing:** storage other than S3 and a local directory, the VFS read replica, the control socket and its commands, and encryption settings.
 
 ## Same as Go
@@ -78,7 +77,7 @@ The replicator saves each batch of changes in its working folder (the folder whe
 | An environment variable in the config that is not set | Expands to nothing and says nothing, wherever it stands in the file, a YAML comment included | Expands to nothing as Go does. Warns once per name when a key or value reads it; a reference only in a comment is silent |
 | `replicate -once -enforce-retention` on an idle database | Keeps 1 snapshot | Keeps 2 |
 | The application holds SQLite's write lock when a checkpoint is due | Waits inside SQLite for up to `busy-timeout` (1 second by default). Still refused, it skips the checkpoint without a word and tries at its next sync | Never waits inside SQLite. It skips the checkpoint and asks again after 10 ms, then less often, up to once a second, with a debug line and no failure counted ([decisions/D225.md](decisions/D225.md)) |
-| A TRUNCATE checkpoint, once the WAL passes `truncate-page-n` | On by default. After it Go copies the whole database while it holds SQLite's write lock, so the application cannot write until the copy ends (minutes, for a large database) | Off unless the config says `litestream-rs: {app-readers: none}`. Then each TRUNCATE that empties the WAL is followed by a copy of the whole database, read from disk and uploaded as a snapshot: disk reads and bucket bytes in proportion to the database's size. The application keeps writing during the copy. Writes wait only while SQLite's own TRUNCATE copies the WAL into the database file, which depends on the WAL's size, not the database's ([decisions/D190.md](decisions/D190.md)) |
+| After a TRUNCATE checkpoint (on by default in both, at `truncate-page-n`, 121,359 pages) | Go copies the whole database while it holds SQLite's write lock, so the application cannot write until the copy ends (minutes, for a large database) | Each TRUNCATE that moves the WAL is followed by a copy of the whole database, read from disk and uploaded as a snapshot: disk reads and bucket bytes in proportion to the database's size, once each time the threshold fires. The application keeps writing during the copy. Writes wait only while SQLite's own TRUNCATE copies the WAL into the database file, which depends on the WAL's size, not the database's ([decisions/D190.md](decisions/D190.md)) |
 
 ## Go has it, litestream-rs does not
 

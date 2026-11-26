@@ -97,7 +97,7 @@ fn an_entry_with_no_settings_gets_go_s_defaults() {
     assert_eq!(config.retry_interval, secs(1));
     assert_eq!(config.checkpoint.interval, Some(Duration::from_secs(60)));
     assert_eq!(config.checkpoint.min_pages, NonZeroU32::new(1000));
-    assert_eq!(config.checkpoint.truncate_pages, None);
+    assert_eq!(config.checkpoint.truncate_pages, NonZeroU32::new(121_359));
     assert_eq!(config.readers, ReaderTracking::Untracked);
     assert_eq!(config.maintenance, Maintenance::go_default());
     assert_eq!(
@@ -160,23 +160,38 @@ fn min_checkpoint_page_count_must_be_above_zero() {
     assert_eq!(db.config().checkpoint.min_pages, NonZeroU32::new(u32::MAX));
 }
 
-/// Go's `effectiveTruncatePageN` (`db.go:1599-1608`), under the operator's claim.
+/// Go's `effectiveTruncatePageN` (`db.go:1599-1608`), under every `app-readers` setting; the
+/// library's defaults and the file's agree.
 #[test]
-fn truncate_page_n_acts_as_go_only_under_the_claim() {
+fn truncate_page_n_acts_as_go() {
     let claim = "litestream-rs:\n  app-readers: none\n";
+    for prefix in ["", claim] {
+        let at = |key: &str| {
+            one(&format!("{prefix}{}", db_with(key)))
+                .config()
+                .checkpoint
+        };
+        assert_eq!(at("").truncate_pages, NonZeroU32::new(121_359));
+        assert_eq!(
+            at("    truncate-page-n: 0\n").truncate_pages,
+            NonZeroU32::new(121_359)
+        );
+        assert_eq!(
+            at("    truncate-page-n: 5000\n").truncate_pages,
+            NonZeroU32::new(5000)
+        );
+        assert_eq!(at("    truncate-page-n: -1\n").truncate_pages, None);
+    }
+    assert_eq!(
+        one(&db_with("")).config().checkpoint.truncate_pages,
+        lsr_replica::Config::default().checkpoint.truncate_pages
+    );
+    assert_eq!(
+        one(&db_with("")).config().readers,
+        ReaderTracking::Untracked
+    );
     let db = one(&format!("{claim}{}", db_with("")));
     assert_eq!(db.config().readers, ReaderTracking::Tracked);
-    assert_eq!(
-        db.config().checkpoint.truncate_pages,
-        NonZeroU32::new(121_359)
-    );
-    let db = one(&format!(
-        "{claim}{}",
-        db_with("    truncate-page-n: 5000\n")
-    ));
-    assert_eq!(db.config().checkpoint.truncate_pages, NonZeroU32::new(5000));
-    let db = one(&format!("{claim}{}", db_with("    truncate-page-n: -1\n")));
-    assert_eq!(db.config().checkpoint.truncate_pages, None);
 }
 
 /// `wal_reader.go:241` and `replica.go:208`: zero or less is no limit.

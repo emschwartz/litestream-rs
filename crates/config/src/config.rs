@@ -317,7 +317,7 @@ impl DbConfig {
     pub fn min_checkpoint_page_count(&self) -> Option<i64> {
         self.min_checkpoint_page_count
     }
-    /// `truncate-page-n`; set only with the `app-readers: none` claim.
+    /// `truncate-page-n`; unset for Go's zero, which is Go's default (121359).
     #[must_use]
     pub fn truncate_page_n(&self) -> Option<i64> {
         self.truncate_page_n
@@ -482,13 +482,13 @@ impl S3Settings {
     }
 }
 
-/// What the operator states about the application's readers: TRUNCATE waits for every reader, so it
-/// runs only when the operator says the application holds no long readers.
+/// What the operator states about the application's readers. It no longer gates TRUNCATE, which
+/// runs either way and reports busy while a reader blocks it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppReaders {
-    /// Nothing stated (the default): litestream-rs never checkpoints with TRUNCATE.
+    /// Nothing stated (the default).
     Unknown,
-    /// `none`: the application holds no long readers, so `truncate-page-n` acts as in Go.
+    /// `none`: the application holds no long readers.
     None,
 }
 
