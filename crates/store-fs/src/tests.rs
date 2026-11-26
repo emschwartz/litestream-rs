@@ -36,6 +36,25 @@ impl Harness for FsHarness {
 
 lsr_core::conformance_suite!(FsHarness::new);
 
+/// A directory on the host reports the room its filesystem has, which a copy of the database
+/// is held against before it is staged.
+#[cfg(unix)]
+#[test]
+fn a_directory_reports_the_free_space_of_its_filesystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FsStore::new(dir.path());
+    let free = store.free_bytes().expect("a temporary directory can say");
+    assert!(free > 0, "a disk with no room could not hold this test");
+}
+
+/// A directory that is not there cannot say, and the store answers nothing rather than a guess.
+#[test]
+fn a_missing_directory_reports_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FsStore::new(dir.path().join("absent"));
+    assert_eq!(store.free_bytes(), None);
+}
+
 fn key(level: u8, min: u64, max: u64) -> FileKey {
     let range = TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap();
     FileKey::new(Level::new(level).unwrap(), range)
