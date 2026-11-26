@@ -79,8 +79,12 @@ fn settled(rig: &Rig, actor: &mut Actor) -> Result<(), Fault> {
     block_on(async {
         let mut none = crate::upload::InFlight::default();
         let unsent = none.stop().await;
+        let held = crate::inventory::Inventory::load(&Replica(&rig.remote))
+            .await
+            .unwrap()
+            .newest();
         actor
-            .settle_course(&Staging(&rig.staging), &Replica(&rig.remote), &unsent)
+            .settle_course(&Staging(&rig.staging), held, &unsent)
             .await
     })
 }
@@ -1108,6 +1112,37 @@ fn a_course_begun_at_the_replicas_newest_file_keeps_its_files() {
     // Two files, one a commit, in one batch that ends at the second.
     assert_eq!(uploaded(&seen), vec![5]);
     assert_eq!(restored(&rig), 5);
+}
+
+/// The boot that settles a course's files against the replica reads the listing it made for
+/// the boot, and lists nothing more for them: a boot with no course lists the same.
+#[test]
+fn settling_a_course_lists_the_replica_no_more_than_a_boot_without_one() {
+    let boot_lists = |with_course: bool| {
+        let (mut rig, mut actor) = caught_up();
+        commit_and_settle(&mut rig, &mut actor, 2, T0 + 1);
+        commit_and_settle(&mut rig, &mut actor, 3, T0 + 1);
+        let mut at = T0 + 1_000;
+        actor = Actor::new(go_like());
+        if with_course {
+            down(&rig);
+            at = at.saturating_add(bound());
+            rig.commit(4);
+            run(&mut rig, &mut actor, T0 + 1_000, at);
+            assert!(is_local(&actor));
+            up(&rig);
+            at += 600_000;
+        }
+        let before = rig.remote.lists();
+        let seen = run(&mut rig, &mut actor, at, at);
+        assert!(
+            seen.iter()
+                .any(|tick| event(tick) == Some(&Event::Booted { cause: None })),
+            "{seen:?}"
+        );
+        rig.remote.lists() - before
+    };
+    assert_eq!(boot_lists(true), boot_lists(false));
 }
 
 /// A replica that holds nothing has no file above the course either: the snapshot that
