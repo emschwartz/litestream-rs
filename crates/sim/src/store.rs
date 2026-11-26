@@ -27,9 +27,9 @@ use std::task::{Context, Poll};
 
 use lsr_core::WriteMode;
 use lsr_core::{
-    BatchKind, BoxFuture, ByteTally, CorruptCause, Entropy, FileInfo, FileKey, Level, ListAt,
-    Listing, ObjectStore, Opened, PageLimit, ReadAt, ReadLen, Reread, SeededEntropy, StoreError,
-    StoreOp, Upload,
+    Again, BatchKind, BoxFuture, CorruptCause, Entropy, FileInfo, FileKey, Flight, Level, ListAt,
+    Listing, ObjectStore, Opened, PageLimit, ReadAt, ReadLen, Reread, Rest, SeededEntropy, Seen,
+    StoreError, StoreOp, Upload,
 };
 use lsr_core::{Clock, CreatedAt, FakeClock};
 use lsr_ltx::{HEADER_LEN, Header, Timestamp, TxidRange, WalOrigin};
@@ -765,26 +765,17 @@ impl<U: Upload> Upload for FaultsUpload<U> {
     }
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        self.commit_inner(None).await
+        self.commit_inner().await
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        self.commit_inner(Some(again)).await
+    /// Not a call to fault: it sends nothing of its own, and a part's failure comes through
+    /// it as the store reports it.
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        self.inner.flight(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
         self.inner.abort().await
-    }
-}
-
-/// Commits `inner`, through the source the engine gave when it gave one.
-async fn commit_of<U: Upload>(
-    inner: U,
-    again: Option<&dyn Reread>,
-) -> Result<FileInfo, StoreError> {
-    match again {
-        Some(again) => inner.commit_from(again).await,
-        None => inner.commit().await,
     }
 }
 
@@ -816,7 +807,7 @@ impl<U: Upload> FaultsUpload<U> {
         Ok(())
     }
 
-    async fn commit_inner(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
+    async fn commit_inner(self) -> Result<FileInfo, StoreError> {
         let verdict = lock(&self.state).decide(Call::Commit);
         if matches!(
             verdict,
@@ -830,14 +821,14 @@ impl<U: Upload> FaultsUpload<U> {
                 Err(err)
             }
             Verdict::AfterPublish(err) => {
-                commit_of(self.inner, again).await?;
+                self.inner.commit().await?;
                 if let Some(volatile) = &self.volatile {
                     volatile.mark_volatile(self.key);
                 }
                 Err(err)
             }
             Verdict::SizeMismatch => {
-                let mut info = commit_of(self.inner, again).await?;
+                let mut info = self.inner.commit().await?;
                 // Not damage the store hid: it said the size, so the engine is
                 // told. A level-0 replace must not delete it (the key may have
                 // held an acknowledged object, D78), so the short object is
@@ -861,18 +852,18 @@ impl<U: Upload> FaultsUpload<U> {
                 Ok(info)
             }
             Verdict::Checksum => {
-                commit_of(self.inner, again).await?;
+                self.inner.commit().await?;
                 Err(checksum_mismatch(self.key))
             }
             Verdict::Corrupt => {
-                let info = commit_of(self.inner, again).await?;
+                let info = self.inner.commit().await?;
                 if let Some(raw) = &self.raw {
                     damage(raw, &info).await?;
                     lock(&self.state).damaged.push(info.key);
                 }
                 Err(checksum_mismatch(self.key))
             }
-            Verdict::Pass | Verdict::Flip(_) => commit_of(self.inner, again).await,
+            Verdict::Pass | Verdict::Flip(_) => self.inner.commit().await,
         }
     }
 }
@@ -1011,9 +1002,9 @@ impl<U: Upload> Upload for YieldUpload<U> {
         self.inner.commit().await
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        YieldNow(false).await;
-        self.inner.commit_from(again).await
+    /// No crash point of its own: the question sends nothing.
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        self.inner.flight(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
@@ -1317,7 +1308,7 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
             head: Vec::new(),
             wrote: 0,
             digest: DIGEST_SEED,
-            first: Vec::new(),
+            first: Arc::default(),
             log: self.log.clone(),
         })
     }
@@ -1365,42 +1356,62 @@ pub struct TapUpload<S: ObjectStore> {
     wrote: u64,
     digest: u64,
     /// The bytes handed over with a source to read them back from: the first read, which
-    /// every second read is compared with.
-    first: Vec<u8>,
+    /// every later read is compared with. Shared with the readers the store was given, which
+    /// a part in flight may read after the write that handed its bytes over.
+    first: Arc<Mutex<Vec<u8>>>,
     log: RecorderLog,
 }
 
-/// The source an engine gave with its bytes, watched: each second read is counted as what
-/// it was against the first read the recorder kept ([`RecorderCounts::rereads_given`] and
-/// the two beside it). It changes no answer.
+/// The source an engine gave with its bytes, watched: each later read through a reader it
+/// opened is counted as what it was against the first read the recorder kept
+/// ([`RecorderCounts::rereads_given`] and the two beside it). It changes no answer.
 struct Watched<'u> {
     inner: &'u dyn Reread,
-    first: &'u [u8],
+    first: &'u Arc<Mutex<Vec<u8>>>,
     log: &'u RecorderLog,
 }
 
 impl Reread for Watched<'_> {
+    fn open(&self) -> BoxFuture<'_, Result<Box<dyn Again>, StoreError>> {
+        Box::pin(async move {
+            let reader: Box<dyn Again> = Box::new(WatchedReader {
+                inner: self.inner.open().await?,
+                first: Arc::clone(self.first),
+                log: self.log.clone(),
+            });
+            Ok(reader)
+        })
+    }
+}
+
+/// A reader [`Watched`] opened.
+struct WatchedReader {
+    inner: Box<dyn Again>,
+    first: Arc<Mutex<Vec<u8>>>,
+    log: RecorderLog,
+}
+
+impl Again for WatchedReader {
     fn read<'a>(
-        &'a self,
+        &'a mut self,
         offset: u64,
-        was: &'a ByteTally,
+        was: &'a Seen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
             let out = self.inner.read(offset, was).await;
-            self.log.with(|s| match &out {
-                Ok(bytes) => {
-                    let first = usize::try_from(offset)
-                        .ok()
-                        .and_then(|start| self.first.get(start..))
-                        .and_then(|rest| rest.get(..bytes.len()));
-                    let whole = u64::try_from(bytes.len()).is_ok_and(|len| len == was.size());
-                    if whole && first == Some(bytes.as_slice()) {
-                        bump(&mut s.counts.rereads_given);
-                    } else {
-                        bump(&mut s.counts.rereads_differing);
-                    }
-                }
-                Err(_) => bump(&mut s.counts.rereads_refused),
+            let same = out.as_ref().ok().map(|bytes| {
+                let first = lock(&self.first);
+                let held = usize::try_from(offset)
+                    .ok()
+                    .and_then(|start| first.get(start..))
+                    .and_then(|rest| rest.get(..bytes.len()));
+                let whole = u64::try_from(bytes.len()).is_ok_and(|len| len == was.len());
+                whole && held == Some(bytes.as_slice())
+            });
+            self.log.with(|s| match same {
+                Some(true) => bump(&mut s.counts.rereads_given),
+                Some(false) => bump(&mut s.counts.rereads_differing),
+                None => bump(&mut s.counts.rereads_refused),
             });
             out
         })
@@ -1450,11 +1461,11 @@ impl<S: ObjectStore> Upload for TapUpload<S> {
     }
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        self.commit_inner(None).await
+        self.commit_inner().await
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        self.commit_inner(Some(again)).await
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        self.inner.flight(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
@@ -1471,7 +1482,7 @@ impl<S: ObjectStore> TapUpload<S> {
         match again {
             Some(again) => {
                 // The store may read back inside this write, so the first read is kept first.
-                self.first.extend_from_slice(chunk);
+                lock(&self.first).extend_from_slice(chunk);
                 let watched = Watched {
                     inner: again,
                     first: &self.first,
@@ -1499,7 +1510,7 @@ impl<S: ObjectStore> TapUpload<S> {
         Ok(())
     }
 
-    async fn commit_inner(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
+    async fn commit_inner(self) -> Result<FileInfo, StoreError> {
         let Self {
             inner,
             key,
@@ -1512,17 +1523,8 @@ impl<S: ObjectStore> TapUpload<S> {
             log,
         } = self;
         let header = parse_header(&head);
-        let outcome = match again {
-            Some(again) => {
-                let watched = Watched {
-                    inner: again,
-                    first: &first,
-                    log: &log,
-                };
-                inner.commit_from(&watched).await
-            }
-            None => inner.commit().await,
-        };
+        drop(first);
+        let outcome = inner.commit().await;
         log.with(|s| {
             bump(&mut s.counts.commits);
             // An object the store accepted is recorded. The recorder sits below `Faults`, so a
@@ -1893,10 +1895,8 @@ impl<U: Upload> Upload for StageUpload<U> {
         Ok(info)
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        let info = self.inner.commit_from(again).await?;
-        self.handle.fsync_all();
-        Ok(info)
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        self.inner.flight(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

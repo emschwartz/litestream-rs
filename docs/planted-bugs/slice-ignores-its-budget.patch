@@ -1,12 +1,12 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 11a67e0bb..d279dd606 100644
+index 521227ec1..11a19393d 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -1103,7 +1103,6 @@ impl Sending {
+@@ -1194,7 +1194,6 @@ impl Sending {
              }
              let read = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
              self.offset = self.offset.saturating_add(read);
 -            *budget = budget.saturating_sub(read);
              let header = self.decoder.header().copied();
-             match (self.open.as_mut(), header) {
-                 (Some(open), _) => write_chunk::<L, S>(open, &chunk, &again).await?,
+             // A store that held the file open can open it again for each part; any other
+             // is handed the bytes to keep.

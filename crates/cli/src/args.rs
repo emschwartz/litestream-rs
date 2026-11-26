@@ -34,8 +34,8 @@ use thiserror::Error;
 mod inspect;
 mod restore;
 
-pub use inspect::{DatabasesArgs, Inspect, LtxArgs, LtxFrom, VersionArgs};
-pub use restore::{Restore, RestoreArgs, RestoreFrom};
+pub use inspect::{DatabasesArgs, LtxArgs, LtxFrom, VersionArgs};
+pub use restore::{RestoreArgs, RestoreFrom};
 
 /// Every word `lsr` takes first, in help order. The dispatcher in [`parse`] matches on it
 /// exhaustively and the help text lists every one, so a command cannot be accepted and left
@@ -753,27 +753,15 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         });
     };
     match command {
-        CommandName::Restore => match restore::parse(rest)? {
-            Restore::Run(args) => Ok(Command::Restore(args)),
-            Restore::Help => Ok(Command::Help),
-        },
-        CommandName::Databases => match inspect::parse_databases(rest)? {
-            Inspect::Run(args) => Ok(Command::Databases(args)),
-            Inspect::Help => Ok(Command::Help),
-        },
+        CommandName::Restore => Ok(restore::parse(rest)?.command(Command::Restore)),
+        CommandName::Databases => Ok(inspect::parse_databases(rest)?.command(Command::Databases)),
         CommandName::Ltx | CommandName::Wal => {
-            match inspect::parse_ltx(rest, command == CommandName::Wal)? {
-                Inspect::Run(args) => Ok(Command::Ltx(args)),
-                Inspect::Help => Ok(Command::Help),
-            }
+            Ok(inspect::parse_ltx(rest, command == CommandName::Wal)?.command(Command::Ltx))
         }
         CommandName::Verify | CommandName::Files | CommandName::TrustLocal => {
             parse_own(command, rest)
         }
-        CommandName::Version => match inspect::parse_version(rest)? {
-            Inspect::Run(args) => Ok(Command::VersionLine(args)),
-            Inspect::Help => Ok(Command::Help),
-        },
+        CommandName::Version => Ok(inspect::parse_version(rest)?.command(Command::VersionLine)),
         CommandName::Replicate => Ok(Command::Daemon(rest.to_vec())),
         CommandName::Config => parse_config(rest),
     }

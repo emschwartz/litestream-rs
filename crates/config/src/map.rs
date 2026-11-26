@@ -56,14 +56,12 @@ use std::time::Duration;
 
 use lsr_core::{
     CheckpointConfig, ConfigError as MaintenanceError, Interval, L0Retention, Maintenance,
-    OtherWriter, Response, Responses, RetentionMode,
+    RetentionMode,
 };
 use lsr_replica::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 use lsr_store_s3::{S3Config, S3Credentials};
 
-use crate::config::{
-    AppReaders, DbConfig, DbSource, GoConfig, OtherWriterSetting, ResponseSetting, ResponseSettings,
-};
+use crate::config::{AppReaders, DbConfig, DbSource, GoConfig};
 use crate::duration::GoDuration;
 use crate::error::KeyPath;
 use crate::expand::{Env, PathError, expand_path};
@@ -446,7 +444,7 @@ fn settings(
         checkpoint: checkpoint?,
         maintenance: maintenance?.clone(),
         sync_limits: sync_limits?,
-        responses: responses(config.rust().responses()),
+        responses: config.rust().responses(),
         readers: match config.rust().app_readers() {
             AppReaders::Unknown => ReaderTracking::Untracked,
             AppReaders::None => ReaderTracking::Tracked,
@@ -565,13 +563,15 @@ fn maintenance(config: &GoConfig, found: &mut Found) -> Option<Maintenance> {
     } else {
         L0Retention::After(l0)
     };
-    let check = l0_check(config.l0_retention_check_interval(), found)?;
+    let check = match config.l0_retention_check_interval() {
+        Some(value) => Some(l0_check(value, found)?),
+        None => None,
+    };
     match Maintenance::new(levels, interval, retention, l0) {
         Ok(schedule) => {
-            let schedule = if config.l0_retention_check_interval_is_set() {
-                schedule.with_l0_check_interval(check)
-            } else {
-                schedule
+            let schedule = match check {
+                Some(check) => schedule.with_l0_check_interval(check),
+                None => schedule,
             };
             Some(schedule.with_retention(if config.retention_enabled() {
                 RetentionMode::Enforce
@@ -595,44 +595,6 @@ fn l0_check(value: GoDuration, found: &mut Found) -> Option<Interval> {
         found.problem(&at, MapProblemKind::Duration { value });
     }
     every
-}
-
-/// `litestream-rs.responses` over Go's.
-fn responses(settings: ResponseSettings) -> Responses {
-    let base = Responses::GO_LIKE;
-    let one = |setting: Option<ResponseSetting>, default: Response| match setting {
-        None => default,
-        Some(ResponseSetting::KeepTrying) => Response::KeepTrying,
-        Some(ResponseSetting::Stop) => Response::Stop,
-    };
-    Responses {
-        credentials: one(settings.credentials, base.credentials),
-        permission_denied: one(settings.permission_denied, base.permission_denied),
-        clock_skew: one(settings.clock_skew, base.clock_skew),
-        bucket_missing: one(settings.bucket_missing, base.bucket_missing),
-        tls: one(settings.tls, base.tls),
-        store_refused: one(settings.store_refused, base.store_refused),
-        remote_corrupt: one(settings.remote_corrupt, base.remote_corrupt),
-        remote_regressed: one(settings.remote_regressed, base.remote_regressed),
-        wal_corrupt: one(settings.wal_corrupt, base.wal_corrupt),
-        wal_truncated: one(settings.wal_truncated, base.wal_truncated),
-        wal_unlinked: one(settings.wal_unlinked, base.wal_unlinked),
-        wal_sync_failed: one(settings.wal_sync_failed, base.wal_sync_failed),
-        page_size_changed: one(settings.page_size_changed, base.page_size_changed),
-        database_page_mismatch: base.database_page_mismatch,
-        conditional_writes_unsupported: one(
-            settings.conditional_writes_unsupported,
-            base.conditional_writes_unsupported,
-        ),
-        bug: one(settings.bug, base.bug),
-        other_writer: match settings.other_writer {
-            None => base.other_writer,
-            Some(OtherWriterSetting::Stop) => OtherWriter::Stop,
-            Some(OtherWriterSetting::ContinueAndInterleaveHistories) => {
-                OtherWriter::ContinueAndInterleaveHistories
-            }
-        },
-    }
 }
 
 /// Refuses two plans on one database, one replica or one meta directory.
