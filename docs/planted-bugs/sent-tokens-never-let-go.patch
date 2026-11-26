@@ -1,0 +1,11 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2233,7 +2233,6 @@
+         }
+         self.kept.tasks.get_mut(Task::Prune).succeed();
+         self.engine.pruned = Some(through);
+-        self.engine.sent.pruned_through(through);
+         if keys.is_empty() {
+             return None;
+         }

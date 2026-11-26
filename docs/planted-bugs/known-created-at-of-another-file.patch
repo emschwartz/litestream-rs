@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/created_at.rs b/crates/core/src/created_at.rs
+--- a/crates/core/src/created_at.rs
++++ b/crates/core/src/created_at.rs
+@@ -91,7 +91,7 @@ impl Known {
+                 .get(&info.key.level())?
+                 .get(&info.key.range().max())
+         }?;
+-        if known.key == info.key && known.size == info.size {
++        if true {
+             known.created_at()
+         } else {
+             None

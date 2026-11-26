@@ -13,7 +13,7 @@ use lsr_ltx::{Timestamp, Txid};
 use super::Actor;
 use crate::fault::{PersistentCause, StopCause};
 use crate::layout::FileKey;
-use crate::maintain::{MaintainState, Remembered, RetentionMode};
+use crate::maintain::{Job, MaintainState, Remembered, RetentionMode};
 use crate::verify::LivePages;
 
 /// What the actor is doing.
@@ -360,6 +360,11 @@ pub(super) struct Maintain {
     /// The last listing planned a snapshot while uploads were busy: the next listing waits
     /// for them to go idle, so the snapshot's last transaction is at most what was published.
     pub(super) snapshot_waits: bool,
+    /// A snapshot job whose step staged commits before it could take its proof: the files
+    /// upload, and the next maintenance tick takes the snapshot again from the same decision
+    /// instead of listing the whole replica to plan it again (a writer that commits every
+    /// tick would otherwise cost one whole listing per attempt).
+    pub(super) snapshot_retry: Option<Job>,
     /// The newest file known at each level, so a pass can list the tail of a level instead
     /// of all of it. In memory only; every fault drops it.
     pub(super) remembered: Remembered,
@@ -382,6 +387,7 @@ impl Default for Maintain {
             suspect: None,
             passed_over: 0,
             snapshot_waits: false,
+            snapshot_retry: None,
             remembered: Remembered::default(),
         }
     }
