@@ -2275,6 +2275,12 @@ impl Actor {
             }
         }
         self.upload_succeeded();
+        // A tick that published a file and began the next spent its bytes as a slice does, and
+        // the file it began goes first next tick: without the count, a backlog of such files
+        // keeps the WAL step from its turn until the last of them is up.
+        if self.engine.in_flight.sent().is_some() {
+            self.engine.slices_ahead = self.engine.slices_ahead.saturating_add(1);
+        }
         Some(self.ran(Event::Uploaded(last), now))
     }
 

@@ -308,6 +308,59 @@ fn checkpoints_run_while_a_file_is_in_flight() {
     );
 }
 
+/// A backlog of staged files, each a little larger than what a tick has left after finishing
+/// the one before: every upload tick publishes a file and leaves the next in flight. Those
+/// ticks are slices like any other, so a commit made before every tick is staged after at
+/// most [`state::FAIR_SHARE`] of them. Before, a tick that published a file counted no slice,
+/// and the WAL step waited until the whole backlog was on the replica: the WAL went
+/// unsynced and unchecked by any checkpoint for as long as that took.
+#[test]
+fn a_tick_that_publishes_a_file_and_starts_the_next_is_a_slice() {
+    let size = {
+        let (mut rig, mut actor) = caught_up_with(cfg());
+        rig.commit(2);
+        rig.tick(&mut actor, T0 + 1);
+        staged_size(&rig, 2)
+    };
+    let (mut rig, mut actor) = caught_up_with(slicing(size + 10));
+    rig.remote.refuse_uploads.store(true, Ordering::SeqCst);
+    let mut now = T0 + 1;
+    for n in 2..30_u8 {
+        rig.commit(n);
+        rig.tick(&mut actor, now);
+        now += 1;
+    }
+    let backlog = staged(&rig).len();
+    assert!(
+        backlog > 3 * usize::try_from(state::FAIR_SHARE).unwrap(),
+        "{backlog}"
+    );
+    rig.remote.refuse_uploads.store(false, Ordering::SeqCst);
+    now += 600_000;
+    let mut seen = Vec::new();
+    let (mut in_a_row, mut syncs) = (0_u32, 0_u32);
+    for n in 30..100_u8 {
+        rig.commit(n);
+        let tick = rig.tick(&mut actor, now);
+        match event(&tick) {
+            Some(Event::Uploaded(_) | Event::Sending { .. }) => in_a_row += 1,
+            Some(Event::Synced { .. } | Event::Checkpointed { .. }) => {
+                (in_a_row, syncs) = (0, syncs + 1);
+            }
+            other => panic!("{other:?}: {seen:?}"),
+        }
+        seen.push(tick);
+        assert!(
+            in_a_row <= state::FAIR_SHARE,
+            "{in_a_row} upload ticks in a row ahead of a waiting commit: {seen:?}"
+        );
+        if sent(&actor).is_none() && syncs >= 2 {
+            break;
+        }
+    }
+    assert!(syncs >= 2, "{seen:?}");
+}
+
 /// The bytes are the tick's, not each file's: a tick that finishes one file starts the next
 /// with what is left, and reports the file it published.
 #[test]
