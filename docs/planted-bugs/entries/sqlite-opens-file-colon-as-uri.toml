@@ -1,0 +1,4 @@
+name = "sqlite-opens-file-colon-as-uri"
+fix = "plant"
+package = "lsr-sqlite"
+tests = ["a_path_starting_with_file_colon_is_never_read_as_a_uri"]
