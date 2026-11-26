@@ -13,12 +13,11 @@
 //!   summary only then, so "every page was staged and the file verified" is
 //!   one value.
 //!
-//! Memory is one chunk: the old chunk is dropped before the next read. A read
-//! to the end ([`LtxRead::read_verified`]) takes its chunks from one
-//! [`ObjectStore::read_stream`], so on S3 the whole file is one request; a read
-//! stepped event by event ([`LtxRead::next`], a compaction's inputs) reads each
-//! chunk alone and holds no connection between steps. The chunks are the same
-//! either way, so the verification rule above is unchanged.
+//! Memory is one chunk: the old chunk is dropped before the next read. Every
+//! read takes its chunks from one [`ObjectStore::read_stream`], so on S3 the
+//! whole file is one request: a read to the end ([`LtxRead::read_verified`])
+//! and a read stepped event by event ([`LtxRead::next`], a compaction's inputs,
+//! each holding its connection between steps as Go's compactor does) alike.
 
 use std::convert::Infallible;
 use std::mem;
@@ -199,24 +198,14 @@ impl LtxRead {
         self.chunk.len()
     }
 
-    /// Feeds bytes until the next event, which `on_event` turns into the
-    /// step's answer, or until the object ends and the file verifies.
+    /// Feeds bytes, its chunks taken from `stream`, until the next event, which `on_event`
+    /// turns into the step's answer, or until the object ends and the file verifies.
     ///
     /// # Errors
     /// [`ReadFault`]; after one, the read is spent.
-    pub(crate) async fn next<S: ObjectStore, R, E>(
+    pub(crate) async fn next<R, E>(
         &mut self,
-        store: &S,
-        on_event: impl FnOnce(Event<'_>) -> Result<R, E>,
-    ) -> Result<Next<R>, ReadFault<E>> {
-        self.next_from(store, None, on_event).await
-    }
-
-    /// [`Self::next`], its chunks taken from `stream` when there is one, else a read each.
-    async fn next_from<S: ObjectStore, R, E>(
-        &mut self,
-        store: &S,
-        mut stream: Option<&mut (dyn ReadStream + '_)>,
+        stream: &mut (dyn ReadStream + '_),
         on_event: impl FnOnce(Event<'_>) -> Result<R, E>,
     ) -> Result<Next<R>, ReadFault<E>> {
         loop {
@@ -228,10 +217,7 @@ impl LtxRead {
                 }
                 // The old chunk goes first so a read never holds two.
                 self.chunk = Vec::new();
-                let chunk = match stream.as_deref_mut() {
-                    Some(stream) => stream.next(self.len).await,
-                    None => store.read(&self.key, self.offset, self.len).await,
-                };
+                let chunk = stream.next(self.len).await;
                 self.take(chunk.map_err(ReadFault::Store)?);
                 continue;
             }
@@ -268,10 +254,7 @@ impl LtxRead {
     ) -> Result<Verified, ReadFault<E>> {
         let mut stream = store.read_stream(self.key, self.offset);
         loop {
-            match self
-                .next_from(store, Some(&mut *stream), &mut on_event)
-                .await?
-            {
+            match self.next(&mut *stream, &mut on_event).await? {
                 Next::Event(()) => {}
                 Next::End(verified) => return Ok(verified),
             }

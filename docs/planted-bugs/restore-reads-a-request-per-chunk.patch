@@ -1,19 +1,13 @@
 diff --git a/crates/core/src/ltx_read.rs b/crates/core/src/ltx_read.rs
 --- a/crates/core/src/ltx_read.rs
 +++ b/crates/core/src/ltx_read.rs
-@@ -229,7 +229,7 @@
-                 // The old chunk goes first so a read never holds two.
-                 self.chunk = Vec::new();
-                 let chunk = match stream.as_deref_mut() {
--                    Some(stream) => stream.next(self.len).await,
-+                    Some(_stream) => store.read(&self.key, self.offset, self.len).await,
-                     None => store.read(&self.key, self.offset, self.len).await,
-                 };
-                 self.take(chunk.map_err(ReadFault::Store)?);
-@@ -285,4 +285,4 @@
-         self.chunk = chunk;
-         self.pos = 0;
-     }
--}
-+}
-\ No newline at end of file
+@@ -252,8 +252,8 @@
+         store: &S,
+         mut on_event: impl FnMut(Event<'_>) -> Result<(), E>,
+     ) -> Result<Verified, ReadFault<E>> {
+-        let mut stream = store.read_stream(self.key, self.offset);
+         loop {
++            let mut stream = store.read_stream(self.key, self.offset);
+             match self.next(&mut *stream, &mut on_event).await? {
+                 Next::Event(()) => {}
+                 Next::End(verified) => return Ok(verified),
