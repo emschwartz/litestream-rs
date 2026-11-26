@@ -148,5 +148,9 @@ fn a_file_held_open_is_yielded_counted_and_faulted_read_by_read() {
         Vec::new(),
         1,
     );
-    assert!(block_on(mem.open(&key(1))).unwrap().is_none());
+    // `MemStore` keeps nothing open: what it gives reads by the key each time.
+    let mut by_key = block_on(mem.open(&key(1)))
+        .unwrap()
+        .expect("the in-memory store gives a reader by key");
+    assert_eq!(block_on(by_key.read(0, four)), Ok(b"0123".to_vec()));
 }

@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
+index 9d9c6b9f5..1f8f87b00 100644
+--- a/crates/store-s3/src/upload.rs
++++ b/crates/store-s3/src/upload.rs
+@@ -839,7 +839,7 @@ impl<T: Transport> Upload for S3Upload<T> {
+             return Ok(Flight::Idle);
+         };
+         multi.shared.ends().wake = Some(waker);
+-        self.pump()?;
++        self.pump().ok();
+         if rest == Rest::None
+             && self.filling.len() > 0
+             && let Some(multi) = &mut self.multi

@@ -162,6 +162,9 @@ classes! {
     SaveDatabase = "SaveDatabase", Undrawn;
     PutBackDatabase = "PutBackDatabase", Undrawn;
     AppAutocheckpoint = "AppAutocheckpoint", Undrawn;
+    // Undrawn: a drawn run's parts land by its seed (`crate::remote`); a scenario lands its
+    // own.
+    Parts = "Parts", Undrawn;
     CrashProcess = "Crash.Process", Once;
     CrashPower = "Crash.Power", Once;
     ClockJump = "ClockJump", Once;
@@ -326,6 +329,7 @@ impl Class {
             Op::PutBackDatabase { .. } => Self::PutBackDatabase,
             Op::AppAutocheckpoint(_) => Self::AppAutocheckpoint,
             Op::HttpFault(_) => Self::HttpFault,
+            Op::Parts(_) => Self::Parts,
             Op::Crash(CrashKind::Process) => Self::CrashProcess,
             Op::Crash(CrashKind::Power) => Self::CrashPower,
             Op::ClockJump(_) => Self::ClockJump,

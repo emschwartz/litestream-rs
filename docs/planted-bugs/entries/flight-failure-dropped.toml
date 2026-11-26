@@ -1,0 +1,9 @@
+# A part's failure collected while the engine asks where the parts are is dropped, so the engine
+# is told there is room and waits for an upload that has already failed.
+name = "flight-failure-dropped"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "flight::a_last_part_that_fails_is_the_answer_to_whether_all_landed",
+    "flight::a_part_that_fails_with_others_in_flight_ends_the_upload_and_the_rest_are_not_sent",
+]

@@ -1,0 +1,9 @@
+# An abort sends AbortMultipartUpload without waiting for the parts in flight, so a part on the
+# wire can land after the abort and stay in the bucket.
+name = "abort-with-parts-started"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "flight::an_abort_waits_for_the_parts_in_flight_and_they_are_not_sent",
+    "flight::a_part_that_fails_with_others_in_flight_ends_the_upload_and_the_rest_are_not_sent",
+]
