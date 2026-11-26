@@ -30,6 +30,8 @@ mod final_snapshot;
 #[cfg(test)]
 mod fixed_seeds;
 #[cfg(test)]
+mod gray;
+#[cfg(test)]
 mod histories;
 #[cfg(test)]
 mod kill_after_fault;
