@@ -486,6 +486,32 @@ mod tests {
         }
     }
 
+    /// The image a restore builds: a file that shrinks the database drops the pages above its
+    /// end, and a restore that starts over holds nothing.
+    #[test]
+    fn the_image_drops_pages_past_a_shrink_and_everything_on_a_reset() {
+        let size = PageSize::MIN;
+        let page = vec![7_u8; size.bytes()];
+        let mut image = Image {
+            counter: Some((pg(3), 1)),
+            ..Image::default()
+        };
+        for n in 1..=3 {
+            image
+                .write_page(lsr_ltx::PageRef::new(pg(n), size, &page).unwrap())
+                .unwrap();
+        }
+        assert_eq!(image.pages.len(), 3);
+        assert_eq!(image.kept.as_deref(), Some(&page[..]));
+        image.truncate(lsr_ltx::DbPages::new(2), size).unwrap();
+        assert_eq!(image.pages.keys().copied().collect::<Vec<_>>(), [1, 2]);
+        image
+            .write_page(lsr_ltx::PageRef::new(pg(3), size, &page).unwrap())
+            .unwrap();
+        image.reset().unwrap();
+        assert!(image.pages.is_empty() && image.kept.is_none());
+    }
+
     /// The bar for reading a database as the replica plus more: three pages on each side, some
     /// page of the replica that is not zeros, and at least half of those held unchanged.
     #[test]

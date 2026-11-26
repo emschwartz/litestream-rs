@@ -968,6 +968,8 @@ fn check_slices(rig: &mut Rig, actor: &mut Actor, limit: usize) -> (usize, Tick)
         // The tick that read the restore's last bytes leaves it whole, waiting for the boot.
         assert!(!actor.boot_judged());
         assert!(actor.checking_identity() || actor.engine.identity.is_some());
+        // The tick that began the check leaves it going.
+        assert!(slices > 0 || actor.checking_identity());
     }
     panic!("the identity check never ended");
 }

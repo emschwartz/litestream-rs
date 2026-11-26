@@ -186,3 +186,90 @@ impl ReadingBack {
         Ok(ReadBack::Reading(self))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
+
+    use super::*;
+    use crate::conformance::block_on;
+    use crate::fault::role::Replica;
+    use crate::mem::MemStore;
+    use crate::store::{ObjectStore, Upload, WriteMode};
+
+    /// One LTX file of `pages` pages of bytes that do not compress, for transactions `min..=max`.
+    fn noisy(min: u64, max: u64, pages: u32) -> Vec<u8> {
+        let ps = PageSize::new(4096).unwrap();
+        let header = Header::new(HeaderFields {
+            tracked: false,
+            page_size: ps,
+            commit: pages,
+            txids: TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap(),
+            timestamp: Timestamp::from_unix_millis(1_000),
+            pre_apply: None,
+            wal: None,
+            node_id: 0,
+        })
+        .unwrap();
+        let mut x = 0x9E37_79B9_7F4A_7C15_u64 ^ max;
+        let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+        for n in 1..=pages {
+            let page: Vec<u8> = (0..ps.bytes())
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x.to_be_bytes()[0]
+                })
+                .collect();
+            encoder
+                .write_page(PageNo::new(n, ps).unwrap(), &page)
+                .unwrap();
+        }
+        encoder.finish(None).unwrap().0
+    }
+
+    fn put(store: &MemStore, level: u8, min: u64, max: u64, bytes: &[u8]) -> FileKey {
+        let key = FileKey::new(
+            Level::new(level).unwrap(),
+            TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap(),
+        );
+        block_on(async {
+            let mut upload = store
+                .begin_upload(&key, Timestamp::from_unix_millis(1_000), WriteMode::Replace)
+                .await
+                .unwrap();
+            upload.write(bytes).await.unwrap();
+            upload.commit().await.unwrap();
+        });
+        key
+    }
+
+    /// A slice of the read-back reads at least one read's bytes however small its budget, and
+    /// stops once its budget is spent.
+    #[test]
+    fn a_slice_reads_at_least_one_read_and_stops_at_its_budget() {
+        let store = MemStore::new();
+        let low = put(&store, 1, 1, 2, &noisy(1, 2, 200));
+        put(&store, 9, 1, 2, &noisy(1, 2, 2));
+        let remote = Replica(&store);
+        block_on(async {
+            let inventory = Inventory::load(&store).await.unwrap();
+            let ReadBack::Reading(reading) = read_back(&remote, &inventory, 1).await.unwrap()
+            else {
+                panic!("one slice read it all");
+            };
+            let one = 256 * 1024;
+            assert_eq!((reading.file.0, reading.bytes), (low, one));
+            assert!(format!("{reading:?}").starts_with("ReadingBack"));
+            let ReadBack::Reading(reading) = reading.slice(&remote, one).await.unwrap() else {
+                panic!("one slice read it all");
+            };
+            assert_eq!(reading.bytes, 2 * one);
+            assert!(matches!(
+                reading.slice(&remote, u64::MAX).await.unwrap(),
+                ReadBack::Sound
+            ));
+        });
+    }
+}

@@ -59,7 +59,7 @@ identity/counter\.rs:\d+:\d+: replace \| with \^ in (be16|varint|serial_int)
 identity/counter\.rs:\d+:\d+: replace > with == in locate
 # core identity.rs local_against_replica: the two page-size guards cannot fail on a path the actor reaches (docs/mutants.md).
 replace match guard reader\.header\(\)\.page_size\(\) != page_size with false in local_against_replica
-replace match guard restored\.page_size\(\) == page_size with true in local_against_replica
+replace match guard last\.page_size\(\) == page_size with true in local_against_replica
 # replica thread.rs count: a sync event with no files comes only from a maintenance step that neither reached the committed end nor found a reset WAL, which no deterministic test produces.
 replace match guard \*files > 0 with true in Worker::count
 replace > with >= in Worker::count
@@ -75,3 +75,5 @@ replace < with <= in Remembered::starts
 replace > with >= in lowest
 # core identity.rs local_against_replica: Actor::boot already stops with PageSizeChanged on a differing WAL page size; the guard is a kept defensive check.
 replace match guard reader.header\(\).page_size\(\) != page_size with false in local_against_replica
+# core identity.rs Check::begin: the same guard as local_against_replica's; the check runs only when the WAL's page size equals the replica's.
+replace match guard reader.header\(\).page_size\(\) != page_size with false in Check::begin
