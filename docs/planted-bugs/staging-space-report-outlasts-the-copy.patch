@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index 623ec828c..69a3aa84d 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -639,7 +639,7 @@ impl Actor {
+     pub fn degraded(&self, task: Task) -> Option<Degraded> {
+         let own = self.kept.tasks.get(task).degraded();
+         match self.kept.staging_short {
+-            Some(since) if task == Task::Sync && own.is_none() && !self.caught_up() => {
++            Some(since) if task == Task::Sync && own.is_none() => {
+                 Some(Degraded {
+                     cause: PersistentCause::Stalled(Stall::LocalDiskFull),
+                     since,

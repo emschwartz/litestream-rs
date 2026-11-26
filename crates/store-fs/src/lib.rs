@@ -564,6 +564,10 @@ fn signed_millis(negative: bool, offset: Duration) -> Option<i64> {
 impl<F: Fs> ObjectStore for FsStore<F> {
     type Upload = FsUpload<F>;
 
+    fn free_bytes(&self) -> Option<u64> {
+        self.fs.free_bytes(&self.root).ok().flatten()
+    }
+
     fn list(
         &self,
         level: Level,

@@ -1199,7 +1199,8 @@ impl Runner {
             | Event::Resnapshot(_)
             | Event::Clamped(_)
             | Event::TakeoverWanted(_)
-            | Event::CheckingIdentity { .. } => Ok(Step::Ran),
+            | Event::CheckingIdentity { .. }
+            | Event::StagingShort { .. } => Ok(Step::Ran),
         }
     }
 
@@ -1246,7 +1247,8 @@ impl Runner {
             | Event::WritesHeld { .. }
             | Event::Clamped(_)
             | Event::TakeoverWanted(_)
-            | Event::CheckingIdentity { .. } => return Ok(()),
+            | Event::CheckingIdentity { .. }
+            | Event::StagingShort { .. } => return Ok(()),
         };
         self.forcings
             .judge(CauseKind::from(cause), at_boot, &mut self.report.reach)?;
@@ -1294,7 +1296,8 @@ impl Runner {
             | Event::WritesHeld { .. }
             | Event::Clamped(_)
             | Event::TakeoverWanted(_)
-            | Event::CheckingIdentity { .. } => {}
+            | Event::CheckingIdentity { .. }
+            | Event::StagingShort { .. } => {}
         }
     }
 
@@ -2888,7 +2891,8 @@ fn capped(event: &Event, began: Timestamp, slack: u64) -> Result<(), Violation> 
         | Event::Resnapshot(_)
         | Event::Clamped(_)
         | Event::TakeoverWanted(_)
-        | Event::CheckingIdentity { .. } => return Ok(()),
+        | Event::CheckingIdentity { .. }
+        | Event::StagingShort { .. } => return Ok(()),
     };
     let cap = named.map_or(MAX_BACKOFF, |named| named.max(MAX_BACKOFF));
     let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
