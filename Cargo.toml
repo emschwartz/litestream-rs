@@ -46,8 +46,8 @@ md-5 = { version = "0.11", default-features = false }
 # `native-tls` feature); reqwest names the same 0.2 line, so an application using it compiles it already.
 native-tls = { version = "0.2.16", default-features = false }
 percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
-# `rustls-no-provider`: the store hands reqwest a finished rustls config on ring (the provider
-# ureq already builds), so reqwest's own default provider, aws-lc-rs (a C build), stays out.
+# `rustls-no-provider`: the store hands reqwest a finished rustls config on the provider rustls
+# resolves (the one ureq gets too), so reqwest's own default provider, aws-lc-rs (a C build), stays out.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23.46", default-features = false }
 # The operating system's certificate verifier, used on macOS and Windows as Go uses it there.
@@ -82,7 +82,9 @@ tempfile = { version = "3", default-features = false }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false, features = ["rt"] }
 toml = { version = "1.1", default-features = false, features = ["parse", "serde", "std"] }
-ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
+# `rustls-no-provider`: the store takes the provider rustls resolves (see D249) and hands
+# it over, so ureq's own `rustls` feature, which forces ring, stays out.
+ureq = { version = "3.5.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 url = { version = "2.5.4", default-features = false, features = ["std"] }
 # Mozilla's roots, trusted when the system has none (as Go's x509roots/fallback, which litestream links).
 webpki-roots = { version = "1", default-features = false }

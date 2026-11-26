@@ -95,7 +95,7 @@ mod soak {
                 &lsr_config::S3Overrides::default(),
             )
             .expect("config");
-            let transport = UreqTransport::new(config.deadline());
+            let transport = UreqTransport::new(config.deadline()).expect("a TLS provider");
             let credentials =
                 S3Credentials::new(self.access.clone(), SecretString::new(self.secret.clone()));
             S3Store::over(config, credentials, transport).expect("store")
