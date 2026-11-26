@@ -190,6 +190,26 @@ struct Report<T> {
     held: usize,
     bytes: Option<Bytes>,
     sent: Option<Result<(HttpResponse, [u8; 16]), StoreError>>,
+    /// Declared after `shared`, and fields drop in order: when this part holds the upload's
+    /// last reference, its id is on the orphan list before the store hears the part ended,
+    /// so what waits for the parts to end (the boot sweep, `orphans.rs`) finds it there.
+    _started: Started<T>,
+}
+
+/// One part counted started on its store, until this is dropped.
+struct Started<T>(Arc<Inner<T>>);
+
+impl<T> Started<T> {
+    fn new(inner: Arc<Inner<T>>) -> Self {
+        inner.part_started();
+        Self(inner)
+    }
+}
+
+impl<T> Drop for Started<T> {
+    fn drop(&mut self) {
+        self.0.part_ended();
+    }
 }
 
 impl<T> Drop for Report<T> {
@@ -213,15 +233,14 @@ impl<T> Drop for Report<T> {
         if let Some(wake) = wake {
             wake.wake();
         }
-        self.shared.inner.part_ended();
     }
 }
 
 impl<T: Transport> Inner<T> {
     /// Starts one part on the store's lanes. Its answer is left with `shared`.
     fn start_part(&self, shared: Arc<Shared<T>>, number: PartNumber, bytes: Bytes) {
-        self.part_started();
         let report = Report {
+            _started: Started::new(Arc::clone(&shared.inner)),
             shared,
             number,
             held: bytes.held(),
@@ -961,5 +980,50 @@ mod part_cap_tests {
         let multi = upload.multi.as_ref().unwrap();
         assert_eq!((multi.etags.len(), multi.flying), (10_000, 0));
         assert!(upload.over);
+    }
+
+    /// The last part of a dropped upload puts its id on the orphan list before the store
+    /// counts the part ended, so what waits for the parts to end (the boot sweep) finds the
+    /// id there. The count is held still while the part lets go on another thread: the id
+    /// must reach the list first. In the other order the part waits on the count, the id
+    /// never arrives, and nextest ends the test.
+    #[test]
+    fn a_last_part_orphans_its_id_before_the_store_counts_it_ended() {
+        let store = store();
+        let shared = Arc::new(Shared {
+            inner: Arc::clone(&store.inner),
+            key: FileKey::new(
+                Level::ZERO,
+                lsr_ltx::TxidRange::new(
+                    lsr_ltx::Txid::new(1).unwrap(),
+                    lsr_ltx::Txid::new(1).unwrap(),
+                )
+                .unwrap(),
+            ),
+            id: UploadId::new("dropped".to_owned()),
+            ends: Mutex::new(Ends::default()),
+            ended: Condvar::new(),
+            stop: AtomicBool::new(true),
+            spent: AtomicBool::new(false),
+        });
+        let report = Report {
+            _started: Started::new(Arc::clone(&store.inner)),
+            shared,
+            number: PartNumber::new(1).unwrap(),
+            held: 0,
+            bytes: None,
+            sent: None,
+        };
+        let count = lock(&store.inner.parts);
+        assert_eq!(*count, 1);
+        std::thread::scope(|scope| {
+            drop(scope.spawn(move || drop(report)));
+            while store.inner.orphans.len() == 0 {
+                std::thread::yield_now();
+            }
+            drop(count);
+        });
+        assert_eq!(*lock(&store.inner.parts), 0);
+        assert_eq!(store.pending_orphans(), 1);
     }
 }

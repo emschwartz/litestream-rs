@@ -103,7 +103,7 @@ pub(crate) struct Inner<T> {
     pub(crate) lanes: Arc<dyn Lanes>,
     /// Parts started by any upload of this store that have not ended, and what wakes the
     /// boot sweep when one does (`orphans.rs`).
-    parts: lanes::Mutex<usize>,
+    pub(crate) parts: lanes::Mutex<usize>,
     part_ended: lanes::Condvar,
 }
 
