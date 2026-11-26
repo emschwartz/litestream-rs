@@ -19,7 +19,7 @@ use crate::mem::{MemStore, MemUpload};
 use crate::plan::RestoreTarget;
 use crate::restore::{Database, MemSink, restore};
 use crate::store::Upload;
-use crate::store::{Listing, PageLimit, StoreOp};
+use crate::store::{Listing, PageLimit, ReadStream, StoreOp};
 
 fn txid(n: u64) -> Txid {
     Txid::new(n).unwrap()
@@ -228,6 +228,8 @@ fn input_fault(err: CompactError) -> (FileKey, InputFault) {
 #[derive(Default)]
 struct Script {
     reads: usize,
+    /// Streams opened: one GET each on a store that bills by request.
+    streams: usize,
     fail_read: Option<(usize, StoreError)>,
     begins: usize,
     fail_begin: Option<StoreError>,
@@ -346,6 +348,32 @@ impl ObjectStore for Spy {
 
     fn delete(&self, keys: &[FileKey]) -> impl Future<Output = Result<(), StoreError>> + Send {
         self.inner.delete(keys)
+    }
+
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.script().streams += 1;
+        Box::new(SpyStream {
+            spy: self,
+            key,
+            offset,
+        })
+    }
+}
+
+/// [`Spy`]'s stream: its pieces are the spy's reads, so a read a test fails fails the stream.
+struct SpyStream<'a> {
+    spy: &'a Spy,
+    key: FileKey,
+    offset: u64,
+}
+
+impl ReadStream for SpyStream<'_> {
+    fn next(&mut self, len: ReadLen) -> crate::store::BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let bytes = self.spy.read(&self.key, self.offset, len).await?;
+            self.offset += u64::try_from(bytes.len()).unwrap();
+            Ok(bytes)
+        })
     }
 }
 
@@ -1239,6 +1267,32 @@ fn the_first_unrewritten_page_skips_the_lock_page_and_stops_at_the_bound() {
     assert_eq!(first(1, lock + 2, lock - 1), Some(lock + 1));
     assert_eq!(first(1, lock + 1, lock - 1), None);
     assert_eq!(first(lock, lock + 2, 3), Some(lock + 1));
+}
+
+/// Go's compactor opens each input once (`compactor.go`, `OpenLTXFile`) and streams it. A read
+/// per window was a GET per mebibyte: a 16 GiB input was 16,000 GETs where Go sends one.
+#[test]
+fn each_replica_input_is_one_stream_however_many_windows_it_spans() {
+    let ps = size(512);
+    let source = Spy::default();
+    let infos: Vec<FileInfo> = (1..=2_u64)
+        .map(|n| {
+            let mut spec = Spec::plain(512, 3000, n, n, &[]);
+            spec.pages = (1..=3000_u32)
+                .map(|p| (p, noisy(ps, n * 10_000 + u64::from(p))))
+                .collect();
+            put(&source.inner, 1, &spec)
+        })
+        .collect();
+    assert!(infos.iter().all(|info| info.size > u64::from(CHUNK_BYTES)));
+    compact_infos(&source, &MemStore::new(), &infos, 2).unwrap();
+    let script = source.script();
+    assert_eq!(script.streams, 2, "one stream per input");
+    assert!(
+        script.reads >= 4,
+        "each input spans windows: {}",
+        script.reads
+    );
 }
 
 #[test]

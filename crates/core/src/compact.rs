@@ -4,7 +4,8 @@
 //! file to a destination store. Source and destination differ because level 0
 //! is read from the local copy and every other level from the replica.
 //!
-//! Each input is read in bounded chunks through its own decoder (the shared
+//! Each input is read through one stream (one GET on S3, as Go's compactor opens each
+//! input once), in bounded chunks, through its own decoder (the shared
 //! `LtxRead`, which ends a file at its first short chunk); the pages of all
 //! inputs are merged in ascending page order and the newest input holding a
 //! page wins. A page above the output's commit is dropped, and the lock page
@@ -59,7 +60,7 @@ use crate::fault::role::{Replica, Role, STAGING_WINDOW};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 use crate::publish::Writer;
-use crate::store::{ObjectStore, ReadLen, StoreError, Upload, WriteMode};
+use crate::store::{ObjectStore, ReadLen, ReadStream, StoreError, Upload, WriteMode};
 
 #[cfg(test)]
 #[expect(
@@ -361,15 +362,21 @@ enum Step {
     End(Verified),
 }
 
-/// One input's bytes: chunked reads pushed through one decoder.
-struct Reader {
+/// One input's bytes: one stream from the source (a single GET on a store that bills by
+/// request, as Go's compactor opens each input once), its pieces pushed through one decoder.
+struct Reader<'a> {
     read: LtxRead,
+    stream: Box<dyn ReadStream + 'a>,
+    /// The source role's error for a failed read.
+    store_fault: fn(StoreError) -> CompactError,
 }
 
-impl Reader {
-    const fn new(key: FileKey, chunk: ReadLen) -> Self {
+impl<'a> Reader<'a> {
+    fn new<S: Role>(source: &'a S, key: FileKey, chunk: ReadLen) -> Self {
         Self {
             read: LtxRead::new(key, chunk),
+            stream: source.read_stream(key, 0),
+            store_fault: S::compact_input,
         }
     }
 
@@ -386,16 +393,15 @@ impl Reader {
 
     /// Advances to the next header, page or verified end, copying a page's
     /// bytes into `page`. Bytes read are added to `bytes_read` as they arrive.
-    async fn step<S: Role>(
+    async fn step(
         &mut self,
-        source: &S,
         bytes_read: &mut u64,
         page: &mut Vec<u8>,
     ) -> Result<Step, CompactError> {
         let before = self.read.bytes_read();
         let next = self
             .read
-            .next(source, |event| {
+            .next(&mut *self.stream, |event| {
                 Ok::<_, Infallible>(match event {
                     Event::Header(header) => Step::Header(header),
                     Event::Page(found) => {
@@ -414,7 +420,7 @@ impl Reader {
             Err(ReadFault::Store(StoreError::NotFound { key })) => {
                 Err(CompactError::InputVanished { key })
             }
-            Err(ReadFault::Store(err)) => Err(S::compact_input(err)),
+            Err(ReadFault::Store(err)) => Err((self.store_fault)(err)),
             Err(ReadFault::Decode(err)) => Err(self.fault(InputFault::Decode(err))),
             Err(ReadFault::Rejected(never)) => match never {},
         }
@@ -426,15 +432,15 @@ impl Reader {
 }
 
 /// One input with its header read and its next page, if any, waiting.
-struct Input {
-    reader: Reader,
+struct Input<'a> {
+    reader: Reader<'a>,
     header: Header,
     page: Vec<u8>,
     head: Option<PageNo>,
     verified: Option<Verified>,
 }
 
-impl Input {
+impl<'a> Input<'a> {
     fn key(&self) -> FileKey {
         self.reader.key()
     }
@@ -442,14 +448,14 @@ impl Input {
     /// Reads the header. A decoder that yields anything else first has
     /// skipped it, which no valid decoder does; it is reported as poisoned.
     async fn open<S: Role>(
-        source: &S,
+        source: &'a S,
         budget: Budget,
         key: FileKey,
         bytes_read: &mut u64,
     ) -> Result<Self, CompactError> {
-        let mut reader = Reader::new(key, budget.chunk);
+        let mut reader = Reader::new(source, key, budget.chunk);
         let mut page = Vec::new();
-        match reader.step(source, bytes_read, &mut page).await? {
+        match reader.step(bytes_read, &mut page).await? {
             Step::Header(header) => Ok(Self {
                 reader,
                 header,
@@ -464,15 +470,11 @@ impl Input {
     }
 
     /// Fills the waiting page, or records the verified end.
-    async fn fill<S: Role>(
-        &mut self,
-        source: &S,
-        bytes_read: &mut u64,
-    ) -> Result<(), CompactError> {
+    async fn fill(&mut self, bytes_read: &mut u64) -> Result<(), CompactError> {
         if self.head.is_some() || self.verified.is_some() {
             return Ok(());
         }
-        match self.reader.step(source, bytes_read, &mut self.page).await? {
+        match self.reader.step(bytes_read, &mut self.page).await? {
             Step::Page(pgno) => self.head = Some(pgno),
             Step::End(verified) => self.verified = Some(verified),
             Step::Header(_) => {
@@ -489,18 +491,17 @@ impl Input {
 
 /// All inputs, merged lazily. The first input is held apart so "the first" and
 /// "the last" exist by construction.
-struct Merge<'a, S> {
-    source: &'a S,
+struct Merge<'a> {
     budget: Budget,
-    first: Input,
-    rest: Vec<Input>,
+    first: Input<'a>,
+    rest: Vec<Input<'a>>,
     bytes_read: u64,
     peak: usize,
 }
 
-impl<'a, S: Role> Merge<'a, S> {
+impl<'a> Merge<'a> {
     /// Opens every input and checks every header before anything is written.
-    async fn open(
+    async fn open<S: Role>(
         source: &'a S,
         inputs: &CompactionInputs,
         budget: Budget,
@@ -509,7 +510,6 @@ impl<'a, S: Role> Merge<'a, S> {
         let first = Input::open(source, budget, inputs.first.key, &mut bytes_read).await?;
         check_range(&first)?;
         let mut merge = Self {
-            source,
             budget,
             first,
             rest: Vec::new(),
@@ -531,15 +531,15 @@ impl<'a, S: Role> Merge<'a, S> {
         Ok(merge)
     }
 
-    fn all(&self) -> impl Iterator<Item = &Input> {
+    fn all(&self) -> impl Iterator<Item = &Input<'a>> {
         std::iter::once(&self.first).chain(self.rest.iter())
     }
 
-    fn all_mut(&mut self) -> impl Iterator<Item = &mut Input> {
+    fn all_mut(&mut self) -> impl Iterator<Item = &mut Input<'a>> {
         std::iter::once(&mut self.first).chain(self.rest.iter_mut())
     }
 
-    fn last(&self) -> &Input {
+    fn last(&self) -> &Input<'a> {
         self.rest.last().unwrap_or(&self.first)
     }
 
@@ -580,10 +580,9 @@ impl<'a, S: Role> Merge<'a, S> {
         &mut self,
         buffered_output: usize,
     ) -> Result<Option<(PageNo, usize)>, CompactError> {
-        let source = self.source;
         let mut bytes_read = self.bytes_read;
         for input in std::iter::once(&mut self.first).chain(self.rest.iter_mut()) {
-            input.fill(source, &mut bytes_read).await?;
+            input.fill(&mut bytes_read).await?;
         }
         self.bytes_read = bytes_read;
         self.observe(buffered_output);
@@ -666,7 +665,7 @@ fn first_unrewritten(lo: u32, hi: u32, shortest: DbPages, size: PageSize) -> Opt
 }
 
 /// The header's range must be the one in the file's name.
-fn check_range(input: &Input) -> Result<(), CompactError> {
+fn check_range(input: &Input<'_>) -> Result<(), CompactError> {
     if input.header.txids() == input.key().range() {
         return Ok(());
     }
@@ -677,8 +676,8 @@ fn check_range(input: &Input) -> Result<(), CompactError> {
 
 /// Merges, encodes and uploads every page, then writes the tail. Returns the
 /// output trailer and page count; nothing is committed yet.
-async fn write_output<S: Role, U: Upload>(
-    merge: &mut Merge<'_, S>,
+async fn write_output<U: Upload>(
+    merge: &mut Merge<'_>,
     mut encoder: Encoder<Vec<u8>>,
     header: &Header,
     upload: &mut Writer<U>,

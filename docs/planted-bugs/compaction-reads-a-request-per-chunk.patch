@@ -1,0 +1,41 @@
+--- a/crates/core/src/compact.rs
++++ b/crates/core/src/compact.rs
+@@ -375,7 +375,11 @@
+     fn new<S: Role>(source: &'a S, key: FileKey, chunk: ReadLen) -> Self {
+         Self {
+             read: LtxRead::new(key, chunk),
+-            stream: source.read_stream(key, 0),
++            stream: Box::new(PerRead {
++                source,
++                key,
++                offset: 0,
++            }),
+             store_fault: S::compact_input,
+         }
+     }
+@@ -431,6 +435,25 @@
+     }
+ }
+ 
++/// A request per chunk.
++struct PerRead<'a, S> {
++    source: &'a S,
++    key: FileKey,
++    offset: u64,
++}
++
++impl<S: ObjectStore> ReadStream for PerRead<'_, S> {
++    fn next(&mut self, len: ReadLen) -> crate::store::BoxFuture<'_, Result<Vec<u8>, StoreError>> {
++        Box::pin(async move {
++            let bytes = self.source.read(&self.key, self.offset, len).await?;
++            self.offset = self
++                .offset
++                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
++            Ok(bytes)
++        })
++    }
++}
++
+ /// One input with its header read and its next page, if any, waiting.
+ struct Input<'a> {
+     reader: Reader<'a>,
