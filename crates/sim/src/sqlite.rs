@@ -1996,7 +1996,9 @@ impl SimSqlite {
     /// Whether our read transaction is held, on any read mark. A mark above
     /// zero keeps any writer from restarting the WAL; mark zero lets one
     /// generation change through and then blocks every backfill, so no commit
-    /// can go with a generation either way (`lsr_core::recover_traced`, rule 6).
+    /// can go with a generation either way (`lsr_core::recover_traced`, rule 6), once the engine
+    /// has staged to the committed end in that hold: frames a mark-0 hold began behind can
+    /// still go with a restart (`crate::forcing::Forcing::PositionUnproven`).
     /// With none held nothing pins the WAL.
     #[must_use]
     pub fn our_reader_pins_wal(&self) -> bool {
