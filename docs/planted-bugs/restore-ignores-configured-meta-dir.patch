@@ -1,24 +1,13 @@
 diff --git a/crates/replica/src/restore.rs b/crates/replica/src/restore.rs
-index b704e1f45..43e450382 100644
 --- a/crates/replica/src/restore.rs
 +++ b/crates/replica/src/restore.rs
-@@ -78,10 +78,8 @@ impl Restore {
- 
- /// The meta directory a restore of `to` records its trust record in.
- fn meta_for(meta_dir: Option<&PathBuf>, to: &Path) -> Result<PathBuf, RestoreError> {
--    let config = Config {
--        meta_dir: meta_dir.cloned(),
--        ..Config::default()
--    };
-+    let _ = meta_dir;
-+    let config = Config::default();
+@@ -89,8 +89,7 @@
+ pub fn restore(store: &dyn DynStore, to: &Path, how: &Restore) -> Result<Restored, RestoreError> {
      // A path that names no file has no default meta directory, and is refused before
      // anything is written rather than restored without a trust record.
-     config
-@@ -203,4 +201,4 @@ pub fn restore_if_missing(
-         Err(RestoreError::EmptyReplica) => Ok(IfMissing::EmptyReplica),
-         Err(other) => Err(other),
-     }
--}
-+}
-\ No newline at end of file
+-    let meta = how
+-        .config
++    let meta = Config::default()
+         .meta_dir_for(to)
+         .ok_or_else(|| RestoreError::NoMetaDir {
+             path: to.to_owned(),

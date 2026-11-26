@@ -1,14 +1,15 @@
 diff --git a/crates/replica/src/restore.rs b/crates/replica/src/restore.rs
-index b704e1f45..6e278993f 100644
 --- a/crates/replica/src/restore.rs
 +++ b/crates/replica/src/restore.rs
-@@ -200,7 +200,6 @@ pub fn restore_if_missing(
+@@ -191,11 +191,6 @@
          Ok(restored) => Ok(IfMissing::Restored(restored)),
          // Another process restored it between the look and the create.
          Err(RestoreError::Destination(CreateError::TargetExists(_))) => Ok(IfMissing::Exists),
--        Err(RestoreError::EmptyReplica) => Ok(IfMissing::EmptyReplica),
+-        Err(RestoreError::Restore(lsr_core::RestoreError::NoPlan(none)))
+-            if *none.outcome() == lsr_core::PlanOutcome::EmptyReplica =>
+-        {
+-            Ok(IfMissing::EmptyReplica)
+-        }
          Err(other) => Err(other),
      }
--}
-+}
-\ No newline at end of file
+ }

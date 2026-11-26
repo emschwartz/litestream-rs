@@ -137,7 +137,7 @@ mod store;
 mod thread;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
-pub use error::{RestoreBug, RestoreError, StartError, TrustLocalError};
+pub use error::{RestoreError, StartError, TrustLocalError};
 pub use events::{ChannelSink, Event, EventReceiver, EventSink, TrustRecordUnusable};
 #[doc(hidden)]
 pub use exec::block_on;
@@ -166,9 +166,9 @@ pub use lsr_core::{
     Degraded, DegradedCause, Denied, Depth, Entropy, Event as EngineEvent, Fault, FileFault,
     FileKey, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate, IfReplicationStops,
     InventoryError, L0Retention, Maintenance, MaxUnreplicatedAge, NoPlan, OtherWriter, PlanOutcome,
-    Report, Response, Responses, RestoreOptions, RestoreTarget, Restored, Severity, SinkOp,
-    SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause, StoreError, Task, Trip,
-    VerifyError, WhyBlocked, WorkCounts,
+    Report, Response, Responses, RestoreError as EngineRestoreError, RestoreOptions, RestoreTarget,
+    Restored, Severity, SinkOp, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause,
+    StoreError, Task, Trip, VerifyError, WhyBlocked, WorkCounts,
 };
 pub use lsr_ltx::{DbChecksum, Timestamp, Txid};
 pub use lsr_sqlite::{ConnectionSetup, Refusal, SetupError, ffi};

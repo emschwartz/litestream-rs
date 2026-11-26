@@ -11,7 +11,7 @@
 //! the restored database builds on the replica it came from instead of refusing it.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::local::{CreateError, FileSink, IntegrityCheck};
 use lsr_core::{
@@ -34,7 +34,7 @@ pub struct Restore {
     target: RestoreTarget,
     options: RestoreOptions,
     integrity: IntegrityCheck,
-    meta_dir: Option<PathBuf>,
+    config: Config,
 }
 
 impl Restore {
@@ -50,7 +50,7 @@ impl Restore {
             target,
             options: RestoreOptions::default(),
             integrity: IntegrityCheck::Off,
-            meta_dir: None,
+            config: Config::default(),
         }
     }
 
@@ -71,24 +71,9 @@ impl Restore {
     /// The configuration the database will be replicated with: the trust record goes in its
     /// meta directory (`Config::meta_dir`), where the replicator's start reads it.
     pub fn config(mut self, config: &Config) -> Self {
-        self.meta_dir.clone_from(&config.meta_dir);
+        self.config.clone_from(config);
         self
     }
-}
-
-/// The meta directory a restore of `to` records its trust record in.
-fn meta_for(meta_dir: Option<&PathBuf>, to: &Path) -> Result<PathBuf, RestoreError> {
-    let config = Config {
-        meta_dir: meta_dir.cloned(),
-        ..Config::default()
-    };
-    // A path that names no file has no default meta directory, and is refused before
-    // anything is written rather than restored without a trust record.
-    config
-        .meta_dir_for(to)
-        .ok_or_else(|| RestoreError::NoMetaDir {
-            path: to.to_owned(),
-        })
 }
 
 /// Restores into a new database at `to` what `how` asks for from `store`, then records the
@@ -96,21 +81,27 @@ fn meta_for(meta_dir: Option<&PathBuf>, to: &Path) -> Result<PathBuf, RestoreErr
 ///
 /// # Errors
 /// [`RestoreError::Destination`] when `to` (or a sidecar beside it) exists or the scratch file
-/// cannot be made; [`RestoreError::EmptyReplica`] and [`RestoreError::NoExactAnswer`] when the
-/// replica has no exact answer; the read, file and publish failures; [`RestoreError::NoMetaDir`]
+/// cannot be made; [`RestoreError::Restore`] when the replica has no exact answer or a read,
+/// a file or the publish fails; [`RestoreError::NoMetaDir`]
 /// when `to` names no file and no meta directory was configured. Nothing is published on these
-/// errors, except a [`RestoreError::Publish`] that says it left the database visible, and
+/// errors, except a publish failure that says it left the database visible, and
 /// [`RestoreError::TrustRecord`], which carries the restore that succeeded.
 pub fn restore(store: &dyn DynStore, to: &Path, how: &Restore) -> Result<Restored, RestoreError> {
-    let meta = meta_for(how.meta_dir.as_ref(), to)?;
+    // A path that names no file has no default meta directory, and is refused before
+    // anything is written rather than restored without a trust record.
+    let meta = how
+        .config
+        .meta_dir_for(to)
+        .ok_or_else(|| RestoreError::NoMetaDir {
+            path: to.to_owned(),
+        })?;
     let sink = FileSink::create(to)?.with_integrity_check(how.integrity);
     let restored = block_on(lsr_core::restore_with(
         &Erased(store),
         how.target,
         how.options,
         sink,
-    ))
-    .map_err(RestoreError::from_core)?;
+    ))?;
     write_takeover(&meta, TakeoverRecord::through(restored.reached())).map_err(|err| {
         RestoreError::TrustRecord {
             restored,
@@ -200,7 +191,11 @@ pub fn restore_if_missing(
         Ok(restored) => Ok(IfMissing::Restored(restored)),
         // Another process restored it between the look and the create.
         Err(RestoreError::Destination(CreateError::TargetExists(_))) => Ok(IfMissing::Exists),
-        Err(RestoreError::EmptyReplica) => Ok(IfMissing::EmptyReplica),
+        Err(RestoreError::Restore(lsr_core::RestoreError::NoPlan(none)))
+            if *none.outcome() == lsr_core::PlanOutcome::EmptyReplica =>
+        {
+            Ok(IfMissing::EmptyReplica)
+        }
         Err(other) => Err(other),
     }
 }

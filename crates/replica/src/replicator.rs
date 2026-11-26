@@ -267,6 +267,10 @@ impl fmt::Debug for Replicator {
 /// How to start one [`Replicator`]: [`Replicator::builder`], then the optional settings, then
 /// [`ReplicatorBuilder::start`].
 #[must_use = "a builder starts nothing until `start` is called"]
+#[expect(
+    missing_debug_implementations,
+    reason = "the store and the event sink are not Debug"
+)]
 pub struct ReplicatorBuilder {
     database: std::path::PathBuf,
     store: Arc<dyn DynStore>,
@@ -274,15 +278,6 @@ pub struct ReplicatorBuilder {
     runtime: Option<Runtime>,
     events: Option<Box<dyn EventSink>>,
     create_if_missing: bool,
-}
-
-impl fmt::Debug for ReplicatorBuilder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReplicatorBuilder")
-            .field("database", &self.database)
-            .field("config", &self.config)
-            .finish_non_exhaustive()
-    }
 }
 
 impl ReplicatorBuilder {
@@ -330,7 +325,7 @@ impl ReplicatorBuilder {
     /// [`StartError`]; nothing is left open or pinned.
     pub fn start(self) -> Result<Replicator, StartError> {
         if self.create_if_missing && !self.database.exists() {
-            lsr_sqlite::create_database(&self.database).map_err(StartError::created)?;
+            lsr_sqlite::create_database(&self.database)?;
         }
         Replicator::start_inner(
             &self.database,

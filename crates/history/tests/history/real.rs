@@ -8,8 +8,8 @@ use lsr_core::conformance::block_on;
 use lsr_core::{Inventory, ObjectStore, PlanOutcome};
 use lsr_history::{Anomaly, Digest, Judge, Log, Target, chain};
 use lsr_replica::{
-    AsOfInside, DynStore, Restore, RestoreError, RestoreOptions, RestoreTarget, Timestamp, Txid,
-    restore,
+    AsOfInside, DynStore, EngineRestoreError, Restore, RestoreError, RestoreOptions, RestoreTarget,
+    Timestamp, Txid, restore,
 };
 
 /// splitmix64: a run is named by its seed.
@@ -83,11 +83,12 @@ pub fn restored(
     };
     match restore(store, &to, &Restore::at(target).options(options)) {
         Ok(_) => {}
-        Err(RestoreError::EmptyReplica) => return None,
-        Err(RestoreError::NoExactAnswer(no)) => {
+        Err(RestoreError::Restore(EngineRestoreError::NoPlan(no))) => {
             assert!(
-                matches!(no.outcome(), PlanOutcome::NoSnapshot { .. })
-                    || matches!(target, RestoreTarget::Txid(_)),
+                matches!(
+                    no.outcome(),
+                    PlanOutcome::EmptyReplica | PlanOutcome::NoSnapshot { .. }
+                ) || matches!(target, RestoreTarget::Txid(_)),
                 "restoring {target:?} was refused: {:?}",
                 no.outcome()
             );

@@ -43,7 +43,7 @@
 //! `bundled` feature, on by default, compiles the SQLite `libsqlite3-sys` bundles; an application
 //! that links its own turns default features off, and its SQLite must be a listed build. The
 //! `rusqlite` feature adds the setup functions that take a rusqlite connection (any rusqlite from
-//! 0.39 to 0.43); [`app_connection_raw`] takes any binding's raw handle.
+//! 0.39 to 0.43); [`ConnectionSetup::apply_raw`] takes any binding's raw handle.
 //!
 //! Errors inside the trait methods are core's `SourceError`: `Busy` for a contended lock or a
 //! wal-index header a writer is mid-way through (retry), `DiskFull`, `Short` for a page past the
@@ -61,9 +61,9 @@
 //! `app_connection` and `check_app_connection` (feature `rusqlite`) set up and check the application's own connections
 //! (`wal_autocheckpoint = 0`, PLAN section 6; never `SQLITE_FCNTL_PERSIST_WAL`, which only the
 //! replicator's own two connections set, see `app_connection`).
-//! `app_connection_for` first checks that the connection opens a given [`DatabaseFile`]
-//! (device and inode), and [`app_connection_raw`] does the same on a raw handle, for an application
-//! whose connections are not rusqlite's; it is here because only this crate may use `unsafe`.
+//! [`ConnectionSetup`] first checks that the connection opens a given [`DatabaseFile`]
+//! (device and inode), on a rusqlite connection or on a raw handle for an application whose
+//! connections are not rusqlite's; it is here because only this crate may use `unsafe`.
 //! [`Sqlite::database_file`] says which file the reader opened, from SQLite's own descriptor
 //! (the `identity` module), for a caller that must not trust a second stat of the path.
 //!
@@ -89,13 +89,13 @@ mod version;
 
 pub use conn::{
     ConnectionSetup, DEFAULT_JOURNAL_SIZE_LIMIT, DatabaseFile, Sqlite, SqliteConfig,
-    app_connection_raw, create_database, read_only_rows,
+    create_database, read_only_rows,
 };
 #[cfg(feature = "rusqlite")]
-pub use conn::{app_connection, app_connection_for, check_app_connection};
+pub use conn::{app_connection, check_app_connection};
 pub use error::{OpenError, Refusal, SetupError, SplitOpen, SqliteError, dotted};
 #[cfg(feature = "rusqlite")]
 pub use gate::fail_fast_while;
 pub use gate::{WriteGate, WritesHeld};
-/// SQLite's C interface (`libsqlite3-sys`), for the raw handle [`app_connection_raw`] takes.
+/// SQLite's C interface (`libsqlite3-sys`), for the raw handle [`ConnectionSetup::apply_raw`] takes.
 pub use libsqlite3_sys as ffi;
