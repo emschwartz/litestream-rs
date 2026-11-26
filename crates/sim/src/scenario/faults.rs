@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use lsr_core::{
-    Denied, Did, Event, Fault, FileKey, Level, MaintainedEvent, PersistentCause, SnapshotCause,
+    DegradedCause, Denied, Did, Event, Fault, FileKey, Level, MaintainedEvent, SnapshotCause,
     SourceError, SourceOp, StopCause, StoreError, StoreOp,
 };
 use lsr_ltx::PageSize;
@@ -195,8 +195,8 @@ impl From<&Fault> for FaultKind {
 
 /// The persistent cause a fault's policy names, if it has one.
 #[must_use]
-pub fn persistent_of(kind: FaultKind) -> Option<PersistentCause> {
-    stop_of(kind).and_then(PersistentCause::of)
+pub fn persistent_of(kind: FaultKind) -> Option<DegradedCause> {
+    stop_of(kind).and_then(DegradedCause::of)
 }
 
 /// The stop cause a fault's policy names, if its policy can stop the engine.
@@ -1561,7 +1561,7 @@ fn nothing_staged_past_the_corrupt_frame(report: &RunReport) -> Result<(), Strin
     for seen in &report.seen {
         match seen {
             Seen::Event(Event::Degraded {
-                cause: PersistentCause::WalCorrupt,
+                cause: DegradedCause::WalCorrupt,
                 ..
             }) => degraded = true,
             Seen::Event(Event::Synced { files }) if degraded && *files > 0 => {

@@ -1,4 +1,4 @@
-//! The public API end to end, judged from outside: `Replicator::start` on a real SQLite file,
+//! The public API end to end, judged from outside: `ReplicatorBuilder::start` on a real SQLite file,
 //! the application's own connection writing the self-certifying chain, restarts (a stop that
 //! drains, then a new replicator on the same files), and real restores into files, on a file
 //! replica and on MinIO.
@@ -15,8 +15,9 @@ use std::time::Duration;
 
 use lsr_core::ObjectStore;
 use lsr_history::{AheadMode, Counts, Judge, Log, chain};
+use lsr_replica::StartOptions;
 use lsr_replica::{
-    Config, DynStore, FakeClockHandle, Health, Phase, Replicator, Runtime, Stopped, Timestamp,
+    DynStore, FakeClockHandle, Health, Phase, Replicator, Runtime, StopOutcome, Timestamp,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -128,9 +129,15 @@ where
 
     pub fn start(&mut self) {
         let store: Arc<dyn DynStore> = Arc::<S>::clone(self.store);
-        let replicator =
-            Replicator::start_with(self.db, store, Config::default(), self.runtime.clone())
-                .unwrap();
+        let replicator = Replicator::start(
+            self.db,
+            store,
+            StartOptions {
+                runtime: Some(self.runtime.clone()),
+                ..StartOptions::default()
+            },
+        )
+        .unwrap();
         let _booted = replicator.wait_booted(PATIENCE);
         self.replicator = Some(replicator);
     }
@@ -172,7 +179,10 @@ where
             matches!(h.phase, Phase::Stopped(_) | Phase::Gone(_))
         });
         let stopped = stop.wait();
-        assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
+        assert!(
+            matches!(stopped, StopOutcome::Drained { .. }),
+            "{stopped:?}"
+        );
         self.judged(true, Some(0));
     }
 

@@ -94,7 +94,7 @@ pub use failstop::{
 #[doc(hidden)]
 pub use fault::reporting_bugs;
 pub use fault::{
-    Backoff, BugSite, Clamped, Fault, MAX_BACKOFF, Next, OtherWriter, PersistentCause, Policy,
+    Backoff, BugSite, Clamped, DegradedCause, Fault, MAX_BACKOFF, Next, OtherWriter, Policy,
     Response, Responses, STALLED_AFTER, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
     StopCause, VERIFY, backoff_wait, policy, retry_wait,
 };

@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use lsr_core::conformance::block_on;
-use lsr_core::{Inventory, ObjectStore, PlanOutcome, RestoreError as CoreRestoreError};
+use lsr_core::{Inventory, ObjectStore, PlanOutcome};
 use lsr_history::{Anomaly, Digest, Judge, Log, Target, chain};
 use lsr_replica::{
-    AsOfInside, DynStore, RestoreError, RestoreOptions, RestoreTarget, Timestamp, Txid,
-    restore_with,
+    AsOfInside, DynStore, EngineRestoreError, Restore, RestoreError, RestoreOptions, RestoreTarget,
+    Timestamp, Txid, restore,
 };
 
 /// splitmix64: a run is named by its seed.
@@ -81,9 +81,17 @@ pub fn restored(
     let options = RestoreOptions {
         as_of_inside: AsOfInside::TakeEarlier,
     };
-    match restore_with(store, target, options, &to) {
+    match restore(
+        store,
+        &to,
+        &Restore {
+            target,
+            options,
+            ..Restore::default()
+        },
+    ) {
         Ok(_) => {}
-        Err(RestoreError::Restore(CoreRestoreError::NoPlan(no))) => {
+        Err(RestoreError::Restore(EngineRestoreError::NoPlan(no))) => {
             assert!(
                 matches!(
                     no.outcome(),

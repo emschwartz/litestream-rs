@@ -64,6 +64,8 @@ struct State {
     /// The store cannot make create-only writes, as an S3 provider without conditional writes:
     /// every [`WriteMode::New`] commit fails and publishes nothing ([`MemStore::refuse_create_only`]).
     no_create_only: bool,
+    /// What [`ObjectStore::free_bytes`] answers ([`MemStore::set_free_bytes`]).
+    free_bytes: Option<u64>,
 }
 
 impl State {
@@ -89,6 +91,12 @@ impl MemStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes [`ObjectStore::free_bytes`] answer `free`, as a directory store on a disk with that
+    /// much room left would.
+    pub fn set_free_bytes(&self, free: Option<u64>) {
+        self.lock().free_bytes = free;
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -283,6 +291,10 @@ impl Opened for MemOpened {
 
 impl ObjectStore for MemStore {
     type Upload = MemUpload;
+
+    fn free_bytes(&self) -> Option<u64> {
+        self.lock().free_bytes
+    }
 
     /// Removes what [`MemStore::plant_scratch`] left.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {

@@ -718,6 +718,17 @@ recovery = "None needed"
 detected_by = "core::`a_steady_writer_stages_one_file_per_poll_interval`, core::`a_commit_inside_the_interval_waits_for_it_and_the_tick_names_the_wake`, core::`a_snapshot_asked_for_does_not_wait_for_the_interval`, core::`the_rest_of_a_capped_sync_follows_at_once`, core::`a_due_checkpoint_syncs_inside_the_interval`, core::`a_drain_does_not_wait_for_the_interval`, replica::`new_commits_are_synced_once_per_poll_interval`; plant::`sync-interval-ignored`, plant::`held-sync-names-no-wake`, plant::`sync-interval-holds-a-forced-step`, plant::`sync-interval-holds-a-drain`"
 notes = "Before: every tick staged what was committed since the last, so a commit that landed while the poll's file was written became a second file in the same second (101 level-0 PUTs a minute against Go's 61 at 20 commits a second; in a run against a file replica 84 files in 42 s, 42 after). The simulator runs with no interval"
 [[row]]
+table = "Running"
+id = "RUN-33"
+circumstance = "A whole-database copy is about to be staged (a first start, any snapshot) and the staging disk has less free space than the database's size, the most the copy can take (`Actor::check_staging_space`, `ObjectStore::free_bytes`)"
+response = "continue. The copy is staged as it would be with room, as Go's is: nothing stops, refuses, retries or waits. `Event::StagingShort { needed, free }` is told to the driver, which logs a warning with both sizes, and the sync task reports `Stalled(LocalDiskFull)` until everything staged is on the replica (`docs/decisions/D252.md`). A store that cannot say how much room it has reports nothing"
+signal = "the `staging disk has less free space than the database copy may need, copying anyway` log line; `local_disk_full` in `Health.degraded` for the sync task while the copy is in staging"
+at_risk = "A copy that does not fit fails as RUN-14 once the disk fills: lag, and a WAL that grows on what is often the same disk. The database's size is an upper bound, so a compressible database that would have fit is reported too"
+recovery = "An operator frees space or moves the working folder; the report ends when the staged files are on the replica or a later copy fits"
+detected_by = "core::`a_copy_that_may_not_fit_is_reported_and_still_runs`, core::`the_report_is_the_local_disk_full_stall_dated_from_the_copy`, core::`a_copy_that_fits_exactly_is_not_reported`, core::`a_staging_store_that_cannot_say_reports_nothing`, core::`a_step_that_stages_only_commits_is_not_checked`, core::`a_later_copy_that_fits_ends_the_report`, sidecar::`a_copy_that_may_not_fit_is_a_warning_with_both_sizes`, store-fs::`a_directory_reports_the_free_space_of_its_filesystem`; plant::`staging-space-checks-every-step`, plant::`staging-space-report-outlasts-the-copy`"
+notes = "Tested with a store that answers a number; no disk is filled, and the simulator's staging store cannot say, so no scenario reaches it. Issue #364 F10 and #331 asked for the check; Go has none"
+
+[[row]]
 table = "Checkpoint"
 id = "CKPT-1"
 circumstance = "1000 synced frames, or 1 minute since the last checkpoint with something synced (`checkpoint.rs`). PASSIVE under a write barrier: seal (sync through the committed end), checkpoint, write one frame of its own, follow the WAL if it restarted (`checkpoint.rs`)"
@@ -2966,5 +2977,3 @@ at_risk = "None (a checker)"
 recovery = "None"
 detected_by = "sim::`kill_after_fault::half_the_swarm_draws_the_law_and_the_default_mix_never`"
 notes = "The law showed the second-writer judge charging a stop to a process it had just killed (fixed: a crash ends the watch, as a boot does), and a lost acknowledged transaction on seed 0x1dc, under triage. The engine journal and its obligation ledger, which the law once proved, are gone (D173)"
-
-

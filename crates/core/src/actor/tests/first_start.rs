@@ -48,6 +48,7 @@ fn quiet_of(pages: u32, fill: impl Fn(u32, u8) -> Vec<u8>) -> Rig {
         remote: Counting::default(),
         takeover: None,
         announced: Vec::new(),
+        short: Vec::new(),
     };
     rig.wal.append_tx(&[(pg(1), fill(1, 1))], nz(pages));
     rig

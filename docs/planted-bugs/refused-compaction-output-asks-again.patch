@@ -9,7 +9,7 @@ diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
 -            self.kept
 -                .tasks
 -                .get_mut(Task::Upload)
--                .stand(PersistentCause::ConditionalWritesUnsupported, since);
+-                .stand(DegradedCause::ConditionalWritesUnsupported, since);
          }
          if let Job::Snapshot(_) = job {
              return self.snapshot_merged(job, outcome, now, created_at_read);

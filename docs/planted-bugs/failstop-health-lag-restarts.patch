@@ -1,8 +1,8 @@
 diff --git a/crates/replica/src/thread.rs b/crates/replica/src/thread.rs
-index f908e923b..493ac4328 100644
+index dee7f60ac..2bdcc6a1d 100644
 --- a/crates/replica/src/thread.rs
 +++ b/crates/replica/src/thread.rs
-@@ -814,8 +814,7 @@ impl Worker {
+@@ -818,8 +818,7 @@ impl Worker {
              // The engine's clock survives a restart (it dates from the oldest pending staged
              // file); this thread's own reading covers what no booted engine has judged yet.
              health.unreplicated_since = match (progress.unreplicated_since, unreplicated) {
@@ -10,5 +10,5 @@ index f908e923b..493ac4328 100644
 -                (seen, engine) => seen.or(engine),
 +                (seen, _engine) => seen,
              };
-             health.held_by = fail_stop;
+             health.fail_stop = fail_stop;
              health.writes = writes;

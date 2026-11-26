@@ -31,7 +31,7 @@ fn key() -> FileKey {
     FileKey::new(Level::ZERO, TxidRange::single(Txid::new(1).unwrap()))
 }
 
-fn persistent(cause: PersistentCause) -> Policy {
+fn persistent(cause: DegradedCause) -> Policy {
     Policy::Persistent(cause)
 }
 
@@ -72,7 +72,7 @@ fn store_denied_is_persistent_under_its_own_kind() {
     for why in DENIED {
         assert_eq!(
             policy(&Fault::StoreDenied(why)),
-            persistent(PersistentCause::StoreDenied(why))
+            persistent(DegradedCause::StoreDenied(why))
         );
     }
 }
@@ -111,22 +111,22 @@ policy_is!(
 policy_is!(
     store_refused_is_persistent,
     Fault::StoreRefused,
-    persistent(PersistentCause::StoreRefused)
+    persistent(DegradedCause::StoreRefused)
 );
 policy_is!(
     remote_corrupt_is_persistent,
     Fault::RemoteCorrupt,
-    persistent(PersistentCause::RemoteCorrupt)
+    persistent(DegradedCause::RemoteCorrupt)
 );
 policy_is!(
     remote_ahead_of_local_is_another_writer,
     Fault::RemoteAheadOfLocal,
-    persistent(PersistentCause::OtherWriter)
+    persistent(DegradedCause::OtherWriter)
 );
 policy_is!(
     remote_regressed_is_persistent,
     Fault::RemoteRegressed,
-    persistent(PersistentCause::RemoteRegressed)
+    persistent(DegradedCause::RemoteRegressed)
 );
 policy_is!(staged_lost_retries, Fault::StagedLost, doubling());
 policy_is!(local_disk_full_retries, Fault::LocalDiskFull, doubling());
@@ -162,7 +162,7 @@ policy_is!(
         was: PageSize::MIN,
         now: ps()
     },
-    persistent(PersistentCause::PageSizeChanged {
+    persistent(DegradedCause::PageSizeChanged {
         was: PageSize::MIN,
         now: ps()
     })
@@ -170,22 +170,22 @@ policy_is!(
 policy_is!(
     wal_corrupt_below_committed_is_persistent,
     Fault::WalCorruptBelowCommitted,
-    persistent(PersistentCause::WalCorrupt)
+    persistent(DegradedCause::WalCorrupt)
 );
 policy_is!(
     wal_truncated_below_committed_is_persistent,
     Fault::WalTruncatedBelowCommitted,
-    persistent(PersistentCause::WalTruncated)
+    persistent(DegradedCause::WalTruncated)
 );
 policy_is!(
     wal_unlinked_is_persistent,
     Fault::WalUnlinked,
-    persistent(PersistentCause::WalUnlinked)
+    persistent(DegradedCause::WalUnlinked)
 );
 policy_is!(
     wal_sync_failed_is_persistent,
     Fault::WalSyncFailed,
-    persistent(PersistentCause::WalSyncFailed)
+    persistent(DegradedCause::WalSyncFailed)
 );
 policy_is!(
     shutdown_deadline_stops,
@@ -195,17 +195,17 @@ policy_is!(
 policy_is!(
     a_database_page_mismatch_is_persistent,
     Fault::DatabasePageMismatch { pgno: page_two() },
-    persistent(PersistentCause::DatabasePageMismatch { pgno: page_two() })
+    persistent(DegradedCause::DatabasePageMismatch { pgno: page_two() })
 );
 policy_is!(
     a_store_without_create_only_writes_is_persistent,
     Fault::CreateOnlyUnsupported,
-    persistent(PersistentCause::ConditionalWritesUnsupported)
+    persistent(DegradedCause::ConditionalWritesUnsupported)
 );
 policy_is!(
     bug_is_persistent,
     Fault::Bug(BugSite::PageMap),
-    persistent(PersistentCause::Bug)
+    persistent(DegradedCause::Bug)
 );
 
 /// Ties every variant to a test above: a new variant breaks this match first.
@@ -251,56 +251,56 @@ fn page_two() -> PageNo {
     PageNo::new(2, PageSize::MIN).unwrap()
 }
 
-fn every_persistent_cause() -> [PersistentCause; 17] {
+fn every_persistent_cause() -> [DegradedCause; 17] {
     [
-        PersistentCause::StoreDenied(Denied::Credentials),
-        PersistentCause::StoreDenied(Denied::Permission),
-        PersistentCause::StoreDenied(Denied::ClockSkew),
-        PersistentCause::StoreDenied(Denied::BucketMissing),
-        PersistentCause::StoreDenied(Denied::Tls),
-        PersistentCause::StoreRefused,
-        PersistentCause::RemoteCorrupt,
-        PersistentCause::OtherWriter,
-        PersistentCause::RemoteRegressed,
-        PersistentCause::WalCorrupt,
-        PersistentCause::WalTruncated,
-        PersistentCause::WalUnlinked,
-        PersistentCause::WalSyncFailed,
-        PersistentCause::PageSizeChanged {
+        DegradedCause::StoreDenied(Denied::Credentials),
+        DegradedCause::StoreDenied(Denied::Permission),
+        DegradedCause::StoreDenied(Denied::ClockSkew),
+        DegradedCause::StoreDenied(Denied::BucketMissing),
+        DegradedCause::StoreDenied(Denied::Tls),
+        DegradedCause::StoreRefused,
+        DegradedCause::RemoteCorrupt,
+        DegradedCause::OtherWriter,
+        DegradedCause::RemoteRegressed,
+        DegradedCause::WalCorrupt,
+        DegradedCause::WalTruncated,
+        DegradedCause::WalUnlinked,
+        DegradedCause::WalSyncFailed,
+        DegradedCause::PageSizeChanged {
             was: PageSize::MIN,
             now: ps(),
         },
-        PersistentCause::DatabasePageMismatch { pgno: page_two() },
-        PersistentCause::ConditionalWritesUnsupported,
-        PersistentCause::Bug,
+        DegradedCause::DatabasePageMismatch { pgno: page_two() },
+        DegradedCause::ConditionalWritesUnsupported,
+        DegradedCause::Bug,
     ]
 }
 
 /// Ties the list above to the enum: a new cause breaks this match first.
 #[test]
 fn every_persistent_cause_is_listed() {
-    let listed = |cause: PersistentCause| match cause {
-        PersistentCause::StoreDenied(
+    let listed = |cause: DegradedCause| match cause {
+        DegradedCause::StoreDenied(
             Denied::Credentials
             | Denied::Permission
             | Denied::ClockSkew
             | Denied::BucketMissing
             | Denied::Tls,
         )
-        | PersistentCause::StoreRefused
-        | PersistentCause::RemoteCorrupt
-        | PersistentCause::OtherWriter
-        | PersistentCause::RemoteRegressed
-        | PersistentCause::WalCorrupt
-        | PersistentCause::WalTruncated
-        | PersistentCause::WalUnlinked
-        | PersistentCause::WalSyncFailed
-        | PersistentCause::PageSizeChanged { .. }
-        | PersistentCause::DatabasePageMismatch { .. }
-        | PersistentCause::ConditionalWritesUnsupported
-        | PersistentCause::Bug => true,
+        | DegradedCause::StoreRefused
+        | DegradedCause::RemoteCorrupt
+        | DegradedCause::OtherWriter
+        | DegradedCause::RemoteRegressed
+        | DegradedCause::WalCorrupt
+        | DegradedCause::WalTruncated
+        | DegradedCause::WalUnlinked
+        | DegradedCause::WalSyncFailed
+        | DegradedCause::PageSizeChanged { .. }
+        | DegradedCause::DatabasePageMismatch { .. }
+        | DegradedCause::ConditionalWritesUnsupported
+        | DegradedCause::Bug => true,
         // Not configurable: `every_retried_fault_stalls_and_no_stall_stops` covers it.
-        PersistentCause::Stalled(_) => false,
+        DegradedCause::Stalled(_) => false,
     };
     assert!(every_persistent_cause().into_iter().all(listed));
 }
@@ -310,7 +310,7 @@ fn go_like_keeps_trying_on_every_cause_but_a_second_writer() {
     for cause in every_persistent_cause() {
         assert_eq!(
             Responses::GO_LIKE.stops(cause),
-            cause == PersistentCause::OtherWriter,
+            cause == DegradedCause::OtherWriter,
             "{cause:?}"
         );
     }
@@ -335,19 +335,19 @@ fn keeping_trying_rebuilds_where_the_state_cannot_be_trusted() {
     };
     for cause in every_persistent_cause() {
         let want = match cause {
-            PersistentCause::Bug | PersistentCause::OtherWriter => Action::Rebuild,
-            PersistentCause::RemoteRegressed => Action::Relist,
-            PersistentCause::StoreDenied(_)
-            | PersistentCause::StoreRefused
-            | PersistentCause::RemoteCorrupt
-            | PersistentCause::WalCorrupt
-            | PersistentCause::WalTruncated
-            | PersistentCause::WalUnlinked
-            | PersistentCause::WalSyncFailed
-            | PersistentCause::PageSizeChanged { .. }
-            | PersistentCause::DatabasePageMismatch { .. }
-            | PersistentCause::ConditionalWritesUnsupported
-            | PersistentCause::Stalled(_) => Action::Retry,
+            DegradedCause::Bug | DegradedCause::OtherWriter => Action::Rebuild,
+            DegradedCause::RemoteRegressed => Action::Relist,
+            DegradedCause::StoreDenied(_)
+            | DegradedCause::StoreRefused
+            | DegradedCause::RemoteCorrupt
+            | DegradedCause::WalCorrupt
+            | DegradedCause::WalTruncated
+            | DegradedCause::WalUnlinked
+            | DegradedCause::WalSyncFailed
+            | DegradedCause::PageSizeChanged { .. }
+            | DegradedCause::DatabasePageMismatch { .. }
+            | DegradedCause::ConditionalWritesUnsupported
+            | DegradedCause::Stalled(_) => Action::Retry,
         };
         assert_eq!(all.action(cause), want, "{cause:?}");
     }
@@ -359,32 +359,32 @@ fn each_field_names_one_cause() {
     for cause in every_persistent_cause() {
         let mut one = Responses::GO_LIKE;
         match cause {
-            PersistentCause::StoreDenied(why) => match why {
+            DegradedCause::StoreDenied(why) => match why {
                 Denied::Credentials => one.credentials = Response::Stop,
                 Denied::Permission => one.permission_denied = Response::Stop,
                 Denied::ClockSkew => one.clock_skew = Response::Stop,
                 Denied::BucketMissing => one.bucket_missing = Response::Stop,
                 Denied::Tls => one.tls = Response::Stop,
             },
-            PersistentCause::StoreRefused => one.store_refused = Response::Stop,
-            PersistentCause::RemoteCorrupt => one.remote_corrupt = Response::Stop,
-            PersistentCause::OtherWriter => {
+            DegradedCause::StoreRefused => one.store_refused = Response::Stop,
+            DegradedCause::RemoteCorrupt => one.remote_corrupt = Response::Stop,
+            DegradedCause::OtherWriter => {
                 one.other_writer = OtherWriter::ContinueAndInterleaveHistories;
             }
-            PersistentCause::RemoteRegressed => one.remote_regressed = Response::Stop,
-            PersistentCause::WalCorrupt => one.wal_corrupt = Response::Stop,
-            PersistentCause::WalTruncated => one.wal_truncated = Response::Stop,
-            PersistentCause::WalUnlinked => one.wal_unlinked = Response::Stop,
-            PersistentCause::WalSyncFailed => one.wal_sync_failed = Response::Stop,
-            PersistentCause::PageSizeChanged { .. } => one.page_size_changed = Response::Stop,
-            PersistentCause::DatabasePageMismatch { .. } => {
+            DegradedCause::RemoteRegressed => one.remote_regressed = Response::Stop,
+            DegradedCause::WalCorrupt => one.wal_corrupt = Response::Stop,
+            DegradedCause::WalTruncated => one.wal_truncated = Response::Stop,
+            DegradedCause::WalUnlinked => one.wal_unlinked = Response::Stop,
+            DegradedCause::WalSyncFailed => one.wal_sync_failed = Response::Stop,
+            DegradedCause::PageSizeChanged { .. } => one.page_size_changed = Response::Stop,
+            DegradedCause::DatabasePageMismatch { .. } => {
                 one.database_page_mismatch = Response::Stop;
             }
-            PersistentCause::ConditionalWritesUnsupported => {
+            DegradedCause::ConditionalWritesUnsupported => {
                 one.conditional_writes_unsupported = Response::Stop;
             }
-            PersistentCause::Bug => one.bug = Response::Stop,
-            PersistentCause::Stalled(_) => {}
+            DegradedCause::Bug => one.bug = Response::Stop,
+            DegradedCause::Stalled(_) => {}
         }
         for other in every_persistent_cause() {
             let flipped = Responses::GO_LIKE.stops(other) != one.stops(other);
@@ -396,9 +396,9 @@ fn each_field_names_one_cause() {
 #[test]
 fn a_persistent_cause_and_its_stop_cause_round_trip() {
     for cause in every_persistent_cause() {
-        assert_eq!(cause.stop().and_then(PersistentCause::of), Some(cause));
+        assert_eq!(cause.stop().and_then(DegradedCause::of), Some(cause));
     }
-    assert_eq!(PersistentCause::of(StopCause::Shutdown), None);
+    assert_eq!(DegradedCause::of(StopCause::Shutdown), None);
 }
 
 /// Every fault, pinned by the match in [`every_fault_has_a_named_policy_test`]'s spirit: the
@@ -462,7 +462,7 @@ fn every_retried_fault_stalls_and_no_stall_stops() {
         };
         assert!(ends_degraded, "{fault:?}");
         if let Some(stall) = Stall::of(&fault) {
-            let cause = PersistentCause::Stalled(stall);
+            let cause = DegradedCause::Stalled(stall);
             assert!(!Responses::STRICT.stops(cause), "{fault:?}");
             assert_eq!(Responses::STRICT.action(cause), Action::Retry);
             assert_eq!(cause.stop(), None);
