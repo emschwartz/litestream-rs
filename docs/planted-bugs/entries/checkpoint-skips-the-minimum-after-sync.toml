@@ -6,3 +6,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["liveness::the_wal_stays_near_the_passive_minimum_through_the_tail"]
+unaided = 50

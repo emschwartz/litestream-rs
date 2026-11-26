@@ -10,3 +10,4 @@ tests = [
     "the_files_of_a_course_that_ended_early_are_still_judged",
     "slot_files_over_an_empty_level_zero_are_settled_against_the_replica",
 ]
+unaided_miss = "The local course needs staging behind the replica with the store down across two restarts and lying reads on return, a history the swarm does not draw; only its explicit scenarios reach it."

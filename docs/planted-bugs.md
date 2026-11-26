@@ -27,9 +27,13 @@ that caught it must fail.
   a test's child that a planted bug never stopped does not outlive it (Linux, through `/proc`).
 - `just planted-bugs-names` (part of `just check`) fails when an entry names a test no `fn` defines, the renamed-test case that left an entry unable to run until the nightly. `just planted-bugs-diff BASE [K/N]` runs only the entries a pull request can have affected (its diff touches the entry, the patch, a file the patch edits or a file that defines a named test, or the patch no longer applies); CI runs it on pull requests in up to four shards of 12 entries, about 5 minutes for 12 entries and about 30 minutes a shard for the whole ledger.
 - `just planted-bugs --shard K/N` runs every N-th entry from the K-th, plus the canaries; the nightly runs eight shards.
-- `just planted-bugs-unaided [seeds]` asks a different question: with no named test run, how many
-  swarm seeds does the simulator need to fail on each plant? It prints a table (seeds to first
-  failure, or `none`); a plant no seed finds is a listed generator gap, not a failure.
+- `just planted-bugs-unaided [seeds] [--shard K/N]` asks a different question and judges it
+  (docs/decisions/D296.md): with no named test run, does the swarm still fail on each plant within
+  the entry's `unaided` budget? An entry in lsr-sim or lsr-core carries `unaided = <seeds>` or
+  `unaided_miss = "<why>"`; `just planted-bugs-names` (in `just check`) refuses one with neither.
+  Found later than its budget, or never, fails; a marked miss that the swarm now finds in `seeds`
+  seeds fails as stale. Nightly in eight shards. `just planted-bugs-judge-test` (in `just check`)
+  checks the judge over fake rows.
 - A new fix adds an entry and a patch in the same commit as the fix. A `STALE` patch is re-expressed
   against the current tree, or the entry is retired with a reason under "Absent and retired entries" below.
 - An entry's `patch` field names another entry's patch when the same production change is planted
@@ -65,6 +69,11 @@ An entry file's name is its `name` with `.toml` appended; the runner refuses one
            Any other verdict on a canary fails the run: the runner itself is broken.
   bin      optional: run the unit tests of one binary target (cargo `--bin`), for a package
            with no library, such as lsr-cli
+  unaided  required for an lsr-sim or lsr-core entry unless `unaided_miss` is set: the seeds,
+           counted from the fixed base, within which the swarm must fail with the plant applied
+  unaided_miss
+           the one sentence saying why the swarm cannot reach the plant; the run fails if it does
+           (entries that plant one patch carry the same field)
 ```
 
 ## Absent and retired entries

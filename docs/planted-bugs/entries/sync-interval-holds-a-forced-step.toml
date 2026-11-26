@@ -7,3 +7,4 @@ tests = [
     "actor::tests::steady::a_snapshot_asked_for_does_not_wait_for_the_interval",
     "actor::tests::steady::the_rest_of_a_capped_sync_follows_at_once",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

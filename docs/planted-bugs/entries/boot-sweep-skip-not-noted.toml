@@ -4,3 +4,4 @@ fix = "claude/sweep-judge"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["remote_s3::a_permission_refusal_of_the_boot_sweep_is_skipped_and_reports_no_refusal"]
+unaided = 72

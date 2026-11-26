@@ -6,3 +6,4 @@ package = "lsr-core"
 tests = [
     "actor::tests::sliced_compaction::a_staged_copy_lost_part_way_starts_the_merge_again_from_the_replica",
 ]
+unaided = 300

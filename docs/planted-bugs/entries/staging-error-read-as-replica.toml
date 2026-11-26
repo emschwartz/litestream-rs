@@ -9,3 +9,4 @@ tests = [
     "sync::tests::a_staging_commit_error_returns_the_same_step_and_the_retry_overwrites_the_file",
     "upload::tests::errors_before_the_commit_leave_the_state_and_cost_no_listing",
 ]
+unaided = 72

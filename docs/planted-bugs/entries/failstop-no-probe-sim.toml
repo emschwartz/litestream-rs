@@ -6,3 +6,4 @@ test_bin = "sim"
 tests = [
     "failstop::a_store_down_past_the_bound_trips_in_time_and_clears_after",
 ]
+unaided_miss = "Fail-stop needs an outage or doubt held past the age bound with the write gate in play, a scenario longer than the swarm's draw; only the named failstop scenarios and lag tests reach it."

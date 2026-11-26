@@ -7,3 +7,4 @@ tests = [
     "a_refused_upload_with_the_replica_ahead_is_another_writer",
     "a_refused_upload_over_an_object_that_does_not_verify_replaces_it",
 ]
+unaided = 252

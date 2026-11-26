@@ -2,3 +2,4 @@ name = "prune-waits-for-level-one-over-a-snapshot"
 fix = "plant"
 package = "lsr-core"
 tests = ["prune_keeps_exactly_the_uncompacted_and_the_newest_staged_file"]
+unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."

@@ -8,3 +8,4 @@ tests = [
     "publish::tests::a_create_only_commit_acknowledged_short_is_deleted_and_reported",
     "upload::tests::a_commit_that_answers_with_a_wrong_size_leaves_no_object",
 ]
+unaided = 50

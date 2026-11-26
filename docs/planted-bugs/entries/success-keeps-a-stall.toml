@@ -3,3 +3,4 @@ name = "success-keeps-a-stall"
 fix = "checker-holes (stall liveness)"
 package = "lsr-core"
 tests = ["actor::tests::degraded::a_retried_fault_that_persists_ends_degraded_as_a_stall"]
+unaided = 50

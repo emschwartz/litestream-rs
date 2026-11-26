@@ -6,3 +6,4 @@ tests = [
     "failstop::tests::a_failure_after_the_bound_trips_until_caught_up",
     "failstop::tests::the_clock_never_trips_early",
 ]
+unaided = 300

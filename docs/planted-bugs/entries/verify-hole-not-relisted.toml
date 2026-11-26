@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "a_hole_one_listing_showed_is_listed_again_and_not_reported",
 ]
+unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."

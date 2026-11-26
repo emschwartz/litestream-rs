@@ -7,3 +7,4 @@ tests = [
     "maintain::tests::a_level_this_engine_compacted_waits_for_its_next_window",
     "maintain::tests::a_compaction_in_the_window_before_leaves_this_one_open",
 ]
+unaided = 50

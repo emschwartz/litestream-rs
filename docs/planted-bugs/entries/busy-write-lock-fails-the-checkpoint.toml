@@ -8,3 +8,4 @@ tests = [
     "a_write_lock_busy_at_the_barrier_is_an_outcome_not_a_fault",
     "a_busy_write_lock_defers_the_checkpoint_on_a_doubling_wait_and_never_degrades",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

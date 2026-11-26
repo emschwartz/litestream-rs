@@ -6,3 +6,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["liveness::commits_made_during_a_large_compaction_reach_the_replica_in_time"]
+unaided = 68

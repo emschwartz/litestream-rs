@@ -4,3 +4,4 @@ name = "tail-lists-whole-while-a-fill-backs-off"
 fix = "claude/level-holes"
 package = "lsr-core"
 tests = ["maintain::tests::a_tail_waits_out_a_failed_fill_instead_of_listing_whole_again"]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

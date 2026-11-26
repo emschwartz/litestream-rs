@@ -7,3 +7,4 @@ package = "lsr-core"
 tests = [
     "maintain::retain::tests::short_view::a_cover_from_two_levels_covers_a_file_only_the_higher_level_holds",
 ]
+unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."

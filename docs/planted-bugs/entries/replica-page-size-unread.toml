@@ -2,3 +2,4 @@ name = "replica-page-size-unread"
 fix = "7bf9707"
 package = "lsr-core"
 tests = ["a_newest_replica_header_that_does_not_decode_still_names_the_page_size"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

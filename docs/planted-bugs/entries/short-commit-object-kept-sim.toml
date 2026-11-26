@@ -3,3 +3,4 @@ fix = "claude/commit-size"
 package = "lsr-sim"
 patch = "short-commit-object-kept"
 tests = ["short_write::an_upload_acknowledged_short_leaves_nothing_a_restore_meets"]
+unaided = 50

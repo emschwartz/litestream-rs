@@ -4,3 +4,4 @@ fix = "48aee1d"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["clock_steps_back_an_hour_mid_retry"]
+unaided = 50

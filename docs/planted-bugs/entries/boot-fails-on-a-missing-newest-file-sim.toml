@@ -5,3 +5,4 @@ package = "lsr-sim"
 test_bin = "sim"
 patch = "boot-fails-on-a-missing-newest-file"
 tests = ["stall_liveness::a_boot_over_a_believed_newest_file_the_replica_lacks_still_drains"]
+unaided_miss = "The local course needs staging behind the replica with the store down across two restarts and lying reads on return, a history the swarm does not draw; only its explicit scenarios reach it."

@@ -7,3 +7,4 @@ package = "lsr-core"
 tests = [
     "a_step_from_the_start_follows_a_header_written_again_with_the_same_salts",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

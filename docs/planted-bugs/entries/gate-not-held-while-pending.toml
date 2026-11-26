@@ -5,3 +5,4 @@ name = "gate-not-held-while-pending"
 fix = "plant"
 package = "lsr-core"
 tests = ["failstop::tests::writes_are_blocked_by_a_held_gate_and_by_a_pending_boot_except_under_report"]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

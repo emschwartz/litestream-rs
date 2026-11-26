@@ -10,3 +10,4 @@ tests = [
     "reread::a_second_read_that_differs_inside_a_write_ends_the_send_as_a_lost_staged_file",
     "reread::a_second_read_is_one_bounded_read_that_must_be_what_was_seen",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

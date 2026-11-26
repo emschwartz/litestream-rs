@@ -2,3 +2,4 @@ name = "restart-abandoned-at-synced-end"
 fix = "9b4a029"
 package = "lsr-core"
 tests = ["recover::tests::an_abandoned_commit_at_the_synced_end_of_a_restart_is_caught"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

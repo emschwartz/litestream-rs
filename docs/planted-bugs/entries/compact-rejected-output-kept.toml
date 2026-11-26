@@ -5,3 +5,4 @@ name = "compact-rejected-output-kept"
 fix = "plant"
 package = "lsr-core"
 tests = ["maintain::tests::a_rejected_compaction_output_is_deleted_by_the_executor"]
+unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."

@@ -4,3 +4,4 @@ package = "lsr-core"
 tests = [
     "maintenance_gets_its_share_while_a_backlog_uploads",
 ]
+unaided = 116

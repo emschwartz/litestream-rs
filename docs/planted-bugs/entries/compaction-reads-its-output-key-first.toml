@@ -7,3 +7,4 @@ tests = [
     "the_first_start_sends_no_read_ahead_of_the_snapshot",
     "a_compaction_writes_its_output_without_reading_the_key_first",
 ]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

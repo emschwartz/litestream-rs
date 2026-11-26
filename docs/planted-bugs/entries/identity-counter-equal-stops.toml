@@ -7,3 +7,4 @@ tests = [
     "older_copy::a_database_with_a_counter_at_or_above_the_replicas_carries_on",
     "older_copy::an_older_copy_taken_after_the_last_bump_carries_on",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

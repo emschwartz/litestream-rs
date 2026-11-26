@@ -2,3 +2,4 @@ name = "wal-bytes-not-counted"
 fix = "plant"
 package = "lsr-core"
 tests = ["actor::tests::work::a_sync_step_counts_one_call_and_its_frames"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

@@ -6,3 +6,4 @@ tests = [
     "a_rejected_write_over_an_object_that_was_there_deletes_nothing",
     "publish::tests::only_a_rejected_create_only_write_hands_back_its_object",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

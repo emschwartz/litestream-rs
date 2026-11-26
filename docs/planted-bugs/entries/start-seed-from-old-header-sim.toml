@@ -4,3 +4,4 @@ fix = "1c818f58"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["faults::a_header_written_again_by_another_connection_is_followed"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

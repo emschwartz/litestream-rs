@@ -10,3 +10,4 @@ tests = [
     "a_restart_after_an_overtaken_bump_is_followed_without_a_snapshot",
     "a_passive_overtaken_at_its_bump_is_pinned_and_not_a_fault",
 ]
+unaided = 104

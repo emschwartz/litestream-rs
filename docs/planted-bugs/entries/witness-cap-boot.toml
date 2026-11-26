@@ -2,3 +2,4 @@ name = "witness-cap-boot"
 fix = "2024ca8"
 package = "lsr-core"
 tests = ["pending_files_past_the_cap_at_boot_are_regenerated_from_the_wal"]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

@@ -8,3 +8,4 @@ tests = [
     "retry::tests::a_replace_commit_size_mismatch_never_deletes_the_key",
     "compact::tests::an_output_acknowledged_short_is_reported_and_left_to_the_caller",
 ]
+unaided_miss = "Needs a fault or interleaving at one request or tick (a rejected part, a busy checkpoint, a slice boundary, a second SQLite in the process) that the swarm does not aim at; only a targeted test sets it up."

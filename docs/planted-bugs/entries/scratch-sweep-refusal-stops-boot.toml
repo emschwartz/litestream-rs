@@ -3,3 +3,4 @@ name = "scratch-sweep-refusal-stops-boot"
 fix = "4d442fe"
 package = "lsr-core"
 tests = ["a_refused_scratch_sweep_does_not_hold_the_boot", "a_refused_scratch_sweep_is_not_asked_again"]
+unaided = 72

@@ -5,3 +5,4 @@ package = "lsr-core"
 tests = [
     "compact::tests::the_replica_window_is_the_budget_shared_out",
 ]
+unaided_miss = "The plant costs requests, memory or bytes and changes no restored page; the swarm's oracles judge pages and needless snapshots, not request counts or buffer sizes, and only the cost tests count those."

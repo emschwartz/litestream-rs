@@ -7,3 +7,4 @@ tests = [
     "vouch::a_foreign_file_put_while_the_engine_was_down_stops_the_boot",
     "vouch::a_takeover_does_not_cover_a_foreign_file_above_it",
 ]
+unaided = 300

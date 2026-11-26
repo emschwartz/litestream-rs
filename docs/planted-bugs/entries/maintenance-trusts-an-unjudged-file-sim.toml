@@ -7,3 +7,4 @@ fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
 tests = ["sliced::another_writers_file_at_the_id_of_an_unsent_file_is_not_compacted"]
+unaided_miss = "Needs another writer at the id of an unsent file, a history the swarm draws only when a second writer is enabled at that moment; only the named scenario reaches it."

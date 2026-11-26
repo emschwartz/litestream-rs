@@ -7,3 +7,4 @@ tests = [
     "foreign_file_while_down_stops",
     "vm_restore_stops_until_trust_local",
 ]
+unaided = 300

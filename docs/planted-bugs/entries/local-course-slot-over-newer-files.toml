@@ -7,3 +7,4 @@ package = "lsr-core"
 tests = [
     "a_slot_that_level_zero_has_passed_is_deleted_and_level_zero_kept",
 ]
+unaided_miss = "The local course needs staging behind the replica with the store down across two restarts and lying reads on return, a history the swarm does not draw; only its explicit scenarios reach it."

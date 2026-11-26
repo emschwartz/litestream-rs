@@ -7,3 +7,4 @@ tests = [
     "maintain::tests::running_a_job_twice_leaves_one_file_at_the_key",
     "maintain::tests::an_output_key_that_holds_another_file_is_not_written_over",
 ]
+unaided_miss = "The compaction, listing or retention state it breaks needs a backlog, a stale carried listing or a hole in a level that the swarm's short runs do not build; only core unit tests set that state directly."

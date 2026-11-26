@@ -5,3 +5,4 @@ tests = [
     "a_failed_drop_after_a_divergence_uploads_nothing_built_on_it",
     "a_failed_drop_after_a_divergence_takes_no_snapshot_at_the_diverged_id",
 ]
+unaided_miss = "Its decision (boot judgment, read verdict, identity or counter rule, metric) needs one precise read fault or history at one decision point; the swarm's random faults do not line up on it within its seeds, and a core unit test sets the input directly."

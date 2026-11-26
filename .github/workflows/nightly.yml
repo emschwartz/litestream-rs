@@ -184,6 +184,27 @@ jobs:
           tool: cargo-nextest,just
       - run: just planted-bugs --shard "${{ matrix.shard }}/8"
 
+  # The swarm alone against each planted bug, judged (docs/decisions/D296.md): a plant must fail
+  # within its `unaided` budget and a plant marked `unaided_miss` must still go unfound, so a swarm
+  # that stops finding a plant, or starts finding a marked miss, fails here. The same deterministic
+  # base as the measuring run, so it is a regression gate. About 26,000 seeds over 219 plants: an
+  # estimated 30 minutes a shard; add shards when one nears 40.
+  planted-bugs-unaided:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,just
+      - run: just planted-bugs-unaided 100 --shard "${{ matrix.shard }}/8"
+
   # The real-SQLite power-loss campaigns (`just power-loss-trials`): 50 seeds of the history rig
   # and 100 of the crash-cycle rig under the block crash law, judged by restores, some made while
   # the loss still holds. Ignored in the gate, which runs a few frozen seeds of each. About two
