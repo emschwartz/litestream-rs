@@ -137,3 +137,19 @@ fn an_s3_put_reads_its_staged_body_again() {
         report.reach
     );
 }
+
+/// Commits two ticks apart, then the healthy tail: once each tail commit reaches the replica,
+/// the WAL holds no more than Go's PASSIVE minimum, the commit's frames and the engine's bump
+/// frame (`lsr_sim::run::tail::wal_bound`).
+#[test]
+fn the_wal_stays_near_the_passive_minimum_through_the_tail() {
+    let report = match run_ops(Seed::new(1), &commits(6, 2), &Opts::default()) {
+        Ok(report) => report,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert!(
+        report.reach.get("wal_bound.judged") >= 30,
+        "{:?}",
+        report.reach
+    );
+}
