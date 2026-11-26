@@ -2124,6 +2124,22 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
     }
 }
 
+/// On a store that cannot make create-only writes, a compaction still reads nothing of its
+/// output key first: the second run writes the same file over the first (Go reads nothing
+/// either).
+#[test]
+fn a_compaction_writes_its_output_without_reading_the_key_first() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let job = l1_job(&replica);
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let out = block_on(run_compact_as(&job, &from, &to, WriteMode::Replace));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    let again = block_on(run_compact_as(&job, &from, &to, WriteMode::Replace));
+    assert!(matches!(again, Outcome::Compacted { .. }), "{again:?}");
+    assert_eq!(listed(&replica, 1), vec![job.output_key()]);
+}
+
 /// An output key that holds something other than this run would write is left as it is:
 /// the bucket refuses the create-only commit, and the job is planned again from a listing
 /// that shows what is there. A store without create-only writes has no such refusal.
