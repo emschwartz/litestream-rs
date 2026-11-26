@@ -58,7 +58,6 @@ use super::{
 use crate::checkpoint::CheckpointState;
 use crate::fault::role::Role;
 use crate::fault::{Fault, Next};
-use crate::inventory::Inventory;
 use crate::layout::{FileKey, Level};
 use crate::position::Position;
 use crate::recover::{
@@ -66,7 +65,7 @@ use crate::recover::{
 };
 use crate::source::{Checkpointer, PageSource, WalSource};
 use crate::store::{PageLimit, exists};
-use crate::upload::{Unsent, drop_staged_from, inventory_fault};
+use crate::upload::{Unsent, drop_staged_from};
 use crate::witness::{Base, Witnessed, scan};
 
 /// Whether this process may still try the local course.
@@ -310,12 +309,14 @@ impl Actor {
     {
         let denied = &mut self.kept.scratch_sweep_denied;
         let listed = boot_listing(env.staging, env.remote, denied, takeover).await?;
-        self.settle_course(env.staging, env.remote, unsent).await?;
+        self.settle_course(env.staging, listed.upload.confirmed(), unsent)
+            .await?;
         Ok(listed)
     }
 
     /// Settles the files in the course's slot, if it holds any, against the replica as
-    /// listed now. The replica's newest transaction, at any level, at or below the newest
+    /// the boot just listed it: `held` is its newest transaction at any level (the listing
+    /// is not made again, a request Go's boot does not make). At or below the newest
     /// level-0 staged file: every file in the slot is above the replica, as a file staged
     /// after a boot is, and moves up to level 0. Past it: the slot's files number
     /// transactions the replica holds, so they are deleted and a course in progress ends.
@@ -327,10 +328,10 @@ impl Actor {
     ///
     /// Called once the boot's own listing answered, so a boot that cannot reach the replica
     /// leaves staging as it found it.
-    pub(super) async fn settle_course<L: Role, R: Role>(
+    pub(super) async fn settle_course<L: Role>(
         &mut self,
         staging: &L,
-        remote: &R,
+        held: Option<Txid>,
         unsent: &Unsent<'_>,
     ) -> Result<(), Fault> {
         let slot = staging
@@ -343,10 +344,6 @@ impl Actor {
         let base = newest_level_zero(staging)
             .await?
             .map(|info| info.key.range().max());
-        let held = Inventory::load(remote)
-            .await
-            .map_err(|err| inventory_fault::<R>(&err))?
-            .newest();
         if held > base || base > Some(oldest) {
             drop_staged_from(&Apart::over(staging, None), Txid::MIN, unsent).await?;
             if matches!(self.engine.course, Course::Local(_)) {
