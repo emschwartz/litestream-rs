@@ -63,8 +63,8 @@ use std::path::Path;
 pub use build::is_url;
 pub use config::{
     AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
-    OtherWriterSetting, ReplicaConfig, ReplicaKind, ResponseSetting, ResponseSettings,
-    RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
+    ReplicaConfig, ReplicaKind, RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride,
+    defaults,
 };
 pub use duration::{DurationError, GoDuration};
 pub use error::{
@@ -250,15 +250,4 @@ fn read_file(path: &Path) -> Result<String, P> {
         }));
     }
     String::from_utf8(bytes).map_err(|_invalid| file_problem(ProblemKind::NotUtf8))
-}
-
-/// What loading config text found, refused or not: every key, warning and problem of
-/// the load alone. `lsr config check` also runs the daemon's start checks
-/// (`lsr_sidecar::check`), which this does not.
-#[must_use]
-pub fn check_text(text: &str, expand: Expand, env: &dyn Env) -> Report {
-    match GoConfig::parse(text, expand, env) {
-        Ok(loaded) => loaded.report,
-        Err(error) => error.report().clone(),
-    }
 }
