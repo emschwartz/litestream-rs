@@ -55,7 +55,7 @@
 //! stream opened for each slice, at the offset the last one reached.
 
 use std::convert::Infallible;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use lsr_ltx::{
     DbChecksum, DbPages, DecodeError, EncodeError, Encoder, Event, Header, HeaderFields, PageNo,
@@ -64,6 +64,7 @@ use lsr_ltx::{
 use thiserror::Error;
 
 use crate::fault::role::{Replica, Role, STAGING_WINDOW};
+use crate::fault::{BugSite, Fault};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
 use crate::publish::{Open, Writer};
@@ -283,6 +284,9 @@ pub enum CompactError {
         /// The first input.
         first: FileKey,
     },
+    /// A condition the compactor rules out was met: the fault [`BugSite::hit`] made.
+    #[error("a compactor invariant failed: {0:?}")]
+    Bug(Fault),
 }
 
 /// A published compaction.
@@ -847,9 +851,15 @@ impl Compacting {
             self.fill((source, &mut *slots), read_until).await?;
             let (len, encoding) = (self.out().len(), self.encoder.is_some());
             // Short of a flush, the slice read its share of the inputs.
-            if len == 0 || (encoding && len < self.merge.budget.flush) {
+            if encoding && len < self.merge.budget.flush {
                 break;
             }
+            // Every pass hands over a byte, so the count down cannot stand still.
+            let Some(n) =
+                NonZeroUsize::new(len.min(usize::try_from(room.get()).unwrap_or(usize::MAX)))
+            else {
+                break;
+            };
             if !patient
                 && self
                     .upload
@@ -861,7 +871,7 @@ impl Compacting {
                 self.waits = true;
                 return Ok(None);
             }
-            let n = len.min(usize::try_from(room.get()).unwrap_or(usize::MAX));
+            let n = n.get();
             let out = match self.encoder.as_mut() {
                 Some(encoder) => encoder.writer_mut(),
                 None => &mut self.rest,
@@ -1050,14 +1060,18 @@ async fn compact_with<S: Role, D: ObjectStore>(
     let mut slots = Slots::new();
     let mut job =
         Compacting::begin_with((source, &mut slots), dest, inputs, level, mode, budget).await?;
-    loop {
-        match job.slice_in((source, &mut slots), u64::MAX, true).await {
-            Ok(Some(trailer)) => return job.commit(dest, trailer).await,
-            Ok(None) => {}
-            Err(err) => {
-                job.abort().await;
-                return Err(err);
-            }
+    // A patient slice with no limit on its bytes hands over the whole output, so one is all
+    // it takes; one that stops short is a bug, never a loop that waits on it.
+    let ended = job.slice_in((source, &mut slots), u64::MAX, true).await;
+    match ended {
+        Ok(Some(trailer)) => job.commit(dest, trailer).await,
+        Ok(None) => {
+            job.abort().await;
+            Err(CompactError::Bug(BugSite::Encode.hit()))
+        }
+        Err(err) => {
+            job.abort().await;
+            Err(err)
         }
     }
 }

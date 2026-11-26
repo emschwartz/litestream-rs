@@ -1080,21 +1080,20 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
     sent: &Sent,
     mode: WriteMode,
 ) -> Outcome {
-    let mut merging = match Merging::begin(inputs, level, (local, replica), sent, mode).await {
+    let merging = match Merging::begin(inputs, level, (local, replica), sent, mode).await {
         Ok(merging) => merging,
         Err(outcome) => return outcome,
     };
-    loop {
-        merging = match merging.slice((local, replica), u64::MAX, true).await {
-            Ok(merging) => merging,
-            Err(outcome) => return outcome,
-        };
+    // A patient slice with no limit on its bytes ends the merge: one is all it takes.
+    match merging.slice((local, replica), u64::MAX, true).await {
+        Ok(_) => panic!("a whole slice left the merge part-way"),
+        Err(outcome) => outcome,
     }
 }
 
 /// A merge of [`run_compaction`] part-way: the compaction ([`Compacting`]), and what its end is
 /// judged by. The engine runs it a slice a tick, syncing and uploading between
-/// (`docs/decisions/D256.md`).
+/// (`docs/decisions/D259.md`).
 #[derive(Debug)]
 pub(crate) struct Merging {
     job: Compacting,
@@ -1258,7 +1257,8 @@ async fn judge<R: Role>(
             | CompactError::Input { .. }
             | CompactError::Encode(_)
             | CompactError::SnapshotLevel { .. }
-            | CompactError::Inputs(_)),
+            | CompactError::Inputs(_)
+            | CompactError::Bug(_)),
         ) => Outcome::Failed(MaintainError::Compact(err)),
     }
 }

@@ -509,7 +509,7 @@ pub(super) struct Engine {
 }
 
 /// A maintenance job that goes to the replica a slice a tick, the engine syncing and uploading
-/// between (`docs/decisions/D255.md`, `docs/decisions/D256.md`).
+/// between (`docs/decisions/D255.md`, `docs/decisions/D259.md`).
 #[derive(Debug)]
 #[expect(
     clippy::large_enum_variant,

@@ -218,6 +218,7 @@ fn input_fault(err: CompactError) -> (FileKey, InputFault) {
         | CompactError::Dest(_)
         | CompactError::Encode(_)
         | CompactError::SnapshotLevel { .. }
+        | CompactError::Bug(_)
         | CompactError::Inputs(_) => panic!("expected an input fault, got {err:?}"),
     }
 }
