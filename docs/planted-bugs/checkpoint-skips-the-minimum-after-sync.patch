@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index 0af5943e4..17bdbf5c0 100644
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -206,7 +206,7 @@ pub fn decide(state: &CheckpointState, observed: &Observed, cfg: &CheckpointConf
+             .min_pages
+             .is_some_and(|min| observed.synced_frames >= min.get())
+     {
+-        return Decision::Passive(CheckpointTrigger::MinPages);
++        return Decision::Nothing;
+     }
+     if let CheckpointState::Pending { last } = state
+         && cfg

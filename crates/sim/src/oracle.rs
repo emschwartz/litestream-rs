@@ -88,6 +88,8 @@ pub enum Bound {
     CommitLagMillis,
     /// Bytes the healthy tail handed to uploads the store never took.
     WastedBytes,
+    /// Frames in the WAL once one of the healthy tail's commits reached the replica.
+    WalFrames,
 }
 
 impl fmt::Display for Bound {
@@ -112,6 +114,7 @@ impl fmt::Display for Bound {
             Self::StagingTickMicros => "microseconds of staging calls in one tick",
             Self::CommitLagMillis => "milliseconds from a commit to the replica",
             Self::WastedBytes => "bytes sent to uploads the store never took",
+            Self::WalFrames => "frames in the WAL after a commit reached the replica",
         };
         f.write_str(name)
     }
