@@ -340,7 +340,20 @@ impl<T: Transport> ObjectStore for S3Store<T> {
 
     /// One GET for the rest of the object, its body read as the pieces are asked for.
     fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
-        Box::new(S3Stream::new(&self.inner, key, offset))
+        Box::new(S3Stream::new(Arc::clone(&self.inner), key, offset))
+    }
+
+    /// The same one GET: it borrows nothing.
+    async fn hold_stream(
+        &self,
+        key: FileKey,
+        offset: u64,
+    ) -> Result<Option<Box<dyn ReadStream>>, StoreError> {
+        Ok(Some(Box::new(S3Stream::new(
+            Arc::clone(&self.inner),
+            key,
+            offset,
+        ))))
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {

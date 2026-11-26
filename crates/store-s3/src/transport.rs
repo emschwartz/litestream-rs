@@ -218,7 +218,8 @@ impl Body for Held {
 }
 
 /// What [`Transport::open`] got: the status and headers (an empty body), and the body to read.
-pub type Opened<'a> = (HttpResponse, Box<dyn Body + 'a>);
+/// The body borrows nothing, so a reader can hold it between ticks (a compaction part-way).
+pub type Opened = (HttpResponse, Box<dyn Body>);
 
 /// Why no response came back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -342,7 +343,7 @@ pub trait Transport: Send + Sync + 'static {
     ///
     /// # Errors
     /// [`TransportError`] when no response arrived.
-    fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
+    fn open(&self, request: HttpRequest) -> Result<Opened, TransportError> {
         let mut response = self.send(request)?;
         let body = std::mem::take(&mut response.body);
         // The head is whole; a body cut short shows as fewer bytes than declared.

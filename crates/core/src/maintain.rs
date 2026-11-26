@@ -107,7 +107,7 @@ use std::cmp::Ordering;
 use lsr_ltx::{TRAILER_LEN, Timestamp, Txid, TxidRange};
 use thiserror::Error;
 
-use crate::compact::{CompactError, Compacted, CompactionInputs, MAX_INPUTS, compact_in};
+use crate::compact::{CompactError, Compacted, Compacting, CompactionInputs, MAX_INPUTS};
 use crate::created_at::{Need, Resolve, ResolvedCreatedAt};
 use crate::fault::role::Role;
 use crate::inventory::{Inventory, is_snapshot_start};
@@ -1071,6 +1071,7 @@ pub enum Outcome {
 /// `Compactor::Compact`), and the job was planned from a listing that shows every
 /// file this engine wrote (a store whose listings lag is unsupported,
 /// `docs/decisions/D173.md`, `docs/decisions/D246.md`).
+#[cfg(test)]
 pub(crate) async fn run_compaction<L: Role, R: Role>(
     inputs: &CompactionInputs,
     level: Level,
@@ -1079,16 +1080,170 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
     sent: &Sent,
     mode: WriteMode,
 ) -> Outcome {
-    let output = FileKey::new(level, inputs.range());
-    let result = if inputs
-        .files()
-        .iter()
-        .all(|info| info.key.level() == Level::ZERO)
-    {
-        compact_from_level_zero(inputs, level, local, replica, sent, mode).await
-    } else {
-        compact_in(replica, replica, inputs, level, mode).await
+    let mut merging = match Merging::begin(inputs, level, (local, replica), sent, mode).await {
+        Ok(merging) => merging,
+        Err(outcome) => return outcome,
     };
+    // A patient slice with no limit on its bytes ends the merge, unless it found a staged copy
+    // gone or unreadable and began again from the replica's copies, which happens once at most.
+    for _ in 0..2 {
+        merging = match merging.slice((local, replica), u64::MAX, true).await {
+            Ok(merging) => merging,
+            Err(outcome) => return outcome,
+        };
+    }
+    merging.abort().await;
+    Outcome::Failed(MaintainError::Compact(CompactError::Bug(
+        crate::BugSite::Encode.hit(),
+    )))
+}
+
+/// A merge of [`run_compaction`] part-way: the compaction ([`Compacting`]), and what its end is
+/// judged by. The engine runs it a slice a tick, syncing and uploading between
+/// (`docs/decisions/D259.md`).
+#[derive(Debug)]
+pub(crate) struct Merging {
+    job: Compacting,
+    /// It reads the staged copies of level 0, which are the replica's objects.
+    staged: bool,
+    inputs: CompactionInputs,
+    level: Level,
+    mode: WriteMode,
+}
+
+impl Merging {
+    /// Opens the inputs and begins the output, as [`run_compaction`] does.
+    ///
+    /// # Errors
+    /// How the merge ended when it could not begin.
+    pub(crate) async fn begin<L: Role, R: Role>(
+        inputs: &CompactionInputs,
+        level: Level,
+        (local, replica): (&L, &R),
+        sent: &Sent,
+        mode: WriteMode,
+    ) -> Result<Self, Outcome> {
+        let output = FileKey::new(level, inputs.range());
+        let zero = inputs
+            .files()
+            .iter()
+            .all(|info| info.key.level() == Level::ZERO);
+        let staged = zero
+            && match local_is_replica(local, replica, inputs, sent).await {
+                Ok(staged) => staged,
+                Err(err) => return Err(judge(Err(err), output, replica, mode).await),
+            };
+        match open(staged, inputs, level, (local, replica), mode).await {
+            Ok((job, staged)) => Ok(Self {
+                job,
+                staged,
+                inputs: inputs.clone(),
+                level,
+                mode,
+            }),
+            Err(err) => Err(judge(Err(err), output, replica, mode).await),
+        }
+    }
+
+    /// The next slice ([`Compacting::slice`]): the merge to go on with, or how it ended. Staged
+    /// inputs that turn out missing or unreadable start it again from the replica's copies, from
+    /// its first page.
+    ///
+    /// # Errors
+    /// How the merge ended.
+    pub(crate) async fn slice<L: Role, R: Role>(
+        mut self,
+        (local, replica): (&L, &R),
+        budget: u64,
+        patient: bool,
+    ) -> Result<Self, Outcome> {
+        let sliced = if self.staged {
+            self.job.slice(local, budget, patient).await
+        } else {
+            self.job.slice(replica, budget, patient).await
+        };
+        let output = FileKey::new(self.level, self.inputs.range());
+        let ended = match sliced {
+            Ok(None) => return Ok(self),
+            Ok(Some(trailer)) => self.job.commit(replica, trailer).await,
+            Err(err) => {
+                self.job.abort().await;
+                let again = self.staged
+                    && matches!(
+                        err,
+                        CompactError::InputVanished { .. } | CompactError::Input { .. }
+                    );
+                if again {
+                    let reopened =
+                        open(false, &self.inputs, self.level, (local, replica), self.mode);
+                    match reopened.await {
+                        Ok((job, staged)) => {
+                            return Ok(Self {
+                                job,
+                                staged,
+                                ..self
+                            });
+                        }
+                        Err(err) => Err(err),
+                    }
+                } else {
+                    Err(err)
+                }
+            }
+        };
+        Err(judge(ended, output, replica, self.mode).await)
+    }
+
+    /// Bytes handed to the replica so far.
+    pub(crate) const fn sent(&self) -> u64 {
+        self.job.sent
+    }
+
+    /// The last slice stopped for the upload's parts.
+    pub(crate) const fn waits(&self) -> bool {
+        self.job.waits
+    }
+
+    /// Whether it reads staged copies, which the staging prune must leave alone until it ends.
+    pub(crate) const fn reads_staging(&self) -> bool {
+        self.staged
+    }
+
+    /// Ends the merge, its upload aborted.
+    pub(crate) async fn abort(self) {
+        self.job.abort().await;
+    }
+}
+
+/// Begins the merge from the staged copies when `staged`, and from the replica's otherwise or
+/// once a staged copy is missing or does not decode (the local copy may be gone after a
+/// restart, or rotten). Says which it reads.
+async fn open<L: Role, R: Role>(
+    staged: bool,
+    inputs: &CompactionInputs,
+    level: Level,
+    (local, replica): (&L, &R),
+    mode: WriteMode,
+) -> Result<(Compacting, bool), CompactError> {
+    if staged {
+        // The source is staging here, so a failed read is staging's error
+        // (`CompactError::Local`), by its role.
+        match Compacting::begin(local, replica, inputs, level, mode).await {
+            Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {}
+            begun => return begun.map(|job| (job, true)),
+        }
+    }
+    let begun = Compacting::begin(replica, replica, inputs, level, mode).await;
+    begun.map(|job| (job, false))
+}
+
+/// What a merge's end means for maintenance.
+async fn judge<R: Role>(
+    result: Result<Compacted, CompactError>,
+    output: FileKey,
+    replica: &R,
+    mode: WriteMode,
+) -> Outcome {
     match result {
         Ok(done) => Outcome::Compacted {
             info: done.info(),
@@ -1109,31 +1264,9 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
             | CompactError::Input { .. }
             | CompactError::Encode(_)
             | CompactError::SnapshotLevel { .. }
-            | CompactError::Inputs(_)),
+            | CompactError::Inputs(_)
+            | CompactError::Bug(_)),
         ) => Outcome::Failed(MaintainError::Compact(err)),
-    }
-}
-
-/// Level-0 inputs from their local copies when those are the replica's
-/// objects, from the replica otherwise.
-async fn compact_from_level_zero<L: Role, R: Role>(
-    inputs: &CompactionInputs,
-    level: Level,
-    local: &L,
-    replica: &R,
-    sent: &Sent,
-    mode: WriteMode,
-) -> Result<Compacted, CompactError> {
-    if !local_is_replica(local, replica, inputs, sent).await? {
-        return compact_in(replica, replica, inputs, level, mode).await;
-    }
-    // The source is staging here, so a failed read is staging's error
-    // (`CompactError::Local`), by its role.
-    match compact_in(local, replica, inputs, level, mode).await {
-        Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
-            compact_in(replica, replica, inputs, level, mode).await
-        }
-        other => other,
     }
 }
 

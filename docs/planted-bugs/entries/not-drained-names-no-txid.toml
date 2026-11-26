@@ -1,0 +1,6 @@
+# The line a drain cut by its deadline logs gives byte counts only, never which transaction the
+# replica holds, so an operator cannot tell what a restore lacks.
+name = "not-drained-names-no-txid"
+fix = "claude/sync-stall"
+package = "lsr-sidecar"
+tests = ["daemon::tests::a_drain_cut_by_its_deadline_names_the_last_replicated_transaction"]

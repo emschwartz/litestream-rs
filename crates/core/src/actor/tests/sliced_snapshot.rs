@@ -126,7 +126,7 @@ fn a_commit_made_during_a_long_snapshot_reaches_the_replica_before_it_ends() {
 fn part_way(rig: &mut Rig, actor: &mut Actor) {
     for _ in 0..50 {
         let tick = rig.tick(actor, T0);
-        if matches!(event(&tick), Some(Event::Sending { .. })) && actor.engine.snapshot.is_some() {
+        if matches!(event(&tick), Some(Event::Sending { .. })) && actor.engine.sliced.is_some() {
             return;
         }
     }
@@ -173,7 +173,7 @@ fn a_drain_ends_the_snapshot_part_way() {
         matches!(ticks.last(), Some(Tick::Drained { .. })),
         "{ticks:?}"
     );
-    assert!(actor.engine.snapshot.is_none());
+    assert!(actor.engine.sliced.is_none());
     assert!(!actor.engine.pages.pinned());
     assert_eq!(newest(&rig, Level::SNAPSHOT), None);
 }
@@ -196,7 +196,7 @@ fn a_failed_slice_ends_the_snapshot_and_lets_the_pin_go() {
         }
     }
     assert!(failed);
-    assert!(actor.engine.snapshot.is_none());
+    assert!(actor.engine.sliced.is_none());
     assert!(!actor.engine.pages.pinned());
     assert_eq!(newest(&rig, Level::SNAPSHOT), None);
 }
@@ -208,7 +208,7 @@ fn a_failed_slice_ends_the_snapshot_and_lets_the_pin_go() {
 fn a_snapshot_whose_upload_waits_for_its_parts_is_no_slice() {
     let (mut rig, mut actor) = before_a_long_snapshot();
     part_way(&mut rig, &mut actor);
-    let sent = actor.engine.snapshot.as_ref().map(|(_, s)| s.sent);
+    let sent = actor.engine.sliced.as_ref().map(|(_, s)| s.sent());
     rig.remote.flights.lock().unwrap().extend([Flight::Full; 3]);
     let tick = rig.tick(&mut actor, T0);
     assert!(actor.awaits_parts(), "{tick:?}");
@@ -217,7 +217,7 @@ fn a_snapshot_whose_upload_waits_for_its_parts_is_no_slice() {
         "{tick:?}"
     );
     assert_ne!(next_of(&tick), Some(Next::Now), "{tick:?}");
-    assert_eq!(actor.engine.snapshot.as_ref().map(|(_, s)| s.sent), sent);
+    assert_eq!(actor.engine.sliced.as_ref().map(|(_, s)| s.sent()), sent);
     for _ in 0..200 {
         if newest(&rig, Level::SNAPSHOT).is_some() {
             break;
@@ -249,7 +249,7 @@ fn a_snapshot_goes_first_for_exactly_its_share_while_commits_wait() {
         }
     }
     assert!(
-        actor.engine.snapshot.is_some(),
+        actor.engine.sliced.is_some(),
         "the snapshot ended inside the window"
     );
     assert!(syncs >= 3, "{syncs}");
@@ -277,6 +277,6 @@ fn a_snapshot_leaves_the_wal_step_a_tick_after_each_share_of_slices() {
         }
     }
     assert!(slices <= super::super::state::FAIR_SHARE, "{slices}");
-    actor.engine.snapshot = None;
+    actor.engine.sliced = None;
     rig.tick(&mut actor, T0);
 }

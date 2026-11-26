@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+index f0e7601c7..fdaceba86 100644
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1162,7 +1162,7 @@ impl Merging {
+             Ok(Some(trailer)) => self.job.commit(replica, trailer).await,
+             Err(err) => {
+                 self.job.abort().await;
+-                let again = self.staged
++                let again = false
+                     && matches!(
+                         err,
+                         CompactError::InputVanished { .. } | CompactError::Input { .. }

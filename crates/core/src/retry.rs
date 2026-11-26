@@ -428,6 +428,23 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         })
     }
 
+    async fn hold_stream(
+        &self,
+        key: FileKey,
+        offset: u64,
+    ) -> Result<Option<Box<dyn ReadStream>>, StoreError> {
+        let core = &*self.core;
+        let Some(held) = core.run(|| core.inner.hold_stream(key, offset)).await? else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(Holding {
+            core: Arc::clone(&self.core),
+            key,
+            offset,
+            open: Some(held),
+        })))
+    }
+
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let core = &*self.core;
         core.run(|| core.inner.created_at(file)).await
@@ -538,21 +555,65 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> ReadStream for Resuming<'_, S, P, E
                 let bytes = fresh.next(len).await?;
                 Ok((fresh, bytes))
             };
-            // A stream that failed is dropped here: the retry opens another.
-            let first = match self.open.take() {
-                Some(mut open) => open.next(len).await.map(|bytes| (open, bytes)),
-                None => {
-                    Counters::bump(&core.counters.calls);
-                    reopen().await
-                }
-            };
-            let (open, bytes) = core.settle(first, reopen, false).await?;
+            let (open, bytes) = piece(core, self.open.take(), len, reopen).await?;
             self.open = Some(open);
             let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             self.offset = offset.saturating_add(read);
             Ok(bytes)
         })
     }
+}
+
+/// [`Resuming`] for a held stream ([`ObjectStore::hold_stream`]): it holds the store's core,
+/// so it borrows nothing, and a failed piece is asked again of a new held stream.
+struct Holding<S, P, E> {
+    core: Arc<Core<S, P, E>>,
+    key: FileKey,
+    offset: u64,
+    open: Option<Box<dyn ReadStream>>,
+}
+
+impl<S: ObjectStore, P: Sleeper, E: Entropy> ReadStream for Holding<S, P, E> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let (core, key, offset) = (&*self.core, self.key, self.offset);
+            let reopen = move || async move {
+                // The store held this object once; one that no longer can has lost it.
+                let held = core.inner.hold_stream(key, offset).await?;
+                let mut fresh = held.ok_or(StoreError::NotFound { key })?;
+                let bytes = fresh.next(len).await?;
+                Ok((fresh, bytes))
+            };
+            let (open, bytes) = piece(core, self.open.take(), len, reopen).await?;
+            self.open = Some(open);
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.offset = offset.saturating_add(read);
+            Ok(bytes)
+        })
+    }
+}
+
+/// The next piece of a resumed stream: from `open`, or a fresh stream from `reopen` when there
+/// is none, and from fresh ones under the policy while they fail. A stream that failed is
+/// dropped here.
+async fn piece<'a, S, P: Sleeper, E: Entropy, F, Fut>(
+    core: &Core<S, P, E>,
+    open: Option<Box<dyn ReadStream + 'a>>,
+    len: ReadLen,
+    mut reopen: F,
+) -> Result<(Box<dyn ReadStream + 'a>, Vec<u8>), StoreError>
+where
+    F: FnMut() -> Fut + Send,
+    Fut: Future<Output = Result<(Box<dyn ReadStream + 'a>, Vec<u8>), StoreError>> + Send,
+{
+    let first = match open {
+        Some(mut open) => open.next(len).await.map(|bytes| (open, bytes)),
+        None => {
+            Counters::bump(&core.counters.calls);
+            reopen().await
+        }
+    };
+    core.settle(first, reopen, false).await
 }
 
 /// An upload through a [`Retrying`] store: passes writes and the commit
