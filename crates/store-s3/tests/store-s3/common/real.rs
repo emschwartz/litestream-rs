@@ -139,7 +139,7 @@ fn store_transport(deadline: std::time::Duration) -> Box<dyn Transport> {
     match std::env::var("LSR_S3_TRANSPORT").as_deref() {
         #[cfg(feature = "reqwest")]
         Ok("reqwest") => Box::new(lsr_store_s3::ReqwestTransport::new(deadline).unwrap()),
-        Ok("ureq") | Err(_) => Box::new(UreqTransport::new(deadline)),
+        Ok("ureq") | Err(_) => Box::new(UreqTransport::new(deadline).expect("a TLS provider")),
         Ok(other) => panic!("LSR_S3_TRANSPORT={other}: ureq, or reqwest with the feature"),
     }
 }
@@ -938,7 +938,7 @@ macro_rules! shared_cases {
                 created_at_of_a_vanished_file_is_not_found,
                 created_at_of_an_overwritten_file_is_refused,
                 read_with_created_at_agrees_with_read_and_created_at,
-                read_many_agrees_with_read,
+                read_stream_agrees_with_read,
                 list_many_agrees_with_list,
                 created_at_many_agrees_with_created_at,
             );

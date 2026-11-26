@@ -1,7 +1,7 @@
-# A response body read into a buffer grown from empty: each 4 MiB read holds 8 MiB.
+# A response body read into a buffer grown from empty: a 12 MiB read holds 16 MiB and the 8 MiB block it grew from.
 name = "response-body-grown-from-empty"
 fix = "9f711e542"
 package = "lsr-store-s3"
 tests = [
-    "memory::a_restore_through_the_real_client_holds_one_read_window",
+    "memory::a_ranged_read_through_the_real_client_holds_its_body_once",
 ]

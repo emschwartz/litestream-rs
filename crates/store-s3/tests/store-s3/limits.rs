@@ -8,9 +8,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::conformance::block_on;
-use lsr_core::{
-    BatchKind, FakeClock, FileInfo, Level, ListAt, ListedTime, ObjectStore, ReadAt, ReadLen, Upload,
-};
+use lsr_core::{BatchKind, FakeClock, FileInfo, Level, ListAt, ListedTime, ObjectStore, Upload};
 use lsr_ltx::Timestamp;
 use lsr_store_s3::{
     FakeS3, FaultTransport, HttpRequest, HttpResponse, Inline, Lanes, Provider, S3Config, S3Store,
@@ -137,13 +135,7 @@ fn concurrency_governs_only_parts() {
         up.write(&bytes).await.unwrap();
         up.commit().await.unwrap();
     });
-    let len = ReadLen::new(2).unwrap();
-    let reads = [0, 2].map(|offset| ReadAt {
-        key: k,
-        offset,
-        len,
-    });
-    block_on(store.read_many(&reads));
+    block_on(store.list_many(&[ListAt::first(Level::ZERO)], limit(10)));
     let files = [FileInfo {
         key: k,
         size: 4,
@@ -176,28 +168,10 @@ fn creation_time_heads_go_sixteen_at_a_time() {
 }
 
 #[test]
-fn range_reads_and_listings_go_eight_at_a_time() {
+fn listings_go_eight_at_a_time() {
     let (store, limits) = store_for(config());
-    let k = key(0, 1, 1);
-    block_on(async {
-        let mut up = store
-            .begin_upload(&k, Timestamp::from_unix_millis(5), WriteMode::Replace)
-            .await
-            .unwrap();
-        up.write(b"abcd").await.unwrap();
-        up.commit().await.unwrap();
-    });
-    let len = ReadLen::new(2).unwrap();
-    let reads = [0, 2].map(|offset| ReadAt {
-        key: k,
-        offset,
-        len,
-    });
-    assert_eq!(block_on(store.read_many(&reads)).len(), 2);
-    assert_eq!(seen(&limits), [8]);
     let pages = [Level::ZERO].map(|level| ListAt { level, after: None });
     assert_eq!(block_on(store.list_many(&pages, limit(10))).len(), 1);
     assert_eq!(seen(&limits), [8]);
-    assert_eq!(store.batch_width(BatchKind::Reads).get(), 8);
     assert_eq!(store.batch_width(BatchKind::Lists).get(), 8);
 }

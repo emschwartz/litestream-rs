@@ -95,6 +95,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 No async runtime is needed, and nothing runs on the application's threads. Writes are refused with SQLite's "database is locked" until `wait_booted` answers `Booted` (see `if-replication-stops` in [docs/how-it-works.md](docs/how-it-works.md)). The crate documentation of `lsr-replica` covers connection setup (`app_connection`, `app_connection_raw`), events, restore and the memory bounds.
 
+TLS to the bucket runs on the rustls crypto provider the application chooses: the one it installed with `rustls::crypto::CryptoProvider::install_default`, else the one provider rustls's own features enable in its build (ring or aws-lc-rs). `lsr-store-s3` enables neither, so it links no provider itself. When rustls cannot pick, building the store returns `ConfigError::NoTlsProvider`. The `lsr` binary installs aws-lc-rs (a C build, so it needs a C compiler) at the start of main.
+
 The library and the application share one SQLite, because `libsqlite3-sys` allows one copy per build. `lsr-replica` accepts `libsqlite3-sys` 0.37 to 0.40 (SQLite 3.51.3 to 3.54.1), so an application on rusqlite 0.39 to 0.43 or sqlx 0.9 builds beside it. With `default-features = false` it links the application's own SQLite, which must be one of the verified builds (`crates/sqlite/src/version.rs`) or `Replicator::start` refuses it.
 
 ## How it differs from Go Litestream

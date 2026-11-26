@@ -229,7 +229,7 @@ impl CompactJob {
     /// [`JobError::InputAtWrongLevel`] for the first input not at `level - 1`.
     pub fn new(inputs: CompactionInputs, level: Level) -> Result<Self, JobError> {
         let expected = Level::new(level.get().saturating_sub(1))
-            .filter(|_| (1..=8).contains(&level.get()))
+            .filter(|_| Level::COMPACTION.contains(&level))
             .ok_or(JobError::LevelOutOfRange { level })?;
         if let Some(wrong) = inputs
             .files()
@@ -565,10 +565,7 @@ pub(crate) fn due_full(
     state: &mut MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Decided> {
-    match decide(inventory, now, config, published, state, resolved) {
-        Ok(decided) => Resolve::Done(decided),
-        Err(file) => Resolve::Need(file),
-    }
+    decide(inventory, now, config, published, state, resolved).into()
 }
 
 /// A decision on a whole listing, with what the short listings that follow it rely on.
@@ -614,17 +611,15 @@ fn decide(
     let mut until: Option<Timestamp> = None;
     // With no snapshot and no level 1 file yet, the first snapshot goes before any level, so
     // the levels start above it (D224) and the database is not carried through levels 1 to 3.
-    let first = (snapshot_end(inventory).is_none()
-        && Level::new(1).is_some_and(|one| inventory.level(one).is_empty()))
-    .then(|| snapshot_step(inventory, now, config, published, state, resolved))
-    .transpose()?;
+    let first = (snapshot_end(inventory).is_none() && inventory.level(Level::ONE).is_empty())
+        .then(|| snapshot_step(inventory, now, config, published, state, resolved))
+        .transpose()?;
     let first_planned = first.is_some();
     if let Some(job) = first.and_then(|step| absorb(step, &mut until)) {
         return Ok(Decided::job(job, gate));
     }
-    let levels = Level::ALL
+    let levels = Level::COMPACTION
         .iter()
-        .skip(1)
         .take(usize::from(config.top().get()));
     // A hole is closed before any other job, at whatever level it is: the next passes see
     // only tails, where a hole that is not right above a level's newest file does not show.
@@ -1031,10 +1026,9 @@ pub enum Outcome {
         /// How many keys the call named.
         count: usize,
     },
-    /// An input is gone from the replica, or the output's key already holds
-    /// an object the listing did not show: list again and plan again.
+    /// An input is gone from the replica: list again and plan again.
     Replan {
-        /// The missing input, or the output found already there.
+        /// The missing input.
         key: FileKey,
     },
     /// The job failed; nothing was retried here.
@@ -1049,11 +1043,13 @@ pub enum Outcome {
 /// deleted.
 ///
 /// When the store rejected the output's commit, the output key is deleted
-/// before returning: a listing would otherwise show it as coverage. That
-/// delete may only take the object this attempt wrote, never one the key held
-/// before (an earlier run's output that retention may already count as
-/// cover): an output key a read finds taken before the write is not written
-/// over, and the job is planned again from a fresh listing.
+/// before returning: a listing would otherwise show it as coverage. The key held
+/// nothing before the write: the job was planned from a listing that shows every
+/// file this engine wrote (a store whose listings lag is unsupported,
+/// `docs/decisions/D173.md`), and a merge whose output that listing shows is
+/// never planned. So the delete takes only what this attempt wrote, and the key
+/// is not read first: Go writes its compaction output with no read either
+/// (`compactor.go:104`, `Compactor::Compact`).
 pub(crate) async fn run_compaction<L: Role, R: Role>(
     inputs: &CompactionInputs,
     level: Level,
@@ -1061,11 +1057,6 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
     replica: &R,
 ) -> Outcome {
     let output = FileKey::new(level, inputs.range());
-    match crate::store::exists(replica, &output).await {
-        Ok(true) => return Outcome::Replan { key: output },
-        Ok(false) => {}
-        Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
-    }
     let result = if inputs
         .files()
         .iter()
@@ -1131,6 +1122,12 @@ const _: () = assert!(matches!(TRAILER_LEN.checked_add(1), Some(17)));
 /// replica. One read of 17 bytes per input from each store; a local copy that
 /// is gone or differs answers false, and a replica object that is gone is
 /// [`CompactError::InputVanished`].
+///
+/// The replica read is the one request here Go does not make. Go merges any
+/// local level-0 file that opens (`compactor.go:139-147`, `LocalFileOpener`),
+/// with no check that it is the object the replica holds, so a stale staged copy
+/// becomes the level-1 file restores read while the replica's level 0 says
+/// otherwise. One 17-byte read per input is what tells the two apart.
 async fn local_is_replica<L: Role, R: Role>(
     local: &L,
     replica: &R,

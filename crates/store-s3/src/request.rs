@@ -579,6 +579,25 @@ impl RequestBuilder {
         Ok(Self::finish(Method::Head, signed, Vec::new()))
     }
 
+    /// A GET of the object from `offset` to its end: no `Range` header from the first byte, as
+    /// Go's whole-object GET sends, else `bytes=offset-`.
+    ///
+    /// # Errors
+    /// [`RequestError::ClockOutOfRange`].
+    pub fn get_from(
+        &self,
+        now: Timestamp,
+        key: &FileKey,
+        offset: u64,
+    ) -> Result<HttpRequest, RequestError> {
+        let object = self.object(key);
+        let mut action = self.bucket.get_object(Some(&self.credentials), &object);
+        let range = (offset > 0).then(|| ("range", format!("bytes={offset}-")));
+        let extra = range.into_iter().collect();
+        let signed = self.sign(&mut action, now, extra)?;
+        Ok(Self::finish(Method::Get, signed, Vec::new()))
+    }
+
     /// A ranged GET of `len` bytes from `offset`.
     ///
     /// # Errors

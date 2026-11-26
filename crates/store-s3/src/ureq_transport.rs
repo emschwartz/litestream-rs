@@ -5,7 +5,8 @@
 //! redirects are not followed (a redirect from a presigned URL is a
 //! misconfigured endpoint, and the retry layers decide what to do), nothing is
 //! retried, and each request is bounded by progress, not by one deadline (see below). TLS is
-//! rustls on ring, trusting what Go's `crypto/x509` trusts (the system store,
+//! rustls on the provider chosen by the application or the crate features (see
+//! [`UreqTransport::new`]), trusting what Go's `crypto/x509` trusts (the system store,
 //! with `SSL_CERT_FILE` and `SSL_CERT_DIR` on Linux; see the `trust` module);
 //! ureq speaks HTTP/1.1 only.
 //!
@@ -33,9 +34,10 @@ use ureq::http;
 use ureq::tls::Certificate;
 use ureq::tls::RootCerts;
 
+use crate::ConfigError;
 use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
-use crate::transport::Bounds;
+use crate::transport::{Bounds, Opened};
 use crate::transport::{
     HttpResponse, MAX_BODY, StreamedRequest, Transport, TransportError, map_io, send_on_threads,
 };
@@ -72,11 +74,17 @@ impl UreqTransport {
     /// `deadline`. On Linux and the BSDs it trusts the system's root certificates
     /// (`SSL_CERT_FILE` and `SSL_CERT_DIR` when set), or Mozilla's roots when the system
     /// has none; that set can differ from Go's on an unusual system. On macOS and Windows
-    /// it asks the operating system's verifier.
-    #[must_use]
-    pub fn new(deadline: Duration) -> Self {
+    /// it asks the operating system's verifier. TLS runs on the crypto provider the application
+    /// installed as rustls's default, else the one provider rustls's features enable in its build
+    /// (see `ConfigError::NoTlsProvider`).
+    ///
+    /// # Errors
+    /// [`ConfigError::NoTlsProvider`] when no provider is installed and the features enable none
+    /// .
+    pub fn new(deadline: Duration) -> Result<Self, ConfigError> {
         let tls = ureq::tls::TlsConfig::builder()
             .root_certs(root_certs(trust::system()))
+            .unversioned_rustls_crypto_provider(trust::crypto_provider()?)
             .build();
         let bounds = Bounds::new(deadline);
         let stall = Some(bounds.stall());
@@ -103,10 +111,10 @@ impl UreqTransport {
             .max_response_header_size(CONN_BUFFER)
             .tls_config(tls)
             .build();
-        Self {
+        Ok(Self {
             agent: ureq::Agent::new_with_config(config),
             bounds,
-        }
+        })
     }
 
     /// The same transport with another floor under its uploads' speed, for a test.
@@ -170,6 +178,20 @@ fn root_certs(roots: Roots) -> RootCerts {
     }
 }
 
+/// A response's headers as received.
+fn head_of(response: &http::Response<ureq::Body>) -> Vec<(String, String)> {
+    response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
+}
+
 fn method_name(method: Method) -> &'static str {
     match method {
         Method::Get => "GET",
@@ -223,16 +245,7 @@ impl UreqTransport {
     ) -> Result<HttpResponse, TransportError> {
         let mut response = self.agent.run(request).map_err(|err| map_error(&err))?;
         let status = response.status().as_u16();
-        let headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_owned(),
-                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
-                )
-            })
-            .collect();
+        let headers = head_of(&response);
         let declared = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
@@ -247,7 +260,57 @@ impl UreqTransport {
     }
 }
 
+/// A streamed GET's body: read from the connection as the caller asks, each socket read bounded
+/// by ureq's per-read stall bound, and the whole body by `allowed` from its head, the time its
+/// declared length needs at the floor rate (`Bounds::cap`). A 4 GiB body may take the stall
+/// bound plus about 73 hours; a body that stops moving fails at the stall bound.
+struct Streamed {
+    reader: ureq::BodyReader<'static>,
+    began: std::time::Instant,
+    allowed: Duration,
+}
+
+impl crate::transport::Body for Streamed {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        if self.began.elapsed() > self.allowed {
+            return Err(TransportError::Timeout);
+        }
+        self.reader
+            .read(buf)
+            .map_err(|err| map_error(&ureq::Error::from(err)))
+    }
+}
+
 impl Transport for UreqTransport {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a socket timeout runs on the real clock, which no injected clock reaches"
+    )]
+    fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
+        // No ceiling over the whole exchange, which would cut a long body: connecting, sending
+        // and the wait for the head each have the stall bound, and the body its own cap below.
+        let built = self
+            .agent
+            .configure_request(Self::build(&request)?)
+            .timeout_global(None)
+            .build();
+        let response = self.agent.run(built).map_err(|err| map_error(&err))?;
+        let head = HttpResponse::new(
+            response.status().as_u16(),
+            head_of(&response),
+            Vec::new(),
+            true,
+        );
+        let body = Streamed {
+            allowed: self
+                .bounds
+                .cap(response.body().content_length().unwrap_or(0)),
+            reader: response.into_body().into_reader(),
+            began: std::time::Instant::now(),
+        };
+        Ok((head, Box::new(body)))
+    }
+
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
         let len = u64::try_from(request.body().len()).unwrap_or(u64::MAX);
@@ -338,7 +401,8 @@ mod tests {
     }
 
     fn status_of(url: &str) -> Result<u16, TransportError> {
-        let transport = UreqTransport::new(Duration::from_secs(5));
+        let transport =
+            UreqTransport::new(Duration::from_secs(5)).map_err(|_none| TransportError::Tls)?;
         let request = http::Request::builder()
             .uri(url)
             .body(Vec::new())
@@ -399,7 +463,9 @@ mod tests {
     fn an_upload_that_keeps_moving_outlives_the_stall_bound() {
         use crate::transport::slow_servers::serve_paced_reader;
         let (url, served) = serve_paced_reader(4 * MIB, Duration::from_millis(62));
-        let transport = UreqTransport::new(Duration::from_secs(3)).with_floor(floor());
+        let transport = UreqTransport::new(Duration::from_secs(3))
+            .expect("a TLS provider")
+            .with_floor(floor());
         let response = transport
             .send(upload(&url, 4 * MIB))
             .expect("an upload that moves is not a timeout");
@@ -413,7 +479,9 @@ mod tests {
     fn a_body_the_server_never_reads_times_out_at_the_stall_bound() {
         use crate::transport::slow_servers::{serve_never_reading, timed};
         let (url, release) = serve_never_reading();
-        let transport = UreqTransport::new(Duration::from_millis(300)).with_floor(floor());
+        let transport = UreqTransport::new(Duration::from_millis(300))
+            .expect("a TLS provider")
+            .with_floor(floor());
         let (err, took) = timed(|| transport.send(upload(&url, 32 * MIB)).err());
         assert_eq!(err, Some(TransportError::Timeout));
         assert!(took < Duration::from_secs(5), "{took:?}");
@@ -426,7 +494,9 @@ mod tests {
     fn a_download_that_keeps_moving_outlives_the_stall_bound() {
         use crate::transport::slow_servers::serve_paced_writer;
         let url = serve_paced_writer(MIB, 16 * 1024, Duration::from_millis(31));
-        let transport = UreqTransport::new(Duration::from_secs(1)).with_floor(floor());
+        let transport = UreqTransport::new(Duration::from_secs(1))
+            .expect("a TLS provider")
+            .with_floor(floor());
         let response = transport
             .send(get(&url))
             .expect("a download that moves is not a timeout");
@@ -439,7 +509,9 @@ mod tests {
     fn a_server_that_never_answers_times_out_at_the_stall_bound() {
         use crate::transport::slow_servers::timed;
         let (url, release) = serve_silence();
-        let transport = UreqTransport::new(Duration::from_millis(300)).with_floor(floor());
+        let transport = UreqTransport::new(Duration::from_millis(300))
+            .expect("a TLS provider")
+            .with_floor(floor());
         let (err, took) = timed(|| transport.send(get(&url)).err());
         assert_eq!(err, Some(TransportError::Timeout));
         assert!(took < Duration::from_secs(5), "{took:?}");
@@ -493,7 +565,7 @@ mod tests {
         use std::sync::atomic::Ordering;
         let width = crate::READ_CONCURRENCY;
         let (url, accepted) = serve_keep_alive(width.get());
-        let transport = UreqTransport::new(Duration::from_secs(5));
+        let transport = UreqTransport::new(Duration::from_secs(5)).expect("a TLS provider");
         for _round in 0..4 {
             let batch = (0..width.get()).map(|_| get(&url)).collect();
             let answers = transport.send_many(batch, width);
@@ -513,7 +585,7 @@ mod tests {
     #[test]
     fn a_batch_answers_in_order_and_each_request_keeps_its_deadline() {
         let (silent, release) = serve_silence();
-        let transport = UreqTransport::new(Duration::from_millis(300));
+        let transport = UreqTransport::new(Duration::from_millis(300)).expect("a TLS provider");
         let batch = vec![get(&serve_once(OK)), get(&silent), get(&serve_once(OK))];
         let got: Vec<Result<Vec<u8>, TransportError>> = transport
             .send_many(batch, NonZeroUsize::new(3).expect("limit"))
@@ -587,7 +659,7 @@ mod tests {
     fn a_streamed_body_arrives_whole_under_its_declared_length() {
         let whole: Vec<u8> = (0..300_000_u32).map(|n| n.to_le_bytes()[0]).collect();
         let (url, served) = serve_put(whole.len());
-        let transport = UreqTransport::new(Duration::from_secs(5));
+        let transport = UreqTransport::new(Duration::from_secs(5)).expect("a TLS provider");
         let mut body = Gives {
             whole: whole.clone(),
             given: 0,
@@ -613,7 +685,7 @@ mod tests {
     #[test]
     fn a_streamed_body_that_fails_leaves_the_server_short_of_its_length() {
         let (url, served) = serve_put(300_000);
-        let transport = UreqTransport::new(Duration::from_secs(5));
+        let transport = UreqTransport::new(Duration::from_secs(5)).expect("a TLS provider");
         let mut body = Gives {
             whole: vec![7; 100_000],
             given: 0,
@@ -637,7 +709,7 @@ mod tests {
     fn a_bare_buckets_leading_slash_reaches_the_socket() {
         use crate::config::UrlStyle;
         use crate::transport::wire_proof::{assert_bare_bucket_arrived, sent_by};
-        let transport = UreqTransport::new(Duration::from_secs(5));
+        let transport = UreqTransport::new(Duration::from_secs(5)).expect("a TLS provider");
         for style in [UrlStyle::Path, UrlStyle::VirtualHost] {
             assert_bare_bucket_arrived(&sent_by(&transport, style), style);
         }
