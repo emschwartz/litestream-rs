@@ -5,14 +5,13 @@
 //!
 //! [`Launch`] says how Rust starts. `Arguments` is Go's one-database form `lsr replicate DB
 //! file://REPLICA`, with Go's defaults (a PASSIVE checkpoint at 1,000 WAL pages, one a
-//! minute, and never a TRUNCATE, which Rust takes only with the `app-readers: none` claim).
+//! minute, and a TRUNCATE at 121,359 pages, as Go does).
 //! `ConfigFile` is the daemon on the very file Go reads, `lsr replicate -config go.yml`, so
 //! both sides are config-driven processes with Go's intervals and checkpoint settings (Rust
 //! then compacts every second too). Go always reads the file.
 //!
 //! The file checkpoints often: `checkpoint-interval: 5s`, `min-checkpoint-page-count: 1000`
-//! and `truncate-page-n: 1500` (Rust takes the last only with the `litestream-rs.app-readers:
-//! none` claim, which the file makes). Commits that rewrite about a hundred 3,000-byte rows
+//! and `truncate-page-n: 1500`. Commits that rewrite about a hundred 3,000-byte rows
 //! ("churn") push the WAL past 1,000 pages within a turn, so every turn may cross a
 //! checkpoint, a WAL restart or a TRUNCATE, and the database stays under 10 MB.
 //!
@@ -178,7 +177,6 @@ snapshot:
   retention: 24h
 litestream-rs:
   app-autocheckpoint: off
-  app-readers: none
 dbs:
   - path: {db}
     monitor-interval: 100ms

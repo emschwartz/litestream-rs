@@ -317,7 +317,7 @@ impl DbConfig {
     pub fn min_checkpoint_page_count(&self) -> Option<i64> {
         self.min_checkpoint_page_count
     }
-    /// `truncate-page-n`; set only with the `app-readers: none` claim.
+    /// `truncate-page-n`; unset for Go's zero, which is Go's default (121359).
     #[must_use]
     pub fn truncate_page_n(&self) -> Option<i64> {
         self.truncate_page_n
@@ -482,20 +482,9 @@ impl S3Settings {
     }
 }
 
-/// What the operator states about the application's readers: TRUNCATE waits for every reader, so it
-/// runs only when the operator says the application holds no long readers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppReaders {
-    /// Nothing stated (the default): litestream-rs never checkpoints with TRUNCATE.
-    Unknown,
-    /// `none`: the application holds no long readers, so `truncate-page-n` acts as in Go.
-    None,
-}
-
 /// The `litestream-rs` section, which Go ignores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RustSettings {
-    pub(crate) app_readers: AppReaders,
     pub(crate) app_autocheckpoint: Option<std::num::NonZeroU32>,
     pub(crate) responses: lsr_core::Responses,
     pub(crate) if_replication_stops: lsr_replica::IfReplicationStops,
@@ -503,11 +492,6 @@ pub struct RustSettings {
 }
 
 impl RustSettings {
-    /// `app-readers`.
-    #[must_use]
-    pub fn app_readers(self) -> AppReaders {
-        self.app_readers
-    }
     /// `app-autocheckpoint`: the `wal_autocheckpoint` the application's connections run, in
     /// frames; `None` for `0` or `off`. SQLite's default, 1000, when the key is absent, since
     /// the replicator cannot read another process's setting.

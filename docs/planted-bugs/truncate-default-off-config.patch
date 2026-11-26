@@ -1,0 +1,13 @@
+diff --git a/crates/config/src/map.rs b/crates/config/src/map.rs
+index 2499a9675..f240a742d 100644
+--- a/crates/config/src/map.rs
++++ b/crates/config/src/map.rs
+@@ -508,7 +508,7 @@ fn checkpoint(db: &DbConfig, entry: &KeyPath, found: &mut Found) -> Option<Check
+         Some(value) => count(value),
+     };
+     let truncate_pages = match db.truncate_page_n() {
+-        None => NonZeroU32::new(go::TRUNCATE_PAGES),
++        None => None,
+         Some(value) if value < 0 => None,
+         Some(value) => count(value),
+     };

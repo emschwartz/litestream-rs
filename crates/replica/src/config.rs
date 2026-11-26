@@ -44,15 +44,15 @@ impl NonZeroDuration {
     }
 }
 
-/// Whether the application says when it holds a long read (TRUNCATE needs the application's word).
+/// Whether the application says when it holds a long read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReaderTracking {
-    /// The application gives no signal, so a reader may always be running: the replicator never
-    /// runs a TRUNCATE checkpoint, only PASSIVE ones.
+    /// The application gives no signal. A TRUNCATE a reader blocks is asked of SQLite anyway: it
+    /// reports busy at once, leaves the WAL as it was, and the engine waits its backoff.
     #[default]
     Untracked,
-    /// The application holds a [`crate::ReaderGuard`] for every long read. TRUNCATE runs only while
-    /// none is held; while one is, the checkpoint reports busy and waits its backoff.
+    /// The application holds a [`crate::ReaderGuard`] for every long read. TRUNCATE is not even
+    /// asked of SQLite while one is held; the checkpoint reports busy and waits its backoff.
     Tracked,
 }
 
@@ -99,8 +99,8 @@ pub struct Config {
     pub poll_interval: NonZeroDuration,
     /// The first retry wait, doubling to 5 minutes (Go's sync interval and backoff cap).
     pub retry_interval: NonZeroDuration,
-    /// Go: PASSIVE at 1,000 pages or every minute, TRUNCATE at 121,359 pages (`db.go:32-35`).
-    /// The TRUNCATE threshold applies only under [`ReaderTracking::Tracked`].
+    /// Go: PASSIVE at 1,000 pages or every minute, TRUNCATE at 121,359 pages (`db.go:32-35`),
+    /// under every [`ReaderTracking`].
     pub checkpoint: CheckpointConfig,
     /// Compaction levels, the snapshot interval and retention, and level 0 retention.
     pub maintenance: Maintenance,
@@ -176,22 +176,15 @@ impl Config {
         Some(parent.join(format!(".{name}-litestream")))
     }
 
-    /// The engine's configuration. Untracked readers turn the TRUNCATE threshold off.
+    /// The engine's configuration.
     pub(crate) fn actor(&self) -> ActorConfig {
-        let checkpoint = match self.readers {
-            ReaderTracking::Untracked => CheckpointConfig {
-                truncate_pages: None,
-                ..self.checkpoint
-            },
-            ReaderTracking::Tracked => self.checkpoint,
-        };
         ActorConfig {
             sync: SyncConfig {
                 cap: self.sync_limits.wal_bytes_per_step,
                 node_id: 0,
             },
             sync_interval: self.poll_interval.get(),
-            checkpoint,
+            checkpoint: self.checkpoint,
             upload: UploadConfig {
                 files_per_tick: self.sync_limits.files_per_upload,
                 ..UploadConfig::default()
@@ -276,16 +269,16 @@ mod tests {
     }
 
     #[test]
-    fn untracked_readers_never_truncate() {
-        let cfg = Config::default();
-        assert_eq!(cfg.actor().checkpoint.truncate_pages, None);
-        let tracked = Config {
-            readers: ReaderTracking::Tracked,
-            ..Config::default()
-        };
-        assert_eq!(
-            tracked.actor().checkpoint.truncate_pages,
-            CheckpointConfig::default().truncate_pages
-        );
+    fn every_reader_setting_truncates_at_go_s_threshold() {
+        for readers in [ReaderTracking::Untracked, ReaderTracking::Tracked] {
+            let cfg = Config {
+                readers,
+                ..Config::default()
+            };
+            assert_eq!(
+                cfg.actor().checkpoint.truncate_pages,
+                NonZeroU32::new(121_359)
+            );
+        }
     }
 }

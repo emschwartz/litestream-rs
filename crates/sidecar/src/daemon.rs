@@ -771,7 +771,7 @@ mod tests {
         let text = format!(
             "snapshot:\n  interval: 2h\n  retention: 48h\nl0-retention-check-interval: 30s\n\
              shutdown-sync-timeout: 7s\n\
-             litestream-rs:\n  app-readers: none\n\
+             litestream-rs:\n  app-autocheckpoint: off\n\
              dbs:\n\
              \x20 - path: {root}/a.db\n    truncate-page-n: 5000\n    busy-timeout: 3s\n    restore-if-db-not-exists: true\n\
              \x20   replica:\n      type: s3\n      bucket: b\n      path: p\n      region: us-east-1\n\
