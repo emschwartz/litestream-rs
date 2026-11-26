@@ -1,0 +1,10 @@
+# A level-9 snapshot slice carries on after the read transaction it began under was taken
+# again: the database file may have changed past its synced end, and the snapshot would publish
+# pages of another transaction.
+name = "snapshot-slice-skips-its-checks"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "snapshot::tests::a_slice_after_the_read_moved_ends_the_snapshot",
+    "snapshot::tests::a_read_that_moved_before_the_commit_publishes_nothing",
+]

@@ -219,6 +219,7 @@ mod tests {
             created_at: Timestamp::from_unix_millis(0),
             size,
             digest: 0,
+            begun: Timestamp::from_unix_millis(0),
             at: Timestamp::from_unix_millis(0),
             high: Timestamp::from_unix_millis(0),
         }

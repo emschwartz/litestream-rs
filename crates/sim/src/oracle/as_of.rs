@@ -53,7 +53,9 @@ fn stagings(staging: &RecorderLog) -> Stagings {
 
 /// Judges the created-at time of every file the replica took: each lies
 /// between the clock and its latest reading at some staging of a file that
-/// ends at the same transaction, or for a snapshot at its own put. A file
+/// ends at the same transaction, or for a snapshot between its upload's
+/// beginning and its put (a snapshot read from the database is stamped when
+/// it begins and sent a slice a tick). A file
 /// ending at another writer's transaction is skipped. Returns how many were
 /// judged.
 ///
@@ -70,7 +72,7 @@ pub fn stamps(
         let RecorderEvent::Put {
             key,
             created_at,
-            at,
+            begun,
             high,
             ..
         } = event
@@ -90,7 +92,7 @@ pub fn stamps(
             .get(&key.range().max())
             .is_some_and(|times| times.iter().any(within));
         let fits = if key.level().is_snapshot() {
-            within(&(at, high)) || from_staged
+            within(&(begun, high)) || from_staged
         } else {
             from_staged
         };

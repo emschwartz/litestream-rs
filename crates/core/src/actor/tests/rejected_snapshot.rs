@@ -13,8 +13,13 @@ fn rejected(key: Option<FileKey>) -> StoreError {
 /// Ticks until the top compaction level is published: the next upload to the
 /// replica is then the first snapshot.
 pub(super) fn before_first_snapshot() -> (Rig, Actor) {
+    before_first_snapshot_with(cfg())
+}
+
+/// [`before_first_snapshot`] under `config`.
+pub(super) fn before_first_snapshot_with(config: ActorConfig) -> (Rig, Actor) {
     let mut rig = Rig::new();
-    let mut actor = Actor::new(cfg());
+    let mut actor = Actor::new(config);
     let top = Level::new(cfg().maintenance.top().get()).unwrap();
     // The first snapshot goes before any level, so this state (every level compacted, no
     // snapshot) is the one a first snapshot that failed leaves: refuse the first attempt, which

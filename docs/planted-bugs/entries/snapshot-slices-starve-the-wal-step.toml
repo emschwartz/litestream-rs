@@ -1,0 +1,10 @@
+# With a level-9 snapshot part-way every tick is one of its slices: the WAL step never gets the
+# tick it is owed after each share of slices, so nothing is staged or uploaded until the snapshot
+# is whole, as before snapshots were sliced.
+name = "snapshot-slices-starve-the-wal-step"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced_snapshot::a_snapshot_leaves_the_wal_step_a_tick_after_each_share_of_slices",
+    "actor::tests::sliced_snapshot::a_commit_made_during_a_long_snapshot_reaches_the_replica_before_it_ends",
+]

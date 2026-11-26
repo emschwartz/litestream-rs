@@ -48,7 +48,7 @@ use crate::witness::{ByteTally, Witnessed};
 const DEFAULT_CAP: u64 = 64 << 20;
 
 /// How many encoded bytes are held before they go to the store.
-const FLUSH_AT: usize = 256 * 1024;
+pub(crate) const FLUSH_AT: usize = 256 * 1024;
 
 /// What a step may do beyond the WAL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,6 +180,8 @@ pub(crate) struct Plan<'a> {
     prev_commit: Option<u32>,
     commit: NonZeroU32,
     page_size: PageSize,
+    /// The first page listed: 1, or where a snapshot part-way through it reads on.
+    from: u32,
 }
 
 impl<'a> Plan<'a> {
@@ -196,7 +198,14 @@ impl<'a> Plan<'a> {
             prev_commit,
             commit,
             page_size,
+            from: 1,
         }
+    }
+
+    /// The same plan, listing only its pages from `from` on.
+    #[must_use]
+    pub(crate) const fn starting_at(self, from: u32) -> Self {
+        Self { from, ..self }
     }
 
     /// At least as many pages as the plan lists, without listing them: a buffer for the file is
@@ -221,8 +230,16 @@ impl<'a> Plan<'a> {
     /// The pages, in ascending page order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = PageFrom> + '_ {
         let commit = self.commit.get();
-        let mut raw = self.prev_commit.map_or(1, |prev| prev.saturating_add(1));
-        let mut held = self.map.pages().peekable();
+        let from = self.from;
+        let mut raw = self
+            .prev_commit
+            .map_or(1, |prev| prev.saturating_add(1))
+            .max(from);
+        let mut held = self
+            .map
+            .pages()
+            .skip_while(move |frame| frame.pgno().get() < from)
+            .peekable();
         std::iter::from_fn(move || {
             loop {
                 let from_map = held.peek().map(|frame| frame.pgno().get());
@@ -535,75 +552,144 @@ async fn fill<R: Read + Seek, P: PageSource, U: FileSink>(
     pages: &mut PageChecksumTable,
     map_store: fn(&StoreError) -> Fault,
 ) -> Result<Filled, Fault> {
-    // Room for the file or, past the flush size, for it and the page that crosses it: the
-    // buffer is emptied, never replaced, and a small file allocates only what it holds.
-    let page = header.page_size().bytes();
-    let room = FLUSH_AT.saturating_add(page.saturating_mul(2));
-    let out = Vec::with_capacity(
-        plan.at_most()
-            .saturating_mul(page)
-            .saturating_add(page)
-            .min(room),
-    );
-    let mut encoder = Encoder::new(out, header).map_err(|_err| BugSite::Encode.hit())?;
-    let mut buf = vec![0_u8; header.page_size().bytes()];
-    let mut last = None;
+    let mut filling = Filling::new(header, plan)?;
     let mut bytes = ByteTally::new();
-    let mut listed = plan.iter().peekable();
-    while let Some(page) = listed.next() {
-        match page {
-            PageFrom::Wal(frame) => wal
-                .read_page(&frame, &mut buf)
-                .map_err(|err| page_fault(wal, err))?,
-            PageFrom::Db(pgno) => {
-                db.read_page(pgno, &mut buf).map_err(Fault::from_source)?;
-                pages
-                    .check(pgno, &buf)
-                    .map_err(|mismatch| Fault::DatabasePageMismatch {
-                        pgno: mismatch.pgno,
-                    })?;
+    while !filling.whole() {
+        filling.encode(plan, wal, db, pages, false)?;
+        let out = filling.out();
+        upload.write(out).await.map_err(|err| map_store(&err))?;
+        bytes.add(out);
+        out.clear();
+    }
+    Ok(Filled {
+        last: filling.last,
+        bytes,
+        checksum: filling.checksum.ok_or_else(|| BugSite::Encode.hit())?,
+    })
+}
+
+/// An LTX file being encoded from a [`Plan`], up to [`FLUSH_AT`] bytes a step, so its bytes
+/// can be handed over in as many steps as the caller likes: a staged file goes in one call, a
+/// level-9 snapshot a slice a tick (`crate::snapshot::Snapshotting`).
+#[derive(Debug)]
+pub(crate) struct Filling {
+    /// `None` once the trailer is written: what is left is in `tail`.
+    encoder: Option<Encoder<Vec<u8>>>,
+    tail: Vec<u8>,
+    /// The next page to encode; `u32::MAX` once every page of the plan is.
+    next: u32,
+    last: Option<LastPage>,
+    checksum: Option<FileChecksum>,
+}
+
+impl Filling {
+    /// A file of `plan`'s pages under `header`.
+    pub(crate) fn new(header: Header, plan: &Plan<'_>) -> Result<Self, Fault> {
+        // Room for the file or, past the flush size, for it and the page that crosses it: the
+        // buffer is emptied, never replaced, and a small file allocates only what it holds.
+        let page = header.page_size().bytes();
+        let room = FLUSH_AT.saturating_add(page.saturating_mul(2));
+        let out = Vec::with_capacity(
+            plan.at_most()
+                .saturating_mul(page)
+                .saturating_add(page)
+                .min(room),
+        );
+        Ok(Self {
+            encoder: Some(Encoder::new(out, header).map_err(|_err| BugSite::Encode.hit())?),
+            tail: Vec::new(),
+            next: 1,
+            last: None,
+            checksum: None,
+        })
+    }
+
+    /// The next page to encode: every page below it is.
+    pub(crate) const fn next(&self) -> u32 {
+        self.next
+    }
+
+    /// Whether the file is encoded and every byte of it taken from [`Self::out`].
+    pub(crate) fn whole(&self) -> bool {
+        self.encoder.is_none() && self.tail.is_empty()
+    }
+
+    /// The encoded bytes not yet taken: the caller drains what it hands over.
+    pub(crate) fn out(&mut self) -> &mut Vec<u8> {
+        match self.encoder.as_mut() {
+            Some(encoder) => encoder.writer_mut(),
+            None => &mut self.tail,
+        }
+    }
+
+    /// Encodes `plan`'s pages from where the last step stopped, then the index and the
+    /// trailer, until [`FLUSH_AT`] bytes wait in [`Self::out`] or the file is encoded. Every
+    /// database-file page is checked against `pages` first, as the table stood at its pin
+    /// when `pinned` (`PageChecksumTable::check_pinned`).
+    pub(crate) fn encode<R: Read + Seek, P: PageSource>(
+        &mut self,
+        plan: &Plan<'_>,
+        wal: &mut WalReader<R>,
+        db: &mut P,
+        pages: &mut PageChecksumTable,
+        pinned: bool,
+    ) -> Result<(), Fault> {
+        let Some(encoder) = self.encoder.as_mut() else {
+            return Ok(());
+        };
+        if self.next != u32::MAX {
+            let mut buf = vec![0_u8; plan.page_size.bytes()];
+            let plan = plan.starting_at(self.next);
+            let mut listed = plan.iter().peekable();
+            while let Some(page) = listed.next() {
+                match page {
+                    PageFrom::Wal(frame) => wal
+                        .read_page(&frame, &mut buf)
+                        .map_err(|err| page_fault(wal, err))?,
+                    PageFrom::Db(pgno) => {
+                        db.read_page(pgno, &mut buf).map_err(Fault::from_source)?;
+                        let checked = if pinned {
+                            pages.check_pinned(pgno, &buf)
+                        } else {
+                            pages.check(pgno, &buf)
+                        };
+                        checked.map_err(|mismatch| Fault::DatabasePageMismatch {
+                            pgno: mismatch.pgno,
+                        })?;
+                    }
+                }
+                encoder
+                    .write_page(page.pgno(), &buf)
+                    .map_err(|_err| BugSite::Encode.hit())?;
+                if listed.peek().is_none() {
+                    self.last = Some(LastPage::new(
+                        page.pgno(),
+                        PageChecksum::of(page.pgno(), &buf),
+                    ));
+                }
+                self.next = page.pgno().get().saturating_add(1);
+                if encoder.writer_mut().len() >= FLUSH_AT {
+                    return Ok(());
+                }
+            }
+            self.next = u32::MAX;
+        }
+        // The index leaves in pieces, as the pages did, so it is never copied whole into the
+        // buffer.
+        while encoder
+            .write_index_chunk()
+            .map_err(|_err| BugSite::Encode.hit())?
+        {
+            if encoder.writer_mut().len() >= FLUSH_AT {
+                return Ok(());
             }
         }
-        encoder
-            .write_page(page.pgno(), &buf)
-            .map_err(|_err| BugSite::Encode.hit())?;
-        if listed.peek().is_none() {
-            last = Some(LastPage::new(
-                page.pgno(),
-                PageChecksum::of(page.pgno(), &buf),
-            ));
-        }
-        if encoder.writer_mut().len() >= FLUSH_AT {
-            upload
-                .write(encoder.writer_mut())
-                .await
-                .map_err(|err| map_store(&err))?;
-            bytes.add(encoder.writer_mut());
-            encoder.writer_mut().clear();
-        }
+        let encoder = self.encoder.take().ok_or_else(|| BugSite::Encode.hit())?;
+        let (rest, trailer) = encoder.finish(None).map_err(|_err| BugSite::Encode.hit())?;
+        self.tail = rest;
+        self.checksum = Some(trailer.file_checksum());
+        Ok(())
     }
-    // The index leaves in pieces, as the pages did, so it is never copied whole into the buffer.
-    while encoder
-        .write_index_chunk()
-        .map_err(|_err| BugSite::Encode.hit())?
-    {
-        if encoder.writer_mut().len() >= FLUSH_AT {
-            upload
-                .write(encoder.writer_mut())
-                .await
-                .map_err(|err| map_store(&err))?;
-            bytes.add(encoder.writer_mut());
-            encoder.writer_mut().clear();
-        }
-    }
-    let (rest, trailer) = encoder.finish(None).map_err(|_err| BugSite::Encode.hit())?;
-    upload.write(&rest).await.map_err(|err| map_store(&err))?;
-    bytes.add(&rest);
-    Ok(Filled {
-        last,
-        bytes,
-        checksum: trailer.file_checksum(),
-    })
 }
 
 /// Writes one file into `store`; the upload is aborted when anything before the

@@ -1024,6 +1024,9 @@ pub enum RecorderEvent {
         /// [`content_digest`] of the bytes written: what tells a file the
         /// engine staged from one put in its place with the same name.
         digest: u64,
+        /// The simulator's clock when the upload began: a snapshot is stamped then and sent
+        /// over many ticks, so its created-at time may be older than the put.
+        begun: Timestamp,
         /// The simulator's clock when the store took it, read below the code
         /// under test: what the oracle judges created-at times against.
         at: Timestamp,
@@ -1283,7 +1286,11 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
         mode: WriteMode,
         len: Option<u64>,
     ) -> Result<Self::Upload, StoreError> {
-        self.log.with(|s| bump(&mut s.counts.begins));
+        let mut begun = Timestamp::from_unix_millis(0);
+        self.log.with(|s| {
+            bump(&mut s.counts.begins);
+            begun = s.times().0;
+        });
 
         let inner = self
             .inner
@@ -1294,6 +1301,7 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
             key: *key,
             mode,
             created_at,
+            begun,
             head: Vec::new(),
             wrote: 0,
             digest: DIGEST_SEED,
@@ -1341,6 +1349,8 @@ pub struct TapUpload<S: ObjectStore> {
     key: FileKey,
     mode: WriteMode,
     created_at: Timestamp,
+    /// The simulator's clock when the upload began.
+    begun: Timestamp,
     head: Vec<u8>,
     wrote: u64,
     digest: u64,
@@ -1505,6 +1515,7 @@ impl<S: ObjectStore> TapUpload<S> {
             key,
             mode,
             created_at,
+            begun,
             head,
             wrote,
             digest,
@@ -1540,6 +1551,7 @@ impl<S: ObjectStore> TapUpload<S> {
                     created_at,
                     size: wrote,
                     digest,
+                    begun,
                     at,
                     high,
                 });

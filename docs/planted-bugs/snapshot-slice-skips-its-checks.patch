@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/snapshot.rs b/crates/core/src/snapshot.rs
+index a5d9e773b..344d83988 100644
+--- a/crates/core/src/snapshot.rs
++++ b/crates/core/src/snapshot.rs
+@@ -318,7 +318,7 @@ impl Snapshotting {
+     /// synced end, and, for a snapshot the engine syncs beside, the table's pin.
+     fn holds<W: WalSource>(&self, wal: &mut W, pages: &PageChecksumTable) -> Result<(), Fault> {
+         let committed = wal.committed().map_err(Fault::from_source)?;
+-        if committed.epoch() != self.epoch {
++        if committed.epoch() != self.epoch && false {
+             return Err(Fault::ReadTxLost);
+         }
+         let moved = committed.end().salts() != self.salts || committed.backfilled() > self.frames;

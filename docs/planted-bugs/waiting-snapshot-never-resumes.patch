@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index edafe56ed..ddb1e2094 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2763,6 +2763,9 @@ impl Actor {
+         env: &mut Env<'_, W, P, C, L, R>,
+         now: Timestamp,
+     ) -> Option<Tick> {
++        if !self.snapshot_ready() {
++            return None;
++        }
+         let (job, mut snapshot) = self.engine.snapshot.take()?;
+         let sent = snapshot.sent;
+         let budget = self.kept.cfg.upload.bytes_per_tick.get();

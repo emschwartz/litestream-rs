@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index edafe56ed..82c53d342 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2815,8 +2815,7 @@ impl Actor {
+     /// Whether the snapshot's slice goes first this tick: until [`state::FAIR_SHARE`] of them
+     /// ran in a row, then the rest of the engine has a tick, as after a staged file's slices.
+     fn snapshot_owed(&mut self) -> bool {
+-        let owed =
+-            self.engine.snapshot.is_some() && self.engine.snapshot_slices < state::FAIR_SHARE;
++        let owed = self.engine.snapshot.is_some();
+         if !owed {
+             self.engine.snapshot_slices = 0;
+         }
