@@ -263,6 +263,10 @@ pub const LEFT_TO_THE_SEEDS: &[(&str, &str)] = &[
         "every run ends with the healthy tail, whose commits are judged unless a stop or a persistent cause ends it first",
     ),
     (
+        "wal_bound.",
+        "the healthy tail judges the WAL after each commit that reached the replica, unless a fault fired in its window or a reader is open",
+    ),
+    (
         "tick_cost.",
         "every tick of every run is judged against its bound",
     ),

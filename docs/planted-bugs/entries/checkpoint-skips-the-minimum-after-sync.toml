@@ -1,0 +1,8 @@
+# A sync that leaves the minimum of synced frames no longer checkpoints PASSIVE: the WAL grows
+# until the interval or the truncate threshold. The healthy tail's WAL bound sees it
+# (crates/sim/src/run/tail.rs).
+name = "checkpoint-skips-the-minimum-after-sync"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["liveness::the_wal_stays_near_the_passive_minimum_through_the_tail"]
