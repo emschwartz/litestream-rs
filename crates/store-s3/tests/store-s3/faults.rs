@@ -20,8 +20,8 @@ mod cases {
         classify as retry_class,
     };
     use lsr_store_s3::{
-        EtagCheck, Fault, FaultTransport, HttpResponse, Shape, TransportError, check_etag,
-        classify, classify_transport, parse_delete_failures, parse_head, parse_list,
+        Fault, FaultTransport, HttpResponse, Shape, TransportError, classify, classify_transport,
+        parse_delete_failures, parse_head, parse_list,
     };
 
     fn faulty() -> FaultTransport<lsr_store_s3::FakeS3> {
@@ -254,27 +254,44 @@ mod cases {
         );
     }
 
+    /// A PUT answered with the ETag of other bytes is a success: the store checked the body
+    /// against its signed SHA-256, and neither Go nor this store compares the ETag.
     #[test]
-    fn a_wrong_etag_on_put_is_visible_as_a_mismatch_and_never_retried() {
+    fn a_wrong_etag_on_put_is_taken_as_it_comes() {
         let t = faulty();
         t.push(Fault::WrongEtag { on: Shape::Put });
         let k = key(0, 1, 1);
+        let response = put(&t, &k, b"data", 0);
+        assert_eq!(response.status(), 200);
+        assert_ne!(
+            response.header("etag"),
+            Some(lsr_store_s3::quoted_md5(b"data").as_str())
+        );
+        assert_eq!(classify(StoreOp::Upload, Some(&k), None, &response), Ok(()));
+        assert_eq!(t.inner().keys().len(), 1);
+    }
+
+    /// A body changed on its way is refused against its signed hash, publishes nothing, and is
+    /// a checksum mismatch the engine never retries as it is.
+    #[test]
+    fn a_body_mismatch_on_put_is_a_checksum_mismatch_and_publishes_nothing() {
+        let t = faulty();
+        let k = key(0, 1, 1);
         let request = builder()
             .put_object(now(), &k, b"data".to_vec(), now())
-            .unwrap();
-        let md5 = request.md5();
+            .unwrap()
+            .tamper_body(b"dat4".to_vec());
         let response = send(&t, request);
-        assert_eq!(response.status(), 200);
-        assert_eq!(check_etag(&response, md5), EtagCheck::Mismatch);
-        assert_eq!(
-            t.inner().keys().len(),
-            1,
-            "the object is already visible, so the store must delete it"
-        );
+        assert_eq!(response.status(), 400);
         let cause = StoreError::Corrupt {
             key: Some(k),
             cause: CorruptCause::ChecksumMismatch { part: None },
         };
+        assert_eq!(
+            classify(StoreOp::Upload, Some(&k), None, &response),
+            Err(cause.clone())
+        );
+        assert!(t.inner().keys().is_empty());
         assert_eq!(retry_class(&cause), Class::Permanent);
     }
 
@@ -366,16 +383,13 @@ mod cases {
                 b.get_range(now(), &k, 0, ReadLen::new(1).unwrap()).unwrap(),
                 Shape::Get,
             ),
-            (
-                b.put_object(now(), &k, vec![], now()).unwrap().into(),
-                Shape::Put,
-            ),
+            (b.put_object(now(), &k, vec![], now()).unwrap(), Shape::Put),
             (
                 b.create_multipart(now(), &k, now()).unwrap(),
                 Shape::CreateMultipart,
             ),
             (
-                b.upload_part(now(), &k, &id, part, vec![]).unwrap().into(),
+                b.upload_part(now(), &k, &id, part, vec![]).unwrap(),
                 Shape::UploadPart,
             ),
             (
@@ -403,6 +417,7 @@ mod cases {
             status(Shape::Put, 408, None, None),
             status(Shape::Put, 403, Some("AccessDenied"), None),
             status(Shape::Put, 400, Some("BadDigest"), None),
+            status(Shape::Put, 400, Some("XAmzContentSHA256Mismatch"), None),
             Fault::AfterPublish {
                 on: Shape::Put,
                 status: 500,

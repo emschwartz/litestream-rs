@@ -1,0 +1,8 @@
+# A compaction refused by a store without create-only writes is tried create-only again at
+# every retry, so the level is never compacted.
+name = "refused-compaction-output-asks-again"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::create_only::a_refused_compaction_output_is_written_again_by_replacing",
+]

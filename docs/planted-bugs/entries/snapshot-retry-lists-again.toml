@@ -1,0 +1,5 @@
+# A snapshot whose step staged commits is planned again from a whole listing instead of retried from its decision: one whole listing per attempt.
+name = "snapshot-retry-lists-again"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = ["actor::tests::steady::a_steady_writer_with_short_intervals_pays_the_bill_and_no_more"]

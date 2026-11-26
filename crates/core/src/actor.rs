@@ -115,7 +115,7 @@ use crate::checkpoint::{
     Staged, after_checkpoint, after_sync, checkpoint, decide, lock_busy_wait, next_wake,
 };
 use crate::counts::{Counted, WorkCounts};
-use crate::created_at::{ResolvedCreatedAt, resolve};
+use crate::created_at::{ResolvedCreatedAt, resolve_knowing};
 use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
 use crate::fault::role::{Replica, Role, Staging};
@@ -201,6 +201,12 @@ impl<
 pub struct ActorConfig {
     /// What a sync step may do.
     pub sync: SyncConfig,
+    /// The least time between two sync steps that only new commits ask for, so a steady
+    /// writer costs one level-0 file an interval however often the engine ticks: Go's
+    /// monitor interval (`db.go`, one `Sync` per tick of its ticker). Zero syncs on every
+    /// tick that finds the WAL moved. A step something else asks for is never held: the
+    /// rest of a sync the byte cap cut short, a snapshot, a checkpoint's proof, a drain.
+    pub sync_interval: Duration,
     /// When to checkpoint.
     pub checkpoint: CheckpointConfig,
     /// Upload limits.
@@ -1598,6 +1604,9 @@ impl Actor {
         now: Timestamp,
         may_checkpoint: bool,
     ) -> Option<Tick> {
+        // A held sync is held by this tick or not at all: a wake left from an earlier tick
+        // would be a deadline nothing acts on.
+        self.engine.sync_due = None;
         if !self.kept.tasks.ready(Task::Sync, now) {
             return None;
         }
@@ -1608,10 +1617,20 @@ impl Actor {
         self.kept.app.poll(committed);
         let wants_live = may_checkpoint && self.kept.live.wanted() && self.caught_up();
         let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
-        let quiet = !self.wal_moved(committed) && self.pending().is_none() && !self.more_wal();
-        if quiet && !wants_proof {
-            return None;
+        // Without one of these a step has only new commits to stage, and those wait out the
+        // sync interval: every tick that follows another at once (a file to upload, a
+        // compaction) would else stage the commits made since the last as a file of their own.
+        let forced = wants_proof || self.pending().is_some() || self.more_wal();
+        if !forced {
+            if !self.wal_moved(committed) {
+                return None;
+            }
+            if let Some(due) = self.sync_held_until(now) {
+                self.engine.sync_due = Some(due);
+                return None;
+            }
         }
+        self.engine.synced_at = Some(now);
         let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
         self.step_ended(env.clock, began, &stepped);
@@ -1630,6 +1649,16 @@ impl Actor {
             return Some(self.checkpoint_unit(env, proof, decision, mode, now).await);
         }
         (files > 0).then(|| self.ran(Event::Synced { files }, now))
+    }
+
+    /// When a sync step that only new commits ask for may run, if not yet: one
+    /// [`ActorConfig::sync_interval`] after the last step began. Engine time never reads
+    /// earlier than it did (`actor/clock.rs`), so the wait is never longer than the
+    /// interval. A drain waits for nothing.
+    fn sync_held_until(&self, now: Timestamp) -> Option<Timestamp> {
+        let last = self.engine.synced_at?;
+        let due = last.checked_add(self.kept.cfg.sync_interval)?;
+        (self.running() && now < due).then_some(due)
     }
 
     /// Whether everything staged is on the replica.
@@ -2118,6 +2147,13 @@ impl Actor {
                     if let Did::Diverged { confirmed } = uploaded.did {
                         return Some(self.diverged(env, uploaded.state, confirmed, now).await);
                     }
+                    // Before the confirmed position lets the token go.
+                    if let Did::Put(info) = &uploaded.did {
+                        self.engine.known.put(*info);
+                        if let Some(token) = self.engine.witnesses.get(&info.key) {
+                            self.engine.sent.put(*token);
+                        }
+                    }
                     self.set_upload(uploaded.state);
                     last = uploaded.did;
                 }
@@ -2149,7 +2185,8 @@ impl Actor {
         }
     }
 
-    /// How level-0 uploads write: create-only until the store said it cannot (D79).
+    /// How level-0 uploads and compaction outputs write: create-only until the store said it
+    /// cannot (D79).
     const fn guard(&self) -> WriteMode {
         match self.kept.unguarded {
             Some(_) => WriteMode::Replace,
@@ -2320,6 +2357,7 @@ impl Actor {
         }
         self.kept.tasks.get_mut(Task::Prune).succeed();
         self.engine.pruned = Some(through);
+        self.engine.sent.pruned_through(through);
         if keys.is_empty() {
             return None;
         }
@@ -2353,6 +2391,9 @@ impl Actor {
     ) -> Option<Tick> {
         if !self.maintain_ready(now) {
             return None;
+        }
+        if let Some(job) = self.engine.maintain.snapshot_retry.take() {
+            return Some(self.snapshot_job(env, &job, now, 0).await);
         }
         if self.short_pass_ok(now) {
             return Some(match self.maintain_short(env, now).await {
@@ -2391,7 +2432,7 @@ impl Actor {
             let mut step = |resolved: &ResolvedCreatedAt| {
                 due_full(&inventory, now, cfg, published, state, resolved)
             };
-            resolve(env.remote, &mut step).await
+            resolve_knowing(env.remote, &mut self.engine.known, &mut step).await
         };
         // A failed created-at time read leaves the listing owed: the next tick lists again.
         let decided = match decided {
@@ -2476,19 +2517,40 @@ impl Actor {
     ) -> Tick {
         // One call site for every merge, so the tick's future holds one compaction.
         let outcome = if let Some((inputs, level)) = job.merge() {
-            run_compaction(inputs, level, env.staging, env.remote).await
+            let (sent, guard) = (&self.engine.sent, self.guard());
+            run_compaction(inputs, level, env.staging, env.remote, sent, guard).await
         } else if let Job::Delete(delete) = job {
             run_delete(delete, env.remote).await
         } else {
             return self.snapshot_job(env, job, now, created_at_read).await;
         };
+        if let Outcome::Failed(err) = &outcome
+            && Fault::from_maintain(err) == Fault::CreateOnlyUnsupported
+        {
+            // Nothing was published. The fault degrades the task (or stops), and from here
+            // on outputs and level-0 uploads replace, as after a refused upload (D79), so the
+            // upload task says so now, not after its first replacing write.
+            let since = *self.kept.unguarded.get_or_insert(now);
+            self.kept
+                .tasks
+                .get_mut(Task::Upload)
+                .stand(PersistentCause::ConditionalWritesUnsupported, since);
+        }
         if let Job::Snapshot(_) = job {
             return self.snapshot_merged(job, outcome, now, created_at_read);
         }
         self.engine.maintain.state.record(now, job, &outcome);
         let event = match outcome {
-            Outcome::Compacted { info, .. } => MaintainedEvent::Compacted(info),
-            Outcome::Deleted { count } => MaintainedEvent::Deleted(count),
+            Outcome::Compacted { info, .. } => {
+                self.engine.known.put(info);
+                MaintainedEvent::Compacted(info)
+            }
+            Outcome::Deleted { count } => {
+                if let Job::Delete(delete) = job {
+                    self.engine.known.deleted(delete.keys());
+                }
+                MaintainedEvent::Deleted(count)
+            }
             Outcome::Replan { .. } => MaintainedEvent::Replan,
             Outcome::Failed(err) => {
                 let waiter = self.job_waiter(job, now);
@@ -2564,6 +2626,7 @@ impl Actor {
     /// A snapshot the store took.
     fn snapshot_written(&mut self, info: FileInfo, now: Timestamp, created_at_read: u64) -> Tick {
         self.maintained(now);
+        self.engine.known.put(info);
         let event = MaintainedEvent::Snapshot(info);
         self.ran_maintained(event, created_at_read, now)
     }
@@ -2633,7 +2696,10 @@ impl Actor {
                 let event = MaintainedEvent::Waiting { held: None };
                 return self.ran_maintained(event, created_at_read, now);
             }
-            Ok((files, _)) => return self.ran(Event::Synced { files }, now),
+            Ok((files, _)) => {
+                self.engine.maintain.snapshot_retry = Some(job.clone());
+                return self.ran(Event::Synced { files }, now);
+            }
             // A failed step waits on the sync task, and the listing with it:
             // the next is due when the step may run again, not at once.
             Err(Tick::Ran { event, .. }) => {
@@ -2776,9 +2842,9 @@ impl Actor {
     }
 
     /// Every deadline a task holds: retry waits, the checkpoint gate, the
-    /// maintenance schedule (whose `Due::Wait` includes each level's backoff)
-    /// and the drain's end. Tasks a draining actor does not run hold none, nor do those an
-    /// engine that has not booted does not run.
+    /// maintenance schedule (whose `Due::Wait` includes each level's backoff),
+    /// the drain's end and a sync this tick held for its interval. Tasks a draining actor does
+    /// not run hold none, nor do those an engine that has not booted does not run.
     fn deadlines(&self) -> impl Iterator<Item = Timestamp> {
         let (running, checkpoints) = (self.running(), self.checkpoints());
         let task = |task: Task| self.kept.tasks.get(task).until();
@@ -2789,7 +2855,8 @@ impl Actor {
             task(Task::Maintenance),
             self.engine.maintain.until,
         ];
-        [task(Task::Sync), task(Task::Upload), deadline]
+        let held = self.engine.sync_due;
+        [task(Task::Sync), task(Task::Upload), deadline, held]
             .into_iter()
             .chain(only_checkpointing.into_iter().filter(move |_| checkpoints))
             .chain(only_running.into_iter().filter(move |_| running))

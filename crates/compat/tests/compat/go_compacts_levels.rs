@@ -8,7 +8,8 @@
 //! retention took the files (`docs/decisions/D228.md`).
 //!
 //! The writer here commits while the engine compacts: once more right after each window's
-//! first level-1 file, which is how a window gains a second one and where the skip happened.
+//! first level-1 file, which is how a window once gained a second one and where the skip
+//! happened; a level is now compacted once per window, so the commit lands in the next one.
 //! The run stops with three level-2 files above level 3's newest, so Go's first compaction
 //! into level 3 has to read across the places a hole would be.
 //!
@@ -121,16 +122,13 @@ fn pages(path: &Path) -> Vec<String> {
     hash_pages(path).expect("hash").page_hashes
 }
 
-/// What the run must have reached for the Go half to mean anything: a window that gave
-/// level 1 two files, and several level-2 files for Go's level 3 to read.
+/// What the run must have reached for the Go half to mean anything: several level-2 files
+/// for Go's level 3 to read. A level is compacted once per window, so level 1 no longer gains
+/// two files in one window here (it takes a backlog of more than 32 level-0 files, which the
+/// simulator's `level_holes` scenario builds); the writer's extra commit after each level-1
+/// file stays, since the engine's next windows still have to take it
+/// (`docs/decisions/D242.md`).
 fn assert_shape(written: &Written) {
-    let one: Vec<FileKey> = written.events.iter().filter_map(level_one_output).collect();
-    assert!(
-        one.iter().zip(one.iter().skip(1)).any(|(a, b)| {
-            a.range().min() < a.range().max() && b.range().min() == b.range().max()
-        }),
-        "level 1 never gained two files in one window: {one:?}"
-    );
     let replica = &written.fixture.replica;
     let three = ranges(replica, 3).last().expect("level 3").1;
     let above = ranges(replica, 2).iter().filter(|r| r.0 > three).count();
