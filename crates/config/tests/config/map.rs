@@ -160,17 +160,12 @@ fn min_checkpoint_page_count_must_be_above_zero() {
     assert_eq!(db.config().checkpoint.min_pages, NonZeroU32::new(u32::MAX));
 }
 
-/// Go's `effectiveTruncatePageN` (`db.go:1599-1608`), under every `app-readers` setting; the
+/// Go's `effectiveTruncatePageN` (`db.go:1599-1608`); the
 /// library's defaults and the file's agree.
 #[test]
 fn truncate_page_n_acts_as_go() {
-    let claim = "litestream-rs:\n  app-readers: none\n";
-    for prefix in ["", claim] {
-        let at = |key: &str| {
-            one(&format!("{prefix}{}", db_with(key)))
-                .config()
-                .checkpoint
-        };
+    {
+        let at = |key: &str| one(&db_with(key)).config().checkpoint;
         assert_eq!(at("").truncate_pages, NonZeroU32::new(121_359));
         assert_eq!(
             at("    truncate-page-n: 0\n").truncate_pages,
@@ -190,8 +185,6 @@ fn truncate_page_n_acts_as_go() {
         one(&db_with("")).config().readers,
         ReaderTracking::Untracked
     );
-    let db = one(&format!("{claim}{}", db_with("")));
-    assert_eq!(db.config().readers, ReaderTracking::Tracked);
 }
 
 /// `wal_reader.go:241` and `replica.go:208`: zero or less is no limit.

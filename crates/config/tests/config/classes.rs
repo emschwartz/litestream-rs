@@ -280,10 +280,9 @@ fn retention_enabled_is_honoured() {
 #[test]
 fn rust_settings_live_under_one_key() {
     let config = config(
-        "litestream-rs:\n  app-readers: none\n  responses:\n    credentials: stop\n    other-writer: continue-and-interleave-histories\n",
+        "litestream-rs:\n  responses:\n    credentials: stop\n    other-writer: continue-and-interleave-histories\n",
     );
     let rust = config.rust();
-    assert_eq!(rust.app_readers(), lsr_config::AppReaders::None);
     let responses = rust.responses();
     assert_eq!(responses.credentials, Response::Stop);
     assert_eq!(responses.wal_corrupt, Responses::GO_LIKE.wal_corrupt);
@@ -291,11 +290,12 @@ fn rust_settings_live_under_one_key() {
         responses.other_writer,
         OtherWriter::ContinueAndInterleaveHistories
     );
-    let problems = refused("litestream-rs:\n  app-reader: none\n  responses:\n    bug: maybe\n");
+    let problems =
+        refused("litestream-rs:\n  app-autocheckpoin: off\n  responses:\n    bug: maybe\n");
     assert_eq!(
-        problem_at(&problems, "litestream-rs.app-reader"),
+        problem_at(&problems, "litestream-rs.app-autocheckpoin"),
         ProblemKind::Unknown {
-            suggestion: Some("app-readers")
+            suggestion: Some("app-autocheckpoint")
         }
     );
     assert!(matches!(

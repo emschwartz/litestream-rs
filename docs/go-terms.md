@@ -7,7 +7,7 @@ A translation aid for reading this code beside Go Litestream, LTX and SQLite. Ea
 | `CreatedAt`, `ListedTime::Created` | `FileInfo.CreatedAt` | `.upstream/ltx/ltx.go:596`; set at `.upstream/litestream/db.go:2421` |
 | `litestream-timestamp` header (`CREATED_AT_HEADER`) | `MetadataKeyTimestamp` | `.upstream/litestream/s3/replica_client.go:55` |
 | `NonZeroCreatedAt` | `CreatedAt` read from the metadata timestamp (zero when the writer recorded none), else `LastModified` | `.upstream/litestream/s3/replica_client.go:1759` |
-| application (`AppCheckpoint`, `app-readers`) | "other applications" | `.upstream/litestream/db.go:934` |
+| application (`AppCheckpoint`) | "other applications" | `.upstream/litestream/db.go:934` |
 | other process (`OtherProcessMode`) | "by another process" | `.upstream/litestream/db.go:1840`, `:1895` |
 | `OtherWriter` | none (Go has no check for a second replicator) | none |
 | `UnrecognizedNames` | names `ParseFilename` rejects | `.upstream/ltx/ltx.go:467` |

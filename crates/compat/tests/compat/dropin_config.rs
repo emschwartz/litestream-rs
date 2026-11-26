@@ -263,7 +263,7 @@ struct Case {
     /// Leave a lone `access-key-id` or `secret-access-key` alone (D42); else the other
     /// is added.
     lone_key: bool,
-    /// The Rust-only section, which Go ignores: `app-readers: none`.
+    /// The Rust-only section, which Go ignores: `app-autocheckpoint: off`.
     rust_section: bool,
 }
 
@@ -398,7 +398,8 @@ fn render(case: &Case, base: &Path) -> Writer {
         writeln!(w.text, "retention:\n  enabled: {value}").unwrap();
     }
     if case.rust_section {
-        w.text.push_str("litestream-rs:\n  app-readers: none\n");
+        w.text
+            .push_str("litestream-rs:\n  app-autocheckpoint: off\n");
     }
     if let Some(key) = case.misspelled {
         writeln!(w.text, "{key}: 1s").unwrap();

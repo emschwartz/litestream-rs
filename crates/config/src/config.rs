@@ -482,20 +482,9 @@ impl S3Settings {
     }
 }
 
-/// What the operator states about the application's readers. It no longer gates TRUNCATE, which
-/// runs either way and reports busy while a reader blocks it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppReaders {
-    /// Nothing stated (the default).
-    Unknown,
-    /// `none`: the application holds no long readers.
-    None,
-}
-
 /// The `litestream-rs` section, which Go ignores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RustSettings {
-    pub(crate) app_readers: AppReaders,
     pub(crate) app_autocheckpoint: Option<std::num::NonZeroU32>,
     pub(crate) responses: lsr_core::Responses,
     pub(crate) if_replication_stops: lsr_replica::IfReplicationStops,
@@ -503,11 +492,6 @@ pub struct RustSettings {
 }
 
 impl RustSettings {
-    /// `app-readers`.
-    #[must_use]
-    pub fn app_readers(self) -> AppReaders {
-        self.app_readers
-    }
     /// `app-autocheckpoint`: the `wal_autocheckpoint` the application's connections run, in
     /// frames; `None` for `0` or `off`. SQLite's default, 1000, when the key is absent, since
     /// the replicator cannot read another process's setting.

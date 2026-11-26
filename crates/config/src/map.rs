@@ -61,7 +61,7 @@ use lsr_core::{
 use lsr_replica::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 use lsr_store_s3::{S3Config, S3Credentials};
 
-use crate::config::{AppReaders, DbConfig, DbSource, GoConfig};
+use crate::config::{DbConfig, DbSource, GoConfig};
 use crate::duration::GoDuration;
 use crate::error::KeyPath;
 use crate::expand::{Env, PathError, expand_path};
@@ -445,10 +445,7 @@ fn settings(
         maintenance: maintenance?.clone(),
         sync_limits: sync_limits?,
         responses: config.rust().responses(),
-        readers: match config.rust().app_readers() {
-            AppReaders::Unknown => ReaderTracking::Untracked,
-            AppReaders::None => ReaderTracking::Tracked,
-        },
+        readers: ReaderTracking::Untracked,
         shutdown_grace,
         app_autocheckpoint: config.rust().app_autocheckpoint(),
         verify_interval: config.validation_interval().and_then(positive),

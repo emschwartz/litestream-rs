@@ -198,11 +198,6 @@ const SETS: &[(&str, &str)] = &[
         "replica.url",
         "`DbPlan::replica`: the whole replica as a URL (`s3://` or `file://`).",
     ),
-    (
-        "rust.app-readers",
-        "`Config.readers`: `none` is `ReaderTracking::Tracked`. The daemon holds no reader guards, so it \
-         changes nothing there; TRUNCATE runs under either setting.",
-    ),
     ("rust.app-autocheckpoint", "`Config.app_autocheckpoint`."),
     ("rust.responses", CONTAINER),
     (

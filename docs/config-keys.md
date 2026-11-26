@@ -168,7 +168,6 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 
 | Key | What it does |
 | --- | --- |
-| `app-readers` | `Config.readers`: `none` is `ReaderTracking::Tracked`. The daemon holds no reader guards, so it changes nothing there; TRUNCATE runs under either setting. |
 | `app-autocheckpoint` | `Config.app_autocheckpoint`. |
 | `responses` | A section; its keys are below. |
 | `if-replication-stops` | `Config.if_replication_stops`. |

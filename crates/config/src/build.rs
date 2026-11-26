@@ -20,9 +20,8 @@ use lsr_core::{OtherWriter, Response, Responses};
 use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge};
 
 use crate::config::{
-    AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
-    ReplicaConfig, ReplicaKind, RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride,
-    defaults,
+    DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging, ReplicaConfig,
+    ReplicaKind, RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
 };
 use crate::duration::GoDuration;
 use crate::error::{KeyPath, ProblemKind, WarningKind};
@@ -528,18 +527,11 @@ fn unsupported(fields: &Fields, name: &str, value: String, allowed: String, walk
 }
 
 fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
-    let app_readers = choice(
-        fields,
-        "app-readers",
-        &[("none", AppReaders::None), ("unknown", AppReaders::Unknown)],
-        walk,
-    );
     let responses = fields
         .and_then(|f| f.map("responses", walk))
         .map(|r| responses(r, walk))
         .unwrap_or(Responses::GO_LIKE);
     RustSettings {
-        app_readers: app_readers.unwrap_or(AppReaders::Unknown),
         app_autocheckpoint: app_autocheckpoint(fields, walk),
         responses,
         if_replication_stops: if_replication_stops(fields, walk),
