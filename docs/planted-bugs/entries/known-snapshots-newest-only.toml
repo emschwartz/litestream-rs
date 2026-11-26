@@ -1,0 +1,5 @@
+# A level above 0 remembers only its newest file, so retention reads the created-at time of every older snapshot from the store, one HEAD each per check.
+name = "known-snapshots-newest-only"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = ["created_at::tests::files_are_kept_until_deleted_and_each_level_has_a_cap", "actor::tests::steady::a_steady_writer_with_short_intervals_pays_the_bill_and_no_more"]

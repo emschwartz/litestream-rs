@@ -410,11 +410,18 @@ mod cases {
         assert_eq!(count(&h.wire, Shape::Head), heads + 1);
     }
 
+    /// A PUT whose body the store refuses against its signed SHA-256 is a checksum mismatch:
+    /// not retried here, and nothing to delete, since the store published nothing.
     #[test]
-    fn wrong_etag_on_put_is_corrupt() {
+    fn a_put_refused_against_its_signed_hash_is_corrupt() {
         let (wire, sleeper, store) = retried(FakeHarness::new());
         let k = key(0, 1, 1);
-        wire.push(Fault::WrongEtag { on: Shape::Put });
+        wire.push(Fault::Status {
+            on: Shape::Put,
+            status: 400,
+            code: Some("XAmzContentSHA256Mismatch"),
+            retry_after: None,
+        });
         assert_eq!(
             put_through(&store, &k, b"abc").unwrap_err(),
             StoreError::Corrupt {
@@ -427,8 +434,20 @@ mod cases {
             1,
             "a corrupt commit is not retried"
         );
+        assert_eq!(count(&wire, Shape::DeleteObjects), 0);
         assert!(sleeper.waits().is_empty());
-        assert!(wire.inner().keys().is_empty(), "the bad object was deleted");
+        assert!(wire.inner().keys().is_empty());
+    }
+
+    /// A PUT answered with the ETag of other bytes is written: as in Go, the ETag is not
+    /// compared with anything (the store checked the body against its signed hash).
+    #[test]
+    fn a_wrong_etag_on_put_is_taken_as_it_comes() {
+        let (wire, _sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        wire.push(Fault::WrongEtag { on: Shape::Put });
+        put_through(&store, &k, b"abc").unwrap();
+        assert_eq!(wire.inner().keys().len(), 1);
     }
 
     #[test]
@@ -563,15 +582,41 @@ mod cases {
         assert_eq!(h.store.pending_orphans(), 0);
     }
 
+    /// A part answered with the ETag of other bytes is taken as it comes; the store refuses the
+    /// completion that names it (`InvalidPart`), which is a checksum mismatch: nothing is
+    /// published and the engine redoes the upload.
     #[test]
-    fn wrong_part_etag_is_corrupt_and_not_retried() {
+    fn a_wrong_part_etag_fails_the_completion_as_corrupt() {
+        let (wire, sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        wire.push(Fault::WrongEtag {
+            on: Shape::UploadPart,
+        });
+        let err = write_all(&store, &k, &body(PART * 2), PART).unwrap_err();
+        assert_eq!(
+            err,
+            StoreError::Corrupt {
+                key: Some(k),
+                cause: CorruptCause::ChecksumMismatch { part: None }
+            }
+        );
+        assert_eq!(count(&wire, Shape::Complete), 1, "not retried here");
+        assert!(sleeper.waits().is_empty());
+        assert!(list_all(&store).unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn a_part_refused_against_its_signed_hash_is_corrupt_and_not_retried() {
         let (wire, sleeper, store) = retried(FakeHarness::new());
         let k = key(0, 1, 1);
         wire.push(Fault::Pass {
             on: Shape::UploadPart,
         });
-        wire.push(Fault::WrongEtag {
+        wire.push(Fault::Status {
             on: Shape::UploadPart,
+            status: 400,
+            code: Some("XAmzContentSHA256Mismatch"),
+            retry_after: None,
         });
         let err = write_all(&store, &k, &body(PART * 3), PART).unwrap_err();
         assert_eq!(

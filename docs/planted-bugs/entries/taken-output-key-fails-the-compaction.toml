@@ -1,0 +1,9 @@
+# A create-only output whose key is taken fails the compaction instead of planning again
+# from a fresh listing.
+name = "taken-output-key-fails-the-compaction"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "maintain::tests::running_a_job_twice_leaves_one_file_at_the_key",
+    "maintain::tests::an_output_key_that_holds_another_file_is_not_written_over",
+]

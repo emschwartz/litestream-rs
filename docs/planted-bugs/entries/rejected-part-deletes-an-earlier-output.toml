@@ -1,0 +1,8 @@
+# A create-only output whose part the store rejected deletes the object under its key, which
+# it never wrote: an earlier output retention may count as cover.
+name = "rejected-part-deletes-an-earlier-output"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "maintain::tests::a_rejected_part_of_a_create_only_output_deletes_nothing_under_its_key",
+]

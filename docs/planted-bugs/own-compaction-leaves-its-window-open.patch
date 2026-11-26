@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -785,7 +785,7 @@
+     }
+     let (start, next) = next_window(now, interval);
+     // This engine's own compaction closed the window, whatever time its output carries.
+-    if state.drained_since(dst, start) {
++    if false && state.drained_since(dst, start) {
+         return Ok(Step::Wait(next));
+     }
+     if let Some(info) = dst_last
