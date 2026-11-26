@@ -8,9 +8,11 @@
 //! The tail is the liveness check. With every fault healed and the run's own judges passed,
 //! the application commits [`TAIL_COMMITS`] times, [`TAIL_GAP`] apart, for long enough that
 //! level-1 and level-2 compactions come due in it, and the clock is charged whatever the run
-//! set. Each commit is made with the replica caught up, so the replica holding a transaction
-//! newer than its newest before the commit means the commit reached it: read from the bucket
-//! itself, never from the engine. Each must within [`Runner::lag_bound`] of simulated time.
+//! set. No file staged or on the replica before a commit holds it, so the replica holding a
+//! transaction newer than the newest of those means the commit reached it: read from the bucket
+//! and the staging directory themselves, never from the engine. A backlog the run left staged
+//! goes up first, and its files say nothing of the commit. Each must within
+//! [`Runner::lag_bound`] of simulated time.
 //! And the tail may hand no more bytes to uploads the store never takes than one file in
 //! flight: a job that restarts from scratch with nothing failing wastes a slice each time.
 //!
@@ -113,6 +115,29 @@ impl Runner {
         Ok(())
     }
 
+    /// Judges what the tick held the write barrier across (`crate::barrier`): no replica
+    /// request, a wait within one staged file's price for each barrier, and, when the tick ended without its
+    /// process dying, no barrier still held.
+    pub(super) fn judge_barrier(&mut self, done: bool) -> Result<(), Violation> {
+        let held = self.barrier.take();
+        if held.holds > 0 {
+            self.report.reach.bump("barrier.judged");
+            within(Bound::BarrierRemoteRequests, held.remote_requests, 0)?;
+            // Each barrier may stage one file, the WAL's tail since the sync, of at most what one
+            // sync may stage; nothing else.
+            let limit = Profile::DEFAULT.staging.micros(
+                held.holds.saturating_mul(crate::cost::REQUESTS_PER_PUT),
+                held.holds
+                    .saturating_mul(self.allowance().written(crate::cost::Store::Staging)),
+            );
+            within(Bound::BarrierWaitMicros, held.wait_micros, limit)?;
+        }
+        if done {
+            within(Bound::BarrierHeldAfterTick, u64::from(held.open), 0)?;
+        }
+        Ok(())
+    }
+
     /// A boot's spare for its whole-file pass over staging ([`Spare`]), from staging's own
     /// sizes.
     pub(super) fn boot_spare(&self) -> Spare {
@@ -129,6 +154,16 @@ impl Runner {
         self.w
             .remote_raw
             .stored()
+            .iter()
+            .map(|info| info.key.range().max())
+            .max()
+    }
+
+    /// The newest transaction staging holds at any level.
+    fn newest_staged(&self) -> Option<Txid> {
+        self.w
+            .staged_files()
+            .unwrap_or_default()
             .iter()
             .map(|info| info.key.range().max())
             .max()
@@ -183,6 +218,7 @@ impl Runner {
         let remote0 = self.w.remote_recorder.counts();
         for _ in 0..TAIL_COMMITS {
             let frontier = self.replica_frontier();
+            let before = self.newest_staged().max(frontier);
             self.commit(TAIL_COMMIT_PAGES, false);
             let mut began = self.now();
             let mut excused = false;
@@ -218,7 +254,7 @@ impl Runner {
                         .unwrap_or(0),
                 )
                 .saturating_add(Profile::DEFAULT.tick(&stats.remote, &stats.staging));
-                if self.replica_frontier() > frontier {
+                if self.replica_frontier() > before {
                     reached = true;
                     self.report.reach.bump("liveness.judged");
                     within(Bound::CommitLagMillis, millis(waited), millis(bound))?;

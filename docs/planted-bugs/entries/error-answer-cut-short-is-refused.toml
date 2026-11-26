@@ -1,0 +1,4 @@
+name = "error-answer-cut-short-is-refused"
+fix = "claude/sim-degraded"
+package = "lsr-store-s3"
+tests = ["classify::tests::an_error_answer_cut_short_is_retried"]
