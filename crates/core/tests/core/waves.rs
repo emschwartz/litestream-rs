@@ -1,30 +1,28 @@
-//! The store both read-ahead gates restore from: `gates` here runs it under the retry layer, and
+//! The store both request gates restore from: `gates` here runs it under the retry layer, and
 //! `crates/replica/tests/replica/gates.rs` includes this file to run it through the public
 //! restore entry.
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    BatchKind, CreatedAt, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit,
-    ReadAt, ReadLen, StoreError, Upload,
+    BoxFuture, CreatedAt, FileInfo, FileKey, Level, Listing, MemStore, ObjectStore, PageLimit,
+    ReadLen, ReadStream, StoreError, Upload,
 };
 use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
 
-/// A store that models a link on a virtual clock: a lone read is one round trip, and a
-/// batch of `n` reads at the store's width is `ceil(n / width)` waves. It answers from
-/// memory, so the run is deterministic and nothing sleeps.
+/// A store that counts the requests a bucket would bill: a lone read is one, and a stream is
+/// one however many pieces are taken from it. It answers from memory, so the run is
+/// deterministic and nothing sleeps.
 pub struct Waves {
     inner: MemStore,
-    pub rounds: Arc<AtomicUsize>,
-    pub reads: Arc<AtomicUsize>,
+    /// Requests: lone reads and streams opened.
+    pub requests: Arc<AtomicUsize>,
+    /// Pieces taken from streams.
+    pub pieces: Arc<AtomicUsize>,
 }
-
-/// Ranged reads in flight at once, as the S3 store designs it.
-pub const WIDTH: usize = 8;
 
 /// Bytes of one restore read: core's `restore::CHUNK_BYTES`.
 pub const RESTORE_CHUNK: usize = 4 * 1024 * 1024;
@@ -33,15 +31,30 @@ impl Waves {
     pub fn new(inner: MemStore) -> Self {
         Self {
             inner,
-            rounds: Arc::default(),
-            reads: Arc::default(),
+            requests: Arc::default(),
+            pieces: Arc::default(),
         }
     }
+}
 
-    fn wave(&self, requests: usize) {
-        self.rounds
-            .fetch_add(requests.div_ceil(WIDTH), Ordering::SeqCst);
-        self.reads.fetch_add(requests, Ordering::SeqCst);
+/// A stream of [`Waves`]: one request, its pieces read from memory in order.
+struct Stream<'a> {
+    store: &'a Waves,
+    key: FileKey,
+    offset: u64,
+}
+
+impl ReadStream for Stream<'_> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            self.store.pieces.fetch_add(1, Ordering::SeqCst);
+            let bytes = self.store.inner.read(&self.key, self.offset, len).await?;
+            self.offset = self
+                .offset
+                .checked_add(u64::try_from(bytes.len()).unwrap())
+                .unwrap();
+            Ok(bytes)
+        })
     }
 }
 
@@ -63,9 +76,17 @@ impl ObjectStore for Waves {
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
-        self.rounds.fetch_add(1, Ordering::SeqCst);
-        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.requests.fetch_add(1, Ordering::SeqCst);
         self.inner.read(key, offset, len).await
+    }
+
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        Box::new(Stream {
+            store: self,
+            key,
+            offset,
+        })
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -95,22 +116,45 @@ impl ObjectStore for Waves {
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         self.inner.delete(keys).await
     }
+}
 
-    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
-        match kind {
-            BatchKind::Reads => NonZeroUsize::new(WIDTH).unwrap(),
-            BatchKind::Lists | BatchKind::ResolvedCreatedAt => NonZeroUsize::MIN,
-        }
+/// Stores, under level 0, the file of transaction `n` of a 2600-page database holding its first
+/// `pages` pages, each filled with `n`.
+pub fn put_increment(store: &MemStore, n: u64, pages: u32) {
+    let size = PageSize::new(16384).unwrap();
+    let txid = Txid::new(n).unwrap();
+    let range = TxidRange::single(txid);
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: size,
+        commit: 2600,
+        txids: range,
+        timestamp: Timestamp::from_unix_millis(1_700_000_000_000),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    let fill = vec![u8::try_from(n).unwrap(); size.bytes()];
+    for at in 1..=pages {
+        encoder
+            .write_page(PageNo::new(at, size).unwrap(), &fill)
+            .unwrap();
     }
-
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        self.wave(reads.len());
-        let mut out = Vec::new();
-        for at in reads {
-            out.push(self.inner.read(&at.key, at.offset, at.len).await);
-        }
-        out
-    }
+    let bytes = encoder.finish(None).unwrap().0;
+    block_on(async {
+        let mut up = store
+            .begin_upload(
+                &FileKey::new(Level::ZERO, range),
+                Timestamp::from_unix_millis(1_700_000_000_000),
+                WriteMode::Replace,
+            )
+            .await
+            .unwrap();
+        up.write(&bytes).await.unwrap();
+        up.commit().await.unwrap();
+    });
 }
 
 /// One snapshot of 2600 random 16 KiB pages (about 42 MiB, 11 restore chunks), stored.

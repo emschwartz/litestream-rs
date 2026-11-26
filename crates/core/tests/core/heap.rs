@@ -3,7 +3,7 @@
 //! A test binary installs [`Counting`] as its `#[global_allocator]` and wraps
 //! the code under test in [`peak_of`], which reports the most heap the closure
 //! held at once beyond what was already live. That is what lets a test say
-//! "restore holds one read window, whatever the database's size" as a number.
+//! "restore holds one chunk, whatever the database's size" as a number.
 //!
 //! Counts are per thread, so tests running side by side in one process do not
 //! disturb each other's measurement; the closure must therefore do its

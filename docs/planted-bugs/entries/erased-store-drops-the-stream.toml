@@ -1,0 +1,9 @@
+# The public restore entry erases the store and drops its stream, so each 4 MiB chunk of a file
+# is a request of its own.
+name = "erased-store-drops-the-stream"
+fix = "claude/restore-requests"
+package = "lsr-replica"
+test_bin = "replica"
+tests = [
+    "gates::restore_through_the_public_entry_reads_each_file_in_one_request",
+]

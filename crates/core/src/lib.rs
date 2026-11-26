@@ -143,7 +143,7 @@ pub use source::{
 };
 pub use store::{
     Again, BatchKind, BoxFuture, CorruptCause, Denied, DynUpload, Flight, ListAt, Listing,
-    ListingStalled, ObjectStore, Opened, PageLimit, PartNumber, ReadAt, ReadLen, Reread, Rest,
+    ListingStalled, ObjectStore, Opened, PageLimit, PartNumber, ReadLen, ReadStream, Reread, Rest,
     Seeing, Seen, StoreError, StoreOp, Upload, WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};

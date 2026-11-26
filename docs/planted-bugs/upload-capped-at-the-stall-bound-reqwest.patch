@@ -1,8 +1,7 @@
 diff --git a/crates/store-s3/src/reqwest_transport.rs b/crates/store-s3/src/reqwest_transport.rs
-index 0eda82655..2e9a5c86e 100644
 --- a/crates/store-s3/src/reqwest_transport.rs
 +++ b/crates/store-s3/src/reqwest_transport.rs
-@@ -311,7 +311,7 @@ async fn exchange(
+@@ -395,7 +395,7 @@
      bounds: Bounds,
      sent: u64,
  ) -> Result<HttpResponse, TransportError> {

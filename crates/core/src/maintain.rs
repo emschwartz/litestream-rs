@@ -1026,10 +1026,9 @@ pub enum Outcome {
         /// How many keys the call named.
         count: usize,
     },
-    /// An input is gone from the replica, or the output's key already holds
-    /// an object the listing did not show: list again and plan again.
+    /// An input is gone from the replica: list again and plan again.
     Replan {
-        /// The missing input, or the output found already there.
+        /// The missing input.
         key: FileKey,
     },
     /// The job failed; nothing was retried here.
@@ -1044,11 +1043,13 @@ pub enum Outcome {
 /// deleted.
 ///
 /// When the store rejected the output's commit, the output key is deleted
-/// before returning: a listing would otherwise show it as coverage. That
-/// delete may only take the object this attempt wrote, never one the key held
-/// before (an earlier run's output that retention may already count as
-/// cover): an output key a read finds taken before the write is not written
-/// over, and the job is planned again from a fresh listing.
+/// before returning: a listing would otherwise show it as coverage. The key held
+/// nothing before the write: the job was planned from a listing that shows every
+/// file this engine wrote (a store whose listings lag is unsupported,
+/// `docs/decisions/D173.md`), and a merge whose output that listing shows is
+/// never planned. So the delete takes only what this attempt wrote, and the key
+/// is not read first: Go writes its compaction output with no read either
+/// (`compactor.go:104`, `Compactor::Compact`).
 pub(crate) async fn run_compaction<L: Role, R: Role>(
     inputs: &CompactionInputs,
     level: Level,
@@ -1056,11 +1057,6 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
     replica: &R,
 ) -> Outcome {
     let output = FileKey::new(level, inputs.range());
-    match crate::store::exists(replica, &output).await {
-        Ok(true) => return Outcome::Replan { key: output },
-        Ok(false) => {}
-        Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
-    }
     let result = if inputs
         .files()
         .iter()
@@ -1126,6 +1122,12 @@ const _: () = assert!(matches!(TRAILER_LEN.checked_add(1), Some(17)));
 /// replica. One read of 17 bytes per input from each store; a local copy that
 /// is gone or differs answers false, and a replica object that is gone is
 /// [`CompactError::InputVanished`].
+///
+/// The replica read is the one request here Go does not make. Go merges any
+/// local level-0 file that opens (`compactor.go:139-147`, `LocalFileOpener`),
+/// with no check that it is the object the replica holds, so a stale staged copy
+/// becomes the level-1 file restores read while the replica's level 0 says
+/// otherwise. One 17-byte read per input is what tells the two apart.
 async fn local_is_replica<L: Role, R: Role>(
     local: &L,
     replica: &R,

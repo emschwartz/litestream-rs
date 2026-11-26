@@ -14,18 +14,12 @@
 //!   one value.
 //!
 //! Memory is one chunk: the old chunk is dropped before the next read. A read
-//! told the object's listed size ([`LtxRead::sized`]) on a store whose
-//! [`ObjectStore::batch_width`] for [`BatchKind::Reads`] is above one also reads ahead: when it runs
-//! out it asks for up to that many chunks in one [`ObjectStore::read_many`],
-//! never more than the listed size still needs, and feeds them to the decoder
-//! in order. Memory is then at most that many chunks. The chunks are held
-//! as fetched and reach the decoder exactly as sequential reads would, so the
-//! verification rule above is unchanged; a failed read in a batch is held in
-//! its place and reported only when the decoder gets there, so a fault is the
-//! one a sequential read would meet first. The listed size only bounds the
-//! batch: a file longer than listed is still read to its end.
+//! to the end ([`LtxRead::read_verified`]) takes its chunks from one
+//! [`ObjectStore::read_stream`], so on S3 the whole file is one request; a read
+//! stepped event by event ([`LtxRead::next`], a compaction's inputs) reads each
+//! chunk alone and holds no connection between steps. The chunks are the same
+//! either way, so the verification rule above is unchanged.
 
-use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::mem;
 
@@ -33,7 +27,7 @@ use lsr_ltx::{DbChecksum, DecodeError, Decoder, Event, Header, Txid, Verified};
 
 use crate::fault::Fault;
 use crate::layout::FileKey;
-use crate::store::{BatchKind, ObjectStore, ReadAt, ReadLen, StoreError};
+use crate::store::{ObjectStore, ReadLen, ReadStream, StoreError};
 
 /// Where a verified file ends, for the file applied after it to be checked
 /// against: its last transaction and, when it tracks one, the database
@@ -157,10 +151,6 @@ pub(crate) struct LtxRead {
     /// The store returned a short chunk: no more reads.
     ended: bool,
     header: Option<Header>,
-    /// The listed size, when the caller allows reading ahead up to it.
-    listed: Option<u64>,
-    /// Chunks fetched ahead, in order from `offset`; an error ends them.
-    ahead: VecDeque<Result<Vec<u8>, StoreError>>,
 }
 
 impl LtxRead {
@@ -175,17 +165,7 @@ impl LtxRead {
             offset: 0,
             ended: false,
             header: None,
-            listed: None,
-            ahead: VecDeque::new(),
         }
-    }
-
-    /// The same read, allowed to fetch ahead up to the object's listed `size`
-    /// (see the module docs).
-    #[must_use]
-    pub(crate) const fn sized(mut self, size: u64) -> Self {
-        self.listed = Some(size);
-        self
     }
 
     /// A read whose first chunk, from offset 0 and asked as `len` bytes, the
@@ -214,12 +194,9 @@ impl LtxRead {
         self.header.as_ref()
     }
 
-    /// Bytes held: the current chunk and any fetched ahead.
+    /// Bytes held: the current chunk.
     pub(crate) fn held(&self) -> usize {
-        self.ahead
-            .iter()
-            .map(|chunk| chunk.as_ref().map_or(0, Vec::len))
-            .fold(self.chunk.len(), usize::saturating_add)
+        self.chunk.len()
     }
 
     /// Feeds bytes until the next event, which `on_event` turns into the
@@ -232,6 +209,16 @@ impl LtxRead {
         store: &S,
         on_event: impl FnOnce(Event<'_>) -> Result<R, E>,
     ) -> Result<Next<R>, ReadFault<E>> {
+        self.next_from(store, None, on_event).await
+    }
+
+    /// [`Self::next`], its chunks taken from `stream` when there is one, else a read each.
+    async fn next_from<S: ObjectStore, R, E>(
+        &mut self,
+        store: &S,
+        mut stream: Option<&mut (dyn ReadStream + '_)>,
+        on_event: impl FnOnce(Event<'_>) -> Result<R, E>,
+    ) -> Result<Next<R>, ReadFault<E>> {
         loop {
             if self.pos >= self.chunk.len() {
                 if self.ended {
@@ -239,7 +226,13 @@ impl LtxRead {
                     let decoder = mem::take(&mut self.decoder);
                     return decoder.finish().map(Next::End).map_err(ReadFault::Decode);
                 }
-                self.refill(store).await.map_err(ReadFault::Store)?;
+                // The old chunk goes first so a read never holds two.
+                self.chunk = Vec::new();
+                let chunk = match stream.as_deref_mut() {
+                    Some(stream) => stream.next(self.len).await,
+                    None => store.read(&self.key, self.offset, self.len).await,
+                };
+                self.take(chunk.map_err(ReadFault::Store)?);
                 continue;
             }
             let rest = self.chunk.get(self.pos..).unwrap_or_default();
@@ -262,8 +255,9 @@ impl LtxRead {
         }
     }
 
-    /// Reads to the end, handing every event to `on_event` in file order.
-    /// The summary is returned only once the whole file verified.
+    /// Reads to the end through one [`ObjectStore::read_stream`] from where the read stands,
+    /// handing every event to `on_event` in file order. The summary is returned only once
+    /// the whole file verified.
     ///
     /// # Errors
     /// [`ReadFault`], the first one met.
@@ -272,62 +266,14 @@ impl LtxRead {
         store: &S,
         mut on_event: impl FnMut(Event<'_>) -> Result<(), E>,
     ) -> Result<Verified, ReadFault<E>> {
+        let mut stream = store.read_stream(self.key, self.offset);
         loop {
-            match self.next(store, &mut on_event).await? {
+            match self
+                .next_from(store, Some(&mut *stream), &mut on_event)
+                .await?
+            {
                 Next::Event(()) => {}
                 Next::End(verified) => return Ok(verified),
-            }
-        }
-    }
-
-    async fn refill<S: ObjectStore>(&mut self, store: &S) -> Result<(), StoreError> {
-        // The old chunk goes first so a read never holds two.
-        self.chunk = Vec::new();
-        self.pos = 0;
-        if self.ahead.is_empty() {
-            let count = self.batch(store.batch_width(BatchKind::Reads).get());
-            if count <= 1 {
-                let chunk = store.read(&self.key, self.offset, self.len).await?;
-                self.take(chunk);
-                return Ok(());
-            }
-            self.fetch_ahead(store, count).await;
-        }
-        let chunk = self.ahead.pop_front().unwrap_or_else(|| Ok(Vec::new()))?;
-        self.take(chunk);
-        Ok(())
-    }
-
-    /// How many chunks the next fetch asks for: what the listed size still
-    /// needs, at least one, at most `width`.
-    fn batch(&self, width: usize) -> usize {
-        let Some(size) = self.listed else { return 1 };
-        let left = size.saturating_sub(self.offset);
-        let chunks = left.div_ceil(self.len.get());
-        usize::try_from(chunks)
-            .unwrap_or(usize::MAX)
-            .clamp(1, width)
-    }
-
-    /// Fetches `count` chunks from `offset` in one batch and keeps them up to
-    /// the first failure. Chunks after a short one (the end) are kept too: they
-    /// are empty reads past the end, and the read has ended before reaching them.
-    async fn fetch_ahead<S: ObjectStore>(&mut self, store: &S, count: usize) {
-        let mut reads = Vec::with_capacity(count);
-        let mut at = self.offset;
-        for _ in 0..count {
-            reads.push(ReadAt {
-                key: self.key,
-                offset: at,
-                len: self.len,
-            });
-            at = at.saturating_add(self.len.get());
-        }
-        for result in store.read_many(&reads).await {
-            let failed = result.is_err();
-            self.ahead.push_back(result);
-            if failed {
-                break;
             }
         }
     }
