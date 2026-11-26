@@ -1,5 +1,5 @@
 diff --git a/crates/core/src/snapshot.rs b/crates/core/src/snapshot.rs
-index a5d9e773b..02025101d 100644
+index a5d9e773b..344d83988 100644
 --- a/crates/core/src/snapshot.rs
 +++ b/crates/core/src/snapshot.rs
 @@ -318,7 +318,7 @@ impl Snapshotting {
@@ -11,10 +11,3 @@ index a5d9e773b..02025101d 100644
              return Err(Fault::ReadTxLost);
          }
          let moved = committed.end().salts() != self.salts || committed.backfilled() > self.frames;
-@@ -401,4 +401,4 @@ fn open_fault(err: OpenError) -> Fault {
- }
- 
- #[cfg(test)]
--mod tests;
-+mod tests;
-\ No newline at end of file
