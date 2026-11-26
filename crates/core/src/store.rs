@@ -796,7 +796,8 @@ pub trait Again: Send {
 pub enum Flight {
     /// No part is in flight and none waits to start.
     Idle,
-    /// Parts are in flight, and a write of one read's worth will not wait for one.
+    /// Parts are in flight, and a write of at most [`ReadLen::CHUNK`] bytes will not wait for
+    /// one.
     Room,
     /// A whole part waits for a part in flight to end: a write now would wait with it.
     Full,
