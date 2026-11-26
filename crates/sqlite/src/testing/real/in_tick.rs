@@ -68,6 +68,9 @@ impl Real {
         }
         let index = Index::read(self);
         let before = (index.salts, index.end(self.page_size), index.db_size);
+        let reset_before = index.mx_frame == 0
+            && super::header_salts(self.wal_file().as_deref())
+                != Some((index.salts.salt1, index.salts.salt2));
         let done = match op {
             InTickOp::Commit => {
                 self.commit_in_tick(InTickSite::AtCall);
@@ -108,6 +111,7 @@ impl Real {
             restarted: after.salts != index.salts,
             emptied: wal.is_none_or(|wal| wal.len() < 32),
             before,
+            reset_before,
         });
     }
 
