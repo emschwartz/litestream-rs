@@ -452,6 +452,8 @@ struct Runner {
     jumped: i64,
     /// The replica recorder's length when the fail-stop judge last restored `Latest`.
     fail_stop_seen: usize,
+    /// The level-0 files staging held when this process started.
+    staged_at_start: Vec<lsr_core::FileKey>,
     /// The digest of the model's newest image as the fail-stop judge last took it.
     fail_stop_image: lsr_history::Digest,
     /// How many commits the model held when the fail-stop judge last looked.
@@ -619,6 +621,7 @@ impl Runner {
             op_began: start,
             jumped: 0,
             fail_stop_seen: 0,
+            staged_at_start: Vec::new(),
             puts_judged: 0,
             put_back: 0,
             saved_database: None,
@@ -642,6 +645,7 @@ impl Runner {
 
     fn reboot(&mut self) {
         self.fail_stop.started();
+        self.staged_at_start = self.w.staged_level_zero();
         self.booted = false;
         self.w.start_driver();
         let base = actor_config();

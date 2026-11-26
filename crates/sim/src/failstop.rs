@@ -3,8 +3,9 @@
 //! It shares nothing with the engine's clock (`lsr_core::Lag`). Its truth is the simulator's:
 //! when the app committed, and whether a restore of the raw replica's `Latest` is the model's
 //! newest image. From those it keeps the time of the first commit since the replica last held
-//! everything (on the engine's clock the earliest stamp among them, since a step back can date a
-//! later commit earlier), which is never later than the oldest commit truly off the replica: the age it
+//! everything (on the engine's clock the earliest stamp among them, or the earliest reading of
+//! the clock at a tick since then: after a step back the engine can date frames by a sighting
+//! earlier than any commit's stamp), which is never later than the oldest commit truly off the replica: the age it
 //! measures is an upper bound, so the judge can only be lenient, never raise a false alarm.
 //! That leniency is the price of judging every run; the named scenarios
 //! (`crates/sim/tests/sim/failstop.rs`) judge the other direction (P2, a missed trip; P3,
@@ -28,8 +29,8 @@
 //!   degraded data-path task on that tick);
 //! - refused at boot: a store refusal fired in this life, and this life has not booted.
 //!
-//! Three exemptions, each excused and counted on its own ([`Excused`]), so a generator change that
-//! makes either common shows.
+//! Four exemptions, each excused and counted on its own ([`Excused`]), so a generator change that
+//! makes any of them common shows.
 //!
 //! **Committed WAL frames the engine never read.** The engine is judged on
 //! what it can know (`docs/decisions.md` D81, amended). When the WAL holds committed frames, no
@@ -54,6 +55,15 @@
 //! landed: it dates that file from its stamp, and an age trip over a replica the simulator knows
 //! is whole is correct while the lie lasts. Only an age trip, only during the hold; the trip
 //! clears once reads are honest (a trip lingers for `CLEAR_TICKS` after the catch-up).
+//!
+//! **A staged file an earlier life left that the boot cannot place.** A restart forgets which
+//! pending staged files hold no commit. The boot finds one again by comparing it with the staged
+//! file before it, or, with none, by its WAL span ending where the replica's newest level-0
+//! file's ends; a snapshot over a restarted WAL ends in another generation and stays counted
+//! (`docs/decisions/D282.md`). Only an age trip dated at that file's header stamp, only while the
+//! simulator knows the replica holds every commit, only for the first pending file, when this
+//! life found it in staging at its start, no staged file stands before it, and its WAL salts are
+//! not those of the replica's file at the replica's newest transaction (or there is none).
 
 use std::time::Duration;
 
@@ -101,6 +111,9 @@ pub struct FailStopJudge {
     lied_before: bool,
     /// Whether the last tick ran while every read of the replica lied.
     lied_last: bool,
+    /// The header stamp of a pending staged file an earlier life left that the boot cannot
+    /// place against the replica (`Self::unplaced`).
+    unplaced: Option<Timestamp>,
     /// An upload's answer could not be believed and no clean upload has landed since: the
     /// replica may hold what the engine cannot know it holds, so a restore that finds
     /// everything there does not count as caught up.
@@ -142,6 +155,8 @@ pub struct Excused {
     pub unvouched_snapshot: u64,
     /// While every read of the replica lied.
     pub lying_reads: u64,
+    /// On a pending staged file an earlier life left that the boot could not place.
+    pub unplaced_file: u64,
 }
 
 impl FailStopJudge {
@@ -233,6 +248,12 @@ impl FailStopJudge {
             self.failed = Some((tick.at, tick.true_at));
         }
         self.refused |= tick.refusal_fired;
+        // The engine dates WAL frames by the observation that first saw them, and after a clock
+        // step back that reading is earlier than every later commit's stamp: the wall date is
+        // also the least reading of the clock since the first commit.
+        if let Some((wall, true_since)) = self.since {
+            self.since = Some((wall.min(tick.at), true_since));
+        }
         if tick.read_wal {
             self.wal_read = Some(tick.at);
         }
@@ -257,6 +278,23 @@ impl FailStopJudge {
         // A read in the tick that first saw the frames came before the sighting: the engine
         // reads during the tick and looks at the WAL's end after it.
         unstaged_only && self.wal_read.is_none_or(|read| read <= since)
+    }
+
+    /// Tells the judge the header stamp of the first pending staged file, when an earlier life
+    /// left it with no staged file before it and its WAL span in another generation than the
+    /// replica's newest level-0 file's (or that file is gone): the boot has nothing to compare
+    /// it with and counts it as a commit (`lsr_core`'s `Seeded::place`).
+    pub const fn unplaced(&mut self, stamp: Option<Timestamp>) {
+        self.unplaced = stamp;
+    }
+
+    /// Whether `trip` is an age trip dated by the unplaced staged file, while the judge knows the
+    /// replica holds every commit.
+    fn unplaced_file(&self, trip: Option<Trip>) -> bool {
+        let Some(Trip::UnreplicatedTooLong { since }) = trip else {
+            return false;
+        };
+        self.since.is_none() && self.unplaced == Some(since)
     }
 
     /// Whether `trip` is an age trip dated at or after a boot of this life that broke
@@ -304,6 +342,10 @@ impl FailStopJudge {
                 }
                 Err(_) if age_trip && (tick.reads_lying || self.dated_by_lying_reads()) => {
                     self.excused.lying_reads = self.excused.lying_reads.saturating_add(1);
+                    Ok(())
+                }
+                Err(_) if self.unplaced_file(trip) => {
+                    self.excused.unplaced_file = self.excused.unplaced_file.saturating_add(1);
                     Ok(())
                 }
                 Err(_) if self.unvouched_snapshot(trip) => {
@@ -491,6 +533,37 @@ mod tests {
             .unwrap();
     }
 
+    /// The engine dates WAL frames by the observation that first saw them. After a clock step
+    /// back that reading is earlier than the stamp of the next commit, so a trip a bound after
+    /// the sighting is a true one, though it is under the bound from every commit's stamp.
+    #[test]
+    fn frames_seen_after_a_clock_step_back_date_from_the_sighting() {
+        let mut judge = caught_up();
+        let image = lsr_history::Digest::genesis();
+        judge.committed(ts(100_000), 100_000, image, image);
+        judge.saw(tick(40_000, true));
+        judge.committed(ts(40_100), 100_200, image, image);
+        let failing = TickSeen {
+            at: ts(640_000),
+            true_at: 650_000,
+            ..tick(640_000, true)
+        };
+        judge.saw(failing);
+        judge
+            .judge(age_trip(40_000), failing, BOUND, true, false)
+            .unwrap();
+        // With no reading of the clock before the later commit, nothing dates from 40 s.
+        let mut unseen = caught_up();
+        unseen.committed(ts(100_000), 100_000, image, image);
+        unseen.committed(ts(40_100), 100_200, image, image);
+        unseen.saw(failing);
+        let early = unseen.judge(age_trip(40_000), failing, BOUND, true, false);
+        assert!(
+            matches!(early, Err(Violation::FalseTrip { .. })),
+            "{early:?}"
+        );
+    }
+
     /// A trip the judge accepted stands while the commits it tripped on are off the replica,
     /// though a clock stepped back leaves the age under the bound; a trip that was never
     /// accepted, or one whose clock's start moved later, is judged afresh.
@@ -643,6 +716,38 @@ mod tests {
                 .judge(age_trip(1_000), tick(700_000, false), BOUND, true, false)
                 .is_err()
         );
+    }
+
+    /// An age trip dated by a pending staged file an earlier life left that the boot could not
+    /// place, over a replica the judge knows is whole: excused and counted. Any other date, no
+    /// such file, or commits the judge knows are off the replica: judged as usual.
+    #[test]
+    fn a_trip_on_an_unplaced_staged_file_is_excused_and_counted() {
+        let mut judge = caught_up();
+        judge.unplaced(Some(ts(1_000)));
+        judge
+            .judge(age_trip(1_000), tick(700_000, false), BOUND, true, false)
+            .unwrap();
+        assert_eq!(judge.excused().unplaced_file, 1);
+        let mut judge = caught_up();
+        judge.unplaced(Some(ts(1_000)));
+        let other = judge.judge(age_trip(2_000), tick(700_000, false), BOUND, true, false);
+        assert!(
+            matches!(other, Err(Violation::FalseTrip { .. })),
+            "{other:?}"
+        );
+        let mut judge = caught_up();
+        let none = judge.judge(age_trip(1_000), tick(700_000, false), BOUND, true, false);
+        assert!(matches!(none, Err(Violation::FalseTrip { .. })), "{none:?}");
+        let image = lsr_history::Digest::genesis();
+        judge.committed(ts(5_000), 5_000, image, image);
+        judge.unplaced(Some(ts(1_000)));
+        let behind = judge.judge(age_trip(1_000), tick(500_000, false), BOUND, true, false);
+        assert!(
+            matches!(behind, Err(Violation::FalseTrip { .. })),
+            "{behind:?}"
+        );
+        assert_eq!(judge.excused(), Excused::default());
     }
 
     /// A trip dated before that boot, after the engine's first upload since it, or in the next
