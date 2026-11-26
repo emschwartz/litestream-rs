@@ -76,7 +76,7 @@ fn txid(n: u64) -> Txid {
 }
 
 fn key(n: u64) -> FileKey {
-    staged_key(txid(n))
+    FileKey::staged(txid(n))
 }
 
 fn ps() -> PageSize {
@@ -1194,13 +1194,7 @@ fn a_verifying_listed_key_unlike_the_staged_file_is_never_written_over() {
     put_bytes(&remote.inner, key(2), &theirs);
     let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(2))));
-    assert_eq!(
-        listed.did,
-        Did::Diverged {
-            confirmed: txid(2),
-            from: txid(2)
-        }
-    );
+    assert_eq!(listed.did, Did::Diverged { confirmed: txid(2) });
     next(listed.state, &staging, &remote, 2).unwrap();
     assert!(remote.log().begins.is_empty());
     assert_eq!(read_all(&remote.inner, &key(2)), theirs);
@@ -1461,13 +1455,7 @@ fn a_refused_upload_of_other_verifying_bytes_is_never_written_over() {
         .unwrap()
         .state;
     let step = next(state, &staging, &remote, 2).unwrap();
-    assert_eq!(
-        step.did,
-        Did::Diverged {
-            confirmed: txid(2),
-            from: txid(2)
-        }
-    );
+    assert_eq!(step.did, Did::Diverged { confirmed: txid(2) });
     assert_eq!(step.state, UploadState::At(Some(txid(2))));
     assert_eq!(read_all(&remote.inner, &key(2)), theirs);
 }
@@ -1534,13 +1522,7 @@ fn one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object() {
     // whole; the read after it (its own verification) is the torn one.
     staging.log().flip_read = Some((key(1), 1));
     let listed = next_with(UploadState::Unknown, &staging, &remote, 1, &witnesses).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Diverged {
-            confirmed: txid(1),
-            from: txid(1)
-        }
-    );
+    assert_eq!(listed.did, Did::Diverged { confirmed: txid(1) });
 }
 
 /// The same with the replica's copy: its first verifying read comes back
@@ -1557,13 +1539,7 @@ fn one_torn_read_of_the_replica_copy_does_not_write_over_it() {
     // (its own verification) is the torn one.
     remote.log().flip_read = Some((key(1), 1));
     let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Diverged {
-            confirmed: txid(1),
-            from: txid(1)
-        }
-    );
+    assert_eq!(listed.did, Did::Diverged { confirmed: txid(1) });
     assert_eq!(read_all(&remote.inner, &key(1)), theirs);
 }
 

@@ -28,6 +28,7 @@ fn plan_pages(
 }
 use crate::conformance::block_on;
 use crate::fault::role::{Role, Staging};
+use crate::layout::Level;
 use crate::mem::MemStore;
 use crate::source::{FakeDb, FakeWal, SourceError};
 use crate::store::Upload;
@@ -711,6 +712,32 @@ fn sizes(rig: &Rig) -> Vec<u64> {
         .skip(1)
         .map(|(_, header, _)| header.fields().wal.unwrap().size())
         .collect()
+}
+
+/// A snapshot lists every page up to the committed end, so a cap that the first commit already
+/// reaches does not cut it short.
+#[test]
+fn a_cap_never_cuts_a_snapshot_short() {
+    let mut rig = Rig::new();
+    commit(&rig.wal, &[1], 1);
+    commit(&rig.wal, &[2], 2);
+    commit(&rig.wal, &[3], 3);
+    let step = Step::Snapshot {
+        after: None,
+        prev_timestamp: None,
+        cause: SnapshotCause::FirstSync,
+    };
+    let synced = rig.step(step, &capped(1), 1).unwrap();
+    assert!(
+        matches!(
+            synced,
+            Synced::Wrote {
+                end: StepEnd::Through(_),
+                ..
+            }
+        ),
+        "{synced:?}"
+    );
 }
 
 #[test]

@@ -33,6 +33,19 @@ impl Level {
     /// before any boot listed the replica (`crate::actor`'s `local` module). Staging holds
     /// level 0 otherwise, and on a replica this is an ordinary compaction level.
     pub(crate) const LOCAL_COURSE: Self = Self(8);
+    /// The first compaction level.
+    pub(crate) const ONE: Self = Self(1);
+    /// The compaction levels, 1 to 8, lowest first.
+    pub(crate) const COMPACTION: [Self; 8] = [
+        Self(1),
+        Self(2),
+        Self(3),
+        Self(4),
+        Self(5),
+        Self(6),
+        Self(7),
+        Self(8),
+    ];
     /// Every level, lowest first.
     pub const ALL: [Self; 10] = [
         Self(0),
@@ -202,6 +215,12 @@ impl FileKey {
     #[must_use]
     pub const fn new(level: Level, range: TxidRange) -> Self {
         Self { level, range }
+    }
+
+    /// The level-0 file of the one transaction `txid`.
+    #[must_use]
+    pub const fn staged(txid: Txid) -> Self {
+        Self::new(Level::ZERO, TxidRange::single(txid))
     }
 
     /// The snapshot of the database at `txid`: level 9, transactions 1

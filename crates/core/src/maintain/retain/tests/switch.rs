@@ -35,11 +35,10 @@ fn retention_is_enforced_by_default_as_in_go() {
     assert_eq!(defaults().retention(), RetentionMode::Enforce);
     assert_eq!(one_level().retention(), RetentionMode::Enforce);
     assert_eq!(small().retention(), RetentionMode::Enforce);
-    let mut switched = off(defaults());
+    let switched = off(defaults());
     assert_eq!(switched.retention(), RetentionMode::Off);
     assert_ne!(switched, defaults());
-    switched.set_retention(RetentionMode::Enforce);
-    assert_eq!(switched, defaults());
+    assert_eq!(switched.with_retention(RetentionMode::Enforce), defaults());
 }
 
 /// The ladder whose old snapshots, the level 1 file under their floor and
@@ -79,7 +78,7 @@ fn a_degraded_tasks_kept_restore_point_behaves_the_same_once_retention_is_back_o
         let mut config = off(one_level());
         let while_off = due_on(ladder(), &config, &mut pinned(restore_point));
         assert_eq!(while_off, QUIET, "kept restore point {restore_point}");
-        config.set_retention(RetentionMode::Enforce);
+        config = config.with_retention(RetentionMode::Enforce);
         let back_on = due_on(ladder(), &config, &mut pinned(restore_point));
         assert_eq!(back_on, always, "kept restore point {restore_point}");
     }
@@ -228,7 +227,7 @@ fn switching_retention_back_on_resumes_deletes_under_the_usual_rules() {
     assert_eq!((now, next), (same_now, same_next));
     assert!(model.files.len() > always.files.len());
 
-    cfg.set_retention(RetentionMode::Enforce);
+    cfg = cfg.with_retention(RetentionMode::Enforce);
     let mut tally = Tally::default();
     settle(&mut model, now, &cfg, &mut tally);
     assert!(tally.deleted > 0, "{tally:?}");

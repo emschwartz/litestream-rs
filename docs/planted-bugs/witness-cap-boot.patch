@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/witness.rs b/crates/core/src/witness.rs
-index 1c5cb1a8b..05aff4b8b 100644
+index d55b812b1..12897c71a 100644
 --- a/crates/core/src/witness.rs
 +++ b/crates/core/src/witness.rs
-@@ -360,7 +360,7 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
+@@ -493,7 +493,7 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
              // Past the cap a file could get no token: it goes as a file that leaves a gap
              // does, unread, and the WAL stages it again once uploads make room.
-             let wanted = expect.map(|txid| FileKey::new(Level::ZERO, TxidRange::single(txid)));
+             let wanted = expect.map(FileKey::staged);
 -            if pending && (scan.tokens.len() >= MAX_WITNESSED || Some(info.key) != wanted) {
 +            if pending && (scan.tokens.len() >= usize::MAX || Some(info.key) != wanted) {
                  scan.bad = Some((info.key, Bad::Unchained));
