@@ -44,14 +44,12 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 
-use lsr_ltx::{
-    Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Timestamp, Txid, TxidRange,
-};
+use lsr_ltx::{Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::fault::role::Role;
 use crate::fault::{BugSite, Fault};
-use crate::layout::{FileKey, Level};
+use crate::layout::FileKey;
 use crate::pages::Seeding;
 use crate::recover::{BootWal, Compare, NewestStagedFile, Origin, Scanned};
 use crate::store::{ObjectStore, ReadLen, StoreError};
@@ -558,11 +556,11 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
                 confirmed = Some(info.key.range().max());
                 expect = info.key.range().max().next();
             }
-            let tail = confirmed.map(|tail| FileKey::new(Level::ZERO, TxidRange::single(tail)));
+            let tail = confirmed.map(FileKey::staged);
             let pending = confirmed.is_none_or(|tip| info.key.range().max() > tip);
             // Past the cap a file could get no token: it goes as a file that leaves a gap
             // does, unread, and the WAL stages it again once uploads make room.
-            let wanted = expect.map(|txid| FileKey::new(Level::ZERO, TxidRange::single(txid)));
+            let wanted = expect.map(FileKey::staged);
             if pending && (scan.tokens.len() >= MAX_WITNESSED || Some(info.key) != wanted) {
                 scan.bad = Some((info.key, Bad::Unchained));
                 return Ok(scan);

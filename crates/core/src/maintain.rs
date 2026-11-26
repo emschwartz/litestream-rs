@@ -114,7 +114,6 @@ use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
 use crate::store::{CorruptCause, ObjectStore, ReadLen, StoreError, WriteMode};
-use crate::upload::Guard;
 use crate::witness::Sent;
 use retain::{Retention, retention};
 
@@ -238,7 +237,7 @@ impl CompactJob {
     /// [`JobError::InputAtWrongLevel`] for the first input not at `level - 1`.
     pub fn new(inputs: CompactionInputs, level: Level) -> Result<Self, JobError> {
         let expected = Level::new(level.get().saturating_sub(1))
-            .filter(|_| (1..=8).contains(&level.get()))
+            .filter(|_| Level::COMPACTION.contains(&level))
             .ok_or(JobError::LevelOutOfRange { level })?;
         if let Some(wrong) = inputs
             .files()
@@ -574,10 +573,7 @@ pub(crate) fn due_full(
     state: &mut MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Decided> {
-    match decide(inventory, now, config, published, state, resolved) {
-        Ok(decided) => Resolve::Done(decided),
-        Err(file) => Resolve::Need(file),
-    }
+    decide(inventory, now, config, published, state, resolved).into()
 }
 
 /// A decision on a whole listing, with what the short listings that follow it rely on.
@@ -623,17 +619,15 @@ fn decide(
     let mut until: Option<Timestamp> = None;
     // With no snapshot and no level 1 file yet, the first snapshot goes before any level, so
     // the levels start above it (D224) and the database is not carried through levels 1 to 3.
-    let first = (snapshot_end(inventory).is_none()
-        && Level::new(1).is_some_and(|one| inventory.level(one).is_empty()))
-    .then(|| snapshot_step(inventory, now, config, published, state, resolved))
-    .transpose()?;
+    let first = (snapshot_end(inventory).is_none() && inventory.level(Level::ONE).is_empty())
+        .then(|| snapshot_step(inventory, now, config, published, state, resolved))
+        .transpose()?;
     let first_planned = first.is_some();
     if let Some(job) = first.and_then(|step| absorb(step, &mut until)) {
         return Ok(Decided::job(job, gate));
     }
-    let levels = Level::ALL
+    let levels = Level::COMPACTION
         .iter()
-        .skip(1)
         .take(usize::from(config.top().get()));
     // A hole is closed before any other job, at whatever level it is: the next passes see
     // only tails, where a hole that is not right above a level's newest file does not show.
@@ -1065,9 +1059,9 @@ pub enum Outcome {
 /// An output key that already holds an object (an earlier run's output a listing did not
 /// show, Go's output for the same range) is never written over, and the job is planned
 /// again from a fresh listing. The bucket says so: the output is a create-only write
-/// ([`Guard::BucketRefuses`]), so a taken key refuses the commit and costs no request to
+/// ([`WriteMode::New`]), so a taken key refuses the commit and costs no request to
 /// find out (`docs/decisions/D239.md`). Go writes over whatever the key holds. On a store
-/// that said it cannot make create-only writes ([`Guard::Unguarded`]) the key is read first
+/// that said it cannot make create-only writes ([`WriteMode::Replace`]) the key is read first
 /// and the output replaces.
 ///
 /// When the store rejected the output's commit, the output key is deleted
@@ -1081,18 +1075,18 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
     local: &L,
     replica: &R,
     sent: &Sent,
-    guard: Guard,
+    guard: WriteMode,
 ) -> Outcome {
     let output = FileKey::new(level, inputs.range());
     match guard {
-        Guard::BucketRefuses => {}
-        Guard::Unguarded => match crate::store::exists(replica, &output).await {
+        WriteMode::New => {}
+        WriteMode::Replace => match crate::store::exists(replica, &output).await {
             Ok(true) => return Outcome::Replan { key: output },
             Ok(false) => {}
             Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
         },
     }
-    let mode = guard.mode();
+    let mode = guard;
     let result = if inputs
         .files()
         .iter()

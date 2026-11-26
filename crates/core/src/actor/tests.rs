@@ -1809,7 +1809,7 @@ fn held(actor: &Actor) -> Vec<Timestamp> {
         .filter_map(|task| actor.kept.tasks.get(*task).until())
         .collect();
     if running {
-        if let Gate::Until(at) = actor.engine.gate {
+        if let Next::At(at) = actor.engine.gate {
             held.push(at);
         }
         held.extend(actor.engine.maintain.until);
@@ -1838,9 +1838,9 @@ proptest::proptest! {
             }
         }
         actor.engine.gate = match gate {
-            0 => Gate::Open,
-            1 => Gate::Until(at(gate_at)),
-            _ => Gate::NextWrite,
+            0 => Next::Now,
+            1 => Next::At(at(gate_at)),
+            _ => Next::OnWalChange,
         };
         actor.engine.maintain.until = maintain.map(at);
         if draining {

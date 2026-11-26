@@ -110,7 +110,7 @@ pub(super) async fn run_compact<L: Role, R: Role>(
     local: &L,
     replica: &R,
 ) -> Outcome {
-    run_compact_as(job, local, replica, Guard::BucketRefuses).await
+    run_compact_as(job, local, replica, WriteMode::New).await
 }
 
 /// [`run_compact`] writing its output as `guard` says.
@@ -118,7 +118,7 @@ async fn run_compact_as<L: Role, R: Role>(
     job: &CompactJob,
     local: &L,
     replica: &R,
-    guard: Guard,
+    guard: WriteMode,
 ) -> Outcome {
     let sent = Sent::default();
     run_compaction(job.inputs(), job.level(), local, replica, &sent, guard).await
@@ -1930,7 +1930,7 @@ fn a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replic
         &Staging(&local),
         &Replica(&replica),
         &sent,
-        Guard::BucketRefuses,
+        WriteMode::New,
     ));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_eq!(whole(&replica, &job.output_key()), level_one_of_three());
@@ -1953,7 +1953,7 @@ fn a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replic
         &Staging(&local),
         &Replica(&fresh),
         &sent_of(&local, &[1, 2]),
-        Guard::BucketRefuses,
+        WriteMode::New,
     ));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_ne!(whole(&fresh, &job.output_key()), level_one_of_three());
@@ -1982,7 +1982,7 @@ fn a_staged_copy_that_changed_since_it_was_sent_is_not_compacted_from() {
         &Staging(&local),
         &Replica(&replica),
         &sent,
-        Guard::BucketRefuses,
+        WriteMode::New,
     ));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_eq!(whole(&replica, &job.output_key()), level_one_of_three());
@@ -2015,7 +2015,7 @@ fn a_replica_object_of_another_size_than_was_sent_is_read_from_the_replica() {
         &Staging(&local),
         &Replica(&replica),
         &sent,
-        Guard::BucketRefuses,
+        WriteMode::New,
     ));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_ne!(whole(&replica, &job.output_key()), level_one_of_three());
@@ -2098,7 +2098,7 @@ fn a_local_source_read_error_is_failed_and_publishes_nothing() {
 fn running_a_job_twice_leaves_one_file_at_the_key() {
     // Create-only, the bucket refuses the second write; on a store that cannot, a read of
     // the key finds the output first.
-    for guard in [Guard::BucketRefuses, Guard::Unguarded] {
+    for guard in [WriteMode::New, WriteMode::Replace] {
         let (local, replica) = (MemStore::new(), MemStore::new());
         three_l0(&local, &replica);
         let job = l1_job(&replica);
@@ -2123,7 +2123,7 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
 /// that shows what is there.
 #[test]
 fn an_output_key_that_holds_another_file_is_not_written_over() {
-    for guard in [Guard::BucketRefuses, Guard::Unguarded] {
+    for guard in [WriteMode::New, WriteMode::Replace] {
         let (local, replica) = (MemStore::new(), MemStore::new());
         three_l0(&local, &replica);
         let job = l1_job(&replica);
@@ -2159,7 +2159,7 @@ fn a_store_without_create_only_writes_takes_no_create_only_output() {
     let job = l1_job(&replica);
     replica.refuse_create_only();
     let (from, to) = (Staging(&local), Replica(&replica));
-    let out = block_on(run_compact_as(&job, &from, &to, Guard::BucketRefuses));
+    let out = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
     assert!(
         matches!(
             &out,
@@ -2170,7 +2170,7 @@ fn a_store_without_create_only_writes_takes_no_create_only_output() {
         "{out:?}"
     );
     assert!(listed(&replica, 1).is_empty());
-    let out = block_on(run_compact_as(&job, &from, &to, Guard::Unguarded));
+    let out = block_on(run_compact_as(&job, &from, &to, WriteMode::Replace));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
     assert_eq!(listed(&replica, 1), vec![job.output_key()]);
 }
@@ -2181,7 +2181,7 @@ fn a_store_without_create_only_writes_takes_no_create_only_output() {
 /// write created.
 #[test]
 fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
-    for guard in [Guard::BucketRefuses, Guard::Unguarded] {
+    for guard in [WriteMode::New, WriteMode::Replace] {
         let (local, replica, _, job) = rejected_setup();
         let (from, to) = (Staging(&local), Replica(&replica));
         let first = block_on(run_compact_as(&job, &from, &to, guard));
@@ -2208,7 +2208,7 @@ fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
 fn a_rejected_part_of_a_create_only_output_deletes_nothing_under_its_key() {
     let (local, replica, _, job) = rejected_setup();
     let (from, to) = (Staging(&local), Replica(&replica));
-    let first = block_on(run_compact_as(&job, &from, &to, Guard::BucketRefuses));
+    let first = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
     assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
     let held = whole(&replica, &job.output_key());
     replica.inject_failure(
@@ -2220,7 +2220,7 @@ fn a_rejected_part_of_a_create_only_output_deletes_nothing_under_its_key() {
             },
         },
     );
-    let again = block_on(run_compact_as(&job, &from, &to, Guard::BucketRefuses));
+    let again = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
     assert!(
         matches!(
             again,
@@ -2466,10 +2466,10 @@ fn a_rejected_compaction_output_is_deleted_by_the_executor() {
         },
     };
     for (mismatch, guard) in [
-        (corrupt_output_error(false), Guard::BucketRefuses),
-        (whole_object.clone(), Guard::BucketRefuses),
-        (whole_object, Guard::Unguarded),
-        (a_part, Guard::Unguarded),
+        (corrupt_output_error(false), WriteMode::New),
+        (whole_object.clone(), WriteMode::New),
+        (whole_object, WriteMode::Replace),
+        (a_part, WriteMode::Replace),
     ] {
         let (local, replica, _, job) = rejected_setup();
         replica.inject_failure_after_publish(mismatch);
@@ -2622,7 +2622,7 @@ fn compact_level_one(
         &Staging(local),
         &Replica(replica),
         &Sent::default(),
-        Guard::BucketRefuses,
+        WriteMode::New,
     ));
     assert!(matches!(ran, Outcome::Compacted { .. }), "{ran:?}");
     state.record(at(now), &job, &ran);

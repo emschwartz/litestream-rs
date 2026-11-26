@@ -234,7 +234,7 @@ fn a_compaction_output_is_the_newest_file_of_its_level_and_an_older_one_is_not()
     let mut known = Remembered::default();
     known.note(file(1, 11, 20, T0));
     known.note(file(1, 1, 10, T0));
-    assert_eq!(known.newest_txid(1), Some(txid(20)));
+    assert_eq!(known.newest_txid(Level::new(1).unwrap()), Some(txid(20)));
 }
 
 /// Dropping the memory makes the next pass whole.
@@ -315,10 +315,10 @@ fn a_whole_listing_that_finds_a_level_empty_forgets_its_record() {
     let mut known = Remembered::default();
     let before = Inventory::from_files([file(0, 1, 1, T0), file(1, 1, 5, T0)]).unwrap();
     known.learn_full(&before, at(T0), &defaults(), &waiting());
-    assert_eq!(known.newest_txid(1), Some(txid(5)));
+    assert_eq!(known.newest_txid(Level::new(1).unwrap()), Some(txid(5)));
     let after = Inventory::from_files([file(0, 1, 1, T0), file(9, 1, 1, T0)]).unwrap();
     known.learn_full(&after, at(T0 + 1), &defaults(), &waiting());
-    assert_eq!(known.newest_txid(1), None);
+    assert_eq!(known.newest_txid(Level::new(1).unwrap()), None);
     assert_eq!(
         after_of(&known.starts(&defaults(), &everything(&defaults())), 1),
         Some(None)
@@ -339,7 +339,7 @@ fn the_newest_file_of_every_level_to_eight_is_remembered_for_the_anchor() {
     let mut known = Remembered::default();
     let inventory = Inventory::from_files([file(0, 1, 1, T0), file(7, 1, 1, T0)]).unwrap();
     known.learn_full(&inventory, at(T0), &defaults(), &waiting());
-    assert_eq!(known.newest_txid(7), Some(txid(1)));
+    assert_eq!(known.newest_txid(Level::new(7).unwrap()), Some(txid(1)));
 }
 
 /// A whole listing whose job is a compaction says nothing about when retention is next due, so

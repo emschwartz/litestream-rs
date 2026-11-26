@@ -151,10 +151,7 @@ pub(super) fn retention(
     state: &MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Retention> {
-    match decide(inventory, now, config, published, state, resolved) {
-        Ok(retention) => Resolve::Done(retention),
-        Err(file) => Resolve::Need(file),
-    }
+    decide(inventory, now, config, published, state, resolved).into()
 }
 
 fn decide(
@@ -545,7 +542,7 @@ fn levels_one_to_eight<'a>(
     out: &mut Vec<FileKey>,
 ) -> Vec<&'a [FileInfo]> {
     let mut kept = Vec::new();
-    for level in Level::ALL.iter().skip(1).take(8) {
+    for level in &Level::COMPACTION {
         let files = inventory.level(*level);
         let deletable = floor.map_or(0, |floor| {
             files
@@ -683,10 +680,7 @@ pub(super) fn short_level_zero(
     state: &MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<ShortZero> {
-    match short_decide(listed, known, now, config, published, state, resolved) {
-        Ok(zero) => Resolve::Done(zero),
-        Err(file) => Resolve::Need(file),
-    }
+    short_decide(listed, known, now, config, published, state, resolved).into()
 }
 
 fn short_decide(
@@ -754,10 +748,8 @@ fn short_decide(
         Ok(None) | Err(_) => return Ok(nothing),
     };
     let floor = rule.floor;
-    let kept: Vec<FileInfo> = Level::ALL
+    let kept: Vec<FileInfo> = Level::COMPACTION
         .iter()
-        .skip(1)
-        .take(8)
         .flat_map(|level| listed.level(*level))
         .filter(|info| floor.is_none_or(|floor| info.key.range().max() >= floor))
         .copied()

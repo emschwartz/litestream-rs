@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 use lsr_ltx::{Timestamp, Txid};
 
 use super::Actor;
-use crate::fault::{Next, PersistentCause, StopCause};
+use crate::fault::{PersistentCause, StopCause};
 use crate::layout::FileKey;
 use crate::maintain::{Job, MaintainState, Remembered, RetentionMode};
 use crate::verify::LivePages;
@@ -284,51 +284,6 @@ impl Tasks {
     }
 }
 
-/// When the checkpoint decision may be asked again, from [`crate::after_checkpoint`]'s
-/// wake: a TRUNCATE that found the WAL unchanged waits rather than repeating.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Gate {
-    /// Ask on any tick.
-    Open,
-    /// Ask from this time on.
-    Until(Timestamp),
-    /// Ask after the next sync that stages a file.
-    NextWrite,
-}
-
-impl Gate {
-    pub(super) const fn of(next: Next) -> Self {
-        match next {
-            Next::Now => Self::Open,
-            Next::At(at) => Self::Until(at),
-            Next::OnWalChange => Self::NextWrite,
-        }
-    }
-
-    pub(super) fn open(self, now: Timestamp) -> bool {
-        match self {
-            Self::Open => true,
-            Self::Until(at) => now >= at,
-            Self::NextWrite => false,
-        }
-    }
-
-    pub(super) const fn until(self) -> Option<Timestamp> {
-        match self {
-            Self::Until(at) => Some(at),
-            Self::Open | Self::NextWrite => None,
-        }
-    }
-
-    /// A passed `Until` is open: the decision is asked on this tick.
-    pub(super) fn expire(self, now: Timestamp) -> Self {
-        match self {
-            Self::Until(at) if at <= now => Self::Open,
-            Self::Until(_) | Self::Open | Self::NextWrite => self,
-        }
-    }
-}
-
 /// The live database's pages a scheduled verify compares a restore with:
 /// asked for, read, taken. One value, so a request cannot be forgotten while
 /// the pages it was answered with are dropped.
@@ -448,6 +403,13 @@ impl Maintain {
         }
     }
 
+    /// The listing no longer holds, and what was remembered of it with it: the next pass lists
+    /// the whole replica.
+    pub(super) fn relist(&mut self) {
+        self.stale = true;
+        self.remembered.owe_full();
+    }
+
     /// Brings the next listing forward to `at`, never back.
     pub(super) fn list_by(&mut self, at: Timestamp) {
         self.until = Some(self.until.map_or(at, |until| until.min(at)));
@@ -467,10 +429,10 @@ impl Actor {
     /// rather than at the last wait's end. A restart takes the setting from
     /// the [`super::ActorConfig`] it is given.
     pub fn set_retention(&mut self, retention: RetentionMode) {
-        self.kept.cfg.maintenance.set_retention(retention);
-        self.engine.maintain.stale = true;
+        let maintenance = self.kept.cfg.maintenance.clone();
+        self.kept.cfg.maintenance = maintenance.with_retention(retention);
         // What was remembered was decided under the old setting.
-        self.engine.maintain.remembered.owe_full();
+        self.engine.maintain.relist();
     }
 
     /// Whether retention deletes anything right now.

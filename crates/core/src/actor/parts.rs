@@ -27,13 +27,13 @@ use super::clock::EngineClock;
 use super::local::{LocalAt, LocalTry};
 use super::once::FinalSnapshot;
 use super::once_retention::FinalRetention;
-use super::state::{Gate, Live, Maintain, Phase, Tasks};
+use super::state::{Live, Maintain, Phase, Tasks};
 use crate::app::AppCheckpointObserver;
 use crate::checkpoint::CheckpointState;
 use crate::counts::WorkCounts;
 use crate::created_at::Known;
 use crate::failstop::{Lag, WalMark};
-use crate::fault::{SnapshotCause, SnapshotCounts, StopCause};
+use crate::fault::{Next, SnapshotCause, SnapshotCounts, StopCause};
 use crate::layout::FileKey;
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
@@ -447,7 +447,7 @@ pub(super) struct Engine {
     /// What each database-file page should hold (`crate::pages`).
     pub(super) pages: PageChecksumTable,
     pub(super) checkpoint: CheckpointState,
-    pub(super) gate: Gate,
+    pub(super) gate: Next,
     /// Checkpoints in a row that found the write lock busy at their barrier
     /// ([`crate::CheckpointOutcome::LockBusy`]); the wait before the next grows with it.
     pub(super) lock_busy: Option<NonZeroU32>,
@@ -503,7 +503,7 @@ impl Engine {
             pages: PageChecksumTable::new(),
             // Replaced at boot, when the time is known.
             checkpoint: CheckpointState::boot(Timestamp::from_unix_millis(0)),
-            gate: Gate::Open,
+            gate: Next::Now,
             lock_busy: None,
             upload: UploadState::Unknown,
             in_flight: InFlight::default(),

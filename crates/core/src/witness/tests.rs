@@ -5,11 +5,12 @@
 
 use std::io::Cursor;
 
-use lsr_ltx::{Encoder, HeaderFields, PageNo, PageSize, Timestamp, WalOrigin};
+use lsr_ltx::{Encoder, HeaderFields, PageNo, PageSize, Timestamp, TxidRange, WalOrigin};
 
 use super::*;
 use crate::conformance::block_on;
 use crate::fault::role::{Replica, Role, Staging};
+use crate::layout::Level;
 use crate::mem::MemStore;
 
 fn txid(n: u64) -> Txid {

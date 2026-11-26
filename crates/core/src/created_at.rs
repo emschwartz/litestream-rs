@@ -213,6 +213,15 @@ pub enum Resolve<T> {
     Need(Need),
 }
 
+impl<T> From<Result<T, Need>> for Resolve<T> {
+    fn from(decided: Result<T, Need>) -> Self {
+        match decided {
+            Ok(done) => Self::Done(done),
+            Err(need) => Self::Need(need),
+        }
+    }
+}
+
 /// A decision that asks for created-at times as it goes.
 pub trait Step {
     /// What the decision produces.
@@ -389,7 +398,7 @@ mod tests {
 
     fn key(n: u64) -> FileKey {
         let id = Txid::new(n).unwrap();
-        FileKey::new(Level::ZERO, TxidRange::single(id))
+        FileKey::staged(id)
     }
 
     /// Commits files 1..=count recorded as created 100 * n and lists them back.
