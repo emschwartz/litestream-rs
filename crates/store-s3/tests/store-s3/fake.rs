@@ -10,8 +10,8 @@ mod cases {
     use super::wire::*;
     use lsr_core::{CorruptCause, FileKey, Level, PartNumber, ReadLen, StoreError, StoreOp};
     use lsr_store_s3::{
-        EtagCheck, RequestBuilder, Transport, UploadId, check_etag, classify, object_key,
-        parse_complete, parse_create, parse_delete_failures, parse_head, parse_list, quoted_md5,
+        PayloadHash, RequestBuilder, Transport, UploadId, classify, object_key, parse_complete,
+        parse_create, parse_delete_failures, parse_head, parse_list, quoted_md5,
     };
     use md5::{Digest as _, Md5};
 
@@ -27,10 +27,8 @@ mod cases {
         let k = key(1, 1, 5);
         let put = put(&fake, &k, b"hello", 1_700_000_000_123);
         assert_eq!(put.status(), 200);
-        let request = builder()
-            .put_object(now(), &k, b"hello".to_vec(), now())
-            .unwrap();
-        assert_eq!(check_etag(&put, request.md5()), EtagCheck::Matches);
+        // As S3's, the ETag of a PUT is the quoted MD5 of what it stored.
+        assert_eq!(put.header("etag"), Some(quoted_md5(b"hello").as_str()));
 
         let head = send(&fake, builder().head(now(), &k).unwrap());
         let parsed = parse_head(&head).unwrap();
@@ -47,15 +45,16 @@ mod cases {
     }
 
     #[test]
-    fn wrong_digest_is_bad_digest_and_malformed_is_invalid() {
+    fn a_body_that_is_not_the_signed_one_is_refused_and_a_malformed_digest_is_invalid() {
         let fake = fake();
         let k = key(1, 1, 5);
         let wrong = builder()
             .put_object(now(), &k, b"hello".to_vec(), now())
             .unwrap();
-        let altered = wrong.clone().tamper_body(b"hellO".to_vec());
+        let altered = wrong.tamper_body(b"hellO".to_vec());
         let response = send(&fake, altered);
         assert_eq!(response.status(), 400);
+        assert!(text(&response).contains("XAmzContentSHA256Mismatch"));
         assert_eq!(
             classify(StoreOp::Upload, Some(&k), None, &response),
             Err(StoreError::Corrupt {
@@ -65,7 +64,9 @@ mod cases {
         );
         assert!(fake.keys().is_empty(), "a refused write publishes nothing");
 
-        let malformed = wrong.tamper_header("content-md5", Some("not base64!".to_owned()));
+        // The one request that still carries Content-MD5.
+        let delete = builder().delete_objects(now(), &[k]).unwrap();
+        let malformed = delete.tamper_header("content-md5", Some("not base64!".to_owned()));
         let response = send(&fake, malformed);
         assert_eq!(response.status(), 400);
         assert_eq!(
@@ -87,7 +88,7 @@ mod cases {
         let unsigned = request
             .clone()
             .tamper_header("x-amz-meta-extra", Some("1".to_owned()));
-        let missing = request.clone().tamper_header("content-md5", None);
+        let missing = request.clone().tamper_header("x-amz-content-sha256", None);
         for bad in [unsigned, missing] {
             let response = send(&fake, bad);
             assert_eq!(response.status(), 400);
@@ -289,8 +290,18 @@ mod cases {
         let request = builder().delete_objects(now(), &[k]).unwrap();
         let missing = send(&fake, request.clone().tamper_header("content-md5", None));
         assert_eq!(missing.status(), 400);
-        let wrong = send(&fake, request.tamper_body(b"<Delete></Delete>".to_vec()));
-        assert!(text(&wrong).contains("BadDigest"));
+        let other = lsr_store_s3::quoted_md5(b"<Delete></Delete>");
+        let wrong = send(
+            &fake,
+            request.clone().tamper_header("content-md5", Some(other)),
+        );
+        assert!(text(&wrong).contains("InvalidDigest"), "{}", text(&wrong));
+        let body = b"<Delete></Delete>".to_vec();
+        let hash = PayloadHash::of(&body).to_hex();
+        let altered = request
+            .tamper_body(body)
+            .tamper_header("x-amz-content-sha256", Some(hash));
+        assert!(text(&send(&fake, altered)).contains("BadDigest"));
         assert_eq!(fake.keys().len(), 1);
     }
 

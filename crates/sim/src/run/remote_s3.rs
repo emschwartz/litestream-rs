@@ -15,6 +15,7 @@ const fn expected(fault: HttpFault) -> Option<Denied> {
         | HttpFault::AfterPublish(_)
         | HttpFault::TruncateBody(_)
         | HttpFault::WrongEtag(_)
+        | HttpFault::BodyMismatch(_)
         | HttpFault::ConnectionReset(_) => None,
     }
 }
@@ -167,9 +168,7 @@ impl Runner {
             let refused = crate::remote::denial_of(fault).is_some();
             let doubtful = matches!(
                 fault,
-                Fault::AfterPublish { .. }
-                    | Fault::WrongEtag { on: Shape::Put }
-                    | Fault::TruncateBody { on: Shape::Put, .. }
+                Fault::AfterPublish { .. } | Fault::TruncateBody { on: Shape::Put, .. }
             );
             Fired {
                 all: was.all.saturating_add(1),

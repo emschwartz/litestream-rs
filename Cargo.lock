@@ -1206,6 +1206,7 @@ dependencies = [
  "rustls-platform-verifier",
  "rusty-s3",
  "serde_json",
+ "sha2",
  "shuttle",
  "tempfile",
  "thiserror",

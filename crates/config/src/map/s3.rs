@@ -245,7 +245,7 @@ fn read_query(
         | "putObjectContentMD5"
         | "put-object-content-md5" => {
             return Ok(Some(
-                "the url's Content-MD5 setting has no effect: litestream-rs always sends Content-MD5 on uploads",
+                "the url's Content-MD5 setting has no effect: litestream-rs checks every upload by its signed SHA-256",
             ));
         }
         "concurrency" => match value.parse::<u64>() {

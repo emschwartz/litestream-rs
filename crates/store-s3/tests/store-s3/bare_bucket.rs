@@ -192,9 +192,7 @@ mod cases {
             let k = key(0, 1, 1);
             let want = format!("{lead}{}", name(&k));
             let urls = [
-                b.put_object(now(), &k, b"x".to_vec(), now())
-                    .unwrap()
-                    .into_request(),
+                b.put_object(now(), &k, b"x".to_vec(), now()).unwrap(),
                 b.head(now(), &k).unwrap(),
                 b.get_range(now(), &k, 0, ReadLen::new(1).unwrap()).unwrap(),
                 b.create_multipart(now(), &k, now()).unwrap(),
