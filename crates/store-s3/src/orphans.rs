@@ -47,7 +47,7 @@ impl Orphans {
         self.list().len()
     }
 
-    fn take(&self) -> VecDeque<(FileKey, UploadId)> {
+    pub(crate) fn take(&self) -> VecDeque<(FileKey, UploadId)> {
         std::mem::take(&mut *self.list())
     }
 
@@ -84,9 +84,14 @@ impl<T: Transport> Inner<T> {
     /// uploads there, and a second engine on one replica is already a stop condition; if one
     /// runs anyway, its upload's Complete finds no upload and fails, and is retried. At most
     /// [`SWEEP_PAGES`] listing pages per call, so a boot's work is bounded; the rest go at
-    /// the next.
+    /// the next. The caller holds no upload of this store: the sweep waits for every part
+    /// this process started to end before it lists, and would wait for ever on a part whose
+    /// upload is alive and never collected.
     pub(crate) fn remove_scratch(&self) -> Result<u64, StoreError> {
         let op = StoreOp::Upload;
+        // An engine rebuilt over this store may have dropped an upload a moment ago: its
+        // parts end first, so no upload listed below has a part of this process on the wire.
+        self.parts_ended();
         let start = self.now();
         let dropped = self.abort_orphans()?;
         let mut removed = u64::try_from(dropped).unwrap_or(u64::MAX);

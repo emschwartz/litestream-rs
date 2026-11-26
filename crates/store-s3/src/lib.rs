@@ -24,6 +24,7 @@ mod credentials;
 mod fake;
 #[cfg(feature = "testing")]
 mod fault;
+mod lanes;
 mod list;
 mod multipart;
 mod orphans;
@@ -61,6 +62,9 @@ pub use credentials::{S3Credentials, SecretString};
 pub use fake::FakeS3;
 #[cfg(feature = "testing")]
 pub use fault::{Fault, FaultTransport, RequestShape, Shape};
+#[cfg(feature = "testing")]
+pub use lanes::Manual;
+pub use lanes::{Inline, Lanes, Sender, Task};
 pub use request::{
     HttpRequest, Method, Precondition, RequestBuilder, RequestError, UploadId, WriteRequest,
     level_prefix, object_key,

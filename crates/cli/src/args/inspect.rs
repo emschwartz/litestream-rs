@@ -7,7 +7,7 @@ use lsr_config::is_url;
 use lsr_core::Level;
 use lsr_sidecar::goflag::{self, Def, Scan};
 
-use super::{FlagRow, UsageError};
+use super::{Command, FlagRow, UsageError};
 
 /// `databases`.
 #[derive(Debug, PartialEq, Eq)]
@@ -66,8 +66,18 @@ pub enum Inspect<T> {
     Help,
 }
 
-fn scan(defs: &[Def], args: &[String]) -> Result<Option<goflag::Set>, UsageError> {
-    match goflag::scan(defs, args).map_err(UsageError::GoFlag)? {
+impl<T> Inspect<T> {
+    /// The command that runs it, or `help`.
+    pub(super) fn command(self, run: impl FnOnce(T) -> Command) -> Command {
+        match self {
+            Self::Run(args) => run(args),
+            Self::Help => Command::Help,
+        }
+    }
+}
+
+pub(super) fn scan(defs: &[Def], args: &[String]) -> Result<Option<goflag::Set>, UsageError> {
+    match goflag::scan(defs, args)? {
         Scan::Set(set) => Ok(Some(set)),
         Scan::Help if goflag::literal_help(args) => Ok(None),
         Scan::Help => Err(UsageError::HelpNotLiteral),
@@ -110,11 +120,10 @@ pub fn parse_databases(args: &[String]) -> Result<Inspect<DatabasesArgs>, UsageE
     if !set.positional().is_empty() {
         return Err(UsageError::GoTooManyArguments);
     }
-    let boolean = |name| set.boolean(name).map_err(UsageError::GoFlag);
     Ok(Inspect::Run(DatabasesArgs {
         config: set.value("config").filter(|c| !c.is_empty()),
-        no_expand_env: boolean("no-expand-env")?,
-        json: boolean("json")?,
+        no_expand_env: set.boolean("no-expand-env")?,
+        json: set.boolean("json")?,
     }))
 }
 
@@ -137,7 +146,7 @@ pub fn parse_version(args: &[String]) -> Result<Inspect<VersionArgs>, UsageError
         return Ok(Inspect::Help);
     };
     Ok(Inspect::Run(VersionArgs {
-        verbose: set.boolean("verbose").map_err(UsageError::GoFlag)?,
+        verbose: set.boolean("verbose")?,
     }))
 }
 
@@ -212,7 +221,7 @@ pub fn parse_ltx(args: &[String], as_wal: bool) -> Result<Inspect<LtxArgs>, Usag
         [path] => LtxFrom::Database {
             path: path.clone(),
             config,
-            no_expand_env: set.boolean("no-expand-env").map_err(UsageError::GoFlag)?,
+            no_expand_env: set.boolean("no-expand-env")?,
         },
     };
     let level = match set.value("level").as_deref() {
@@ -224,10 +233,9 @@ pub fn parse_ltx(args: &[String], as_wal: bool) -> Result<Inspect<LtxArgs>, Usag
             .ok()
             .and_then(Level::new),
     };
-    let boolean = |name| set.boolean(name).map_err(UsageError::GoFlag);
     Ok(Inspect::Run(LtxArgs {
         from,
-        json: boolean("json")?,
+        json: set.boolean("json")?,
         level,
         as_wal,
     }))

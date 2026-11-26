@@ -168,16 +168,7 @@ pub async fn verify_against<S: ObjectStore>(
 /// Whether the transaction sits inside a compacted file and cannot be
 /// restored exactly.
 const fn inside_file(outcome: &PlanOutcome) -> bool {
-    match outcome {
-        PlanOutcome::InsideFile { .. } => true,
-        PlanOutcome::Plan(_)
-        | PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
-        | PlanOutcome::MalformedSnapshot { .. } => false,
-    }
+    matches!(outcome, PlanOutcome::InsideFile { .. })
 }
 
 fn compare(live: &LivePages, restored: &BTreeMap<u32, PageChecksum>, commit: u32) -> Compared {

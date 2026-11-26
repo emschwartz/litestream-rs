@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
+index 521227ec1..a035eccb5 100644
+--- a/crates/core/src/upload.rs
++++ b/crates/core/src/upload.rs
+@@ -805,7 +805,7 @@ impl InFlight {
+     /// may be deleted.
+     pub(crate) async fn stop(&mut self) -> Unsent<'_> {
+         if let Some(sending) = self.0.take() {
+-            abort(sending.open).await;
++            drop(sending.open);
+         }
+         Unsent(PhantomData)
+     }

@@ -75,6 +75,10 @@ struct State {
     no_conditional_writes: bool,
     /// Lists in Cloudflare R2's order: a name that is the start of others after all of them.
     r2_order: bool,
+    /// Takes a part below [`MIN_PART`] anywhere in an upload.
+    small_parts: bool,
+    /// Parts that arrived for an upload that was not open.
+    parts_after_the_end: u64,
 }
 
 /// An in-memory bucket behind the [`Transport`] trait.
@@ -193,6 +197,22 @@ impl FakeS3 {
         self.state().uploads.len()
     }
 
+    /// Takes parts below S3's 5 MiB minimum from now on, for a simulator whose files are
+    /// small.
+    pub fn accept_small_parts(&self) {
+        self.state().small_parts = true;
+    }
+
+    /// How many parts arrived for an upload that was already completed or aborted, or never
+    /// begun; each was answered 404 `NoSuchUpload`. S3 may keep a part that is on its way
+    /// while the upload is aborted, so a client that ends an upload with a part still on
+    /// the wire can leave storage behind; one that waits for its parts first sends none of
+    /// these.
+    #[must_use]
+    pub fn parts_after_the_end(&self) -> u64 {
+        self.state().parts_after_the_end
+    }
+
     /// Makes every conditional write answer 501 `NotImplemented`, as a
     /// provider without conditional writes does.
     pub fn refuse_conditional_writes(&self) {
@@ -288,7 +308,8 @@ impl FakeS3 {
             return error_response(404, Some("NoSuchUpload"), None);
         };
         let listed = parse_parts(request.body());
-        let joined = match join_parts(upload, &listed) {
+        let min_part = if state.small_parts { 0 } else { MIN_PART };
+        let joined = match join_parts(upload, &listed, min_part) {
             Ok(joined) => joined,
             Err(refused) => return refused,
         };
@@ -631,6 +652,7 @@ fn upload_part(state: &mut State, request: &HttpRequest, key: &str) -> HttpRespo
     };
     let id = query(request, "uploadId").unwrap_or_default();
     let Some(upload) = state.uploads.get_mut(&id).filter(|up| up.key == key) else {
+        state.parts_after_the_end = state.parts_after_the_end.saturating_add(1);
         return error_response(404, Some("NoSuchUpload"), None);
     };
     if let Err(refused) = check_md5(request, true) {
@@ -670,7 +692,11 @@ fn parse_parts(body: &[u8]) -> Vec<(u16, String)> {
 }
 
 /// Validates a completion against the stored parts and concatenates them.
-fn join_parts(upload: &Pending, listed: &[(u16, String)]) -> Result<Joined, HttpResponse> {
+fn join_parts(
+    upload: &Pending,
+    listed: &[(u16, String)],
+    min_part: usize,
+) -> Result<Joined, HttpResponse> {
     let invalid = |code| error_response(400, Some(code), None);
     if listed.is_empty() || listed.windows(2).any(|pair| pair.first() >= pair.get(1)) {
         return Err(invalid("InvalidPartOrder"));
@@ -687,7 +713,7 @@ fn join_parts(upload: &Pending, listed: &[(u16, String)]) -> Result<Joined, Http
             return Err(invalid("InvalidPart"));
         }
         let is_last = position.saturating_add(1) == listed.len();
-        if !is_last && part.len() < MIN_PART {
+        if !is_last && part.len() < min_part {
             return Err(invalid("EntityTooSmall"));
         }
         body.extend_from_slice(part);
