@@ -243,11 +243,6 @@ classes! {
     HoldSecondWriter = "Hold.SecondWriter", Lasting;
 }
 
-const PAGE_COUNT_RARE: &str = "the engine reads the page count only for a snapshot that finds nothing in the WAL (a \
-     torn header at boot; the repair D173 removed read it too), and an app step arms for one \
-     tick: ran 0 or 1 times in 6000 seeds (the two required, PageCount.DeleteWal and \
-     PageCount.Spill, have coverage scenarios); a finding";
-
 /// A count the gate would require that a class cannot earn, with the reason. Each is a known gap in what the soak
 /// exercises, not a pass.
 pub const EXEMPT: &[(&str, &str)] = &[
@@ -275,26 +270,6 @@ pub const EXEMPT: &[(&str, &str)] = &[
     (
         "fault.WalDamage.FlipLastFrameBit.judged_during",
         "drawn WAL damage is not judged while in place; Hold.Wal judges this shape",
-    ),
-    // Error-domain cells and app action points the soak rarely or never reaches (measured over
-    // 6000 seeds with the nightly's TRUNCATE law, docs/decisions.md D112). Marks that rare and
-    // required anyway are reached by `lsr_sim::scenario::coverage`.
-    // The engine reads the page count only for a snapshot that scans nothing, and an app step
-    // arms for one tick: Commit ran once in 6000 seeds and the others in none.
-    ("point.PageCount.Commit.ran", PAGE_COUNT_RARE),
-    ("point.PageCount.ReaderBegin.ran", PAGE_COUNT_RARE),
-    ("point.PageCount.ReaderEnd.ran", PAGE_COUNT_RARE),
-    ("point.PageCount.Checkpoint.Passive.ran", PAGE_COUNT_RARE),
-    ("point.PageCount.Checkpoint.Restart.ran", PAGE_COUNT_RARE),
-    ("point.PageCount.Checkpoint.Truncate.ran", PAGE_COUNT_RARE),
-    // Ran 3 and 6 times in 6000 seeds, and in some nights not at all.
-    (
-        "point.ReadPage.ReaderEnd.ran",
-        "rare: an app reader ends right before a page read 3 times in 6000 seeds",
-    ),
-    (
-        "point.EndBarrier.Checkpoint.Passive.ran",
-        "rare: a PASSIVE right before the barrier ends ran 6 times in 6000 seeds",
     ),
 ];
 
