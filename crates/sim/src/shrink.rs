@@ -331,6 +331,13 @@ pub fn simpler(op: &Op) -> Vec<Op> {
             .into_iter()
             .map(Op::ClockJump)
             .collect(),
+        Op::Pause { read, millis } => lower(*millis)
+            .into_iter()
+            .map(|millis| Op::Pause {
+                read: *read,
+                millis,
+            })
+            .collect(),
         Op::ShutdownWithSnapshot | Op::ShutdownWithRetention => vec![Op::Shutdown],
         Op::Wal(wal) => wals(*wal).into_iter().map(Op::Wal).collect(),
         Op::Structured { seq, data } => {
@@ -491,6 +498,7 @@ fn opts_fields(opts: &Opts) -> Vec<String> {
         slice_bytes,
         first_db_pages,
         cost: _,
+        latency_tail,
         kill_after_fault,
         remote_s3,
         remote_parts,
@@ -510,6 +518,7 @@ fn opts_fields(opts: &Opts) -> Vec<String> {
         ("kill_after_fault", kill_after_fault),
         ("remote_s3", remote_s3),
         ("no_create_only", no_create_only),
+        ("latency_tail", latency_tail),
     ] {
         if *on {
             out.push(format!("{name}: true"));
