@@ -222,7 +222,7 @@ impl Allowance {
 /// Staging reads the S3 replica may make of a staged body it is putting whole, past the
 /// upload's own read: the store reads each cell of a part of more than one cell again as it
 /// sends it, each counted by the recorder as a re-read given (`RecorderCounts::rereads_given`).
-/// The simulator sets the cell to 32 bytes (`remote.rs`), so its small files reach the second
+/// The simulator sets the cell to 128 bytes (`remote.rs`), so its small files reach the second
 /// read the judges watch. The bound allows a staging request for each one, so a tick of many
 /// uploads to an S3 replica stays within it.
 #[must_use]
