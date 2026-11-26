@@ -166,6 +166,9 @@ pub struct RunReport {
     /// Every commit and delete the replica accepted, when the run was asked to
     /// record.
     pub remote_events: Vec<crate::store::RecorderEvent>,
+    /// The replica's call counts after each operation, when the run was asked to record:
+    /// what one stretch of a history cost, for the request budgets Go's code fixes.
+    pub remote_counts: Vec<crate::store::RecorderCounts>,
     /// Every commit and delete staging accepted, when the run was asked to
     /// record.
     pub staging_events: Vec<crate::store::RecorderEvent>,
@@ -2562,6 +2565,11 @@ impl Runner {
         self.marks.begin(op);
         self.apply_op(op)?;
         self.marks.end(op);
+        if self.record {
+            self.report
+                .remote_counts
+                .push(self.w.remote_recorder.counts());
+        }
         // An operation that runs ticks between its edits (another writer's
         // file put, then removed after the engine ran) edits again after them.
         self.forcings.note_op(op);
