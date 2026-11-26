@@ -10,7 +10,7 @@ use lsr_core::{
     CorruptCause, FileKey, Level, StoreError, StoreOp, is_scratch_name, parse_file_name,
 };
 use lsr_ltx::Timestamp;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "testing")]
 use md5::{Digest as _, Md5};
 use rusty_s3::actions::{
     CompleteMultipartUploadResponse, CreateMultipartUpload, DeleteObjectsResponse, ListObjectsV2,
@@ -234,37 +234,6 @@ pub fn parse_delete_failure_codes(r: &HttpResponse) -> Result<Vec<S3Code>, Respo
         .collect())
 }
 
-/// How a response's ETag compares with the MD5 that was sent.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum EtagCheck {
-    /// The ETag is the quoted hex MD5 of the body.
-    Matches,
-    /// The ETag has the shape of an MD5 and is a different one.
-    Mismatch,
-    /// The ETag is not an MD5 (SSE-KMS, multipart form): nothing to compare;
-    /// the Content-MD5 the server checked still stands.
-    NotMd5,
-    /// No ETag came back.
-    Missing,
-}
-
-/// Compares the response's ETag with `sent`.
-#[must_use]
-pub fn check_etag(r: &HttpResponse, sent: [u8; 16]) -> EtagCheck {
-    let Some(raw) = r.header("etag") else {
-        return EtagCheck::Missing;
-    };
-    let text = raw.trim().trim_matches('"');
-    if text.len() != 32 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return EtagCheck::NotMd5;
-    }
-    if text.eq_ignore_ascii_case(&hex(&sent)) {
-        EtagCheck::Matches
-    } else {
-        EtagCheck::Mismatch
-    }
-}
-
 /// Lowercase hex, the form of a part's ETag.
 #[must_use]
 pub fn hex(bytes: &[u8]) -> String {
@@ -277,7 +246,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// The quoted hex MD5 of `body`, as a part's ETag reads on S3.
 #[must_use]
-#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "testing")]
 pub fn quoted_md5(body: &[u8]) -> String {
     format!("\"{}\"", hex(&Md5::digest(body)))
 }
@@ -459,33 +428,6 @@ mod tests {
             "<DeleteResult {NS}><Error><Key>a</Key><Code>NoSuchKey</Code><Message>m</Message></Error><Error><Key>b</Key><Code>AccessDenied</Code><Message>m</Message></Error></DeleteResult>"
         ));
         assert_eq!(parse_delete_failures(&mixed), Ok(1));
-    }
-
-    #[test]
-    fn etag_check_cases() {
-        let sent: [u8; 16] = Md5::digest(b"hello").into();
-        let quoted = quoted_md5(b"hello");
-        assert_eq!(quoted, "\"5d41402abc4b2a76b9719d911017c592\"");
-        assert_eq!(
-            check_etag(&with_headers(&[("ETag", &quoted)]), sent),
-            EtagCheck::Matches
-        );
-        assert_eq!(
-            check_etag(
-                &with_headers(&[("etag", "5D41402ABC4B2A76B9719D911017C592")]),
-                sent
-            ),
-            EtagCheck::Matches
-        );
-        assert_eq!(
-            check_etag(&with_headers(&[("etag", &quoted_md5(b"other"))]), sent),
-            EtagCheck::Mismatch
-        );
-        assert_eq!(
-            check_etag(&with_headers(&[("etag", "\"abc-2\"")]), sent),
-            EtagCheck::NotMd5
-        );
-        assert_eq!(check_etag(&with_headers(&[]), sent), EtagCheck::Missing);
     }
 
     #[test]

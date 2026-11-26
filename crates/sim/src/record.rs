@@ -320,6 +320,7 @@ fn http_fault(fault: HttpFault) -> String {
         HttpFault::AfterPublish(shape) => ("AfterPublish", shape),
         HttpFault::TruncateBody(shape) => ("TruncateBody", shape),
         HttpFault::WrongEtag(shape) => ("WrongEtag", shape),
+        HttpFault::BodyMismatch(shape) => ("BodyMismatch", shape),
         HttpFault::ConnectionReset(shape) => ("ConnectionReset", shape),
         HttpFault::Denied(shape, code) => {
             return format!("HttpFault::Denied(HttpShape::{shape:?}, DenialCode::{code:?})");

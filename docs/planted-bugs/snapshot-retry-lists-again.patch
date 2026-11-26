@@ -1,0 +1,11 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2685,7 +2685,6 @@ impl Actor {
+                 return self.ran_maintained(event, created_at_read, now);
+             }
+             Ok((files, _)) => {
+-                self.engine.maintain.snapshot_retry = Some(job.clone());
+                 return self.ran(Event::Synced { files }, now);
+             }
+             // A failed step waits on the sync task, and the listing with it:

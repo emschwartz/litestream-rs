@@ -1,0 +1,8 @@
+# A compaction that took as many inputs as one job may closes the level's window, so a backlog
+# drains at one job per window and the level falls behind a fast writer.
+name = "full-compaction-closes-its-window"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "maintain::tests::a_full_compaction_leaves_the_window_open_for_the_backlog",
+]
