@@ -111,8 +111,8 @@ impl Profile {
 /// of its inputs (the swarm's largest seen was 60 reads and 10 listings), with room to spare.
 pub const BASE_REQUESTS: u64 = 128;
 
-/// Staging reads one part the S3 replica sends may make of its staged bytes: one to hash the
-/// part and one to send it (`lsr-store-s3`'s lanes).
+/// Staging reads one part the S3 replica sends may make of its staged bytes, before the
+/// re-reads each cell is allowed (`s3_rereads`): room to spare.
 pub const REREADS_PER_PART: u64 = 2;
 
 /// Requests a boot may make per staged file it finds: a header and a body read, a copy put
@@ -219,13 +219,12 @@ impl Allowance {
     }
 }
 
-/// Staging reads the S3 replica's own retry wrapper may make of a staged body it is putting
-/// whole, past the upload's own read: the S3 store hashes the body in one read and sends it in
-/// another, each counted by the recorder as a re-read given (`RecorderCounts::rereads_given`).
-/// The bound allows a staging request for each one, so a tick of many small uploads to an S3
-/// replica stays within it. A defect allowance (<https://github.com/emschwartz/litestream-rs/issues/478>): when the store hashes and
-/// sends from one read, the re-reads go, the reach count `tick_cost.s3_rereads_allowed` stays at
-/// zero and `liveness::an_s3_put_reads_its_staged_body_again` fails, and this allowance goes.
+/// Staging reads the S3 replica may make of a staged body it is putting whole, past the
+/// upload's own read: the store reads each cell of a part of more than one cell again as it
+/// sends it, each counted by the recorder as a re-read given (`RecorderCounts::rereads_given`).
+/// The simulator sets the cell to 32 bytes (`remote.rs`), so its small files reach the second
+/// read the judges watch. The bound allows a staging request for each one, so a tick of many
+/// uploads to an S3 replica stays within it.
 #[must_use]
 pub const fn s3_rereads(remote: &RecorderCounts) -> u64 {
     remote.rereads_given

@@ -298,6 +298,9 @@ fn config(parts: Option<Parts>) -> Option<S3Config> {
         BucketName::new("sim").ok()?,
         Prefix::new(PREFIX).ok()?,
     );
+    // Cells of 32 bytes: the simulator's files are a few kilobytes, and a part of one cell
+    // or less is sent from the bytes it kept, with no second read to judge.
+    let config = config.with_cell(NonZeroU64::MIN.saturating_add(31));
     Some(match parts {
         Some(parts) => config
             .with_part_size(PartSize::below_the_minimum(parts.part))

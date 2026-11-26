@@ -1,9 +1,9 @@
-# The S3 store hashes and sends a cell of a part read again without checking it against the length
+# The S3 store sends a cell of a part read again without checking it against the length
 # and CRC-64 the engine's first read saw.
 name = "store-trusts-a-changed-cell"
 fix = "plant"
 package = "lsr-store-s3"
 tests = [
-    "again::tests::a_cell_that_is_not_what_was_seen_is_neither_hashed_nor_sent",
+    "again::tests::a_cell_that_is_not_what_was_seen_is_not_sent",
     "sourced::a_source_that_breaks_its_word_publishes_nothing",
 ]
