@@ -13,8 +13,14 @@
 //! An application that passes its own `reqwest::Client` keeps whatever that
 //! client trusts.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+use rustls::crypto::CryptoProvider;
 #[cfg(all(unix, not(target_vendor = "apple")))]
 use rustls::pki_types::CertificateDer;
+
+use crate::ConfigError;
 
 /// What a client the store builds verifies server certificates against.
 #[derive(Debug, Clone)]
@@ -48,15 +54,36 @@ pub(crate) fn system() -> Roots {
     Roots::Platform
 }
 
-/// The rustls configuration for a reqwest client the store builds, on ring,
-/// the provider ureq uses too.
+/// The crypto provider of the clients the store builds, by rustls's own rule: the one the
+/// application installed as the process default, else the one provider rustls's crate features
+/// enable in this build, which rustls installs as the default.
+///
+/// rustls exposes no way to ask for that second case, so it is asked the way rustls's own
+/// builders ask, and its panic when the features name none or two providers is caught and
+/// reported as the error it stands for.
+///
+/// # Errors
+/// [`ConfigError::NoTlsProvider`] when nothing is installed and rustls cannot pick.
+pub(crate) fn crypto_provider() -> Result<Arc<CryptoProvider>, ConfigError> {
+    if CryptoProvider::get_default().is_none() {
+        let probed = catch_unwind(AssertUnwindSafe(rustls::ClientConfig::builder));
+        drop(probed);
+    }
+    CryptoProvider::get_default()
+        .map(Arc::clone)
+        .ok_or(ConfigError::NoTlsProvider)
+}
+
+/// The rustls configuration for a reqwest client the store builds, on `provider`,
+/// the one ureq gets too.
 ///
 /// # Errors
 /// When the protocol versions or the platform verifier cannot be set up.
 #[cfg(feature = "reqwest")]
-pub(crate) fn rustls_config(roots: Roots) -> Result<rustls::ClientConfig, rustls::Error> {
-    use std::sync::Arc;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+pub(crate) fn rustls_config(
+    roots: Roots,
+    provider: Arc<CryptoProvider>,
+) -> Result<rustls::ClientConfig, rustls::Error> {
     let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_safe_default_protocol_versions()?;
     let builder = match roots {

@@ -29,7 +29,19 @@ fn command_line() -> Result<Vec<String>, UsageError> {
         .collect()
 }
 
+/// Installs aws-lc-rs, rustls's own default provider, as the process default, so the store's
+/// clients use it whatever else is in the build. Another provider already installed is left alone.
+fn install_tls_provider() {
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        // Already installed: the store uses that one.
+    }
+}
+
 fn execute() -> Result<Done, CliError> {
+    install_tls_provider();
     let args = command_line()?;
     let command = args::parse(&args)?;
     block_on(run::run(command))
@@ -94,4 +106,22 @@ fn main() -> ExitCode {
         }
     };
     ExitCode::from(code)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_binary_installs_aws_lc_rs() {
+        super::install_tls_provider();
+        let installed = rustls::crypto::CryptoProvider::get_default().expect("installed");
+        let want = rustls::crypto::aws_lc_rs::default_provider();
+        let names = |provider: &rustls::crypto::CryptoProvider| {
+            provider
+                .kx_groups
+                .iter()
+                .map(|group| format!("{:?}", group.name()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(installed), names(&want));
+    }
 }

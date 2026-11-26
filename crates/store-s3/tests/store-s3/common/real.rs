@@ -139,7 +139,7 @@ fn store_transport(deadline: std::time::Duration) -> Box<dyn Transport> {
     match std::env::var("LSR_S3_TRANSPORT").as_deref() {
         #[cfg(feature = "reqwest")]
         Ok("reqwest") => Box::new(lsr_store_s3::ReqwestTransport::new(deadline).unwrap()),
-        Ok("ureq") | Err(_) => Box::new(UreqTransport::new(deadline)),
+        Ok("ureq") | Err(_) => Box::new(UreqTransport::new(deadline).expect("a TLS provider")),
         Ok(other) => panic!("LSR_S3_TRANSPORT={other}: ureq, or reqwest with the feature"),
     }
 }

@@ -490,10 +490,16 @@ pub fn rust_dump(config: &Path, env: &DumpEnv) -> Dump {
 /// daemon's HTTP client for the sources that fetch.
 fn resolve(credentials: &Credentials, region: &str, env: &DumpEnv) -> DumpCredentials {
     let env = env.clone();
-    let transport: Arc<dyn Transport> = Arc::new(UreqTransport::new(Duration::from_secs(5)));
-    let chain = CredentialChain::with_env(move |name| env.var_or_home(name))
-        .with_transport(transport, Arc::new(SystemClock))
-        .with_region(region);
+    let chain = CredentialChain::with_env(move |name| env.var_or_home(name));
+    // No TLS provider: the sources that fetch over HTTP are not built, as in the daemon.
+    let chain = match UreqTransport::new(Duration::from_secs(5)) {
+        Ok(transport) => {
+            let transport: Arc<dyn Transport> = Arc::new(transport);
+            chain.with_transport(transport, Arc::new(SystemClock))
+        }
+        Err(_no_provider) => chain,
+    }
+    .with_region(region);
     // The daemon's own construction (`sidecar/src/daemon.rs`): config keys are explicit
     // values on the same chain, so the shared files are still read first.
     let chain = match credentials {
