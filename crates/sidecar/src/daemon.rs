@@ -6,7 +6,7 @@
 //! by health, as Go's SDK fetches them per request); with
 //! `-restore-if-db-not-exists` (or the key) and no file, restore the newest state,
 //! a replica with no files being Go's "no backup found, starting fresh"; then
-//! `Replicator::builder`, which returns once the read transaction pins the
+//! `Replicator::start`, which returns once the read transaction pins the
 //! WAL; the log sink goes in with it, before the thread runs, so no boot line is lost. A
 //! database that fails any of these is logged and left out; the others keep
 //! running (Go exits instead), and the exit code says so at the end.
@@ -40,6 +40,7 @@ use std::time::Duration;
 
 use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::Clock;
+use lsr_replica::StartOptions;
 use lsr_replica::{
     Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate, IfMissing,
     IfReplicationStops, Replicator, RestoreError, Runtime, StartError, StopOutcome, Trip, lock,
@@ -321,11 +322,16 @@ impl Daemon {
         if self.mode == Mode::Once {
             config.maintenance = config.maintenance.one_off();
         }
-        let started = Replicator::builder(path, Arc::clone(store))
-            .config(config)
-            .runtime(Runtime::system())
-            .events(Box::new(DbEvents::new(Arc::clone(&self.log), path)))
-            .start();
+        let started = Replicator::start(
+            path,
+            Arc::clone(store),
+            StartOptions {
+                config,
+                runtime: Some(Runtime::system()),
+                events: Some(Box::new(DbEvents::new(Arc::clone(&self.log), path))),
+                ..StartOptions::default()
+            },
+        );
         match started {
             Ok(replicator) => {
                 self.started.add(&replicator);

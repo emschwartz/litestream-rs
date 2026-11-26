@@ -106,7 +106,7 @@ impl Site {
     /// and passes SQLite's integrity check.
     pub fn assert_restores(&self, store: &dyn DynStore) {
         let to = self.path("restored");
-        restore(store, &to, &Restore::latest()).unwrap();
+        restore(store, &to, &Restore::default()).unwrap();
         assert_same(&self.app, &to);
     }
 }

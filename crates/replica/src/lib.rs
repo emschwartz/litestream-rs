@@ -1,7 +1,7 @@
 //! Replicate a live SQLite database in the application's process, Litestream-compatible.
 //!
 //! An application builds a store (`S3Store` over ureq or reqwest, `FsStore`, or its own), wraps it once
-//! in an `Arc`, and starts one [`Replicator`] per database ([`Replicator::builder`]) before its connection pool
+//! in an `Arc`, and starts one [`Replicator`] per database ([`Replicator::start`]) before its connection pool
 //! opens. The replicator owns one OS thread and three SQLite connections, holds a read
 //! transaction that pins the WAL from before the application's first write, and returns a handle.
 //!
@@ -28,7 +28,7 @@
 //!   3.51.3 to 3.54.1), so an application's rusqlite, sqlx or other binding in that range builds
 //!   beside this crate. The default `bundled` feature compiles the SQLite `libsqlite3-sys`
 //!   bundles; with default features off the application links its own, which must be one of the
-//!   builds `lsr-sqlite` lists as verified, or [`ReplicatorBuilder::start`] refuses it
+//!   builds `lsr-sqlite` lists as verified, or [`Replicator::start`] refuses it
 //!   ([`StartError::SqliteBuild`], `docs/decisions/D200.md`).
 //! - Each long read the application starts holds a [`ReaderGuard`] from [`Replicator::long_reader`];
 //!   under [`ReaderTracking::Tracked`] no TRUNCATE checkpoint runs while one lives.
@@ -44,7 +44,7 @@
 //! `testing`). Not covered by `Runtime`: an `S3Store` signs with its own clock, and HTTP request
 //! deadlines run on real time inside the HTTP client.
 //!
-//! No panic crosses [`ReplicatorBuilder::start`], [`Replicator::stop`] or [`Replicator::health`]: the
+//! No panic crosses [`Replicator::start`], [`Replicator::stop`] or [`Replicator::health`]: the
 //! thread catches its own (see the `thread` module), and a thread that ends without saying
 //! why, or a process forked from the one that started it, reports [`Gone`].
 //!
@@ -150,7 +150,7 @@ pub use local::{
     clear_journal_files,
 };
 pub use readers::ReaderGuard;
-pub use replicator::{Ready, Replicator, ReplicatorBuilder, StopFuture};
+pub use replicator::{Ready, Replicator, StartOptions, StopFuture};
 pub use restore::{
     IfMissing, Restore, record_trust, restore, restore_if_missing, trust_local, verify,
 };

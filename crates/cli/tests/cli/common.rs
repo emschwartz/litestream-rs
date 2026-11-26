@@ -156,6 +156,6 @@ pub fn restores_to(dir: &Path, replica: &Path, conn: &Connection) {
         "restored-{}.db",
         replica.file_name().unwrap().to_string_lossy()
     ));
-    restore(&*store, &to, &lsr_replica::Restore::latest()).unwrap();
+    restore(&*store, &to, &lsr_replica::Restore::default()).unwrap();
     assert_eq!(rows(&Connection::open(&to).unwrap()), rows(conn));
 }

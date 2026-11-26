@@ -22,7 +22,7 @@ fn restore_through_the_public_entry_reads_each_file_in_one_request() {
     let waves = Waves::new(inner);
     let (requests, pieces) = (Arc::clone(&waves.requests), Arc::clone(&waves.pieces));
     let dir = tempfile::tempdir().unwrap();
-    let restored = restore(&waves, &dir.path().join("db"), &Restore::latest()).unwrap();
+    let restored = restore(&waves, &dir.path().join("db"), &Restore::default()).unwrap();
     assert_eq!(restored.files(), 4);
     assert!(pieces.load(Ordering::SeqCst) > size.div_ceil(RESTORE_CHUNK));
     assert_eq!(requests.load(Ordering::SeqCst), 4, "one request per file");

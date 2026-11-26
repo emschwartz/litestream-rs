@@ -87,7 +87,7 @@ impl Default for SyncLimits {
 }
 
 /// How a replicator runs. Go's behaviour by default. The event sink is not part of it
-/// ([`crate::ReplicatorBuilder::events`], [`crate::Replicator::set_events`]).
+/// ([`crate::StartOptions::events`], [`crate::Replicator::set_events`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// Go's meta directory, `<dir>/.<name>-litestream` beside the database unless set, so Go

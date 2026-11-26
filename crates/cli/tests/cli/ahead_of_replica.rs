@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use lsr_core::conformance::block_on;
 use lsr_core::{Inventory, Level};
+use lsr_replica::Restore;
 use lsr_replica::{DynStore, RestoreTarget, Txid, restore};
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
@@ -59,7 +60,15 @@ fn point(link: &Path, to: &Path) {
 fn restored(dir: &Path, replica: &Path, target: RestoreTarget, name: &str) -> Vec<(i64, Vec<u8>)> {
     let store: Arc<dyn DynStore> = Arc::new(FsStore::new(replica));
     let to = dir.join(format!("restored-{name}.db"));
-    restore(&*store, &to, &lsr_replica::Restore::at(target)).unwrap();
+    restore(
+        &*store,
+        &to,
+        &lsr_replica::Restore {
+            target,
+            ..Restore::default()
+        },
+    )
+    .unwrap();
     rows(&Connection::open(&to).unwrap())
 }
 

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Site, assert_same, config, fake, stopped_on_system_clock, wait};
+use lsr_replica::StartOptions;
 use lsr_replica::{
     Config, IfMissing, IntegrityCheck, Replicator, Restore, RestoreError, StartError, StopOutcome,
     restore, restore_if_missing,
@@ -32,10 +33,15 @@ const BOUND: u64 = 200;
 /// level-0 chain starts at transaction 1 and restores on its own.
 fn restored(site: &Site) -> PathBuf {
     let store = site.store();
-    let replicator = Replicator::builder(&site.db, Arc::clone(&store))
-        .config(config())
-        .start()
-        .unwrap();
+    let replicator = Replicator::start(
+        &site.db,
+        Arc::clone(&store),
+        StartOptions {
+            config: config(),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     site.commit(3);
     let stopped = stopped_on_system_clock(&replicator);
     assert!(
@@ -48,7 +54,7 @@ fn restored(site: &Site) -> PathBuf {
         std::fs::remove_dir_all(&snapshots).unwrap();
     }
     let to = site.path("restored");
-    restore(&*store, &to, &Restore::latest()).unwrap();
+    restore(&*store, &to, &Restore::default()).unwrap();
     to
 }
 
@@ -57,11 +63,16 @@ fn a_restored_database_with_no_write_ticks_by_the_poll_and_snapshots_at_once() {
     let site = Site::new();
     let db = restored(&site);
     let (runtime, clock) = fake();
-    let replicator = Replicator::builder(&db, site.store())
-        .config(config())
-        .runtime(runtime)
-        .start()
-        .unwrap();
+    let replicator = Replicator::start(
+        &db,
+        site.store(),
+        StartOptions {
+            config: config(),
+            runtime: Some(runtime),
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     for _ in 0..60 {
         clock.advance(POLL);
         let now = clock.now();
@@ -79,7 +90,7 @@ fn a_restored_database_with_no_write_ticks_by_the_poll_and_snapshots_at_once() {
     );
     let app = Connection::open(&db).unwrap();
     let again = site.path("again");
-    restore(&*site.store(), &again, &Restore::latest()).unwrap();
+    restore(&*site.store(), &again, &Restore::default()).unwrap();
     assert_same(&app, &again);
 }
 
@@ -92,7 +103,7 @@ fn a_restore_to_a_path_with_no_file_name_is_refused_before_writing() {
     let replica = restored(&site);
     let dir = tempfile::tempdir().unwrap();
     let to = dir.path().join("sub").join("..");
-    let refused = restore(&*site.store(), &to, &Restore::latest());
+    let refused = restore(&*site.store(), &to, &Restore::default());
     assert!(
         matches!(&refused, Err(lsr_replica::RestoreError::NoMetaDir { path }) if *path == to),
         "{refused:?}"
@@ -113,9 +124,14 @@ fn a_first_start_against_an_empty_replica_creates_the_database_and_replicates() 
     let missing = restore_if_missing(&*store, &db, &Config::default()).unwrap();
     assert_eq!(missing, IfMissing::EmptyReplica);
     assert!(!db.exists(), "an empty replica writes nothing");
-    let refused = Replicator::builder(&db, Arc::clone(&store))
-        .config(config())
-        .start();
+    let refused = Replicator::start(
+        &db,
+        Arc::clone(&store),
+        StartOptions {
+            config: config(),
+            ..StartOptions::default()
+        },
+    );
     assert!(
         matches!(
             refused,
@@ -125,11 +141,16 @@ fn a_first_start_against_an_empty_replica_creates_the_database_and_replicates() 
         ),
         "{refused:?}"
     );
-    let replicator = Replicator::builder(&db, Arc::clone(&store))
-        .config(config())
-        .create_if_missing()
-        .start()
-        .unwrap();
+    let replicator = Replicator::start(
+        &db,
+        Arc::clone(&store),
+        StartOptions {
+            config: config(),
+            create_if_missing: true,
+            ..StartOptions::default()
+        },
+    )
+    .unwrap();
     let app = Connection::open(&db).unwrap();
     app.execute_batch(
         "CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB); INSERT INTO t(v) VALUES (x'01')",
@@ -159,7 +180,15 @@ fn a_restore_records_its_trust_record_in_the_configured_meta_directory() {
         ..Config::default()
     };
     let to = site.path("configured");
-    restore(&*site.store(), &to, &Restore::latest().config(&config)).unwrap();
+    restore(
+        &*site.store(),
+        &to,
+        &Restore {
+            config: config.clone(),
+            ..Restore::default()
+        },
+    )
+    .unwrap();
     assert!(
         meta.join("lsr-takeover").exists(),
         "the record is in the configured directory"
@@ -185,7 +214,14 @@ fn a_trust_record_that_cannot_be_written_carries_the_restore() {
         ..Config::default()
     };
     let to = site.path("unrecorded");
-    let failed = restore(&*site.store(), &to, &Restore::latest().config(&config));
+    let failed = restore(
+        &*site.store(),
+        &to,
+        &Restore {
+            config: config.clone(),
+            ..Restore::default()
+        },
+    );
     let Err(RestoreError::TrustRecord { restored, .. }) = failed else {
         panic!("{failed:?}");
     };
@@ -203,7 +239,10 @@ fn a_restore_with_an_integrity_check_publishes_a_sound_database() {
     let site = Site::new();
     let replica = restored(&site);
     let to = site.path("checked");
-    let how = Restore::latest().integrity(IntegrityCheck::Full);
+    let how = Restore {
+        integrity: IntegrityCheck::Full,
+        ..Restore::default()
+    };
     restore(&*site.store(), &to, &how).unwrap();
     assert_same(&site.app, &to);
     drop(replica);

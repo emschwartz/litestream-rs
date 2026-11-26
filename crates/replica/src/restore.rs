@@ -6,7 +6,7 @@
 //! ([`crate::local::FileSink`]); an existing target or a stale sidecar is refused, never replaced.
 //!
 //! A restore then records a trust record through the transaction it restored, in the target's
-//! meta directory as the replicator's [`Config`] names it ([`Restore::config`]; the default
+//! meta directory as the replicator's [`Config`] names it (`Restore::config`; the default
 //! is `.<name>-litestream` beside the target, see `crate::meta`), so a replicator started on
 //! the restored database builds on the replica it came from instead of refusing it.
 
@@ -25,55 +25,21 @@ use crate::exec::block_on;
 use crate::meta::write_takeover;
 use crate::store::{DynStore, Erased};
 
-/// What [`restore`] restores and how: the target, the options for the cases it can either
-/// refuse or accept, the integrity check before it publishes, and the meta directory the
-/// trust record goes in.
-#[derive(Clone, Debug)]
-#[must_use]
+/// What [`restore`] restores and how. Each field's default is the one a restore without it
+/// gets: `Restore { target, ..Restore::default() }`.
+#[derive(Clone, Debug, Default)]
 pub struct Restore {
-    target: RestoreTarget,
-    options: RestoreOptions,
-    integrity: IntegrityCheck,
-    config: Config,
-}
-
-impl Restore {
-    /// The newest state the replica holds, with the default options, no integrity check, and
-    /// the default meta directory.
-    pub fn latest() -> Self {
-        Self::at(RestoreTarget::Latest)
-    }
-
-    /// `target`, otherwise as [`Restore::latest`].
-    pub fn at(target: RestoreTarget) -> Self {
-        Self {
-            target,
-            options: RestoreOptions::default(),
-            integrity: IntegrityCheck::Off,
-            config: Config::default(),
-        }
-    }
-
+    /// The state to restore; the newest the replica holds by default.
+    pub target: RestoreTarget,
     /// The options for the cases a restore can either refuse or accept, such as an instant
     /// inside a compacted file.
-    pub const fn options(mut self, options: RestoreOptions) -> Self {
-        self.options = options;
-        self
-    }
-
+    pub options: RestoreOptions,
     /// The SQLite check run on the restored file before it is published (Go's
     /// `-integrity-check`); off by default, as in Go.
-    pub const fn integrity(mut self, check: IntegrityCheck) -> Self {
-        self.integrity = check;
-        self
-    }
-
+    pub integrity: IntegrityCheck,
     /// The configuration the database will be replicated with: the trust record goes in its
     /// meta directory (`Config::meta_dir`), where the replicator's start reads it.
-    pub fn config(mut self, config: &Config) -> Self {
-        self.config.clone_from(config);
-        self
-    }
+    pub config: Config,
 }
 
 /// Restores into a new database at `to` what `how` asks for from `store`, then records the
@@ -159,7 +125,7 @@ pub enum IfMissing {
     /// A database is already at the path; nothing was done.
     Exists,
     /// Nothing was at the path and the replica holds nothing: a first start. Nothing was
-    /// written. Start the replicator with [`crate::ReplicatorBuilder::create_if_missing`],
+    /// written. Start the replicator with `StartOptions::create_if_missing`,
     /// which creates the empty database as SQLite would, or create it before the start, and
     /// replicate from scratch (Go's `replicate -restore-if-db-not-exists` starts fresh the
     /// same way).
@@ -187,7 +153,11 @@ pub fn restore_if_missing(
             }));
         }
     }
-    match restore(store, to, &Restore::latest().config(config)) {
+    let how = Restore {
+        config: config.clone(),
+        ..Restore::default()
+    };
+    match restore(store, to, &how) {
         Ok(restored) => Ok(IfMissing::Restored(restored)),
         // Another process restored it between the look and the create.
         Err(RestoreError::Destination(CreateError::TargetExists(_))) => Ok(IfMissing::Exists),

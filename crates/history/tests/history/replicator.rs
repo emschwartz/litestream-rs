@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use lsr_core::ObjectStore;
 use lsr_history::{AheadMode, Counts, Judge, Log, chain};
+use lsr_replica::StartOptions;
 use lsr_replica::{
     DynStore, FakeClockHandle, Health, Phase, Replicator, Runtime, StopOutcome, Timestamp,
 };
@@ -128,10 +129,15 @@ where
 
     pub fn start(&mut self) {
         let store: Arc<dyn DynStore> = Arc::<S>::clone(self.store);
-        let replicator = Replicator::builder(self.db, store)
-            .runtime(self.runtime.clone())
-            .start()
-            .unwrap();
+        let replicator = Replicator::start(
+            self.db,
+            store,
+            StartOptions {
+                runtime: Some(self.runtime.clone()),
+                ..StartOptions::default()
+            },
+        )
+        .unwrap();
         let _booted = replicator.wait_booted(PATIENCE);
         self.replicator = Some(replicator);
     }

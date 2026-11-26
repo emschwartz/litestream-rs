@@ -264,77 +264,25 @@ impl fmt::Debug for Replicator {
     }
 }
 
-/// How to start one [`Replicator`]: [`Replicator::builder`], then the optional settings, then
-/// [`ReplicatorBuilder::start`].
-#[must_use = "a builder starts nothing until `start` is called"]
-#[expect(
-    missing_debug_implementations,
-    reason = "the store and the event sink are not Debug"
-)]
-pub struct ReplicatorBuilder {
-    database: std::path::PathBuf,
-    store: Arc<dyn DynStore>,
-    config: Config,
-    runtime: Option<Runtime>,
-    events: Option<Box<dyn EventSink>>,
-    create_if_missing: bool,
-}
-
-impl ReplicatorBuilder {
-    /// The configuration (the default without this call).
-    pub fn config(mut self, config: Config) -> Self {
-        self.config = config;
-        self
-    }
-
-    /// Every source of time, waiting and chance ([`Runtime::system`] without this call).
-    pub fn runtime(mut self, runtime: Runtime) -> Self {
-        self.runtime = Some(runtime);
-        self
-    }
-
+/// How [`Replicator::start`] starts a replicator. Each field's default is the one a start
+/// without it gets: `StartOptions { config, ..StartOptions::default() }`.
+#[derive(Default)]
+#[expect(missing_debug_implementations, reason = "the event sink is not Debug")]
+pub struct StartOptions {
+    /// The configuration.
+    pub config: Config,
+    /// Every source of time, waiting and chance; [`Runtime::system`] when `None`.
+    pub runtime: Option<Runtime>,
     /// The event sink, in place before the thread starts, so it sees every event, the first
     /// boot's included. A sink set later with [`Replicator::set_events`] sees only what comes
     /// after the thread picks it up, which may be after the first boot.
-    pub fn events(mut self, sink: Box<dyn EventSink>) -> Self {
-        self.events = Some(sink);
-        self
-    }
-
+    pub events: Option<Box<dyn EventSink>>,
     /// Creates an empty database in WAL mode when nothing is at the path, so a first start
     /// against an empty replica ([`crate::IfMissing::EmptyReplica`]) replicates from scratch,
     /// as Go's does. Without it a missing database is [`StartError::Open`] with `NotFound`.
     /// The page size of a database created here is SQLite's default: an application that wants
     /// another creates the database itself before the start.
-    pub const fn create_if_missing(mut self) -> Self {
-        self.create_if_missing = true;
-        self
-    }
-
-    /// Opens the replication connections, takes the read transaction that pins the WAL,
-    /// starts the thread, and returns. The first boot (listing the replica, recovering the
-    /// position) runs on the thread afterwards and shows in [`Replicator::health`]; no store
-    /// call happens on the caller's thread. Call it before the application's connection pool
-    /// opens.
-    ///
-    /// It blocks: it opens SQLite, and if a replicator for the same file (device and inode, not
-    /// path) is still draining in this process, it waits for it, up to its shutdown grace. An
-    /// async application calls it from a blocking task (`spawn_blocking`).
-    ///
-    /// # Errors
-    /// [`StartError`]; nothing is left open or pinned.
-    pub fn start(self) -> Result<Replicator, StartError> {
-        if self.create_if_missing && !self.database.exists() {
-            lsr_sqlite::create_database(&self.database)?;
-        }
-        Replicator::start_inner(
-            &self.database,
-            self.store,
-            self.config,
-            self.runtime.unwrap_or_else(Runtime::system),
-            self.events,
-        )
-    }
+    pub create_if_missing: bool,
 }
 
 /// Shared by every clone of one replicator; its drop is the last handle's.
@@ -351,18 +299,33 @@ impl Drop for LastHandle {
 }
 
 impl Replicator {
-    /// A builder for the replicator of the database at `database`, replicating to `store`:
-    /// the default [`Config`], the system clock, and no event sink until
-    /// [`ReplicatorBuilder::start`] says otherwise.
-    pub fn builder(database: &Path, store: Arc<dyn DynStore>) -> ReplicatorBuilder {
-        ReplicatorBuilder {
-            database: database.to_owned(),
-            store,
-            config: Config::default(),
-            runtime: None,
-            events: None,
-            create_if_missing: false,
+    /// Opens the replication connections for the database at `database`, takes the read
+    /// transaction that pins the WAL, starts the thread replicating to `store`, and returns.
+    /// The first boot (listing the replica, recovering the position) runs on the thread
+    /// afterwards and shows in [`Replicator::health`]; no store call happens on the caller's
+    /// thread. Call it before the application's connection pool opens.
+    ///
+    /// It blocks: it opens SQLite, and if a replicator for the same file (device and inode, not
+    /// path) is still draining in this process, it waits for it, up to its shutdown grace. An
+    /// async application calls it from a blocking task (`spawn_blocking`).
+    ///
+    /// # Errors
+    /// [`StartError`]; nothing is left open or pinned.
+    pub fn start(
+        database: &Path,
+        store: Arc<dyn DynStore>,
+        options: StartOptions,
+    ) -> Result<Self, StartError> {
+        if options.create_if_missing && !database.exists() {
+            lsr_sqlite::create_database(database)?;
         }
+        Self::start_inner(
+            database,
+            store,
+            options.config,
+            options.runtime.unwrap_or_else(Runtime::system),
+            options.events,
+        )
     }
 
     fn start_inner(
@@ -567,7 +530,7 @@ impl Replicator {
     /// Sends every event from the thread's next turn on to `sink`, replacing the sink before
     /// it. Events the thread emitted before it took the sink, the first boot's among them,
     /// went to the sink before it (or nowhere): give the first sink to
-    /// [`ReplicatorBuilder::events`] to see them all.
+    /// [`StartOptions::events`] to see them all.
     pub fn set_events(&self, sink: Box<dyn EventSink>) {
         self.shared.command(|commands| commands.sink = Some(sink));
     }

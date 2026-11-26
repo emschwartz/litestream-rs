@@ -81,7 +81,15 @@ pub fn restored(
     let options = RestoreOptions {
         as_of_inside: AsOfInside::TakeEarlier,
     };
-    match restore(store, &to, &Restore::at(target).options(options)) {
+    match restore(
+        store,
+        &to,
+        &Restore {
+            target,
+            options,
+            ..Restore::default()
+        },
+    ) {
         Ok(_) => {}
         Err(RestoreError::Restore(EngineRestoreError::NoPlan(no))) => {
             assert!(
