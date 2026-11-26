@@ -498,7 +498,8 @@ fn a_store_fault_during_a_send_retries_the_file_from_its_first_byte() {
 }
 
 /// Maintenance keeps its share of the ticks while a file is in flight, and the send goes on
-/// from where it was afterwards.
+/// from where it was afterwards. A compaction maintenance begins goes a slice a tick too, its
+/// slices first, so the file's next slice waits at most `FAIR_SHARE` ticks.
 #[test]
 fn maintenance_takes_its_turn_between_the_slices_of_a_file() {
     let (mut rig, mut actor) = caught_up_with(slicing(8));
@@ -514,30 +515,34 @@ fn maintenance_takes_its_turn_between_the_slices_of_a_file() {
     rig.commit(6);
     rig.tick(&mut actor, now);
     let mut seen = Vec::new();
+    let mut file_slices = Vec::new();
     let mut last_sent = 0;
-    for _ in 0..80 {
+    for at in 0..200 {
+        let before = sent(&actor);
         let tick = rig.tick(&mut actor, now);
         match event(&tick) {
-            Some(Event::Sending { bytes }) => {
+            // A compaction's slices report its own bytes; the file's move the send on.
+            Some(Event::Sending { bytes }) if sent(&actor) != before => {
                 assert!(*bytes > last_sent, "the send started again: {seen:?}");
                 last_sent = *bytes;
+                file_slices.push(at);
             }
             Some(Event::Uploaded(_)) => break,
             _ => {}
         }
         seen.push(tick);
     }
-    let maintained: Vec<usize> = (0..seen.len())
-        .filter(|at| matches!(event(&seen[*at]), Some(Event::Maintained { .. })))
-        .collect();
-    assert!(maintained.len() >= 2, "{seen:?}");
-    // Its share is exact: one tick after every `FAIR_SHARE` slices.
+    let maintained = seen
+        .iter()
+        .filter(|tick| matches!(event(tick), Some(Event::Maintained { .. })))
+        .count();
+    assert!(maintained >= 2, "{seen:?}");
     let share = usize::try_from(state::FAIR_SHARE).unwrap();
     assert!(
-        maintained
+        file_slices
             .windows(2)
-            .all(|pair| pair[1] - pair[0] == share + 1),
-        "{maintained:?} in {seen:?}"
+            .all(|pair| pair[1] - pair[0] <= share + 1),
+        "{file_slices:?} in {seen:?}"
     );
     assert_eq!(newest_replica_file(&rig), Some(6));
 }

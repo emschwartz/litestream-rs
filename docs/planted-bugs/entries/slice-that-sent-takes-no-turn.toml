@@ -1,0 +1,8 @@
+# A job's slice that handed bytes over and then found its upload's parts in the way is taken for a
+# slice that sent nothing: the tick goes on to other work and hands the replica more than its bytes.
+name = "slice-that-sent-takes-no-turn"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced_compaction::a_slice_that_hands_bytes_over_before_it_waits_is_the_ticks_unit",
+]

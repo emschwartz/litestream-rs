@@ -44,7 +44,7 @@ One thread per database does everything, one unit of work at a time, in this ord
 3. **Upload** each staged file, 8 MiB a turn: a larger file is sent over several turns, with syncs and checkpoints in between, and appears on the replica only when it is whole. Every file is verified on the read that uploads it and sent with a checksum. Uploads are create-only where the store supports it, so a second writer's file is refused instead of overwritten.
 4. **Maintenance**: merges, snapshots and deletes, planned from a listing of the bucket. A restarted process reading the same listing plans the same job.
 
-A failure in one task does not stop the others, but a long unit does: while the thread copies the whole database (a first sync, a snapshot), nothing new is synced or uploaded. Each retry waits longer, up to 5 minutes, and a failure that persists becomes a named degraded state.
+A failure in one task does not stop the others, but a long unit does: while the thread copies the whole database at level 0 (a first sync, a start that cannot prove the WAL continues), nothing new is synced or uploaded. Snapshots and merges are sent 8 MiB a turn like uploads, with syncs and uploads in between. Each retry waits longer, up to 5 minutes, and a failure that persists becomes a named degraded state.
 
 ## Compaction, snapshots and retention
 

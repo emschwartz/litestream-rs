@@ -60,7 +60,8 @@ const fn retry_after(err: &MaintainError) -> Option<Duration> {
                 | CompactError::Input { .. }
                 | CompactError::Encode(_)
                 | CompactError::Inputs(_)
-                | CompactError::SnapshotLevel { .. } => return None,
+                | CompactError::SnapshotLevel { .. }
+                | CompactError::Bug(_) => return None,
             }
         }
         MaintainError::Delete(err) => err,

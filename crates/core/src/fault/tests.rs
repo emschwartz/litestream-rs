@@ -1011,3 +1011,10 @@ fn snapshot_counts_keep_each_cause_apart() {
     assert!(listed.contains(&(SnapshotCauseKind::CheckpointBoundary, 2)));
     assert!(listed.contains(&(SnapshotCauseKind::GenerationChanged, 0)));
 }
+
+/// A compactor invariant that fails is reported as the fault it made, a bug.
+#[test]
+fn a_compactor_bug_is_reported_as_the_fault_it_made() {
+    let fault = Fault::Bug(BugSite::Encode);
+    assert_eq!(Fault::from_compact(&CompactError::Bug(fault)), fault);
+}

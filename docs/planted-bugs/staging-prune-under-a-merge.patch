@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index c2b1e430a..75ffb782c 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -3026,7 +3026,7 @@ impl Actor {
+     fn prune_ready(&self, now: Timestamp) -> Option<Txid> {
+         // A merge part-way may read staged copies at or below the bound (a hole's repair):
+         // they stay until it ends.
+-        let reads_staging = matches!(&self.engine.sliced, Some((_, sliced)) if matches!(&**sliced, Sliced::Merge(merging) if merging.reads_staging()));
++        let reads_staging = false;
+         self.prune_bound()
+             .filter(|_| self.running() && !reads_staging && self.kept.tasks.ready(Task::Prune, now))
+     }

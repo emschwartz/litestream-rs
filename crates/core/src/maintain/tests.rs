@@ -3030,3 +3030,39 @@ fn a_one_off_schedule_keeps_its_settings_and_is_not_run() {
     assert_ne!(once, ordinary);
     assert!(!Maintenance::go_default().is_one_off());
 }
+
+/// A staged copy whose damage shows only at its end (its index) passes the identity check and
+/// opens; the merge meets it part-way and begins again from the replica's copies, so the whole
+/// compaction takes a second slice and publishes what the replica holds.
+#[test]
+fn a_staged_copy_bad_at_its_end_starts_the_merge_again_from_the_replica() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let mut bytes = whole(&local, &key(0, 2, 2));
+    let index_end = bytes.len() - TRAILER_LEN - 1;
+    bytes[index_end] ^= 0xff;
+    block_on(async {
+        let created = T0 - 100_000 + 2;
+        let mut up = local
+            .begin_upload(&key(0, 2, 2), at(created), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&bytes).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let job = l1_job(&replica);
+    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    let want = MemStore::new();
+    three_l0(&MemStore::new(), &want);
+    let built = block_on(run_compact(
+        &job,
+        &Staging(&MemStore::new()),
+        &Replica(&want),
+    ));
+    assert!(matches!(built, Outcome::Compacted { .. }), "{built:?}");
+    assert_eq!(
+        whole(&replica, &job.output_key()),
+        whole(&want, &job.output_key())
+    );
+}

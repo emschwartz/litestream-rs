@@ -101,13 +101,14 @@ impl Driver {
 /// A [`Transport`] over a `reqwest::Client`.
 pub struct ReqwestTransport {
     client: reqwest::Client,
-    driver: Driver,
+    /// Shared with the bodies of streamed GETs, which outlive the call that opened them.
+    driver: Arc<Driver>,
     bounds: Bounds,
 }
 
 impl std::fmt::Debug for ReqwestTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let driver = match self.driver {
+        let driver = match *self.driver {
             Driver::Own(_) => "own runtime",
             Driver::App(_) => "application runtime",
         };
@@ -142,7 +143,7 @@ impl ReqwestTransport {
             .map_err(|_build| ReqwestSetupError::Client)?;
         Ok(Self {
             client,
-            driver: Driver::own()?,
+            driver: Arc::new(Driver::own()?),
             bounds,
         })
     }
@@ -157,7 +158,7 @@ impl ReqwestTransport {
     ) -> Result<Self, ReqwestSetupError> {
         Ok(Self {
             client,
-            driver: Driver::own()?,
+            driver: Arc::new(Driver::own()?),
             bounds: Bounds::new(deadline),
         })
     }
@@ -167,7 +168,7 @@ impl ReqwestTransport {
     pub fn with_client_on(client: reqwest::Client, runtime: Handle, deadline: Duration) -> Self {
         Self {
             client,
-            driver: Driver::App(runtime),
+            driver: Arc::new(Driver::App(runtime)),
             bounds: Bounds::new(deadline),
         }
     }
@@ -216,6 +217,16 @@ fn method(method: Method) -> reqwest::Method {
 }
 
 impl ReqwestTransport {
+    fn drive<F>(&self, future: F, failed: F::Output) -> F::Output
+    where
+        F: std::future::Future + Send,
+        F::Output: Send,
+    {
+        self.driver.drive(future, failed)
+    }
+}
+
+impl Driver {
     /// Drives `future` to completion. Inside a runtime, where `block_on`
     /// panics, it runs on a fresh thread, which is outside every runtime.
     fn drive<F>(&self, future: F, failed: F::Output) -> F::Output
@@ -226,12 +237,12 @@ impl ReqwestTransport {
         if Handle::try_current().is_ok() {
             std::thread::scope(|scope| {
                 scope
-                    .spawn(|| self.driver.block_on(future))
+                    .spawn(|| self.block_on(future))
                     .join()
                     .unwrap_or(failed)
             })
         } else {
-            self.driver.block_on(future)
+            self.block_on(future)
         }
     }
 }
@@ -239,8 +250,9 @@ impl ReqwestTransport {
 /// A streamed GET's body ([`Transport::open`]): each chunk driven to completion as the caller
 /// asks, no later than the stall bound after the one before, and the whole body within the cap
 /// its declared length allows from its head.
-struct Streamed<'a> {
-    transport: &'a ReqwestTransport,
+struct Streamed {
+    driver: Arc<Driver>,
+    stall: Duration,
     response: reqwest::Response,
     /// What is left of the chunk being handed out.
     pending: VecDeque<u8>,
@@ -248,15 +260,15 @@ struct Streamed<'a> {
     allowed: Duration,
 }
 
-impl crate::transport::Body for Streamed<'_> {
+impl crate::transport::Body for Streamed {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         if self.pending.is_empty() {
             if self.began.elapsed() > self.allowed {
                 return Err(TransportError::Timeout);
             }
-            let stall = self.transport.bounds.stall();
+            let stall = self.stall;
             let response = &mut self.response;
-            let next = self.transport.drive(
+            let next = self.driver.drive(
                 async move {
                     tokio::time::timeout(stall, response.chunk())
                         .await
@@ -278,7 +290,7 @@ impl Transport for ReqwestTransport {
         clippy::disallowed_methods,
         reason = "a socket timeout runs on the real clock, which no injected clock reaches"
     )]
-    fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
+    fn open(&self, request: HttpRequest) -> Result<Opened, TransportError> {
         // No cap over the whole exchange, which would cut a long body: the request up to its
         // head has the stall bound, and the body its own cap from there.
         let builder = self.build(&request).timeout(Duration::MAX);
@@ -300,7 +312,8 @@ impl Transport for ReqwestTransport {
         );
         let allowed = self.bounds.cap(response.content_length().unwrap_or(0));
         let body = Streamed {
-            transport: self,
+            driver: Arc::clone(&self.driver),
+            stall,
             response,
             pending: VecDeque::new(),
             began: std::time::Instant::now(),

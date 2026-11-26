@@ -11,6 +11,7 @@
 //! whole object, and the bytes before the offset are skipped.
 
 use std::io;
+use std::sync::Arc;
 
 use lsr_core::{BoxFuture, FileKey, ReadLen, ReadStream, StoreError, StoreOp};
 
@@ -18,29 +19,30 @@ use super::Inner;
 use crate::classify::classify_transport;
 use crate::transport::{Body, MAX_BODY, Transport};
 
-/// One object read through one GET.
-pub(crate) struct S3Stream<'a, T> {
-    inner: &'a Inner<T>,
+/// One object read through one GET. It borrows nothing, so a reader can hold it between
+/// ticks ([`ObjectStore::hold_stream`](lsr_core::ObjectStore::hold_stream)).
+pub(crate) struct S3Stream<T> {
+    inner: Arc<Inner<T>>,
     key: FileKey,
     /// Where the GET starts.
     from: u64,
-    state: State<'a>,
+    state: State,
 }
 
-enum State<'a> {
+enum State {
     /// No request yet.
     Unsent,
     /// The body, and how much of it the response declared that is still to come.
     Open {
-        body: Box<dyn Body + 'a>,
+        body: Box<dyn Body>,
         left: Option<u64>,
     },
     /// The object ended, or a failure spent the stream.
     Done,
 }
 
-impl<'a, T: Transport> S3Stream<'a, T> {
-    pub(crate) const fn new(inner: &'a Inner<T>, key: FileKey, from: u64) -> Self {
+impl<T: Transport> S3Stream<T> {
+    pub(crate) const fn new(inner: Arc<Inner<T>>, key: FileKey, from: u64) -> Self {
         Self {
             inner,
             key,
@@ -50,7 +52,7 @@ impl<'a, T: Transport> S3Stream<'a, T> {
     }
 
     /// Sends the GET and judges its head.
-    fn open(&self) -> Result<State<'a>, StoreError> {
+    fn open(&self) -> Result<State, StoreError> {
         let op = StoreOp::Read;
         let key = self.key;
         let request = self
@@ -113,7 +115,7 @@ impl<'a, T: Transport> S3Stream<'a, T> {
     }
 }
 
-impl<T: Transport> ReadStream for S3Stream<'_, T> {
+impl<T: Transport> ReadStream for S3Stream<T> {
     fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
         Box::pin(async move { self.piece(len) })
     }
