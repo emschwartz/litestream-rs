@@ -286,7 +286,7 @@ impl Transport for UreqTransport {
         clippy::disallowed_methods,
         reason = "a socket timeout runs on the real clock, which no injected clock reaches"
     )]
-    fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
+    fn open(&self, request: HttpRequest) -> Result<Opened, TransportError> {
         // No ceiling over the whole exchange, which would cut a long body: connecting, sending
         // and the wait for the head each have the stall bound, and the body its own cap below.
         let built = self

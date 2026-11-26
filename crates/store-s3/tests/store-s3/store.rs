@@ -143,6 +143,24 @@ mod cases {
         assert_eq!(pieces(&h.store, k, 4, 4), [&b"efgh"[..], b"i"]);
     }
 
+    /// A held stream borrows nothing (a compaction keeps it between ticks) and is the same one
+    /// GET, however many pieces it hands out.
+    #[test]
+    fn a_held_stream_is_one_get_however_many_pieces_it_hands_out() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abcdefghi").unwrap();
+        let before = count(&h.wire, Shape::Get);
+        let mut stream = block_on(h.store.hold_stream(k, 2)).unwrap().unwrap();
+        let len = ReadLen::new(3).unwrap();
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            got.push(block_on(stream.next(len)).unwrap());
+        }
+        assert_eq!(got, [&b"cde"[..], b"fgh", b"i"]);
+        assert_eq!(count(&h.wire, Shape::Get), before + 1);
+    }
+
     #[test]
     fn a_stream_from_past_the_end_hands_out_nothing() {
         let h = FakeHarness::new();

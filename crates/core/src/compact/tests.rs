@@ -218,6 +218,7 @@ fn input_fault(err: CompactError) -> (FileKey, InputFault) {
         | CompactError::Dest(_)
         | CompactError::Encode(_)
         | CompactError::SnapshotLevel { .. }
+        | CompactError::Bug(_)
         | CompactError::Inputs(_) => panic!("expected an input fault, got {err:?}"),
     }
 }
@@ -1457,4 +1458,104 @@ fn the_output_reaches_the_upload_in_writes_of_the_flush_size() {
             "a write of {len} bytes in {lens:?}"
         );
     }
+}
+
+/// One input of `pages` pages of 512 bytes; `noise` makes them incompressible, else they are
+/// all one byte, so every page frame of the output has one size.
+fn one_input(source: &MemStore, pages: u32, noise: bool) -> Vec<FileInfo> {
+    let ps = size(512);
+    let mut spec = Spec::plain(512, pages, 1, 1, &[]);
+    spec.pages = (1..=pages)
+        .map(|p| {
+            (
+                p,
+                if noise {
+                    noisy(ps, u64::from(p))
+                } else {
+                    solid(ps, 7)
+                },
+            )
+        })
+        .collect();
+    vec![put(source, 0, &spec)]
+}
+
+/// Begins a merge of `infos` from `source` into `dest` under `budget`.
+fn begun(source: &MemStore, dest: &Spy, infos: &[FileInfo], budget: Budget) -> Compacting {
+    let staging = Staging(source);
+    let mut slots = Slots::new();
+    block_on(Compacting::begin_with(
+        (&staging, &mut slots),
+        dest,
+        &inputs(infos),
+        level(1),
+        WriteMode::Replace,
+        budget,
+    ))
+    .unwrap()
+}
+
+/// A slice reads its inputs up to the bytes it is given and no further: a slice of four
+/// chunks' worth reads exactly four chunks, whatever page the fourth ends in.
+#[test]
+fn a_slice_reads_exactly_its_budget_of_input() {
+    let source = MemStore::new();
+    let infos = one_input(&source, 400, true);
+    let dest = Spy::default();
+    let chunk = 1024_u64;
+    let budget = Budget {
+        chunk: ReadLen::new(1024).unwrap(),
+        flush: 1 << 20,
+    };
+    let mut job = begun(&source, &dest, &infos, budget);
+    let before = job.merge.bytes_read;
+    assert_eq!(before % chunk, 0, "the header is read in whole chunks");
+    let sliced = block_on(job.slice(&Staging(&source), 4 * chunk, true)).unwrap();
+    assert!(sliced.is_none());
+    assert_eq!(job.merge.bytes_read, before + 4 * chunk);
+    assert_eq!(job.sent, 0, "nothing reached a flush");
+    block_on(job.abort());
+}
+
+/// The output buffer is handed over once it holds a flush: one that holds exactly a flush
+/// takes no further page first.
+#[test]
+fn a_buffer_that_holds_exactly_a_flush_is_handed_over() {
+    let source = MemStore::new();
+    let infos = one_input(&source, 50, false);
+    let whole = |flush: usize| {
+        let dest = Spy::default();
+        let budget = Budget {
+            chunk: ReadLen::new(1 << 20).unwrap(),
+            flush,
+        };
+        let mut job = begun(&source, &dest, &infos, budget);
+        let trailer = block_on(job.slice(&Staging(&source), u64::MAX, true))
+            .unwrap()
+            .unwrap();
+        block_on(job.commit(&dest, trailer)).unwrap();
+        dest.script().write_lens.clone()
+    };
+    // A flush of one byte hands over what begins the file, then each page frame alone.
+    let lens = whole(1);
+    let (first, frame) = (lens[0], lens[1]);
+    assert_eq!(lens[2], frame, "{lens:?}");
+    let flush = first + 2 * frame;
+    assert_eq!(whole(flush)[0], flush);
+}
+
+#[test]
+fn a_compaction_part_way_shows_its_header_and_bytes_sent() {
+    let source = MemStore::new();
+    let infos = one_input(&source, 10, false);
+    let job = begun(
+        &source,
+        &Spy::default(),
+        &infos,
+        Budget::reading::<Staging<'_, MemStore>>(1),
+    );
+    let shown = format!("{job:?}");
+    assert!(shown.starts_with("Compacting {"), "{shown}");
+    assert!(shown.contains("sent: 0"), "{shown}");
+    block_on(job.abort());
 }

@@ -1,14 +1,15 @@
 diff --git a/crates/replica/src/store.rs b/crates/replica/src/store.rs
+index 241ce134f..12bf60f31 100644
 --- a/crates/replica/src/store.rs
 +++ b/crates/replica/src/store.rs
-@@ -215,10 +215,6 @@
- 
-     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
+@@ -219,10 +219,6 @@ where
          self.0.read_boxed(key, offset, len).await
--    }
--
--    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
--        self.0.read_stream_dyn(key, offset)
      }
  
-     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
+-    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+-        self.0.read_stream_dyn(key, offset)
+-    }
+-
+     async fn hold_stream(
+         &self,
+         key: FileKey,

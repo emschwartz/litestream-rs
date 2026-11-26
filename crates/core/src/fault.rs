@@ -1099,6 +1099,7 @@ impl Fault {
             CompactError::Inputs(_) | CompactError::SnapshotLevel { .. } => {
                 Self::Bug(BugSite::CompactionInputs)
             }
+            CompactError::Bug(fault) => *fault,
         }
     }
 

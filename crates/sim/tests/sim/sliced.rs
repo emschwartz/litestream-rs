@@ -145,7 +145,13 @@ fn a_crash_between_two_slices_sends_the_file_again_from_its_first_byte() {
         want.extend(whole_file());
         assert_eq!(sent(&report)[..want.len()], want, "{kind:?}");
         assert_eq!(report.crashes, 1);
-        assert_eq!(report.reach.get("send.then_the_process_ended"), 1);
+        // The crash, and the restore's stop, which ends the snapshot merged from level 0
+        // part-way; the next process writes it again.
+        assert_eq!(
+            report.reach.get("send.then_the_process_ended"),
+            2,
+            "{kind:?}"
+        );
     }
 }
 
@@ -214,9 +220,10 @@ fn a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snap
         pages: 3,
         grow: true,
     }];
-    // The first file goes up in five ticks, the snapshot follows, and the checkpoint the idle
-    // engine runs stages the second file, beside the first. The twelfth tick reads it.
-    ops.extend(ticks(12));
+    // The first file goes up in five ticks, the snapshot merged from it in five more, and the
+    // checkpoint the idle engine runs stages the second file, beside the first. The sixteenth
+    // tick reads it.
+    ops.extend(ticks(16));
     ops.push(Op::Meta(MetaOp::FlipNewestByte));
     // The publish. The process ends before anything prunes the staged file.
     ops.extend([Op::Tick, Op::Restart]);
@@ -224,15 +231,15 @@ fn a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snap
     ops.push(Op::Restore);
     let report = run_with(&ops, second, false);
     let all = events(&report);
-    assert_eq!(all[11], &Event::Sending { bytes: second }, "{all:?}");
+    assert_eq!(all[15], &Event::Sending { bytes: second }, "{all:?}");
     assert!(
-        matches!(all[12], Event::Uploaded(Did::Put(info)) if info.size == second),
+        matches!(all[16], Event::Uploaded(Did::Put(info)) if info.size == second),
         "{all:?}"
     );
     // The send met no damage; the boot after it did, twice, and snapshots.
     assert!(
         matches!(
-            all[13],
+            all[17],
             Event::Retrying {
                 fault: Fault::StagedLost,
                 ..
@@ -243,7 +250,7 @@ fn a_staged_file_damaged_after_its_last_read_is_published_whole_and_costs_a_snap
     let snapshot = Event::Booted {
         cause: Some(SnapshotCause::NewestStagedFileUnreadable),
     };
-    assert!(all[14..].contains(&&snapshot), "{all:?}");
+    assert!(all[18..].contains(&&snapshot), "{all:?}");
     assert_eq!(
         report
             .reach
