@@ -512,8 +512,8 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestCompactor_CompactClosesPipeOnWriteError" = { counterpart = "lsr-core::compact::tests::a_failed_upload_write_aborts_and_an_abort_failure_does_not_replace_the_error" }
 "TestCompactor_CompactDoesNotReopenSourcesAfterClose" = { reason = "Go-only: a resumable reader reopening HTTP streams after the pipe closed. Rust reads each input in bounded ranged reads with no open stream (docs/PLAN.md phase 1, restore executor), so there is nothing to reopen or leak." }
 "TestCompactor_CompactResumesRemoteSourceAfterDisconnect" = { counterpart = ["lsr-store-s3::store-s3::faults::cases::a_truncated_get_is_transient_never_a_short_read", "lsr-core::maintain::tests::a_failing_level_backs_off_and_others_run"] }
-"TestCompactor_CompactWithVerification" = { counterpart = "lsr-core::maintain::tests::a_rejected_compaction_output_is_deleted_by_the_executor" }
-"TestCompactor_CompactWithVerification/VerificationEnabled" = { counterpart = ["lsr-core::maintain::tests::a_rejected_compaction_output_is_deleted_by_the_executor", "lsr-core::actor::tests::audit::a_boot_reads_back_the_newest_file_of_each_level_once"] }
+"TestCompactor_CompactWithVerification" = { counterpart = "lsr-core::maintain::tests::an_output_taken_at_another_size_is_deleted_by_the_executor" }
+"TestCompactor_CompactWithVerification/VerificationEnabled" = { counterpart = ["lsr-core::maintain::tests::an_output_taken_at_another_size_is_deleted_by_the_executor", "lsr-core::actor::tests::audit::a_damaged_output_the_store_refused_is_read_back_and_rebuilt", "lsr-core::actor::tests::audit::a_boot_reads_back_the_newest_file_of_each_level_once"] }
 "TestCompactor_EnforceL0Retention" = { counterpart = "lsr-core::maintain::retain::tests::a_covered_level_zero_file_wakes_when_it_is_old_enough" }
 "TestCompactor_EnforceL0Retention/DeletesCompactedFiles" = { counterpart = "lsr-core::maintain::retain::tests::a_covered_level_zero_file_wakes_when_it_is_old_enough" }
 "TestCompactor_EnforceL0Retention/SkipsIfNoL1" = { counterpart = "lsr-core::maintain::retain::tests::level_zero_files_the_levels_do_not_cover_stay" }

@@ -450,6 +450,24 @@ fn splitmix(state: &mut u64) -> u32 {
 }
 
 impl State {
+    /// [`SimSqlite::wal_header_salts`].
+    fn wal_header_salts(&self) -> Option<(u32, u32)> {
+        let wal = self.present.then_some(&self.wal)?;
+        let word = |at: usize| {
+            let bytes: [u8; 4] = wal.get(at..at.checked_add(4)?)?.try_into().ok()?;
+            Some(u32::from_be_bytes(bytes))
+        };
+        let page_size = word(8)?;
+        let salts = (word(16)?, word(20)?);
+        (page_size != 0 && wal.len() >= 32).then_some(salts)
+    }
+
+    /// [`SimSqlite::index_reset_ahead`].
+    pub(super) fn index_reset_ahead(&self) -> bool {
+        let index = (self.index.salts.salt1, self.index.salts.salt2);
+        self.index.mx_frame == 0 && self.wal_header_salts() != Some(index)
+    }
+
     /// The app commits `pages` leaving `db_size` pages, then runs its automatic
     /// checkpoint.
     fn app_commit(&mut self, pages: &[(PageNo, Vec<u8>)], db_size: u32) -> Option<AppCommit> {
@@ -1965,27 +1983,14 @@ impl SimSqlite {
     /// reads the 32 header bytes, not the file.
     #[must_use]
     pub fn wal_header_salts(&self) -> Option<(u32, u32)> {
-        self.with(|state| {
-            let wal = state.present.then_some(&state.wal)?;
-            let word = |at: usize| {
-                let bytes: [u8; 4] = wal.get(at..at.checked_add(4)?)?.try_into().ok()?;
-                Some(u32::from_be_bytes(bytes))
-            };
-            let page_size = word(8)?;
-            let salts = (word(16)?, word(20)?);
-            (page_size != 0 && wal.len() >= 32).then_some(salts)
-        })
+        self.with(|state| state.wal_header_salts())
     }
 
     /// Whether the wal-index counts no frame and names salts the WAL file's
     /// header does not: SQLite reset it and the next commit writes the header.
     #[must_use]
     pub fn index_reset_ahead(&self) -> bool {
-        let header = self.wal_header_salts();
-        self.with(|state| {
-            let index = (state.index.salts.salt1, state.index.salts.salt2);
-            state.index.mx_frame == 0 && header != Some(index)
-        })
+        self.with(|state| state.index_reset_ahead())
     }
 
     /// Whether our read transaction is held, on any read mark. A mark above

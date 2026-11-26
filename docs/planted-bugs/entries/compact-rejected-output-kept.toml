@@ -1,7 +1,0 @@
-# Blind plant 10 of the recall pilot (issue #127): a compaction output the store took and then
-# rejected (a digest that does not match) is not deleted, so a listing shows an object that does
-# not decode.
-name = "compact-rejected-output-kept"
-fix = "plant"
-package = "lsr-core"
-tests = ["maintain::tests::a_rejected_compaction_output_is_deleted_by_the_executor"]
