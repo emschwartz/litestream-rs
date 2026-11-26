@@ -57,7 +57,7 @@ fn the_coverage_scenarios_reach_their_required_marks() {
 
 /// The engine reads the page count only for a snapshot that finds nothing in the WAL, so every
 /// page-count point is rare in random histories (`marks::EXEMPT` cites the rates): each one the
-/// gate requires needs a coverage scenario, or a soak of a thousand seeds leaves it at zero. A
+/// gate requires needs a coverage scenario, or the nightly soak leaves it at zero. A
 /// new app action adds a required page-count point; this names it until it has a scenario.
 #[test]
 fn every_required_page_count_point_has_a_coverage_scenario() {

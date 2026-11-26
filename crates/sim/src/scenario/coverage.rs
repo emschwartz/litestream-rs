@@ -1,4 +1,4 @@
-//! Scenarios that reach the marks a soak of a thousand seeds does not reliably reach.
+//! Scenarios that reach the marks the nightly soak does not reliably reach.
 //!
 //! The soak gate ([`crate::marks::gate`]) requires every drawn app action point
 //! ([`crate::domain::points`]) and every drawn error cell to be reached. A random history
