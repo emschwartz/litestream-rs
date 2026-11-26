@@ -45,16 +45,22 @@ pub enum StartError {
         /// What the file system said.
         kind: io::ErrorKind,
     },
-    /// SQLite refused to open the database or to set it up.
-    #[error("SQLite refused the database (result code {code})")]
+    /// SQLite refused to open the database, to set it up, or to create it.
+    #[error("SQLite refused the database: {message}")]
     Sqlite {
-        /// SQLite's extended result code; -1 when the error was not SQLite's own.
-        code: i32,
+        /// SQLite's extended result code; `None` when the error was not SQLite's own.
+        code: Option<i32>,
+        /// What SQLite (or the binding) said.
+        message: String,
     },
+    /// The database path names no file (`/`, or a path ending in `..`), so it has no default
+    /// meta directory.
+    #[error("the database path names no file")]
+    NoFileName,
     /// SQLite's file handle or wal-index cannot be used without this library opening a
     /// descriptor of its own on the database, which would drop the application's locks.
     #[error("SQLite's own file handle cannot be used: {0}")]
-    Refused(#[from] lsr_sqlite::Refusal),
+    UnsupportedVfs(lsr_sqlite::Refusal),
     /// SQLite reported a page size no SQLite build allows.
     #[error("page size {bytes} is not one SQLite allows")]
     PageSize {
@@ -89,15 +95,25 @@ pub enum StartError {
     },
 }
 
+impl From<lsr_sqlite::SqliteError> for StartError {
+    fn from(err: lsr_sqlite::SqliteError) -> Self {
+        Self::Sqlite {
+            code: err.code(),
+            message: err.to_string(),
+        }
+    }
+}
+
 impl From<lsr_sqlite::OpenError> for StartError {
     fn from(err: lsr_sqlite::OpenError) -> Self {
         match err {
-            lsr_sqlite::OpenError::Sqlite { source, .. } => Self::Sqlite {
-                code: source.code().unwrap_or(-1),
-            },
+            lsr_sqlite::OpenError::Sqlite { source, .. } => source.into(),
             lsr_sqlite::OpenError::NotWal { mode } => Self::NotWal { journal_mode: mode },
             lsr_sqlite::OpenError::PageSize { bytes } => Self::PageSize { bytes },
-            lsr_sqlite::OpenError::Refused(refusal) => Self::Refused(refusal),
+            lsr_sqlite::OpenError::Refused(lsr_sqlite::Refusal::NotWal { mode }) => {
+                Self::NotWal { journal_mode: mode }
+            }
+            lsr_sqlite::OpenError::Refused(refusal) => Self::UnsupportedVfs(refusal),
             lsr_sqlite::OpenError::SqliteBuild {
                 found,
                 source_id,
@@ -111,31 +127,37 @@ impl From<lsr_sqlite::OpenError> for StartError {
     }
 }
 
-/// Why [`crate::restore`] or [`crate::restore_if_missing`] published nothing.
+/// Why [`crate::restore`] or [`crate::restore_if_missing`] did not restore. Nothing is
+/// published, except after a publish failure whose error says it left the database visible,
+/// and after [`RestoreError::TrustRecord`].
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreError {
-    /// The destination cannot take a restore: it exists, a stale sidecar sits beside it, or
-    /// its scratch file cannot be made.
+    /// The destination cannot take a restore: it exists, a stale sidecar sits beside it
+    /// ([`crate::clear_journal_files`] removes those), or its scratch file cannot be made.
     #[error("{0}")]
     Destination(#[from] CreateError),
-    /// The restore itself failed.
-    #[error("{0}")]
-    Restore(#[from] lsr_core::RestoreError),
-    /// The database was restored and published, and the takeover record that lets
-    /// replication build on the replica it came from (`lsr-takeover`) could not be written
-    /// in its meta directory. Replication will refuse to start over that replica until
-    /// `lsr trust-local` writes one.
-    #[error("the database was restored but its takeover record could not be written: {kind:?}")]
-    TakeoverRecord {
-        /// What the file system said.
-        kind: io::ErrorKind,
-    },
-    /// The destination names no file (`/`, or a path ending in `..`), so it has no meta
-    /// directory to hold the takeover record. Refused before anything is written.
-    #[error("{} names no file, so it has no meta directory for the takeover record", .path.display())]
+    /// The destination names no file (`/`, or a path ending in `..`), so it has no default
+    /// meta directory to hold the trust record. Refused before anything is written.
+    #[error("{} names no file, so it has no meta directory for the trust record", .path.display())]
     NoMetaDir {
         /// The destination given.
         path: std::path::PathBuf,
+    },
+    /// The restore itself failed: the replica has no exact answer for the target (an empty
+    /// replica is `NoPlan` with `PlanOutcome::EmptyReplica`), a read or a file failed, or the
+    /// publish did (its source is a [`crate::PublishError`]).
+    #[error("{0}")]
+    Restore(#[from] lsr_core::RestoreError),
+    /// The database was restored and published, and the trust record that lets replication
+    /// build on the replica it came from (`lsr-takeover`) could not be written in its meta
+    /// directory. Replication will refuse to start over that replica until one is written:
+    /// [`crate::record_trust`] with `restored.reached()` retries exactly this one.
+    #[error("the database was restored but its trust record could not be written: {kind:?}")]
+    TrustRecord {
+        /// The restore that succeeded.
+        restored: lsr_core::Restored,
+        /// What the file system said.
+        kind: io::ErrorKind,
     },
 }
 
@@ -157,17 +179,17 @@ pub enum TrustLocalError {
 mod tests {
     use super::*;
 
-    /// A failure that never reached SQLite carries no SQLite code, and says so with a value
-    /// no SQLite code takes.
+    /// A failure that never reached SQLite carries no SQLite code; SQLite's own carries its
+    /// code and message.
     #[test]
-    fn an_open_failure_outside_sqlite_has_code_minus_one() {
+    fn an_open_failure_outside_sqlite_has_no_code() {
         let outside = lsr_sqlite::OpenError::Sqlite {
             path: "db".into(),
             source: lsr_sqlite::SqliteError::NoRow,
         };
         assert!(matches!(
             StartError::from(outside),
-            StartError::Sqlite { code: -1 }
+            StartError::Sqlite { code: None, .. }
         ));
         let busy = lsr_sqlite::OpenError::Sqlite {
             path: "db".into(),
@@ -178,7 +200,7 @@ mod tests {
         };
         assert!(matches!(
             StartError::from(busy),
-            StartError::Sqlite { code: 5 }
+            StartError::Sqlite { code: Some(5), ref message } if message.contains("database is locked")
         ));
     }
 }

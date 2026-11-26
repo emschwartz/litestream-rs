@@ -8,7 +8,7 @@ index a9ea49ed..c1ee1e72 100644
              .degraded
 -            .filter(|was| outlasts_success(was.cause))
 +            .filter(|was| {
-+                outlasts_success(was.cause) || matches!(was.cause, PersistentCause::Stalled(_))
++                outlasts_success(was.cause) || matches!(was.cause, DegradedCause::Stalled(_))
 +            })
              .map(|was| Degraded { retries: 1, ..was });
          *self = Self {

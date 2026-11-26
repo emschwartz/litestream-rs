@@ -164,7 +164,8 @@ const fn lists_allowed(event: &Event) -> bool {
         | Event::Resnapshot(_)
         | Event::Clamped(_)
         | Event::TakeoverWanted(_)
-        | Event::CheckingIdentity { .. } => false,
+        | Event::CheckingIdentity { .. }
+        | Event::StagingShort { .. } => false,
     }
 }
 
@@ -315,6 +316,7 @@ impl SendTurns {
             Some(
                 Event::Booted { .. }
                 | Event::CheckingIdentity { .. }
+                | Event::StagingShort { .. }
                 | Event::Synced { .. }
                 | Event::Checkpointed { .. }
                 | Event::Uploaded(_)

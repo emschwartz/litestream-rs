@@ -1,0 +1,5 @@
+name = "empty-replica-is-a-restore-error"
+fix = "claude/library-api"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["a_first_start_against_an_empty_replica_creates_the_database_and_replicates"]

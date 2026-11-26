@@ -61,13 +61,10 @@ fn a_failed_wal_sync_stages_nothing_and_is_tried_again() {
     else {
         panic!("the sync should fail: {failed:?}");
     };
-    assert_eq!(
-        (*task, *cause),
-        (Task::Sync, PersistentCause::WalSyncFailed)
-    );
+    assert_eq!((*task, *cause), (Task::Sync, DegradedCause::WalSyncFailed));
     assert_eq!(
         actor.degraded(Task::Sync).map(|d| d.cause),
-        Some(PersistentCause::WalSyncFailed),
+        Some(DegradedCause::WalSyncFailed),
         "health shows it"
     );
     let before = ranges(&rig);
