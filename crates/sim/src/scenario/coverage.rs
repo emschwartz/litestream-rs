@@ -219,6 +219,12 @@ pub fn coverage() -> Vec<Coverage> {
             passive,
         ),
         point(
+            "passive_checkpoint_before_the_sequence_bump",
+            Situation::PassiveDue,
+            SourceOp::BumpSeq,
+            passive,
+        ),
+        point(
             "restart_checkpoint_before_the_sequence_bump",
             Situation::PassiveDue,
             SourceOp::BumpSeq,
@@ -262,6 +268,12 @@ pub fn coverage() -> Vec<Coverage> {
             Situation::TornWalBoot,
             SourceOp::PageCount,
             AppOp::DeleteWal,
+        ),
+        point(
+            "write_transaction_begins_before_the_page_count",
+            Situation::TornWalBoot,
+            SourceOp::PageCount,
+            AppOp::Spill { pages: 1 },
         ),
     ]
 }

@@ -54,3 +54,31 @@ fn the_coverage_scenarios_reach_their_required_marks() {
         }
     }
 }
+
+/// The engine reads the page count only for a snapshot that finds nothing in the WAL, so every
+/// page-count point is rare in random histories (`marks::EXEMPT` cites the rates): each one the
+/// gate requires needs a coverage scenario, or a soak of a thousand seeds leaves it at zero. A
+/// new app action adds a required page-count point; this names it until it has a scenario.
+#[test]
+fn every_required_page_count_point_has_a_coverage_scenario() {
+    let covered: Vec<String> = lsr_sim::scenario::coverage()
+        .iter()
+        .flat_map(|scenario| scenario.keys().to_vec())
+        .collect();
+    let required: Vec<String> = lsr_sim::marks::required_keys()
+        .into_iter()
+        .filter(|key| key.starts_with("point.PageCount."))
+        .collect();
+    assert!(
+        !required.is_empty(),
+        "the gate requires no page-count point"
+    );
+    let uncovered: Vec<&String> = required
+        .iter()
+        .filter(|key| !covered.contains(key))
+        .collect();
+    assert!(
+        uncovered.is_empty(),
+        "no coverage scenario for {uncovered:?}"
+    );
+}

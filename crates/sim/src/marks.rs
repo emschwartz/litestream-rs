@@ -245,8 +245,8 @@ classes! {
 
 const PAGE_COUNT_RARE: &str = "the engine reads the page count only for a snapshot that finds nothing in the WAL (a \
      torn header at boot; the repair D173 removed read it too), and an app step arms for one \
-     tick: ran 0 or 1 times in 6000 seeds (the one required, PageCount.DeleteWal, has a \
-     coverage scenario); a finding";
+     tick: ran 0 or 1 times in 6000 seeds (the two required, PageCount.DeleteWal and \
+     PageCount.Spill, have coverage scenarios); a finding";
 
 /// A count the gate would require that a class cannot earn, with the reason. Each is a known gap in what the soak
 /// exercises, not a pass.
