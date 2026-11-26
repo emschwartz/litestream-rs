@@ -123,7 +123,9 @@ impl DbView {
             DbState::Failed => true,
             DbState::Running(health) => match health.phase {
                 // A fail-stop trip is 503 under every mode (`crate::failstop`).
-                Phase::Booting | Phase::Running | Phase::Draining => health.held_by.trip.is_some(),
+                Phase::Booting | Phase::Running | Phase::Draining => {
+                    health.fail_stop.trip().is_some()
+                }
                 Phase::Stopped(_) | Phase::Gone(_) => true,
             },
         }
@@ -335,11 +337,11 @@ fn running_json(o: &mut Object, health: &Health) {
     o.maybe(
         "held_by",
         health
-            .held_by
-            .trip
+            .fail_stop
+            .trip()
             .map(|trip| crate::failstop::trip_name(trip).to_owned()),
     );
-    o.text("app", crate::failstop::gate_name(health.held_by.gate));
+    o.text("app", crate::failstop::gate_name(health.fail_stop.gate()));
     o.text("reported_at", &health.reported_at.to_string());
 }
 
@@ -420,8 +422,9 @@ mod tests {
             state: DbState::Running(Box::new(health.clone())),
         };
         assert!(!view(&health).down());
-        health.held_by.trip = Some(lsr_replica::Trip::UnreplicatedTooLong { since: at });
-        health.held_by.gate = lsr_replica::Gate::Allowed;
+        health.fail_stop = lsr_replica::FailStop::Allowed {
+            trip: Some(lsr_replica::Trip::UnreplicatedTooLong { since: at }),
+        };
         assert!(view(&health).down(), "report and hold-start still say 503");
         let (up, body) = healthz(&[view(&health)], at);
         assert!(!up);

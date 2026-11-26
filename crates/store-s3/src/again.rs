@@ -8,14 +8,14 @@
 //!
 //! A part is sent on one of the store's lanes (`lanes.rs`), and the thread that sends it
 //! reads it twice more:
-//! - the hash pass ([`Sealed::md5`]) reads every cell for the MD5 the request carries as
-//!   `Content-MD5`;
+//! - the hash pass ([`Sealed::sha256`]) reads every cell for the SHA-256 the request signs
+//!   and carries as `x-amz-content-sha256`;
 //! - the send pass ([`Body`]) reads every cell again as the request's body.
 //!
 //! On both passes a cell's bytes are used only when they are what was seen on the first
-//! read, checked here whatever the source checked. So the MD5 is taken over bytes that match
+//! read, checked here whatever the source checked. So the SHA-256 is taken over bytes that match
 //! the first read cell by cell, the body is made of bytes that match it cell by cell, and
-//! the store checks what it received against that MD5. A cell that does not match, or that
+//! the store checks what it received against that hash. A cell that does not match, or that
 //! the source does not give, ends the hash pass before a request is made, or ends the body
 //! short of its `Content-Length`, which no server takes as a whole part; the part's result is
 //! then the source's own error (`docs/decisions/D222.md`, `docs/decisions/D233.md`).
@@ -34,9 +34,10 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
 use lsr_core::{Again, Seeing, Seen, StoreError, StoreOp};
-use md5::{Digest as _, Md5};
+use sha2::{Digest as _, Sha256};
 
 use crate::classify::invalid_data;
+use crate::sigv4::PayloadHash;
 
 /// Bytes one [`Seen`] covers, and so one second read asks for: 256 KiB, the size the engine
 /// first read them in. A part being sent holds one cell's bytes at a time.
@@ -161,15 +162,15 @@ impl Sealed {
             .saturating_mul(std::mem::size_of::<Seen>())
     }
 
-    /// The hash pass: the MD5 of the part, over a second read of every cell.
-    pub(crate) fn md5(&mut self, stop: &AtomicBool) -> Result<[u8; 16], StoreError> {
-        let mut md5 = Md5::new();
+    /// The hash pass: the SHA-256 of the part, over a second read of every cell.
+    pub(crate) fn sha256(&mut self, stop: &AtomicBool) -> Result<PayloadHash, StoreError> {
+        let mut hash = Sha256::new();
         let mut offset = self.offset;
         for was in &self.cells {
-            md5.update(cell(&mut *self.reader, offset, was, stop)?);
+            hash.update(cell(&mut *self.reader, offset, was, stop)?);
             offset = offset.saturating_add(was.len());
         }
-        Ok(md5.finalize().into())
+        Ok(PayloadHash::from_hasher(hash))
     }
 
     /// The send pass: the part's bytes, read again as they are sent.
@@ -321,8 +322,7 @@ mod tests {
         let go = AtomicBool::new(false);
         let mut part = sealed(&bytes, bytes.clone());
         assert_eq!(part.len(), 700_000);
-        let want: [u8; 16] = Md5::digest(&bytes).into();
-        assert_eq!(part.md5(&go).unwrap(), want);
+        assert_eq!(part.sha256(&go).unwrap(), PayloadHash::of(&bytes));
         let mut sent = Vec::new();
         let mut body = part.body(&go);
         body.read_to_end(&mut sent).unwrap();
@@ -344,7 +344,7 @@ mod tests {
             op: StoreOp::Upload,
             kind: io::ErrorKind::InvalidData,
         };
-        assert_eq!(part.md5(&go), Err(unseen.clone()));
+        assert_eq!(part.sha256(&go), Err(unseen.clone()));
         let mut sent = Vec::new();
         let mut body = part.body(&go);
         let ended = body.read_to_end(&mut sent).unwrap_err();
@@ -358,7 +358,7 @@ mod tests {
         let bytes = bytes();
         let over = AtomicBool::new(true);
         let mut part = sealed(&bytes, bytes.clone());
-        assert_eq!(part.md5(&over), Err(stopped()));
+        assert_eq!(part.sha256(&over), Err(stopped()));
         let mut sent = Vec::new();
         let mut body = part.body(&over);
         body.read_to_end(&mut sent).unwrap_err();

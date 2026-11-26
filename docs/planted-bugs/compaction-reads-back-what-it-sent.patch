@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1159,7 +1159,7 @@
+         if ours.len() != TRAILER_LEN {
+             return Ok(false);
+         }
+-        if let Some(token) = sent.get(&info.key) {
++        if let Some(token) = sent.get(&info.key).filter(|_| false) {
+             // The listed size is the replica's: an object another hand replaced with one of
+             // another length is read from the replica, as is a staged copy that changed.
+             if token.ends_as(info.size, &ours) {

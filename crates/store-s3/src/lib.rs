@@ -36,6 +36,7 @@ mod response;
 #[cfg(test)]
 mod secrets;
 mod signer;
+mod sigv4;
 mod source;
 mod store;
 mod transport;
@@ -66,22 +67,25 @@ pub use fault::{Fault, FaultTransport, RequestShape, Shape};
 pub use lanes::Manual;
 pub use lanes::{Inline, Lanes, Sender, Task};
 pub use request::{
-    HttpRequest, Method, Precondition, RequestBuilder, RequestError, UploadId, WriteRequest,
-    level_prefix, object_key,
+    HttpRequest, Method, Precondition, RequestBuilder, RequestError, UploadId, level_prefix,
+    object_key,
 };
 #[cfg(feature = "testing")]
 pub use request::{OpenUpload, abandon_upload, abort_upload, open_uploads};
 #[cfg(feature = "reqwest")]
 pub use reqwest_transport::{ReqwestSetupError, ReqwestTransport};
 pub use response::{
-    EtagCheck, Head, ListPage, ListedFile, ResponseError, Unrecognized, check_etag, hex,
-    parse_complete, parse_create, parse_delete_failure_codes, parse_head, parse_list,
+    Head, ListPage, ListedFile, ResponseError, Unrecognized, hex, parse_complete, parse_create,
+    parse_delete_failure_codes, parse_head, parse_list,
 };
 #[cfg(feature = "testing")]
 pub use response::{parse_delete_failures, quoted_md5};
+pub use sigv4::PayloadHash;
 pub use source::{CredentialSource, Expiring, REFRESH_BEFORE};
 pub use store::{ListStats, S3Store, SystemClock, WriteStats};
-pub use transport::{HttpResponse, StreamedRequest, Transport, TransportError, send_on_threads};
+pub use transport::{
+    Body, HttpResponse, Opened, StreamedRequest, Transport, TransportError, send_on_threads,
+};
 pub use upload::S3Upload;
 #[cfg(feature = "ureq")]
 pub use ureq_transport::UreqTransport;

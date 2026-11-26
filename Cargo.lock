@@ -1182,6 +1182,7 @@ dependencies = [
  "lsr-core",
  "lsr-ltx",
  "lsr-wal",
+ "rustix",
  "tempfile",
 ]
 
@@ -1206,6 +1207,7 @@ dependencies = [
  "rustls-platform-verifier",
  "rusty-s3",
  "serde_json",
+ "sha2",
  "shuttle",
  "tempfile",
  "thiserror",

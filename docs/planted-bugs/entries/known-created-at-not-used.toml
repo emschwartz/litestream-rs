@@ -1,0 +1,9 @@
+# Retention does not use the created-at times of the files this process put, so on a store
+# whose listings carry only a last-modified time it sends one HEAD per level-0 file it deletes.
+name = "known-created-at-not-used"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::retention_reads_no_created_at_time_of_a_file_this_process_put",
+    "created_at::tests::a_known_created_at_time_costs_no_read",
+]

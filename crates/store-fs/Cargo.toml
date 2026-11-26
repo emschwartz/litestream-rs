@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 lsr-core.workspace = true
 lsr-ltx.workspace = true
+# The free space of the staging disk (`statvfs`), through safe calls.
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 lsr-core = { workspace = true, features = ["testing"] }

@@ -1,0 +1,7 @@
+# A drain waits out the sync interval before it stages the commits that are left.
+name = "sync-interval-holds-a-drain"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::a_drain_does_not_wait_for_the_interval",
+]

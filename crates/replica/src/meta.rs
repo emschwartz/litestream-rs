@@ -53,7 +53,7 @@ use std::path::Path;
 use lsr_core::TakeoverRecord;
 
 use crate::error::StartError;
-use crate::events::TakeoverUnusable;
+use crate::events::TrustRecordUnusable;
 
 /// The file the engine locks.
 pub(crate) const LOCK_FILE: &str = "lsr-lock";
@@ -102,18 +102,18 @@ impl MetaLock {
 /// The takeover record `lsr trust-local`, a restore or the engine left, if any.
 ///
 /// # Errors
-/// [`TakeoverUnusable`] when the file exists and cannot be read or does not
+/// [`TrustRecordUnusable`] when the file exists and cannot be read or does not
 /// decode. The caller treats that as no record, and says so: it costs what
 /// having no record costs (the boot builds only on what the WAL vouches
 /// for), never a stop the WAL could have spared, and never a record taken
 /// as given.
-pub(crate) fn read_takeover(meta: &Path) -> Result<Option<TakeoverRecord>, TakeoverUnusable> {
+pub(crate) fn read_takeover(meta: &Path) -> Result<Option<TakeoverRecord>, TrustRecordUnusable> {
     match fs::read(meta.join(TAKEOVER_FILE)) {
         Ok(bytes) => TakeoverRecord::decode(&bytes)
             .map(Some)
-            .map_err(TakeoverUnusable::Invalid),
+            .map_err(TrustRecordUnusable::Invalid),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(TakeoverUnusable::Unreadable { kind: err.kind() }),
+        Err(err) => Err(TrustRecordUnusable::Unreadable { kind: err.kind() }),
     }
 }
 
@@ -227,7 +227,7 @@ mod tests {
         fs::write(dir.path().join(TAKEOVER_FILE), b"lsr-takeover 1 0").unwrap();
         assert_eq!(
             read_takeover(dir.path()),
-            Err(TakeoverUnusable::Invalid(
+            Err(TrustRecordUnusable::Invalid(
                 lsr_core::TakeoverRecordError::Unterminated
             ))
         );
@@ -235,7 +235,7 @@ mod tests {
         fs::create_dir(dir.path().join(TAKEOVER_FILE)).unwrap();
         assert!(matches!(
             read_takeover(dir.path()),
-            Err(TakeoverUnusable::Unreadable { .. })
+            Err(TrustRecordUnusable::Unreadable { .. })
         ));
     }
 }

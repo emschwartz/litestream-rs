@@ -34,8 +34,8 @@ use crate::env::{Clock, Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, Flight, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, Reread, Rest,
-    StoreError, Upload, WriteMode,
+    BatchKind, BoxFuture, Flight, ListAt, Listing, ObjectStore, PageLimit, ReadLen, ReadStream,
+    Reread, Rest, StoreError, Upload, WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -419,6 +419,15 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         core.run(|| core.inner.read(key, offset, len)).await
     }
 
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Resuming {
+            core: &self.core,
+            key,
+            offset,
+            open: None,
+        })
+    }
+
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let core = &*self.core;
         core.run(|| core.inner.created_at(file)).await
@@ -506,21 +515,43 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         }
         out
     }
+}
 
-    /// One batch through the inner store, then each failed read retried
-    /// alone under the policy, in order.
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        let core = &*self.core;
-        let firsts = core.inner.read_many(reads).await;
-        let mut out = Vec::with_capacity(firsts.len());
-        for (at, first) in reads.iter().zip(firsts) {
-            Counters::bump(&core.counters.calls);
-            let settled = core
-                .settle(first, || core.inner.read(&at.key, at.offset, at.len), false)
-                .await;
-            out.push(settled);
-        }
-        out
+/// A stream through a [`Retrying`] store. A piece that fails is asked again of a new stream
+/// from the offset the pieces before it reached, under the policy as a read would be, so a
+/// connection lost a gigabyte into a file costs one request more, not the file.
+struct Resuming<'a, S, P, E> {
+    core: &'a Core<S, P, E>,
+    key: FileKey,
+    /// Where the next piece starts: the bytes handed out so far.
+    offset: u64,
+    /// The inner stream, once one answered; `None` before the first piece and after a failure.
+    open: Option<Box<dyn ReadStream + 'a>>,
+}
+
+impl<S: ObjectStore, P: Sleeper, E: Entropy> ReadStream for Resuming<'_, S, P, E> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let (core, key, offset) = (self.core, self.key, self.offset);
+            let reopen = move || async move {
+                let mut fresh = core.inner.read_stream(key, offset);
+                let bytes = fresh.next(len).await?;
+                Ok((fresh, bytes))
+            };
+            // A stream that failed is dropped here: the retry opens another.
+            let first = match self.open.take() {
+                Some(mut open) => open.next(len).await.map(|bytes| (open, bytes)),
+                None => {
+                    Counters::bump(&core.counters.calls);
+                    reopen().await
+                }
+            };
+            let (open, bytes) = core.settle(first, reopen, false).await?;
+            self.open = Some(open);
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.offset = offset.saturating_add(read);
+            Ok(bytes)
+        })
     }
 }
 

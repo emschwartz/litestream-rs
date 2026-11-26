@@ -40,6 +40,7 @@
 //! application client on native-tls needs this crate's `native-tls` feature for its
 //! TLS failures to be [`TransportError::Tls`] rather than a connection error.
 
+use std::collections::VecDeque;
 use std::io;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -50,7 +51,7 @@ use tokio::task::JoinSet;
 
 use crate::lanes::{Lanes, Sender};
 use crate::request::{HttpRequest, Method};
-use crate::transport::{Bounds, HttpResponse, Transport, TransportError};
+use crate::transport::{Bounds, HttpResponse, Opened, Transport, TransportError};
 use crate::transport::{MAX_BODY, map_io};
 use crate::trust;
 
@@ -235,7 +236,79 @@ impl ReqwestTransport {
     }
 }
 
+/// A streamed GET's body ([`Transport::open`]): each chunk driven to completion as the caller
+/// asks, no later than the stall bound after the one before, and the whole body within the cap
+/// its declared length allows from its head.
+struct Streamed<'a> {
+    transport: &'a ReqwestTransport,
+    response: reqwest::Response,
+    /// What is left of the chunk being handed out.
+    pending: VecDeque<u8>,
+    began: std::time::Instant,
+    allowed: Duration,
+}
+
+impl crate::transport::Body for Streamed<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        if self.pending.is_empty() {
+            if self.began.elapsed() > self.allowed {
+                return Err(TransportError::Timeout);
+            }
+            let stall = self.transport.bounds.stall();
+            let response = &mut self.response;
+            let next = self.transport.drive(
+                async move {
+                    tokio::time::timeout(stall, response.chunk())
+                        .await
+                        .map_err(|_elapsed| TransportError::Timeout)?
+                        .map_err(|err| map_error(&err))
+                        .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+                },
+                Err(TransportError::Io(io::ErrorKind::Other)),
+            )?;
+            let Some(chunk) = next else { return Ok(0) };
+            self.pending = chunk.into();
+        }
+        io::Read::read(&mut self.pending, buf).map_err(|err| TransportError::Io(err.kind()))
+    }
+}
+
 impl Transport for ReqwestTransport {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a socket timeout runs on the real clock, which no injected clock reaches"
+    )]
+    fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
+        // No cap over the whole exchange, which would cut a long body: the request up to its
+        // head has the stall bound, and the body its own cap from there.
+        let builder = self.build(&request).timeout(Duration::MAX);
+        let stall = self.bounds.stall();
+        let response = self.drive(
+            async move {
+                tokio::time::timeout(stall, builder.send())
+                    .await
+                    .map_err(|_elapsed| TransportError::Timeout)?
+                    .map_err(|err| map_error(&err))
+            },
+            Err(TransportError::Io(io::ErrorKind::Other)),
+        )?;
+        let head = HttpResponse::new(
+            response.status().as_u16(),
+            head_of(&response),
+            Vec::new(),
+            true,
+        );
+        let allowed = self.bounds.cap(response.content_length().unwrap_or(0));
+        let body = Streamed {
+            transport: self,
+            response,
+            pending: VecDeque::new(),
+            began: std::time::Instant::now(),
+            allowed,
+        };
+        Ok((head, Box::new(body)))
+    }
+
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
         let head_only = request.method() == Method::Head;
         let sent = u64::try_from(request.body().len()).unwrap_or(u64::MAX);
@@ -331,16 +404,7 @@ async fn exchange(
         .map_err(|_elapsed| TransportError::Timeout)?
         .map_err(|err| map_error(&err))?;
     let status = response.status().as_u16();
-    let headers: Vec<(String, String)> = response
-        .headers()
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_owned(),
-                String::from_utf8_lossy(value.as_bytes()).into_owned(),
-            )
-        })
-        .collect();
+    let headers = head_of(&response);
     let declared = response.content_length();
     let expected = declared
         .filter(|_| !head_only)
@@ -366,6 +430,20 @@ async fn exchange(
         .map_err(|_elapsed| TransportError::Timeout)??;
     let complete = head_only || declared.is_none_or(|n| u64::try_from(body.len()) == Ok(n));
     Ok(HttpResponse::new(status, headers, body, complete))
+}
+
+/// A response's headers as received.
+fn head_of(response: &reqwest::Response) -> Vec<(String, String)> {
+    response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
 }
 
 /// Maps a reqwest failure to a kind; the error's own text carries the URL.

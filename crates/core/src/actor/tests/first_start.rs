@@ -48,6 +48,7 @@ fn quiet_of(pages: u32, fill: impl Fn(u32, u8) -> Vec<u8>) -> Rig {
         remote: Counting::default(),
         takeover: None,
         announced: Vec::new(),
+        short: Vec::new(),
     };
     rig.wal.append_tx(&[(pg(1), fill(1, 1))], nz(pages));
     rig
@@ -97,6 +98,19 @@ fn the_first_start_reads_each_page_once() {
         .sum();
     assert_eq!(uploaded, held);
     assert_eq!(Rig::files(&rig.remote, Level::ZERO).len(), 1);
+}
+
+/// A first start reads nothing of the snapshot's key before it writes it, as Go reads nothing:
+/// the listing it planned from shows every file this engine wrote, so the key holds nothing.
+/// Before, a one-byte read of the key (a not-found GET on S3) went out ahead of every merge.
+#[test]
+fn the_first_start_sends_no_read_ahead_of_the_snapshot() {
+    let mut rig = quiet();
+    let mut actor = Actor::new(cfg());
+    rig.settle(&mut actor, T0);
+    let snapshot = FileKey::snapshot(Txid::new(1).unwrap());
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
+    assert_eq!(rig.remote.reads_of(&snapshot), 0);
 }
 
 /// A first start moves the database twice, to level 0 and to level 9: the levels between hold

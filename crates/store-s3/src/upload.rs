@@ -6,7 +6,7 @@
 //!
 //! **Parts in flight.** A part is sent the moment it is whole: the upload hands it to the
 //! store's lanes (`lanes.rs`) and goes on filling the next one, as Go's uploader feeds its
-//! workers. The thread that sends a part computes its MD5. The upload and the parts it
+//! workers. The thread that sends a part computes its SHA-256. The upload and the parts it
 //! started share one small state under one lock: each part started leaves exactly one answer
 //! there, whether its request was answered, failed, was never sent or its work panicked, and
 //! a part that ends wakes whoever waits (a thread on the condition variable, or the task whose
@@ -29,7 +29,7 @@
 //! **Parts written from a source.** An upload whose first write is [`Upload::write_from`]
 //! keeps no part buffer: of each part it keeps what was seen of every 256 KiB and a reader of
 //! the caller's source (`again.rs`). The thread that sends the part reads it again for the
-//! MD5 and once more as the body, using a cell's bytes only when they are what was first
+//! SHA-256 it signs and once more as the body, using a cell's bytes only when they are what was first
 //! seen. So a part in flight holds one read of 256 KiB, the HTTP client's buffers (768 KiB a
 //! request by the gate in `tests/store-s3/memory.rs`) and one open file, whatever the part
 //! size. The engine's staged send asks [`Upload::flight`] before each read and stops when the
@@ -49,23 +49,20 @@
 //! of the shared state, so an id is never aborted from that list with a part of it still on
 //! the wire. The boot sweep waits for the same thing store-wide (`orphans.rs`).
 //!
-//! A single PUT is judged by the status, and then by the `ETag`: for a PUT
-//! without server-side encryption the ETag is the object's MD5, so a different
-//! one means the bytes stored are not the bytes sent. The object is already
-//! visible then, so it is deleted (best effort) before the error returns, as the
-//! file store does for a size mismatch; the uploader writes the same key again
-//! without listing. A completed multipart object whose ETag names another
-//! part count is treated the same way; a wrong part ETag leaves nothing visible, so the upload
-//! id goes on the orphan list instead.
+//! A single PUT is judged by its status. Its body's SHA-256 is signed, so the store refuses a
+//! body that differs from it and publishes nothing; what the `ETag` says is not compared, as
+//! in Go. A completed multipart object whose ETag names another part count is visible and
+//! wrong, so it is deleted (best effort) before the error returns, as the file store does for
+//! a size mismatch; the uploader writes the same key again without listing.
 //!
 //! A create-only upload ([`WriteMode::New`]) sends `If-None-Match: *` on its
 //! PUT, or on its complete (`multipart.rs`). A 412 is
 //! [`StoreError::AlreadyExists`]. A provider that answers the condition with
-//! `NotImplemented` has no conditional writes: the PUT fails `Transient` (its
-//! body is not kept, so the caller writes again), and from then on this store
-//! sends create-only writes without the condition, as Go's are, and counts
-//! them in [`crate::WriteStats`]. A provider that ignores the header
-//! silently cannot be told apart here.
+//! `NotImplemented` has no conditional writes: the write fails with
+//! [`StoreError::CreateOnlyUnsupported`] and publishes nothing, and the caller
+//! decides whether to write the key as a replace. The store never drops the
+//! condition itself (`docs/decisions/D079.md`). A provider that ignores the
+//! header silently cannot be told apart here.
 
 use std::future::poll_fn;
 use std::io;
@@ -80,12 +77,12 @@ use lsr_core::{
 use lsr_ltx::Timestamp;
 
 use crate::again::{Run, Sealed};
-use crate::classify::{classify, invalid_data, is_not_implemented, transient_other};
+use crate::classify::{classify, is_not_implemented, transient_other};
 use crate::lanes::{Condvar, Mutex, MutexGuard, lock};
 use crate::multipart::{PAYLOAD_TOO_LARGE, Sent, completed_etag_fits, judge_part};
 use crate::part_plan::{MAX_OBJECT, held_width, plan_part_size};
-use crate::request::{Precondition, UploadId};
-use crate::response::{EtagCheck, check_etag};
+use crate::request::{HttpRequest, Precondition, RequestBuilder, RequestError, UploadId};
+use crate::sigv4::PayloadHash;
 use crate::store::Inner;
 use crate::transport::{HttpResponse, StreamedRequest, Transport};
 
@@ -101,6 +98,52 @@ impl Bytes {
         match self {
             Self::Held(buf) => buf.capacity(),
             Self::Again(part) => part.held(),
+        }
+    }
+
+    /// Sends the write `build` makes for these bytes, with them as its body, and returns the
+    /// answer and the length the request declared. A buffer's SHA-256 is taken as the request
+    /// is built, after the clock and the credentials are read, and the buffer is moved into it,
+    /// never copied. A part read again is hashed over a second read and streamed from a third
+    /// (`again.rs`); a read that gave nothing is the result, whatever the request came to.
+    /// Nothing is sent once `stop` is set.
+    fn send_with<T: Transport>(
+        &mut self,
+        inner: &Inner<T>,
+        stop: &AtomicBool,
+        build: impl FnOnce(
+            &RequestBuilder,
+            Timestamp,
+            (u64, PayloadHash),
+        ) -> Result<HttpRequest, RequestError>,
+    ) -> Result<(HttpResponse, u64), StoreError> {
+        let op = StoreOp::Upload;
+        if stop.load(Ordering::Relaxed) {
+            return Err(StoreError::Transient {
+                op,
+                kind: io::ErrorKind::Interrupted,
+            });
+        }
+        match self {
+            Self::Held(buf) => {
+                let body = std::mem::take(buf);
+                let len = u64::try_from(body.len()).unwrap_or(u64::MAX);
+                let mut request =
+                    inner.request(op, |b, now| build(b, now, (len, PayloadHash::of(&body))))?;
+                request.set_body(body);
+                Ok((inner.send(op, request)?, len))
+            }
+            Self::Again(part) => {
+                let sized = (part.len(), part.sha256(stop)?);
+                let request = inner.request(op, |b, now| build(b, now, sized))?;
+                let mut body = part.body(stop);
+                let streamed = StreamedRequest::new(request, sized.0, &mut body);
+                let sent = inner.send_streamed(op, streamed);
+                if let Some(unread) = body.failed() {
+                    return Err(unread);
+                }
+                Ok((sent?, sized.0))
+            }
         }
     }
 }
@@ -129,6 +172,15 @@ impl Filling {
         matches!(self, Self::Again(_))
     }
 
+    /// The part as it stands, taken out: the filling is left empty and of the same kind, so an
+    /// upload written from a source stays one. `None` for a source not yet read from.
+    fn seal(&mut self) -> Option<Bytes> {
+        match self {
+            Self::Held(buf) => Some(Bytes::Held(std::mem::take(buf))),
+            Self::Again(run) => run.take().map(|run| Bytes::Again(run.seal())),
+        }
+    }
+
     #[cfg(feature = "testing")]
     fn held(&self) -> usize {
         match self {
@@ -138,12 +190,12 @@ impl Filling {
     }
 }
 
-/// How one part started ended: its answer and the MD5 it was sent with, or why there is none.
+/// How one part started ended: its answer, or why there is none.
 pub(crate) struct Done {
     number: PartNumber,
     /// The memory the part held, let go of before this was left.
     held: usize,
-    sent: Result<(HttpResponse, [u8; 16]), StoreError>,
+    sent: Result<HttpResponse, StoreError>,
 }
 
 /// The answers not yet collected, and whom a part that ends wakes.
@@ -189,7 +241,7 @@ struct Report<T> {
     number: PartNumber,
     held: usize,
     bytes: Option<Bytes>,
-    sent: Option<Result<(HttpResponse, [u8; 16]), StoreError>>,
+    sent: Option<Result<HttpResponse, StoreError>>,
     /// Declared after `shared`, and fields drop in order: when this part holds the upload's
     /// last reference, its id is on the orphan list before the store hears the part ended,
     /// so what waits for the parts to end (the boot sweep, `orphans.rs`) finds it there.
@@ -422,58 +474,31 @@ fn append_bounded(buf: &mut Vec<u8>, bytes: &[u8], part: usize) {
 }
 
 impl<T: Transport> Inner<T> {
-    /// One PUT of `body` under `key`; see the module docs for the `ETag` rule.
-    pub(crate) fn put(
+    /// One PUT of `bytes` under `key`; see the module docs for the `ETag` rule. A part read
+    /// again lives until the answer is judged, so its reader outlasts the delete of a wrong
+    /// object.
+    fn put(
         &self,
         key: &FileKey,
         created_at: Timestamp,
-        body: Vec<u8>,
+        mut bytes: Bytes,
         mode: WriteMode,
     ) -> Result<FileInfo, StoreError> {
-        let op = StoreOp::Upload;
-        let wrote = u64::try_from(body.len()).unwrap_or(u64::MAX);
         let precondition = self.precondition(mode);
-        let request = self.request(op, |b, now| {
-            b.put_object_if(now, key, body, created_at, precondition)
-        })?;
-        let sent = request.md5();
-        let response = self.send(op, request.into_request())?;
-        self.judge_put(key, created_at, (wrote, sent), precondition, &response)
-    }
-
-    /// [`Self::put`] of an object the upload let go of: the same request, its MD5 taken over
-    /// a second read and its body a third (`again.rs`), on the calling thread. A read that
-    /// gives nothing is the result, with the source's own error: no request was made, or the
-    /// body ended short, so the store holds no new object.
-    fn put_from(
-        &self,
-        key: &FileKey,
-        created_at: Timestamp,
-        mut whole: Sealed,
-        mode: WriteMode,
-    ) -> Result<FileInfo, StoreError> {
-        let op = StoreOp::Upload;
+        // A commit is never stopped: it is the caller's own call.
         let go = AtomicBool::new(false);
-        let sized = (whole.len(), whole.md5(&go)?);
-        let precondition = self.precondition(mode);
-        let request = self.request(op, |b, now| {
-            b.put_object_streamed_if(now, key, sized, created_at, precondition)
+        let (response, wrote) = bytes.send_with(self, &go, |b, now, sized| {
+            b.put_object_of(now, key, sized, created_at, precondition)
         })?;
-        let mut body = whole.body(&go);
-        let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
-        let sent = self.send_streamed(op, streamed);
-        if let Some(unread) = body.failed() {
-            return Err(unread);
-        }
-        self.judge_put(key, created_at, sized, precondition, &sent?)
+        self.judge_put(key, created_at, wrote, precondition, &response)
     }
 
-    /// What a PUT's answer must prove, for a body of `wrote` bytes whose MD5 is `sent`.
+    /// What a PUT's answer must prove, for a body of `wrote` bytes.
     fn judge_put(
         &self,
         key: &FileKey,
         created_at: Timestamp,
-        (wrote, sent): (u64, [u8; 16]),
+        wrote: u64,
         precondition: Precondition,
         response: &HttpResponse,
     ) -> Result<FileInfo, StoreError> {
@@ -487,15 +512,11 @@ impl<T: Transport> Inner<T> {
             self.tally_taken();
         }
         classify(op, Some(key), None, response)?;
-        match check_etag(response, sent) {
-            EtagCheck::Matches | EtagCheck::NotMd5 => Ok(FileInfo {
-                key: *key,
-                size: wrote,
-                listed: ListedTime::Created(CreatedAt::metadata(created_at)),
-            }),
-            EtagCheck::Missing => Err(invalid_data(op)),
-            EtagCheck::Mismatch => Err(self.delete_bad_object(key, None)),
-        }
+        Ok(FileInfo {
+            key: *key,
+            size: wrote,
+            listed: ListedTime::Created(CreatedAt::metadata(created_at)),
+        })
     }
 
     /// Deletes an object the store acknowledged wrongly, best effort, and
@@ -513,42 +534,13 @@ impl<T: Transport> Inner<T> {
 }
 
 impl<T: Transport> Shared<T> {
-    /// One part's work, on the thread that sends it: the MD5, the request, the answer.
-    fn send_part(
-        &self,
-        number: PartNumber,
-        bytes: Bytes,
-    ) -> Result<(HttpResponse, [u8; 16]), StoreError> {
-        let op = StoreOp::Upload;
-        let (inner, key, id) = (&self.inner, &self.key, &self.id);
-        if self.stop.load(Ordering::Relaxed) {
-            return Err(StoreError::Transient {
-                op,
-                kind: io::ErrorKind::Interrupted,
-            });
-        }
-        match bytes {
-            Bytes::Held(body) => {
-                let request =
-                    inner.request(op, |b, now| b.upload_part(now, key, id, number, body))?;
-                let md5 = request.md5();
-                Ok((inner.send(op, request.into_request())?, md5))
-            }
-            Bytes::Again(mut part) => {
-                let sized = (part.len(), part.md5(&self.stop)?);
-                let request = inner.request(op, |b, now| {
-                    b.upload_part_streamed(now, key, id, number, sized)
-                })?;
-                let mut body = part.body(&self.stop);
-                let streamed = StreamedRequest::new(request.into_request(), sized.0, &mut body);
-                let sent = inner.send_streamed(op, streamed);
-                // A read that gave nothing is the part's result, whatever the request came to.
-                if let Some(unread) = body.failed() {
-                    return Err(unread);
-                }
-                Ok((sent?, sized.1))
-            }
-        }
+    /// One part's work, on the thread that sends it: the SHA-256, the request, the answer.
+    fn send_part(&self, number: PartNumber, mut bytes: Bytes) -> Result<HttpResponse, StoreError> {
+        let (key, id) = (&self.key, &self.id);
+        let (response, _) = bytes.send_with(&self.inner, &self.stop, |b, now, sized| {
+            b.upload_part_of(now, key, id, number, sized)
+        })?;
+        Ok(response)
     }
 }
 
@@ -568,7 +560,7 @@ impl<T: Transport> S3Upload<T> {
             multi.flying_held = multi.flying_held.saturating_sub(part.held);
             let judged = part
                 .sent
-                .and_then(|(response, md5)| judge_part(&self.key, part.number, md5, &response));
+                .and_then(|response| judge_part(&self.key, part.number, &response));
             let slot = usize::from(part.number.get()).checked_sub(1);
             match (judged, slot.and_then(|at| multi.etags.get_mut(at))) {
                 (Ok(etag), Some(slot)) => *slot = Some(etag),
@@ -670,12 +662,8 @@ impl<T: Transport> S3Upload<T> {
             return;
         };
         let len = self.filling.len();
-        let bytes = match &mut self.filling {
-            Filling::Held(buf) => Bytes::Held(std::mem::take(buf)),
-            Filling::Again(run) => match run.take() {
-                Some(run) => Bytes::Again(run.seal()),
-                None => return,
-            },
+        let Some(bytes) = self.filling.seal() else {
+            return;
         };
         self.sealed = self.sealed.saturating_add(len);
         multi.ready = Some(bytes);
@@ -879,15 +867,9 @@ impl<T: Transport> Upload for S3Upload<T> {
         }
         self.over = true;
         if self.multi.is_none() {
-            let whole = std::mem::replace(&mut self.filling, Filling::Held(Vec::new()));
-            let (key, created_at) = (&self.key, self.created_at);
-            return match whole {
-                Filling::Held(body) => self.inner.put(key, created_at, body, self.mode),
-                Filling::Again(None) => self.inner.put(key, created_at, Vec::new(), self.mode),
-                Filling::Again(Some(run)) => {
-                    self.inner.put_from(key, created_at, run.seal(), self.mode)
-                }
-            };
+            // Nothing written from a source yet is an empty object.
+            let whole = self.filling.seal().unwrap_or(Bytes::Held(Vec::new()));
+            return self.inner.put(&self.key, self.created_at, whole, self.mode);
         }
         let finished = self.finish();
         if finished.is_err() {

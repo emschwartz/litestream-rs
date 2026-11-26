@@ -1,7 +1,7 @@
-# A ranged read hands back a copy of the response body, so a batch holds a ninth chunk.
+# A ranged read hands back a copy of the response body, so it holds the body twice.
 name = "ranged-body-copied"
 fix = "ba4c4951d"
 package = "lsr-store-s3"
 tests = [
-    "memory::a_restore_through_the_real_client_holds_one_read_window",
+    "memory::a_ranged_read_through_the_real_client_holds_its_body_once",
 ]

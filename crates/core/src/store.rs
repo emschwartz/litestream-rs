@@ -27,12 +27,12 @@
 //! - Retrying is the caller's decision, made from the [`StoreError`] variant.
 //! - Every method returns within a deadline the implementation enforces, failing as
 //!   `Transient`; core holds no timer.
-//! - The batch methods (`read_many`, `list_many`, `created_at_many`) answer
+//! - The batch methods (`list_many`, `created_at_many`) answer
 //!   each item exactly as the single method would, one result per item in
 //!   order. Their defaults call the single method item by item, so a store
 //!   that is not concurrent (the simulator's, a directory) needs nothing.
 //!   [`ObjectStore::batch_width`] says how many items of a [`BatchKind`] a
-//!   store runs at once (a store may allow more HEADs than ranged reads);
+//!   store runs at once (a store may allow more HEADs than listings);
 //!   callers size their batches by it, so at width one nothing is fetched
 //!   ahead of need and the call sequence is the one sequential code makes.
 
@@ -433,17 +433,6 @@ impl StoreError {
     }
 }
 
-/// One ranged read of a batch: up to `len` bytes of `key` from `offset`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ReadAt {
-    /// The object.
-    pub key: FileKey,
-    /// The first byte.
-    pub offset: u64,
-    /// How many bytes, at most.
-    pub len: ReadLen,
-}
-
 /// One listing of a batch: the page of `level` strictly after `after`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ListAt {
@@ -499,8 +488,6 @@ impl ListAt {
 /// because a backend's limits differ per kind of request.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BatchKind {
-    /// [`ObjectStore::read_many`].
-    Reads,
     /// [`ObjectStore::list_many`].
     Lists,
     /// [`ObjectStore::created_at_many`].
@@ -532,6 +519,22 @@ pub trait ObjectStore: Send + Sync {
         offset: u64,
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send;
+
+    /// The object `key` from `offset` to its end, as one read the store keeps open and the
+    /// caller takes a piece at a time ([`ReadStream`]): on S3 one GET whose body is read as it
+    /// is used, so an object of any size costs one request and the memory of one piece. Nothing
+    /// is asked of the store before the first [`ReadStream::next`].
+    ///
+    /// The default reads each piece with [`Self::read`], one request a piece: what a store
+    /// whose reads cost nothing needs (memory, a directory). A store that bills by request
+    /// overrides it, and a wrapper forwards it, or its reads go back to one request a piece.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Ranged {
+            store: self,
+            key,
+            offset,
+        })
+    }
 
     /// Opens `key` for a caller that reads it in many reads, one after another (a send of a
     /// staged file), when this store would otherwise open the object again for each:
@@ -603,26 +606,20 @@ pub trait ObjectStore: Send + Sync {
     /// default, so a new store or wrapper cannot drop it by saying nothing.
     fn remove_scratch(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
+    /// Bytes this store can still take before its disk is full, when it can say: a directory
+    /// store reports the free space of its filesystem. A store with no disk of its own (memory,
+    /// a bucket) answers `None`, the default; a wrapper forwards it. The engine asks only before
+    /// it stages a whole-database copy, to report that the copy may not fit (Go does not look).
+    fn free_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// How many items of a batch of `kind` this store runs at once. A caller
     /// asks for at most this many at a time, so its memory is this many
     /// responses. One, the default, means the batch methods are sequential.
     fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
         let _ = kind;
         NonZeroUsize::MIN
-    }
-
-    /// [`Self::read`] for each item, one result per item, in order.
-    fn read_many(
-        &self,
-        reads: &[ReadAt],
-    ) -> impl Future<Output = Vec<Result<Vec<u8>, StoreError>>> + Send {
-        async move {
-            let mut out = Vec::with_capacity(reads.len());
-            for at in reads {
-                out.push(self.read(&at.key, at.offset, at.len).await);
-            }
-            out
-        }
     }
 
     /// [`Self::created_at`] for each file, one result per file, in order.
@@ -864,6 +861,40 @@ pub trait Upload: Send {
 /// A boxed future that may move between threads.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// One object read in order from an offset to its end ([`ObjectStore::read_stream`]).
+///
+/// The pieces follow each other: each starts where the one before ended. A piece is exactly
+/// the length asked for unless the object ends inside it, so a short piece is the end, as for
+/// [`ObjectStore::read`], and no read follows to learn it. A body cut off before the length
+/// the store declared for it is an error (`Transient`), never a short piece: only the end of
+/// the object is one.
+pub trait ReadStream: Send {
+    /// The next `len` bytes: fewer only at the end of the object, none past it.
+    ///
+    /// # Errors
+    /// The store's error. After one the stream is spent: a caller that goes on opens another
+    /// at the offset it reached.
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>>;
+}
+
+/// [`ObjectStore::read_stream`]'s default: one [`ObjectStore::read`] a piece.
+struct Ranged<'a, S: ?Sized> {
+    store: &'a S,
+    key: FileKey,
+    offset: u64,
+}
+
+impl<S: ObjectStore + ?Sized> ReadStream for Ranged<'_, S> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let bytes = self.store.read(&self.key, self.offset, len).await?;
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.offset = self.offset.saturating_add(read);
+            Ok(bytes)
+        })
+    }
+}
+
 /// [`Upload`] with boxed futures, so an upload of any store can be held as one type: the
 /// engine keeps a file part-way sent between ticks without naming its store. Every `Upload`
 /// is one, and `Box<dyn DynUpload>` is an `Upload` again.
@@ -941,7 +972,7 @@ impl Upload for Box<dyn DynUpload> {
 }
 
 /// Whether the store holds an object under `key`, by a one-byte read. Used where one key is
-/// named without a listing: a compaction's output key, a torn tail's key.
+/// named without a listing: a boot's refused staged file.
 ///
 /// # Errors
 /// The store's error for a read that fails other than as not found.

@@ -94,7 +94,7 @@ pub use failstop::{
 #[doc(hidden)]
 pub use fault::reporting_bugs;
 pub use fault::{
-    Backoff, BugSite, Clamped, Fault, MAX_BACKOFF, Next, OtherWriter, PersistentCause, Policy,
+    Backoff, BugSite, Clamped, DegradedCause, Fault, MAX_BACKOFF, Next, OtherWriter, Policy,
     Response, Responses, STALLED_AFTER, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall,
     StopCause, VERIFY, backoff_wait, policy, retry_wait,
 };
@@ -143,7 +143,7 @@ pub use source::{
 };
 pub use store::{
     Again, BatchKind, BoxFuture, CorruptCause, Denied, DynUpload, Flight, ListAt, Listing,
-    ListingStalled, ObjectStore, Opened, PageLimit, PartNumber, ReadAt, ReadLen, Reread, Rest,
+    ListingStalled, ObjectStore, Opened, PageLimit, PartNumber, ReadLen, ReadStream, Reread, Rest,
     Seeing, Seen, StoreError, StoreOp, Upload, WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};

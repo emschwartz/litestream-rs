@@ -668,8 +668,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: Role>(
 /// counts, so callers take the read first and call this before staging.
 ///
 /// # Errors
-/// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing, and no later sync
-/// of that WAL generation is trusted (`actor::unproven`).
+/// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing and the next step
+/// syncs again, remembering nothing (`docs/decisions/D173.md`).
 pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W) -> Result<(), Fault> {
     wal.sync().map_err(Fault::from_source)
 }

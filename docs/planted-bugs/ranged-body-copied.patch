@@ -1,11 +1,10 @@
 diff --git a/crates/store-s3/src/store.rs b/crates/store-s3/src/store.rs
-index 0dba6e5..21e92df 100644
 --- a/crates/store-s3/src/store.rs
 +++ b/crates/store-s3/src/store.rs
-@@ -701,7 +701,7 @@ impl<T: Transport> Inner<T> {
-                 return Err(invalid_data(op));
-             }
-         }
+@@ -701,7 +701,7 @@
+         let Some(partial) = Self::range_head(key, offset, &response)? else {
+             return Ok(Vec::new());
+         };
 -        let mut body = response.into_body();
 +        let mut body = response.body().to_vec();
          if !partial {

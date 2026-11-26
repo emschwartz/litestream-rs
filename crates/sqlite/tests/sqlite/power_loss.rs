@@ -6,9 +6,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
-use lsr_core::{
-    Event, Fault as EngineFault, PersistentCause, Responses, SnapshotCause, Task, Tick,
-};
+use lsr_core::{DegradedCause, Event, Fault as EngineFault, Responses, SnapshotCause, Task, Tick};
 use lsr_ltx::PageSize;
 use lsr_sim::RecorderEvent;
 use lsr_sqlite::Sqlite;
@@ -322,7 +320,7 @@ fn a_failed_wal_sync_stages_nothing_then_goes_on_and_a_power_loss_snapshots() {
             Tick::Ran {
                 event: Event::Degraded {
                     task: Task::Sync,
-                    cause: PersistentCause::WalSyncFailed,
+                    cause: DegradedCause::WalSyncFailed,
                     ..
                 },
                 ..
@@ -333,7 +331,7 @@ fn a_failed_wal_sync_stages_nothing_then_goes_on_and_a_power_loss_snapshots() {
     assert_eq!(rig.vfs().fired().len(), 1, "the engine's sync failed once");
     assert_eq!(
         rig.actor().degraded(Task::Sync).map(|d| d.cause),
-        Some(PersistentCause::WalSyncFailed),
+        Some(DegradedCause::WalSyncFailed),
         "health shows it"
     );
     nothing_unproven_staged(&rig, before);

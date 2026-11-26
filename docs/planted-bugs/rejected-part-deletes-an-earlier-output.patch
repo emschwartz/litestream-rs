@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1214,7 +1214,7 @@
+             CorruptCause::CommitSizeMismatch { removed, .. } => !*removed,
+             CorruptCause::ChecksumMismatch { part } => match mode {
+                 WriteMode::Replace => true,
+-                WriteMode::New => part.is_none(),
++                WriteMode::New => true,
+             },
+             CorruptCause::NotARegularFile
+             | CorruptCause::TimestampOutOfRange

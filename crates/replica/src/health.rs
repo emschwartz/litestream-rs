@@ -1,5 +1,5 @@
 //! What a replicator reports: a [`Health`] snapshot the thread writes after every tick, and
-//! the outcomes of the first boot ([`Booted`]) and of a stop ([`Stopped`]).
+//! the outcomes of the first boot ([`Readiness`]) and of a stop ([`StopOutcome`]).
 //!
 //! A snapshot is a copy: reading it takes one lock for as long as a clone, never across I/O.
 //!
@@ -10,7 +10,7 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, FinalRetention, FinalSnapshot, Gate, PersistentCause,
+    AppCheckpoint, AppCheckpoints, Degraded, DegradedCause, FinalRetention, FinalSnapshot, Gate,
     Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, WhyBlocked, WorkCounts,
 };
 use lsr_ltx::{Timestamp, Txid};
@@ -44,11 +44,11 @@ pub enum Gone {
 
 /// How the first boot went, as [`crate::Replicator::wait_booted`] reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Booted {
+pub enum Readiness {
     /// The replica was listed and the position recovered.
-    Booted,
+    Ready,
     /// The boot keeps failing with this cause; it keeps trying.
-    Degraded(PersistentCause),
+    Degraded(DegradedCause),
     /// The wait ran out first.
     TimedOut,
     /// The replicator stopped before it booted.
@@ -59,7 +59,7 @@ pub enum Booted {
 
 /// How a stop ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Stopped {
+pub enum StopOutcome {
     /// Everything committed before the stop is on the replica, through `txid` (`None` when the
     /// database never committed anything).
     Drained {
@@ -82,6 +82,7 @@ pub enum Stopped {
 
 /// One store operation's totals.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpCounters {
     /// Calls made.
     pub calls: u64,
@@ -93,6 +94,7 @@ pub struct OpCounters {
 
 /// Every store operation's totals (Go's per-operation replica metrics).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StoreCounters {
     /// Listing pages.
     pub list: OpCounters,
@@ -116,6 +118,7 @@ pub struct StoreCounters {
 
 /// Running totals since the replicator started.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Counters {
     /// Ticks run.
     pub ticks: u64,
@@ -153,15 +156,16 @@ pub struct Counters {
 
 /// One copy of the replicator's state, written by its thread after every tick.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Health {
     /// When the thread last wrote this; a stale value means the thread is stuck inside a
     /// blocking call (one store request can take up to its own deadline).
     pub reported_at: Timestamp,
     /// What it is doing.
     pub phase: Phase,
-    /// Per task, in [`Task::ALL`] order (sync, checkpoint, upload, prune, maintenance): the
-    /// persistent failure it keeps retrying, if any.
-    pub degraded: [Option<Degraded>; 5],
+    /// Per task, in [`Task::ALL`] order: read through [`Health::degraded`] and
+    /// [`Health::task`].
+    pub(crate) degraded: [Option<Degraded>; 5],
     /// The newest transaction staged locally, and when the thread first saw it.
     pub synced: Option<(Txid, Timestamp)>,
     /// The newest transaction confirmed on the replica, and when the thread first saw it.
@@ -191,7 +195,7 @@ pub struct Health {
     pub verification: Verification,
     /// Fail-stop (`Config::if_replication_stops`): whether replication has tripped, and what
     /// that does to the application.
-    pub held_by: FailStop,
+    pub fail_stop: FailStop,
     /// Whether the replicator holds the application's writes now, and why.
     pub writes: Writes,
     /// The retention pass a stop was asked to end with
@@ -202,16 +206,62 @@ pub struct Health {
     pub final_snapshot: FinalSnapshot,
 }
 
-/// Fail-stop's state (`lsr_core::failstop`).
+/// Fail-stop's state (`lsr_core::failstop`): whether replication has tripped, and what that
+/// does to the application under `Config::if_replication_stops`. While it is
+/// [`FailStop::Held`], and while it is [`FailStop::Pending`] under `hold-start` and
+/// `stop-app`, the replicator holds the application's writes ([`Health::writes`]).
+///
+/// A trip is an unsafe stop, a commit off the replica past `Config::max_unreplicated_age`, or
+/// a refusal by the store before the first listing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FailStop {
-    /// Why replication tripped, if it has: an unsafe stop, a commit off the replica past
-    /// `Config::max_unreplicated_age`, or a refusal by the store before the first listing.
-    pub trip: Option<Trip>,
-    /// What the trip does to the application under `Config::if_replication_stops`. While it is
-    /// [`Gate::Held`], and while it is [`Gate::Pending`] under `hold-start` and `stop-app`,
-    /// the replicator holds the application's writes ([`Health::writes`]).
-    pub gate: Gate,
+pub enum FailStop {
+    /// The boot has not been judged yet, and nothing has tripped.
+    Pending,
+    /// The application may run: nothing tripped, or the trip only reports under the mode.
+    Allowed {
+        /// The trip that only reports, if any.
+        trip: Option<Trip>,
+    },
+    /// The trip holds the application.
+    Held(Trip),
+}
+
+impl FailStop {
+    /// The engine's trip and gate, which agree by construction: a held gate holds the trip,
+    /// and a pending one has none.
+    pub(crate) fn of(trip: Option<Trip>, gate: Gate) -> Self {
+        match gate {
+            Gate::Pending => {
+                debug_assert!(trip.is_none(), "a trip judges the boot");
+                Self::Pending
+            }
+            Gate::Allowed => Self::Allowed { trip },
+            Gate::Held(held) => {
+                debug_assert_eq!(trip, Some(held), "the gate holds the trip it was given");
+                Self::Held(held)
+            }
+        }
+    }
+
+    /// Why replication tripped, if it has.
+    #[must_use]
+    pub const fn trip(self) -> Option<Trip> {
+        match self {
+            Self::Pending => None,
+            Self::Allowed { trip } => trip,
+            Self::Held(trip) => Some(trip),
+        }
+    }
+
+    /// The engine's gate for this state.
+    #[must_use]
+    pub const fn gate(self) -> Gate {
+        match self {
+            Self::Pending => Gate::Pending,
+            Self::Allowed { .. } => Gate::Allowed,
+            Self::Held(trip) => Gate::Held(trip),
+        }
+    }
 }
 
 /// Whether the replicator holds the application's writes: a write transaction of its own on
@@ -232,6 +282,7 @@ pub enum Writes {
 /// What the scheduled verify found: the replica's listing checked, and a restore of the
 /// transaction the replica holds compared with the live database at that transaction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Verification {
     /// When the last run ended; `None` before the first, and always while the verify is off.
     pub last_run: Option<Timestamp>,
@@ -251,6 +302,7 @@ pub struct Verification {
 
 /// Scheduled verify runs, by how they ended.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyRuns {
     /// The restore equalled the live database.
     pub passed: u64,
@@ -265,6 +317,7 @@ pub struct VerifyRuns {
 
 /// A scheduled verify that did not pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyFailure {
     /// The first failing run of this stretch.
     pub since: Timestamp,
@@ -328,10 +381,7 @@ impl Health {
             app_checkpoints_ran: 0,
             app_checkpoints: AppCheckpoints::NONE,
             counters: Counters::default(),
-            held_by: FailStop {
-                trip: None,
-                gate: Gate::Pending,
-            },
+            fail_stop: FailStop::Pending,
             writes: Writes::Allowed,
             verification: Verification::default(),
             final_retention: FinalRetention::NotAsked,
@@ -344,6 +394,15 @@ impl Health {
     pub fn task(&self, task: Task) -> Option<Degraded> {
         let index = Task::ALL.iter().position(|each| *each == task)?;
         self.degraded.get(index).copied().flatten()
+    }
+
+    /// Each task that is degraded, with the persistent failure it keeps retrying, in
+    /// [`Task::ALL`] order (sync, checkpoint, upload, prune, maintenance).
+    pub fn degraded(&self) -> impl Iterator<Item = (Task, Degraded)> + '_ {
+        Task::ALL
+            .into_iter()
+            .zip(self.degraded)
+            .filter_map(|(task, degraded)| Some((task, degraded?)))
     }
 
     /// Whether any task is degraded, or the scheduled verify is failing.
@@ -448,5 +507,49 @@ mod tests {
             assert!(text.contains(words), "{text}");
         }
         assert!(!stalled.is_degraded());
+    }
+}
+#[cfg(test)]
+mod degraded_tests {
+    use super::*;
+    use lsr_core::DegradedCause;
+
+    /// The iterator names each degraded task by its slot, and only those.
+    #[test]
+    fn degraded_lists_each_degraded_task_by_name() {
+        let at = Timestamp::from_unix_millis(1_700_000_000_000);
+        let mut health = Health::new(at);
+        assert_eq!(health.degraded().count(), 0);
+        let upload = Degraded {
+            cause: DegradedCause::StoreRefused,
+            since: at,
+            retries: 3,
+        };
+        let index = Task::ALL
+            .iter()
+            .position(|task| *task == Task::Upload)
+            .unwrap();
+        health.degraded[index] = Some(upload);
+        assert_eq!(
+            health.degraded().collect::<Vec<_>>(),
+            vec![(Task::Upload, upload)]
+        );
+        assert_eq!(health.task(Task::Upload), Some(upload));
+        assert!(health.is_degraded());
+    }
+
+    /// A held gate and a pending one are read back as the engine judged them.
+    #[test]
+    fn fail_stop_reads_back_the_engine_gate_and_trip() {
+        let trip = Trip::Stopped(StopCause::OtherWriter);
+        let held = FailStop::of(Some(trip), Gate::Held(trip));
+        assert_eq!((held.trip(), held.gate()), (Some(trip), Gate::Held(trip)));
+        let reported = FailStop::of(Some(trip), Gate::Allowed);
+        assert_eq!(
+            (reported.trip(), reported.gate()),
+            (Some(trip), Gate::Allowed)
+        );
+        let pending = FailStop::of(None, Gate::Pending);
+        assert_eq!((pending.trip(), pending.gate()), (None, Gate::Pending));
     }
 }

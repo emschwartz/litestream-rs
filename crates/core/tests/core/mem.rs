@@ -4,8 +4,8 @@
 //! a plan holds at once, and each gate asserts the law the code documents rather than
 //! a figure from one machine:
 //!
-//! - Restore memory is one read window (the store's read width times the 4 MiB
-//!   chunk), whatever the database's size and however long the chain. The gate runs a
+//! - Restore memory is one 4 MiB chunk of the file being read (each file is one stream,
+//!   taken a chunk at a time), whatever the database's size and however long the chain. The gate runs a
 //!   size N and a size 4N, so a buffer that grows with the file shows as a difference,
 //!   and also caps the peak by the constants the window is made of.
 //! - A snapshot is linear in pages and in nothing else: the page checksum table and the
@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs::File;
 use std::io::{self, BufWriter, Cursor, Write};
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroU32;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -35,10 +35,10 @@ use crate::heap::{Counting, Peak, peak_of};
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    AsOfPlanner, BatchKind, CreatedAt, DatabaseSink, FakeWal, FileInfo, FileKey, Inventory,
-    KeyTarget, Level, ListedTime, Listing, ObjectStore, PageChecksumTable, PageLimit, PageSource,
-    PlanOutcome, ReadLen, RestoreTarget, SourceError, Step, StepEnd, StoreError, SyncConfig,
-    Synced, Upload, build_listing, plan, restore, sync_step,
+    AsOfPlanner, CreatedAt, DatabaseSink, FakeWal, FileInfo, FileKey, Inventory, KeyTarget, Level,
+    ListedTime, Listing, ObjectStore, PageChecksumTable, PageLimit, PageSource, PlanOutcome,
+    ReadLen, RestoreTarget, SourceError, Step, StepEnd, StoreError, SyncConfig, Synced, Upload,
+    build_listing, plan, restore, sync_step,
 };
 use lsr_ltx::{
     DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
@@ -142,16 +142,14 @@ fn write_file(
 pub struct Spool {
     _dir: tempfile::TempDir,
     files: Vec<(FileInfo, File)>,
-    width: usize,
     pages: u64,
 }
 
 impl Spool {
     /// A snapshot of `pages` pages at transaction 1, then `overlays` level-0 files
     /// (transactions 2, 3, ...) that each rewrite `per_overlay` pages spread over the
-    /// database. `width` is the read width the store reports, so the restore's window
-    /// is `width` chunks.
-    pub fn build(pages: u32, overlays: u64, per_overlay: u32, width: usize) -> Self {
+    /// database.
+    pub fn build(pages: u32, overlays: u64, per_overlay: u32) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
         let mut files = Vec::new();
@@ -178,7 +176,6 @@ impl Spool {
         Self {
             _dir: dir,
             files,
-            width,
             pages: written,
         }
     }
@@ -283,13 +280,6 @@ impl ObjectStore for Spool {
     async fn delete(&self, _keys: &[FileKey]) -> Result<(), StoreError> {
         Ok(())
     }
-
-    fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
-        match kind {
-            BatchKind::Reads => NonZeroUsize::new(self.width).unwrap(),
-            BatchKind::Lists | BatchKind::ResolvedCreatedAt => NonZeroUsize::MIN,
-        }
-    }
 }
 
 /// A destination that keeps a page count and nothing else.
@@ -335,32 +325,30 @@ pub fn restore_peak(store: &Spool) -> (Peak, u64) {
     (peak, pages.load(Ordering::Relaxed))
 }
 
-/// What restore may hold beyond the read window (`width` chunks, one per read in
-/// flight): the decoder's one page, the index entry being checked and the result.
+/// What restore may hold beyond the chunk it reads: the decoder's one page, the index entry
+/// being checked and the result.
 pub const RESTORE_MARGIN: usize = MIB;
 
 /// How much two peaks may differ and still be "flat": allocator rounding and the
 /// bookkeeping of a longer run, never a buffer.
 pub const FLAT_SLACK: usize = 256 * KIB;
 
-/// The most a restore of `width` chunks may hold, from the constants it is made of.
-pub const fn restore_cap(width: usize) -> usize {
-    width * RESTORE_CHUNK + RESTORE_MARGIN
-}
+/// The most a restore may hold, from the constants it is made of.
+pub const RESTORE_CAP: usize = RESTORE_CHUNK + RESTORE_MARGIN;
 
 /// Checks the restore law over two databases of `small` and `4 * small` pages, built
 /// one after the other so the disk holds one at a time.
-pub fn assert_restore_flat_in_size(small: u32, width: usize) {
+pub fn assert_restore_flat_in_size(small: u32) {
     let measure = |pages: u32| {
-        let spool = Spool::build(pages, 3, 16, width);
+        let spool = Spool::build(pages, 3, 16);
         assert!(
-            spool.bytes() > u64::try_from(restore_cap(width)).unwrap(),
+            spool.bytes() > u64::try_from(RESTORE_CAP).unwrap(),
             "the database must be larger than the window, or the gate cannot see a buffer"
         );
         let (peak, written) = restore_peak(&spool);
         assert_eq!(written, spool.pages());
         eprintln!(
-            "restore width {width}: {} MiB -> {} KiB",
+            "restore: {} MiB -> {} KiB",
             spool.bytes() >> 20,
             peak.extra >> 10
         );
@@ -369,9 +357,8 @@ pub fn assert_restore_flat_in_size(small: u32, width: usize) {
     let few = measure(small);
     let many = measure(small * 4);
     assert!(
-        few <= restore_cap(width) && many <= restore_cap(width),
-        "{few} and {many} bytes, over the cap {}",
-        restore_cap(width)
+        few <= RESTORE_CAP && many <= RESTORE_CAP,
+        "{few} and {many} bytes, over the cap {RESTORE_CAP}"
     );
     assert!(
         many <= few + FLAT_SLACK,
@@ -382,7 +369,7 @@ pub fn assert_restore_flat_in_size(small: u32, width: usize) {
 
 #[test]
 fn restore_peak_heap_is_flat_in_database_size() {
-    assert_restore_flat_in_size(4096, 2);
+    assert_restore_flat_in_size(4096);
 }
 
 /// The same bytes in one file and in sixty-four: a chain holds no per-file state that
@@ -390,8 +377,8 @@ fn restore_peak_heap_is_flat_in_database_size() {
 #[test]
 fn restore_peak_heap_is_flat_in_chain_length() {
     let pages = 4096;
-    let one = Spool::build(pages, 0, 16, 2);
-    let long = Spool::build(pages, 63, 64, 2);
+    let one = Spool::build(pages, 0, 16);
+    let long = Spool::build(pages, 63, 64);
     let (one_peak, _) = restore_peak(&one);
     let (long_peak, long_pages) = restore_peak(&long);
     eprintln!(
@@ -406,7 +393,7 @@ fn restore_peak_heap_is_flat_in_chain_length() {
         one_peak.extra,
         long_peak.extra
     );
-    assert!(long_peak.extra <= restore_cap(2));
+    assert!(long_peak.extra <= RESTORE_CAP);
 }
 
 /// A database past 1 GiB has no lock page, so the fixtures past it must leave it out:
@@ -770,4 +757,9 @@ fn the_planning_fixture_has_the_shape_it_claims() {
     assert_eq!((count(0), count(1), count(2), count(9)), (900, 90, 9, 10));
     let by_level: BTreeMap<u8, usize> = [0, 1, 2, 9].into_iter().map(|l| (l, count(l))).collect();
     assert_eq!(by_level.values().sum::<usize>(), inventory.files().len());
+}
+/// A store that says nothing of its disk is a store with no free-space answer: the default.
+#[test]
+fn a_store_that_does_not_say_has_no_free_space_answer() {
+    assert_eq!(Spool::build(2, 0, 1).free_bytes(), None);
 }
