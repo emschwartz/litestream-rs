@@ -2801,7 +2801,6 @@ impl Runner {
             return;
         }
         for kind in [
-            lsr_core::BatchKind::Reads,
             lsr_core::BatchKind::Lists,
             lsr_core::BatchKind::ResolvedCreatedAt,
         ] {

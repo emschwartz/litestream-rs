@@ -1,0 +1,8 @@
+# A restore's stream that failed part way is opened again from the object's first byte, so the
+# decoder is handed bytes it already had.
+name = "stream-resumes-from-the-start"
+fix = "claude/restore-requests"
+package = "lsr-core"
+tests = [
+    "retry::tests::a_stream_that_fails_goes_on_from_the_bytes_it_handed_out",
+]

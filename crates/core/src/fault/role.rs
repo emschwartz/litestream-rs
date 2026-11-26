@@ -21,7 +21,7 @@ use super::Fault;
 use crate::compact::CompactError;
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, ListAt, Listing, ObjectStore, Opened, PageLimit, ReadAt, ReadLen, StoreError,
+    BatchKind, ListAt, Listing, ObjectStore, Opened, PageLimit, ReadLen, ReadStream, StoreError,
     WriteMode,
 };
 
@@ -124,6 +124,10 @@ macro_rules! pass_through {
                 self.0.read(key, offset, len).await
             }
 
+            fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+                self.0.read_stream(key, offset)
+            }
+
             async fn open(&self, key: &FileKey) -> Result<Option<Box<dyn Opened>>, StoreError> {
                 self.0.open(key).await
             }
@@ -160,10 +164,6 @@ macro_rules! pass_through {
 
             fn batch_width(&self, kind: BatchKind) -> NonZeroUsize {
                 self.0.batch_width(kind)
-            }
-
-            async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-                self.0.read_many(reads).await
             }
 
             async fn created_at_many(

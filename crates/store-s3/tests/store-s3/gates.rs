@@ -2,16 +2,16 @@
 //! sequential round trips are on its critical path.
 //!
 //! Every slow path the store has won back came from the same mistake in
-//! reverse: independent requests sent one after another (ranged reads of a
-//! restore, parts of a multipart upload, the levels of a listing, the HEADs
-//! that read created-at times). Wall time is round trips times latency, so a
+//! reverse: independent requests sent one after another (parts of a multipart
+//! upload, the levels of a listing, the HEADs that read created-at times), or one
+//! request cut into many (a restore's file read a chunk per GET). Wall time is round trips times latency, so a
 //! serial path sends the same requests and costs many more round trips. A
 //! count alone cannot see it. These tests run each representative operation
 //! through a [`Link`] (a virtual clock, nothing sleeps) and hold the requests
 //! per kind and the waves to a bound derived from the design, stated beside
 //! each test. Cutting a batch to one request (`READ_CONCURRENCY`,
-//! `CREATION_TIME_CONCURRENCY` or an upload's concurrency set to 1) breaks the
-//! matching gate.
+//! `CREATION_TIME_CONCURRENCY` or an upload's concurrency set to 1), or a restore's
+//! stream to a GET per chunk, breaks the matching gate.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -45,7 +45,7 @@ const LEVELS: usize = 10;
 /// change of either shows as a failing count here.
 const RESTORE_CHUNK: u64 = 4 * 1024 * 1024;
 
-/// Ranged reads and listing pages in flight at once, as designed. Restated, not
+/// Listing pages in flight at once, as designed. Restated, not
 /// read from the store's constants, so shrinking a constant cannot shrink the bound
 /// with it; the first test pins the two together.
 const READ_WIDTH: usize = 8;
@@ -158,13 +158,13 @@ fn put(store: &impl ObjectStore, key: &FileKey, bytes: &[u8]) {
     });
 }
 
-// A restore reads each file in chunks of RESTORE_CHUNK, up to READ_CONCURRENCY
-// of one file's chunks side by side. Requests: one GET per chunk of every
-// file in the chain, nothing more (no empty read to find an end). Depth: the
-// listing, then ceil(chunks / width) waves per file; files are applied in
-// order, so their waves add. Serial reading costs the chunk count (14 here).
+// A restore reads each file through one GET, its body taken a chunk of RESTORE_CHUNK at a
+// time as the decoder needs it. Requests: one GET per file of the chain, however many chunks
+// it spans, nothing more (no empty read to find an end). Depth: the listing, then one round
+// trip per file; files are applied in order, so their round trips add. Reading a GET per chunk
+// costs the chunk count (15 GETs here).
 #[test]
-fn restore_reads_chunks_side_by_side() {
+fn restore_reads_each_file_in_one_get() {
     let link = Link::new(fake());
     let store =
         S3Store::with_transport(config(), credentials(), link.clone(), FakeClock::new(now()))
@@ -178,28 +178,29 @@ fn restore_reads_chunks_side_by_side() {
     for (key, bytes) in &files {
         put(&store, key, bytes);
     }
-    let chunks: Vec<usize> = files
+    let chunks: usize = files
         .iter()
         .map(|(_, bytes)| waves(bytes.len(), usize::try_from(RESTORE_CHUNK).unwrap()))
-        .collect();
+        .sum();
+    assert!(
+        chunks > files.len(),
+        "the files span more chunks than files"
+    );
     let sink = MemSink::new();
     let (restored, tally) =
         link.measure(|| block_on(restore(&store, RestoreTarget::Latest, sink.clone())).unwrap());
     assert_eq!(restored.files(), 3);
-    println!("restore {tally:?} chunks {chunks:?}");
-    let total: usize = chunks.iter().sum();
-    assert_eq!(tally.get, total, "one GET per chunk");
+    println!("restore {tally:?} chunks {chunks}");
+    assert_eq!(tally.get, files.len(), "one GET per file");
     assert_eq!(tally.head, 0, "Latest reads no created-at time");
-    let width = READ_WIDTH;
-    let reads: usize = chunks.iter().map(|n| waves(*n, width)).sum();
-    let listing = waves(LEVELS, width);
-    let depth = listing + reads;
+    let listing = waves(LEVELS, READ_WIDTH);
+    let depth = listing + files.len();
     assert!(
         tally.rounds <= depth,
-        "{} round trips, bound {depth} = {listing} listing + {reads} reads ({tally:?})",
-        tally.rounds
+        "{} round trips, bound {depth} = {listing} listing + {} files ({tally:?})",
+        tally.rounds,
+        files.len()
     );
-    assert!(tally.widest <= width, "{} in flight", tally.widest);
 }
 
 // A multipart upload keeps up to `concurrency` parts in flight while it fills the next.

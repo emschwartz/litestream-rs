@@ -28,7 +28,7 @@ use std::task::{Context, Poll};
 use lsr_core::WriteMode;
 use lsr_core::{
     Again, BatchKind, BoxFuture, CorruptCause, Entropy, FileInfo, FileKey, Flight, Level, ListAt,
-    Listing, ObjectStore, Opened, PageLimit, ReadAt, ReadLen, Reread, Rest, SeededEntropy, Seen,
+    Listing, ObjectStore, Opened, PageLimit, ReadLen, Reread, Rest, SeededEntropy, Seen,
     StoreError, StoreOp, Upload,
 };
 use lsr_core::{Clock, CreatedAt, FakeClock};
@@ -150,7 +150,7 @@ struct FaultState {
     // Objects a flipped byte reached on a read, once per such read.
     flipped: Vec<FileKey>,
     // Reads, listings and created-at times one batch may hold.
-    widths: [NonZeroUsize; 3],
+    widths: [NonZeroUsize; 2],
     // Batch calls that held more than one item.
     batched: u32,
 }
@@ -402,7 +402,7 @@ impl<S> Faults<S> {
             short: Vec::new(),
             flipped: Vec::new(),
             rejected: Vec::new(),
-            widths: [NonZeroUsize::MIN; 3],
+            widths: [NonZeroUsize::MIN; 2],
             batched: 0,
         };
         Self {
@@ -471,9 +471,8 @@ impl<S> Faults<S> {
 
 const fn width_slot(kind: BatchKind) -> usize {
     match kind {
-        BatchKind::Reads => 0,
-        BatchKind::Lists => 1,
-        BatchKind::ResolvedCreatedAt => 2,
+        BatchKind::Lists => 0,
+        BatchKind::ResolvedCreatedAt => 1,
     }
 }
 
@@ -662,16 +661,6 @@ impl<S: ObjectStore> ObjectStore for Faults<S> {
     // The batch methods run last item first and return results in order: a
     // real store sends a batch side by side and it finishes in some other
     // order; this one is fixed, so a run replays.
-
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        self.note_batch(reads.len());
-        let mut out = Vec::with_capacity(reads.len());
-        for at in reads.iter().rev() {
-            out.push(self.read(&at.key, at.offset, at.len).await);
-        }
-        out.reverse();
-        out
-    }
 
     async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
         self.note_batch(files.len());

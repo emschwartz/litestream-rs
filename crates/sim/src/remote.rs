@@ -42,8 +42,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use lsr_core::conformance::block_on;
 use lsr_core::{
     BatchKind, Clock, CreatedAt, Entropy, FakeClock, FileInfo, FileKey, Flight, Level, ListAt,
-    Listing, MemStore, ObjectStore, PageLimit, ReadAt, ReadLen, Reread, Rest, SeededEntropy,
-    StoreError, Upload, WriteMode, parse_file_name,
+    Listing, MemStore, ObjectStore, PageLimit, ReadLen, Reread, Rest, SeededEntropy, StoreError,
+    Upload, WriteMode, parse_file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 use lsr_store_s3::{
@@ -990,13 +990,6 @@ impl ObjectStore for RemoteBackend {
         match self {
             Self::Mem(s) => s.batch_width(kind),
             Self::S3(s) => s.store.batch_width(kind),
-        }
-    }
-
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        match self {
-            Self::Mem(s) => s.read_many(reads).await,
-            Self::S3(s) => s.store.read_many(reads).await,
         }
     }
 
