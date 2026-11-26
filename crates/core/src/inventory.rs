@@ -699,6 +699,92 @@ mod tests {
         }
     }
 
+    /// A store holding level 9 files, `l0` level-0 files and one level-1 file starting far past them
+    /// all, behind a store that runs `width` pages of a batch at once.
+    fn listed_store(l9: u64, l0: u64, width: usize) -> crate::mem::wrapped::Wrapped {
+        let store = MemStore::new();
+        block_on(async {
+            for n in 1..=l9 {
+                put(&store, key(9, 1, n)).await;
+            }
+            for n in 1..=l0 {
+                put(&store, key(0, n, n)).await;
+            }
+            put(&store, key(1, 9000, 9000)).await;
+        });
+        let mut wrapped = crate::mem::wrapped::Wrapped::new(store);
+        wrapped.width = width;
+        wrapped
+    }
+
+    #[test]
+    fn a_round_lists_no_more_levels_than_the_store_runs_at_once() {
+        let store = listed_store(3, 5, 3);
+        for level in 2..=7 {
+            block_on(put_into(&store, key(level, 1, 2)));
+        }
+        let inv = block_on(Inventory::load(&store)).unwrap();
+        assert_eq!(inv.files().len(), 3 + 5 + 1 + 6);
+        let batches = store.batches.lock().unwrap().clone();
+        assert!(batches.iter().all(|&len| len <= 3), "{batches:?}");
+        assert_eq!(batches.iter().sum::<usize>(), 10);
+    }
+
+    async fn put_into(store: &crate::mem::wrapped::Wrapped, k: FileKey) {
+        let at = Timestamp::from_unix_millis(7);
+        let mut up = store
+            .begin_upload(&k, at, WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(b"x").await.unwrap();
+        up.commit().await.unwrap();
+    }
+
+    #[test]
+    fn a_first_look_lists_level_nine_whole_and_one_page_of_every_other_level() {
+        // Two pages of snapshots and of level 0.
+        let store = listed_store(1500, 1500, 1);
+        let mut listing = block_on(super::Listing::begin(&store)).unwrap();
+        let held = listing.inventory().unwrap();
+        assert_eq!(held.level(Level::SNAPSHOT).len(), 1500);
+        let first_page = held.level(Level::ZERO).len();
+        assert!(first_page > 0 && first_page < 1500, "{first_page}");
+        assert_eq!(held.level(Level::new(1).unwrap()).len(), 1);
+        assert!(!listing.is_complete());
+        // Level 0 is listed to its first page: a chain ending at 10 needs nothing more of it, one
+        // ending in the second page needs its next page.
+        let beyond = Txid::new(u64::try_from(first_page).unwrap()).unwrap();
+        assert!(listing.is_past(Txid::new(10).unwrap()));
+        assert!(!listing.is_past(beyond));
+        // Nothing is wanted past a chain that needs nothing: no request is made.
+        let requests = || store.batches.lock().unwrap().iter().sum::<usize>();
+        let asked = requests();
+        block_on(listing.advance(&store, Scope::Past(Txid::new(10).unwrap()))).unwrap();
+        assert_eq!(requests(), asked);
+        // A chain in the second page lists it, and only level 0 (the one level behind).
+        block_on(listing.advance(&store, Scope::Past(beyond))).unwrap();
+        assert_eq!(requests(), asked + 1);
+        assert_eq!(listing.inventory().unwrap().level(Level::ZERO).len(), 1500);
+        assert!(listing.is_complete());
+        assert!(listing.is_past(Txid::new(1500).unwrap()));
+    }
+
+    #[test]
+    fn a_levels_end_is_read_from_its_own_files() {
+        // Level 1 holds one file starting at 9000: it must not stand for level 0's last file.
+        let store = listed_store(1, 1500, 1);
+        let listing = block_on(super::Listing::begin(&store)).unwrap();
+        assert!(!listing.is_past(Txid::new(1400).unwrap()));
+    }
+
+    #[test]
+    fn a_complete_listing_is_past_every_chain() {
+        let store = listed_store(2, 3, 1);
+        let listing = block_on(super::Listing::begin(&store)).unwrap();
+        assert!(listing.is_complete());
+        assert!(listing.is_past(Txid::MAX));
+    }
+
     #[test]
     fn a_cursor_that_does_not_advance_is_a_typed_give_up() {
         let got = block_on(Inventory::load(&Stuck));

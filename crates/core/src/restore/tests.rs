@@ -647,6 +647,10 @@ fn an_early_instant_stops_listing_each_level_near_it() {
 #[test]
 fn an_instant_past_the_first_page_lists_on_without_reading_a_created_at_twice() {
     let store = long_replica(1200, 2500);
+    // Too new for the instant, listed on the first page, passing every chain's end: a plan over
+    // that page alone would take the instant to fall inside it, where the whole replica shows
+    // the level-0 file for 1201 dating the end.
+    put(&store, 1, 5, 1300, b"junk");
     let (result, _) = run(
         &store,
         RestoreTarget::AsOf(Timestamp::from_unix_millis(1_200_500)),
@@ -656,9 +660,9 @@ fn an_instant_past_the_first_page_lists_on_without_reading_a_created_at_twice() 
     // Level 0 needed its second page, and no other level did.
     assert_eq!(store.list_calls(), 11);
     assert_eq!(restored.created_at_read(), store.created_at_calls());
-    // The 1,200 files of the chain, then the two files that touch its end and are too new:
-    // the level-0 file for 1201 and the level-1 file from it.
-    assert_eq!(store.created_at_calls(), 1202);
+    // The 1,200 files of the chain, then the three files that touch its end and are too new:
+    // the level-0 file for 1201 and the two level-1 files that reach past it.
+    assert_eq!(store.created_at_calls(), 1203);
 }
 
 #[test]

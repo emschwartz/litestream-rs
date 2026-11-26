@@ -9,7 +9,10 @@ use lsr_ltx::{Timestamp, TxidRange};
 use super::MemStore;
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level};
 use crate::store::WriteMode;
-use crate::store::{Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload};
+use crate::store::{
+    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadLen, StoreError, Upload,
+};
+use std::num::NonZeroUsize;
 
 /// A store whose files can vanish at the moment they are read, lie about
 /// their size, and whose reads are counted.
@@ -30,6 +33,10 @@ pub(crate) struct Wrapped {
     /// A put in flight: it commits right after a read of its key has found nothing, as R2
     /// allows (a 404 is not final with respect to an earlier put whose outcome is unknown).
     pub(crate) put_after_miss: Mutex<Option<(FileKey, Vec<u8>)>>,
+    /// How many pages of a batch the store runs at once ([`ObjectStore::batch_width`]).
+    pub(crate) width: usize,
+    /// The size of each `list_many` batch asked of it, in order.
+    pub(crate) batches: Mutex<Vec<usize>>,
 }
 
 impl Wrapped {
@@ -51,6 +58,8 @@ impl Wrapped {
             hide_once: Mutex::new(BTreeSet::new()),
             put_after_list: Mutex::new(VecDeque::new()),
             put_after_miss: Mutex::new(None),
+            width: 1,
+            batches: Mutex::new(Vec::new()),
         }
     }
 
@@ -67,6 +76,24 @@ impl ObjectStore for Wrapped {
     /// Forwards to the store it wraps.
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         self.inner.remove_scratch().await
+    }
+
+    fn batch_width(&self, _kind: BatchKind) -> NonZeroUsize {
+        NonZeroUsize::new(self.width).unwrap_or(NonZeroUsize::MIN)
+    }
+
+    async fn list_many(
+        &self,
+        pages: &[ListAt],
+        limit: PageLimit,
+    ) -> Vec<Result<Listing, StoreError>> {
+        assert!(pages.len() <= self.width, "a batch wider than the store");
+        self.batches.lock().unwrap().push(pages.len());
+        let mut out = Vec::with_capacity(pages.len());
+        for at in pages {
+            out.push(self.list(at.level, at.after, limit).await);
+        }
+        out
     }
 
     async fn list(
