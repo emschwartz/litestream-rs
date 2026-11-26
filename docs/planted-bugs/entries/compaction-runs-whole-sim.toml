@@ -1,0 +1,8 @@
+# The simulator's per-tick bound sees a compaction run whole in one tick: its first slice hands
+# the replica the whole output (crates/sim/src/cost.rs, crates/sim/src/resources.rs).
+name = "compaction-runs-whole-sim"
+patch = "compaction-runs-whole"
+fix = "plant"
+package = "lsr-sim"
+test_bin = "sim"
+tests = ["liveness::commits_made_during_a_large_compaction_reach_the_replica_in_time"]

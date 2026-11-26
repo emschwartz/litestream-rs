@@ -79,6 +79,15 @@ pub enum Bound {
     SliceBytes,
     /// Slices of a staged file sent in a row while a commit waited for the WAL step.
     SlicesAhead,
+    /// Microseconds one tick's replica calls take at the run's prices (`crate::cost`).
+    RemoteTickMicros,
+    /// Microseconds one tick's staging calls take at the run's prices.
+    StagingTickMicros,
+    /// Milliseconds from an application commit, the replica caught up, to the replica
+    /// holding a newer transaction, in the healthy tail (`run::tail`).
+    CommitLagMillis,
+    /// Bytes the healthy tail handed to uploads the store never took.
+    WastedBytes,
 }
 
 impl fmt::Display for Bound {
@@ -99,6 +108,10 @@ impl fmt::Display for Bound {
             Self::CommitCalls => "replica commits",
             Self::SliceBytes => "bytes one upload tick handed the replica",
             Self::SlicesAhead => "slices in a row ahead of a waiting commit",
+            Self::RemoteTickMicros => "microseconds of replica calls in one tick",
+            Self::StagingTickMicros => "microseconds of staging calls in one tick",
+            Self::CommitLagMillis => "milliseconds from a commit to the replica",
+            Self::WastedBytes => "bytes sent to uploads the store never took",
         };
         f.write_str(name)
     }

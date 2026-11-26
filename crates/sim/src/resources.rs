@@ -139,6 +139,8 @@ pub fn delta(before: RecorderCounts, after: RecorderCounts) -> RecorderCounts {
         commits: after.commits.saturating_sub(before.commits),
         deletes: after.deletes.saturating_sub(before.deletes),
         written_bytes: after.written_bytes.saturating_sub(before.written_bytes),
+        read_bytes: after.read_bytes.saturating_sub(before.read_bytes),
+        committed_bytes: after.committed_bytes.saturating_sub(before.committed_bytes),
         rereads_given: after.rereads_given.saturating_sub(before.rereads_given),
         rereads_differing: after
             .rereads_differing
@@ -193,13 +195,10 @@ pub fn per_tick(stats: &TickStats, limits: Limits) -> Result<(), Violation> {
         limits.staged_bytes,
     )?;
     within(Bound::ListCalls, stats.remote.lists, LIST_CALLS_PER_TICK)?;
-    if matches!(
-        stats.event,
-        Some(Event::Sending { .. } | Event::Uploaded(_))
-    ) {
-        let slice = limits.slice_bytes.saturating_add(HELD_HEADER);
-        within(Bound::SliceBytes, stats.remote.written_bytes, slice)?;
-    }
+    // Every tick, whatever it ended in: a job that hands the replica more than a slice in one
+    // tick (a compaction or a snapshot run whole) holds every other task off meanwhile.
+    let slice = limits.slice_bytes.saturating_add(HELD_HEADER);
+    within(Bound::SliceBytes, stats.remote.written_bytes, slice)?;
     if matches!(stats.event, Some(Event::Idle)) {
         let spent = calls(&stats.remote);
         within(Bound::IdleLists, spent, 0)?;
