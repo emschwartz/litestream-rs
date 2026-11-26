@@ -6,4 +6,4 @@ patch = "snapshot-slices-starve-the-wal-step"
 fix = "plant"
 package = "lsr-sim"
 test_bin = "sim"
-tests = ["liveness::a_snapshot_of_a_large_database_goes_up_a_slice_a_tick"]
+tests = ["liveness::commits_made_during_a_large_compaction_reach_the_replica_in_time"]

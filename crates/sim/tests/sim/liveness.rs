@@ -6,6 +6,7 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
 use lsr_sim::cost::Profile;
+use lsr_sim::oracle::{Bound, Violation};
 use lsr_sim::run::run_ops;
 use lsr_sim::{Op, Opts, RunReport, Seed};
 
@@ -56,15 +57,26 @@ fn commits(n: usize, pages: u8) -> Vec<Op> {
         .collect()
 }
 
-/// The tail's level-9 snapshot of the whole database is 160 slices: no tick may send more
-/// than one, and the tail's commits, made while it goes up, reach the replica in time.
+/// The level-9 snapshot of the whole database goes up a slice a tick, but the read-back that
+/// checks it reads the newest file of every level whole in one maintenance tick
+/// (`lsr_core`'s `maintain::audit`): 10 MiB here, the whole database at any size. This pins
+/// that defect (`docs/decisions/D263.md`) so the bound is never loosened to hide it; once the
+/// read-back goes a slice a tick this fails, and the test goes back to asserting that the run
+/// passes and judges the tail's lag.
 #[test]
-fn a_snapshot_of_a_large_database_goes_up_a_slice_a_tick() {
-    let report = run(&commits(4, 2));
+fn the_read_back_of_a_large_snapshot_reads_it_whole_in_one_tick() {
+    let failure = match run_ops(Seed::new(1), &commits(4, 2), &large()) {
+        Ok(report) => panic!("the read-back went a slice a tick: {:?}", report.reach),
+        Err(failure) => failure,
+    };
+    // Ten seconds of replica time at 1 MiB a second: the whole snapshot, read in one tick.
     assert!(
-        report.reach.get("liveness.judged") > 0,
-        "{:?}",
-        report.reach
+        matches!(
+            failure.violation,
+            Violation::ResourceBound { what: Bound::RemoteTickMicros, seen, .. }
+                if seen > 10_000_000
+        ),
+        "{failure}"
     );
 }
 

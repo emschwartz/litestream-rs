@@ -80,23 +80,17 @@ fn a_tick_of_many_requests_fails_as_one_of_many_bytes_does() {
     ));
 }
 
+/// The checker can fail: a boot's spare covers staging alone, so a boot that reads a whole
+/// replica file in one tick fails as any other tick would, whatever it found staged.
 #[test]
-fn a_boot_reads_its_newest_files_whole_once() {
+fn a_boot_that_reads_a_replica_file_whole_fails() {
     let quiet = counts(0, 0, 0);
     let read = counts(10, 8 << 20, 0);
-    let mut spare = Spare::boot(&Profile::DEFAULT, 4 << 20, (0, 0));
-    judged(&read, &quiet, &mut spare).unwrap();
-    assert!(judged(&read, &quiet, &mut spare).is_err());
-}
-
-#[test]
-fn a_boot_with_nothing_staged_may_restore_the_replica_once() {
-    let quiet = counts(0, 0, 0);
-    let restore = counts(BASE_REQUESTS + 200, 1 << 20, 0);
-    let mut spare = Spare::default();
-    spare.restore(&Profile::DEFAULT.remote, 100, 1 << 20);
-    judged(&restore, &quiet, &mut spare).unwrap();
-    assert!(judged(&restore, &quiet, &mut spare).is_err());
+    let mut spare = Spare::boot(&Profile::DEFAULT, (100, 64 << 20));
+    assert!(over(
+        judged(&read, &quiet, &mut spare),
+        Bound::RemoteTickMicros
+    ));
 }
 
 #[test]
@@ -108,7 +102,7 @@ fn staging_is_judged_on_its_own_bound_and_spare() {
         Bound::StagingTickMicros
     ));
     let read = counts(4, 32 << 20, 0);
-    let mut spare = Spare::boot(&Profile::DEFAULT, 0, (1, 16 << 20));
+    let mut spare = Spare::boot(&Profile::DEFAULT, (1, 16 << 20));
     judged(&quiet, &read, &mut spare).unwrap();
     assert!(over(
         judged(&quiet, &read, &mut spare),

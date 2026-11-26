@@ -220,7 +220,8 @@ impl Allowance {
 }
 
 /// Judges one tick's cost on each store against its bound. `spare` holds what a boot may
-/// spend past the bound ([`Spare`]); what the tick spent past its own bound is taken from it.
+/// spend on staging past the bound ([`Spare`]); what the tick spent there past its own bound
+/// is taken from it.
 ///
 /// # Errors
 /// [`Violation::ResourceBound`] of [`Bound::RemoteTickMicros`] or [`Bound::StagingTickMicros`].
@@ -258,38 +259,36 @@ pub fn judge(
     ] {
         let limit = allowance.micros(store, link, puts, extra);
         let spent = allowance.judged(store, link, counts, puts, extra);
-        let excused = spare.take(store, spent.saturating_sub(limit));
+        let excused = match store {
+            Store::Remote => 0,
+            Store::Staging => spare.take(spent.saturating_sub(limit)),
+        };
         within(what, spent.saturating_sub(excused), limit)?;
     }
     Ok(())
 }
 
-/// What a boot may spend past one tick's bound, in microseconds per store, for the whole-file
-/// passes the engine makes in one tick today, each kept here by name so the bound stays tight
-/// everywhere else:
+/// What a boot may spend on staging past one tick's bound, in microseconds: the one
+/// whole-file pass the engine makes there in one tick, kept here by name so the bound stays
+/// tight everywhere else. The boot's check of what it finds staged reads every staged file
+/// whole and moves it to its own name; staging is the local disk, and what it holds is bounded
+/// by what one sync may stage ([`Allowance::staged`]) for each file a store outage left there.
 ///
-/// - on the replica, the newest file of each level read whole, once by the boot and once by
-///   the read-back after it (`lsr_core`'s `maintain::audit`); and, for a boot with no staged
-///   file, the restore it may make to compare the database with the replica, a header and a
-///   body for every file;
-/// - on staging, every staged file read whole by the boot's check of what it finds there, and
-///   moved to its own name.
+/// The replica has no spare: a boot's reads of it are judged as any tick's are, so a boot that
+/// reads a whole replica file in one tick fails (`docs/decisions/D263.md`).
 ///
-/// Filled at every boot from the stores' own sizes and counts, never from the engine's; a
-/// tick that spends more than this and its own bound fails.
+/// Filled at every boot from staging's own sizes and counts, never from the engine's; a tick
+/// that spends more than this and its own bound fails.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Spare {
-    remote: u64,
     staging: u64,
 }
 
 impl Spare {
-    /// A boot over a replica whose newest file per level holds `newest` bytes in all, with
-    /// `staged` files holding `bytes` bytes staged.
+    /// A boot that finds `staged` files holding `bytes` bytes staged.
     #[must_use]
-    pub fn boot(profile: &Profile, newest: u64, (staged, bytes): (u64, u64)) -> Self {
+    pub fn boot(profile: &Profile, (staged, bytes): (u64, u64)) -> Self {
         Self {
-            remote: profile.remote.micros(0, newest.saturating_mul(2)),
             staging: profile.staging.micros(
                 staged.saturating_mul(REQUESTS_PER_STAGED_FILE),
                 bytes.saturating_mul(2),
@@ -297,20 +296,10 @@ impl Spare {
         }
     }
 
-    /// Adds a restore of `files` replica files holding `bytes` bytes in all.
-    pub fn restore(&mut self, link: &Link, files: u64, bytes: u64) {
-        let requests = files.saturating_mul(crate::budget::READS_PER_RESTORED_FILE);
-        self.remote = self.remote.saturating_add(link.micros(requests, bytes));
-    }
-
-    /// Takes up to `want` microseconds of `store`'s spare; what it gave.
-    pub fn take(&mut self, store: Store, want: u64) -> u64 {
-        let left = match store {
-            Store::Remote => &mut self.remote,
-            Store::Staging => &mut self.staging,
-        };
-        let given = want.min(*left);
-        *left = left.saturating_sub(given);
+    /// Takes up to `want` microseconds of the spare; what it gave.
+    pub fn take(&mut self, want: u64) -> u64 {
+        let given = want.min(self.staging);
+        self.staging = self.staging.saturating_sub(given);
         given
     }
 }

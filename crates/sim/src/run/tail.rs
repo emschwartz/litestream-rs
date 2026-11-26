@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use lsr_core::{Event, FileKey};
+use lsr_core::Event;
 use lsr_ltx::Txid;
 
 use super::{Runner, Step};
@@ -96,37 +96,15 @@ impl Runner {
         Ok(())
     }
 
-    /// A boot's spare for whole-file passes ([`Spare`]), from the stores' own sizes.
+    /// A boot's spare for its whole-file pass over staging ([`Spare`]), from staging's own
+    /// sizes.
     pub(super) fn boot_spare(&self) -> Spare {
-        let mut newest: [Option<(FileKey, u64)>; 10] = [None; 10];
-        for info in self.w.remote_raw.stored() {
-            let slot = usize::from(info.key.level().get());
-            if let Some(cell) = newest.get_mut(slot)
-                && cell.is_none_or(|(key, _)| key.range().max() < info.key.range().max())
-            {
-                *cell = Some((info.key, info.size));
-            }
-        }
-        let newest = newest
-            .iter()
-            .flatten()
-            .fold(0_u64, |sum, (_, size)| sum.saturating_add(*size));
         let staged = self.w.staged_files().unwrap_or_default();
         let bytes = staged
             .iter()
             .fold(0_u64, |sum, info| sum.saturating_add(info.size));
         let files = u64::try_from(staged.len()).unwrap_or(u64::MAX);
-        Spare::boot(&Profile::DEFAULT, newest, (files, bytes))
-    }
-
-    /// A tick that boots with no staged file may restore the replica whole: its allowance.
-    pub(super) fn allow_boot_restore(&mut self) {
-        let stored = self.w.remote_raw.stored();
-        let files = u64::try_from(stored.len()).unwrap_or(u64::MAX);
-        let bytes = stored
-            .iter()
-            .fold(0_u64, |sum, info| sum.saturating_add(info.size));
-        self.spare.restore(&Profile::DEFAULT.remote, files, bytes);
+        Spare::boot(&Profile::DEFAULT, (files, bytes))
     }
 
     /// The newest transaction the bucket holds at any level.

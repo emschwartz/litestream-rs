@@ -933,15 +933,17 @@ impl Runner {
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
         if booting {
-            // What this boot attempt finds on both stores now, staged files a store outage
-            // left in a local course among them (`crate::cost::Spare`).
+            // What this boot attempt finds staged now, files a store outage left in a local
+            // course among them (`crate::cost::Spare`).
             self.spare = self.boot_spare();
+        } else {
+            // A boot's spare is for its own tick: nothing after it may spend what is left.
+            self.spare = crate::cost::Spare::default();
         }
         if booting && self.w.staged_level_zero().is_empty() {
             self.restore_files = self
                 .restore_files
                 .saturating_add(self.w.remote_file_count());
-            self.allow_boot_restore();
         }
         let held = self.holding_writes();
         self.forcings_before_tick();
