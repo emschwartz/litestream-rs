@@ -486,3 +486,38 @@ fn a_steady_writer_with_short_intervals_pays_the_bill_and_no_more() {
     assert!(at(Request::List, 9) <= 12, "{bill:?}");
     assert!(count(&bill, Request::List) <= 284, "{bill:?}");
 }
+
+/// A first start lists the replica whole twice: at boot, and after its first snapshot (the
+/// snapshot moves the floor retention reads). The snapshot is planned from the boot's listing
+/// and the level-0 file this engine put since, as Go plans it from one listing of level 9
+/// (`store.go`, `CompactDB`). It once listed the whole replica again for it, ten more
+/// requests on every first start (and one more whole listing for each pass made while the
+/// first file was still in flight).
+#[test]
+fn a_first_start_lists_the_replica_at_boot_and_after_its_first_snapshot_only() {
+    let mut rig = s3_like();
+    let mut actor = Actor::new(short_intervals());
+    let start = 600_000_000;
+    drive(&mut rig, &mut actor, start, start + 5_000);
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
+    let bill = bill(&rig, 0);
+    // Level 5 is listed by whole listings alone.
+    assert_eq!(bill.get(&(Request::List, 5)), Some(&2), "{bill:?}");
+    assert_eq!(count(&bill, Request::List), 20, "{bill:?}");
+}
+
+/// A boot that finds files on the replica plans maintenance from a listing, as before: what
+/// another process left is not known from this engine's own puts.
+#[test]
+fn a_restart_lists_the_replica_before_its_first_maintenance_pass() {
+    let mut rig = s3_like();
+    let mut actor = Actor::new(short_intervals());
+    let start = 600_000_000;
+    let now = drive(&mut rig, &mut actor, start, start + 5_000);
+    let mark = rig.remote.requests_made();
+    let mut restarted = Actor::new(short_intervals());
+    drive(&mut rig, &mut restarted, now, now + 3_000);
+    let bill = bill(&rig, mark);
+    // The boot's listing and the first pass's.
+    assert_eq!(bill.get(&(Request::List, 5)), Some(&2), "{bill:?}");
+}

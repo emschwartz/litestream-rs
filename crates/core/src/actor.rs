@@ -1452,6 +1452,9 @@ impl Actor {
             Err(fault) => return self.boot_failed(fault, took(), now),
         };
         self.quiet_at_boot(quiet);
+        // The boot listing found nothing to confirm: maintenance plans its first job from what
+        // this engine puts, not from listing again what the boot just listed.
+        let first_start = upload.confirmed().is_none();
         // Every step succeeded: the engine is assigned whole.
         self.engine = Engine {
             course,
@@ -1462,6 +1465,9 @@ impl Actor {
             witnesses: tokens.into_iter().collect(),
             ..Engine::fresh()
         };
+        if first_start {
+            self.engine.maintain.remembered.begin_first_start();
+        }
         self.kept.tasks.get_mut(task).succeed();
         self.ran(Event::Booted { cause }, now)
     }
@@ -2255,6 +2261,12 @@ impl Actor {
                         return Some(self.diverged(env, uploaded.state, confirmed, now).await);
                     }
                     // Before the confirmed position lets the token go.
+                    match &uploaded.did {
+                        Did::Put(info) => self.engine.maintain.remembered.note_put(*info),
+                        // A key this engine did not see itself put: a listing says what it holds.
+                        Did::AlreadyPut(_) => self.engine.maintain.remembered.end_first_start(),
+                        Did::Nothing | Did::Listed { .. } | Did::Diverged { .. } => {}
+                    }
                     if let Did::Put(info) = &uploaded.did {
                         self.engine.known.put(*info);
                         if let Some(token) = self.engine.witnesses.get(&info.key) {
@@ -2521,7 +2533,10 @@ impl Actor {
                 Err(tick) => *tick,
             });
         }
-        let loaded = Inventory::load(env.remote).await;
+        let loaded = match self.engine.maintain.remembered.first_start() {
+            Some(own) => Ok(own),
+            None => Inventory::load(env.remote).await,
+        };
         let inventory = match loaded.map_err(|err| inventory_fault::<R>(&err)) {
             Ok(inventory) => inventory,
             Err(fault) => return Some(self.fault(Task::Maintenance, fault, now)),

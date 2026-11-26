@@ -989,3 +989,55 @@ fn a_replica_with_no_snapshot_and_no_level_one_file_is_listed_whole() {
         assert!(known.short_ok(at(T0 + 1)), "{held:?}");
     }
 }
+
+/// What a first start notes: each level-0 file this engine confirms, once per key, up to
+/// the bound; past it the next whole pass lists.
+#[test]
+fn a_first_start_holds_the_files_this_engine_confirmed_up_to_its_bound() {
+    let mut known = Remembered::default();
+    known.note_put(file(0, 1, 1, T0));
+    assert!(known.first_start().is_none(), "not begun: nothing is held");
+    known.begin_first_start();
+    assert_eq!(known.first_start().unwrap().files().len(), 0);
+    known.note_put(file(0, 1, 1, T0));
+    known.note_put(file(0, 1, 1, T0 + 1));
+    known.note_put(file(0, 2, 2, T0));
+    assert_eq!(known.first_start().unwrap().files().len(), 2);
+    for n in 3..=u64::try_from(FIRST_START_FILES).unwrap() {
+        known.note_put(file(0, n, n, T0));
+    }
+    assert_eq!(
+        known.first_start().unwrap().files().len(),
+        FIRST_START_FILES
+    );
+    let past = u64::try_from(FIRST_START_FILES).unwrap() + 1;
+    known.note_put(file(0, past, past, T0));
+    assert!(known.first_start().is_none());
+}
+
+/// A first start ends at its first job, at a whole listing owed, at a key this engine did not
+/// see itself put, and at a fault; a pass that only waits keeps it.
+#[test]
+fn a_first_start_ends_at_the_first_job_or_anything_that_owes_a_listing() {
+    let begun = || {
+        let mut known = Remembered::default();
+        known.begin_first_start();
+        known.note_put(file(0, 1, 1, T0));
+        known
+    };
+    let own = Inventory::from_files([file(0, 1, 1, T0)]).unwrap();
+    let mut known = begun();
+    known.learn_full(&own, at(T0), &defaults(), &waiting());
+    assert!(known.first_start().is_some());
+    known.learn_full(&own, at(T0), &defaults(), &compacting());
+    assert!(known.first_start().is_none());
+    let mut known = begun();
+    known.owe_full();
+    assert!(known.first_start().is_none());
+    let mut known = begun();
+    known.end_first_start();
+    assert!(known.first_start().is_none());
+    let mut known = begun();
+    known.forget();
+    assert!(known.first_start().is_none());
+}

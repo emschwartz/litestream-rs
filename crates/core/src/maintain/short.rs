@@ -21,7 +21,9 @@
 //! read-back is owed, after a retention delete or a snapshot, when the last whole listing did not
 //! pass the retention gate ([`Gate::Held`]), when snapshot retention next has
 //! something to delete ([`Remembered::retention_wake`]), and at the latest [`FULL_LISTING_INTERVAL`]
-//! after the last whole listing.
+//! after the last whole listing. On a first start (the boot listed an empty replica) the whole
+//! passes before the first job plan from the level-0 files this engine put instead of listing
+//! them ([`Remembered::first_start`]).
 //!
 //! # What each decision reads
 //!
@@ -91,6 +93,11 @@ use crate::store::{ListAt, ObjectStore};
 /// passes save (docs/decisions/D193.md).
 pub(crate) const FULL_LISTING_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
+/// The most level-0 files a first start notes before its first job (`Remembered::note_put`):
+/// about a quarter hour of a writer synced every second, which a first snapshot that waits on
+/// uploads can take; past it the pass lists.
+pub(crate) const FIRST_START_FILES: usize = 1024;
+
 /// How old a listing may be and still stand in for the one a pass directly after this engine's
 /// own job would make: the job changed nothing it listed but the output it noted.
 const CARRY_MAX_AGE_MILLIS: i64 = 5_000;
@@ -137,6 +144,9 @@ pub(crate) struct Remembered {
     /// planned before any level (D224), and only a whole listing plans it, so a short pass
     /// that came first would compact level 1 while the snapshot waited.
     first_snapshot_owed: bool,
+    /// The level-0 files this engine confirmed since a boot that found the replica empty, until
+    /// the first job: see [`Self::first_start`].
+    first_start: Option<Vec<FileInfo>>,
 }
 
 /// A listing kept for the pass right after this engine's own job (see
@@ -188,8 +198,48 @@ impl Remembered {
     }
 
     /// The next pass lists whole (a refused or listed upload, a restore point released).
-    pub(crate) const fn owe_full(&mut self) {
+    pub(crate) fn owe_full(&mut self) {
         self.full_owed = true;
+        self.first_start = None;
+    }
+
+    /// The boot listed an empty replica: until the first job, a whole pass plans from the files
+    /// this engine confirms instead of listing them ([`Self::first_start`]).
+    pub(crate) fn begin_first_start(&mut self) {
+        self.first_start = Some(Vec::new());
+    }
+
+    /// The next whole pass lists the replica, whatever the boot found.
+    pub(crate) fn end_first_start(&mut self) {
+        self.first_start = None;
+    }
+
+    /// Notes a level-0 file this engine confirmed on a first start. Past
+    /// [`FIRST_START_FILES`] the next whole pass lists instead.
+    pub(crate) fn note_put(&mut self, info: FileInfo) {
+        let Some(files) = &mut self.first_start else {
+            return;
+        };
+        files.retain(|held| held.key != info.key);
+        if files.len() < FIRST_START_FILES {
+            files.push(info);
+        } else {
+            self.first_start = None;
+        }
+    }
+
+    /// What a whole listing shows on a first start before the first job: the files this
+    /// engine confirmed since a boot that listed the replica empty. Go plans its first snapshot
+    /// from one listing of level 9 (`store.go`, `CompactDB`); here the boot's listing stands for it.
+    /// Another process writing to the same prefix meanwhile is refused by the create-only puts
+    /// or found by the whole listing after the first snapshot, a few ticks later. `None` once
+    /// a job ran, a whole listing is owed, or a fault dropped what was remembered.
+    ///
+    /// A boot that found only a torn level-0 file of the first transaction starts here too
+    /// (its confirmed position is none): the first put replaces that key, and until then a
+    /// pass plans as on an empty replica, which a listing of the torn file would not improve.
+    pub(crate) fn first_start(&self) -> Option<Inventory> {
+        Inventory::from_files(self.first_start.as_ref()?.iter().copied()).ok()
     }
 
     /// Whether the last whole listing found no snapshot and no level-1 file: the first
@@ -285,6 +335,10 @@ impl Remembered {
             RetentionMode::Off => Gate::Clear,
             RetentionMode::Enforce => decided.gate,
         };
+        // The first job ends a first start: what follows is planned from listings.
+        if matches!(decided.due, Due::Run(_)) {
+            self.first_start = None;
+        }
         // A delete above level 0 or a snapshot moves the floor: the next pass is whole too.
         // So is the one after a compaction that closes a hole (its output is not the newest
         // file of its level): only a whole listing shows the next hole and what can close it.
