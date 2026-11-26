@@ -342,7 +342,6 @@ fn ended(tick: &Tick) -> Option<u8> {
         MaintainedEvent::Deleted(_)
         | MaintainedEvent::Replan
         | MaintainedEvent::Repaired(_)
-        | MaintainedEvent::ReadBack
         | MaintainedEvent::Waiting { .. } => None,
     }
 }
