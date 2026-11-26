@@ -13,7 +13,7 @@ use super::*;
 use crate::conformance::block_on;
 use crate::fault::Next;
 use crate::fault::role::{Replica, Role, Staging};
-use crate::fault::{Backoff, PersistentCause, Policy, policy};
+use crate::fault::{Backoff, DegradedCause, Policy, policy};
 use crate::layout::CreatedAt;
 use crate::mem::{MemStore, MemUpload};
 use crate::store::Upload;
@@ -931,7 +931,7 @@ fn a_remote_ahead_of_local_is_a_second_writer() {
     assert_eq!(failed.fault, Fault::RemoteAheadOfLocal);
     assert_eq!(
         policy(&failed.fault),
-        Policy::Persistent(PersistentCause::OtherWriter)
+        Policy::Persistent(DegradedCause::OtherWriter)
     );
     assert_eq!(failed.state, UploadState::Unknown);
     let failed = failure(next(UploadState::Unknown, &staging, &remote, 0));
@@ -949,7 +949,7 @@ fn a_remote_that_went_backwards_is_a_persistent_fault() {
     assert_eq!(failed.fault, Fault::RemoteRegressed);
     assert_eq!(
         policy(&failed.fault),
-        Policy::Persistent(PersistentCause::RemoteRegressed)
+        Policy::Persistent(DegradedCause::RemoteRegressed)
     );
     assert_eq!(failed.state, state);
     let empty = MemStore::new();

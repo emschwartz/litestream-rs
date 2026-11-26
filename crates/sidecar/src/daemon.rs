@@ -6,7 +6,7 @@
 //! by health, as Go's SDK fetches them per request); with
 //! `-restore-if-db-not-exists` (or the key) and no file, restore the newest state,
 //! a replica with no files being Go's "no backup found, starting fresh"; then
-//! `Replicator::start_with_events`, which returns once the read transaction pins the
+//! `Replicator::start`, which returns once the read transaction pins the
 //! WAL; the log sink goes in with it, before the thread runs, so no boot line is lost. A
 //! database that fails any of these is logged and left out; the others keep
 //! running (Go exits instead), and the exit code says so at the end.
@@ -39,11 +39,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use lsr_config::{DbPlan, Plan, ReplicaPlan};
-use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
+use lsr_core::Clock;
+use lsr_replica::StartOptions;
 use lsr_replica::{
-    Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
-    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, Stopped, Trip, lock,
-    record_takeover, restore_if_missing,
+    Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate, IfMissing,
+    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, StopOutcome, Trip, lock,
+    restore_if_missing,
 };
 
 use crate::exec::ChildEnd;
@@ -55,7 +56,7 @@ use crate::signals;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum End {
     /// Its replicator stopped this way.
-    Stopped(Stopped),
+    Stopped(StopOutcome),
     /// It never started: its store, restore or start failed.
     DidNotStart,
     /// Its file never appeared.
@@ -97,9 +98,11 @@ impl Finished {
     #[must_use]
     pub fn clean(&self) -> bool {
         let dbs = self.dbs.iter().all(|(_, end)| match end {
-            End::Stopped(Stopped::Drained { .. }) | End::NeverAppeared => true,
+            End::Stopped(StopOutcome::Drained { .. }) | End::NeverAppeared => true,
             End::Stopped(
-                Stopped::DeadlineReached { .. } | Stopped::Stopped(_) | Stopped::Gone(_),
+                StopOutcome::DeadlineReached { .. }
+                | StopOutcome::Stopped(_)
+                | StopOutcome::Gone(_),
             )
             | End::DidNotStart
             | End::SnapshotNotWritten { .. }
@@ -319,12 +322,15 @@ impl Daemon {
         if self.mode == Mode::Once {
             config.maintenance = config.maintenance.one_off();
         }
-        let started = Replicator::start_with_events(
+        let started = Replicator::start(
             path,
             Arc::clone(store),
-            config,
-            Runtime::system(),
-            Box::new(DbEvents::new(Arc::clone(&self.log), path)),
+            StartOptions {
+                config,
+                runtime: Some(Runtime::system()),
+                events: Some(Box::new(DbEvents::new(Arc::clone(&self.log), path))),
+                ..StartOptions::default()
+            },
         );
         match started {
             Ok(replicator) => {
@@ -379,9 +385,9 @@ impl Daemon {
 
     /// Go's `restoreIfNeeded`.
     ///
-    /// A restore records a takeover through what it restored, so the replicator started on
-    /// it builds on the replica instead of refusing it: the library writes it in the default
-    /// meta directory, and a configured `meta-dir` gets it here too.
+    /// A restore records a trust record through what it restored, in the meta directory
+    /// `config` names, so the replicator started on it builds on the replica instead of
+    /// refusing it.
     fn restore(
         &self,
         path: &Path,
@@ -392,31 +398,26 @@ impl Daemon {
             "attempting restore before replication",
             &[("path", path.into())],
         );
-        match restore_if_missing(&**store, path) {
-            Ok(Some(restored)) => {
+        match restore_if_missing(&**store, path, config) {
+            Ok(IfMissing::Restored(restored)) => {
                 self.log.info("restore completed", &[("path", path.into())]);
-                let through = restored.reached();
-                if config.meta_dir.is_some()
-                    && let Some(meta) = config.meta_dir_for(path)
-                {
-                    record_takeover(&meta, through).map_err(|error| Failure {
-                        msg: "restore completed but the takeover record could not be written",
-                        error: error.to_string(),
-                        transient: false,
-                    })?;
-                }
-                let msg = format!("takeover recorded through {through}");
+                let msg = format!("takeover recorded through {}", restored.reached());
                 self.log.info(&msg, &[("path", path.into())]);
             }
-            Ok(None) => self.log.info(
+            Ok(IfMissing::Exists) => self.log.info(
                 "database exists, skipping restore",
                 &[("path", path.into())],
             ),
-            Err(RestoreError::Restore(CoreRestoreError::NoPlan(none)))
-                if *none.outcome() == PlanOutcome::EmptyReplica =>
-            {
+            Ok(IfMissing::EmptyReplica) => {
                 self.log
                     .info("no backup found, starting fresh", &[("path", path.into())]);
+            }
+            Err(error @ RestoreError::TrustRecord { .. }) => {
+                return Err(Failure {
+                    msg: "restore completed but the takeover record could not be written",
+                    error: error.to_string(),
+                    transient: false,
+                });
             }
             Err(error) => {
                 return Err(Failure {
@@ -549,7 +550,7 @@ impl Daemon {
             .views()
             .into_iter()
             .filter_map(|view| match view.state {
-                DbState::Running(health) => Some((view.path, health.held_by.gate)),
+                DbState::Running(health) => Some((view.path, health.fail_stop.gate())),
                 DbState::Waiting | DbState::Failed => None,
             })
             .collect()
@@ -582,12 +583,12 @@ impl Daemon {
     fn ended(&self, path: &Path, end: &End) {
         let at = ("path", Value::from(path));
         match end {
-            End::Stopped(Stopped::Drained { txid }) => {
+            End::Stopped(StopOutcome::Drained { txid }) => {
                 let txid = txid.map_or_else(|| "none".to_owned(), |t| t.to_string());
                 self.log
                     .info("database drained", &[at, ("txid", txid.into())]);
             }
-            End::Stopped(Stopped::DeadlineReached {
+            End::Stopped(StopOutcome::DeadlineReached {
                 unsynced_wal_bytes,
                 staged_not_uploaded,
             }) => {
@@ -602,12 +603,12 @@ impl Daemon {
                 self.log
                     .error("database not drained: deadline reached", &fields);
             }
-            End::Stopped(Stopped::Stopped(cause)) => {
+            End::Stopped(StopOutcome::Stopped(cause)) => {
                 let fields = [at, ("cause", format!("{cause:?}").into())];
                 self.log
                     .error("database had stopped before the drain", &fields);
             }
-            End::Stopped(Stopped::Gone(gone)) => {
+            End::Stopped(StopOutcome::Gone(gone)) => {
                 let fields = [at, ("cause", format!("{gone:?}").into())];
                 self.log.error("database replicator is gone", &fields);
             }
@@ -675,14 +676,15 @@ fn exists(path: &Path) -> bool {
 /// overlapping deploy, docs/decisions/D178.md).
 fn passes_by_itself(error: &StartError) -> bool {
     match error {
-        StartError::Sqlite { code } => matches!(code & 0xff, 5 | 6),
+        StartError::Sqlite { code, .. } => code.is_some_and(|code| matches!(code & 0xff, 5 | 6)),
         StartError::MetaLocked => true,
         StartError::Open { .. }
         | StartError::NotWal { .. }
         | StartError::AlreadyReplicated
         | StartError::MetaDir { .. }
         | StartError::MetaLock { .. }
-        | StartError::Refused(_)
+        | StartError::NoFileName
+        | StartError::UnsupportedVfs(_)
         | StartError::PageSize { .. }
         | StartError::SqliteBuild { .. }
         | StartError::Thread { .. } => false,
@@ -692,13 +694,13 @@ fn passes_by_itself(error: &StartError) -> bool {
 /// A drained database's end, with the snapshot and the retention pass it was asked to end
 /// with: a snapshot that failed, or a pass that did not finish, is not clean. Retention
 /// switched off finishes, as in Go; a pass skipped for a failed snapshot is the snapshot's end.
-fn ending(stopped: Stopped, snapshot: FinalSnapshot, retention: FinalRetention) -> End {
+fn ending(stopped: StopOutcome, snapshot: FinalSnapshot, retention: FinalRetention) -> End {
     match (stopped, snapshot, retention) {
-        (Stopped::Drained { txid }, FinalSnapshot::Failed(why), _) => {
+        (StopOutcome::Drained { txid }, FinalSnapshot::Failed(why), _) => {
             End::SnapshotNotWritten { txid, why }
         }
         (
-            Stopped::Drained { txid },
+            StopOutcome::Drained { txid },
             FinalSnapshot::NotAsked | FinalSnapshot::Asked { .. } | FinalSnapshot::Written(_),
             ended @ (FinalRetention::Held { .. }
             | FinalRetention::Failed { .. }

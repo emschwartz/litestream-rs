@@ -10,7 +10,7 @@
 //! it (revoked credentials, say) health names that one, and the store's cause shows again at the
 //! task's next success; what may never happen is a replace while health calls uploads healthy.
 
-use lsr_core::{Level, PersistentCause, StopCause, Task, WriteMode};
+use lsr_core::{DegradedCause, Level, StopCause, Task, WriteMode};
 
 use super::Runner;
 use crate::oracle::Violation;
@@ -53,7 +53,7 @@ impl Runner {
                 .actor
                 .degraded(Task::Upload)
                 .map(|degraded| degraded.cause)
-                == Some(PersistentCause::ConditionalWritesUnsupported)
+                == Some(DegradedCause::ConditionalWritesUnsupported)
             {
                 self.report.reach.bump("remote.replaced_unguarded.named");
             }

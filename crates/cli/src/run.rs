@@ -1072,7 +1072,7 @@ async fn restore_on<S: ObjectStore>(
         let options = RestoreOptions { as_of_inside };
         let restored = restore_with(store, target, options, sink).await?;
         if let Some(meta) = meta {
-            lsr_replica::record_takeover(&meta, restored.reached()).map_err(|err| {
+            lsr_replica::record_trust(&meta, restored.reached()).map_err(|err| {
                 CliError::Takeover {
                     meta,
                     kind: err.kind(),
@@ -1250,7 +1250,7 @@ async fn trust_local_command(args: TrustLocalArgs) -> Result<Done, CliError> {
         Opened::S3(store) => Inventory::load(&store).await?.newest(),
     };
     if let Some(through) = newest {
-        lsr_replica::record_takeover(&meta, through).map_err(|err| CliError::Takeover {
+        lsr_replica::record_trust(&meta, through).map_err(|err| CliError::Takeover {
             meta: meta.clone(),
             kind: err.kind(),
         })?;

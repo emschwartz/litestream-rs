@@ -9,5 +9,5 @@ index 623ec828c..69a3aa84d 100644
 -            Some(since) if task == Task::Sync && own.is_none() && !self.caught_up() => {
 +            Some(since) if task == Task::Sync && own.is_none() => {
                  Some(Degraded {
-                     cause: PersistentCause::Stalled(Stall::LocalDiskFull),
+                     cause: DegradedCause::Stalled(Stall::LocalDiskFull),
                      since,

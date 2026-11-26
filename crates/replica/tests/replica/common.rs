@@ -20,9 +20,11 @@ use lsr_core::{
 };
 use lsr_ltx::TxidRange;
 use lsr_replica::{
-    Booted, Config, DynStore, FakeClockHandle, Health, Phase, Replicator, RestoreTarget, Runtime,
-    Stopped, Task, Timestamp, restore, waiting,
+    Config, DynStore, FakeClockHandle, Health, Phase, Readiness, Replicator, Restore, Runtime,
+    StopOutcome, Task, Timestamp, restore,
 };
+
+use crate::waiting;
 use lsr_store_fs::FsStore;
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -31,8 +33,8 @@ use tempfile::TempDir;
 pub const START: Timestamp = Timestamp::from_unix_millis(1_700_000_000_000);
 
 /// Long enough that a test never sees it run out unless it is stuck; on the fake clock
-/// [`LOOKS`] is what ends a stuck wait ([`lsr_replica::waiting`]).
-pub use lsr_replica::waiting::{LOOKS, PATIENCE};
+/// [`LOOKS`] is what ends a stuck wait ([`crate::waiting`]).
+pub use crate::waiting::{LOOKS, PATIENCE};
 
 /// A database in a directory of its own, with the application's connection and a replica beside it.
 pub struct Site {
@@ -104,7 +106,7 @@ impl Site {
     /// and passes SQLite's integrity check.
     pub fn assert_restores(&self, store: &dyn DynStore) {
         let to = self.path("restored");
-        restore(store, RestoreTarget::Latest, &to).unwrap();
+        restore(store, &to, &Restore::default()).unwrap();
         assert_same(&self.app, &to);
     }
 }
@@ -147,7 +149,7 @@ pub fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
 
 /// [`Replicator::wait_booted`], failing the test instead of hanging if the first boot never
 /// ends (its deadline is on the replicator's clock).
-pub fn booted(replicator: &Replicator) -> Booted {
+pub fn booted(replicator: &Replicator) -> Readiness {
     wait(replicator, |health| {
         health.phase != Phase::Booting || health.task(Task::Sync).is_some()
     });
@@ -165,7 +167,7 @@ const STOP_STEP: Duration = Duration::from_secs(1);
 /// thread's park to have looked at the clock it set, so a stop that needs no wait leaves the
 /// clock where it was. Fails the test after [`LOOKS`] steps. The clock must be the
 /// replicator's own: a park never reads another clock's reading.
-pub fn stopped(replicator: &Replicator, clock: &FakeClockHandle) -> Stopped {
+pub fn stopped(replicator: &Replicator, clock: &FakeClockHandle) -> StopOutcome {
     let stop = replicator.stop(PATIENCE);
     let gone = |health: &Health| matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_));
     for _ in 0..LOOKS {
@@ -178,10 +180,10 @@ pub fn stopped(replicator: &Replicator, clock: &FakeClockHandle) -> Stopped {
 }
 
 /// `stop(PATIENCE).wait()` for a replicator on the system clock (started with
-/// `Replicator::start`, never `fake()`), failing the test instead of hanging if the thread
+/// `ReplicatorBuilder::start`, never `fake()`), failing the test instead of hanging if the thread
 /// never stops. Its waits end on their own; a replicator on a fake clock goes through
 /// [`stopped`], which moves that clock.
-pub fn stopped_on_system_clock(replicator: &Replicator) -> Stopped {
+pub fn stopped_on_system_clock(replicator: &Replicator) -> StopOutcome {
     let stop = replicator.stop(PATIENCE);
     wait(replicator, |health| {
         matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_))
@@ -190,7 +192,7 @@ pub fn stopped_on_system_clock(replicator: &Replicator) -> Stopped {
 }
 
 /// Moves the fake clock `step` at a time, at most `steps` times, until `done` holds; fails the
-/// test if it never does ([`lsr_replica::waiting::moved_until`]).
+/// test if it never does ([`crate::waiting::moved_until`]).
 pub fn moved_until(
     replicator: &Replicator,
     clock: &FakeClockHandle,

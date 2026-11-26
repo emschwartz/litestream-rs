@@ -52,18 +52,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lsr_core::{
-    Actor, AppCheckpoints, AppGate, Degraded, Did, Env, Event as EngineEvent, Level, ObjectStore,
-    PageLimit, PersistentCause, Phase as EnginePhase, Response, StopCause, TakeoverRecord, Task,
-    Tick, Unfinished, WalSource, WhyBlocked, blocks_writes, retry_wait,
+    Actor, AppCheckpoints, AppGate, Degraded, DegradedCause, Did, Env, Event as EngineEvent, Level,
+    ObjectStore, PageLimit, Phase as EnginePhase, Response, StopCause, TakeoverRecord, Task, Tick,
+    Unfinished, WalSource, WhyBlocked, blocks_writes, retry_wait,
 };
 use lsr_ltx::{Timestamp, Txid};
 use lsr_sqlite::{DatabaseFile, Sqlite, WriteGate};
 use lsr_store_fs::FsStore;
 
 use crate::config::Config;
-use crate::events::{Event, EventSink, TakeoverUnusable};
+use crate::events::{Event, EventSink, TrustRecordUnusable};
 use crate::exec::{block_on, block_on_tick};
-use crate::health::{Counters, FailStop, Gone, Phase, Stopped, Writes};
+use crate::health::{Counters, FailStop, Gone, Phase, StopOutcome, Writes};
 use crate::meta::{MetaLock, remove_takeover, write_takeover};
 use crate::readers::Guarded;
 use crate::replicator::Shared;
@@ -78,14 +78,14 @@ enum Turn {
     /// Park until this time, or until a command when `None`.
     Wait(Option<Timestamp>),
     /// The thread is done.
-    Done(Stopped),
+    Done(StopOutcome),
 }
 
 /// The engine is gone (a panic dropped it) and a fresh one waits before booting.
 #[derive(Clone, Copy, Debug)]
 struct Rebuilt {
     /// Why it waits: `Bug` after a panic, `WalUnlinked` once the path names another file.
-    cause: PersistentCause,
+    cause: DegradedCause,
     attempts: NonZeroU32,
     since: Timestamp,
     until: Timestamp,
@@ -246,7 +246,7 @@ struct ExitGuard {
 impl Drop for ExitGuard {
     fn drop(&mut self) {
         if self.worker.take().is_some() {
-            self.shared.finish(Stopped::Gone(Gone::ThreadDied));
+            self.shared.finish(StopOutcome::Gone(Gone::ThreadDied));
         }
     }
 }
@@ -267,7 +267,7 @@ impl Worker {
         runtime: Runtime,
         events: Option<Box<dyn EventSink>>,
         meta_lock: MetaLock,
-        takeover: Result<Option<TakeoverRecord>, TakeoverUnusable>,
+        takeover: Result<Option<TakeoverRecord>, TrustRecordUnusable>,
     ) -> Self {
         let mut actor = Actor::new(config.actor());
         actor.set_app_autocheckpoint(config.app_autocheckpoint);
@@ -324,7 +324,7 @@ impl Worker {
         match takeover {
             Ok(Some(takeover)) => worker.actor.remember_takeover(takeover),
             Ok(None) => {}
-            Err(unusable) => worker.emit(&Event::TakeoverRecordUnusable(unusable)),
+            Err(unusable) => worker.emit(&Event::TrustRecordUnusable(unusable)),
         }
         worker
     }
@@ -337,7 +337,7 @@ impl Worker {
         if let Some(spent) = self.actor.takeover_spent() {
             match remove_takeover(&self.meta) {
                 Ok(()) => self.actor.forget_takeover(spent),
-                Err(err) => self.emit(&Event::TakeoverNotRemoved { kind: err.kind() }),
+                Err(err) => self.emit(&Event::TrustRecordNotRemoved { kind: err.kind() }),
             }
         }
         let Some(record) = self.actor.takeover_wanted() else {
@@ -345,7 +345,7 @@ impl Worker {
         };
         match write_takeover(&self.meta, record) {
             Ok(()) => self.actor.remember_takeover(record),
-            Err(err) => self.emit(&Event::TakeoverNotRecorded { kind: err.kind() }),
+            Err(err) => self.emit(&Event::TrustRecordNotWritten { kind: err.kind() }),
         }
     }
 
@@ -366,7 +366,7 @@ impl Worker {
         }
     }
 
-    fn main_loop(&mut self) -> Stopped {
+    fn main_loop(&mut self) -> StopOutcome {
         loop {
             self.take_commands();
             let now = self.runtime.clock.now();
@@ -566,7 +566,7 @@ impl Worker {
         }
         match tick {
             Tick::Ran { event, next } => self.ran(event, next, now),
-            Tick::Drained { txid } => Turn::Done(Stopped::Drained { txid }),
+            Tick::Drained { txid } => Turn::Done(StopOutcome::Drained { txid }),
             Tick::DeadlineReached(left) => Turn::Done(deadline_reached(left)),
             Tick::Stopped(cause) => self.stopped(cause),
         }
@@ -622,12 +622,12 @@ impl Worker {
     fn stopped(&mut self, cause: StopCause) -> Turn {
         if !std::mem::replace(&mut self.seen.stopped_reported, true) {
             if let Some(through) = self.actor.refused_through() {
-                self.emit(&Event::Refused { through });
+                self.emit(&Event::UnvouchedReplicaFiles { through });
             }
             self.emit(&Event::Stopped(cause));
         }
         if self.stop.is_some() {
-            Turn::Done(Stopped::Stopped(cause))
+            Turn::Done(StopOutcome::Stopped(cause))
         } else {
             self.park_until(None)
         }
@@ -715,13 +715,13 @@ impl Worker {
         }
         // The dropped engine's reports and what was asked of it go to the fresh one.
         self.actor = self.actor.rebuilt();
-        let until = self.schedule_rebuild(PersistentCause::Bug, now);
+        let until = self.schedule_rebuild(DegradedCause::Bug, now);
         self.observe(now);
         self.park_until(Some(until))
     }
 
     /// The next rebuild's wait, for `cause`; returns when it ends.
-    fn schedule_rebuild(&mut self, cause: PersistentCause, now: Timestamp) -> Timestamp {
+    fn schedule_rebuild(&mut self, cause: DegradedCause, now: Timestamp) -> Timestamp {
         let attempts = self
             .rebuilt
             .map_or(NonZeroU32::MIN, |was| was.attempts.saturating_add(1));
@@ -743,8 +743,8 @@ impl Worker {
     /// that is not the registered one, take `WalUnlinked`'s configured response.
     fn reopen_failed(&mut self, reopen: Reopen, now: Timestamp) -> Turn {
         let cause = match reopen {
-            Reopen::Failed => self.rebuilt.map_or(PersistentCause::Bug, |was| was.cause),
-            Reopen::Replaced => PersistentCause::WalUnlinked,
+            Reopen::Failed => self.rebuilt.map_or(DegradedCause::Bug, |was| was.cause),
+            Reopen::Replaced => DegradedCause::WalUnlinked,
         };
         if let Some(cause) = cause.stop().filter(|_| self.config.responses.stops(cause)) {
             self.stopped = Some(cause);
@@ -826,7 +826,7 @@ impl Worker {
                 (Some(seen), Some(engine)) => Some(seen.min(engine)),
                 (seen, engine) => seen.or(engine),
             };
-            health.held_by = fail_stop;
+            health.fail_stop = fail_stop;
             health.writes = writes;
             health.wal_bytes = wal_bytes;
             health.db_bytes = db_bytes;
@@ -862,7 +862,7 @@ impl Worker {
             .app_gate
             .judge(self.config.if_replication_stops, trip, judged);
         self.blocked = blocks_writes(self.config.if_replication_stops, gate);
-        FailStop { trip, gate }
+        FailStop::of(trip, gate)
     }
 
     /// Takes or lets go of the write lock as last judged. One that fails (an application write
@@ -1028,8 +1028,8 @@ fn emit_to(sink: &mut Option<Box<dyn EventSink>>, panics: &mut u64, event: &Even
     }
 }
 
-const fn deadline_reached(left: Unfinished) -> Stopped {
-    Stopped::DeadlineReached {
+const fn deadline_reached(left: Unfinished) -> StopOutcome {
+    StopOutcome::DeadlineReached {
         unsynced_wal_bytes: left.unsynced_wal_bytes,
         staged_not_uploaded: left.staged_not_uploaded,
     }
