@@ -70,16 +70,6 @@ fn planted(step: u32) -> Opts {
 }
 
 #[test]
-fn shrink_finds_planted_step() {
-    let weights = Weights::default();
-    assert_eq!(
-        shrink(Seed::new(2), 200, &weights, &planted(117)),
-        Some(118)
-    );
-    assert_eq!(shrink(Seed::new(2), 200, &weights, &Opts::default()), None);
-}
-
-#[test]
 fn failure_prints_replay_line() {
     let failure = run_with(Seed::new(2), 200, &Weights::default(), &planted(117)).unwrap_err();
     assert_eq!(failure.step, 117);

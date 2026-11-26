@@ -57,6 +57,8 @@ mod retention_windows;
 #[cfg(test)]
 mod short_write;
 #[cfg(test)]
+mod shrink;
+#[cfg(test)]
 mod sliced;
 #[cfg(test)]
 mod snapshot_causes;

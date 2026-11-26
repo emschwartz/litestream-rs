@@ -85,6 +85,12 @@ doctest:
 sim-replay seed steps="300":
     LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^replay::/)' --no-capture --locked
 
+# Replays a failing simulator run, cuts its history down to the operations that matter
+# (docs/decisions/D285.md) and prints them as Rust source for an explicit scenario test:
+# just sim-shrink 0x2a [steps]. Same mix and overrides as sim-replay.
+sim-shrink seed steps="300":
+    LSR_SIM_SEED={{seed}} LSR_SIM_STEPS={{steps}} cargo nextest run --cargo-profile sim -p lsr-sim --test sim -E 'test(/^shrink::/)' --no-capture --locked
+
 # Sums what random simulator histories reach over `seeds` seeds from `base`: one count per state.
 sim-tally seeds="200" base="1":
     LSR_SIM_TALLY_SEEDS={{seeds}} LSR_SIM_BASE_SEED={{base}} cargo nextest run -p lsr-sim --test sim -E 'test(/^tally::/)' --run-ignored only --no-capture --locked
