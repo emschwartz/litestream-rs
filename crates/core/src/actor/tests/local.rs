@@ -4,7 +4,6 @@
 
 use super::second_writer::put_foreign;
 use super::*;
-use crate::SnapshotCauseKind;
 use crate::actor::lag::BOOT_UNDECIDED_BOUND;
 use crate::actor::local::LocalTry;
 use crate::actor::parts::Course;
@@ -182,12 +181,11 @@ fn a_restart_during_an_outage_stages_and_checkpoints_from_local_state() {
     assert_eq!(snapshots(&rig), vec![1], "{after:?}");
 }
 
-/// A TRUNCATE checkpoint in a local course stages its boundary snapshot as one in a booted
-/// engine does, and as Go's local sync does through an outage: in the slot, with the course's
-/// other files. The course goes on in the new WAL, and the boot that lists the replica moves
-/// every file up, so the replica restores every commit.
+/// A TRUNCATE checkpoint in a local course takes no snapshot, as one in a booted engine does
+/// not: the course goes on in the new WAL, and the boot that lists the replica moves every
+/// file up, so the replica restores every commit.
 #[test]
-fn a_courses_truncate_stages_its_boundary_snapshot_in_the_slot() {
+fn a_courses_truncate_takes_no_snapshot() {
     let cfg = ActorConfig {
         checkpoint: CheckpointConfig {
             interval: None,
@@ -197,8 +195,7 @@ fn a_courses_truncate_stages_its_boundary_snapshot_in_the_slot() {
         ..go_like()
     };
     let (mut rig, mut actor, at) = restarted_down(cfg);
-    let boundary = |actor: &Actor| actor.snapshots().get(SnapshotCauseKind::CheckpointBoundary);
-    let counted = boundary(&actor);
+    let counted = actor.snapshots().total();
     // A reader holds one PASSIVE back, so the TRUNCATE comes due.
     rig.ck.script(CheckpointScript {
         busy: false,
@@ -224,14 +221,14 @@ fn a_courses_truncate_stages_its_boundary_snapshot_in_the_slot() {
         })
         .count();
     assert!(truncates > 0, "{seen:?}");
-    assert!(boundary(&actor) > counted, "{seen:?}");
+    assert_eq!(actor.snapshots().total(), counted, "{seen:?}");
     assert_eq!(
         staged(&rig),
         vec![2, 3],
         "level 0 is as the course found it"
     );
-    // A file a commit, and a boundary snapshot a TRUNCATE.
-    assert!(apart(&rig).len() > 6, "{:?}", apart(&rig));
+    // A file a commit, and one a checkpoint's new generation.
+    assert!(apart(&rig).len() >= 6, "{:?}", apart(&rig));
     assert_eq!(ranges(&rig.remote), vec![(1, 1)]);
     up(&rig);
     let after = run(&mut rig, &mut actor, at + 600_000, at + 600_000);

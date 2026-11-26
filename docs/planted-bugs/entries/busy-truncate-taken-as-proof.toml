@@ -1,0 +1,6 @@
+# A TRUNCATE checkpoint that SQLite reported busy taken as done: the engine claims it emptied a
+# WAL that still holds frames (docs/decisions/D263.md).
+name = "busy-truncate-taken-as-proof"
+fix = "claude/truncate-proof"
+package = "lsr-core"
+tests = ["a_busy_truncate_takes_no_snapshot"]

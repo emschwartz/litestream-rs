@@ -18,7 +18,9 @@
 //!    sends on from there (`docs/decisions/D217.md`). A file in flight goes first, and
 //!    the sync takes a turn after every [`state::FAIR_SHARE`] slices, so commits are staged
 //!    and checkpoints run while it goes up; with no file in flight an upload goes first
-//!    only after that many syncs in a row.
+//!    only after that many syncs in a row. A job part-way (below) counts its slices with the
+//!    file's: inside a share the two take turns, and the sync's turn still comes after
+//!    [`state::FAIR_SHARE`] slices of either (`docs/decisions/D264.md`).
 //! 3. Prune staged level-0 files the replica's level 1 covers, keeping the
 //!    newest staged file.
 //! 4. Maintenance. Its first listing after a
@@ -28,9 +30,9 @@
 //!    A snapshot job runs only once uploads are idle, so its last
 //!    transaction is at most what was published; with uploads busy it waits,
 //!    and the next listing waits with it. A snapshot read from the database goes a slice a
-//!    tick: its slices go first, the rest of the engine has the tick after each
-//!    [`state::FAIR_SHARE`] of them, no checkpoint runs and nothing is listed until it ends
-//!    (`docs/decisions/D255.md`). A compaction, and a snapshot merged from level 0, go a
+//!    tick: its slices and an upload's take turns, the rest of the engine has the tick after
+//!    each [`state::FAIR_SHARE`] of them together, no checkpoint runs and nothing is listed
+//!    until it ends (`docs/decisions/D255.md`). A compaction, and a snapshot merged from level 0, go a
 //!    slice a tick the same way; checkpoints run between their slices, and the staging prune
 //!    waits while one reads staged copies (`docs/decisions/D259.md`).
 //!
@@ -1478,6 +1480,7 @@ impl Actor {
         if owed && let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
+        self.engine.slices_ahead = 0;
         if let Some(tick) = self.wal_unit(env, now, true).await {
             return self.passed_over_uploads(tick);
         }
@@ -1527,6 +1530,7 @@ impl Actor {
         if owed && let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
+        self.engine.slices_ahead = 0;
         if let Some(tick) = self.wal_unit(env, now, false).await {
             return self.passed_over_uploads(tick);
         }
@@ -2115,22 +2119,8 @@ impl Actor {
             }
         };
         let position = self.took(done.staged);
-        match done.outcome {
-            CheckpointOutcome::LockBusy => return self.lock_busy(skips, now),
-            // A TRUNCATE that changed the WAL staged its boundary snapshot.
-            CheckpointOutcome::Truncated => self
-                .kept
-                .snapshots
-                .count(&SnapshotCause::CheckpointBoundary),
-            // The same snapshot, which the next sync stages and counts.
-            CheckpointOutcome::BoundaryOwed => self
-                .engine
-                .course
-                .snapshot_for(SnapshotCause::CheckpointBoundary, false),
-            CheckpointOutcome::Busy
-            | CheckpointOutcome::NotRestarted
-            | CheckpointOutcome::Overtaken
-            | CheckpointOutcome::Restarted => {}
+        if done.outcome == CheckpointOutcome::LockBusy {
+            return self.lock_busy(skips, now);
         }
         let observed = Observed::of(now, &position, true);
         let (state, next) = after_checkpoint(
@@ -2150,8 +2140,7 @@ impl Actor {
             CheckpointOutcome::LockBusy
             | CheckpointOutcome::NotRestarted
             | CheckpointOutcome::Restarted
-            | CheckpointOutcome::Truncated
-            | CheckpointOutcome::BoundaryOwed => false,
+            | CheckpointOutcome::Truncated => false,
         };
         self.ran(Event::Checkpointed { mode, busy }, now)
     }
@@ -2206,9 +2195,14 @@ impl Actor {
         if !self.upload_ready(now) {
             return None;
         }
-        let turns = (self.engine.syncs_ahead, self.engine.maintain.passed_over);
+        let turns = (
+            self.engine.syncs_ahead,
+            self.engine.maintain.passed_over,
+            self.engine.job_went_last,
+        );
         let sent = self.engine.in_flight.sent();
         self.engine.syncs_ahead = 0;
+        self.engine.job_went_last = false;
         // Owed or in its own turn, an upload tick is one that passed prune and maintenance over.
         let maintain = &mut self.engine.maintain;
         maintain.passed_over = maintain.passed_over.saturating_add(1);
@@ -2242,7 +2236,11 @@ impl Actor {
                         && self.engine.in_flight.waits()
                         && self.engine.in_flight.sent() == sent =>
                 {
-                    (self.engine.syncs_ahead, self.engine.maintain.passed_over) = turns;
+                    (
+                        self.engine.syncs_ahead,
+                        self.engine.maintain.passed_over,
+                        self.engine.job_went_last,
+                    ) = turns;
                     return None;
                 }
                 Ok(None) if last == Did::Nothing => {
@@ -2660,7 +2658,6 @@ impl Actor {
                 Ok(merging) => {
                     let sliced = Box::new(Sliced::Merge(merging));
                     self.engine.sliced = Some((job.clone(), sliced));
-                    self.engine.job_slices = 0;
                     return match self.sliced_unit(env, now, created_at_read).await {
                         Some(tick) => tick,
                         None => self.ran(Event::Sending { bytes: 0 }, now),
@@ -2878,7 +2875,6 @@ impl Actor {
                 self.engine.pages.pin();
                 let sliced = Box::new(Sliced::Snapshot(snapshot));
                 self.engine.sliced = Some((job.clone(), sliced));
-                self.engine.job_slices = 0;
                 match self.sliced_unit(env, now, 0).await {
                     Some(tick) => tick,
                     None => self.ran(Event::Sending { bytes: 0 }, now),
@@ -2932,7 +2928,8 @@ impl Actor {
         if waited && bytes == before {
             return None;
         }
-        self.engine.job_slices = self.engine.job_slices.saturating_add(1);
+        self.engine.slices_ahead = self.engine.slices_ahead.saturating_add(1);
+        self.engine.job_went_last = true;
         Some(self.ran(Event::Sending { bytes }, now))
     }
 
@@ -2989,14 +2986,12 @@ impl Actor {
             .is_some_and(|(_, sliced)| !sliced.waits())
     }
 
-    /// Whether the job's slice goes first this tick: until [`state::FAIR_SHARE`] of them ran
-    /// in a row, then the rest of the engine has a tick, as after a staged file's slices.
-    fn sliced_owed(&mut self) -> bool {
-        let owed = self.engine.sliced.is_some() && self.engine.job_slices < state::FAIR_SHARE;
-        if !owed {
-            self.engine.job_slices = 0;
-        }
-        owed
+    /// Whether the job's slice goes first this tick: until [`state::FAIR_SHARE`] slices, its
+    /// own and a staged file's together, ran since the WAL step's turn, and only once an
+    /// upload with work had its turn after the job's last slice.
+    fn sliced_owed(&self) -> bool {
+        let turn = !self.job_went_last() || self.uploads_idle();
+        self.engine.sliced.is_some() && self.engine.slices_ahead < state::FAIR_SHARE && turn
     }
 
     /// A snapshot that did not publish. When the store took the commit and
@@ -3066,18 +3061,22 @@ impl Actor {
     /// [`state::FAIR_SHARE`] ticks in a row ended in the WAL step. The step runs only when
     /// uploads are ready, and resets the count when it does.
     /// A file in flight turns the share around: its slices go first, and the WAL step (and
-    /// with it prune and maintenance) has the tick after each [`state::FAIR_SHARE`] of them.
+    /// with it prune and maintenance) has the tick after each [`state::FAIR_SHARE`] of them,
+    /// a job's slices counted with them. After a job's slice the upload goes first too, so the
+    /// two take turns ([`Self::sliced_owed`]).
     /// A turn after every slice would have an application that commits before each tick pay
     /// a sync, and stage a file, for every slice (`docs/decisions/D217.md`).
-    fn owed_upload(&mut self) -> bool {
-        let owed = match self.engine.in_flight.sent() {
-            Some(_) => self.engine.slices_ahead < state::FAIR_SHARE,
-            None => self.engine.syncs_ahead >= state::FAIR_SHARE,
+    fn owed_upload(&self) -> bool {
+        let turn = match self.engine.in_flight.sent() {
+            Some(_) => true,
+            None => self.job_went_last() || self.engine.syncs_ahead >= state::FAIR_SHARE,
         };
-        if !owed {
-            self.engine.slices_ahead = 0;
-        }
-        owed
+        turn && self.engine.slices_ahead < state::FAIR_SHARE
+    }
+
+    /// Whether the job part-way sent the last slice, so an upload with work has the next.
+    const fn job_went_last(&self) -> bool {
+        self.engine.job_went_last && self.engine.sliced.is_some()
     }
 
     /// `tick`, from the WAL step, counted: the upload step resets the count when it runs, and

@@ -3,8 +3,8 @@
 //! and checkpoints from local state, so the WAL stays short, and the boot that at last lists
 //! the replica judges it as any boot does. One scenario for the store coming back as it was,
 //! and one each for it coming back with another writer's file, rolled back, refusing, and
-//! with the WAL damaged since the course staged from it; and one for a course whose own
-//! TRUNCATE stages a boundary snapshot.
+//! with the WAL damaged since the course staged from it; and one for a course that runs its own
+//! TRUNCATE.
 
 use lsr_core::{CheckpointMode, Denied, Event, SnapshotCause, StopCause, StoreError, StoreOp};
 
@@ -264,13 +264,9 @@ fn wal_damaged_as_the_store_returns(
 
 /// A reader in another process holds the WAL through the first rounds of an outage after a
 /// restart, so the course's PASSIVE checkpoints cannot restart it and it passes the TRUNCATE
-/// threshold; the reader ends, and the course's TRUNCATE stages its boundary snapshot, a file
-/// that holds every page, in the slot. The engine counts that snapshot and the checks find
-/// the file that is it, where the course wrote it.
-///
-/// The rotating seeds of 2026-11-25 failed here once the checks read the slot's files as
-/// staged: the file was looked for at level 0 only, so the engine had counted a snapshot the
-/// checks saw no file for.
+/// threshold; the reader ends, and the course's TRUNCATE empties the WAL and follows it into
+/// the new generation without a snapshot, as a booted engine's does (docs/decisions/D263.md):
+/// the course goes on, and every file it staged moves up.
 #[must_use]
 pub fn store_down_and_the_course_truncates() -> Scenario {
     let mut ops = vec![commit(3, false)];
@@ -296,9 +292,6 @@ pub fn store_down_and_the_course_truncates() -> Scenario {
         ],
     );
     s.check = Some(|report| {
-        if report.reach.get("snapshot.staged.CheckpointBoundary") == 0 {
-            return Err("the engine counted no snapshot at a TRUNCATE".to_owned());
-        }
         let truncated = while_down(report)?.iter().any(|seen| {
             matches!(
                 seen,

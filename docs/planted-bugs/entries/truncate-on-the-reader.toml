@@ -1,0 +1,12 @@
+# The TRUNCATE checkpoint run on the reader after its read transaction ends, as a PASSIVE is.
+# With the read gone nothing holds a commit made after the barrier's release out of the backfill,
+# so the TRUNCATE can swallow it; the engine finds its read lost and fails the checkpoint
+# instead of following the new generation (docs/decisions/D263.md).
+name = "truncate-on-the-reader"
+fix = "claude/truncate-proof"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = [
+    "truncate_proof::a_commit_after_the_barrier_makes_the_truncate_busy",
+    "truncate_proof::a_commit_anywhere_around_a_truncate_restores_whole",
+]

@@ -348,3 +348,76 @@ fn a_boot_reads_back_a_long_snapshot_a_slice_a_tick() {
         "the commit waited for the read-back"
     );
 }
+
+/// A file of many slices put in flight while the snapshot is part-way: the WAL step has staged
+/// it, and the next tick sends its first slice.
+fn file_in_flight_beside_the_snapshot(rig: &mut Rig, actor: &mut Actor) {
+    let pages: Vec<_> = (3..403)
+        .map(|n| (pg(n), noise(u64::from(n) << 20)))
+        .collect();
+    rig.wal.append_tx(&pages, nz(PAGES));
+    for _ in 0..50 {
+        rig.tick(actor, T0);
+        if actor.engine.in_flight.sent().is_some() && actor.engine.sliced.is_some() {
+            return;
+        }
+    }
+    panic!("the file never went in flight beside the snapshot");
+}
+
+/// A file in flight and a snapshot part-way share one count of slices: with a commit waiting at
+/// every tick, at most [`state::FAIR_SHARE`] ticks in a row end in a slice of either before the
+/// WAL step syncs. Before, the snapshot's share ended in the file's slice, which was counted
+/// apart, and a commit waited behind both.
+#[test]
+fn a_commit_waits_at_most_a_share_of_slices_of_a_file_and_a_snapshot_together() {
+    let (mut rig, mut actor) = before_a_long_snapshot();
+    part_way(&mut rig, &mut actor);
+    file_in_flight_beside_the_snapshot(&mut rig, &mut actor);
+    let (mut run, mut syncs) = (0_u32, 0_u32);
+    for n in 0..60_u8 {
+        if actor.engine.in_flight.sent().is_none() || actor.engine.sliced.is_none() {
+            break;
+        }
+        rig.wal
+            .append_tx(&[(pg(PAGES), vec![n; PS.bytes()])], nz(PAGES));
+        let tick = rig.tick(&mut actor, T0);
+        match event(&tick) {
+            Some(Event::Sending { .. }) => run += 1,
+            Some(Event::Synced { .. }) => (run, syncs) = (0, syncs + 1),
+            Some(Event::Uploaded(_)) => run = 0,
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            run <= super::super::state::FAIR_SHARE,
+            "{run} slices in a row ahead of a waiting commit"
+        );
+    }
+    assert!(syncs >= 2, "{syncs}");
+}
+
+/// Inside a share the file in flight and the snapshot take turns: neither waits for the other
+/// to end, and the file's slices still go up while the snapshot is part-way.
+#[test]
+fn a_file_in_flight_and_a_snapshot_part_way_take_turns() {
+    let (mut rig, mut actor) = before_a_long_snapshot();
+    part_way(&mut rig, &mut actor);
+    file_in_flight_beside_the_snapshot(&mut rig, &mut actor);
+    let job_sent = |actor: &Actor| actor.engine.sliced.as_ref().map(|(_, s)| s.sent());
+    let mut turns = Vec::new();
+    for _ in 0..12 {
+        let (file, job) = (actor.engine.in_flight.sent(), job_sent(&actor));
+        let tick = rig.tick(&mut actor, T0);
+        assert!(
+            matches!(event(&tick), Some(Event::Sending { .. })),
+            "{tick:?}"
+        );
+        turns.push((
+            actor.engine.in_flight.sent() != file,
+            job_sent(&actor) != job,
+        ));
+    }
+    // The file sent its first slice last; the snapshot has the next, and so on.
+    let expected: Vec<_> = (0..12).map(|n| (n % 2 == 1, n % 2 == 0)).collect();
+    assert_eq!(turns, expected);
+}

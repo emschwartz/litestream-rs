@@ -497,16 +497,19 @@ pub(super) struct Engine {
     /// every tick keeps the WAL step busy on each one, and the upload step that follows it
     /// would otherwise never run.
     pub(super) syncs_ahead: u32,
-    /// Slices of the file in flight sent in a row since the WAL step last had its turn; at
-    /// [`super::state::FAIR_SHARE`] the WAL step goes first again. A file of many slices
-    /// would otherwise keep every commit made meanwhile in the WAL until it is whole.
+    /// Slices sent in a row since the WAL step last had its turn, the file in flight's and the
+    /// job part-way's together; at [`super::state::FAIR_SHARE`] the WAL step goes first again.
+    /// A file or a job of many slices would otherwise keep every commit made meanwhile in the
+    /// WAL until it is whole, and one counted apart from the other would take the turn the
+    /// other left.
     pub(super) slices_ahead: u32,
     /// The maintenance job part-way to the replica, if any, and the job it is. In memory
     /// only, as a send is.
     pub(super) sliced: Option<(Job, Box<Sliced>)>,
-    /// Slices of that job in a row: at [`super::state::FAIR_SHARE`] the rest of the engine
-    /// has the next tick, as it has after a staged file's slices.
-    pub(super) job_slices: u32,
+    /// The job's slice was the upload step's last turn: an upload with work goes before the
+    /// job's next slice, so the two take turns inside a share and neither waits for the
+    /// other to end.
+    pub(super) job_went_last: bool,
     /// The boot's read-back part-way, if it is (`crate::maintain::audit`). In memory only.
     pub(super) reading_back: Option<Box<ReadingBack>>,
     /// The boot's identity check across its ticks (`crate::identity`). In memory only.
@@ -578,7 +581,7 @@ impl Engine {
             syncs_ahead: 0,
             slices_ahead: 0,
             sliced: None,
-            job_slices: 0,
+            job_went_last: false,
             reading_back: None,
             identity: None,
         }

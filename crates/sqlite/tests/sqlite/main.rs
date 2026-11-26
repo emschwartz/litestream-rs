@@ -22,7 +22,7 @@ fn child(role: &str, db: &Path) -> bool {
     if sidecar_read_lock::child(role, db) {
         return true;
     }
-    faults::child(role, db) || kill::child(role, db)
+    faults::child(role, db) || kill::child(role, db) || truncate_proof::child(role, db)
 }
 
 // `cfg(test)` is always set here; it marks the helpers as test code, so clippy.toml's
@@ -31,8 +31,6 @@ fn child(role: &str, db: &Path) -> bool {
 mod app_at_defaults;
 #[cfg(test)]
 mod big;
-#[cfg(test)]
-mod boundary_snapshot;
 #[cfg(test)]
 mod common;
 #[cfg(test)]
@@ -57,6 +55,8 @@ mod sidecar_read_lock;
 mod sim_model;
 #[cfg(test)]
 mod sim_real;
+#[cfg(test)]
+mod truncate_proof;
 #[cfg(test)]
 mod wal_index;
 #[cfg(test)]

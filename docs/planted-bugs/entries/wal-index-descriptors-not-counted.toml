@@ -1,0 +1,8 @@
+# The SQLite backend reported one copy of SQLite on the database without counting the
+# descriptors the process holds on the wal-index, so a second copy's TRUNCATE race went unseen
+# (docs/decisions/D263.md).
+name = "wal-index-descriptors-not-counted"
+fix = "claude/truncate-proof"
+package = "lsr-sqlite"
+test_bin = "sqlite"
+tests = ["truncate_proof::a_second_opener_of_the_wal_index_voids_the_proof"]

@@ -1,12 +1,12 @@
-//! The boundary snapshot, the copy of the database the engine stages after a TRUNCATE checkpoint
-//! moved the WAL, on real SQLite with application commits landing inside it.
+//! A TRUNCATE checkpoint on real SQLite with application commits landing around it, and no copy
+//! of the database after it (docs/decisions/D263.md).
 //!
 //! The engine's backend is wrapped so that, before each of the engine's calls into it, a hook
 //! runs: an application commit at one chosen call, and another connection's PASSIVE checkpoint
-//! (and, from the TRUNCATE on, its TRUNCATE) at every call. The fault VFS adds the one moment no
-//! engine call reaches, inside the TRUNCATE's own call: after SQLite truncated the WAL and
-//! before the engine's read transaction is retaken. Every state the replica restores to must be
-//! one some commit made, and the last must be the database as it stands.
+//! (and, from the first call on, its TRUNCATE) at every call. The fault VFS adds the one moment
+//! no engine call reaches, inside the TRUNCATE's own call: after SQLite truncated the WAL. Every
+//! state the replica restores to must be one some commit made, and the last must be the
+//! database as it stands.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -30,6 +30,12 @@ type Hook = Box<dyn FnMut(SourceOp)>;
 thread_local! {
     /// What runs before each of the engine's calls, when a case arms it.
     pub(crate) static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// What each of the engine's TRUNCATE calls returned.
+    static TRUNCATES: RefCell<Vec<Result<CheckpointRun, SourceError>>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 fn hook(op: SourceOp) {
@@ -101,7 +107,11 @@ impl Checkpointer for Hooked {
 
     fn checkpoint(&mut self, mode: CheckpointMode) -> Result<CheckpointRun, SourceError> {
         hook(SourceOp::Checkpoint);
-        self.0.checkpoint(mode)
+        let run = self.0.checkpoint(mode);
+        if mode == CheckpointMode::Truncate {
+            TRUNCATES.with(|runs| runs.borrow_mut().push(run));
+        }
+        run
     }
 
     fn bump_seq(&mut self) -> Result<(), SourceError> {
@@ -152,9 +162,15 @@ enum At {
     Nowhere,
     /// Right before the engine's call with this index, counted from the TRUNCATE's.
     Call(usize),
-    /// Inside the TRUNCATE's call, after SQLite truncated the WAL and before the engine's read
-    /// transaction is retaken.
+    /// Inside the TRUNCATE's call, after SQLite truncated the WAL.
     AfterTheTruncate,
+    /// Right before the engine's call with this index: a commit that restarts the WAL, then
+    /// the backfill count set to its frame count, as a writer leaves it that restarted the WAL
+    /// and died before clearing the count (`walRestartHdr` writes the header first).
+    StaleBackfill(usize),
+    /// A descriptor of the test's own on `-shm`, opened before the engine's first call and
+    /// held: what a second copy of SQLite in the process opens.
+    SecondOpener,
 }
 
 /// What another process does at each of the engine's calls.
@@ -165,6 +181,8 @@ enum Other {
     /// A PASSIVE checkpoint, then (once the engine's own TRUNCATE has run) a TRUNCATE, which
     /// restarts the WAL whenever no reader holds a mark above 0 and everything is backfilled.
     PassiveAndTruncate,
+    /// Nothing.
+    Nothing,
 }
 
 /// What one case saw.
@@ -177,6 +195,8 @@ struct Seen {
     commit: Option<Result<(), String>>,
     /// The engine's call the commit was made before, for a commit at a call.
     commit_before: Option<SourceOp>,
+    /// Whether a file staged from the TRUNCATE on is a copy of the whole database.
+    snapshotted: bool,
 }
 
 /// Images of every state the database has been in, as a fresh reader saw each.
@@ -245,9 +265,24 @@ fn arm_hook(
                 let done = insert(&writer).map(drop).map_err(|e| e.to_string());
                 *commit.lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
             }
-            // Another process checkpoints at every call; its TRUNCATE only once the engine's
-            // own has run, so it races the copy, not the proof.
-            let _passive = other.execute_batch("PRAGMA wal_checkpoint(PASSIVE)");
+            if at == At::StaleBackfill(index) {
+                let status = crate::common::spawn("child_process_entry", STALE_BACKFILL, &db)
+                    .wait()
+                    .unwrap();
+                let done = if status.success() {
+                    Ok(())
+                } else {
+                    Err(status.to_string())
+                };
+                *commit.lock().unwrap_or_else(PoisonError::into_inner) = Some(done);
+            }
+            if at == At::SecondOpener && index == 0 {
+                hold_a_second_descriptor(&db);
+            }
+            // Another process checkpoints at every call, its TRUNCATE too from the second on.
+            if others != Other::Nothing {
+                let _passive = other.execute_batch("PRAGMA wal_checkpoint(PASSIVE)");
+            }
             if others == Other::PassiveAndTruncate && index > 0 {
                 let _truncate = other.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
             }
@@ -316,15 +351,18 @@ fn run(at: At, others: Other) -> Seen {
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
     let calls = calls.borrow().clone();
+    // Only a snapshot reads the database file's pages.
+    let snapshotted = calls.contains(&SourceOp::ReadPage);
     let commit_before = match at {
-        At::Call(index) => calls.get(index).copied(),
-        At::Nowhere | At::AfterTheTruncate => None,
+        At::Call(index) | At::StaleBackfill(index) => calls.get(index).copied(),
+        At::Nowhere | At::AfterTheTruncate | At::SecondOpener => None,
     };
     Seen {
         outcome,
         calls,
         commit,
         commit_before,
+        snapshotted,
     }
 }
 
@@ -338,41 +376,111 @@ fn restored(stepper: &Stepper<Hooked>, target: RestoreTarget) -> Vec<u8> {
         .collect()
 }
 
-/// The copy holds no lock that keeps the application out: a commit made while the boundary
-/// snapshot reads the database succeeds, and the next step stages it.
-#[test]
-fn a_write_commits_while_the_boundary_snapshot_is_copied() {
-    let dry = run(At::Nowhere, Other::Passive);
-    assert_eq!(dry.outcome, CheckpointOutcome::Truncated);
-    let first_page = dry
-        .calls
+/// The index of the engine's `nth` checkpoint call (from 0): the PASSIVE's, then the TRUNCATE's.
+fn nth_checkpoint(calls: &[SourceOp], nth: usize) -> usize {
+    calls
         .iter()
-        .position(|op| *op == SourceOp::ReadPage)
-        .expect("the snapshot read a page");
-    let seen = run(At::Call(first_page.saturating_add(1)), Other::Passive);
-    assert_eq!(seen.outcome, CheckpointOutcome::Truncated);
-    assert_eq!(seen.commit_before, Some(SourceOp::ReadPage));
-    assert_eq!(
-        seen.commit,
-        Some(Ok(())),
-        "the application's commit during the copy"
-    );
+        .enumerate()
+        .filter(|(_, op)| **op == SourceOp::Checkpoint)
+        .nth(nth)
+        .map(|(at, _)| at)
+        .expect("the engine's checkpoint calls")
 }
 
-/// A commit at every one of the engine's calls from the TRUNCATE to the end of the sync after
-/// it, and one inside the TRUNCATE's call before the read is retaken, each with another process
-/// checkpointing throughout: every state restores to one a commit made.
+/// The wal-index beside `db`.
+fn shm_of(db: &Path) -> std::path::PathBuf {
+    let mut name = db.as_os_str().to_owned();
+    name.push("-shm");
+    name.into()
+}
+
+/// Opens `-shm` a second time, as another copy of SQLite in the process would, and never
+/// closes it.
+#[expect(
+    clippy::disallowed_methods,
+    clippy::mem_forget,
+    reason = "the second descriptor is the case; never closed, since closing it would drop \
+              every POSIX lock the process holds on the file, SQLite's own among them"
+)]
+fn hold_a_second_descriptor(db: &Path) {
+    std::mem::forget(std::fs::File::open(shm_of(db)).unwrap());
+}
+
+/// The child's role for [`At::StaleBackfill`].
+const STALE_BACKFILL: &str = "commit-then-stale-backfill";
+
+/// This file's roles for the binary's `child_process_entry` (`common::spawn`): whether `role`
+/// is one, after running it.
+pub fn child(role: &str, db: &Path) -> bool {
+    if role != STALE_BACKFILL {
+        return false;
+    }
+    stale_backfill(db);
+    true
+}
+
+/// Another process commits, which restarts the WAL the engine's PASSIVE copied whole, then sets
+/// the wal-index's backfill count to its frame count (`WalCkptInfo.nBackfill` at byte 96,
+/// `WalIndexHdr.mxFrame` at byte 16, both native-endian) and exits: the state a writer leaves
+/// that restarted the WAL and died before `walRestartHdr` cleared the count, once a later
+/// commit brought the frame count up to the stale one.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a child process of its own: closing the descriptor drops only its locks"
+)]
+fn stale_backfill(db: &Path) {
+    use std::os::unix::fs::FileExt;
+    let conn = Connection::open(db).unwrap();
+    // Page 1 alone: the database keeps its length, so what the TRUNCATE drops is this commit,
+    // not pages SQLite still counts.
+    conn.execute_batch("PRAGMA user_version = 7").unwrap();
+    let shm = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(shm_of(db))
+        .unwrap();
+    let mut frames = [0; 4];
+    shm.read_exact_at(&mut frames, 16).unwrap();
+    assert_ne!(u32::from_ne_bytes(frames), 0, "the commit's frames");
+    shm.write_all_at(&frames, 96).unwrap();
+}
+
+/// A commit at every one of the engine's calls from the TRUNCATE's barrier to the end of the
+/// sync after it, and one inside the TRUNCATE's call after SQLite truncated the WAL, each with
+/// another process checkpointing throughout: every state restores to one a commit made. With
+/// the other process running only PASSIVE checkpoints no case copies the database: a commit
+/// either is sealed, makes the TRUNCATE busy, or lands in the generation the engine follows.
 #[test]
-fn a_commit_anywhere_around_the_boundary_snapshot_restores_whole() {
+fn a_commit_anywhere_around_a_truncate_restores_whole() {
     for others in [Other::Passive, Other::PassiveAndTruncate] {
+        TRUNCATES.with(|runs| runs.borrow_mut().clear());
         let dry = run(At::Nowhere, others);
-        assert_eq!(dry.outcome, CheckpointOutcome::Truncated);
-        assert!(dry.calls.contains(&SourceOp::ReadPage), "{:?}", dry.calls);
+        assert_eq!(dry.outcome, CheckpointOutcome::Truncated, "{others:?}");
+        // Another process's TRUNCATE right after ours resets the generation again before the
+        // engine reads its header: nothing proves the generation continues, so it is copied.
+        assert_eq!(
+            dry.snapshotted,
+            others == Other::PassiveAndTruncate,
+            "{:?}",
+            dry.calls
+        );
+        let truncate = nth_checkpoint(&dry.calls, 1);
         let mut committed = 0;
         for index in 0..dry.calls.len() {
             let seen = run(At::Call(index), others);
             if seen.commit == Some(Ok(())) {
                 committed += 1;
+            }
+            // A commit between the TRUNCATE and the engine's next read of the WAL header may
+            // have written that header with fresh salts, so nothing proves the generation
+            // continues the sealed one: that one case is snapshotted.
+            if others == Other::Passive {
+                assert_eq!(
+                    seen.snapshotted,
+                    index == truncate + 1,
+                    "{index}: {:?}",
+                    seen.calls
+                );
             }
         }
         assert!(
@@ -380,12 +488,71 @@ fn a_commit_anywhere_around_the_boundary_snapshot_restores_whole() {
             "{others:?}: only {committed} of {} commits landed",
             dry.calls.len()
         );
+        // With another process truncating too, the moment after a truncation can fall while
+        // the engine's barrier holds the write lock, where the commit would wait forever.
+        if others != Other::Passive {
+            continue;
+        }
         let inside = run(At::AfterTheTruncate, others);
-        assert_eq!(inside.outcome, CheckpointOutcome::Truncated);
         assert_eq!(
             inside.commit,
             Some(Ok(())),
-            "{others:?}: the commit between the TRUNCATE and the retaken read"
+            "{others:?}: the commit right after the TRUNCATE"
         );
     }
+}
+
+/// The SQLite fact the proof stands on, on the build lsr links: with the engine's read held, a
+/// commit after the barrier's release leaves the TRUNCATE busy, its frames in the WAL, and the
+/// next step stages them. An upgrade that changed it fails here.
+#[test]
+fn a_commit_after_the_barrier_makes_the_truncate_busy() {
+    let dry = run(At::Nowhere, Other::Passive);
+    let truncate = nth_checkpoint(&dry.calls, 1);
+    TRUNCATES.with(|runs| runs.borrow_mut().clear());
+    let seen = run(At::Call(truncate), Other::Passive);
+    assert_eq!(seen.commit_before, Some(SourceOp::Checkpoint));
+    assert_eq!(seen.commit, Some(Ok(())), "the commit after the release");
+    let runs = TRUNCATES.with(|runs| runs.borrow().clone());
+    assert!(
+        matches!(runs.as_slice(), [Ok(run)] if run.busy),
+        "SQLite's TRUNCATE: {runs:?}"
+    );
+    assert_ne!(seen.outcome, CheckpointOutcome::Truncated);
+    assert!(!seen.snapshotted);
+}
+
+/// A writer that restarted the WAL and died before clearing the backfill count leaves frames
+/// nobody copied counted as copied, and SQLite's TRUNCATE then succeeds over them. The engine
+/// does not take that success as its proof: the generation was reset twice, so the next sync
+/// snapshots what the database holds.
+#[test]
+fn a_restart_whose_writer_died_mid_reset_is_not_followed() {
+    let dry = run(At::Nowhere, Other::Passive);
+    let truncate = nth_checkpoint(&dry.calls, 1);
+    TRUNCATES.with(|runs| runs.borrow_mut().clear());
+    let seen = run(At::StaleBackfill(truncate), Other::Nothing);
+    assert_eq!(seen.commit, Some(Ok(())));
+    let runs = TRUNCATES.with(|runs| runs.borrow().clone());
+    assert!(
+        matches!(runs.as_slice(), [Ok(run)] if !run.busy),
+        "SQLite truncated over the uncopied frames: {runs:?}"
+    );
+    assert_eq!(seen.outcome, CheckpointOutcome::Truncated);
+    assert!(seen.snapshotted, "the next sync copied the database");
+}
+
+/// Another open descriptor on the wal-index, as a second copy of SQLite in the process holds,
+/// voids the proof: the next sync snapshots the new generation instead of following it.
+#[test]
+fn a_second_opener_of_the_wal_index_voids_the_proof() {
+    let seen = run(At::SecondOpener, Other::Passive);
+    let runs = TRUNCATES.with(|runs| runs.borrow().clone());
+    assert!(
+        runs.iter()
+            .any(|run| matches!(run, Ok(run) if !run.one_sqlite)),
+        "{runs:?}"
+    );
+    assert_eq!(seen.outcome, CheckpointOutcome::Truncated);
+    assert!(seen.snapshotted, "the next sync copied the database");
 }

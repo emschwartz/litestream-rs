@@ -1,8 +1,8 @@
 diff --git a/crates/core/src/actor/lag.rs b/crates/core/src/actor/lag.rs
-index c45b213..234fb01 100644
+index 323208402..9983a3d42 100644
 --- a/crates/core/src/actor/lag.rs
 +++ b/crates/core/src/actor/lag.rs
-@@ -23,8 +23,7 @@ use crate::source::WalSource;
+@@ -32,8 +32,7 @@ pub(crate) const BOOT_UNDECIDED_BOUND: Duration = Duration::from_secs(15);
  /// staged files lack.
  const fn doubt_only(cause: SnapshotCause) -> bool {
      match cause {
@@ -12,11 +12,11 @@ index c45b213..234fb01 100644
          | SnapshotCause::WalMissing
          | SnapshotCause::PrevFrameMismatch
          | SnapshotCause::LastPageMismatch
-@@ -32,6 +31,7 @@ const fn doubt_only(cause: SnapshotCause) -> bool {
-         // The database's first copy, a replica ahead of us, frames a checkpoint or a failed
-         // sync moved past staging, a rewind, staged files deleted: commits may be in the file.
+@@ -41,6 +40,7 @@ const fn doubt_only(cause: SnapshotCause) -> bool {
+         // The database's first copy, a replica ahead of us, a rewind, staged files deleted:
+         // commits may be in the file.
          SnapshotCause::FirstSync
 +        | SnapshotCause::OperatorRequested
          | SnapshotCause::BehindRemote { .. }
          | SnapshotCause::LocalRewound { .. }
-         | SnapshotCause::CheckpointBoundary
+         | SnapshotCause::StagedUnverified { .. }
