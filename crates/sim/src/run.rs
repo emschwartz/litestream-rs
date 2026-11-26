@@ -670,7 +670,6 @@ impl Runner {
             self.actor.remember_takeover(record);
         }
         self.unwatched = true;
-        self.spare = self.boot_spare();
         self.degraded = [false; 5];
         self.latest = None;
         self.forcings.rebooted();
@@ -933,6 +932,11 @@ impl Runner {
         let began = self.now();
         let hits0 = self.fault_hits();
         let booting = !self.actor.booted();
+        if booting {
+            // What this boot attempt finds on both stores now, staged files a store outage
+            // left in a local course among them (`crate::cost::Spare`).
+            self.spare = self.boot_spare();
+        }
         if booting && self.w.staged_level_zero().is_empty() {
             self.restore_files = self
                 .restore_files

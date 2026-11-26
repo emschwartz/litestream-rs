@@ -50,12 +50,12 @@ mod fixed {
         within_budget(spent(ticks));
     }
 
-    /// The budget fails a history that ticks past it: 5,000 idle ticks, the shape of a seed
+    /// The budget fails a history that ticks past it: 8,000 idle ticks, the shape of a seed
     /// whose engine loops, run through the same measure and the same assertion.
     #[test]
     #[should_panic(expected = "simulator tick budget exceeded")]
     fn a_history_that_loops_past_the_tick_budget_fails_it() {
-        let ops = vec![Op::Tick; 5_000];
+        let ops = vec![Op::Tick; 8_000];
         let report = run_ops(Seed::new(1), &ops, &Opts::default()).expect("idle ticks pass");
         assert!(
             report.ticks > BATCH_TICKS,

@@ -180,8 +180,10 @@ impl Runner {
         self.tail = true;
         // A level-9 snapshot goes up while the tail commits: every run's tail meets a job
         // many slices long, and its commits must get the turns they are owed.
-        self.forcings.note_op(&crate::Op::RequestSnapshot);
-        self.actor.request_snapshot();
+        if self.cost.is_some() {
+            self.forcings.note_op(&crate::Op::RequestSnapshot);
+            self.actor.request_snapshot();
+        }
         let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let remote0 = self.w.remote_recorder.counts();
         for _ in 0..TAIL_COMMITS {

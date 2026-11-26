@@ -260,4 +260,12 @@ pub const LEFT_TO_THE_SEEDS: &[(&str, &str)] = &[
         "cell.",
         "an error cell is drawn as a fault on its call; the rarest ran 18 times per 1,000 seeds",
     ),
+    (
+        "liveness.",
+        "every run ends with the healthy tail, whose commits are judged unless a stop or a persistent cause ends it first",
+    ),
+    (
+        "tick_cost.",
+        "every tick of every run is judged against its bound",
+    ),
 ];
