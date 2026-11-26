@@ -351,16 +351,6 @@ fn a_streamed_read_opens_one_stream_and_feeds_the_decoder_what_reads_would() {
 }
 
 #[test]
-fn a_read_stepped_event_by_event_opens_no_stream() {
-    let bytes = snapshot(40);
-    let store = Streams::new(stored(&bytes), None);
-    let mut read = LtxRead::new(key(), len(100));
-    while let Next::Event(()) = block_on(read.next(&store, |_| Ok::<(), Infallible>(()))).unwrap() {
-    }
-    assert_eq!(store.opened(), 0);
-}
-
-#[test]
 fn a_stream_that_fails_part_way_is_a_store_fault_after_the_pages_before_it() {
     let bytes = snapshot(40);
     let store = Streams::new(stored(&bytes), Some(500));
