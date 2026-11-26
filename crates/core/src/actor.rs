@@ -928,9 +928,11 @@ impl Actor {
                 {
                     *until = shift(*until);
                 }
+                // A wake from `now`'s view is one from `ended`'s: a deadline that passed while
+                // the tick ran is due now.
                 let next = match next {
-                    Next::At(at) if shift(at) != at => self.next(ended),
-                    other @ (Next::At(_) | Next::Now | Next::OnWalChange) => other,
+                    Next::At(_) => self.next(ended),
+                    other @ (Next::Now | Next::OnWalChange) => other,
                 };
                 Tick::Ran { event, next }
             }

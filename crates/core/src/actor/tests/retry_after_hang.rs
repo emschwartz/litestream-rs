@@ -50,3 +50,43 @@ fn a_retry_waits_from_when_the_failed_call_returned() {
         "retried the moment the call returned: {at_once:?}"
     );
 }
+
+/// A wait set by an earlier tick stays where it was when a later tick is slow: only the waits a
+/// tick sets itself are timed from its end. Here the upload's retry is due a second after its
+/// failure, and the sync that stages the next commit meanwhile takes half a second; the retry
+/// still goes at its second.
+#[test]
+fn a_slow_tick_moves_no_wait_an_earlier_tick_set() {
+    let (mut rig, mut actor) = caught_up();
+    let clock = Arc::new(FakeClock::new(ts(T0 + 1_000)));
+    rig.remote.refuse_uploads.store(true, Ordering::SeqCst);
+    *rig.remote.hangs_uploads.lock().unwrap() = Some((Arc::clone(&clock), DEADLINE));
+    rig.commit(2);
+    tick_on(&mut rig, &mut actor, &clock);
+    let failed = tick_on(&mut rig, &mut actor, &clock);
+    let Some(&Event::Retrying { until, .. }) = event(&failed) else {
+        panic!("{failed:?}");
+    };
+    *rig.remote.hangs_uploads.lock().unwrap() = None;
+    rig.remote.refuse_uploads.store(false, Ordering::SeqCst);
+    rig.commit(3);
+    *rig.staging.hangs_uploads.lock().unwrap() =
+        Some((Arc::clone(&clock), Duration::from_millis(500)));
+    let synced = tick_on(&mut rig, &mut actor, &clock);
+    assert_eq!(
+        event(&synced),
+        Some(&Event::Synced { files: 1 }),
+        "{synced:?}"
+    );
+    assert!(
+        clock.now() < until,
+        "the sync ended before the retry was due"
+    );
+    *rig.staging.hangs_uploads.lock().unwrap() = None;
+    clock.set(until);
+    let retried = tick_on(&mut rig, &mut actor, &clock);
+    assert!(
+        matches!(event(&retried), Some(Event::Uploaded(_))),
+        "the retry did not go at {until:?}: {retried:?}"
+    );
+}
