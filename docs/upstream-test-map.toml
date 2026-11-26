@@ -1,5 +1,5 @@
 # The upstream test map: every Go test at the pinned upstream commits (litestream
-# 041a8c3, ltx v0.5.3), as listed in docs/upstream-test-map/upstream-tests.txt by
+# 3e0fdc0, ltx v0.5.3), as listed in docs/upstream-test-map/upstream-tests.txt by
 # scripts/upstream-tests.sh, mapped to exactly one of:
 #   counterpart = "<nextest binary id>::<test path>" (or a list): Rust tests that check
 #                 the same behaviour, each one `cargo nextest list` prints;
@@ -45,7 +45,7 @@ go-replica-helper = "Go-only helper: Replica.TimeBounds computes a replica's old
 go-file-resolver = "Go-only: resolving a file:// replica path written with the pre-0.5 percent-escaping. The Rust CLI takes a directory path as given."
 backend-azure = "Azure Blob Storage backend: backends other than S3 and a local directory are not in v1 (docs/PLAN.md section 1)."
 go-reset = "`litestream reset` is one of Go's subcommands v1 does not have. The replicator recovers from a missing staging directory by itself (lsr-sim::faults meta_dir_deleted_mid_run)."
-go-library-api = "Go library API (DB.EnsureExists) with no caller in cmd/ at 041a8c3. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice."
+go-library-api = "Go library API (DB.EnsureExists) with no caller in cmd/ at 3e0fdc0. A Rust replicator never restores implicitly: restore is the caller's explicit call (lsr-core restore), and starting on a missing database is the caller's choice."
 go-ltx-encode = "Go-only: the `ltx encode-db` debugging command (a database file to a snapshot LTX file, written over a chosen output). Rust snapshots only from a live WAL source (lsr-core snapshot::tests::snapshot_equals_model) and has no such command."
 go-encoder = "Go-only: the encoder's runtime state machine. Rust's Encoder takes the header in Encoder::new and finish(self) consumes it (crates/ltx/src/encoder.rs), so a page before the header or a call after close does not compile."
 event-sink = "The library reports through EventSink events and the health() handle; the sidecar's /metrics renders that handle on each scrape, so there is no collector to keep, reset or delete, and a database's series exist exactly while it is in the daemon (the lsr-sidecar metrics module doc lists every Go series and why)."
@@ -152,6 +152,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 
 ["litestream/cmd/litestream/databases_test.go"]
 "TestDatabasesCommand_Run" = { reason = "@control-socket-cli" }
+"TestDatabasesCommand_Run/DirectoryConfig" = { counterpart = ["lsr-cli::cli::cli::databases_lists_every_database_a_dir_entry_finds", "lsr-cli::cli::cli::databases_refuses_a_dir_entry_that_finds_nothing"] }
 "TestDatabasesCommand_Run/EmptyJSONOutput" = { reason = "@control-socket-cli" }
 "TestDatabasesCommand_Run/JSONOutput" = { reason = "@control-socket-cli" }
 "TestDatabasesCommand_Run/StdinJSONOutput" = { reason = "@control-socket-cli" }
@@ -168,6 +169,9 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestDirectoryMonitor_pendingEvents/coalesces multiple events for same path" = { reason = "@watch-dir" }
 "TestDirectoryMonitor_pendingEvents/queues different paths separately" = { reason = "@watch-dir" }
 "TestDirectoryMonitor_shouldSkipPath" = { reason = "@watch-dir" }
+
+["litestream/cmd/litestream/helpers_test.go"]
+"TestCaptureStdout_OutputLargerThanPipeBuffer" = { reason = "@go-test-helper" }
 
 ["litestream/cmd/litestream/info_test.go"]
 "TestInfoCommand_Run" = { reason = "@control-socket-cli" }
@@ -462,6 +466,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 
 ["litestream/cmd/litestream/status_test.go"]
 "TestStatusCommand_Run" = { reason = "@control-socket-cli" }
+"TestStatusCommand_Run/DirectoryConfig" = { reason = "@control-socket-cli" }
 "TestStatusCommand_Run/EmptyJSONOutput" = { reason = "@control-socket-cli" }
 "TestStatusCommand_Run/FilterByPath" = { reason = "@control-socket-cli" }
 "TestStatusCommand_Run/JSONOutput" = { reason = "@control-socket-cli" }
@@ -574,6 +579,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestDB_ReplicaSync_OperationMetrics" = { counterpart = "lsr-cli::cli::sidecar::metrics_and_health_are_served_on_exactly_the_given_address" }
 "TestDB_SnapshotClosesReaderWhenReplicaReturnsEarly" = { counterpart = "lsr-core::snapshot::tests::snapshot_store_error_maps_by_from_remote" }
 "TestDB_SnapshotReaderConsistentDuringConcurrentCheckpoints" = { counterpart = ["lsr-core::snapshot::tests::snapshot_ignores_concurrent_backfill", "lsr-core::snapshot::tests::snapshot_borrows_the_proof_so_the_checkpoint_can_use_it"] }
+"TestDB_SnapshotReaderStaleWALOffset" = { counterpart = ["lsr-core::snapshot::tests::snapshot_mark_above_synced_is_bug", "lsr-core::snapshot::tests::snapshot_ignores_concurrent_backfill"] }
 "TestDB_SyncChunksWALAtCommitBoundary" = { counterpart = "lsr-core::sync::tests::a_cap_stops_on_the_first_commit_that_reaches_it" }
 "TestDB_SyncDiagnostic" = { reason = "Go-only: a diagnostic snapshot of the sync phase for the control socket's status. Rust reports state through events and the health() handle (docs/PLAN.md phase 3, public API)." }
 "TestDB_SyncDiagnosticReportsExecutorWait" = { reason = "Go-only: fairness and context handling of Go mutexes shared between goroutines (the exec, sync and checkpoint locks). The Rust engine is one actor driven tick by tick with no shared locks (docs/PLAN.md section 3)." }
@@ -584,6 +590,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestDB_Sync_ErrorMetrics" = { counterpart = "lsr-core::actor::tests::work::a_full_disk_is_reported_until_a_step_stages" }
 "TestDB_Sync_InitErrorMetrics" = { counterpart = "lsr-core::actor::tests::work::a_full_disk_is_reported_until_a_step_stages" }
 "TestDB_Sync_UpdatesMetrics" = { counterpart = "lsr-cli::cli::sidecar::metrics_and_health_are_served_on_exactly_the_given_address" }
+"TestDB_SyncPathWithHash" = { missing = "a database whose name holds #, ? or % opens, replicates and restores byte for byte (#483, upstream #1647)" }
 "TestDB_Verify_WALOffsetAtHeader" = { counterpart = "lsr-core::recover::tests::go_parity_an_end_at_offset_32_continues" }
 "TestDB_Verify_WALOffsetAtHeader_SaltMismatch" = { counterpart = "lsr-core::recover::tests::go_parity_an_unknown_salt_snapshots" }
 "TestDB_WALIndexMaxFrame" = { counterpart = ["lsr-sqlite::sqlite::wal_index::the_committed_read_agrees_with_the_file_across_checkpoints_and_a_restart", "lsr-compat::compat::live_source::committed_read_matches_the_wal_file"] }
@@ -605,6 +612,9 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestVerifyAndSync_DelaysExpectedTruncationStateMutationUntilApply" = { counterpart = "lsr-core::sync::tests::a_staging_commit_error_returns_the_same_step_and_the_retry_overwrites_the_file" }
 "TestVerifyAndSync_DelaysStateMutationUntilApply" = { counterpart = "lsr-core::sync::tests::a_staging_commit_error_returns_the_same_step_and_the_retry_overwrites_the_file" }
 "TestWALReaderPageMapLimitStopsAtCommittedFrame" = { counterpart = "lsr-wal::wal::synthetic::committed_limit_stops_at_the_end_and_never_reads_past_it" }
+"TestWALReaderPageMapEndOffsetStopsBeforeStraddlingTransaction" = { counterpart = "lsr-wal::wal::synthetic::committed_limit_stops_at_the_end_and_never_reads_past_it" }
+"TestWALReaderPageMapEndOffsetStopsBeforeStraddlingTransaction/AtCommitBoundary" = { counterpart = "lsr-wal::wal::synthetic::committed_limit_stops_at_the_end_and_never_reads_past_it" }
+"TestWALReaderPageMapEndOffsetStopsBeforeStraddlingTransaction/MidTransaction" = { counterpart = "lsr-wal::wal::synthetic::committed_limit_stops_at_the_end_and_never_reads_past_it" }
 
 ["litestream/db_killed_writer_test.go"]
 "TestDB_ClosePreservesWALLocks" = { counterpart = ["lsr-sqlite::sqlite::descriptors::a_sync_and_checkpoint_cycle_opens_and_closes_no_descriptor_on_the_database_or_shm", "lsr-sqlite::sqlite::descriptors::closing_a_descriptor_on_shm_drops_the_locks_sqlite_holds"] }
@@ -866,6 +876,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestApplyLTXFile_OpenConnection" = { reason = "@restore-follow" }
 "TestApplyLTXFile_TruncatesAfterWrite" = { reason = "@restore-follow" }
 "TestCheckIntegrity_CorruptDB" = { counterpart = ["lsr-replica::local::tests::quick_and_full_refuse_a_corrupt_b_tree_and_leave_nothing", "lsr-cli::cli::cli::integrity_check_refuses_a_corrupt_b_tree_with_exit_1"] }
+"TestCheckIntegrity_LiteralFilename" = { missing = "an integrity check opens a database whose name holds #, ? or % by its literal name (#483, upstream #1647)" }
 "TestCheckIntegrity_Full_ValidDB" = { counterpart = ["lsr-replica::local::tests::every_check_publishes_a_valid_database_and_nothing_beside_it", "lsr-cli::cli::cli::integrity_check_publishes_a_valid_database_in_every_mode"] }
 "TestCheckIntegrity_None_Skips" = { counterpart = ["lsr-replica::local::tests::off_publishes_the_corrupt_b_tree_as_restored", "lsr-cli::bin/lsr::args::tests::integrity_check_takes_go_s_three_words"] }
 "TestCheckIntegrity_Quick_ValidDB" = { counterpart = ["lsr-replica::local::tests::every_check_publishes_a_valid_database_and_nothing_beside_it", "lsr-cli::cli::cli::integrity_check_publishes_a_valid_database_in_every_mode"] }
@@ -902,6 +913,15 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplica_CalcRestorePlan/SkipsDuplicateRangesAcrossLevels" = { counterpart = "lsr-core::plan::tests::equal_reach_prefers_the_higher_level_then_the_earlier_start" }
 "TestReplica_CalcRestorePlan/SnapshotAndIncremental" = { counterpart = "lsr-core::plan::tests::a_target_with_the_finer_files_present_plans_to_it" }
 "TestReplica_CalcRestorePlan/SnapshotOnly" = { counterpart = "lsr-core::plan::tests::the_newer_snapshot_is_used_when_eligible_and_the_older_for_earlier_targets" }
+"TestReplica_CalcRestorePlan/TimestampBridgedByCompactedLevelAfterL0Retention" = { reason = "Go-only mechanism: Go walks per-level cursors by created-at time to decide whether a hole lies before the instant. The Rust as-of planner judges holes by keys over the whole inventory and refuses every hole (crates/core/src/plan.rs module doc, docs/differences-from-go.md), so there is no walk to compare." }
+"TestReplica_CalcRestorePlan/TimestampBridgedByConsecutiveAndOverlappingCompactedLevels" = { reason = "Go-only mechanism: Go walks per-level cursors by created-at time to decide whether a hole lies before the instant. The Rust as-of planner judges holes by keys over the whole inventory and refuses every hole (crates/core/src/plan.rs module doc, docs/differences-from-go.md), so there is no walk to compare." }
+"TestReplica_CalcRestorePlan/TimestampDoesNotDrainFuturePages" = { reason = "Go-only mechanism: Go walks per-level cursors by created-at time to decide whether a hole lies before the instant. The Rust as-of planner judges holes by keys over the whole inventory and refuses every hole (crates/core/src/plan.rs module doc, docs/differences-from-go.md), so there is no walk to compare." }
+"TestReplica_CalcRestorePlan/TimestampGapAcrossLevelsReportsLowestNextTXID" = { counterpart = "lsr-core::plan::tests::a_timestamp_restore_that_would_stop_at_a_hole_is_a_gap" }
+"TestReplica_CalcRestorePlan/TimestampGapAfterTargetSucceeds" = { reason = "Go-only mechanism: Go walks per-level cursors by created-at time to decide whether a hole lies before the instant. The Rust as-of planner judges holes by keys over the whole inventory and refuses every hole (crates/core/src/plan.rs module doc, docs/differences-from-go.md), so there is no walk to compare." }
+"TestReplica_CalcRestorePlan/TimestampGapBeyondCompactedRangeFails" = { counterpart = "lsr-core::plan::tests::a_timestamp_restore_that_would_stop_at_a_hole_is_a_gap" }
+"TestReplica_CalcRestorePlan/TimestampGapFails" = { counterpart = "lsr-core::plan::tests::a_timestamp_restore_that_would_stop_at_a_hole_is_a_gap" }
+"TestReplica_CalcRestorePlan/TimestampGapSingleFileAtExactTimestampFails" = { counterpart = "lsr-core::plan::tests::a_timestamp_restore_that_would_stop_at_a_hole_is_a_gap" }
+"TestReplica_CalcRestorePlan/TimestampHealthyStopBeforeFutureFiles" = { reason = "Go-only mechanism: Go walks per-level cursors by created-at time to decide whether a hole lies before the instant. The Rust as-of planner judges holes by keys over the whole inventory and refuses every hole (crates/core/src/plan.rs module doc, docs/differences-from-go.md), so there is no walk to compare." }
 "TestReplica_CalcRestoreTarget" = { counterpart = "lsr-core::core::plan_lazy::lazy::plan_as_of_equals_the_exact_planner" }
 "TestReplica_CalcRestoreTarget/NoTimestamp" = { counterpart = "lsr-core::plan::tests::a_replica_with_only_level_zero_files_from_transaction_one_plans_latest" }
 "TestReplica_CalcRestoreTarget/TimestampAfterAllFiles" = { counterpart = "lsr-core::plan::tests::as_of_later_than_every_file_is_latest" }
@@ -909,6 +929,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplica_CalcRestoreTarget/TimestampInSnapshotRange" = { counterpart = "lsr-core::plan::tests::a_snapshot_can_straddle_the_instant_too" }
 "TestReplica_ContextCancellationNoLogs" = { reason = "@go-context" }
 "TestReplica_RestoreAndReplicateAfterDataLoss" = { counterpart = "lsr-sqlite::sqlite::faults::a_restore_after_data_loss_replicates_into_the_same_replica" }
+
 "TestReplica_RestoreReplanBounded" = { counterpart = "lsr-core::restore::tests::files_vanishing_on_every_attempt_are_unstable" }
 "TestReplica_RestoreReplanPastTarget" = { counterpart = ["lsr-core::restore::tests::a_file_deleted_between_plan_and_read_is_replanned_once", "lsr-core::plan::tests::a_target_inside_a_compacted_file_names_the_file"] }
 "TestReplica_RestoreReplansDeletedFile" = { counterpart = "lsr-core::restore::tests::a_file_deleted_between_plan_and_read_is_replanned_once" }
@@ -937,6 +958,7 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestReplica_Restore_CancelledOpenClosesBodies" = { reason = "@go-context" }
 "TestReplica_Restore_ChecksumTracked" = { counterpart = "lsr-core::restore::tests::tracked_chain_reports_the_final_checksum" }
 "TestReplica_Restore_Follow" = { reason = "@restore-follow" }
+"TestReplica_Restore_MissingLTXFile" = { counterpart = "lsr-core::plan::tests::plan_is_what_the_contract_allows" }
 "TestReplica_Restore_Follow_ContextCancellation" = { reason = "@restore-follow" }
 "TestReplica_Restore_Follow_CrashRecovery" = { reason = "@restore-follow" }
 "TestReplica_Restore_Follow_IncompatibleFlags" = { reason = "@restore-follow" }
@@ -1066,6 +1088,12 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestLeaser_RenewLease_LostLease" = { reason = "@leaser" }
 "TestLeaser_RenewLease_NilLease" = { reason = "@leaser" }
 "TestLeaser_Type" = { reason = "@leaser" }
+
+["litestream/s3/write_timeout_test.go"]
+"TestS3TransportResponseHeaderTimeout" = { missing = "a response that never starts ends the request after a bound on the wait for headers (#398)" }
+"TestS3WriteTimeoutBlockedAndIdle" = { missing = "a request body write that makes no progress ends the request, one that is slow but moving does not (#398)" }
+"TestS3WriteTimeoutPropagatesSetupErrors" = { missing = "a connection that fails to set up reports its own error, not a timeout (#398)" }
+"TestS3WriteTimeoutRefreshesEachWrite" = { missing = "each body write renews the no-progress bound (#398)" }
 
 ["litestream/s3/replica_client_test.go"]
 "TestComputeDeleteObjectsContentMD5_Deterministic" = { counterpart = "lsr-store-s3::store-s3::fake::cases::delete_without_or_with_a_wrong_digest_is_refused" }
@@ -1466,6 +1494,8 @@ go-checksum-parse = "Go-only: parsing a checksum from its 16-digit hex text, use
 "TestVFSFile_OpenFailsWithInvalidBufferPath" = { reason = "@go-vfs" }
 "TestVFSFile_OpenNewDatabase" = { reason = "@go-vfs" }
 "TestVFSFile_PollDoesNotRegressLocalSync" = { reason = "@go-vfs" }
+"TestVFSFile_PollOlderL1PreservesUnsyncedTruncate" = { reason = "@go-vfs" }
+"TestVFSFile_PollUnsyncedGrowthIsNotAShrink" = { reason = "@go-vfs" }
 "TestVFSFile_SyncToRemote" = { reason = "@go-vfs" }
 "TestVFSFile_TransactionTracking" = { reason = "@go-vfs" }
 "TestVFSFile_Truncate" = { reason = "@go-vfs" }
