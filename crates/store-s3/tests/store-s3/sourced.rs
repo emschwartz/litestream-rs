@@ -3,7 +3,7 @@
 //! and fails with the source's own error, before anything is published, when a later read
 //! gives nothing. A part of more than one cell is read again as its body, a cell at a time,
 //! through a reader of its own; a part of one cell or less is sent from the bytes it kept and
-//! its source is never read again (`docs/decisions/D266.md`). What happens with several parts in flight is in `flight.rs`.
+//! its source is never read again (`docs/decisions/D270.md`). What happens with several parts in flight is in `flight.rs`.
 
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;

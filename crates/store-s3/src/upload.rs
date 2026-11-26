@@ -34,7 +34,7 @@
 //! the caller's source (`again.rs`), and the SHA-256 of what it was handed. The thread that sends
 //! the part reads it again as the body, using a cell's bytes only when they are what was first
 //! seen; a part of one cell or less keeps its bytes and reads nothing again
-//! (`docs/decisions/D266.md`). So a part in flight holds one read of 256 KiB, the HTTP client's buffers (768 KiB a
+//! (`docs/decisions/D270.md`). So a part in flight holds one read of 256 KiB, the HTTP client's buffers (768 KiB a
 //! request by the gate in `tests/store-s3/memory.rs`) and one open file, whatever the part
 //! size. The engine's staged send asks [`Upload::flight`] before each read and stops when the
 //! answer is [`Flight::Full`], so its tick never waits for a part

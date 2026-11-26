@@ -19,7 +19,7 @@
 //! that does not match, or that the source does not give, ends the body short of its
 //! `Content-Length`, which no server takes as a whole part; the part's result is then the
 //! source's own error (`docs/decisions/D222.md`, `docs/decisions/D233.md`,
-//! `docs/decisions/D266.md`).
+//! `docs/decisions/D270.md`).
 //!
 //! The pass stops between cells once the upload is over (failed, aborted or dropped).
 //!
