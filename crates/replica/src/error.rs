@@ -4,7 +4,7 @@ use std::io;
 
 use crate::local::CreateError;
 
-/// Why [`crate::Replicator::start`] returned no replicator. Nothing is pinned or running when
+/// Why [`crate::ReplicatorBuilder::start`] returned no replicator. Nothing is pinned or running when
 /// it returns one of these.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {

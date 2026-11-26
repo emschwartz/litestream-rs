@@ -51,11 +51,18 @@ fn a_second_engine_on_one_meta_directory_is_refused() {
         ..config()
     };
     let (runtime, clock) = fake();
-    let first = Replicator::start_with(&site.db, site.store(), shared.clone(), runtime).unwrap();
+    let first = Replicator::builder(&site.db, site.store())
+        .config(shared.clone())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let other = other_db(site.dir.path());
     let (runtime, _clock) = fake();
     assert!(matches!(
-        Replicator::start_with(&other, site.store(), shared.clone(), runtime),
+        Replicator::builder(&other, site.store())
+            .config(shared.clone())
+            .runtime(runtime)
+            .start(),
         Err(StartError::MetaLocked)
     ));
     assert!(matches!(
@@ -63,7 +70,11 @@ fn a_second_engine_on_one_meta_directory_is_refused() {
         StopOutcome::Drained { .. }
     ));
     let (runtime, clock) = fake();
-    let second = Replicator::start_with(&other, site.store(), shared, runtime).unwrap();
+    let second = Replicator::builder(&other, site.store())
+        .config(shared)
+        .runtime(runtime)
+        .start()
+        .unwrap();
     assert!(matches!(
         stopped(&second, &clock),
         StopOutcome::Drained { .. }
@@ -103,7 +114,10 @@ fn a_second_process_on_one_meta_directory_is_refused() {
         ..config()
     };
     let (runtime, _clock) = fake();
-    let refused = Replicator::start_with(&site.db, site.store(), shared.clone(), runtime);
+    let refused = Replicator::builder(&site.db, site.store())
+        .config(shared.clone())
+        .runtime(runtime)
+        .start();
     assert!(
         matches!(refused, Err(StartError::MetaLocked)),
         "{refused:?}"
@@ -111,7 +125,11 @@ fn a_second_process_on_one_meta_directory_is_refused() {
     child.0.stdin.take().unwrap().write_all(b"stop\n").unwrap();
     assert!(child.0.wait().unwrap().success());
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, site.store(), shared, runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, site.store())
+        .config(shared)
+        .runtime(runtime)
+        .start()
+        .unwrap();
     assert!(matches!(
         stopped(&replicator, &clock),
         StopOutcome::Drained { .. }
@@ -144,7 +162,11 @@ fn child_holds_the_meta_directory() {
         ..config()
     };
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&db, store, shared, runtime).unwrap();
+    let replicator = Replicator::builder(&db, store)
+        .config(shared)
+        .runtime(runtime)
+        .start()
+        .unwrap();
     println!("lsr-child: started");
     std::io::stdout().flush().unwrap();
     let mut line = String::new();
@@ -209,7 +231,11 @@ fn a_stop_for_another_writer_survives_a_restart() {
     let site = Site::new();
     site.commit(2);
     let (runtime, clock) = fake();
-    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let first = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let ours = wait(&first, caught_up)
         .replicated
         .map(|(txid, _)| txid)
@@ -234,7 +260,11 @@ fn a_stop_for_another_writer_survives_a_restart() {
 
     site.commit(2);
     let (runtime, clock) = fake();
-    let second = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let second = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     clock.advance(Duration::from_secs(1));
     wait(&second, stopped_for_other_writer);
     assert_eq!(
@@ -249,7 +279,11 @@ fn a_stop_for_another_writer_survives_a_restart() {
 
     block_on(FsStore::new(&site.replica).delete(&[foreign])).unwrap();
     let (runtime, clock) = fake();
-    let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let third = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     clock.advance(Duration::from_secs(1));
     wait(&third, caught_up);
     assert!(matches!(
@@ -267,7 +301,11 @@ fn a_restored_database_replicates_without_a_refusal() {
     let site = Site::new();
     site.commit(3);
     let (runtime, clock) = fake();
-    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let first = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&first, caught_up);
     assert!(matches!(
         stopped(&first, &clock),
@@ -295,7 +333,11 @@ fn a_restored_database_replicates_without_a_refusal() {
         .unwrap();
     lsr_sqlite::app_connection(&app).unwrap();
     let (runtime, clock) = fake();
-    let next = Replicator::start_with(&restored, site.store(), config(), runtime).unwrap();
+    let next = Replicator::builder(&restored, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     app.execute("INSERT INTO t(v) VALUES (randomblob(3000))", [])
         .unwrap();
     clock.advance(Duration::from_secs(1));
@@ -317,7 +359,11 @@ fn a_refused_boot_names_the_tip_and_trust_local_clears_it() {
     let site = Site::new();
     site.commit(2);
     let (runtime, clock) = fake();
-    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let first = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&first, caught_up);
     // The drain's txid, not the health's: `caught_up` can hold while a commit is unsynced.
     let StopOutcome::Drained { txid: Some(ours) } = stopped(&first, &clock) else {
@@ -327,9 +373,12 @@ fn a_refused_boot_names_the_tip_and_trust_local_clears_it() {
 
     let (sink, events) = lsr_replica::ChannelSink::new(std::num::NonZeroUsize::new(64).unwrap());
     let (runtime, clock) = fake();
-    let second =
-        Replicator::start_with_events(&site.db, site.store(), config(), runtime, Box::new(sink))
-            .unwrap();
+    let second = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .events(Box::new(sink))
+        .start()
+        .unwrap();
     wait(&second, stopped_for_other_writer);
     assert_eq!(
         stopped(&second, &clock),
@@ -351,7 +400,11 @@ fn a_refused_boot_names_the_tip_and_trust_local_clears_it() {
     let taken = lsr_replica::trust_local(&*site.store(), &meta_of(&site)).unwrap();
     assert_eq!(taken, Some(foreign.range().max()));
     let (runtime, clock) = fake();
-    let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let third = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     site.commit(1);
     clock.advance(Duration::from_secs(1));
     let health = wait(&third, |h| {
@@ -372,7 +425,11 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
     let site = Site::new();
     site.commit(2);
     let (runtime, clock) = fake();
-    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let first = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&first, caught_up);
     assert!(matches!(
         stopped(&first, &clock),
@@ -385,9 +442,12 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
     .unwrap();
     let (sink, events) = lsr_replica::ChannelSink::new(std::num::NonZeroUsize::new(64).unwrap());
     let (runtime, clock) = fake();
-    let second =
-        Replicator::start_with_events(&site.db, site.store(), config(), runtime, Box::new(sink))
-            .unwrap();
+    let second = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .events(Box::new(sink))
+        .start()
+        .unwrap();
     site.commit(1);
     clock.advance(Duration::from_secs(1));
     let health = wait(&second, |h| {
@@ -409,7 +469,11 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
     // no record at all.
     let foreign = put_foreign(&site, ours.next().unwrap());
     let (runtime, clock) = fake();
-    let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let third = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&third, stopped_for_other_writer);
     assert_eq!(newest_l0(&site), Some(foreign.range().max()));
     assert_eq!(
@@ -428,7 +492,11 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
     let store: std::sync::Arc<dyn lsr_replica::DynStore> =
         std::sync::Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let poll = Duration::from_secs(1);
     let full = common::moved_until(&replicator, &clock, (poll, 240), caught_up);
     faulty

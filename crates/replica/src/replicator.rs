@@ -264,6 +264,70 @@ impl fmt::Debug for Replicator {
     }
 }
 
+/// How to start one [`Replicator`]: [`Replicator::builder`], then the optional settings, then
+/// [`ReplicatorBuilder::start`].
+#[must_use = "a builder starts nothing until `start` is called"]
+pub struct ReplicatorBuilder {
+    database: std::path::PathBuf,
+    store: Arc<dyn DynStore>,
+    config: Config,
+    runtime: Option<Runtime>,
+    events: Option<Box<dyn EventSink>>,
+}
+
+impl fmt::Debug for ReplicatorBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplicatorBuilder")
+            .field("database", &self.database)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReplicatorBuilder {
+    /// The configuration (the default without this call).
+    pub fn config(mut self, config: Config) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Every source of time, waiting and chance ([`Runtime::system`] without this call).
+    pub fn runtime(mut self, runtime: Runtime) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// The event sink, in place before the thread starts, so it sees every event, the first
+    /// boot's included. A sink set later with [`Replicator::set_events`] sees only what comes
+    /// after the thread picks it up, which may be after the first boot.
+    pub fn events(mut self, sink: Box<dyn EventSink>) -> Self {
+        self.events = Some(sink);
+        self
+    }
+
+    /// Opens the replication connections, takes the read transaction that pins the WAL,
+    /// starts the thread, and returns. The first boot (listing the replica, recovering the
+    /// position) runs on the thread afterwards and shows in [`Replicator::health`]; no store
+    /// call happens on the caller's thread. Call it before the application's connection pool
+    /// opens.
+    ///
+    /// It blocks: it opens SQLite, and if a replicator for the same file (device and inode, not
+    /// path) is still draining in this process, it waits for it, up to its shutdown grace. An
+    /// async application calls it from a blocking task (`spawn_blocking`).
+    ///
+    /// # Errors
+    /// [`StartError`]; nothing is left open or pinned.
+    pub fn start(self) -> Result<Replicator, StartError> {
+        Replicator::start_inner(
+            &self.database,
+            self.store,
+            self.config,
+            self.runtime.unwrap_or_else(Runtime::system),
+            self.events,
+        )
+    }
+}
+
 /// Shared by every clone of one replicator; its drop is the last handle's.
 struct LastHandle {
     shared: Arc<Shared>,
@@ -278,52 +342,18 @@ impl Drop for LastHandle {
 }
 
 impl Replicator {
-    /// Opens the replication connections, takes the read transaction that pins the WAL,
-    /// starts the thread, and returns. The first boot (listing the replica, recovering the
-    /// position) runs on the thread afterwards and shows in [`Replicator::health`]; no store
-    /// call happens on the caller's thread. Call it before the application's connection pool opens.
-    ///
-    /// If a replicator for the same file (device and inode, not path) is still draining in
-    /// this process, waits for it, up to its shutdown grace.
-    ///
-    /// # Errors
-    /// [`StartError`]; nothing is left open or pinned.
-    pub fn start(
-        database: &Path,
-        store: Arc<dyn DynStore>,
-        config: Config,
-    ) -> Result<Self, StartError> {
-        Self::start_with(database, store, config, Runtime::system())
-    }
-
-    /// [`Replicator::start`] with every source of time, waiting and chance supplied.
-    ///
-    /// # Errors
-    /// As [`Replicator::start`].
-    pub fn start_with(
-        database: &Path,
-        store: Arc<dyn DynStore>,
-        config: Config,
-        runtime: Runtime,
-    ) -> Result<Self, StartError> {
-        Self::start_inner(database, store, config, runtime, None)
-    }
-
-    /// [`Replicator::start_with`] with the event sink in place before the thread starts, so
-    /// it sees every event, the first boot's included. A sink set later with
-    /// [`Replicator::set_events`] sees only what comes after the thread picks it up, which
-    /// may be after the first boot.
-    ///
-    /// # Errors
-    /// As [`Replicator::start`].
-    pub fn start_with_events(
-        database: &Path,
-        store: Arc<dyn DynStore>,
-        config: Config,
-        runtime: Runtime,
-        events: Box<dyn EventSink>,
-    ) -> Result<Self, StartError> {
-        Self::start_inner(database, store, config, runtime, Some(events))
+    /// A builder for the replicator of the database at `database`, replicating to `store`:
+    /// the default [`Config`], the system clock, and no event sink until
+    /// [`ReplicatorBuilder::start`] says otherwise.
+    #[must_use]
+    pub fn builder(database: &Path, store: Arc<dyn DynStore>) -> ReplicatorBuilder {
+        ReplicatorBuilder {
+            database: database.to_owned(),
+            store,
+            config: Config::default(),
+            runtime: None,
+            events: None,
+        }
     }
 
     fn start_inner(
@@ -528,7 +558,7 @@ impl Replicator {
     /// Sends every event from the thread's next turn on to `sink`, replacing the sink before
     /// it. Events the thread emitted before it took the sink, the first boot's among them,
     /// went to the sink before it (or nowhere): give the first sink to
-    /// [`Replicator::start_with_events`] to see them all.
+    /// [`ReplicatorBuilder::events`] to see them all.
     pub fn set_events(&self, sink: Box<dyn EventSink>) {
         self.shared.command(|commands| commands.sink = Some(sink));
     }

@@ -29,7 +29,10 @@ const BOUND: u64 = 200;
 /// level-0 chain starts at transaction 1 and restores on its own.
 fn restored(site: &Site) -> PathBuf {
     let store = site.store();
-    let replicator = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
+    let replicator = Replicator::builder(&site.db, Arc::clone(&store))
+        .config(config())
+        .start()
+        .unwrap();
     site.commit(3);
     let stopped = stopped_on_system_clock(&replicator);
     assert!(
@@ -51,7 +54,11 @@ fn a_restored_database_with_no_write_ticks_by_the_poll_and_snapshots_at_once() {
     let site = Site::new();
     let db = restored(&site);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&db, site.store(), config(), runtime).unwrap();
+    let replicator = Replicator::builder(&db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     for _ in 0..60 {
         clock.advance(POLL);
         let now = clock.now();

@@ -213,8 +213,12 @@ fn deploy_child() {
         .unwrap();
     let store = Arc::new(FsStore::new(dir.join("replica")));
     let (runtime, clock) = fake();
-    let replicator =
-        Replicator::start_with_events(&db, store, config(), runtime, Box::new(Printer)).unwrap();
+    let replicator = Replicator::builder(&db, store)
+        .config(config())
+        .runtime(runtime)
+        .events(Box::new(Printer))
+        .start()
+        .unwrap();
     booted(&replicator);
     let insert = |n: u32| {
         for _ in 0..n {

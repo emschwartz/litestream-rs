@@ -56,8 +56,11 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let retry = Duration::from_secs(60);
-    let replicator =
-        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(retrying_every(retry))
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let staged = wait(&replicator, |h| {
         h.synced.is_some() && h.counters.retries > 0
     });
@@ -108,8 +111,11 @@ fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let retry = Duration::from_secs(60);
-    let replicator =
-        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(retrying_every(retry))
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let held = moved_until(&replicator, &clock, (POLL, 240), caught_up).replicated;
     faulty.fail_uploads.store(true, Ordering::SeqCst);
     site.commit(1);
@@ -168,8 +174,11 @@ fn a_panic_during_a_drain_still_stops_at_the_deadline() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let retry = Duration::from_secs(10);
-    let replicator =
-        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(retrying_every(retry))
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&replicator, |h| {
         h.synced.is_some() && h.counters.retries > 0
     });
@@ -197,7 +206,11 @@ fn a_database_removed_after_a_panic_still_stops_at_the_deadline() {
     faulty.panics.store(1, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     std::fs::remove_file(&site.db).unwrap();
     let stop = replicator.stop(Duration::from_secs(5));
@@ -217,7 +230,11 @@ fn a_database_removed_after_a_panic_still_stops_at_the_deadline() {
 fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     let site = Site::new();
     let (runtime, clock) = fake();
-    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let first = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     assert!(matches!(
         stopped(&first, &clock),
         StopOutcome::Drained { .. }
@@ -227,7 +244,11 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     faulty.panics.store(2, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     // Taken by the thread before the boot it wakes for, which panics too.
     replicator.request_snapshot();
@@ -264,8 +285,11 @@ fn a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
     let retry = Duration::from_secs(60);
-    let replicator =
-        Replicator::start_with(&site.db, store, retrying_every(retry), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(retrying_every(retry))
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     clock.step_back(Duration::from_secs(3600));
     let ten = Duration::from_secs(10);
@@ -286,7 +310,11 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     let faulty = site.faulty();
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     faulty.refuse.store(true, Ordering::SeqCst);
     site.commit(1);
@@ -358,7 +386,11 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
     faulty.panics.store(1, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     let replaced = replace(&site);
     clock.advance(POLL);
@@ -396,7 +428,11 @@ fn a_database_deleted_after_a_panic_is_degraded_and_not_reopened() {
     faulty.panics.store(1, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     std::fs::remove_file(&site.db).unwrap();
     clock.advance(POLL);
@@ -431,7 +467,11 @@ fn a_database_replaced_after_a_panic_stops_when_configured_to() {
         },
         ..config()
     };
-    let replicator = Replicator::start_with(&site.db, store, stopping, runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(stopping)
+        .runtime(runtime)
+        .start()
+        .unwrap();
     wait(&replicator, |h| h.counters.panics == 1);
     let replaced = replace(&site);
     clock.advance(POLL);

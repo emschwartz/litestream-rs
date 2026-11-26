@@ -180,7 +180,7 @@ pub fn stopped(replicator: &Replicator, clock: &FakeClockHandle) -> StopOutcome 
 }
 
 /// `stop(PATIENCE).wait()` for a replicator on the system clock (started with
-/// `Replicator::start`, never `fake()`), failing the test instead of hanging if the thread
+/// `ReplicatorBuilder::start`, never `fake()`), failing the test instead of hanging if the thread
 /// never stops. Its waits end on their own; a replicator on a fake clock goes through
 /// [`stopped`], which moves that clock.
 pub fn stopped_on_system_clock(replicator: &Replicator) -> StopOutcome {

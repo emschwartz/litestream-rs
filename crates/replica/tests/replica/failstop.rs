@@ -160,7 +160,11 @@ fn a_refusal_at_boot_blocks_every_writer_until_the_first_listing() {
     faulty.refuse.store(true, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     replicator.app_connection(&site.app).unwrap();
     let raw = raw(&site, &replicator);
     let probe = probe(&site);
@@ -196,9 +200,12 @@ fn writes_are_held_while_the_boot_is_pending() {
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, _clock) = fake();
     let gates = Gates::default();
-    let replicator =
-        Replicator::start_with_events(&site.db, store, config(), runtime, Box::new(gates.clone()))
-            .unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .events(Box::new(gates.clone()))
+        .start()
+        .unwrap();
     let probe = probe(&site);
     assert_eq!(
         replicator.health().writes,
@@ -277,14 +284,12 @@ fn writes_go_through_before_the_boot_snapshot_is_staged() {
     site.commit(3);
     let (runtime, _clock) = fake();
     let hold = HoldAtBoot::default();
-    let replicator = Replicator::start_with_events(
-        &site.db,
-        site.store(),
-        config(),
-        runtime,
-        Box::new(hold.clone()),
-    )
-    .unwrap();
+    let replicator = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .events(Box::new(hold.clone()))
+        .start()
+        .unwrap();
     hold.reached();
     let health = replicator.health();
     assert_eq!(health.writes, Writes::Allowed);
@@ -321,7 +326,11 @@ fn a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds() {
     let site = Site::new();
     site.commit(2);
     let (runtime, _clock) = fake();
-    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let first = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let stopped = first.stop(PATIENCE).wait();
     assert!(
         matches!(stopped, lsr_replica::StopOutcome::Drained { .. }),
@@ -335,14 +344,12 @@ fn a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds() {
     std::fs::remove_dir_all(site.dir.path().join(".app.db-litestream")).unwrap();
     let (runtime, _clock) = fake();
     let gates = Gates::default();
-    let replicator = Replicator::start_with_events(
-        &site.db,
-        site.store(),
-        config(),
-        runtime,
-        Box::new(gates.clone()),
-    )
-    .unwrap();
+    let replicator = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .events(Box::new(gates.clone()))
+        .start()
+        .unwrap();
     assert_eq!(block_on(replicator.ready(PATIENCE)), Readiness::Ready);
     gates.wait_for(|events| events.contains(&Event::WritesAllowed));
     let seen: Vec<Event> = gates.events();
@@ -376,7 +383,11 @@ fn a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds() {
 fn resize(site: &Site, keep_wal: bool) {
     let (runtime, _clock) = fake();
     site.commit(2);
-    let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
+    let first = Replicator::builder(&site.db, site.store())
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let stopped = first.stop(PATIENCE).wait();
     assert!(
         matches!(stopped, lsr_replica::StopOutcome::Drained { .. }),
@@ -412,14 +423,12 @@ fn a_stop_found_before_the_decision_still_holds_the_start() {
     resize(&site, true);
     let (runtime, _clock) = fake();
     let gates = Gates::default();
-    let replicator = Replicator::start_with_events(
-        &site.db,
-        site.store(),
-        resize_stops(IfReplicationStops::HoldStart),
-        runtime,
-        Box::new(gates.clone()),
-    )
-    .unwrap();
+    let replicator = Replicator::builder(&site.db, site.store())
+        .config(resize_stops(IfReplicationStops::HoldStart))
+        .runtime(runtime)
+        .events(Box::new(gates.clone()))
+        .start()
+        .unwrap();
     let trip = Trip::Stopped(StopCause::PageSizeChanged {
         was: lsr_ltx::PageSize::new(4096).unwrap(),
         now: lsr_ltx::PageSize::new(8192).unwrap(),
@@ -457,14 +466,12 @@ fn a_stop_the_boot_snapshot_finds_blocks_writes_again_under_stop_app() {
     resize(&site, false);
     let (runtime, _clock) = fake();
     let gates = Gates::default();
-    let replicator = Replicator::start_with_events(
-        &site.db,
-        site.store(),
-        resize_stops(IfReplicationStops::StopApp),
-        runtime,
-        Box::new(gates.clone()),
-    )
-    .unwrap();
+    let replicator = Replicator::builder(&site.db, site.store())
+        .config(resize_stops(IfReplicationStops::StopApp))
+        .runtime(runtime)
+        .events(Box::new(gates.clone()))
+        .start()
+        .unwrap();
     assert_eq!(block_on(replicator.ready(PATIENCE)), Readiness::Ready);
     let trip = Trip::Stopped(StopCause::PageSizeChanged {
         was: lsr_ltx::PageSize::new(4096).unwrap(),
@@ -515,7 +522,11 @@ fn report_never_blocks_a_write() {
         if_replication_stops: IfReplicationStops::Report,
         ..config()
     };
-    let replicator = Replicator::start_with(&site.db, store, report, runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(report)
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let probe = probe(&site);
     assert_eq!(replicator.health().writes, Writes::Allowed);
     insert(&probe).unwrap();
@@ -543,7 +554,11 @@ fn an_unsafe_stop_while_running_blocks_writes_only_under_stop_app() {
             if_replication_stops: mode,
             ..config()
         };
-        let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
+        let replicator = Replicator::builder(&site.db, store)
+            .config(strict)
+            .runtime(runtime)
+            .start()
+            .unwrap();
         let probe = probe(&site);
         wait(&replicator, |h| h.held_by.gate == Gate::Allowed);
         // A commit to upload, made before the store refuses: once it does, a stop can hold
@@ -584,7 +599,11 @@ fn a_panic_that_stops_the_replicator_keeps_writes_blocked_under_stop_app() {
         if_replication_stops: IfReplicationStops::StopApp,
         ..config()
     };
-    let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(strict)
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let probe = probe(&site);
     wait(&replicator, |h| h.writes == Writes::Allowed);
     insert(&probe).unwrap();
@@ -621,9 +640,12 @@ fn a_checkpoint_waits_while_writes_are_held_and_runs_after() {
         ..config()
     };
     let gates = Gates::default();
-    let replicator =
-        Replicator::start_with_events(&site.db, store, stop_app, runtime, Box::new(gates.clone()))
-            .unwrap();
+    let replicator = Replicator::builder(&site.db, store)
+        .config(stop_app)
+        .runtime(runtime)
+        .events(Box::new(gates.clone()))
+        .start()
+        .unwrap();
     wait(&replicator, |h| h.writes == Writes::Allowed);
     site.commit(2);
     let held = moved_until(&replicator, &clock, (POLL * 30, 120), |h| {
@@ -665,8 +687,11 @@ fn a_restart_keeps_the_age_of_a_commit_off_the_replica() {
     faulty.fail_uploads.store(true, Ordering::SeqCst);
     let store: Arc<dyn DynStore> = Arc::<common::Faulty>::clone(&faulty);
     let (runtime, clock) = fake();
-    let replicator =
-        Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime.clone()).unwrap();
+    let replicator = Replicator::builder(&site.db, Arc::clone(&store))
+        .config(config())
+        .runtime(runtime.clone())
+        .start()
+        .unwrap();
     wait(&replicator, |h| h.phase == Phase::Running);
     site.commit(1);
     clock.advance(POLL);
@@ -676,7 +701,11 @@ fn a_restart_keeps_the_age_of_a_commit_off_the_replica() {
     drop(replicator);
     let stopped_at = clock.now();
     clock.advance(Duration::from_secs(120));
-    let again = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
+    let again = Replicator::builder(&site.db, store)
+        .config(config())
+        .runtime(runtime)
+        .start()
+        .unwrap();
     let after = wait(&again, |h| {
         h.phase == Phase::Running && h.unreplicated_since.is_some()
     });
@@ -717,8 +746,11 @@ fn a_crash_loop_over_a_staging_disk_that_takes_nothing_reports_a_growing_age() {
     let site = Site::new();
     let store = site.store();
     let (runtime, clock) = fake();
-    let first =
-        Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime.clone()).unwrap();
+    let first = Replicator::builder(&site.db, Arc::clone(&store))
+        .config(config())
+        .runtime(runtime.clone())
+        .start()
+        .unwrap();
     wait(&first, |h| h.phase == Phase::Running);
     site.commit(1);
     clock.advance(POLL);
@@ -751,7 +783,10 @@ fn a_crash_loop_over_a_staging_disk_that_takes_nothing_reports_a_growing_age() {
     let mut oldest = None;
     for _ in 0..6 {
         clock.advance(Duration::from_secs(120));
-        let again = Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime.clone())
+        let again = Replicator::builder(&site.db, Arc::clone(&store))
+            .config(config())
+            .runtime(runtime.clone())
+            .start()
             .unwrap();
         let health = wait(&again, |h| h.unreplicated_since == Some(written_at));
         oldest = health.unreplicated_since;
