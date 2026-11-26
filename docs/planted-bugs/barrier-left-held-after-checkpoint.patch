@@ -1,0 +1,14 @@
+diff --git a/crates/core/src/checkpoint.rs b/crates/core/src/checkpoint.rs
+index bb7a0b752..9562a93d1 100644
+--- a/crates/core/src/checkpoint.rs
++++ b/crates/core/src/checkpoint.rs
+@@ -635,7 +635,8 @@ impl<W: WalSource, P: PageSource, C: Checkpointer, L: Role> Protocol<'_, W, P, C
+         }
+         let barrier = barrier.map_err(Fault::from_source)?;
+         let sealed = self.seal_and_checkpoint().await;
+-        let released = self.ck.end_barrier(barrier);
++        std::mem::forget(barrier);
++        let released: Result<(), SourceError> = Ok(());
+         let run = sealed?;
+         released.map_err(Fault::from_source)?;
+         let truncated = truncate && self.truncate_held()?;
