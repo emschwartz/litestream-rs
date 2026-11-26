@@ -78,8 +78,8 @@ impl Runner {
     pub(super) fn judge_tick_cost(
         &mut self,
         stats: &TickStats,
-        remote_at: usize,
-        staging_at: usize,
+        (remote_at, staging_at): (usize, usize),
+        restoring: bool,
     ) -> Result<(), Violation> {
         let remote_puts = puts_since(&self.w.remote_recorder.events(), remote_at);
         let staging_puts = puts_since(&self.w.staging_recorder.events(), staging_at);
@@ -91,8 +91,16 @@ impl Runner {
             (&stats.staging, staging_puts),
             &mut self.spare,
         );
-        judged?;
+        let judged = judged?;
         self.report.reach.bump("tick_cost.judged");
+        // The two defect allowances' own counts (`crate::cost::Spare`, `crate::cost::s3_rereads`):
+        // each goes to zero when its engine fix lands, and a scenario test then fails.
+        if restoring && judged > 0 {
+            self.report.reach.bump("tick_cost.boot_restore_read");
+        }
+        if crate::cost::s3_rereads(&stats.remote) > 0 {
+            self.report.reach.bump("tick_cost.s3_rereads_allowed");
+        }
         Ok(())
     }
 
@@ -105,6 +113,18 @@ impl Runner {
             .fold(0_u64, |sum, info| sum.saturating_add(info.size));
         let files = u64::try_from(staged.len()).unwrap_or(u64::MAX);
         Spare::boot(&Profile::DEFAULT, (files, bytes))
+    }
+
+    /// A boot that finds nothing staged may restore the replica whole, the defect allowance
+    /// in [`Spare`]: adds it.
+    pub(super) fn allow_boot_restore(&mut self) {
+        let stored = self.w.remote_raw.stored();
+        let files = u64::try_from(stored.len()).unwrap_or(u64::MAX);
+        let bytes = stored
+            .iter()
+            .fold(0_u64, |sum, info| sum.saturating_add(info.size));
+        self.spare
+            .boot_restore(&Profile::DEFAULT.remote, files, bytes);
     }
 
     /// The newest transaction the bucket holds at any level.

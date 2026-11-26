@@ -19,7 +19,7 @@ fn judged(
     remote: &RecorderCounts,
     staging: &RecorderCounts,
     spare: &mut Spare,
-) -> Result<(), Violation> {
+) -> Result<u64, Violation> {
     judge(
         &Profile::DEFAULT,
         ALLOWANCE,
@@ -29,7 +29,7 @@ fn judged(
     )
 }
 
-fn over(result: Result<(), Violation>, bound: Bound) -> bool {
+fn over(result: Result<u64, Violation>, bound: Bound) -> bool {
     matches!(result, Err(Violation::ResourceBound { what, .. }) if what == bound)
 }
 
@@ -130,4 +130,34 @@ fn each_part_sent_may_read_staging_once_more() {
     };
     judged(parted).unwrap();
     assert!(over(judged(ALLOWANCE), Bound::StagingTickMicros));
+}
+
+/// The boot-restore defect allowance covers one restore of the replica, in the boot's tick.
+#[test]
+fn a_boot_with_nothing_staged_may_restore_the_replica_once() {
+    let quiet = counts(0, 0, 0);
+    let restore = counts(BASE_REQUESTS + 200, 1 << 20, 0);
+    let mut spare = Spare::default();
+    spare.boot_restore(&Profile::DEFAULT.remote, 100, 1 << 20);
+    judged(&restore, &quiet, &mut spare).unwrap();
+    assert!(over(
+        judged(&restore, &quiet, &mut spare),
+        Bound::RemoteTickMicros
+    ));
+}
+
+/// The S3 re-read defect allowance is a staging request for each re-read the S3 store was
+/// given, and no more.
+#[test]
+fn staging_may_make_a_request_for_each_s3_reread_and_no_more() {
+    let reads = counts(BASE_REQUESTS + 4 + 300, 0, 0);
+    let rereads = |n| RecorderCounts {
+        rereads_given: n,
+        ..RecorderCounts::default()
+    };
+    judged(&rereads(300), &reads, &mut Spare::default()).unwrap();
+    assert!(over(
+        judged(&rereads(200), &reads, &mut Spare::default()),
+        Bound::StagingTickMicros
+    ));
 }

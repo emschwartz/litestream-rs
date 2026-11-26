@@ -940,10 +940,12 @@ impl Runner {
             // A boot's spare is for its own tick: nothing after it may spend what is left.
             self.spare = crate::cost::Spare::default();
         }
-        if booting && self.w.staged_level_zero().is_empty() {
+        let restoring = booting && self.w.staged_level_zero().is_empty();
+        if restoring {
             self.restore_files = self
                 .restore_files
                 .saturating_add(self.w.remote_file_count());
+            self.allow_boot_restore();
         }
         let held = self.holding_writes();
         self.forcings_before_tick();
@@ -1004,7 +1006,7 @@ impl Runner {
             checkpoints: self.tally.total().saturating_sub(total0),
         };
         per_tick(&stats, self.limits())?;
-        self.judge_tick_cost(&stats, at, staged_at)?;
+        self.judge_tick_cost(&stats, (at, staged_at), restoring)?;
         let replica_fired = self.remote_fired().all > fired0.0.all;
         let reach = &mut self.report.reach;
         // Every second read since the last tick was judged, the ones between ticks with it.

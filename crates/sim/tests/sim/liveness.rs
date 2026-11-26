@@ -8,7 +8,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use lsr_sim::cost::Profile;
 use lsr_sim::oracle::{Bound, Violation};
 use lsr_sim::run::run_ops;
-use lsr_sim::{Op, Opts, RunReport, Seed};
+use lsr_sim::{EnvFault, Op, Opts, RunReport, Seed};
 
 /// The large profile: 20,000 pages of 512 bytes (10 MiB), sent 64 KiB a tick.
 fn large() -> Opts {
@@ -60,7 +60,7 @@ fn commits(n: usize, pages: u8) -> Vec<Op> {
 /// The level-9 snapshot of the whole database goes up a slice a tick, but the read-back that
 /// checks it reads the newest file of every level whole in one maintenance tick
 /// (`lsr_core`'s `maintain::audit`): 10 MiB here, the whole database at any size. This pins
-/// that defect (`docs/decisions/D263.md`) so the bound is never loosened to hide it; once the
+/// that defect (<https://github.com/emschwartz/litestream-rs/issues/476>, `docs/decisions/D263.md`) so the bound is never loosened to hide it; once the
 /// read-back goes a slice a tick this fails, and the test goes back to asserting that the run
 /// passes and judges the tail's lag.
 #[test]
@@ -92,4 +92,48 @@ fn commits_made_during_a_large_compaction_reach_the_replica_in_time() {
         report.reach
     );
     assert!(report.reach.get("put.level.1") > 0, "{:?}", report.reach);
+}
+
+/// A defect allowance's test (`lsr_sim::cost::Spare`, <https://github.com/emschwartz/litestream-rs/issues/477>): a boot that finds
+/// nothing staged and another writer's files on the replica reads them in its one tick, past
+/// the per-tick bound. It fails once the boot reads the replica a slice a tick; the allowance
+/// goes with it.
+#[test]
+fn a_boot_over_another_writer_reads_the_replica_in_one_tick() {
+    let mut ops = commits(200, 1);
+    ops.extend([
+        Op::EnvFault(EnvFault::WipeStaging),
+        Op::SecondWriter { ticks: 2 },
+        Op::Tick,
+        Op::Tick,
+    ]);
+    let report = match run_ops(Seed::new(1), &ops, &Opts::default()) {
+        Ok(report) => report,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert!(
+        report.reach.get("tick_cost.boot_restore_read") > 0,
+        "{:?}",
+        report.reach
+    );
+}
+
+/// A defect allowance's test (`lsr_sim::cost::s3_rereads`, <https://github.com/emschwartz/litestream-rs/issues/478>): the S3 replica
+/// reads each staged body it puts whole again from staging, to hash it and to send it. It
+/// fails once the store hashes and sends from one read; the allowance goes with it.
+#[test]
+fn an_s3_put_reads_its_staged_body_again() {
+    let opts = Opts {
+        remote_s3: true,
+        ..Opts::default()
+    };
+    let report = match run_ops(Seed::new(1), &commits(5, 1), &opts) {
+        Ok(report) => report,
+        Err(failure) => panic!("{failure}"),
+    };
+    assert!(
+        report.reach.get("tick_cost.s3_rereads_allowed") > 0,
+        "{:?}",
+        report.reach
+    );
 }
