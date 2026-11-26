@@ -19,7 +19,7 @@ fn page_bytes(page: u32, commit: u8) -> Vec<u8> {
 }
 
 /// A quiet database of [`PAGES`] pages with one committed transaction in its WAL.
-fn quiet() -> Rig {
+pub(super) fn quiet() -> Rig {
     quiet_of(PAGES, page_bytes)
 }
 

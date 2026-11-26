@@ -1,6 +1,7 @@
 //! Short listings: what a maintenance pass reads between whole ones.
 //!
-//! A whole listing pages through every file of all ten levels, so its cost grows with the
+//! A whole listing pages through every file of every level (but the levels above the top the boot
+//! found empty, `docs/decisions/D294.md`), so its cost grows with the
 //! replica's retention: a week of level-1 files is about 20,000 entries and 21 requests, and
 //! maintenance used to run one whole listing at least every 15 seconds while the database was
 //! written (issue 324, and upstream's report of the same shape). The engine now remembers, in

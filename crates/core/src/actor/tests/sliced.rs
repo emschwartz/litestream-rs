@@ -638,7 +638,9 @@ fn another_writers_file_at_the_id_in_flight_is_not_compacted(whole: bool) {
             .filter(|key| key.range().max().get() >= 7)
             .collect()
     };
-    let all = u32::try_from(Level::ALL.len()).unwrap();
+    // A whole listing reads levels 0 to 3 and the snapshots; the boot alone lists the empty
+    // levels above the top.
+    let all = 5;
     let mut seen = Vec::new();
     let mut waits = Vec::new();
     for _ in 0..200 {

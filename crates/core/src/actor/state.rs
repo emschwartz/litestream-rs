@@ -12,6 +12,7 @@ use lsr_ltx::{Timestamp, Txid};
 
 use super::Actor;
 use crate::fault::{DegradedCause, StopCause};
+use crate::inventory::EmptyLevels;
 use crate::layout::FileKey;
 use crate::maintain::{Job, MaintainState, Remembered, RetentionMode};
 use crate::verify::LivePages;
@@ -375,6 +376,10 @@ pub(super) struct Maintain {
     /// The newest file known at each level, so a pass can list the tail of a level instead
     /// of all of it. In memory only; every fault drops it.
     pub(super) remembered: Remembered,
+    /// The levels 1 to 8 the last listing of each found empty, from the boot's listing of
+    /// every level on: a whole listing leaves out those above the configured top. Kept across
+    /// faults, as Go never lists those levels at all; each boot learns it again.
+    pub(super) empty: EmptyLevels,
 }
 
 /// How many uploads in a row run before prune or maintenance, when either has work, takes
@@ -396,6 +401,7 @@ impl Default for Maintain {
             snapshot_waits: false,
             snapshot_retry: None,
             remembered: Remembered::default(),
+            empty: EmptyLevels::default(),
         }
     }
 }
