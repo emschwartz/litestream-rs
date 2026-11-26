@@ -459,13 +459,12 @@ fn short_bill() -> BTreeMap<(Request, u8), usize> {
 /// | DELETE batches | 103 | 64 | 66 |
 /// | LIST, all levels | 284 | 998 | 338 |
 ///
-/// The one type above Go's is LIST: about one level-0, level-1 and level-9 listing per
-/// 5 second retention check (retention reads the level above to know what a restore needs,
-/// `maintain/retain.rs`), and a whole listing, one request per level, for each snapshot
-/// (level 5 is only ever listed by a whole listing) and at start. A snapshot that finds
-/// commits since its last sync takes its proof after their upload from the same decision, not
-/// from another whole listing (`docs/decisions/D243.md`). The level-9 listing of each
-/// retention check is not guarded by a Go defect and is left for the owner to rule on.
+/// LIST is the type nearest Go's: about one level-0 and one level-1 listing per 5 second
+/// retention check, as Go's `EnforceL0RetentionByTime` makes (`db.go`, levels 1 and 0, never
+/// level 9), and a whole listing, one request per level, for each snapshot (level 5 is only ever
+/// listed by a whole listing) and at start. A snapshot that finds commits since its last sync
+/// takes its proof after their upload from the same decision, not from another whole listing
+/// (`docs/decisions/D243.md`). The check reads no snapshot (`docs/decisions/D252.md`).
 /// Level 1 and level 2 GET one more than Go in this run (inputs read, as Go's; the bounds
 /// allow it, and the difference is not explained further).
 #[test]
@@ -483,5 +482,7 @@ fn a_steady_writer_with_short_intervals_pays_the_bill_and_no_more() {
     assert!(count(&bill, Request::Delete) <= 103, "{bill:?}");
     // One whole listing per snapshot and one at start: level 5 is listed by no other kind.
     assert!(at(Request::List, 5) <= 6, "{bill:?}");
-    assert!(count(&bill, Request::List) <= 345, "{bill:?}");
+    // Level 9 is listed for a snapshot window and by a whole listing, never by a retention check.
+    assert!(at(Request::List, 9) <= 12, "{bill:?}");
+    assert!(count(&bill, Request::List) <= 284, "{bill:?}");
 }

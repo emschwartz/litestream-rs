@@ -7,7 +7,7 @@
 //! memory only, the newest file it knows at each level 1 to 8 ([`Remembered`]), and between
 //! whole listings a pass asks the store only for what its decision reads ([`Plan`], [`Tail`]): level 0,
 //! the tail of a compaction level whose window is open and the level below it, level 1 after the
-//! cover cursor and level 9 when level-0 retention is due. A pass with nothing due lists nothing, and the
+//! cover cursor when level-0 retention is due, and level 9 when the snapshot window is open. A pass with nothing due lists nothing, and the
 //! passes after this engine's own jobs reuse a listing at most five seconds old ([`Carry`], which keeps the time it was really made, gains every output this engine confirms meanwhile, and is never used by a pass that may delete).
 //! A level whose own output closed its window is quiet until the next window; level-0 retention is
 //! checked every [`Maintenance::retention_check_every`]. Nothing is written to disk and nothing survives a fault,
@@ -29,7 +29,7 @@
 //! |---|---|---|
 //! | Compaction into level `d` | level `d` after what is known, level `d-1` after the level's last transaction | The planner reads the destination's last file and the sources above its last transaction, nothing older. Level 0 and level 9 are listed whole. A remembered newest file can only be a file that was there: retention never deletes a level's last file, and a file another process removed is caught at the next whole listing. A tail whose first source does not start right after the destination's newest file is not planned from: the next pass is whole. |
 //! | Snapshot | level 9 whole, the newest position over what was listed or known | The planner reads the newest snapshot start and the newest transaction. |
-//! | Level-0 retention | level 0 whole, level 9 whole, level 1 to 8 files after the cursor | [`super::retain::short_level_zero`]: its deletes are a subset of the whole rule's, because its anchor reads the newest known file of every level 1 to 8 as the whole anchor does (a remembered one for its age only). A covering file must be listed in this pass, never remembered. |
+//! | Level-0 retention | level 0 whole, level 1 to 8 files after the cursor | [`super::retain::short_level_zero`]: Go's check (levels 1 and 0, no snapshot read) plus a cover: a level-0 file goes only when level 1 to 8 files listed in this pass cover it whole, and ages against an anchor that reads the newest known file of every level 1 to 8 (a remembered one for its age only, never as a cover). The whole listing keeps the floor and the snapshots (`docs/decisions/D252.md`). |
 //! | Snapshot retention (rule 1) | whole listing only | It deletes by age against every snapshot and the floor moves by it. |
 //! | Level 1 to 8 prefix deletes (rule 2) | whole listing only | They are decided against the floor and the whole level. |
 //! | Delete of a rejected output, read-back repair | whole listing only | They are decided against what the whole level holds. |
@@ -62,7 +62,7 @@
 //! - With a record above the configured top, level-0 retention is decided on whole listings only
 //!   (see [`Remembered::plan`]): the record may name a file another process removed, which would
 //!   hold the anchor too high.
-//! - Never seen by a short pass: a foreign snapshot until the snapshot window or retention lists
+//! - Never seen by a short pass: a foreign snapshot until the snapshot window or a whole listing lists
 //!   level 9, and any file at a level above the configured top, which no short pass lists (the
 //!   anchor reads the remembered newest file of each such level, learned at the whole listing). The
 //!   gap is accepted in docs/decisions/D193.md.
@@ -475,8 +475,7 @@ impl Remembered {
     /// after its newest file when its window is open (to see what follows the destination's last
     /// file) unless this engine confirmed that file a moment ago, after the level above's last
     /// transaction when that level's window is open (its sources), and, for level 1 when
-    /// retention is due, after the cover cursor. Level 9 when the snapshot's window is open or
-    /// retention is due.
+    /// retention is due, after the cover cursor. Level 9 when the snapshot's window is open.
     pub(crate) fn starts(&self, config: &Maintenance, plan: &Plan) -> Vec<ListAt> {
         let top = config.top().get();
         let mut starts = vec![ListAt::first(Level::ZERO)];
@@ -510,7 +509,7 @@ impl Remembered {
                 after: lowest(&needs),
             });
         }
-        if plan.snapshot || plan.retention {
+        if plan.snapshot {
             starts.push(ListAt::first(Level::SNAPSHOT));
         }
         starts
