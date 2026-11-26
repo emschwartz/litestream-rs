@@ -862,6 +862,11 @@ impl Worker {
             .app_gate
             .judge(self.config.if_replication_stops, trip, judged);
         self.blocked = blocks_writes(self.config.if_replication_stops, gate);
+        // The identity check spans ticks once its restore takes more than one: the hold keeps
+        // naming it until the boot after it compares (`docs/decisions/D267.md`).
+        if self.blocked == Some(WhyBlocked::Booting) && self.actor.checking_identity() {
+            self.blocked = Some(WhyBlocked::CheckingIdentity);
+        }
         FailStop::of(trip, gate)
     }
 
