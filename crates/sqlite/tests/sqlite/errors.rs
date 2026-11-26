@@ -364,6 +364,6 @@ fn a_path_starting_with_file_colon_is_never_read_as_a_uri() {
     assert!(path.exists());
     // A name made of query syntax is not the in-memory database it would ask for.
     let not_memory = Path::new("file:app.db?mode=memory");
-    assert!(Sqlite::open(not_memory).is_err());
+    Sqlite::open(not_memory).unwrap_err();
     assert!(!dir.path().join("file:app.db?mode=memory").exists());
 }
