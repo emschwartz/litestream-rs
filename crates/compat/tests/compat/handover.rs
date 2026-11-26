@@ -893,7 +893,17 @@ mod live {
         ) -> Option<Summary> {
             let kind = process.kind();
             process.wait_up(UP).expect("the process comes up");
-            let mut at = previous;
+            // On a fresh database the first commit waits for the first staged file: Go before
+            // v0.5.4 stalls for good when its first sync meets a commit SQLite has not finished
+            // writing to the WAL. It stages transaction 1 at the WAL header with no frames, and
+            // every later sync fails "prev WAL offset is less than the header size" (upstream
+            // issue #900, fixed by #901).
+            let mut at = match previous {
+                Some(prev) => Some(prev),
+                None => {
+                    Some(wait_staged_past(&mut process, fixture, None).expect("the first file"))
+                }
+            };
             let mut boot = None;
             for i in 0..COMMITS {
                 fixture
