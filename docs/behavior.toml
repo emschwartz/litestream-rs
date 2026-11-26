@@ -633,10 +633,10 @@ table = "Running"
 id = "RUN-24"
 circumstance = "A stop is asked for (library `stop`, SIGINT, SIGTERM, SIGHUP). Only sync and upload run until the deadline"
 response = "`Drained { txid }` when everything committed is on the replica; else at the deadline stop, `Shutdown`, reporting what was left"
-signal = "`Stopped::Drained` or `Stopped::DeadlineReached`; exit code"
-at_risk = "With `DeadlineReached`: `unsynced_wal_bytes` and `staged_not_uploaded`, counted high. They are replicated by the next start"
+signal = "`Stopped::Drained` or `Stopped::DeadlineReached`; exit code. The daemon's line names `last_replicated_txid`, the newest transaction the replica was confirmed to hold"
+at_risk = "With `DeadlineReached`: every commit after `last_replicated_txid`, which a restore lacks; `unsynced_wal_bytes` and `staged_not_uploaded` say how much, counted high. A deadline that passes inside a tick (a compaction can hold the engine's thread for minutes) raises the unsynced bytes to the WAL file's length, since the last measure was taken before that tick began. They are replicated by the next start"
 recovery = "Next start"
-detected_by = "core::`drain_finishes_uploads`, core::`drain_deadline_stops`, core::`a_drain_retries_a_transient_upload_and_drains`, cli::`two_databases_from_one_config_drain_on_sigterm_and_restore`, cli::`a_second_signal_cuts_the_drain`"
+detected_by = "core::`drain_finishes_uploads`, core::`drain_deadline_stops`, core::`a_drain_retries_a_transient_upload_and_drains`, cli::`two_databases_from_one_config_drain_on_sigterm_and_restore`, cli::`a_second_signal_cuts_the_drain`, replica::`a_stop_cut_off_inside_a_tick_counts_the_wal_written_since`, sidecar::`a_drain_cut_by_its_deadline_names_the_last_replicated_transaction`; plant::`stop-cut-off-reports-the-last-tick`, plant::`not-drained-names-no-txid`"
 
 [[row]]
 table = "Running"
@@ -2177,7 +2177,7 @@ response = "as Go: the snapshot is written after the last upload, outside the sn
 signal = "exit 0; a database whose snapshot was not written logs `database drained, snapshot not written` with the reason and the run exits 1"
 at_risk = "None: a snapshot not written leaves the replica as the drain left it, and one published with a lost response is a whole file"
 recovery = "Operator: run it again"
-detected_by = "compat::`go_and_lsr_end_once_with_one_level_nine_snapshot`, compat::`a_second_run_at_the_same_position_writes_the_same_snapshot_on_both`, compat::`once_alone_writes_no_snapshot_on_either_side`, core::`the_snapshot_follows_the_last_upload_and_ends_the_drain`, core::`a_reset_wal_index_fails_the_snapshot_by_name`, core::`a_failed_write_ends_the_drain_without_a_snapshot`, core::`a_passed_deadline_does_not_cut_the_snapshot`, sim::`a_snapshot_published_with_a_lost_response_then_a_power_loss_restores`, cli::`once_replicates_everything_committed_and_exits`"
+detected_by = "compat::`go_and_lsr_end_once_with_one_level_nine_snapshot`, compat::`a_second_run_at_the_same_position_writes_the_same_snapshot_on_both`, compat::`once_alone_writes_no_snapshot_on_either_side`, core::`the_snapshot_follows_the_last_upload_and_ends_the_drain`, core::`a_reset_wal_index_fails_the_snapshot_by_name`, core::`a_failed_write_ends_the_drain_without_a_snapshot`, core::`a_passed_deadline_does_not_cut_the_snapshot`, sim::`a_snapshot_published_with_a_lost_response_then_a_power_loss_restores`, cli::`once_replicates_everything_committed_and_exits`, cli::`once_with_a_snapshot_that_cannot_be_written_is_not_clean`; plant::`drain-end-read-before-the-drain`"
 notes = "Go runs database by database and stops at the first error; every database runs here and each outcome is reported (D167). With `-enforce-retention` too, the snapshot comes first, and a snapshot that was not written skips that database's retention, as Go returns before it (CFG-47)"
 
 [[row]]

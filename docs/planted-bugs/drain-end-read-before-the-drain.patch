@@ -1,0 +1,14 @@
+diff --git a/crates/sidecar/src/daemon.rs b/crates/sidecar/src/daemon.rs
+index 97a657bd2..a0deff696 100644
+--- a/crates/sidecar/src/daemon.rs
++++ b/crates/sidecar/src/daemon.rs
+@@ -530,8 +530,8 @@ impl Daemon {
+             let mut replicated = None;
+             let end = match (sync, &slot.state) {
+                 (Some(sync), Entry::Running(replicator)) => {
+-                    let stopped = sync.wait();
+                     let health = replicator.health();
++                    let stopped = sync.wait();
+                     replicated = health.replicated.map(|(txid, _)| txid);
+                     ending(stopped, health.final_snapshot, health.final_retention)
+                 }

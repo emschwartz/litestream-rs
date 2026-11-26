@@ -168,7 +168,40 @@ fn a_second_signal_cuts_the_drain() {
     let (status, out) = finish(daemon);
     assert_eq!(status.code(), Some(1), "{out}");
     assert!(
-        out.contains("msg=\"database not drained: deadline reached\""),
+        out.contains(
+            "msg=\"database not drained: deadline reached, the replica lacks every commit after last_replicated_txid\""
+        ),
+        "{out}"
+    );
+    assert!(out.contains("last_replicated_txid=none"), "{out}");
+}
+
+/// `-once -force-snapshot` whose level-9 snapshot cannot be written exits 1 and says so. The
+/// outcome is read once the drain has ended: read before, it said the snapshot was still asked
+/// for, and the run was reported clean.
+#[cfg(unix)]
+#[test]
+fn once_with_a_snapshot_that_cannot_be_written_is_not_clean() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("app.db");
+    let replica = dir.path().join("replica");
+    let level9 = replica.join("ltx").join("9");
+    std::fs::create_dir_all(&level9).unwrap();
+    std::fs::set_permissions(&level9, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let app = database(&db);
+    write(&app, 15);
+    let cfg = config(dir.path(), &format!("dbs:\n{}", entry(&db, &replica)));
+    let (status, out) = finish(start(&[
+        "-once",
+        "-force-snapshot",
+        "-config",
+        cfg.to_str().unwrap(),
+    ]));
+    std::fs::set_permissions(&level9, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(status.code(), Some(1), "{out}");
+    assert!(
+        out.contains("msg=\"database drained, snapshot not written\""),
         "{out}"
     );
 }
