@@ -1,0 +1,5 @@
+name = "restore-ignores-configured-meta-dir"
+fix = "claude/library-api"
+package = "lsr-replica"
+test_bin = "replica"
+tests = ["a_restore_records_its_trust_record_in_the_configured_meta_directory"]

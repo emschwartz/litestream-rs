@@ -133,9 +133,10 @@ use crate::created_at::{Need, Resolve, ResolvedCreatedAt, Step};
 use crate::inventory::{Inventory, Listed, is_snapshot_start};
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, Stamp};
 /// The state of the database to rebuild.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum RestoreTarget {
     /// The newest state the replica holds.
+    #[default]
     Latest,
     /// The state right after this transaction.
     Txid(Txid),

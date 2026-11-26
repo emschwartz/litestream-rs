@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lsr_replica::{DynStore, RestoreTarget, restore};
+use lsr_replica::{DynStore, restore};
 use lsr_store_fs::FsStore;
 use rusqlite::{Connection, OptionalExtension};
 use tempfile::TempDir;
@@ -67,7 +67,7 @@ fn counter(conn: &Connection) -> i64 {
 fn newest_state(dir: &Path, replica: &Path, name: &str) -> Connection {
     let store: Arc<dyn DynStore> = Arc::new(FsStore::new(replica));
     let to = dir.join(format!("newest-{name}.db"));
-    restore(&*store, RestoreTarget::Latest, &to).unwrap();
+    restore(&*store, &to, &lsr_replica::Restore::default()).unwrap();
     Connection::open(&to).unwrap()
 }
 

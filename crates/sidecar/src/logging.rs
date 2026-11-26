@@ -362,23 +362,23 @@ impl EventSink for DbEvents {
                 "replication stopped",
                 vec![("cause", debug(cause))],
             ),
-            Event::Refused { through } => {
+            Event::UnvouchedReplicaFiles { through } => {
                 let msg = refused_message(*through);
                 let through = ("through", Value::from(through.get()));
                 self.log.log(LogLevel::Error, &msg, &[db, through]);
                 return;
             }
-            Event::TakeoverRecordUnusable(unusable) => (
+            Event::TrustRecordUnusable(unusable) => (
                 LogLevel::Warn,
                 "the takeover record in the meta directory (lsr-takeover) cannot be used and is ignored; the boot builds only on what the WAL vouches for",
                 vec![("problem", debug(unusable))],
             ),
-            Event::TakeoverNotRecorded { kind } => (
+            Event::TrustRecordNotWritten { kind } => (
                 LogLevel::Error,
                 "the takeover record could not be written; staged files are kept until it is",
                 vec![("kind", debug(kind))],
             ),
-            Event::TakeoverNotRemoved { kind } => (
+            Event::TrustRecordNotRemoved { kind } => (
                 LogLevel::Error,
                 "a spent takeover record could not be deleted from the meta directory; retrying",
                 vec![("kind", debug(kind))],
@@ -409,7 +409,7 @@ fn ahead_message(tip: Txid) -> String {
 }
 
 /// The approved text for a boot that refused the replica's newest transactions: nothing
-/// local vouched for them (`lsr_replica::Event::Refused`).
+/// local vouched for them (`lsr_replica::Event::UnvouchedReplicaFiles`).
 fn refused_message(through: Txid) -> String {
     format!(
         "replicate refused: the replica holds transactions up to {through} that this database has no record of writing. Another replicator may be using this prefix. If this database is the right one, run `lsr trust-local <db> --replica <url>` and start again. If the replica is the right one, restore from it with `lsr restore`."

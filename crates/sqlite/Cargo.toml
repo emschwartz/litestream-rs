@@ -15,7 +15,7 @@ default = ["bundled"]
 # SQLite compiled from libsqlite3-sys's bundled source. Off, libsqlite3-sys links the system's
 # (or the application's) SQLite, which must then be one of the builds the `version` module lists.
 bundled = ["libsqlite3-sys/bundled"]
-# `app_connection`, `app_connection_for`, `check_app_connection` and `fail_fast_while` on a
+# `app_connection`, `ConnectionSetup::apply`, `check_app_connection` and `fail_fast_while` on a
 # rusqlite connection; any rusqlite from 0.39 to 0.43.
 rusqlite = ["dep:rusqlite"]
 # The real-SQLite fault suite's support: the fault-injecting VFS and the harness that drives the

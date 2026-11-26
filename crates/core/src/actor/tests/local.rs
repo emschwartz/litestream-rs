@@ -601,7 +601,7 @@ fn a_refusal_during_the_course_holds_the_start_and_keeps_the_course() {
     let degraded = actor.degraded(Task::Upload).map(|was| was.cause);
     assert_eq!(
         degraded,
-        Some(PersistentCause::StoreDenied(Denied::Credentials)),
+        Some(DegradedCause::StoreDenied(Denied::Credentials)),
         "{seen:?}"
     );
     assert_eq!(actor.degraded(Task::Sync), None);
@@ -793,7 +793,7 @@ fn a_wal_at_another_page_size_is_reported_by_the_course() {
             event(&tick),
             Some(Event::Degraded {
                 task: Task::Sync,
-                cause: PersistentCause::PageSizeChanged { .. },
+                cause: DegradedCause::PageSizeChanged { .. },
                 ..
             })
         ),
@@ -1021,7 +1021,7 @@ fn a_courses_file_is_never_written_over_an_unreadable_replica_file() {
                         fault: Fault::RemoteCorrupt,
                         ..
                     } | Event::Degraded {
-                        cause: PersistentCause::RemoteCorrupt,
+                        cause: DegradedCause::RemoteCorrupt,
                         ..
                     }
                 )

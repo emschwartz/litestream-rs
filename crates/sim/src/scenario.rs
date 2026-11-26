@@ -16,7 +16,7 @@
 //! fault tests run each persistent fault's scenarios under both presets.
 
 use lsr_core::{
-    CheckpointMode, Level, MaintainedEvent, PersistentCause, Responses, SnapshotCause, StopCause,
+    CheckpointMode, DegradedCause, Level, MaintainedEvent, Responses, SnapshotCause, StopCause,
 };
 use lsr_ltx::PageSize;
 
@@ -82,7 +82,7 @@ pub enum Expect {
 /// Whether `responses` stop the engine on `cause`; the end of a drain always does.
 #[must_use]
 pub fn stops(responses: &Responses, cause: StopCause) -> bool {
-    PersistentCause::of(cause).is_none_or(|cause| responses.stops(cause))
+    DegradedCause::of(cause).is_none_or(|cause| responses.stops(cause))
 }
 
 impl Expect {

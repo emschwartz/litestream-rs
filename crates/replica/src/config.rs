@@ -87,7 +87,7 @@ impl Default for SyncLimits {
 }
 
 /// How a replicator runs. Go's behaviour by default. The event sink is not part of it
-/// ([`crate::Replicator::start_with_events`], [`crate::Replicator::set_events`]).
+/// ([`crate::StartOptions::events`], [`crate::Replicator::set_events`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// Go's meta directory, `<dir>/.<name>-litestream` beside the database unless set, so Go
@@ -129,7 +129,7 @@ pub struct Config {
     /// What a fail-stop trip does to the application (`if-replication-stops`, decisions D13
     /// and D14): `HoldStart` by default. For the library, a held gate, and a boot not yet
     /// judged except under `Report`, hold the application's writes with the write lock the
-    /// replicator keeps (`docs/decisions/D192.md`); see [`crate::Health::held_by`] and
+    /// replicator keeps (`docs/decisions/D192.md`); see [`crate::Health::fail_stop`] and
     /// [`crate::Health::writes`].
     pub if_replication_stops: IfReplicationStops,
     /// How long a commit may stay off the replica before fail-stop trips for it (decision
