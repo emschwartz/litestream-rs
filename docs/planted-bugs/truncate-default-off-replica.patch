@@ -1,0 +1,26 @@
+diff --git a/crates/replica/src/config.rs b/crates/replica/src/config.rs
+index 01167aa8c..4f9a7ee78 100644
+--- a/crates/replica/src/config.rs
++++ b/crates/replica/src/config.rs
+@@ -178,13 +178,20 @@ impl Config {
+ 
+     /// The engine's configuration.
+     pub(crate) fn actor(&self) -> ActorConfig {
++        let checkpoint = match self.readers {
++            ReaderTracking::Untracked => CheckpointConfig {
++                truncate_pages: None,
++                ..self.checkpoint
++            },
++            ReaderTracking::Tracked => self.checkpoint,
++        };
+         ActorConfig {
+             sync: SyncConfig {
+                 cap: self.sync_limits.wal_bytes_per_step,
+                 node_id: 0,
+             },
+             sync_interval: self.poll_interval.get(),
+-            checkpoint: self.checkpoint,
++            checkpoint,
+             upload: UploadConfig {
+                 files_per_tick: self.sync_limits.files_per_upload,
+                 ..UploadConfig::default()

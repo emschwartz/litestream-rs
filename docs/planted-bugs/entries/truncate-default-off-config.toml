@@ -1,0 +1,6 @@
+# The file's TRUNCATE default left off when truncate-page-n is unset (claude/truncate-default).
+name = "truncate-default-off-config"
+fix = "claude/truncate-default"
+package = "lsr-config"
+test_bin = "config"
+tests = ["truncate_page_n_acts_as_go", "an_entry_with_no_settings_gets_go_s_defaults"]

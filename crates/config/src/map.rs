@@ -14,7 +14,7 @@
 //!   sync interval; litestream-rs uploads on the poll that staged the file.
 //! - `checkpoint-interval` (Go 1 m; zero or less is off, `db.go:1571`),
 //!   `min-checkpoint-page-count` (Go 1000; zero or less Go refuses at open,
-//!   `db.go:872`), `truncate-page-n` (only with `app-readers: none`; Go's zero is
+//!   `db.go:872`), `truncate-page-n` (Go's zero is
 //!   121359 and less than zero is off, `db.go:1599-1608`).
 //! - `max-sync-wal-bytes` (Go 64 MiB; zero or less is no cap, `wal_reader.go:241`)
 //!   and `max-sync-ltx-files` (Go 256; zero or less is all, `replica.go:208`).
@@ -61,7 +61,7 @@ use lsr_core::{
 use lsr_replica::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 use lsr_store_s3::{S3Config, S3Credentials};
 
-use crate::config::{AppReaders, DbConfig, DbSource, GoConfig};
+use crate::config::{DbConfig, DbSource, GoConfig};
 use crate::duration::GoDuration;
 use crate::error::KeyPath;
 use crate::expand::{Env, PathError, expand_path};
@@ -434,7 +434,7 @@ fn settings(
 ) -> Option<Config> {
     let poll = poll_interval(db, entry, found);
     let retry = retry_interval(db, entry, found);
-    let checkpoint = checkpoint(config, db, entry, found);
+    let checkpoint = checkpoint(db, entry, found);
     let sync_limits = sync_limits(db);
     let shutdown_grace = config.shutdown_sync_timeout().to_std().unwrap_or_default();
     Some(Config {
@@ -445,10 +445,7 @@ fn settings(
         maintenance: maintenance?.clone(),
         sync_limits: sync_limits?,
         responses: config.rust().responses(),
-        readers: match config.rust().app_readers() {
-            AppReaders::Unknown => ReaderTracking::Untracked,
-            AppReaders::None => ReaderTracking::Tracked,
-        },
+        readers: ReaderTracking::Untracked,
         shutdown_grace,
         app_autocheckpoint: config.rust().app_autocheckpoint(),
         verify_interval: config.validation_interval().and_then(positive),
@@ -493,12 +490,7 @@ fn retry_interval(db: &DbConfig, entry: &KeyPath, found: &mut Found) -> Option<N
     }
 }
 
-fn checkpoint(
-    config: &GoConfig,
-    db: &DbConfig,
-    entry: &KeyPath,
-    found: &mut Found,
-) -> Option<CheckpointConfig> {
+fn checkpoint(db: &DbConfig, entry: &KeyPath, found: &mut Found) -> Option<CheckpointConfig> {
     let interval = match db.checkpoint_interval() {
         None => Some(go::CHECKPOINT_INTERVAL),
         Some(value) => value.to_std().filter(|d| !d.is_zero()),
@@ -512,11 +504,10 @@ fn checkpoint(
         }
         Some(value) => count(value),
     };
-    let truncate_pages = match (config.rust().app_readers(), db.truncate_page_n()) {
-        (AppReaders::Unknown, _) => None,
-        (AppReaders::None, None) => NonZeroU32::new(go::TRUNCATE_PAGES),
-        (AppReaders::None, Some(value)) if value < 0 => None,
-        (AppReaders::None, Some(value)) => count(value),
+    let truncate_pages = match db.truncate_page_n() {
+        None => NonZeroU32::new(go::TRUNCATE_PAGES),
+        Some(value) if value < 0 => None,
+        Some(value) => count(value),
     };
     Some(CheckpointConfig {
         interval,

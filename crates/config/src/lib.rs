@@ -66,9 +66,8 @@ use std::path::Path;
 
 pub use build::is_url;
 pub use config::{
-    AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
-    ReplicaConfig, ReplicaKind, RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride,
-    defaults,
+    DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging, ReplicaConfig,
+    ReplicaKind, RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
 };
 pub use duration::{DurationError, GoDuration};
 pub use error::{

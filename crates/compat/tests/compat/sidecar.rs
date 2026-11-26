@@ -11,8 +11,7 @@
 //!   define, so it shows both programs start on such a file.
 //! - `go_and_rust_sidecars_alternate_on_one_config_file`: the alternation run of
 //!   `alternation.rs` with Rust as the daemon on Go's config file, so both sides checkpoint
-//!   on the file's schedule (every 5 s, PASSIVE at 1,000 pages, TRUNCATE at 1,500 under the
-//!   `app-readers: none` claim) and the run crosses checkpoints, WAL restarts and TRUNCATEs
+//!   on the file's schedule (every 5 s, PASSIVE at 1,000 pages, TRUNCATE at 1,500) and the run crosses checkpoints, WAL restarts and TRUNCATEs
 //!   on both.
 //!
 //! Metrics are compared in `dropin_metrics`.

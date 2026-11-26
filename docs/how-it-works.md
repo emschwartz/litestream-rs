@@ -16,7 +16,7 @@ One page on the mechanism. [go-terms.md](go-terms.md) maps the words used here t
 
 SQLite in WAL mode appends each commit to `app.db-wal` and later copies those pages into the database file (a checkpoint). Once a checkpoint has copied everything, the next writer starts the WAL again from the top, and the old frames are gone.
 
-The replicator holds a read transaction on the database from before the application's first write. That read lock stops any checkpoint from restarting the WAL past frames the replicator has not read. The replicator then runs the checkpoints itself, each one only after it has read through the WAL and staged what it found: a PASSIVE checkpoint once the WAL holds 1,000 pages, or once a minute. A TRUNCATE checkpoint runs only when the config says the application holds no long readers (`app-readers: none`).
+The replicator holds a read transaction on the database from before the application's first write. That read lock stops any checkpoint from restarting the WAL past frames the replicator has not read. The replicator then runs the checkpoints itself, each one only after it has read through the WAL and staged what it found: a PASSIVE checkpoint once the WAL holds 1,000 pages, or once a minute. A TRUNCATE checkpoint runs once the WAL holds 121,359 pages (`truncate-page-n`), as in Go. A reader that blocks it makes it report busy and leave the WAL as it was; it is asked again later.
 
 It reads only up to the last commit SQLite's wal-index records, never to the end of the file, so frames left by a writer that stopped mid-commit are never replicated.
 

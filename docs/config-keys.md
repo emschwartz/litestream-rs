@@ -4,7 +4,7 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 
 `lsr_config::load_plan` reads a `litestream.yml` and returns a `Plan`: per database a `lsr_replica::Config`, a `ReplicaPlan` (open it with `lsr_config::open_store`), and the restore-if-missing setting. The tables say what each key sets in it. "Daemon only" keys are read by `lsr replicate` and are not in a plan.
 
-`busy-timeout` has no effect, and the reason is worth a sentence: Go's `busy-timeout` is how long Go's own SQLite connections wait on a lock, while litestream-rs's connections never wait (a busy timeout of zero): a checkpoint that finds the write lock busy is skipped and asked for again within a second (`docs/decisions/D225.md`); the TRUNCATE wait it guarded in Go is replaced by the reader-guard rule, which runs TRUNCATE only under `litestream-rs.app-readers: none` (`ReaderTracking::Tracked`).
+`busy-timeout` has no effect, and the reason is worth a sentence: Go's `busy-timeout` is how long Go's own SQLite connections wait on a lock, while litestream-rs's connections never wait (a busy timeout of zero): a checkpoint that finds the write lock busy is skipped and asked for again within a second (`docs/decisions/D225.md`); the TRUNCATE wait it guarded in Go is replaced by asking SQLite at once: a TRUNCATE a reader blocks reports busy and leaves the WAL as it was.
 
 ## Top level
 
@@ -142,7 +142,7 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 | `checkpoint-interval` | `Config.checkpoint.interval`: how often a PASSIVE checkpoint runs on a quiet WAL; 0 never. |
 | `busy-timeout` | No effect: litestream-rs's connections run with busy timeout zero. |
 | `min-checkpoint-page-count` | `Config.checkpoint.min_pages`: WAL pages that trigger a PASSIVE checkpoint. |
-| `truncate-page-n` | `Config.checkpoint.truncate_pages`: WAL pages that trigger a TRUNCATE checkpoint. Takes effect only with `litestream-rs.app-readers: none`; 0 or less never truncates. |
+| `truncate-page-n` | `Config.checkpoint.truncate_pages`: WAL pages that trigger a TRUNCATE checkpoint (Go's default, 121359, when unset or 0); less than 0 never truncates. Each TRUNCATE that moves the WAL costs one full copy of the database, read from disk and uploaded as a snapshot. |
 | `max-sync-wal-bytes` | `Config.sync_limits.wal_bytes_per_step`; 0 or less means no cap. |
 | `restore-if-db-not-exists` | `DbPlan::restore_if_missing`: only on a `path` entry. The caller restores; see `restore_if_missing` in `lsr-replica`. |
 | `replica` | `DbPlan::replica`: where the database replicates to. |
@@ -168,7 +168,6 @@ Generated from `crates/config/src/keys.rs` by `crates/config/src/keys/table.rs`;
 
 | Key | What it does |
 | --- | --- |
-| `app-readers` | `Config.readers`: `none` is `ReaderTracking::Tracked`, which lets TRUNCATE run. Its cost: each TRUNCATE that empties the WAL is followed by a copy of the whole database, read from disk and uploaded as a snapshot. The application keeps writing during the copy; writes wait only while SQLite's TRUNCATE copies the WAL into the database file. |
 | `app-autocheckpoint` | `Config.app_autocheckpoint`. |
 | `responses` | A section; its keys are below. |
 | `if-replication-stops` | `Config.if_replication_stops`. |
