@@ -14,7 +14,7 @@
 //! reach is summed, written as JSON to `LSR_SIM_REACH_OUT` when it is set
 //! (the nightly workflow uploads it), and judged by [`lsr_sim::marks::gate`].
 //! A fault class's required count that no seed reached fails the soak as a
-//! failing seed does. The marks too rare for a soak of a thousand seeds to reach reliably
+//! failing seed does. The marks too rare for the nightly's seeds to reach reliably
 //! come from `lsr_sim::scenario::coverage`, run once ahead of the seeds; a scenario that stops
 //! reaching its mark fails the soak too.
 
