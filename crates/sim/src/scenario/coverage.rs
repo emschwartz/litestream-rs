@@ -1,13 +1,14 @@
-//! Scenarios that reach the marks a soak of a thousand seeds does not reliably reach.
+//! Scenarios that reach every app action point, so no point's count rests on luck.
 //!
 //! The soak gate ([`crate::marks::gate`]) requires every drawn app action point
 //! ([`crate::domain::points`]) and every drawn error cell to be reached. A random history
 //! reaches a point only when it arms the app's action in the one tick that makes the engine's
 //! call, and several calls are rare: the engine copies the database after a TRUNCATE only
 //! when the TRUNCATE moved the WAL, reads the page count only for a snapshot that finds nothing
-//! in the WAL, and reads pages only for a snapshot. Measured over 6,000 seeds, the rarest of these points ran
-//! 0 to 3 times per 1,000 seeds, so a soak of 1,600 seeds left each at zero about as often as
-//! it reached it.
+//! in the WAL, and reads pages only for a snapshot. Over the nightly soaks the rarest points ran
+//! about once per 10,000 seeds and dozens ran 1 to 3 times per 1,000, so a soak shorter than the
+//! nightly's left one or another at zero by chance. Every point gets a scenario; the other
+//! required marks are left to the seeds for the reasons in [`LEFT_TO_THE_SEEDS`].
 //!
 //! Each [`Coverage`] is a short explicit history that puts the engine in the situation that
 //! makes the call and arms the action right before it. The soak runs them all once, ahead of its
@@ -20,7 +21,8 @@ use std::num::NonZeroU32;
 
 use lsr_core::SourceOp;
 
-use crate::domain::points::{Action, point_key};
+use crate::domain::points::{ACTIONS, Action, point_cell, point_key};
+use crate::domain::{Cell, SOURCE_OPS};
 use crate::generate::{AppAt, AppOp, MetaOp, Op, WalOp};
 use crate::reach::Reach;
 use crate::run::{Opts, run_ops};
@@ -37,8 +39,6 @@ enum Situation {
     SnapshotRequested,
     /// Enough frames are waiting that the engine's next tick runs a PASSIVE checkpoint.
     PassiveDue,
-    /// As [`Self::PassiveDue`], with an app reader open that the armed action can end.
-    PassiveDueWithReader,
     /// The TRUNCATE threshold is low, a reader held off the PASSIVE checkpoint that tried first,
     /// and the reader is gone: the next tick truncates the WAL and snapshots the database, with
     /// no lock that keeps the application's commits out.
@@ -56,17 +56,6 @@ impl Situation {
             Self::SnapshotRequested => vec![Op::Tick, commit(2), Op::RequestSnapshot],
             Self::PassiveDue => {
                 let mut ops = vec![Op::Tick];
-                ops.extend((0..6).map(|_| commit(2)));
-                ops
-            }
-            Self::PassiveDueWithReader => {
-                let mut ops = vec![
-                    Op::Tick,
-                    Op::AppInTick {
-                        at: AppAt::Call(0),
-                        op: AppOp::ReaderBegin,
-                    },
-                ];
                 ops.extend((0..6).map(|_| commit(2)));
                 ops
             }
@@ -100,10 +89,9 @@ impl Situation {
                 Op::Tick,
                 Op::Tick,
             ],
-            Self::SnapshotRequested
-            | Self::PassiveDue
-            | Self::PassiveDueWithReader
-            | Self::TruncateDue => vec![Op::Tick, Op::Tick],
+            Self::SnapshotRequested | Self::PassiveDue | Self::TruncateDue => {
+                vec![Op::Tick, Op::Tick]
+            }
         }
     }
 
@@ -111,10 +99,7 @@ impl Situation {
     fn truncate_pages(self) -> Option<NonZeroU32> {
         match self {
             Self::TruncateDue => NonZeroU32::new(2),
-            Self::SnapshotRequested
-            | Self::PassiveDue
-            | Self::PassiveDueWithReader
-            | Self::TornWalBoot => None,
+            Self::SnapshotRequested | Self::PassiveDue | Self::TornWalBoot => None,
         }
     }
 }
@@ -122,7 +107,7 @@ impl Situation {
 /// A short history that reaches the keys it names.
 #[derive(Clone, Debug)]
 pub struct Coverage {
-    name: &'static str,
+    name: String,
     truncate_pages: Option<NonZeroU32>,
     ops: Vec<Op>,
     keys: Vec<String>,
@@ -131,8 +116,8 @@ pub struct Coverage {
 impl Coverage {
     /// The scenario's name, as a failure shows it.
     #[must_use]
-    pub const fn name(&self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// The reach keys the scenario exists for.
@@ -169,99 +154,110 @@ impl Coverage {
     }
 }
 
-/// The app does `op` right before the engine's `call`, in `situation`'s armed tick.
-fn point(name: &'static str, situation: Situation, call: SourceOp, op: AppOp) -> Coverage {
-    let mut ops = situation.setup();
-    ops.push(Op::AppInTick {
-        at: AppAt::Before(call),
-        op,
-    });
-    ops.extend(situation.after());
-    Coverage {
-        name,
-        truncate_pages: situation.truncate_pages(),
-        ops,
-        keys: vec![format!("{}.ran", point_key(call, Action::of(op)))],
+/// The situation that makes the engine's `call` in its next tick. Exhaustive, so a new call
+/// breaks the build here until it has one.
+const fn situation(call: SourceOp, action: Action) -> Situation {
+    match (call, action) {
+        // The boundary snapshot after a TRUNCATE reads pages with no lock that keeps the app's
+        // commit out.
+        (SourceOp::ReadPage, Action::Commit) => Situation::TruncateDue,
+        (SourceOp::ReadPage, _) => Situation::SnapshotRequested,
+        (SourceOp::PageCount, _) => Situation::TornWalBoot,
+        (
+            SourceOp::Open
+            | SourceOp::Len
+            | SourceOp::Committed
+            | SourceOp::BeginBarrier
+            | SourceOp::EndBarrier
+            | SourceOp::Checkpoint
+            | SourceOp::BumpSeq
+            | SourceOp::BeginWriteLock
+            | SourceOp::EndWriteLock
+            | SourceOp::Sync,
+            _,
+        ) => Situation::PassiveDue,
     }
 }
 
-/// Every scenario, one per mark it exists for.
+/// The app's operation for `action`: one page, never growing; a checkpoint keeps its mode.
+const fn app_op(action: Action) -> AppOp {
+    match action {
+        Action::Commit => AppOp::Commit {
+            pages: 1,
+            grow: false,
+        },
+        Action::ReaderBegin => AppOp::ReaderBegin,
+        Action::ReaderEnd => AppOp::ReaderEnd,
+        Action::CheckpointPassive => AppOp::Checkpoint(OtherProcessMode::Passive),
+        Action::CheckpointRestart => AppOp::Checkpoint(OtherProcessMode::Restart),
+        Action::CheckpointTruncate => AppOp::Checkpoint(OtherProcessMode::Truncate),
+        Action::CheckpointFull => AppOp::Checkpoint(OtherProcessMode::Full),
+        Action::DeleteWal => AppOp::DeleteWal,
+        Action::Spill => AppOp::Spill { pages: 1 },
+    }
+}
+
+/// The app does `action` right before the engine's `call`, in the armed tick of the situation
+/// that makes the call. An action that ends a reader gets one, begun in a tick of its own first.
+fn point(call: SourceOp, action: Action) -> Coverage {
+    let situation = situation(call, action);
+    let mut ops = Vec::new();
+    if action == Action::ReaderEnd {
+        ops.extend([
+            Op::Tick,
+            Op::AppInTick {
+                at: AppAt::Call(0),
+                op: AppOp::ReaderBegin,
+            },
+        ]);
+    }
+    ops.extend(situation.setup());
+    ops.push(Op::AppInTick {
+        at: AppAt::Before(call),
+        op: app_op(action),
+    });
+    ops.extend(situation.after());
+    let key = point_key(call, action);
+    Coverage {
+        name: key.clone(),
+        truncate_pages: situation.truncate_pages(),
+        ops,
+        keys: vec![format!("{key}.ran")],
+    }
+}
+
+/// One scenario for every app action point the gate requires (`docs/decisions/D256.md`).
 ///
-/// Each names why the soak needs it: the mark's measured rate over 6,000 seeds is in
-/// `docs/decisions/` as part of the entry that added this list.
+/// A random history reaches a point only when it arms the app's action in the one tick that
+/// makes the engine's call, so the rarest points ran about once per 10,000 seeds and dozens ran
+/// 1 to 3 times per 1,000: a soak shorter than the nightly left some at zero by chance. Every
+/// point is the same kind of mark, so every one has a scenario, and a new call or action has
+/// one from the start.
 #[must_use]
 pub fn coverage() -> Vec<Coverage> {
-    let passive = AppOp::Checkpoint(OtherProcessMode::Passive);
-    let restart = AppOp::Checkpoint(OtherProcessMode::Restart);
-    vec![
-        point(
-            "reader_begins_before_a_snapshot_reads_a_page",
-            Situation::SnapshotRequested,
-            SourceOp::ReadPage,
-            AppOp::ReaderBegin,
-        ),
-        point(
-            "passive_checkpoint_before_a_snapshot_reads_a_page",
-            Situation::SnapshotRequested,
-            SourceOp::ReadPage,
-            passive,
-        ),
-        point(
-            "restart_checkpoint_before_a_snapshot_reads_a_page",
-            Situation::SnapshotRequested,
-            SourceOp::ReadPage,
-            restart,
-        ),
-        point(
-            "passive_checkpoint_before_the_engines_checkpoint",
-            Situation::PassiveDue,
-            SourceOp::Checkpoint,
-            passive,
-        ),
-        point(
-            "restart_checkpoint_before_the_sequence_bump",
-            Situation::PassiveDue,
-            SourceOp::BumpSeq,
-            restart,
-        ),
-        point(
-            "write_transaction_begins_before_the_sequence_bump",
-            Situation::PassiveDue,
-            SourceOp::BumpSeq,
-            AppOp::Spill { pages: 1 },
-        ),
-        point(
-            "reader_ends_before_the_sequence_bump",
-            Situation::PassiveDueWithReader,
-            SourceOp::BumpSeq,
-            AppOp::ReaderEnd,
-        ),
-        point(
-            "reader_ends_before_the_barrier_begins",
-            Situation::PassiveDueWithReader,
-            SourceOp::BeginBarrier,
-            AppOp::ReaderEnd,
-        ),
-        point(
-            "reader_ends_before_the_barrier_ends",
-            Situation::PassiveDueWithReader,
-            SourceOp::EndBarrier,
-            AppOp::ReaderEnd,
-        ),
-        point(
-            "commit_while_the_boundary_snapshot_reads_a_page",
-            Situation::TruncateDue,
-            SourceOp::ReadPage,
-            AppOp::Commit {
-                pages: 1,
-                grow: false,
-            },
-        ),
-        point(
-            "delete_wal_before_the_page_count",
-            Situation::TornWalBoot,
-            SourceOp::PageCount,
-            AppOp::DeleteWal,
-        ),
-    ]
+    SOURCE_OPS
+        .iter()
+        .flat_map(|call| ACTIONS.iter().map(|action| (*call, *action)))
+        .filter(|(call, action)| matches!(point_cell(*call, *action), Cell::Drawn))
+        .map(|(call, action)| point(call, action))
+        .collect()
 }
+
+/// The required marks no scenario reaches, by key prefix, with why random histories reach them
+/// reliably. `marks::every_required_mark_has_a_scenario_or_a_reason` holds every required key to
+/// one or the other. Rates are the rarest key of each family over the nightly soaks of 24 and 25
+/// November 2026 (23,017 seeds).
+pub const LEFT_TO_THE_SEEDS: &[(&str, &str)] = &[
+    (
+        "op.",
+        "an app or operator step is drawn as a step of its own; the rarest count ran over 66 times per 1,000 seeds",
+    ),
+    (
+        "fault.",
+        "a fault class is drawn as a step of its own; the rarest count ran 40 times per 1,000 seeds",
+    ),
+    (
+        "cell.",
+        "an error cell is drawn as a fault on its call; the rarest ran 18 times per 1,000 seeds",
+    ),
+];
