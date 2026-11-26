@@ -1,8 +1,0 @@
-# The boot's read-back of the newest file of each level reads every file whole in one
-# maintenance tick, so a level-9 snapshot (the whole database) holds sync and upload until it ends.
-name = "read-back-in-one-tick"
-fix = "plant"
-package = "lsr-core"
-tests = [
-    "sliced_snapshot::a_boot_reads_back_a_long_snapshot_a_slice_a_tick",
-]

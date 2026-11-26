@@ -56,12 +56,13 @@ fn commits(n: usize, pages: u8) -> Vec<Op> {
         .collect()
 }
 
-/// The level-9 snapshot of the whole database goes up a slice a tick, and the read-back that
-/// checks the newest file of every level after the boot goes a slice a tick too: the run passes
-/// and judges the tail's lag. Read in one maintenance tick, the read-back held the replica for
-/// ten seconds here and for the whole database at any size.
+/// The level-9 snapshot of the whole database goes up a slice a tick, and the boot's
+/// read-back reads only the header and tail of each level's newest file
+/// (`docs/decisions/D272.md`): no tick passes its bound, and the run judges the tail's lag.
+/// Read whole in one maintenance tick, the read-back held the replica for ten seconds here
+/// and for the whole database at any size.
 #[test]
-fn the_read_back_of_a_large_snapshot_goes_a_slice_a_tick() {
+fn the_boot_read_back_of_a_large_snapshot_stays_within_the_tick_bound() {
     let report = run(&commits(4, 2));
     assert!(
         report.reach.get("liveness.judged") > 0,
