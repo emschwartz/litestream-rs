@@ -1,0 +1,4 @@
+name = "fault-vfs-full-sync"
+fix = "claude/sqlite-fault-flake"
+package = "lsr-sqlite"
+tests = ["a_full_sync_reaches_the_file_as_a_normal_one"]
