@@ -22,7 +22,7 @@
 //! | 404 on a keyed request with `NoSuchKey` or no code | `NotFound` |
 //! | other 404, 501, 3xx, other 4xx, `InvalidDigest`, `InvalidRange`, `NoSuchUpload` | `Refused` |
 //! | 400 `BadDigest` or `XAmzContentSHA256Mismatch`; 400 `InvalidPart` (a part's ETag is not the one the store holds) | `Corrupt` |
-//! | 408, 5xx, a short 2xx body, a timeout, reset, refused connection or other I/O | `Transient` |
+//! | 408, 5xx, a body cut short (any status), a timeout, reset, refused connection or other I/O | `Transient` |
 //!
 //! A DeleteObjects result lists a code per key it could not delete; those
 //! follow the same rule ([`classify_delete_failures`]), so object lock
@@ -208,16 +208,17 @@ pub fn classify(
     part: Option<PartNumber>,
     r: &HttpResponse,
 ) -> Result<(), StoreError> {
+    // A body cut short is retried whatever its status: an error's code may be in the part
+    // that never arrived.
+    if !r.body_complete() {
+        return Err(StoreError::Transient {
+            op,
+            kind: io::ErrorKind::UnexpectedEof,
+        });
+    }
     let status = r.status();
     if (200..300).contains(&status) {
-        return if r.body_complete() {
-            Ok(())
-        } else {
-            Err(StoreError::Transient {
-                op,
-                kind: io::ErrorKind::UnexpectedEof,
-            })
-        };
+        return Ok(());
     }
     let code = S3Code::from_body(r.body());
     if code == Some(S3Code::AccessDenied) && signing_time_outside_window(r.body()) {
@@ -571,6 +572,26 @@ mod tests {
             // A KMS code not on that list goes by its status.
             (resp(400, Some("KMS.SomethingElse"), None), refused(400)),
         ]);
+    }
+
+    /// An error answer cut short says nothing of its code: a part's `InvalidPart` read as a bare
+    /// 400 would stop the engine for a refusal the store never made.
+    #[test]
+    fn an_error_answer_cut_short_is_retried() {
+        let whole = resp(400, Some("InvalidPart"), None);
+        let cut = HttpResponse::new(
+            400,
+            Vec::new(),
+            whole.body().get(..16).unwrap().to_vec(),
+            false,
+        );
+        assert_eq!(
+            classify(OP, Some(&key()), None, &cut),
+            Err(StoreError::Transient {
+                op: OP,
+                kind: io::ErrorKind::UnexpectedEof,
+            })
+        );
     }
 
     #[test]
