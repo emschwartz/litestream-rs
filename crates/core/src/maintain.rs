@@ -127,7 +127,7 @@ pub use state::MaintainState;
 
 #[cfg(test)]
 pub(crate) use audit::restores_without;
-pub(crate) use audit::{ReadBack, ReadingBack, read_back};
+pub(crate) use audit::{ReadBack, read_back};
 
 #[cfg(test)]
 #[expect(

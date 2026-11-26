@@ -11,7 +11,9 @@
 //! The actor owes it again after a store refused an output or a snapshot against
 //! its checksum (`docs/decisions/D280.md`): that refusal deletes nothing, since the
 //! key may hold an earlier attempt's sound file, so the read-back is what removes
-//! a damaged one a store took before it refused.
+//! one a store took cut short or with a bad tail before it refused. A body damaged
+//! behind a sound header and tail is not looked for here either (D272): its first
+//! whole read refuses it.
 //!
 //! Only the newest file of a level is read. An older one was either written by
 //! a commit this engine saw succeed, or was the newest at an earlier boot and
@@ -30,61 +32,44 @@
 //! fails with `RemoteCorrupt`, as any corrupt object does (a persistent fault:
 //! the configured response keeps maintenance degraded or stops the engine).
 //!
-//! The cost is one pass over each newest file, once per boot and never in steady state. It
-//! goes a slice a tick ([`ReadingBack`]): at most a tick's bytes are read before the tick
-//! ends, and sync and upload take their turns between slices, as for a compaction. A level-9
-//! snapshot is the whole database, and read in one tick it held the engine for minutes.
-//! Each file is one stream held between ticks where the store can hold one
-//! ([`crate::store::ObjectStore::hold_stream`]), so a file costs one GET however many ticks it spans.
+//! The read is of each newest file's header and tail (the page index's terminator, its size
+//! field and the trailer): two ranged reads of about 125 bytes a file, never its body. The
+//! header must decode and name the file's key; the tail must end where the listing says the
+//! object ends, with a zero terminator, an index that fits between the header and the
+//! tail, and a trailer that decodes against the header. An object cut short, or one that
+//! holds another file, fails. A body with wrong bytes behind a sound header and tail is not
+//! looked for: a signed upload (S3's SHA-256, a part's `Content-MD5`) has the store refuse
+//! one, and reading every newest file whole cost about 16 GB of egress a restart at full size
+//! (the owner's decision, `docs/decisions/D272.md`, amending D6's reasoning).
 
-use std::collections::VecDeque;
-use std::convert::Infallible;
+use lsr_ltx::{HEADER_LEN, Header, TRAILER_LEN, Trailer};
 
 use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
-use crate::ltx_read::{LtxRead, Next, ReadFault};
 use crate::plan::{KeyTarget, plan_without};
-use crate::store::{ReadLen, ReadStream};
+use crate::store::ReadLen;
 
-/// The bytes one read of the read-back asks for: a slice ends at most this far past its bytes.
-const READ: ReadLen = ReadLen::or_chunk(256 * 1024);
+/// The bytes read of a file's start: its header.
+const HEAD: ReadLen = ReadLen::or_chunk(100);
 
-/// What a slice of the read-back found.
+/// The bytes read of a file's end: the page index's zero terminator, the index size field and
+/// the trailer.
+const TAIL: ReadLen = ReadLen::or_chunk(25);
+
+/// What the read-back found.
 #[derive(Debug)]
 pub(crate) enum ReadBack {
-    /// Every newest file verifies and names its key.
+    /// Every newest file's header and tail are sound and name its key.
     Sound,
-    /// This file does not.
+    /// This file's are not.
     Rotten {
         /// The file.
         key: FileKey,
-        /// Whether [`restores_without`] held for it in the listing the read-back began on.
+        /// Whether [`restores_without`] holds for it.
         covered: bool,
     },
-    /// The tick's bytes are spent and more is left: the next slice reads on.
-    Reading(Box<ReadingBack>),
-}
-
-/// The read-back part-way: the file being read, the files after it, each with whether
-/// [`restores_without`] held for it in the listing the read-back began on, and the bytes read.
-pub(crate) struct ReadingBack {
-    file: (FileKey, bool),
-    rest: VecDeque<(FileKey, bool)>,
-    read: LtxRead,
-    held: Option<Box<dyn ReadStream>>,
-    bytes: u64,
-}
-
-impl std::fmt::Debug for ReadingBack {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReadingBack")
-            .field("file", &self.file)
-            .field("rest", &self.rest)
-            .field("bytes", &self.bytes)
-            .finish_non_exhaustive()
-    }
 }
 
 /// The newest file of each level above 0 that holds one, lowest level first.
@@ -108,173 +93,71 @@ pub(crate) fn restores_without(inventory: &Inventory, key: &FileKey) -> bool {
     .is_some()
 }
 
-/// Begins the read-back of the newest file of each level above 0 in `inventory` and reads its
-/// first slice of at most `budget` bytes (see [`ReadingBack::slice`]).
+/// Reads the header and tail of the newest file of each level above 0 and stops at the first
+/// that is not sound.
 ///
 /// # Errors
 /// The replica's fault when a read fails; nothing was judged then.
 pub(crate) async fn read_back<R: Role>(
     remote: &R,
     inventory: &Inventory,
-    budget: u64,
 ) -> Result<ReadBack, Fault> {
-    let mut files = newest_per_level(inventory)
-        .map(|info| (info.key, restores_without(inventory, &info.key)))
-        .collect::<VecDeque<_>>();
-    let Some(file) = files.pop_front() else {
-        return Ok(ReadBack::Sound);
-    };
-    let reading = ReadingBack {
-        file,
-        rest: files,
-        read: LtxRead::new(file.0, READ),
-        held: None,
-        bytes: 0,
-    };
-    Box::new(reading)
-        .opened(remote)
-        .await?
-        .slice(remote, budget)
-        .await
+    for info in newest_per_level(inventory) {
+        if !ends_sound(remote, info).await? {
+            return Ok(ReadBack::Rotten {
+                key: info.key,
+                covered: restores_without(inventory, &info.key),
+            });
+        }
+    }
+    Ok(ReadBack::Sound)
 }
 
-impl ReadingBack {
-    /// Holds the file's one stream from its first byte, where the store can hold one.
-    async fn opened<R: Role>(mut self: Box<Self>, remote: &R) -> Result<Box<Self>, Fault> {
-        self.held = remote
-            .hold_stream(self.file.0, 0)
-            .await
-            .map_err(|err| R::fault(&err))?;
-        Ok(self)
-    }
-
-    /// Reads on until `budget` bytes were read this slice, the last read ending at most [`READ`]
-    /// past them, and stops at the first file that does not verify or name its key.
-    ///
-    /// # Errors
-    /// The replica's fault when a read fails; nothing was judged then.
-    pub(crate) async fn slice<R: Role>(
-        mut self: Box<Self>,
-        remote: &R,
-        budget: u64,
-    ) -> Result<ReadBack, Fault> {
-        let start = self.bytes;
-        let mut slot: Option<Box<dyn ReadStream + '_>> = None;
-        while self.bytes.saturating_sub(start) < budget {
-            let (key, covered) = self.file;
-            let before = self.read.bytes_read();
-            let stream: &mut (dyn ReadStream + '_) = match self.held.as_mut() {
-                Some(held) => &mut **held,
-                None => &mut **slot.get_or_insert_with(|| remote.read_stream(key, before)),
-            };
-            let next = self.read.next(stream, |_| Ok::<(), Infallible>(())).await;
-            let read = self.read.bytes_read().saturating_sub(before);
-            self.bytes = self.bytes.saturating_add(read);
-            let verified = match next {
-                Ok(Next::Event(())) => continue,
-                Ok(Next::End(verified)) => verified,
-                Err(ReadFault::Store(err)) => return Err(R::fault(&err)),
-                Err(ReadFault::Decode(_)) => return Ok(ReadBack::Rotten { key, covered }),
-                Err(ReadFault::Rejected(never)) => match never {},
-            };
-            if verified.header().txids() != key.range() {
-                return Ok(ReadBack::Rotten { key, covered });
-            }
-            let Some(file) = self.rest.pop_front() else {
-                return Ok(ReadBack::Sound);
-            };
-            self.file = file;
-            self.read = LtxRead::new(file.0, READ);
-            slot = None;
-            self = self.opened(remote).await?;
-        }
-        Ok(ReadBack::Reading(self))
-    }
+/// Whether `info`'s object begins with a header naming its key and ends, at the listed size,
+/// with a page index terminator, an index size that fits the file and a trailer that decodes
+/// against the header.
+///
+/// # Errors
+/// The replica's fault when a read fails.
+async fn ends_sound<R: Role>(remote: &R, info: &FileInfo) -> Result<bool, Fault> {
+    let head = remote
+        .read(&info.key, 0, HEAD)
+        .await
+        .map_err(|err| R::fault(&err))?;
+    let Some(header) = <&[u8; HEADER_LEN]>::try_from(head.as_slice())
+        .ok()
+        .and_then(|head| Header::decode(head).ok())
+        .filter(|header| header.txids() == info.key.range())
+    else {
+        return Ok(false);
+    };
+    let Some(at) = info
+        .size
+        .checked_sub(TAIL.get())
+        .filter(|at| *at >= HEAD.get())
+    else {
+        return Ok(false);
+    };
+    let tail = remote
+        .read(&info.key, at, TAIL)
+        .await
+        .map_err(|err| R::fault(&err))?;
+    let Some((terminator, rest)) = tail.split_first() else {
+        return Ok(false);
+    };
+    let Some((size, trailer)) = rest.split_first_chunk::<8>() else {
+        return Ok(false);
+    };
+    let Ok(trailer) = <&[u8; TRAILER_LEN]>::try_from(trailer) else {
+        return Ok(false);
+    };
+    // The index ends at its terminator and starts after the header.
+    let index = u64::from_be_bytes(*size);
+    let fits = index
+        .checked_add(HEAD.get())
+        .is_some_and(|end| end <= at.saturating_add(1));
+    Ok(*terminator == 0 && index > 0 && fits && Trailer::decode(trailer, &header).is_ok())
 }
 
 #[cfg(test)]
-mod tests {
-    use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
-
-    use super::*;
-    use crate::conformance::block_on;
-    use crate::fault::role::Replica;
-    use crate::mem::MemStore;
-    use crate::store::{ObjectStore, Upload, WriteMode};
-
-    /// One LTX file of `pages` pages of bytes that do not compress, for transactions `min..=max`.
-    fn noisy(min: u64, max: u64, pages: u32) -> Vec<u8> {
-        let ps = PageSize::new(4096).unwrap();
-        let header = Header::new(HeaderFields {
-            tracked: false,
-            page_size: ps,
-            commit: pages,
-            txids: TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap(),
-            timestamp: Timestamp::from_unix_millis(1_000),
-            pre_apply: None,
-            wal: None,
-            node_id: 0,
-        })
-        .unwrap();
-        let mut x = 0x9E37_79B9_7F4A_7C15_u64 ^ max;
-        let mut encoder = Encoder::new(Vec::new(), header).unwrap();
-        for n in 1..=pages {
-            let page: Vec<u8> = (0..ps.bytes())
-                .map(|_| {
-                    x ^= x << 13;
-                    x ^= x >> 7;
-                    x ^= x << 17;
-                    x.to_be_bytes()[0]
-                })
-                .collect();
-            encoder
-                .write_page(PageNo::new(n, ps).unwrap(), &page)
-                .unwrap();
-        }
-        encoder.finish(None).unwrap().0
-    }
-
-    fn put(store: &MemStore, level: u8, min: u64, max: u64, bytes: &[u8]) -> FileKey {
-        let key = FileKey::new(
-            Level::new(level).unwrap(),
-            TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap(),
-        );
-        block_on(async {
-            let mut upload = store
-                .begin_upload(&key, Timestamp::from_unix_millis(1_000), WriteMode::Replace)
-                .await
-                .unwrap();
-            upload.write(bytes).await.unwrap();
-            upload.commit().await.unwrap();
-        });
-        key
-    }
-
-    /// A slice of the read-back reads at least one read's bytes however small its budget, and
-    /// stops once its budget is spent.
-    #[test]
-    fn a_slice_reads_at_least_one_read_and_stops_at_its_budget() {
-        let store = MemStore::new();
-        let low = put(&store, 1, 1, 2, &noisy(1, 2, 200));
-        put(&store, 9, 1, 2, &noisy(1, 2, 2));
-        let remote = Replica(&store);
-        block_on(async {
-            let inventory = Inventory::load(&store).await.unwrap();
-            let ReadBack::Reading(reading) = read_back(&remote, &inventory, 1).await.unwrap()
-            else {
-                panic!("one slice read it all");
-            };
-            let one = 256 * 1024;
-            assert_eq!((reading.file.0, reading.bytes), (low, one));
-            assert!(format!("{reading:?}").starts_with("ReadingBack"));
-            let ReadBack::Reading(reading) = reading.slice(&remote, one).await.unwrap() else {
-                panic!("one slice read it all");
-            };
-            assert_eq!(reading.bytes, 2 * one);
-            assert!(matches!(
-                reading.slice(&remote, u64::MAX).await.unwrap(),
-                ReadBack::Sound
-            ));
-        });
-    }
-}
+mod tests;

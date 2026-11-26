@@ -25,11 +25,28 @@ fn newest_upper(rig: &Rig) -> Vec<FileInfo> {
         .collect()
 }
 
-/// Rewrites the replica's object with one byte changed: same size, same created-at time.
+/// Rewrites the replica's object with its file checksum zeroed: same size, same created-at
+/// time. The read-back reads the header and the tail only, so a body the store took wrong is
+/// the store's to refuse (signed uploads, `docs/decisions/D272.md`); a bad tail it catches.
 pub(super) fn rot(rig: &Rig, info: &FileInfo) {
+    rewrite(rig, info, |bytes| {
+        let at = bytes.len().saturating_sub(8);
+        bytes[at..].fill(0);
+    });
+}
+
+/// Rewrites the replica's object cut short by a third, as a torn upload leaves it.
+fn cut(rig: &Rig, info: &FileInfo) {
+    rewrite(rig, info, |bytes| {
+        bytes.truncate(bytes.len().saturating_sub(bytes.len() / 3))
+    });
+}
+
+fn rewrite(rig: &Rig, info: &FileInfo, change: impl FnOnce(&mut Vec<u8>)) {
     let store = &rig.remote.inner;
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
-    let bad = flipped(block_on(store.read(&info.key, 0, all)).unwrap());
+    let mut bad = block_on(store.read(&info.key, 0, all)).unwrap();
+    change(&mut bad);
     block_on(async {
         let mut up = store
             .begin_upload(&info.key, ts(T0), WriteMode::Replace)
@@ -131,6 +148,24 @@ fn a_rotten_newest_file_the_lower_levels_cover_is_deleted_and_rebuilt() {
     assert_eq!(restored(&rig), 3);
 }
 
+/// A newest file cut short has page bytes where its tail belongs: the read-back of its header
+/// and tail catches it, and the lower levels rebuild it.
+#[test]
+fn a_newest_file_cut_short_is_caught_and_rebuilt() {
+    let mut rig = replica();
+    let one = Level::new(1).unwrap();
+    let bad = *Rig::files(&rig.remote, one).last().unwrap();
+    cut(&rig, &bad);
+    let mut actor = Actor::new(cfg());
+    let seen = rig.follow(&mut actor, T0 + 60_000, 50);
+    no_stop(&seen);
+    assert_eq!(repaired(&seen), vec![bad.key], "{seen:?}");
+    for info in upper(&rig) {
+        assert!(decodes(&rig, &info.key), "{}", info.key);
+    }
+    assert_eq!(restored(&rig), 3);
+}
+
 #[test]
 fn a_rotten_snapshot_the_lower_levels_cover_is_deleted_and_taken_again() {
     let mut rig = replica();
@@ -173,7 +208,7 @@ fn a_rotten_newest_file_nothing_else_covers_stops_and_stays() {
     );
 }
 
-/// One read of a sound snapshot returns a flipped byte. A read that fails
+/// One read of a sound snapshot returns bytes that do not decode. A read that fails
 /// verification is evidence about the read, not the object: nothing is
 /// deleted, and the next maintenance tick reads it again and finds it sound.
 #[test]
@@ -181,7 +216,10 @@ fn one_bad_read_of_a_sound_snapshot_deletes_nothing() {
     let mut rig = replica();
     let before = upper(&rig);
     let snapshot = *Rig::files(&rig.remote, Level::SNAPSHOT).last().unwrap();
-    rig.remote.flip_next_read(snapshot.key);
+    // The read-back reads the header first: that read answers with bytes no header decodes.
+    let nth = rig.remote.reads_of(&snapshot.key) + 1;
+    rig.remote
+        .other_bytes_on_read(snapshot.key, nth, vec![0; lsr_ltx::HEADER_LEN]);
     let mut actor = Actor::new(cfg());
     let seen = rig.follow(&mut actor, T0 + 60_000, 50);
     no_stop(&seen);
