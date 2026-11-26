@@ -1,0 +1,9 @@
+# A job's slices are not counted with a file in flight's: the WAL step's turn comes only after a
+# share of the file's slices, so a commit waits behind the job's slices and the file's together,
+# as when a level-9 snapshot's share ended in a level-0 file's slice and the sync waited past it.
+name = "job-slices-counted-apart"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced_snapshot::a_commit_waits_at_most_a_share_of_slices_of_a_file_and_a_snapshot_together",
+]
