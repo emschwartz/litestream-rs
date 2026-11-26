@@ -99,6 +99,10 @@ pub struct InTickRan {
     /// The wal-index's salts, committed end and database size right before it: the engine
     /// may have committed a frame of its own earlier in the tick (its sequence bump).
     pub before: (Salts, WalOffset, u32),
+    /// The wal-index was reset ahead of the WAL header right before it
+    /// ([`SimSqlite::index_reset_ahead`]): a step earlier in the tick may have read under the
+    /// reset, though a commit it made writes the header and ends the reset before the tick does.
+    pub reset_before: bool,
 }
 
 /// The armed operation, the tick's calls so far, what the operation did, and a commit's
@@ -150,12 +154,14 @@ impl State {
             WalOffset::from_frame_index(self.index.mx_frame, self.page_size),
             self.index.db_size,
         );
+        let reset_before = self.index_reset_ahead();
         let done = self.run_in_tick(op);
         self.app.ran = Some(InTickRan {
             done,
             restarted: self.index.salts != salts,
             emptied: !self.present || self.wal.len() < HEADER_LEN,
             before,
+            reset_before,
         });
     }
 
