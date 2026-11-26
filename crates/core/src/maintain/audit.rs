@@ -1,12 +1,17 @@
 //! The read-back after a boot: is the newest file of each level what its key
 //! says it is?
 //!
-//! A compaction output or a snapshot that the store acknowledged with wrong
-//! bytes is deleted at once, and remembered as distrusted when that delete
-//! fails (`state`). Neither survives the process: a crash between the publish
-//! and the delete leaves an object the listing shows as cover, that no restore
-//! can decode. Level 0 has its own read-back in the uploader (`judge_tail`);
-//! this is the same check for every level above it.
+//! A compaction output or a snapshot that the store acknowledged at a wrong size
+//! is deleted at once, and remembered as distrusted when that delete fails
+//! (`state`). Neither survives the process: a crash between the publish and
+//! the delete leaves an object the listing shows as cover, that no restore can
+//! decode. Level 0 has its own read-back in the uploader (`judge_tail`); this
+//! is the same check for every level above it.
+//!
+//! The actor owes it again after a store refused an output or a snapshot against
+//! its checksum (`docs/decisions/D280.md`): that refusal deletes nothing, since the
+//! key may hold an earlier attempt's sound file, so the read-back is what removes
+//! a damaged one a store took before it refused.
 //!
 //! Only the newest file of a level is read. An older one was either written by
 //! a commit this engine saw succeed, or was the newest at an earlier boot and

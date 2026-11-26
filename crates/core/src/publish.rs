@@ -260,9 +260,9 @@ pub(crate) enum Why {
     Retention,
     /// A read-back found the object rotten, twice, and a later file covers it.
     RottenCovered,
-    /// A snapshot the store took and then rejected.
+    /// A snapshot the store took at a size other than the one sent.
     RejectedSnapshot,
-    /// A compaction output the store took and then rejected.
+    /// A compaction output the store took at a size other than the one sent.
     RejectedOutput,
 }
 

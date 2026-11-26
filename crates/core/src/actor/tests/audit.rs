@@ -26,7 +26,7 @@ fn newest_upper(rig: &Rig) -> Vec<FileInfo> {
 }
 
 /// Rewrites the replica's object with one byte changed: same size, same created-at time.
-fn rot(rig: &Rig, info: &FileInfo) {
+pub(super) fn rot(rig: &Rig, info: &FileInfo) {
     let store = &rig.remote.inner;
     let all = ReadLen::new(ReadLen::MAX_RAW).unwrap();
     let bad = flipped(block_on(store.read(&info.key, 0, all)).unwrap());
@@ -252,4 +252,91 @@ fn the_cover_test_is_the_restore_planner() {
     let alone = Inventory::from_files(upper(&rig).into_iter().take(1)).unwrap();
     let only = alone.files()[0].key;
     assert!(!crate::maintain::restores_without(&alone, &only));
+}
+
+fn refused() -> StoreError {
+    StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+    }
+}
+
+/// Ticks at `now` until a write the store refused against its checksum ends a tick.
+fn until_refused(rig: &mut Rig, actor: &mut Actor, now: i64) {
+    for _ in 0..50 {
+        let tick = rig.tick(actor, now);
+        if let Some(Event::Retrying {
+            fault: Fault::UploadChecksumMismatch,
+            ..
+        }) = event(&tick)
+        {
+            return;
+        }
+    }
+    panic!("no write was refused");
+}
+
+/// A compaction output the store took damaged and then refused against its checksum: the
+/// refusal deletes nothing (the key may hold an earlier attempt's sound output), and the
+/// read-back it owes finds the file rotten, removes it, and level 1 is built again.
+#[test]
+fn a_damaged_output_the_store_refused_is_read_back_and_rebuilt() {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=3 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    let one = Level::new(1).unwrap();
+    let before = Rig::files(&rig.remote, one);
+    rig.remote.inner.inject_failure_after_publish(refused());
+    until_refused(&mut rig, &mut actor, T0 + 60_000);
+    assert!(
+        actor.engine.maintain.read_back_owed,
+        "the refusal owes a read-back"
+    );
+    let left: Vec<FileInfo> = Rig::files(&rig.remote, one)
+        .into_iter()
+        .filter(|info| !before.contains(info))
+        .collect();
+    let [bad] = left.as_slice() else {
+        panic!("the refused output is still listed: {left:?}");
+    };
+    rot(&rig, bad);
+    let seen = rig.follow(&mut actor, T0 + 60_000, 100);
+    no_stop(&seen);
+    assert_eq!(repaired(&seen), vec![bad.key], "{seen:?}");
+    for info in upper(&rig) {
+        assert!(decodes(&rig, &info.key), "{}", info.key);
+    }
+    assert_eq!(restored(&rig), 3);
+}
+
+/// The same refusal of a sound output: the read-back finds it sound and nothing is deleted.
+#[test]
+fn a_sound_output_the_store_refused_stays_and_is_read_back() {
+    let (mut rig, mut actor) = caught_up();
+    for n in 2..=3 {
+        commit_and_settle(&mut rig, &mut actor, n, T0 + 1);
+    }
+    let one = Level::new(1).unwrap();
+    let before = Rig::files(&rig.remote, one);
+    rig.remote.inner.inject_failure_after_publish(refused());
+    until_refused(&mut rig, &mut actor, T0 + 60_000);
+    assert!(
+        actor.engine.maintain.read_back_owed,
+        "the refusal owes a read-back"
+    );
+    let left: Vec<FileInfo> = Rig::files(&rig.remote, one)
+        .into_iter()
+        .filter(|info| !before.contains(info))
+        .collect();
+    let [kept] = left.as_slice() else {
+        panic!("the refused output is still listed: {left:?}");
+    };
+    let reads = rig.remote.reads_of(&kept.key);
+    let seen = rig.follow(&mut actor, T0 + 60_000, 100);
+    no_stop(&seen);
+    assert!(repaired(&seen).is_empty(), "{seen:?}");
+    assert!(rig.remote.reads_of(&kept.key) > reads, "it was read back");
+    assert!(!rig.remote.deleted().contains(&kept.key));
+    assert_eq!(restored(&rig), 3);
 }

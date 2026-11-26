@@ -2710,8 +2710,10 @@ impl Actor {
             }
             Outcome::Replan { .. } => MaintainedEvent::Replan,
             Outcome::Failed(err) => {
+                let fault = Fault::from_maintain(&err);
+                self.owe_read_back(fault);
                 let waiter = self.job_waiter(job, now);
-                return self.fault(waiter, Fault::from_maintain(&err), now);
+                return self.fault(waiter, fault, now);
             }
         };
         self.maintained(now);
@@ -2818,6 +2820,7 @@ impl Actor {
                 let fault = Fault::from_maintain(&err);
                 state.record_snapshot(now, Some(&fault));
                 state.refuse_seed();
+                self.owe_read_back(fault);
                 let waiter = self.job_waiter(job, now);
                 self.fault(waiter, fault, now)
             }
@@ -2994,9 +2997,8 @@ impl Actor {
         self.engine.sliced.is_some() && self.engine.slices_ahead < state::FAIR_SHARE && turn
     }
 
-    /// A snapshot that did not publish. When the store took the commit and
-    /// then said the object is not what was sent, it is listed, so it goes,
-    /// as a rejected compaction output does.
+    /// A snapshot that did not publish. When the store took the commit at another size, the
+    /// object is this attempt's and listed, so it goes, as such a compaction output does.
     async fn snapshot_failed<R: Role>(
         &mut self,
         remote: &R,
@@ -3011,8 +3013,20 @@ impl Actor {
         {
             self.engine.maintain.state.distrust_snapshot(key);
         }
+        self.owe_read_back(fault);
         let waiter = self.job_waiter(job, now);
         self.fault(waiter, fault, now)
+    }
+
+    /// A compaction output or snapshot the store refused against its checksum deletes nothing
+    /// (`docs/decisions/D280.md`): S3 checks the body before the key, so the key may hold an
+    /// earlier attempt's file, sound, or this attempt's, damaged by a store that took it first.
+    /// The next listing reads back the newest file of each level before anything is planned
+    /// from it, as after a boot, and removes one that does not verify.
+    fn owe_read_back(&mut self, fault: Fault) {
+        if fault == Fault::UploadChecksumMismatch {
+            self.engine.maintain.read_back_owed = true;
+        }
     }
 
     /// Maintenance lists again when the sync task's wait ends, or after the

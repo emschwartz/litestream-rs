@@ -1,0 +1,11 @@
+# A compaction output or a level-9 snapshot the store refused against its checksum owes no
+# read-back, so one a store took damaged before it refused stays listed as cover that no restore
+# can decode (docs/decisions/D280.md).
+name = "refused-output-owes-no-read-back"
+fix = "claude/sim-snapshot-judge"
+package = "lsr-core"
+tests = [
+    "actor::tests::audit::a_damaged_output_the_store_refused_is_read_back_and_rebuilt",
+    "actor::tests::rejected_snapshot::a_damaged_snapshot_the_store_refused_is_read_back_and_taken_again",
+    "actor::tests::rejected_snapshot::a_refused_snapshot_is_kept_and_read_back",
+]

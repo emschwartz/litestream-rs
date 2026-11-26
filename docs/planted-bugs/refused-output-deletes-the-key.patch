@@ -1,0 +1,29 @@
+diff --git a/crates/core/src/fault.rs b/crates/core/src/fault.rs
+--- a/crates/core/src/fault.rs
++++ b/crates/core/src/fault.rs
+@@ -1103,9 +1103,8 @@ impl Fault {
+     #[must_use]
+     pub(crate) const fn leaves_bad_snapshot(self) -> bool {
+         match self {
+-            Self::UploadAmbiguous => true,
+-            Self::UploadChecksumMismatch
+-            | Self::StoreTransient
++            Self::UploadAmbiguous | Self::UploadChecksumMismatch => true,
++            Self::StoreTransient
+             | Self::StoreThrottled { .. }
+             | Self::StoreDenied(_)
+             | Self::RemoteObjectMissing
+diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+--- a/crates/core/src/maintain.rs
++++ b/crates/core/src/maintain.rs
+@@ -1348,8 +1348,8 @@ const fn leaves_bad_output(err: &StoreError) -> bool {
+     match err {
+         StoreError::Corrupt { cause, .. } => match cause {
+             CorruptCause::CommitSizeMismatch { removed, .. } => !*removed,
+-            CorruptCause::ChecksumMismatch { .. }
+-            | CorruptCause::NotARegularFile
++            CorruptCause::ChecksumMismatch { .. } => true,
++            CorruptCause::NotARegularFile
+             | CorruptCause::TimestampOutOfRange
+             | CorruptCause::BadCreatedAt => false,
+         },
