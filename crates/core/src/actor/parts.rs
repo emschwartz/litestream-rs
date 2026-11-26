@@ -35,7 +35,7 @@ use crate::created_at::Known;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{Next, SnapshotCause, SnapshotCounts, StopCause};
 use crate::layout::FileKey;
-use crate::maintain::{Job, Merging};
+use crate::maintain::{Job, Merging, ReadingBack};
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::snapshot::Snapshotting;
@@ -506,6 +506,8 @@ pub(super) struct Engine {
     /// Slices of that job in a row: at [`super::state::FAIR_SHARE`] the rest of the engine
     /// has the next tick, as it has after a staged file's slices.
     pub(super) job_slices: u32,
+    /// The boot's read-back part-way, if it is (`crate::maintain::audit`). In memory only.
+    pub(super) reading_back: Option<Box<ReadingBack>>,
 }
 
 /// A maintenance job that goes to the replica a slice a tick, the engine syncing and uploading
@@ -574,6 +576,7 @@ impl Engine {
             slices_ahead: 0,
             sliced: None,
             job_slices: 0,
+            reading_back: None,
         }
     }
 }
