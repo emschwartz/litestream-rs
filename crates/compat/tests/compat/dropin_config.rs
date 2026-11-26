@@ -263,8 +263,7 @@ struct Case {
     /// Leave a lone `access-key-id` or `secret-access-key` alone (D42); else the other
     /// is added.
     lone_key: bool,
-    /// The Rust-only section, which Go ignores: `app-readers: none`, which
-    /// `truncate-page-n` needs.
+    /// The Rust-only section, which Go ignores: `app-autocheckpoint: off`.
     rust_section: bool,
 }
 
@@ -399,7 +398,8 @@ fn render(case: &Case, base: &Path) -> Writer {
         writeln!(w.text, "retention:\n  enabled: {value}").unwrap();
     }
     if case.rust_section {
-        w.text.push_str("litestream-rs:\n  app-readers: none\n");
+        w.text
+            .push_str("litestream-rs:\n  app-autocheckpoint: off\n");
     }
     if let Some(key) = case.misspelled {
         writeln!(w.text, "{key}: 1s").unwrap();
@@ -590,8 +590,6 @@ const DEPARTURES: &[(&str, &str)] = &[
     ("would never poll the database", "D45"),
     // A signing region with whitespace, `/` or a control character (D45).
     ("bad region", "D45"),
-    // `truncate-page-n` without the `app-readers: none` claim (D45).
-    ("TRUNCATE checkpoints need", "D45"),
     // A key set twice in one mapping: Go keeps the last and warns (D45, CFG-1).
     ("key set twice", "D45"),
     // A duration core cannot hold: below one millisecond, or negative (D45).
@@ -608,7 +606,7 @@ const DEPARTURES: &[(&str, &str)] = &[
 ];
 
 /// How often each departure excused a case, by its index in [`DEPARTURES`].
-static EXCUSED: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
+static EXCUSED: [AtomicUsize; 15] = [const { AtomicUsize::new(0) }; 15];
 
 /// Whether litestream-rs refused this for a recorded departure only.
 fn departure(text: &str) -> Option<&'static str> {

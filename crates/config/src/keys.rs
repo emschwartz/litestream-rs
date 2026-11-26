@@ -320,7 +320,6 @@ const AGE: &[Key] = &[
 /// The one key Go does not define, which holds every Rust-only setting: Go ignores it, so the
 /// same file still starts Go and rolling back is a binary swap.
 const RUST: &[Key] = &[
-    key("app-readers", Str, Implemented),
     key("app-autocheckpoint", Str, Implemented),
     key("responses", Map(Section::Responses), Implemented),
     key("if-replication-stops", Str, Implemented),

@@ -11,8 +11,7 @@
 //! 4. `Validate`, every rule, collecting all failures rather than the first.
 //!    Then what Go refuses only when it starts a database (`replica` with
 //!    `replicas`, two replicas, a URL in `path`, an unknown replica type) is
-//!    refused here too, before anything runs; and `truncate-page-n` without
-//!    the `app-readers: none` claim.
+//!    refused here too, before anything runs.
 //! 5. `LOG_LEVEL` over `logging.level`; the snapshot-retention warning.
 
 use std::num::NonZeroU32;
@@ -21,9 +20,8 @@ use lsr_core::{OtherWriter, Response, Responses};
 use lsr_replica::{IfReplicationStops, MaxUnreplicatedAge};
 
 use crate::config::{
-    AppReaders, DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging,
-    ReplicaConfig, ReplicaKind, RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride,
-    defaults,
+    DbConfig, DbSource, DirSource, GoConfig, LogFormat, LogLevel, Logging, ReplicaConfig,
+    ReplicaKind, RustSettings, S3Settings, Secret, Snapshot, SnapshotOverride, defaults,
 };
 use crate::duration::GoDuration;
 use crate::error::{KeyPath, ProblemKind, WarningKind};
@@ -43,7 +41,7 @@ pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
     let mut seen: Vec<(String, usize)> = Vec::new();
     if let Listed::Items(items) = top.maps("dbs", walk) {
         for (index, fields) in items.iter().enumerate() {
-            if let Some(db) = db(fields, index, top, rust, &mut seen, env, walk) {
+            if let Some(db) = db(fields, index, top, &mut seen, env, walk) {
                 dbs.push((index, fields, db));
             }
         }
@@ -61,9 +59,6 @@ pub(crate) fn build(top: &Fields, env: &dyn Env, walk: &mut Walk) -> GoConfig {
             .unwrap_or(defaults::SNAPSHOT_RETENTION),
     };
     snapshot_checks(snapshot, &KeyPath::root().key("snapshot"), global, walk);
-    if rust.app_readers != AppReaders::None && !dbs.is_empty() {
-        walk.warn(KeyPath::root(), None, WarningKind::NoTruncateWithoutClaim);
-    }
     GoConfig {
         addr: top.string("addr", walk),
         exec: top.string("exec", walk),
@@ -212,7 +207,6 @@ fn db(
     fields: &Fields,
     index: usize,
     top: &Fields,
-    rust: RustSettings,
     seen: &mut Vec<(String, usize)>,
     env: &dyn Env,
     walk: &mut Walk,
@@ -247,13 +241,6 @@ fn db(
         );
     }
     let truncate_page_n = fields.int("truncate-page-n", walk).filter(|&n| n != 0);
-    if truncate_page_n.is_some() && rust.app_readers != AppReaders::None {
-        walk.problem(
-            at.key("truncate-page-n"),
-            fields.line("truncate-page-n"),
-            ProblemKind::TruncateNeedsClaim,
-        );
-    }
     Some(DbConfig {
         source,
         meta_path: fields.string("meta-path", walk),
@@ -540,18 +527,11 @@ fn unsupported(fields: &Fields, name: &str, value: String, allowed: String, walk
 }
 
 fn rust_settings(fields: Option<&Fields>, walk: &mut Walk) -> RustSettings {
-    let app_readers = choice(
-        fields,
-        "app-readers",
-        &[("none", AppReaders::None), ("unknown", AppReaders::Unknown)],
-        walk,
-    );
     let responses = fields
         .and_then(|f| f.map("responses", walk))
         .map(|r| responses(r, walk))
         .unwrap_or(Responses::GO_LIKE);
     RustSettings {
-        app_readers: app_readers.unwrap_or(AppReaders::Unknown),
         app_autocheckpoint: app_autocheckpoint(fields, walk),
         responses,
         if_replication_stops: if_replication_stops(fields, walk),

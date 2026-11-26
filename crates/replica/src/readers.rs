@@ -4,9 +4,9 @@
 //! and SQLite cannot tell the replicator whether one is coming. The engine's connections never
 //! wait on a lock (a busy timeout of zero), so a TRUNCATE a reader blocks does not wait for it:
 //! it copies what the reader allows into the database file, reports busy, leaves the WAL as it
-//! was and takes no snapshot. So TRUNCATE runs only on the application's word:
-//! under [`ReaderTracking::Untracked`] it never runs, and under [`ReaderTracking::Tracked`] it runs only while no [`ReaderGuard`]
-//! lives. A TRUNCATE asked for while one does is refused without calling SQLite, as
+//! was and takes no snapshot. Under [`ReaderTracking::Untracked`] SQLite is asked and answers.
+//! Under [`ReaderTracking::Tracked`] the application says when it reads: a TRUNCATE asked for
+//! while a [`ReaderGuard`] lives is refused without calling SQLite, as
 //! `SourceError::ReadersHeld` and not as busy (SQLite was never asked), so the engine waits its
 //! backoff and asks again. A FULL checkpoint (the cure after a failed WAL sync runs one) is
 //! blocked by readers on older snapshots the same way, also reports busy without waiting, and
@@ -50,7 +50,7 @@ impl Drop for ReaderGuard {
     }
 }
 
-/// The backend's checkpointer, refusing TRUNCATE unless the application said no reader runs,
+/// The backend's checkpointer, refusing TRUNCATE and FULL while a tracked reader lives,
 /// and every write while the application's writes are held.
 #[derive(Clone, Debug)]
 pub(crate) struct Guarded {
@@ -85,7 +85,7 @@ impl Guarded {
 
     fn may_wait(&self) -> bool {
         match self.tracking {
-            ReaderTracking::Untracked => false,
+            ReaderTracking::Untracked => true,
             ReaderTracking::Tracked => self.readers.load(Ordering::SeqCst) == 0,
         }
     }

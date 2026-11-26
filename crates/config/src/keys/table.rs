@@ -171,7 +171,7 @@ const SETS: &[(&str, &str)] = &[
     ),
     (
         "db.truncate-page-n",
-        "`Config.checkpoint.truncate_pages`: WAL pages that trigger a TRUNCATE checkpoint. Takes effect only with `litestream-rs.app-readers: none`; 0 or less never truncates.",
+        "`Config.checkpoint.truncate_pages`: WAL pages that trigger a TRUNCATE checkpoint (Go's default, 121359, when unset or 0); less than 0 never truncates. Each TRUNCATE that moves the WAL costs one full copy of the database, read from disk and uploaded as a snapshot.",
     ),
     (
         "db.max-sync-wal-bytes",
@@ -197,13 +197,6 @@ const SETS: &[(&str, &str)] = &[
     (
         "replica.url",
         "`DbPlan::replica`: the whole replica as a URL (`s3://` or `file://`).",
-    ),
-    (
-        "rust.app-readers",
-        "`Config.readers`: `none` is `ReaderTracking::Tracked`, which lets TRUNCATE run. Its cost: each \
-         TRUNCATE that empties the WAL is followed by a copy of the whole database, read from disk \
-         and uploaded as a snapshot. The application keeps writing during the copy; writes wait \
-         only while SQLite's TRUNCATE copies the WAL into the database file.",
     ),
     ("rust.app-autocheckpoint", "`Config.app_autocheckpoint`."),
     ("rust.responses", CONTAINER),
@@ -264,8 +257,8 @@ fn render() -> Result<String, String> {
          long Go's own SQLite connections wait on a lock, while litestream-rs's connections never wait \
          (a busy timeout of zero): a checkpoint that finds the write lock busy is skipped and asked \
          for again within a second (`docs/decisions/D225.md`); the TRUNCATE wait it guarded in Go \
-         is replaced by the reader-guard rule, which runs TRUNCATE only under \
-         `litestream-rs.app-readers: none` (`ReaderTracking::Tracked`).\n",
+         is replaced by asking SQLite at once: a TRUNCATE a reader blocks reports busy and leaves the \
+         WAL as it was.\n",
     );
     for (heading, tag, keys) in GROUPS {
         out.push_str("\n## ");
