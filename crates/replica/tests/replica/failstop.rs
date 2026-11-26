@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use lsr_core::Denied;
 use lsr_replica::{
-    Booted, CheckpointConfig, Config, DynStore, Event, EventSink, Gate, IfReplicationStops, Phase,
-    Replicator, Response, Responses, StopCause, Task, Trip, WhyBlocked, Writes,
+    CheckpointConfig, Config, DynStore, Event, EventSink, Gate, IfReplicationStops, Phase,
+    Readiness, Replicator, Response, Responses, StopCause, Task, Trip, WhyBlocked, Writes,
 };
 use rusqlite::Connection;
 
@@ -186,7 +186,7 @@ fn a_refusal_at_boot_blocks_every_writer_until_the_first_listing() {
 }
 
 /// Writes are held from the start until the boot is judged, under the default: `ready` (the
-/// future) and `wait_booted` answer `Booted` only once they go through again, and the change
+/// future) and `wait_booted` answer `Readiness::Ready` only once they go through again, and the change
 /// is told once each way.
 #[test]
 fn writes_are_held_while_the_boot_is_pending() {
@@ -207,16 +207,16 @@ fn writes_are_held_while_the_boot_is_pending() {
     assert_eq!(replicator.health().held_by.gate, Gate::Pending);
     let err = insert(&probe).unwrap_err();
     assert!(locked(&err), "{err}");
-    assert_eq!(replicator.wait_booted(Duration::ZERO), Booted::TimedOut);
+    assert_eq!(replicator.wait_booted(Duration::ZERO), Readiness::TimedOut);
 
     drop(stall);
-    assert_eq!(block_on(replicator.ready(PATIENCE)), Booted::Booted);
+    assert_eq!(block_on(replicator.ready(PATIENCE)), Readiness::Ready);
     assert_eq!(replicator.health().writes, Writes::Allowed);
-    assert_eq!(replicator.wait_booted(Duration::ZERO), Booted::Booted);
+    assert_eq!(replicator.wait_booted(Duration::ZERO), Readiness::Ready);
     insert(&probe).unwrap();
     let stopped = replicator.stop(PATIENCE).wait();
     assert!(
-        matches!(stopped, lsr_replica::Stopped::Drained { .. }),
+        matches!(stopped, lsr_replica::StopOutcome::Drained { .. }),
         "{stopped:?}"
     );
     assert_eq!(
@@ -292,7 +292,7 @@ fn writes_go_through_before_the_boot_snapshot_is_staged() {
         health.resnapshot.is_some(),
         "the snapshot is still owed: {health:?}"
     );
-    assert_eq!(replicator.wait_booted(Duration::ZERO), Booted::Booted);
+    assert_eq!(replicator.wait_booted(Duration::ZERO), Readiness::Ready);
     let probe = probe(&site);
     insert(&probe).unwrap();
     hold.release();
@@ -305,7 +305,7 @@ fn writes_go_through_before_the_boot_snapshot_is_staged() {
     site.commit(2);
     let stopped = replicator.stop(PATIENCE).wait();
     assert!(
-        matches!(stopped, lsr_replica::Stopped::Drained { .. }),
+        matches!(stopped, lsr_replica::StopOutcome::Drained { .. }),
         "{stopped:?}"
     );
     assert_eq!(rows(&site), 6);
@@ -324,7 +324,7 @@ fn a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds() {
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let stopped = first.stop(PATIENCE).wait();
     assert!(
-        matches!(stopped, lsr_replica::Stopped::Drained { .. }),
+        matches!(stopped, lsr_replica::StopOutcome::Drained { .. }),
         "{stopped:?}"
     );
     drop(first);
@@ -343,7 +343,7 @@ fn a_start_over_a_new_meta_directory_names_the_identity_check_while_it_holds() {
         Box::new(gates.clone()),
     )
     .unwrap();
-    assert_eq!(block_on(replicator.ready(PATIENCE)), Booted::Booted);
+    assert_eq!(block_on(replicator.ready(PATIENCE)), Readiness::Ready);
     gates.wait_for(|events| events.contains(&Event::WritesAllowed));
     let seen: Vec<Event> = gates.events();
     let checking = WhyBlocked::CheckingIdentity;
@@ -379,7 +379,7 @@ fn resize(site: &Site, keep_wal: bool) {
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let stopped = first.stop(PATIENCE).wait();
     assert!(
-        matches!(stopped, lsr_replica::Stopped::Drained { .. }),
+        matches!(stopped, lsr_replica::StopOutcome::Drained { .. }),
         "{stopped:?}"
     );
     drop(first);
@@ -426,7 +426,7 @@ fn a_stop_found_before_the_decision_still_holds_the_start() {
     });
     assert_eq!(
         block_on(replicator.ready(PATIENCE)),
-        Booted::Stopped(StopCause::PageSizeChanged {
+        Readiness::Stopped(StopCause::PageSizeChanged {
             was: lsr_ltx::PageSize::new(4096).unwrap(),
             now: lsr_ltx::PageSize::new(8192).unwrap(),
         })
@@ -465,7 +465,7 @@ fn a_stop_the_boot_snapshot_finds_blocks_writes_again_under_stop_app() {
         Box::new(gates.clone()),
     )
     .unwrap();
-    assert_eq!(block_on(replicator.ready(PATIENCE)), Booted::Booted);
+    assert_eq!(block_on(replicator.ready(PATIENCE)), Readiness::Ready);
     let trip = Trip::Stopped(StopCause::PageSizeChanged {
         was: lsr_ltx::PageSize::new(4096).unwrap(),
         now: lsr_ltx::PageSize::new(8192).unwrap(),

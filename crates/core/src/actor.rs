@@ -120,7 +120,7 @@ use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
 use crate::fault::role::{Replica, Role, Staging};
 use crate::fault::{
-    Action, Backoff, Clamped, Fault, Next, OtherWriter, PersistentCause, Policy, Responses,
+    Action, Backoff, Clamped, DegradedCause, Fault, Next, OtherWriter, Policy, Responses,
     STALLED_AFTER, SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
 };
 use crate::identity::{self, Identity};
@@ -293,7 +293,7 @@ pub enum Event {
         /// The task that failed.
         task: Task,
         /// Why.
-        cause: PersistentCause,
+        cause: DegradedCause,
         /// When the task first failed this way without a success between.
         since: Timestamp,
         /// When the retry is due.
@@ -944,7 +944,7 @@ impl Actor {
         match policy(&fault) {
             Policy::Retry(backoff) => {
                 if let Some(stall) = self.stalled(waiter, &fault) {
-                    return self.persistent(waiter, PersistentCause::Stalled(stall), backoff, now);
+                    return self.persistent(waiter, DegradedCause::Stalled(stall), backoff, now);
                 }
                 let until = self.wait(waiter, backoff, now);
                 self.ran(Event::Retrying { fault, until }, now)
@@ -1004,7 +1004,7 @@ impl Actor {
     /// the configured response, the end of a drain stops.
     fn verdict(&mut self, task: Task, cause: StopCause, now: Timestamp) -> Tick {
         self.lag_failed(Waiter::Task(task), None, now);
-        match PersistentCause::of(cause) {
+        match DegradedCause::of(cause) {
             Some(cause) => self.persistent(Waiter::Task(task), cause, Backoff::Doubling, now),
             None => self.stop(cause),
         }
@@ -1016,7 +1016,7 @@ impl Actor {
     fn persistent(
         &mut self,
         waiter: Waiter,
-        cause: PersistentCause,
+        cause: DegradedCause,
         backoff: Backoff,
         now: Timestamp,
     ) -> Tick {
@@ -2145,7 +2145,7 @@ impl Actor {
         let upload = self.kept.tasks.get_mut(Task::Upload);
         upload.succeed();
         if let Some(since) = self.kept.unguarded {
-            upload.stand(PersistentCause::ConditionalWritesUnsupported, since);
+            upload.stand(DegradedCause::ConditionalWritesUnsupported, since);
         }
     }
 

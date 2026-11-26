@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use common::{Site, config, fake, moved_until, stopped, wait};
 use lsr_replica::{
-    Config, DegradedCause, DynStore, FinalSync, Health, NonZeroDuration, Phase, Replicator,
-    Response, Responses, SnapshotCause, StopCause, Stopped, Task,
+    Config, DegradedCause, DynStore, Health, NonZeroDuration, Phase, Replicator, Response,
+    Responses, SnapshotCause, StopCause, StopFuture, StopOutcome, Task,
 };
 use rusqlite::Connection;
 
@@ -39,7 +39,7 @@ fn retrying_every(interval: Duration) -> Config {
 }
 
 /// The stop's outcome, or `None` if it did not end within [`BOUND`] of real time.
-fn ended(sync: FinalSync) -> Option<Stopped> {
+fn ended(sync: StopFuture) -> Option<StopOutcome> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || tx.send(sync.wait()));
     rx.recv_timeout(BOUND).ok()
@@ -87,7 +87,7 @@ fn a_panic_keeps_what_is_left_in_health_and_the_deadline_report() {
     let stop = replicator.stop(Duration::from_secs(5));
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
-    let Some(Stopped::DeadlineReached {
+    let Some(StopOutcome::DeadlineReached {
         staged_not_uploaded,
         ..
     }) = stopped
@@ -149,7 +149,7 @@ fn a_deadline_report_after_a_panic_counts_the_staged_files_past_the_replica() {
     let stop = replicator.stop(Duration::from_secs(5));
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
-    let Some(Stopped::DeadlineReached {
+    let Some(StopOutcome::DeadlineReached {
         staged_not_uploaded,
         ..
     }) = stopped
@@ -183,7 +183,7 @@ fn a_panic_during_a_drain_still_stops_at_the_deadline() {
     clock.advance(Duration::from_secs(5));
     let stopped = ended(stop);
     assert!(
-        matches!(stopped, Some(Stopped::DeadlineReached { .. })),
+        matches!(stopped, Some(StopOutcome::DeadlineReached { .. })),
         "{stopped:?}"
     );
 }
@@ -206,7 +206,7 @@ fn a_database_removed_after_a_panic_still_stops_at_the_deadline() {
     }
     let stopped = ended(stop);
     assert!(
-        matches!(stopped, Some(Stopped::DeadlineReached { .. })),
+        matches!(stopped, Some(StopOutcome::DeadlineReached { .. })),
         "{stopped:?}"
     );
 }
@@ -218,7 +218,10 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     let site = Site::new();
     let (runtime, clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&first, &clock),
+        StopOutcome::Drained { .. }
+    ));
     drop(first);
     let faulty = site.faulty();
     faulty.panics.store(2, Ordering::SeqCst);
@@ -244,7 +247,7 @@ fn an_operator_snapshot_request_survives_a_panic_before_the_boot() {
     });
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -271,7 +274,7 @@ fn a_clock_step_back_does_not_lengthen_the_wait_before_a_rebuild() {
     });
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -314,7 +317,7 @@ fn a_degraded_task_is_still_reported_while_the_engine_is_rebuilt() {
     });
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -380,7 +383,7 @@ fn a_database_replaced_after_a_panic_is_degraded_and_not_reopened() {
     );
     assert!(matches!(
         replicator.stop(Duration::ZERO).wait(),
-        Stopped::DeadlineReached { .. }
+        StopOutcome::DeadlineReached { .. }
     ));
 }
 
@@ -409,7 +412,7 @@ fn a_database_deleted_after_a_panic_is_degraded_and_not_reopened() {
     assert!(!site.db.exists(), "not reopened, which would create it");
     assert!(matches!(
         replicator.stop(Duration::ZERO).wait(),
-        Stopped::DeadlineReached { .. }
+        StopOutcome::DeadlineReached { .. }
     ));
 }
 
@@ -439,6 +442,6 @@ fn a_database_replaced_after_a_panic_stops_when_configured_to() {
     assert!(!has_replicator_tables(&replaced));
     assert_eq!(
         stopped(&replicator, &clock),
-        Stopped::Stopped(StopCause::WalUnlinked)
+        StopOutcome::Stopped(StopCause::WalUnlinked)
     );
 }

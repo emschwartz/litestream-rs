@@ -1,5 +1,5 @@
 //! What a replicator reports: a [`Health`] snapshot the thread writes after every tick, and
-//! the outcomes of the first boot ([`Booted`]) and of a stop ([`Stopped`]).
+//! the outcomes of the first boot ([`Readiness`]) and of a stop ([`StopOutcome`]).
 //!
 //! A snapshot is a copy: reading it takes one lock for as long as a clone, never across I/O.
 //!
@@ -10,7 +10,7 @@
 use std::fmt;
 
 use lsr_core::{
-    AppCheckpoint, AppCheckpoints, Degraded, FinalRetention, FinalSnapshot, Gate, PersistentCause,
+    AppCheckpoint, AppCheckpoints, Degraded, DegradedCause, FinalRetention, FinalSnapshot, Gate,
     Severity, SnapshotCause, SnapshotCounts, StopCause, Task, Trip, WhyBlocked, WorkCounts,
 };
 use lsr_ltx::{Timestamp, Txid};
@@ -44,11 +44,11 @@ pub enum Gone {
 
 /// How the first boot went, as [`crate::Replicator::wait_booted`] reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Booted {
+pub enum Readiness {
     /// The replica was listed and the position recovered.
-    Booted,
+    Ready,
     /// The boot keeps failing with this cause; it keeps trying.
-    Degraded(PersistentCause),
+    Degraded(DegradedCause),
     /// The wait ran out first.
     TimedOut,
     /// The replicator stopped before it booted.
@@ -59,7 +59,7 @@ pub enum Booted {
 
 /// How a stop ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Stopped {
+pub enum StopOutcome {
     /// Everything committed before the stop is on the replica, through `txid` (`None` when the
     /// database never committed anything).
     Drained {

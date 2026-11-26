@@ -233,7 +233,7 @@ fn the_verify_thread_lets_the_store_go_once_the_replicator_stops() {
     wait(&replicator, |h| runs(h) == 1);
     assert!(matches!(
         common::stopped(&replicator, &clock),
-        lsr_replica::Stopped::Drained { .. }
+        lsr_replica::StopOutcome::Drained { .. }
     ));
     // The verify thread drops its handle on the store as it ends, on its own time.
     let mut looks = 0_u32;

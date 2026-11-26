@@ -34,7 +34,7 @@
 //!   under [`ReaderTracking::Tracked`] no TRUNCATE checkpoint runs while one lives.
 //! - [`Replicator::health`] can be read at any time: one lock, no I/O.
 //! - [`Replicator::stop`] runs at shutdown, after the application's connections close, and reports
-//!   whether everything committed reached the replica ([`Stopped`]). The replicator's own
+//!   whether everything committed reached the replica ([`StopOutcome`]). The replicator's own
 //!   connections keep the WAL when they close last, and the next start continues from it. An
 //!   application connection that closes after them deletes the WAL, as SQLite does by default,
 //!   and the next start takes a snapshot (`WalMissing`).
@@ -138,19 +138,17 @@ mod thread;
 
 pub use config::{Config, NonZeroDuration, ReaderTracking, SyncLimits};
 pub use error::{RestoreError, StartError, TrustLocalError};
-pub use local::{ClearError, CreateError, IntegrityCheck, IntegrityFailure, clear_journal_files};
-pub use events::{ChannelSink, Event, EventReceiver, EventSink, TakeoverUnusable};
+pub use events::{ChannelSink, Event, EventReceiver, EventSink, TrustRecordUnusable};
 #[doc(hidden)]
 pub use exec::block_on;
 pub use health::{
-    AppNotice, Booted, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase, Stopped,
-    StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns, Writes,
+    AppNotice, Counters, FailStop, Gone, Health, Mismatch, OpCounters, Phase, Readiness,
+    StopOutcome, StoreCounters, Verification, VerifyFailure, VerifyOutcome, VerifyRuns, Writes,
 };
+pub use local::{ClearError, CreateError, IntegrityCheck, IntegrityFailure, clear_journal_files};
 pub use readers::ReaderGuard;
-pub use replicator::{FinalSync, Ready, Replicator};
-pub use restore::{
-    record_takeover, restore, restore_if_missing, restore_with, trust_local, verify,
-};
+pub use replicator::{Ready, Replicator, StopFuture};
+pub use restore::{record_trust, restore, restore_if_missing, restore_with, trust_local, verify};
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
 pub use runtime::{CALLER_SLICE, Park, Runtime};
@@ -160,11 +158,11 @@ pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{
     AppCheckpoint, AppCheckpoints, AsOfInside, CallTotals, CheckpointConfig, CheckpointMode, Clock,
-    Degraded, Denied, Depth, Entropy, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
-    IfReplicationStops, L0Retention, Maintenance, MaxUnreplicatedAge, OtherWriter,
-    PersistentCause as DegradedCause, Report, Response, Responses, RestoreOptions, RestoreTarget,
-    Restored, Severity, SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause,
-    TakeoverRecord, Task, Trip, WhyBlocked, WorkCounts,
+    Degraded, DegradedCause, Denied, Depth, Entropy, FinalRetention, FinalSnapshot,
+    FinalSnapshotFailure, Gate, IfReplicationStops, L0Retention, Maintenance, MaxUnreplicatedAge,
+    OtherWriter, Report, Response, Responses, RestoreOptions, RestoreTarget, Restored, Severity,
+    SnapshotCause, SnapshotCauseKind, SnapshotCounts, Stall, StopCause, TakeoverRecord, Task, Trip,
+    WhyBlocked, WorkCounts,
 };
 pub use lsr_ltx::{Timestamp, Txid};
 pub use lsr_sqlite::{DatabaseFile, SetupError, WritesHeld, app_connection_raw, ffi};

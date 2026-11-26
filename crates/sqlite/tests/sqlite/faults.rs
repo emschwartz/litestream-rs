@@ -26,7 +26,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use lsr_core::{
-    CheckpointMode, Event, Fault, PersistentCause, Policy, RecoverEvent, Recovered, Responses,
+    CheckpointMode, DegradedCause, Event, Fault, Policy, RecoverEvent, Recovered, Responses,
     SnapshotCause, SourceError, StopCause, Tick, policy,
 };
 use lsr_sqlite::Sqlite;
@@ -81,7 +81,7 @@ struct Outcome {
     needed_a_write: bool,
     /// A task was degraded on the way: the engine's own sync of the WAL failed, which it never
     /// retries past (it checkpoints with TRUNCATE and snapshots instead).
-    degraded: Vec<PersistentCause>,
+    degraded: Vec<DegradedCause>,
 }
 
 /// What a cycle needed beyond ticking to settle.
@@ -147,7 +147,7 @@ fn each_step<B: Backend>(
             "{at}: no stop"
         );
         for cause in rig.degraded() {
-            assert_eq!(*cause, PersistentCause::WalSyncFailed, "{at}");
+            assert_eq!(*cause, DegradedCause::WalSyncFailed, "{at}");
         }
         rig.check().unwrap_or_else(|err| panic!("{at}: {err}"));
         outcomes.push(Outcome {
@@ -225,7 +225,7 @@ fn a_sync_error_at_each_step_of_a_cycle_is_retried_and_loses_nothing() {
                 .iter()
                 .all(|o| match (o.faults.first(), o.degraded.first()) {
                     (Some(Fault::LocalIo), None) => true,
-                    (_, Some(PersistentCause::WalSyncFailed)) => kind == FileKind::Wal,
+                    (_, Some(DegradedCause::WalSyncFailed)) => kind == FileKind::Wal,
                     (Some(_) | None, _) => false,
                 }),
             "{outcomes:?}"

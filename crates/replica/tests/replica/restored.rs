@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Site, assert_same, config, fake, stopped_on_system_clock, wait};
-use lsr_replica::{Replicator, RestoreTarget, Stopped, restore};
+use lsr_replica::{Replicator, RestoreTarget, StopOutcome, restore};
 use rusqlite::Connection;
 
 const POLL: Duration = Duration::from_secs(1);
@@ -32,7 +32,10 @@ fn restored(site: &Site) -> PathBuf {
     let replicator = Replicator::start(&site.db, Arc::clone(&store), config()).unwrap();
     site.commit(3);
     let stopped = stopped_on_system_clock(&replicator);
-    assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
+    assert!(
+        matches!(stopped, StopOutcome::Drained { .. }),
+        "{stopped:?}"
+    );
     drop(replicator);
     let snapshots = site.replica.join("ltx").join("9");
     if snapshots.exists() {
@@ -60,7 +63,10 @@ fn a_restored_database_with_no_write_ticks_by_the_poll_and_snapshots_at_once() {
     assert_eq!(health.resnapshot, None, "{health:?}");
     assert!(health.unreplicated_since.is_none(), "{health:?}");
     let stopped = replicator.stop(Duration::ZERO).wait();
-    assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
+    assert!(
+        matches!(stopped, StopOutcome::Drained { .. }),
+        "{stopped:?}"
+    );
     let app = Connection::open(&db).unwrap();
     let again = site.path("again");
     restore(&*site.store(), RestoreTarget::Latest, &again).unwrap();

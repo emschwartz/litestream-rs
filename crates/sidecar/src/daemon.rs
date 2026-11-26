@@ -42,8 +42,8 @@ use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
 use lsr_replica::{
     Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
-    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, Stopped, Trip, lock,
-    record_takeover, restore_if_missing,
+    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, StopOutcome, Trip, lock,
+    record_trust, restore_if_missing,
 };
 
 use crate::exec::ChildEnd;
@@ -55,7 +55,7 @@ use crate::signals;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum End {
     /// Its replicator stopped this way.
-    Stopped(Stopped),
+    Stopped(StopOutcome),
     /// It never started: its store, restore or start failed.
     DidNotStart,
     /// Its file never appeared.
@@ -97,9 +97,11 @@ impl Finished {
     #[must_use]
     pub fn clean(&self) -> bool {
         let dbs = self.dbs.iter().all(|(_, end)| match end {
-            End::Stopped(Stopped::Drained { .. }) | End::NeverAppeared => true,
+            End::Stopped(StopOutcome::Drained { .. }) | End::NeverAppeared => true,
             End::Stopped(
-                Stopped::DeadlineReached { .. } | Stopped::Stopped(_) | Stopped::Gone(_),
+                StopOutcome::DeadlineReached { .. }
+                | StopOutcome::Stopped(_)
+                | StopOutcome::Gone(_),
             )
             | End::DidNotStart
             | End::SnapshotNotWritten { .. }
@@ -399,7 +401,7 @@ impl Daemon {
                 if config.meta_dir.is_some()
                     && let Some(meta) = config.meta_dir_for(path)
                 {
-                    record_takeover(&meta, through).map_err(|error| Failure {
+                    record_trust(&meta, through).map_err(|error| Failure {
                         msg: "restore completed but the takeover record could not be written",
                         error: error.to_string(),
                         transient: false,
@@ -582,12 +584,12 @@ impl Daemon {
     fn ended(&self, path: &Path, end: &End) {
         let at = ("path", Value::from(path));
         match end {
-            End::Stopped(Stopped::Drained { txid }) => {
+            End::Stopped(StopOutcome::Drained { txid }) => {
                 let txid = txid.map_or_else(|| "none".to_owned(), |t| t.to_string());
                 self.log
                     .info("database drained", &[at, ("txid", txid.into())]);
             }
-            End::Stopped(Stopped::DeadlineReached {
+            End::Stopped(StopOutcome::DeadlineReached {
                 unsynced_wal_bytes,
                 staged_not_uploaded,
             }) => {
@@ -602,12 +604,12 @@ impl Daemon {
                 self.log
                     .error("database not drained: deadline reached", &fields);
             }
-            End::Stopped(Stopped::Stopped(cause)) => {
+            End::Stopped(StopOutcome::Stopped(cause)) => {
                 let fields = [at, ("cause", format!("{cause:?}").into())];
                 self.log
                     .error("database had stopped before the drain", &fields);
             }
-            End::Stopped(Stopped::Gone(gone)) => {
+            End::Stopped(StopOutcome::Gone(gone)) => {
                 let fields = [at, ("cause", format!("{gone:?}").into())];
                 self.log.error("database replicator is gone", &fields);
             }
@@ -692,13 +694,13 @@ fn passes_by_itself(error: &StartError) -> bool {
 /// A drained database's end, with the snapshot and the retention pass it was asked to end
 /// with: a snapshot that failed, or a pass that did not finish, is not clean. Retention
 /// switched off finishes, as in Go; a pass skipped for a failed snapshot is the snapshot's end.
-fn ending(stopped: Stopped, snapshot: FinalSnapshot, retention: FinalRetention) -> End {
+fn ending(stopped: StopOutcome, snapshot: FinalSnapshot, retention: FinalRetention) -> End {
     match (stopped, snapshot, retention) {
-        (Stopped::Drained { txid }, FinalSnapshot::Failed(why), _) => {
+        (StopOutcome::Drained { txid }, FinalSnapshot::Failed(why), _) => {
             End::SnapshotNotWritten { txid, why }
         }
         (
-            Stopped::Drained { txid },
+            StopOutcome::Drained { txid },
             FinalSnapshot::NotAsked | FinalSnapshot::Asked { .. } | FinalSnapshot::Written(_),
             ended @ (FinalRetention::Held { .. }
             | FinalRetention::Failed { .. }

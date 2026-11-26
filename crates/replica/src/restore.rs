@@ -78,7 +78,7 @@ pub fn restore_with(
 ///
 /// # Errors
 /// The first failed file operation.
-pub fn record_takeover(meta: &Path, through: Txid) -> io::Result<()> {
+pub fn record_trust(meta: &Path, through: Txid) -> io::Result<()> {
     write_takeover(meta, TakeoverRecord::through(through))
 }
 

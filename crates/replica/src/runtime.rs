@@ -5,7 +5,7 @@
 //! from the injected [`Clock`]. So a test that injects [`Runtime::fake`] drives the poll
 //! interval, the backoff and the stop deadline by moving the clock, and nothing sleeps.
 //!
-//! A caller that waits ([`crate::Replicator::wait_booted`], [`crate::FinalSync::wait`]) waits
+//! A caller that waits ([`crate::Replicator::wait_booted`], [`crate::StopFuture::wait`]) waits
 //! on the replicator's condition variable, which the thread signals after every tick. Its
 //! deadline is on the injected clock too; since a fake clock signals nobody when it moves, the
 //! caller reads the clock again at least every [`CALLER_SLICE`] of real time.

@@ -20,7 +20,7 @@ const fn expected(fault: HttpFault) -> Option<Denied> {
 }
 use lsr_store_s3::{Fault, Shape};
 
-use lsr_core::{Degraded, Denied, Event, PersistentCause, StopCause, Task, Tick};
+use lsr_core::{Degraded, DegradedCause, Denied, Event, StopCause, Task, Tick};
 
 use crate::failstop::{Fired, fired};
 use crate::generate::{HttpFault, PartsOp};
@@ -230,12 +230,12 @@ impl Runner {
             self.report.reach.bump("http_fault.denial_masked");
             return Ok(());
         }
-        let mut reported: Vec<PersistentCause> = Task::ALL
+        let mut reported: Vec<DegradedCause> = Task::ALL
             .iter()
             .filter_map(|task| self.actor.degraded(*task).map(|degraded| degraded.cause))
             .collect();
         if let TickEnd::Done(Tick::Stopped(cause)) = ended {
-            reported.extend(PersistentCause::of(*cause));
+            reported.extend(DegradedCause::of(*cause));
         }
         // A task standing degraded on the WAL or the database says nothing of a request the
         // store refused in this tick: a read-ahead HEAD (maintenance's created-at reads) the
@@ -270,7 +270,7 @@ impl Runner {
         if owed
             .kinds
             .iter()
-            .any(|why| reported.contains(&PersistentCause::StoreDenied(*why)))
+            .any(|why| reported.contains(&DegradedCause::StoreDenied(*why)))
         {
             self.report.reach.bump("http_fault.denial_reported");
             return Ok(());
@@ -355,7 +355,7 @@ impl Runner {
 fn fresh_causes(
     before: &[(Task, Degraded)],
     now: impl Fn(Task) -> Option<Degraded>,
-) -> Vec<PersistentCause> {
+) -> Vec<DegradedCause> {
     Task::ALL
         .iter()
         .filter_map(|task| {
@@ -372,22 +372,22 @@ fn fresh_causes(
 /// no failure of one: the local WAL or database, and a store with no conditional writes (a 501 on
 /// a create-only write, which stands for the rest of the process whatever else the store later
 /// refuses).
-const fn says_nothing_of_requests(cause: PersistentCause) -> bool {
+const fn says_nothing_of_requests(cause: DegradedCause) -> bool {
     match cause {
-        PersistentCause::WalCorrupt
-        | PersistentCause::WalTruncated
-        | PersistentCause::WalUnlinked
-        | PersistentCause::WalSyncFailed
-        | PersistentCause::PageSizeChanged { .. }
-        | PersistentCause::DatabasePageMismatch { .. }
-        | PersistentCause::ConditionalWritesUnsupported => true,
-        PersistentCause::StoreDenied(_)
-        | PersistentCause::StoreRefused
-        | PersistentCause::RemoteCorrupt
-        | PersistentCause::OtherWriter
-        | PersistentCause::RemoteRegressed
-        | PersistentCause::Bug
-        | PersistentCause::Stalled(_) => false,
+        DegradedCause::WalCorrupt
+        | DegradedCause::WalTruncated
+        | DegradedCause::WalUnlinked
+        | DegradedCause::WalSyncFailed
+        | DegradedCause::PageSizeChanged { .. }
+        | DegradedCause::DatabasePageMismatch { .. }
+        | DegradedCause::ConditionalWritesUnsupported => true,
+        DegradedCause::StoreDenied(_)
+        | DegradedCause::StoreRefused
+        | DegradedCause::RemoteCorrupt
+        | DegradedCause::OtherWriter
+        | DegradedCause::RemoteRegressed
+        | DegradedCause::Bug
+        | DegradedCause::Stalled(_) => false,
     }
 }
 
@@ -410,15 +410,15 @@ mod tests {
     #[test]
     fn a_standing_unsupported_create_only_is_no_failure_of_a_refused_request() {
         assert!(says_nothing_of_requests(
-            PersistentCause::ConditionalWritesUnsupported
+            DegradedCause::ConditionalWritesUnsupported
         ));
-        assert!(!says_nothing_of_requests(PersistentCause::StoreDenied(
+        assert!(!says_nothing_of_requests(DegradedCause::StoreDenied(
             Denied::Permission
         )));
-        assert!(!says_nothing_of_requests(PersistentCause::StoreRefused));
+        assert!(!says_nothing_of_requests(DegradedCause::StoreRefused));
     }
 
-    fn degraded(cause: PersistentCause, retries: u32) -> Degraded {
+    fn degraded(cause: DegradedCause, retries: u32) -> Degraded {
         Degraded {
             cause,
             since: lsr_ltx::Timestamp::from_unix_millis(1_700_000_057_000),
@@ -431,24 +431,24 @@ mod tests {
     /// the standing state is no failure of that tick; a task that failed again in the tick is.
     #[test]
     fn a_standing_degradation_is_no_failure_of_a_later_tick() {
-        let standing = degraded(PersistentCause::StoreDenied(Denied::BucketMissing), 1);
+        let standing = degraded(DegradedCause::StoreDenied(Denied::BucketMissing), 1);
         let before = [(Task::Maintenance, standing)];
         let unchanged = |task| (task == Task::Maintenance).then_some(standing);
         assert!(fresh_causes(&before, unchanged).is_empty());
 
-        let again = degraded(PersistentCause::StoreDenied(Denied::BucketMissing), 2);
+        let again = degraded(DegradedCause::StoreDenied(Denied::BucketMissing), 2);
         assert_eq!(
             fresh_causes(&before, |task| (task == Task::Maintenance).then_some(again)),
-            [PersistentCause::StoreDenied(Denied::BucketMissing)]
+            [DegradedCause::StoreDenied(Denied::BucketMissing)]
         );
-        let other = degraded(PersistentCause::StoreDenied(Denied::Permission), 1);
+        let other = degraded(DegradedCause::StoreDenied(Denied::Permission), 1);
         assert_eq!(
             fresh_causes(&before, |task| match task {
                 Task::Maintenance => Some(standing),
                 Task::Upload => Some(other),
                 Task::Sync | Task::Checkpoint | Task::Prune => None,
             }),
-            [PersistentCause::StoreDenied(Denied::Permission)]
+            [DegradedCause::StoreDenied(Denied::Permission)]
         );
     }
 }

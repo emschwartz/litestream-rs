@@ -11,7 +11,7 @@ fn newest_on_replica(rig: &Rig) -> Option<u64> {
         .max()
 }
 
-fn cause(actor: &Actor) -> Option<PersistentCause> {
+fn cause(actor: &Actor) -> Option<DegradedCause> {
     actor.degraded(Task::Upload).map(|degraded| degraded.cause)
 }
 
@@ -31,7 +31,7 @@ fn a_store_without_create_only_writes_degrades_and_uploads_by_replacing() {
             event(tick),
             Some(Event::Degraded {
                 task: Task::Upload,
-                cause: PersistentCause::ConditionalWritesUnsupported,
+                cause: DegradedCause::ConditionalWritesUnsupported,
                 ..
             })
         )
@@ -43,7 +43,7 @@ fn a_store_without_create_only_writes_degrades_and_uploads_by_replacing() {
     assert_eq!(newest_on_replica(&rig), Some(3));
     assert_eq!(
         cause(&actor),
-        Some(PersistentCause::ConditionalWritesUnsupported),
+        Some(DegradedCause::ConditionalWritesUnsupported),
         "the cause outlasts the successes"
     );
 }
@@ -68,7 +68,7 @@ fn the_refused_create_only_write_publishes_nothing() {
     }
     assert_eq!(
         cause(&actor),
-        Some(PersistentCause::ConditionalWritesUnsupported),
+        Some(DegradedCause::ConditionalWritesUnsupported),
         "{seen:?}"
     );
     assert_eq!(newest_on_replica(&rig), Some(1));
@@ -106,7 +106,7 @@ fn a_restart_asks_for_create_only_writes_again() {
     commit_and_settle(&mut rig, &mut restarted, 3, T0 + 120_001);
     assert_eq!(
         cause(&restarted),
-        Some(PersistentCause::ConditionalWritesUnsupported)
+        Some(DegradedCause::ConditionalWritesUnsupported)
     );
 }
 
@@ -134,7 +134,7 @@ fn the_cause_comes_back_after_another_fault_on_the_upload_task() {
     assert!(
         matches!(
             cause(&actor),
-            Some(PersistentCause::StoreDenied(_) | PersistentCause::ConditionalWritesUnsupported)
+            Some(DegradedCause::StoreDenied(_) | DegradedCause::ConditionalWritesUnsupported)
         ),
         "{:?}",
         cause(&actor)
@@ -143,6 +143,6 @@ fn the_cause_comes_back_after_another_fault_on_the_upload_task() {
     assert_eq!(newest_on_replica(&rig), Some(3));
     assert_eq!(
         cause(&actor),
-        Some(PersistentCause::ConditionalWritesUnsupported)
+        Some(DegradedCause::ConditionalWritesUnsupported)
     );
 }

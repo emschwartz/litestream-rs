@@ -20,9 +20,9 @@ use common::{
 };
 use lsr_core::{CheckpointMode, Event as EngineEvent, Fault};
 use lsr_replica::{
-    AppCheckpoint, AppCheckpoints, AppNotice, Booted, ChannelSink, CheckpointConfig, Config,
-    DegradedCause, Depth, DynStore, Event, EventSink, Gone, Phase, ReaderTracking, Replicator,
-    Responses, SetupError, StartError, StopCause, Stopped, Task, restore_if_missing, verify,
+    AppCheckpoint, AppCheckpoints, AppNotice, ChannelSink, CheckpointConfig, Config, DegradedCause,
+    Depth, DynStore, Event, EventSink, Gone, Phase, ReaderTracking, Readiness, Replicator,
+    Responses, SetupError, StartError, StopCause, StopOutcome, Task, restore_if_missing, verify,
 };
 use rusqlite::Connection;
 
@@ -45,7 +45,7 @@ fn start_returns_with_the_read_lock_held_and_stop_drains_every_commit() {
     assert!(truncate_is_busy(&site.db), "the read lock holds the WAL");
     site.commit(5);
     let stopped = stopped_on_system_clock(&replicator);
-    let Stopped::Drained { txid: Some(txid) } = stopped else {
+    let StopOutcome::Drained { txid: Some(txid) } = stopped else {
         panic!("{stopped:?}");
     };
     assert_eq!(
@@ -76,7 +76,7 @@ fn a_stop_before_the_first_boot_drains_without_waiting_for_a_poll() {
         wait(&first, |h| h.synced.is_some() && h.counters.retries > 0);
         assert!(matches!(
             first.stop(Duration::ZERO).wait(),
-            Stopped::DeadlineReached { .. }
+            StopOutcome::DeadlineReached { .. }
         ));
         drop(first);
         site.commit(2);
@@ -84,7 +84,7 @@ fn a_stop_before_the_first_boot_drains_without_waiting_for_a_poll() {
         let replicator = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
         let stopped = stopped(&replicator, &clock);
         assert!(
-            matches!(stopped, Stopped::Drained { txid: Some(_) }),
+            matches!(stopped, StopOutcome::Drained { txid: Some(_) }),
             "{stopped:?}"
         );
         site.assert_restores(&*site.store());
@@ -105,7 +105,7 @@ fn a_stop_can_be_awaited() {
     site.commit(2);
     let stopped = lsr_core::conformance::block_on(replicator.stop(PATIENCE));
     assert!(
-        matches!(stopped, Stopped::Drained { txid: Some(_) }),
+        matches!(stopped, StopOutcome::Drained { txid: Some(_) }),
         "{stopped:?}"
     );
     site.assert_restores(&*store);
@@ -124,7 +124,7 @@ fn a_stop_can_end_with_a_level_nine_snapshot() {
     site.commit(2);
     replicator.request_final_snapshot();
     let stopped = lsr_core::conformance::block_on(replicator.stop(PATIENCE));
-    let Stopped::Drained { txid: Some(txid) } = stopped else {
+    let StopOutcome::Drained { txid: Some(txid) } = stopped else {
         panic!("{stopped:?}");
     };
     let health = replicator.health();
@@ -155,7 +155,7 @@ fn a_stop_awaited_during_a_retry_wait_drains() {
     faulty.fail_uploads.store(false, Ordering::SeqCst);
     let stopped = lsr_core::conformance::block_on(replicator.stop(PATIENCE));
     assert!(
-        matches!(stopped, Stopped::Drained { txid: Some(_) }),
+        matches!(stopped, StopOutcome::Drained { txid: Some(_) }),
         "{stopped:?}"
     );
     site.assert_restores(&*store);
@@ -168,13 +168,13 @@ fn wait_booted_reports_the_first_boot() {
     let (runtime, clock) = fake();
     let replicator =
         Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
-    assert_eq!(booted(&replicator), Booted::Booted);
+    assert_eq!(booted(&replicator), Readiness::Ready);
     let health = wait(&replicator, caught_up);
     assert_eq!(health.phase, Phase::Running);
     assert!(!health.is_degraded());
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*store);
 }
@@ -192,17 +192,20 @@ fn a_sink_given_at_start_sees_the_first_boot() {
     site.commit(2);
     assert!(matches!(
         stopped_on_system_clock(&first),
-        Stopped::Drained { txid: Some(_) }
+        StopOutcome::Drained { txid: Some(_) }
     ));
     drop(first);
     let recovered = Event::Engine(EngineEvent::Booted { cause: None });
 
     let (runtime, clock) = fake();
     let late = Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
-    assert_eq!(booted(&late), Booted::Booted);
+    assert_eq!(booted(&late), Readiness::Ready);
     let (sink, events) = ChannelSink::new(NonZeroUsize::new(256).unwrap());
     late.set_events(Box::new(sink));
-    assert!(matches!(stopped(&late, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&late, &clock),
+        StopOutcome::Drained { .. }
+    ));
     drop(late);
     let seen = events.drain();
     assert!(!seen.contains(&recovered), "{seen:?}");
@@ -217,10 +220,10 @@ fn a_sink_given_at_start_sees_the_first_boot() {
         Box::new(sink),
     )
     .unwrap();
-    assert_eq!(booted(&replicator), Booted::Booted);
+    assert_eq!(booted(&replicator), Readiness::Ready);
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     let seen = events.drain();
     // The write gate's events come first: writes are held from the start until the boot.
@@ -249,7 +252,7 @@ fn a_refused_boot_is_degraded_and_recovers() {
     let replicator = Replicator::start_with(&site.db, store, config(), runtime).unwrap();
     assert_eq!(
         booted(&replicator),
-        Booted::Degraded(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
+        Readiness::Degraded(DegradedCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         replicator.health().task(Task::Sync).map(|d| d.cause),
@@ -260,11 +263,11 @@ fn a_refused_boot_is_degraded_and_recovers() {
     wait(&replicator, |h| {
         h.phase == Phase::Running && !h.is_degraded()
     });
-    assert_eq!(booted(&replicator), Booted::Booted);
+    assert_eq!(booted(&replicator), Readiness::Ready);
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -288,7 +291,7 @@ fn the_lag_counts_from_the_start_while_the_first_boot_fails() {
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -331,7 +334,7 @@ fn health_compares_the_local_and_replica_positions() {
     assert!(after.counters.store.bytes_uploaded > full.counters.store.bytes_uploaded);
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -353,7 +356,7 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
     let uploads = replicator.health().counters.store.begin_upload.calls;
     site.commit(3);
     let cut_off = replicator.stop(Duration::ZERO).wait();
-    let Stopped::DeadlineReached {
+    let StopOutcome::DeadlineReached {
         unsynced_wal_bytes,
         staged_not_uploaded,
     } = cut_off
@@ -380,15 +383,18 @@ fn a_zero_deadline_reports_what_was_left_and_the_next_start_continues() {
     wait(&panicked, |h| h.counters.panics > 0);
     let again = panicked.stop(Duration::ZERO).wait();
     assert!(
-        matches!(again, Stopped::DeadlineReached { staged_not_uploaded: n, .. } if n == staged_not_uploaded),
+        matches!(again, StopOutcome::DeadlineReached { staged_not_uploaded: n, .. } if n == staged_not_uploaded),
         "{again:?}"
     );
     drop(panicked);
     faulty.panic_always.store(false, Ordering::SeqCst);
     let (runtime, clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    assert_eq!(booted(&next), Booted::Booted);
-    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
+    assert_eq!(booted(&next), Readiness::Ready);
+    assert!(matches!(
+        stopped(&next, &clock),
+        StopOutcome::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -411,7 +417,7 @@ fn a_staged_file_damaged_before_the_first_upload_is_dropped_and_the_next_start_b
     });
     let cut_off = replicator.stop(Duration::ZERO).wait();
     assert!(
-        matches!(cut_off, Stopped::DeadlineReached { staged_not_uploaded, .. } if staged_not_uploaded > 0),
+        matches!(cut_off, StopOutcome::DeadlineReached { staged_not_uploaded, .. } if staged_not_uploaded > 0),
         "{cut_off:?}"
     );
     drop(replicator);
@@ -428,8 +434,11 @@ fn a_staged_file_damaged_before_the_first_upload_is_dropped_and_the_next_start_b
     // file); the clock moves through that wait, and through the doubling waits a boot that asks
     // for a takeover it never gets would take.
     moved_until(&next, &clock, (POLL, 120), |h| h.phase != Phase::Booting);
-    assert_eq!(next.wait_booted(PATIENCE), Booted::Booted);
-    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
+    assert_eq!(next.wait_booted(PATIENCE), Readiness::Ready);
+    assert!(matches!(
+        stopped(&next, &clock),
+        StopOutcome::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -468,7 +477,7 @@ fn a_second_stop_keeps_the_earlier_deadline() {
     wait(&replicator, |h| h.phase == Phase::Draining);
     let second = replicator.stop(Duration::ZERO).wait();
     assert!(
-        matches!(second, Stopped::DeadlineReached { .. }),
+        matches!(second, StopOutcome::DeadlineReached { .. }),
         "{second:?}"
     );
     assert_eq!(first.wait(), second);
@@ -495,7 +504,10 @@ fn dropping_the_last_handle_drains_and_closes() {
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     let health = wait(&next, caught_up);
     assert_eq!(health.resnapshot, None);
-    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&next, &clock),
+        StopOutcome::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -515,7 +527,7 @@ fn a_stopped_replicator_reports_its_cause() {
     let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
     assert_eq!(
         booted(&replicator),
-        Booted::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
+        Readiness::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
     assert_eq!(
         replicator.health().phase,
@@ -523,7 +535,7 @@ fn a_stopped_replicator_reports_its_cause() {
     );
     assert_eq!(
         stopped(&replicator, &clock),
-        Stopped::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
+        StopOutcome::Stopped(StopCause::StoreDenied(lsr_core::Denied::Credentials))
     );
 }
 
@@ -557,7 +569,7 @@ fn accepting_the_database_pages_ends_a_page_mismatch() {
     wait(&replicator, |h| h.task(Task::Sync).is_none());
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -586,7 +598,7 @@ fn request_snapshot_stages_a_snapshot_and_events_report_it() {
     assert_eq!(health.task(Task::Sync), None);
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -663,7 +675,7 @@ fn a_reader_guard_holds_off_truncate() {
     // this clock moves only when the test moves it.
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -676,7 +688,7 @@ fn app_connection_sets_up_only_this_database() {
     let pooled = Connection::open(&site.db).unwrap();
     replicator.app_connection(&pooled).unwrap();
     // Writes are held until the boot is judged, and a connection set up fails at once on them.
-    assert_eq!(booted(&replicator), Booted::Booted);
+    assert_eq!(booted(&replicator), Readiness::Ready);
     lsr_sqlite::check_app_connection(&pooled).unwrap();
     let other = Site::new();
     assert!(matches!(
@@ -692,7 +704,10 @@ fn app_connection_sets_up_only_this_database() {
         .unwrap();
     // The insert may meet the replicator's read: the drain retries, so the clock must move.
     let stopped = stopped(&replicator, &clock);
-    assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
+    assert!(
+        matches!(stopped, StopOutcome::Drained { .. }),
+        "{stopped:?}"
+    );
     site.assert_restores(&*site.store());
 }
 
@@ -708,7 +723,10 @@ fn verify_and_restore_if_missing_use_the_shared_store() {
         Replicator::start_with(&site.db, Arc::clone(&store), config(), runtime).unwrap();
     site.commit(4);
     let stopped = stopped(&replicator, &clock);
-    assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
+    assert!(
+        matches!(stopped, StopOutcome::Drained { .. }),
+        "{stopped:?}"
+    );
     let report = verify(&*store, Depth::Contents).unwrap();
     assert_eq!(report.worst(), None, "{report:?}");
     assert!(restore_if_missing(&*store, &site.db).unwrap().is_none());
@@ -748,14 +766,14 @@ fn a_panic_rebuilds_the_engine_and_replication_continues() {
     wait(&replicator, |h| {
         h.phase == Phase::Running && !h.is_degraded()
     });
-    assert_eq!(booted(&replicator), Booted::Booted);
+    assert_eq!(booted(&replicator), Readiness::Ready);
     site.commit(2);
     clock.advance(POLL);
     let health = moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert!(!health.is_degraded(), "{health:?}");
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -772,10 +790,10 @@ fn a_panic_under_strict_responses_stops_with_bug() {
         ..config()
     };
     let replicator = Replicator::start_with(&site.db, store, strict, runtime).unwrap();
-    assert_eq!(booted(&replicator), Booted::Stopped(StopCause::Bug));
+    assert_eq!(booted(&replicator), Readiness::Stopped(StopCause::Bug));
     assert_eq!(
         stopped(&replicator, &clock),
-        Stopped::Stopped(StopCause::Bug)
+        StopOutcome::Stopped(StopCause::Bug)
     );
 }
 
@@ -826,7 +844,7 @@ fn an_app_checkpoint_is_counted_and_reported() {
     );
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -863,7 +881,7 @@ fn grown_on_read_mark_zero(
     }
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     (health, events.drain())
 }
@@ -930,7 +948,7 @@ fn an_idle_replicator_keeps_its_health_current() {
     }
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -950,7 +968,7 @@ fn a_second_start_on_the_same_file_is_refused() {
     ));
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -978,7 +996,7 @@ fn start_refuses_a_missing_database_and_an_unusable_meta_dir() {
     let replicator = Replicator::start(&site.db, site.store(), config()).unwrap();
     assert!(matches!(
         stopped_on_system_clock(&replicator),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -1006,7 +1024,7 @@ fn a_panicking_sink_is_counted_and_replication_goes_on() {
     assert_eq!(health.phase, Phase::Running);
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -1045,12 +1063,12 @@ fn a_thread_that_dies_is_reported_gone() {
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     assert_eq!(
         stopped(&replicator, &clock),
-        Stopped::Gone(Gone::ThreadDied)
+        StopOutcome::Gone(Gone::ThreadDied)
     );
-    assert_eq!(booted(&replicator), Booted::Gone(Gone::ThreadDied));
+    assert_eq!(booted(&replicator), Readiness::Gone(Gone::ThreadDied));
     assert!(matches!(
         stopped(&next, &next_clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }
@@ -1082,12 +1100,15 @@ fn a_thread_that_dies_without_an_outcome_is_reported_gone() {
     moved_until(&replicator, &clock, (POLL, 240), caught_up);
     assert_eq!(
         stopped(&replicator, &clock),
-        Stopped::Gone(Gone::ThreadDied)
+        StopOutcome::Gone(Gone::ThreadDied)
     );
     assert_eq!(replicator.health().phase, Phase::Gone(Gone::ThreadDied));
     let (runtime, clock) = fake();
     let next = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
-    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&next, &clock),
+        StopOutcome::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -1112,7 +1133,7 @@ fn a_drain_that_waits_out_a_retry_ends_once_the_clock_reaches_it() {
     faulty.fail_uploads.store(false, Ordering::SeqCst);
     let stopped = stopped(&replicator, &clock);
     assert!(
-        matches!(stopped, Stopped::Drained { txid: Some(_) }),
+        matches!(stopped, StopOutcome::Drained { txid: Some(_) }),
         "{stopped:?}"
     );
     site.assert_restores(&*site.store());
@@ -1153,7 +1174,7 @@ fn a_retry_s_backoff_is_waited_out_by_moving_the_clock() {
     );
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -1177,6 +1198,6 @@ fn a_replicator_and_its_runtime_print_what_they_hold() {
     assert!(printed.contains("state: "), "{printed}");
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }

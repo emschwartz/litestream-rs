@@ -12,7 +12,7 @@ use std::time::Duration;
 use common::{Site, config, fake, stopped, wait};
 use lsr_core::{FileKey, Level, ObjectStore, Upload, WriteMode};
 use lsr_ltx::{Encoder, Header, HeaderFields, PageNo, PageSize, Timestamp, Txid, TxidRange};
-use lsr_replica::{Config, Phase, Replicator, StartError, StopCause, Stopped, block_on};
+use lsr_replica::{Config, Phase, Replicator, StartError, StopCause, StopOutcome, block_on};
 use lsr_store_fs::FsStore;
 
 /// The environment variable that names the meta directory a child holds.
@@ -58,10 +58,16 @@ fn a_second_engine_on_one_meta_directory_is_refused() {
         Replicator::start_with(&other, site.store(), shared.clone(), runtime),
         Err(StartError::MetaLocked)
     ));
-    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&first, &clock),
+        StopOutcome::Drained { .. }
+    ));
     let (runtime, clock) = fake();
     let second = Replicator::start_with(&other, site.store(), shared, runtime).unwrap();
-    assert!(matches!(stopped(&second, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&second, &clock),
+        StopOutcome::Drained { .. }
+    ));
 }
 
 /// The same across processes: a child holds a replicator on the meta directory, and a start
@@ -108,7 +114,7 @@ fn a_second_process_on_one_meta_directory_is_refused() {
     let replicator = Replicator::start_with(&site.db, site.store(), shared, runtime).unwrap();
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -145,7 +151,7 @@ fn child_holds_the_meta_directory() {
     std::io::stdin().read_line(&mut line).unwrap();
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
 }
 
@@ -223,7 +229,7 @@ fn a_stop_for_another_writer_survives_a_restart() {
     wait(&first, stopped_for_other_writer);
     assert_eq!(
         stopped(&first, &clock),
-        Stopped::Stopped(StopCause::OtherWriter)
+        StopOutcome::Stopped(StopCause::OtherWriter)
     );
 
     site.commit(2);
@@ -238,7 +244,7 @@ fn a_stop_for_another_writer_survives_a_restart() {
     );
     assert_eq!(
         stopped(&second, &clock),
-        Stopped::Stopped(StopCause::OtherWriter)
+        StopOutcome::Stopped(StopCause::OtherWriter)
     );
 
     block_on(FsStore::new(&site.replica).delete(&[foreign])).unwrap();
@@ -246,7 +252,10 @@ fn a_stop_for_another_writer_survives_a_restart() {
     let third = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     clock.advance(Duration::from_secs(1));
     wait(&third, caught_up);
-    assert!(matches!(stopped(&third, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&third, &clock),
+        StopOutcome::Drained { .. }
+    ));
     site.assert_restores(&*site.store());
 }
 
@@ -260,7 +269,10 @@ fn a_restored_database_replicates_without_a_refusal() {
     let (runtime, clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     wait(&first, caught_up);
-    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&first, &clock),
+        StopOutcome::Drained { .. }
+    ));
     let restored = site.path("restored");
     let reached = lsr_replica::restore(
         &*site.store(),
@@ -291,11 +303,14 @@ fn a_restored_database_replicates_without_a_refusal() {
         caught_up(h) || matches!(h.phase, Phase::Stopped(_))
     });
     assert_eq!(health.phase, Phase::Running, "{health:?}");
-    assert!(matches!(stopped(&next, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&next, &clock),
+        StopOutcome::Drained { .. }
+    ));
 }
 
 /// Another writer's file appeared while the replicator was down: the boot refuses it,
-/// naming the replica's newest transaction in `Event::Refused`, and writes nothing. A
+/// naming the replica's newest transaction in `Event::UnvouchedReplicaFiles`, and writes nothing. A
 /// `trust_local` through that transaction lets the next start snapshot above it.
 #[test]
 fn a_refused_boot_names_the_tip_and_trust_local_clears_it() {
@@ -305,7 +320,7 @@ fn a_refused_boot_names_the_tip_and_trust_local_clears_it() {
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     wait(&first, caught_up);
     // The drain's txid, not the health's: `caught_up` can hold while a commit is unsynced.
-    let Stopped::Drained { txid: Some(ours) } = stopped(&first, &clock) else {
+    let StopOutcome::Drained { txid: Some(ours) } = stopped(&first, &clock) else {
         panic!("the first replicator drains");
     };
     let foreign = put_foreign(&site, ours.next().unwrap());
@@ -318,11 +333,11 @@ fn a_refused_boot_names_the_tip_and_trust_local_clears_it() {
     wait(&second, stopped_for_other_writer);
     assert_eq!(
         stopped(&second, &clock),
-        Stopped::Stopped(StopCause::OtherWriter)
+        StopOutcome::Stopped(StopCause::OtherWriter)
     );
     let mut refused = None;
     while let Some(event) = events.try_recv() {
-        if let lsr_replica::Event::Refused { through } = event {
+        if let lsr_replica::Event::UnvouchedReplicaFiles { through } = event {
             refused = Some(through);
         }
     }
@@ -344,7 +359,10 @@ fn a_refused_boot_names_the_tip_and_trust_local_clears_it() {
     });
     assert_eq!(health.phase, Phase::Running, "{health:?}");
     assert!(newest_l0(&site) > Some(foreign.range().max()));
-    assert!(matches!(stopped(&third, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&third, &clock),
+        StopOutcome::Drained { .. }
+    ));
 }
 
 /// A takeover record that does not decode is reported and ignored, as if there were none: a
@@ -356,7 +374,10 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
     let (runtime, clock) = fake();
     let first = Replicator::start_with(&site.db, site.store(), config(), runtime).unwrap();
     wait(&first, caught_up);
-    assert!(matches!(stopped(&first, &clock), Stopped::Drained { .. }));
+    assert!(matches!(
+        stopped(&first, &clock),
+        StopOutcome::Drained { .. }
+    ));
     std::fs::write(
         meta_of(&site).join("lsr-takeover"),
         b"lsr-takeover 1 garbage\n",
@@ -377,11 +398,11 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
     while let Some(event) = events.try_recv() {
         warned |= matches!(
             event,
-            lsr_replica::Event::TakeoverRecordUnusable(lsr_replica::TakeoverUnusable::Invalid(_))
+            lsr_replica::Event::TrustRecordUnusable(lsr_replica::TrustRecordUnusable::Invalid(_))
         );
     }
     assert!(warned, "the unusable record is reported");
-    let Stopped::Drained { txid: Some(ours) } = stopped(&second, &clock) else {
+    let StopOutcome::Drained { txid: Some(ours) } = stopped(&second, &clock) else {
         panic!("the second replicator drains");
     };
     // Never taken as given either: another writer's file above everything is refused, as with
@@ -393,7 +414,7 @@ fn an_unusable_takeover_record_is_reported_and_costs_no_stop() {
     assert_eq!(newest_l0(&site), Some(foreign.range().max()));
     assert_eq!(
         stopped(&third, &clock),
-        Stopped::Stopped(StopCause::OtherWriter)
+        StopOutcome::Stopped(StopCause::OtherWriter)
     );
 }
 
@@ -444,7 +465,7 @@ fn a_lost_staged_file_is_dropped_after_the_takeover_record_is_written() {
     assert!(!path.exists());
     assert!(matches!(
         stopped(&replicator, &clock),
-        Stopped::Drained { .. }
+        StopOutcome::Drained { .. }
     ));
     site.assert_restores(&*site.store());
 }

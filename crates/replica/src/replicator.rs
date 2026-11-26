@@ -1,7 +1,7 @@
 //! The handle, the state it shares with its thread, and the stop's outcome.
 //!
 //! [`Shared`] is everything the thread and the handles both touch: a [`State`] the thread
-//! writes after every tick (read by `health`, `wait_booted` and [`FinalSync`] under one lock,
+//! writes after every tick (read by `health`, `wait_booted` and [`StopFuture`] under one lock,
 //! never across I/O), a condition variable signalled with each write, and the pending commands.
 //! Commands are not a queue but slots, each idempotent (stop with the earliest deadline asked,
 //! a snapshot asked, the newest event sink), so they are bounded by construction; setting one
@@ -34,7 +34,7 @@ use lsr_sqlite::{DatabaseFile, Sqlite, SqliteConfig, WriteGate, WritesHeld};
 use crate::config::Config;
 use crate::error::StartError;
 use crate::events::EventSink;
-use crate::health::{Booted, Gone, Health, Phase, Stopped, Writes};
+use crate::health::{Gone, Health, Phase, Readiness, StopOutcome, Writes};
 use crate::meta::{MetaLock, read_takeover};
 use crate::readers::ReaderGuard;
 use crate::runtime::{CALLER_SLICE, Park, Runtime, later, lock};
@@ -48,7 +48,7 @@ pub(crate) struct State {
     /// The first boot finished.
     pub(crate) booted: bool,
     /// How the thread ended; set once.
-    pub(crate) outcome: Option<Stopped>,
+    pub(crate) outcome: Option<StopOutcome>,
     /// When the tick now running began; `None` between ticks.
     pub(crate) tick_began: Option<Timestamp>,
     /// What is not on the replica, as of the last tick.
@@ -198,16 +198,16 @@ impl Shared {
     }
 
     /// The thread's last act: the outcome, out of the registry, every waiter woken.
-    pub(crate) fn finish(self: &Arc<Self>, outcome: Stopped) {
+    pub(crate) fn finish(self: &Arc<Self>, outcome: StopOutcome) {
         self.unregister();
         self.update(|state| {
             let outcome = *state.outcome.get_or_insert(outcome);
             state.health.phase = match outcome {
-                Stopped::Drained { .. } | Stopped::DeadlineReached { .. } => {
+                StopOutcome::Drained { .. } | StopOutcome::DeadlineReached { .. } => {
                     Phase::Stopped(StopCause::Shutdown)
                 }
-                Stopped::Stopped(cause) => Phase::Stopped(cause),
-                Stopped::Gone(gone) => Phase::Gone(gone),
+                StopOutcome::Stopped(cause) => Phase::Stopped(cause),
+                StopOutcome::Gone(gone) => Phase::Gone(gone),
             };
             state.tick_began = None;
         });
@@ -415,16 +415,16 @@ impl Replicator {
     /// the first snapshot taken), or cannot be, or until `within` passes on the replicator's
     /// clock: [`Replicator::ready`] for a caller without async.
     #[must_use]
-    pub fn wait_booted(&self, within: Duration) -> Booted {
+    pub fn wait_booted(&self, within: Duration) -> Readiness {
         if self.shared.forked() {
-            return Booted::Gone(Gone::Forked);
+            return Readiness::Gone(Gone::Forked);
         }
         settle_boot(&self.shared, later(self.shared.clock.now(), within))
     }
 
     /// Resolves once the replicator is ready: the first boot listed the replica and decided how
     /// this start proceeds (continue from a position, or snapshot for a named cause), so the
-    /// write hold that covers it is over (`Booted::Booted`). Or once it cannot be: the boot
+    /// write hold that covers it is over (`Readiness::Ready`). Or once it cannot be: the boot
     /// keeps failing (`Degraded`), the replicator stopped, its thread is gone, or `within`
     /// passed on the replicator's clock (`TimedOut`). It answers as
     /// [`Replicator::wait_booted`] does. The future needs no runtime: `.await` it or call
@@ -449,7 +449,7 @@ impl Replicator {
         let deadline = later(self.shared.clock.now(), within);
         let watched = Watched::new(&self.shared, deadline, settle_boot, "lsr-ready");
         if self.shared.forked() {
-            return Ready(watched.answered(Booted::Gone(Gone::Forked)));
+            return Ready(watched.answered(Readiness::Gone(Gone::Forked)));
         }
         Ready(watched)
     }
@@ -470,16 +470,16 @@ impl Replicator {
 
     /// Stops after syncing and uploading everything committed. The deadline is the earlier of
     /// this call's and any earlier stop's, so a second stop with a zero wait shortens a drain.
-    /// The future needs no runtime: `.await` it or call [`FinalSync::wait`]. It resolves at the
+    /// The future needs no runtime: `.await` it or call [`StopFuture::wait`]. It resolves at the
     /// deadline on the caller's side even if the thread is still inside a request (which can
     /// take up to that request's own deadline); the thread then finishes in the background.
-    pub fn stop(&self, within: Duration) -> FinalSync {
+    pub fn stop(&self, within: Duration) -> StopFuture {
         if self.shared.forked() {
-            return FinalSync::ready(&self.shared, Stopped::Gone(Gone::Forked));
+            return StopFuture::ready(&self.shared, StopOutcome::Gone(Gone::Forked));
         }
         let deadline = later(self.shared.clock.now(), within);
         self.shared.ask_stop(deadline);
-        FinalSync::new(&self.shared, deadline)
+        StopFuture::new(&self.shared, deadline)
     }
 
     /// A copy of the replicator's state.
@@ -591,63 +591,68 @@ fn snapshot(state: &State, died: bool, meters: &Meters) -> Health {
     health
 }
 
-fn boot_answer(state: &State, died: bool) -> Option<Booted> {
+fn boot_answer(state: &State, died: bool) -> Option<Readiness> {
     if died {
-        return Some(Booted::Gone(Gone::ThreadDied));
+        return Some(Readiness::Gone(Gone::ThreadDied));
     }
     match state.outcome {
-        Some(Stopped::Gone(gone)) => return Some(Booted::Gone(gone)),
-        Some(Stopped::Stopped(cause)) => return Some(Booted::Stopped(cause)),
+        Some(StopOutcome::Gone(gone)) => return Some(Readiness::Gone(gone)),
+        Some(StopOutcome::Stopped(cause)) => return Some(Readiness::Stopped(cause)),
         // A drain before the first boot finished is answered by the phase below, which the
         // outcome set to `Stopped(Shutdown)` under the same lock.
-        Some(Stopped::Drained { .. } | Stopped::DeadlineReached { .. }) | None => {}
+        Some(StopOutcome::Drained { .. } | StopOutcome::DeadlineReached { .. }) | None => {}
     }
     // Ready once the boot is judged too: until then writes are held (`Gate::Pending`), so an
     // application told it may go would meet "database is locked".
     if state.booted && state.health.held_by.gate != Gate::Pending {
-        return Some(Booted::Booted);
+        return Some(Readiness::Ready);
     }
     if let Phase::Stopped(cause) = state.health.phase {
-        return Some(Booted::Stopped(cause));
+        return Some(Readiness::Stopped(cause));
     }
     state
         .health
         .task(Task::Sync)
-        .map(|degraded| Booted::Degraded(degraded.cause))
+        .map(|degraded| Readiness::Degraded(degraded.cause))
 }
 
 /// [`boot_answer`] by `deadline`, blocking the calling thread.
-fn settle_boot(shared: &Shared, deadline: Timestamp) -> Booted {
+fn settle_boot(shared: &Shared, deadline: Timestamp) -> Readiness {
     shared
         .wait_for(Some(deadline), boot_answer)
-        .unwrap_or(Booted::TimedOut)
+        .unwrap_or(Readiness::TimedOut)
 }
 
 /// The end of a stop, as the thread reports it or, at the deadline, as the caller sees it.
-fn stop_answer(state: &State, died: bool, now: Timestamp, deadline: Timestamp) -> Option<Stopped> {
+fn stop_answer(
+    state: &State,
+    died: bool,
+    now: Timestamp,
+    deadline: Timestamp,
+) -> Option<StopOutcome> {
     if let Some(outcome) = state.outcome {
         return Some(outcome);
     }
     if died {
-        return Some(Stopped::Gone(Gone::ThreadDied));
+        return Some(StopOutcome::Gone(Gone::ThreadDied));
     }
     // Only a tick that began before the deadline and is still running is cut off: the thread
     // is inside a request. One that began at or after it does no store I/O and ends at once.
     let stuck = state.tick_began.is_some_and(|began| began < deadline);
-    (now >= deadline && stuck).then_some(Stopped::DeadlineReached {
+    (now >= deadline && stuck).then_some(StopOutcome::DeadlineReached {
         unsynced_wal_bytes: state.left.unsynced_wal_bytes,
         staged_not_uploaded: state.left.staged_not_uploaded,
     })
 }
 
 /// [`stop_answer`], blocking the calling thread.
-fn settle_stop(shared: &Shared, deadline: Timestamp) -> Stopped {
+fn settle_stop(shared: &Shared, deadline: Timestamp) -> StopOutcome {
     let clock = Arc::clone(&shared.clock);
     shared
         .wait_for(None, |state, died| {
             stop_answer(state, died, clock.now(), deadline)
         })
-        .unwrap_or(Stopped::Gone(Gone::ThreadDied))
+        .unwrap_or(StopOutcome::Gone(Gone::ThreadDied))
 }
 
 #[derive(Debug)]
@@ -658,7 +663,7 @@ struct Watch<T> {
 }
 
 /// One answer from the thread's state, as a future that needs no runtime or by blocking:
-/// what [`FinalSync`] and [`Ready`] share. `settle` blocks until the answer, by `deadline`.
+/// what [`StopFuture`] and [`Ready`] share. `settle` blocks until the answer, by `deadline`.
 #[derive(Debug)]
 struct Watched<T> {
     shared: Arc<Shared>,
@@ -736,13 +741,13 @@ impl<T: Copy + Send + 'static> Watched<T> {
     }
 }
 
-/// The outcome of [`Replicator::stop`]: a future that needs no runtime, or [`FinalSync::wait`]
+/// The outcome of [`Replicator::stop`]: a future that needs no runtime, or [`StopFuture::wait`]
 /// to block for it.
 #[derive(Debug)]
 #[must_use = "a stop's outcome says whether everything committed reached the replica"]
-pub struct FinalSync(Watched<Stopped>);
+pub struct StopFuture(Watched<StopOutcome>);
 
-impl FinalSync {
+impl StopFuture {
     fn new(shared: &Arc<Shared>, deadline: Timestamp) -> Self {
         Self(Watched::new(
             shared,
@@ -752,7 +757,7 @@ impl FinalSync {
         ))
     }
 
-    fn ready(shared: &Arc<Shared>, outcome: Stopped) -> Self {
+    fn ready(shared: &Arc<Shared>, outcome: StopOutcome) -> Self {
         Self(
             Watched::new(shared, shared.clock.now(), settle_stop, "lsr-final-sync")
                 .answered(outcome),
@@ -761,15 +766,15 @@ impl FinalSync {
 
     /// Blocks until the stop ends, or until its deadline passes with the thread still inside
     /// a request.
-    pub fn wait(self) -> Stopped {
+    pub fn wait(self) -> StopOutcome {
         self.0.wait()
     }
 }
 
-impl Future for FinalSync {
-    type Output = Stopped;
+impl Future for StopFuture {
+    type Output = StopOutcome;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Stopped> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StopOutcome> {
         self.0.poll(cx)
     }
 }
@@ -778,19 +783,19 @@ impl Future for FinalSync {
 /// block for it, which is [`Replicator::wait_booted`].
 #[derive(Debug)]
 #[must_use = "the outcome says whether the replicator is ready, and why not"]
-pub struct Ready(Watched<Booted>);
+pub struct Ready(Watched<Readiness>);
 
 impl Ready {
     /// Blocks until the replicator is ready or cannot be, or the wait runs out.
-    pub fn wait(self) -> Booted {
+    pub fn wait(self) -> Readiness {
         self.0.wait()
     }
 }
 
 impl Future for Ready {
-    type Output = Booted;
+    type Output = Readiness;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Booted> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Readiness> {
         self.0.poll(cx)
     }
 }
@@ -841,12 +846,12 @@ mod tests {
         assert_eq!(forked.health().phase, Phase::Gone(Gone::Forked));
         assert_eq!(
             forked.wait_booted(Duration::from_secs(60)),
-            Booted::Gone(Gone::Forked)
+            Readiness::Gone(Gone::Forked)
         );
         assert_eq!(forked.wait_until(Duration::from_secs(60), |_| true), None);
         assert_eq!(
             forked.stop(Duration::from_secs(60)).wait(),
-            Stopped::Gone(Gone::Forked)
+            StopOutcome::Gone(Gone::Forked)
         );
     }
 
@@ -855,7 +860,7 @@ mod tests {
     #[test]
     fn a_stop_is_cut_off_only_by_a_tick_from_before_its_deadline() {
         let deadline = at(1_000);
-        let cut = Some(Stopped::DeadlineReached {
+        let cut = Some(StopOutcome::DeadlineReached {
             unsynced_wal_bytes: 7,
             staged_not_uploaded: 2,
         });

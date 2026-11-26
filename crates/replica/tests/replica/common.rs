@@ -20,8 +20,8 @@ use lsr_core::{
 };
 use lsr_ltx::TxidRange;
 use lsr_replica::{
-    Booted, Config, DynStore, FakeClockHandle, Health, Phase, Replicator, RestoreTarget, Runtime,
-    Stopped, Task, Timestamp, restore,
+    Config, DynStore, FakeClockHandle, Health, Phase, Readiness, Replicator, RestoreTarget,
+    Runtime, StopOutcome, Task, Timestamp, restore,
 };
 
 use crate::waiting;
@@ -149,7 +149,7 @@ pub fn wait(replicator: &Replicator, done: impl Fn(&Health) -> bool) -> Health {
 
 /// [`Replicator::wait_booted`], failing the test instead of hanging if the first boot never
 /// ends (its deadline is on the replicator's clock).
-pub fn booted(replicator: &Replicator) -> Booted {
+pub fn booted(replicator: &Replicator) -> Readiness {
     wait(replicator, |health| {
         health.phase != Phase::Booting || health.task(Task::Sync).is_some()
     });
@@ -167,7 +167,7 @@ const STOP_STEP: Duration = Duration::from_secs(1);
 /// thread's park to have looked at the clock it set, so a stop that needs no wait leaves the
 /// clock where it was. Fails the test after [`LOOKS`] steps. The clock must be the
 /// replicator's own: a park never reads another clock's reading.
-pub fn stopped(replicator: &Replicator, clock: &FakeClockHandle) -> Stopped {
+pub fn stopped(replicator: &Replicator, clock: &FakeClockHandle) -> StopOutcome {
     let stop = replicator.stop(PATIENCE);
     let gone = |health: &Health| matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_));
     for _ in 0..LOOKS {
@@ -183,7 +183,7 @@ pub fn stopped(replicator: &Replicator, clock: &FakeClockHandle) -> Stopped {
 /// `Replicator::start`, never `fake()`), failing the test instead of hanging if the thread
 /// never stops. Its waits end on their own; a replicator on a fake clock goes through
 /// [`stopped`], which moves that clock.
-pub fn stopped_on_system_clock(replicator: &Replicator) -> Stopped {
+pub fn stopped_on_system_clock(replicator: &Replicator) -> StopOutcome {
     let stop = replicator.stop(PATIENCE);
     wait(replicator, |health| {
         matches!(health.phase, Phase::Stopped(_) | Phase::Gone(_))

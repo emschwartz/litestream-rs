@@ -16,7 +16,7 @@ use std::time::Duration;
 use lsr_core::ObjectStore;
 use lsr_history::{AheadMode, Counts, Judge, Log, chain};
 use lsr_replica::{
-    Config, DynStore, FakeClockHandle, Health, Phase, Replicator, Runtime, Stopped, Timestamp,
+    Config, DynStore, FakeClockHandle, Health, Phase, Replicator, Runtime, StopOutcome, Timestamp,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -172,7 +172,10 @@ where
             matches!(h.phase, Phase::Stopped(_) | Phase::Gone(_))
         });
         let stopped = stop.wait();
-        assert!(matches!(stopped, Stopped::Drained { .. }), "{stopped:?}");
+        assert!(
+            matches!(stopped, StopOutcome::Drained { .. }),
+            "{stopped:?}"
+        );
         self.judged(true, Some(0));
     }
 
