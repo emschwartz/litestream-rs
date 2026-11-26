@@ -286,7 +286,7 @@ The simulator can inject exactly these: `Op` (commit, spill, vacuum, shrink, oth
 
 ## 3. The behaviour table
 
-Responses are one of: **continue** (no cost), **snapshot** (the next file is every page of the database), **retry** (the failing task waits and tries again; the wait doubles from 1 s to a cap of 5 minutes, `core/src/fault.rs`), **degraded** (a retry that is also reported as a persistent failure in `Health.degraded`, `/healthz` and `lsr_degraded`), **stop** (the engine does no further I/O until restarted; `/healthz` answers 503), **refuse** (a command or a start fails).
+Responses are one of: **continue** (no cost), **snapshot** (the next file is every page of the database), **retry** (the failing task waits and tries again; the wait runs from when the failed call returned and doubles from 1 s to a cap of 5 minutes, `core/src/fault.rs`), **degraded** (a retry that is also reported as a persistent failure in `Health.degraded`, `/healthz` and `lsr_degraded`), **stop** (the engine does no further I/O until restarted; `/healthz` answers 503), **refuse** (a command or a start fails).
 
 Five tasks keep separate retry waits and degraded states: sync, checkpoint, upload, prune, maintenance (`Task` in `core/src/actor/state.rs`). They are not independent. A boot fault holds all five. A checkpoint never runs without a sync that reached the committed end in the same tick. Maintenance runs only while uploads are idle, so an upload backlog or an upload fault holds merges, retention and the read-back (MAINT-13). A level-9 snapshot waits on the sync task.
 

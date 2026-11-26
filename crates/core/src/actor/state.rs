@@ -248,6 +248,11 @@ impl Tasks {
         self.get(task).ready(now)
     }
 
+    /// Each task's wait, in [`Task::ALL`]'s order: what a tick leaves changed, it set.
+    pub(super) fn untils(&self) -> [Option<Timestamp>; 5] {
+        Task::ALL.map(|task| self.get(task).until())
+    }
+
     /// Moves `from`'s retry memory to `to` and leaves `from` as a task that never failed:
     /// boot attempts change task when a local course begins or ends (`super::local`), and
     /// their run of failures goes with them.
