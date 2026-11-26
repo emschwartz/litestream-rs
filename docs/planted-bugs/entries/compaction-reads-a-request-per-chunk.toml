@@ -1,0 +1,6 @@
+# A compaction reads each input from the replica a request per chunk instead of through one
+# stream: a 16 GiB input is 16,000 GETs where Go's compactor sends one.
+name = "compaction-reads-a-request-per-chunk"
+fix = "claude/compact-stream"
+package = "lsr-core"
+tests = ["each_replica_input_is_one_stream_however_many_windows_it_spans"]
