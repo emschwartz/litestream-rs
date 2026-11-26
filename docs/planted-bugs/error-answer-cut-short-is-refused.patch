@@ -1,0 +1,39 @@
+diff --git a/crates/store-s3/src/classify.rs b/crates/store-s3/src/classify.rs
+index 0bdebcaa4..366c3851c 100644
+--- a/crates/store-s3/src/classify.rs
++++ b/crates/store-s3/src/classify.rs
+@@ -22,7 +22,7 @@
+ //! | 404 on a keyed request with `NoSuchKey` or no code | `NotFound` |
+ //! | other 404, 501, 3xx, other 4xx, `InvalidDigest`, `InvalidRange`, `NoSuchUpload` | `Refused` |
+ //! | 400 `BadDigest` or `XAmzContentSHA256Mismatch`; 400 `InvalidPart` (a part's ETag is not the one the store holds) | `Corrupt` |
+-//! | 408, 5xx, a body cut short (any status), a timeout, reset, refused connection or other I/O | `Transient` |
++//! | 408, 5xx, a short 2xx body, a timeout, reset, refused connection or other I/O | `Transient` |
+ //!
+ //! A DeleteObjects result lists a code per key it could not delete; those
+ //! follow the same rule ([`classify_delete_failures`]), so object lock
+@@ -208,17 +208,16 @@ pub fn classify(
+     part: Option<PartNumber>,
+     r: &HttpResponse,
+ ) -> Result<(), StoreError> {
+-    // A body cut short is retried whatever its status: an error's code may be in the part
+-    // that never arrived.
+-    if !r.body_complete() {
+-        return Err(StoreError::Transient {
+-            op,
+-            kind: io::ErrorKind::UnexpectedEof,
+-        });
+-    }
+     let status = r.status();
+     if (200..300).contains(&status) {
+-        return Ok(());
++        return if r.body_complete() {
++            Ok(())
++        } else {
++            Err(StoreError::Transient {
++                op,
++                kind: io::ErrorKind::UnexpectedEof,
++            })
++        };
+     }
+     let code = S3Code::from_body(r.body());
+     if code == Some(S3Code::AccessDenied) && signing_time_outside_window(r.body()) {
