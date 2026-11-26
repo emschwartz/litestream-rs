@@ -8,5 +8,5 @@ package = "lsr-core"
 tests = [
     "reread::a_staged_file_changed_behind_the_send_is_lost_and_nothing_is_published",
     "reread::a_second_read_that_differs_inside_a_write_ends_the_send_as_a_lost_staged_file",
-    "reread::a_second_read_is_one_bounded_read_that_must_tally",
+    "reread::a_second_read_is_one_bounded_read_that_must_be_what_was_seen",
 ]

@@ -165,6 +165,34 @@ pub const UNREQUIRED: &[(&str, &str)] = &[
         "a refused second read in a tick where a fault of the replica's fired too, so the report may be either's; never drawn together in a short history",
     ),
     (
+        "parts.landed",
+        "a part of a multipart upload answered: only the S3 store sends parts, and the fixed seed set runs on MemStore (tests/sim/parts.rs asserts this and the six below, for its seeds or in a scenario)",
+    ),
+    (
+        "parts.landed.out_of_order",
+        "a part answered while one started before it was still started",
+    ),
+    (
+        "parts.landed.faulted",
+        "a part whose request met a provider fault while others were started",
+    ),
+    (
+        "parts.full",
+        "an upload asked about its parts with every lane taken and a whole part waiting",
+    ),
+    (
+        "parts.tick_waited",
+        "a tick that ended with the send waiting for a part and nothing due at once",
+    ),
+    (
+        "parts.at_exit.landed",
+        "a part started by a process that ended, whose request reached the bucket all the same",
+    ),
+    (
+        "parts.at_exit.lost",
+        "a part started by a process that ended, whose request was never sent",
+    ),
+    (
         "staging_fs.undone_entries",
         "on the directory store: a power loss that undid a directory entry no sync covered",
     ),

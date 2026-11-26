@@ -700,16 +700,29 @@ pub async fn sync_step<R: Read + Seek, P: PageSource, L: ObjectStore>(
     cfg: &SyncConfig,
     now: Timestamp,
 ) -> Result<Synced, StepFailed> {
-    sync_step_in(step, wal, committed, db, pages, &Staging(staging), cfg, now).await
+    match run(
+        &step,
+        wal,
+        committed,
+        db,
+        pages,
+        &Staging(staging),
+        cfg,
+        now,
+    )
+    .await
+    {
+        Ok(synced) => Ok(synced),
+        Err(fault) => Err(StepFailed { fault, retry: step }),
+    }
 }
 
-/// [`sync_step`] with each store as its role.
 #[expect(
     clippy::too_many_arguments,
     reason = "the plan fixes this signature; each argument is a distinct source of the step"
 )]
-pub(crate) async fn sync_step_in<R: Read + Seek, P: PageSource, L: Role>(
-    step: Step,
+async fn run<R: Read + Seek, P: PageSource, L: Role>(
+    step: &Step,
     wal: &mut WalReader<R>,
     committed: CommittedRead,
     db: &mut P,
@@ -717,24 +730,7 @@ pub(crate) async fn sync_step_in<R: Read + Seek, P: PageSource, L: Role>(
     staging: &L,
     cfg: &SyncConfig,
     now: Timestamp,
-) -> Result<Synced, StepFailed> {
-    let source = Source { db, pages };
-    match run(&step, wal, committed, source, staging, cfg, now).await {
-        Ok(synced) => Ok(synced),
-        Err(fault) => Err(StepFailed { fault, retry: step }),
-    }
-}
-
-async fn run<R: Read + Seek, P: PageSource, L: Role>(
-    step: &Step,
-    wal: &mut WalReader<R>,
-    committed: CommittedRead,
-    source: Source<'_, P>,
-    staging: &L,
-    cfg: &SyncConfig,
-    now: Timestamp,
 ) -> Result<Synced, Fault> {
-    let Source { db, pages } = source;
     let epoch = committed.epoch();
     let start = Start::of(step, wal)?;
     forget(pages, step, wal.header().page_size());
@@ -801,12 +797,6 @@ async fn run<R: Read + Seek, P: PageSource, L: Role>(
         txs: scanned.txs,
         changes,
     })
-}
-
-/// The database file and its page checksum table, as one argument.
-struct Source<'a, P> {
-    db: &'a mut P,
-    pages: &'a mut PageChecksumTable,
 }
 
 /// How far a staged position can be trusted: not at all under a reset

@@ -61,7 +61,13 @@ pub fn open_store(replica: &ReplicaPlan) -> Result<Arc<dyn DynStore>, OpenStoreE
 pub fn open_store_noting(replica: &ReplicaPlan) -> Result<Opened, OpenStoreError> {
     match replica {
         ReplicaPlan::File(dir) => Ok(Opened {
-            store: Arc::new(FsStore::new(dir)),
+            store: Arc::new(
+                if std::thread::available_parallelism().is_ok_and(|n| n.get() > 1) {
+                    FsStore::new(dir).with_write_behind()
+                } else {
+                    FsStore::new(dir)
+                },
+            ),
             deferred: None,
         }),
         ReplicaPlan::S3 {

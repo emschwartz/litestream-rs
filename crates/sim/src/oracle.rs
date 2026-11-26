@@ -342,6 +342,21 @@ pub enum Violation {
         /// The fault the engine reported.
         fault: String,
     },
+    /// A part was sent for a multipart upload that was already completed or aborted. S3 may
+    /// keep a part that is on its way while its upload is aborted, as storage nothing names
+    /// any more (`crate::remote`).
+    #[error("{parts} part(s) were sent for an upload that was already completed or aborted")]
+    PartAfterTheEnd {
+        /// How many.
+        parts: u64,
+    },
+    /// A boot's sweep of abandoned multipart uploads reported success and left some open:
+    /// their parts are stored, and billed, until a bucket rule removes them.
+    #[error("a sweep of abandoned uploads succeeded and left {open} open")]
+    UploadsLeftBySweep {
+        /// How many multipart uploads the bucket still holds open.
+        open: u64,
+    },
     /// A compaction output left a hole in its level with a file of the level below inside
     /// it: the compaction jumped over that file, and Go's compaction of the level above
     /// refuses to read across the hole (`crate::oracle::levels`).

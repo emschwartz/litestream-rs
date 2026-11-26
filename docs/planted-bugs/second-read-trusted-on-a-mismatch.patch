@@ -1,13 +1,13 @@
 diff --git a/crates/core/src/upload.rs b/crates/core/src/upload.rs
-index 11a67e0bb..1c6d21600 100644
+index 521227ec1..f6daf1352 100644
 --- a/crates/core/src/upload.rs
 +++ b/crates/core/src/upload.rs
-@@ -993,7 +993,7 @@ impl<'a, L: Role> Staged<'a, L> {
-             .map_err(Unread::Failed)?;
-         let mut tally = ByteTally::new();
-         tally.add(&bytes);
--        if tally == *was {
-+        if tally.size() == was.size() {
-             Ok(bytes)
-         } else {
-             Err(Unread::Changed)
+@@ -1085,7 +1085,7 @@ impl Again for Checked {
+                     status: 0,
+                 }),
+                 Some(len) => match self.source.read(offset, len).await {
+-                    Ok(bytes) if Seen::of(&bytes) == *was => return Ok(bytes),
++                    Ok(bytes) if Seen::of(&bytes).len() == was.len() => return Ok(bytes),
+                     Ok(_) => Unread::Changed,
+                     Err(err) => Unread::Failed(err),
+                 },

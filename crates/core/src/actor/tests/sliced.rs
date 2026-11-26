@@ -127,6 +127,99 @@ fn a_file_larger_than_the_ticks_bytes_goes_up_a_slice_a_tick() {
     assert_eq!(restored(&rig), 2);
 }
 
+/// The upload has a whole part waiting for one in flight. The tick that finds it so sends
+/// nothing and takes no slice's turn: it does the engine's other work, and with none left
+/// it is idle and asks for no tick at once (the part that ends wakes the task). The engine
+/// says it waits for parts.
+/// When the upload has room the file goes on from where it stopped.
+#[test]
+fn a_send_whose_upload_waits_for_its_parts_is_no_slice_and_no_work_to_tick_for() {
+    let (mut rig, mut actor) = caught_up_with(slicing(SLICE));
+    in_flight(&mut rig, &mut actor, 2, T0 + 1);
+    assert!(!actor.awaits_parts());
+    rig.remote.flights.lock().unwrap().extend([Flight::Full; 3]);
+    for nth in 0..3 {
+        let tick = rig.tick(&mut actor, T0 + 1);
+        // Maintenance has the first of them, with the upload not in its way.
+        match event(&tick) {
+            Some(Event::Maintained { .. }) => assert_eq!(nth, 0, "{tick:?}"),
+            Some(Event::Idle) => assert_ne!(next_of(&tick), Some(Next::Now), "{tick:?}"),
+            _ => panic!("{tick:?}"),
+        }
+        assert!(actor.awaits_parts());
+        assert_eq!(sent(&actor), Some(2 * SLICE));
+        assert_eq!(newest_replica_file(&rig), Some(1));
+    }
+    let tick = rig.tick(&mut actor, T0 + 1);
+    assert_eq!(event(&tick), Some(&Event::Sending { bytes: 3 * SLICE }));
+    assert_eq!(next_of(&tick), Some(Next::Now));
+    assert!(!actor.awaits_parts());
+}
+
+/// A send that waits for its parts holds nothing else up: a commit made meanwhile is staged
+/// by the very tick that could not send, however many slices the file had left of its share.
+#[test]
+fn a_commit_is_staged_by_the_tick_whose_send_waits_for_its_parts() {
+    let (mut rig, mut actor) = caught_up_with(slicing(SLICE));
+    in_flight(&mut rig, &mut actor, 2, T0 + 1);
+    rig.remote.flights.lock().unwrap().extend([Flight::Full; 2]);
+    rig.commit(3);
+    let tick = rig.tick(&mut actor, T0 + 1);
+    assert_eq!(event(&tick), Some(&Event::Synced { files: 1 }), "{tick:?}");
+    assert!(actor.awaits_parts());
+    assert_eq!(sent(&actor), Some(2 * SLICE));
+    // Still waiting, and the WAL has nothing more: the tick is maintenance's.
+    let tick = rig.tick(&mut actor, T0 + 1);
+    assert!(
+        matches!(event(&tick), Some(Event::Maintained { .. })),
+        "{tick:?}"
+    );
+    assert_eq!(sent(&actor), Some(2 * SLICE));
+    // Room again: both files go up, the one in flight first.
+    let seen = rig.settle(&mut actor, T0 + 1);
+    assert_eq!(actor.replicated(), Txid::new(3), "{seen:?}");
+    assert_eq!(restored(&rig), 3);
+}
+
+/// The file is read to its end with parts still in flight: the ticks that wait for them
+/// publish nothing, and the tick after the last part is answered commits the file.
+#[test]
+fn a_file_read_whole_is_published_by_the_tick_after_its_last_part_is_answered() {
+    let (mut rig, mut actor) = caught_up_with(slicing(1 << 20));
+    commit_big(&rig, 2);
+    assert_eq!(
+        event(&rig.tick(&mut actor, T0 + 1)),
+        Some(&Event::Synced { files: 1 })
+    );
+    let size = staged_size(&rig, 2);
+    // Asked once at the file's end by the tick that read it whole, and once by the next.
+    rig.remote
+        .flights
+        .lock()
+        .unwrap()
+        .extend([Flight::Room, Flight::Room]);
+    let tick = rig.tick(&mut actor, T0 + 1);
+    assert_eq!(
+        event(&tick),
+        Some(&Event::Sending { bytes: size }),
+        "{tick:?}"
+    );
+    assert!(actor.awaits_parts());
+    let tick = rig.tick(&mut actor, T0 + 1);
+    assert!(
+        matches!(event(&tick), Some(Event::Maintained { .. })),
+        "{tick:?}"
+    );
+    assert_eq!(newest_replica_file(&rig), Some(1));
+    let tick = rig.tick(&mut actor, T0 + 1);
+    assert!(
+        matches!(event(&tick), Some(Event::Uploaded(Did::Put(info))) if info.size == size),
+        "{tick:?}"
+    );
+    assert!(!actor.awaits_parts());
+    assert_eq!(restored(&rig), 2);
+}
+
 /// A file in flight goes first, and the WAL step has the tick after each `FAIR_SHARE` slices:
 /// an application that commits before every tick has its commits staged within that many
 /// slices, and the file takes the slices it takes with no commits at all.

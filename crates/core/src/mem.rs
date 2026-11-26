@@ -12,7 +12,8 @@ use lsr_ltx::{Timestamp, TxidRange};
 
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, ListedTime};
 use crate::store::{
-    Listing, ObjectStore, PageLimit, ReadLen, StoreError, StoreOp, Upload, WriteMode, build_listing,
+    BoxFuture, Listing, ObjectStore, Opened, PageLimit, ReadLen, StoreError, StoreOp, Upload,
+    WriteMode, build_listing,
 };
 
 #[derive(Debug)]
@@ -265,6 +266,21 @@ impl MemStore {
     }
 }
 
+/// An object of a [`MemStore`] opened ([`ObjectStore::open`]): the store and the key.
+#[derive(Debug)]
+struct MemOpened {
+    store: MemStore,
+    key: FileKey,
+}
+
+impl Opened for MemOpened {
+    fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(std::future::ready(
+            self.store.read_now(&self.key, offset, len),
+        ))
+    }
+}
+
 impl ObjectStore for MemStore {
     type Upload = MemUpload;
 
@@ -289,6 +305,25 @@ impl ObjectStore for MemStore {
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send {
         std::future::ready(self.read_now(key, offset, len))
+    }
+
+    /// Nothing is kept open here: what is opened reads by the key each time, as
+    /// [`Self::read`] does, and owns its handle on the store, so a caller can keep it
+    /// between ticks and read it on another thread.
+    fn open(
+        &self,
+        key: &FileKey,
+    ) -> impl Future<Output = Result<Option<Box<dyn Opened>>, StoreError>> + Send {
+        let held = if self.lock().objects.contains_key(key) {
+            let held: Box<dyn Opened> = Box::new(MemOpened {
+                store: self.clone(),
+                key: *key,
+            });
+            Ok(Some(held))
+        } else {
+            Err(StoreError::NotFound { key: *key })
+        };
+        std::future::ready(held)
     }
 
     fn created_at(

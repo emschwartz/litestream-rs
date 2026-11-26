@@ -94,7 +94,7 @@
 use std::io;
 use std::marker::PhantomData;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_ltx::{Decoder, Txid, TxidRange, Verified};
 
@@ -105,8 +105,8 @@ use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{verified, verifies};
 use crate::publish::{self, Open, Unpublished, Writer};
 use crate::store::{
-    BoxFuture, ListAt, ObjectStore, Opened, PageLimit, ReadLen, Reread, StoreError, StoreOp,
-    WriteMode,
+    Again, BoxFuture, Flight, ListAt, ObjectStore, Opened, PageLimit, ReadLen, Reread, Rest, Seen,
+    StoreError, StoreOp, WriteMode,
 };
 use crate::witness::{ByteTally, Witnessed, Witnesses};
 
@@ -262,25 +262,8 @@ pub async fn upload_next<L: ObjectStore, S: ObjectStore>(
     newest_staged: Option<Txid>,
     witnesses: &Witnesses,
 ) -> Result<Uploaded, UploadFailed> {
-    upload_next_in(
-        state,
-        &Staging(staging),
-        &Replica(remote),
-        newest_staged,
-        (witnesses, WriteMode::New),
-    )
-    .await
-}
-
-/// [`upload_next`] with each store as its role, and level-0 writes as `mode` says: the
-/// steps of [`upload_step`], a slice each, until one ends.
-pub(crate) async fn upload_next_in<L: Role, S: Role>(
-    state: UploadState,
-    staging: &L,
-    remote: &S,
-    newest_staged: Option<Txid>,
-    with: (&Witnesses, WriteMode),
-) -> Result<Uploaded, UploadFailed> {
+    let (staging, remote) = (&Staging(staging), &Replica(remote));
+    let with = (witnesses, WriteMode::New);
     let mut in_flight = InFlight::default();
     loop {
         let mut budget = SLICE.get();
@@ -701,6 +684,14 @@ pub(crate) struct Sending {
     held: Vec<u8>,
     /// Begun as soon as the header is known.
     open: Option<Open>,
+    /// Second reads that gave nothing, noted by the readers the upload's parts hold.
+    notes: Notes,
+    /// The file's last byte was read and the whole verified: only the upload's parts and
+    /// its commit are left.
+    ended: bool,
+    /// The last step stopped for the upload's parts: nothing to do on this send until one
+    /// of them ends.
+    waits: bool,
 }
 
 /// The upload task's file part-way sent, if any: at most one, kept between steps.
@@ -716,6 +707,12 @@ impl InFlight {
     /// How many bytes of the file in flight were read and handed to the replica.
     pub(crate) fn sent(&self) -> Option<u64> {
         self.0.as_ref().map(|sending| sending.offset)
+    }
+
+    /// Whether the send in flight stopped for parts its upload has started: a tick has
+    /// nothing to do on it until one ends (the upload wakes the task that asked).
+    pub(crate) fn waits(&self) -> bool {
+        self.0.as_ref().is_some_and(|sending| sending.waits)
     }
 
     /// Ends the send in flight and aborts the upload it had begun, so that any staged file
@@ -772,12 +769,20 @@ async fn put_step<L: Role, S: Role>(
     (in_flight, budget): (&mut InFlight, &mut u64),
 ) -> Result<Option<Uploaded>, UploadFailed> {
     let token = sending.token;
-    let outcome = match sending.advance(staging, remote, budget).await {
-        Ok(Reached::Budget) => {
+    let reached = match sending.advance(staging, remote, budget).await {
+        Ok(Reached::End) => sending
+            .landed::<L, S>()
+            .await
+            .map(|landed| if landed { Reached::End } else { Reached::Full }),
+        reached => reached,
+    };
+    let outcome = match reached {
+        Ok(stopped @ (Reached::Budget | Reached::Full)) => {
+            sending.waits = matches!(stopped, Reached::Full);
             in_flight.0 = Some(sending);
             return Ok(None);
         }
-        Ok(Reached::End) => sending.commit(staging, remote).await,
+        Ok(Reached::End) => sending.commit::<L, S>(remote).await,
         Err(err) => {
             abort(sending.open.take()).await;
             Err(err)
@@ -897,60 +902,34 @@ impl Unread {
     }
 }
 
-/// The most second reads that gave nothing one step remembers: a store fails its upload at
-/// the first, and reads at most a batch of parts at once, so more than this is a store that
-/// went on asking.
+/// The most second reads that gave nothing one send remembers: a store fails its upload at
+/// the first it collects, and only the parts it has in flight read at once, so more than
+/// this is a store that went on asking.
 const UNREAD_KEPT: usize = 64;
 
-/// The staged file being sent, for the replica's store to read again ([`Reread`]): the
-/// staging store's own read of the same key, answered only when the bytes tally as they did
-/// when the send first read and verified them. It is made for one step and remembers the
-/// reads that gave nothing, so that when the store fails the upload with one of their
-/// errors the step reports a staged file that changed, or a staging read that failed, as
-/// that and not as the replica's fault.
-struct Staged<'a, L> {
-    staging: &'a L,
-    key: FileKey,
-    unread: Mutex<Vec<Unread>>,
-}
+/// The second reads of the file being sent that gave nothing, kept for the whole send. A
+/// part is read again on the thread that sends it, ticks after the slice that handed it
+/// over, so when the store fails the upload with one of these errors, whichever call
+/// reports it, the step says a staged file that changed, or a staging read that failed, and
+/// not the replica's fault.
+#[derive(Clone, Debug, Default)]
+struct Notes(Arc<Mutex<Vec<Unread>>>);
 
-impl<'a, L: Role> Staged<'a, L> {
-    const fn of(staging: &'a L, key: FileKey) -> Self {
-        Self {
-            staging,
-            key,
-            unread: Mutex::new(Vec::new()),
+impl Notes {
+    /// Remembers `unread`; the error the store that asked is answered with.
+    fn note(&self, unread: Unread) -> StoreError {
+        let err = unread.error();
+        let mut kept = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() < UNREAD_KEPT {
+            kept.push(unread);
         }
+        err
     }
 
-    async fn read_checked(&self, offset: u64, was: &ByteTally) -> Result<Vec<u8>, Unread> {
-        // A tally of more than one read's bytes (or of none) is not one this source can
-        // check in a bounded read: the store asked for what the contract does not give.
-        let Some(len) = u32::try_from(was.size()).ok().and_then(ReadLen::new) else {
-            return Err(Unread::Failed(StoreError::Refused {
-                op: StoreOp::Read,
-                status: 0,
-            }));
-        };
-        let bytes = self
-            .staging
-            .read(&self.key, offset, len)
-            .await
-            .map_err(Unread::Failed)?;
-        let mut tally = ByteTally::new();
-        tally.add(&bytes);
-        if tally == *was {
-            Ok(bytes)
-        } else {
-            Err(Unread::Changed)
-        }
-    }
-
-    /// The fault of a write or commit that failed with `err`: the staged file's when `err`
-    /// is what a second read of it answered the store with, else the replica's. The store
-    /// reports the first failure in part order, which need not be a second read's.
-    fn fault<S: Role>(&self, err: &StoreError) -> Fault {
-        let unread = self.unread.lock().unwrap_or_else(PoisonError::into_inner);
+    /// The fault of a write, a part or a commit that failed with `err`: the staged file's
+    /// when `err` is what a second read of it answered the store with, else the replica's.
+    fn fault<L: Role, S: Role>(&self, err: &StoreError) -> Fault {
+        let unread = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         match unread.iter().find(|unread| unread.error() == *err) {
             Some(Unread::Changed) => Fault::StagedLost,
             Some(Unread::Failed(read)) => L::fault(read),
@@ -960,28 +939,72 @@ impl<'a, L: Role> Staged<'a, L> {
 
     /// Whether `err` is what a second read answered the store with.
     fn gave(&self, err: &StoreError) -> bool {
-        let unread = self.unread.lock().unwrap_or_else(PoisonError::into_inner);
+        let unread = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         unread.iter().any(|unread| unread.error() == *err)
     }
 }
 
+/// The staged file being sent, for the replica's store to open readers of ([`Reread`]). It
+/// is made for one step; what it opens is the staging store's own held-open file
+/// ([`ObjectStore::open`]), which borrows nothing and goes with the part it is for.
+struct Staged<'a, L> {
+    staging: &'a L,
+    key: FileKey,
+    notes: &'a Notes,
+}
+
 impl<L: Role> Reread for Staged<'_, L> {
+    fn open(&self) -> BoxFuture<'_, Result<Box<dyn Again>, StoreError>> {
+        Box::pin(async move {
+            let unread = match self.staging.open(&self.key).await {
+                Ok(Some(source)) => {
+                    let reader: Box<dyn Again> = Box::new(Checked {
+                        source,
+                        notes: self.notes.clone(),
+                    });
+                    return Ok(reader);
+                }
+                // The send is written from a source only when the store held the file open
+                // for its first read: a store with nothing to hold now is not that store.
+                Ok(None) => Unread::Failed(StoreError::Refused {
+                    op: StoreOp::Read,
+                    status: 0,
+                }),
+                Err(err) => Unread::Failed(err),
+            };
+            Err(self.notes.note(unread))
+        })
+    }
+}
+
+/// One reader of the staged file being sent: the held-open file, answered only when the
+/// bytes are the ones the send first read and verified ([`Seen`]).
+struct Checked {
+    source: Box<dyn Opened>,
+    notes: Notes,
+}
+
+impl Again for Checked {
     fn read<'a>(
-        &'a self,
+        &'a mut self,
         offset: u64,
-        was: &'a ByteTally,
+        was: &'a Seen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
-            let unread = match self.read_checked(offset, was).await {
-                Ok(bytes) => return Ok(bytes),
-                Err(unread) => unread,
+            // More than one read's bytes (or none) is not what this source can check in a
+            // bounded read: the store asked for what the contract does not give.
+            let unread = match u32::try_from(was.len()).ok().and_then(ReadLen::new) {
+                None => Unread::Failed(StoreError::Refused {
+                    op: StoreOp::Read,
+                    status: 0,
+                }),
+                Some(len) => match self.source.read(offset, len).await {
+                    Ok(bytes) if Seen::of(&bytes) == *was => return Ok(bytes),
+                    Ok(_) => Unread::Changed,
+                    Err(err) => Unread::Failed(err),
+                },
             };
-            let err = unread.error();
-            let mut kept = self.unread.lock().unwrap_or_else(PoisonError::into_inner);
-            if kept.len() < UNREAD_KEPT {
-                kept.push(unread);
-            }
-            Err(err)
+            Err(self.notes.note(unread))
         })
     }
 }
@@ -1003,7 +1026,10 @@ fn feed_all(decoder: &mut Decoder, chunk: &[u8]) -> Result<bool, Fault> {
 enum Reached {
     /// The budget ran out before the staged file ended.
     Budget,
-    /// The staged file ended.
+    /// The upload has a whole part waiting for one in flight to end: reading on would wait
+    /// with it.
+    Full,
+    /// The staged file ended, and verified whole.
     End,
 }
 
@@ -1019,13 +1045,24 @@ impl Sending {
             tally: ByteTally::new(),
             held: Vec::new(),
             open: None,
+            notes: Notes::default(),
+            ended: false,
+            waits: false,
         })
     }
 
     /// Reads the staged file on from where the last slice stopped, in chunks, decodes each
     /// and forwards it to an upload begun as soon as the header is known, until the file
-    /// ends or `budget` bytes were read. The upload counts the bytes it writes; its commit
-    /// checks the store holds them ([`Writer`]).
+    /// ends, `budget` bytes were read, or the upload's parts are in the way
+    /// ([`Flight::Full`]: the step never waits for one). The upload counts the bytes it
+    /// writes; its commit checks the store holds them ([`Writer`]).
+    ///
+    /// The file's end is verified here, on the read that reached it: the decoder's verdict
+    /// on the whole file, and its length and trailer checksum against the token. A file
+    /// replaced after it was witnessed is refused then and its upload aborted: one replaced
+    /// before the first slice always, one replaced between two slices when the store reads
+    /// it by range (a file held open is still the file that was opened, and goes up if that
+    /// one is what was witnessed).
     async fn advance<L: Role, S: Role>(
         &mut self,
         staging: &L,
@@ -1033,8 +1070,21 @@ impl Sending {
         budget: &mut u64,
     ) -> Result<Reached, PutError> {
         let key = &self.token.key();
-        let again = Staged::of(staging, *key);
-        while *budget > 0 {
+        let again = Staged {
+            staging,
+            key: *key,
+            notes: &self.notes,
+        };
+        while *budget > 0 && !self.ended {
+            if let Some(open) = self.open.as_mut() {
+                let flight = open
+                    .flight(Rest::More)
+                    .await
+                    .map_err(|err| PutError::Before(self.notes.fault::<L, S>(&err)))?;
+                if flight == Flight::Full {
+                    return Ok(Reached::Full);
+                }
+            }
             // Never past the budget: a tick hands the replica no more than it may.
             let len = u32::try_from((*budget).min(CHUNK.get()))
                 .ok()
@@ -1060,8 +1110,11 @@ impl Sending {
             self.offset = self.offset.saturating_add(read);
             *budget = budget.saturating_sub(read);
             let header = self.decoder.header().copied();
+            // A store that held the file open can open it again for each part; any other
+            // is handed the bytes to keep.
+            let again = self.source.is_some().then_some(&again);
             match (self.open.as_mut(), header) {
-                (Some(open), _) => write_chunk::<L, S>(open, &chunk, &again).await?,
+                (Some(open), _) => write_chunk::<L, S>(open, &chunk, again, &self.notes).await?,
                 (None, Some(header)) => {
                     if header.txids() != key.range() {
                         return Err(PutError::Before(Fault::StagedLost));
@@ -1075,58 +1128,67 @@ impl Sending {
                     let open = self.open.insert(begun.boxed());
                     self.held.extend_from_slice(&chunk);
                     let held = std::mem::take(&mut self.held);
-                    write_chunk::<L, S>(open, &held, &again).await?;
+                    write_chunk::<L, S>(open, &held, again, &self.notes).await?;
                 }
                 (None, None) => self.held.extend_from_slice(&chunk),
             }
             if read < len.get() {
-                return Ok(Reached::End);
+                let decoder = std::mem::replace(&mut self.decoder, Decoder::new());
+                let sound = decoder.finish().is_ok_and(|verified| {
+                    verified.header().txids() == key.range()
+                        && self
+                            .token
+                            .matches(self.tally, verified.trailer().file_checksum())
+                });
+                if !sound {
+                    return Err(PutError::Before(Fault::StagedLost));
+                }
+                self.ended = true;
             }
         }
-        Ok(Reached::Budget)
+        Ok(if self.ended {
+            Reached::End
+        } else {
+            Reached::Budget
+        })
     }
 
-    /// The staged file ended: commits the upload once the decoder has verified the whole
-    /// file and its length and trailer checksum, on the reads that were sent, are the ones
-    /// the token was minted for. A file replaced after it was witnessed is refused here and
-    /// its upload aborted: one replaced before the first slice always, one replaced between
-    /// two slices when the store reads it by range (a file held open is still the file that
-    /// was opened, and goes up if that one is what was witnessed).
+    /// The staged file ended and verified: tells the upload no byte follows, so it starts
+    /// its last part, and says whether every part it started has been answered. The commit
+    /// waits for that across ticks, never inside one.
+    async fn landed<L: Role, S: Role>(&mut self) -> Result<bool, PutError> {
+        let Some(open) = self.open.as_mut() else {
+            return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
+        };
+        let flight = open
+            .flight(Rest::None)
+            .await
+            .map_err(|err| PutError::Before(self.notes.fault::<L, S>(&err)))?;
+        Ok(flight == Flight::Idle)
+    }
+
+    /// Commits the upload of a file that ended, verified, with every part answered. A file
+    /// replaced after it was witnessed is refused here and its upload aborted: one replaced
+    /// before the first slice always, one replaced between two slices when the store reads it
+    /// by range (a file held open is still the file that was opened, and goes up if that one
+    /// is what was witnessed).
     ///
-    /// What the store let go of and has not sent yet is read back from the staged file
-    /// first. A second read that gives nothing fails the commit before anything is
-    /// published, so the state stands and nothing is deleted, whatever the store's error
-    /// would mean coming from the replica.
-    async fn commit<L: Role, S: Role>(
-        self: Box<Self>,
-        staging: &L,
-        remote: &S,
-    ) -> Result<FileInfo, PutError> {
+    /// A second read that gave nothing fails the commit before anything is published, so
+    /// the state stands and nothing is deleted, whatever the store's error would mean
+    /// coming from the replica.
+    async fn commit<L: Role, S: Role>(self: Box<Self>, remote: &S) -> Result<FileInfo, PutError> {
         let Self {
-            token,
-            decoder,
-            tally,
-            open,
-            ..
+            token, open, notes, ..
         } = *self;
         let key = token.key();
-        let sound = decoder.finish().is_ok_and(|verified| {
-            verified.header().txids() == key.range()
-                && token.matches(tally, verified.trailer().file_checksum())
-        });
-        if !sound {
-            abort(open).await;
-            return Err(PutError::Before(Fault::StagedLost));
-        }
         let Some(open) = open else {
             return Err(PutError::Before(BugSite::UploadNeverOpened.hit()));
         };
-        let again = Staged::of(staging, key);
-        match open.commit_from(remote, &again).await {
+        match open.commit(remote).await {
             Ok(published) if published.key() == key => Ok(published.info()),
             Ok(_) => Err(PutError::Commit(Fault::UploadAmbiguous)),
-            Err(unpublished) if again.gave(unpublished.error()) => {
-                Err(PutError::Before(again.fault::<S>(unpublished.error())))
+            Err(unpublished) if notes.gave(unpublished.error()) => {
+                Err(PutError::Before(notes.fault::<L, S>(unpublished.error())))
             }
             Err(Unpublished::Taken(_)) => Err(PutError::Taken),
             Err(Unpublished::Rejected(err, own)) => Err(PutError::Rejected(S::fault(&err), own)),
@@ -1135,16 +1197,19 @@ impl Sending {
     }
 }
 
-/// Hands the upload a chunk it may let go of and read back from the staged file.
+/// Hands the upload a chunk: one it may let go of and read back from the staged file when
+/// `again` is given, else one it keeps.
 async fn write_chunk<L: Role, S: Role>(
     upload: &mut Open,
     chunk: &[u8],
-    again: &Staged<'_, L>,
+    again: Option<&Staged<'_, L>>,
+    notes: &Notes,
 ) -> Result<(), PutError> {
-    upload
-        .write_from(chunk, again)
-        .await
-        .map_err(|err| PutError::Before(again.fault::<S>(&err)))
+    let wrote = match again {
+        Some(again) => upload.write_from(chunk, again).await,
+        None => upload.write(chunk).await,
+    };
+    wrote.map_err(|err| PutError::Before(notes.fault::<L, S>(&err)))
 }
 
 #[cfg(test)]

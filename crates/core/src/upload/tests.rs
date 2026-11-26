@@ -200,6 +200,9 @@ struct Log {
     held_reads: u32,
     /// The read through a held file, counted from one over all of them, that fails.
     fail_held_read: Option<(u32, StoreError)>,
+    /// The read through a held file, counted the same way, that comes back with a byte
+    /// flipped.
+    flip_held_read: Option<u32>,
 }
 
 /// A [MemStore] that counts calls and can fail a commit before it publishes
@@ -236,11 +239,12 @@ impl std::fmt::Debug for ProbeOpened {
 
 impl Opened for ProbeOpened {
     fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
-        let failed = {
+        let (failed, flip) = {
             let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             log.held_reads = log.held_reads.saturating_add(1);
             let nth = log.held_reads;
-            log.fail_held_read.take_if(|(at, _)| *at == nth)
+            let flip = log.flip_held_read.take_if(|at| *at == nth).is_some();
+            (log.fail_held_read.take_if(|(at, _)| *at == nth), flip)
         };
         let from = usize::try_from(offset).unwrap().min(self.bytes.len());
         let to = from
@@ -248,7 +252,14 @@ impl Opened for ProbeOpened {
             .min(self.bytes.len());
         let read = match failed {
             Some((_, err)) => Err(err),
-            None => Ok(self.bytes[from..to].to_vec()),
+            None => {
+                let mut bytes = self.bytes[from..to].to_vec();
+                let middle = bytes.len() / 2;
+                if flip && let Some(byte) = bytes.get_mut(middle) {
+                    *byte ^= 0x40;
+                }
+                Ok(bytes)
+            }
         };
         Box::pin(std::future::ready(read))
     }
@@ -1630,6 +1641,7 @@ fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twic
 }
 
 mod endless;
+mod parts;
 mod reread;
 mod slices;
 
