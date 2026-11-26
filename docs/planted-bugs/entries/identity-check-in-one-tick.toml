@@ -1,0 +1,10 @@
+# The boot's identity check restores the replica's whole state inside one boot tick, so a boot
+# over a new meta directory reads the whole replica (a level-9 snapshot is the whole database)
+# before the tick ends.
+name = "identity-check-in-one-tick"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "vouch::the_identity_check_restores_the_replica_a_slice_a_tick",
+    "vouch::a_replica_that_moves_under_a_sliced_identity_check_stops_the_boot",
+]

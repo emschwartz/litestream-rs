@@ -130,7 +130,10 @@ use crate::fault::{
     Action, Backoff, Clamped, DegradedCause, Fault, Next, OtherWriter, Policy, Responses,
     STALLED_AFTER, SnapshotCause, SnapshotCounts, Stall, StopCause, backoff_wait, policy,
 };
-use crate::identity::{self, Identity};
+use crate::identity::{self, Check, Identity};
+
+/// Where the boot's identity check stands between ticks, and the bytes a tick may read.
+type Checks<'a> = (&'a mut Option<Check>, u64);
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
@@ -248,6 +251,8 @@ pub enum MaintainedEvent {
     /// The read-back after a boot found this file does not verify and deleted
     /// it: the replica's other files still restore its last transaction.
     Repaired(FileKey),
+    /// A slice of the read-back after a boot was read (`docs/decisions/D266.md`).
+    ReadBack,
     /// Nothing is due.
     Waiting {
         /// Why deletions are refused, if they are.
@@ -347,9 +352,10 @@ pub enum Event {
     /// A boot with a brand-new meta directory found replica files through `tip` that nothing
     /// local vouches for: before it decides, it restores the replica's state at `tip` and
     /// compares it with the database, page by page (`crate::identity`), which takes about a
-    /// restore's time. Never a tick's event: the boot hands it to [`Env::notice`] as the check
-    /// starts, in the tick that runs it, and the start is held through it
-    /// (`docs/decisions/D201.md`).
+    /// restore's time. The boot hands it to [`Env::notice`] as the check starts, in the tick
+    /// that begins it, and the start is held through it (`docs/decisions/D201.md`). It is also
+    /// the event of each later tick that reads the restore on, a tick's bytes at a time
+    /// (`docs/decisions/D267.md`); a driver says it once, at the notice.
     CheckingIdentity {
         /// The replica's newest transaction, the state compared.
         tip: Txid,
@@ -1191,6 +1197,7 @@ impl Actor {
                 self.kept.refused_through = Some(through);
                 self.verdict(self.boot_task(), StopCause::OtherWriter, now)
             }
+            BootStep::Checking(tip) => self.ran(Event::CheckingIdentity { tip }, now),
         }
     }
 
@@ -1338,8 +1345,31 @@ impl Actor {
         if !ready {
             return self.ran(Event::Idle, now);
         }
+        // The identity check's restore reads on a tick's bytes at a time, and the boot runs
+        // again once it is whole (`docs/decisions/D267.md`).
+        if let Some(check) = self.engine.identity.take_if(|check| check.going()) {
+            let (tip, began) = (check.tip(), env.clock.now());
+            let budget = self.kept.cfg.upload.bytes_per_tick.get();
+            return match check.step(env.remote, budget).await {
+                Ok(check) => {
+                    self.engine.identity = Some(check);
+                    self.ran(Event::CheckingIdentity { tip }, now)
+                }
+                Err(fault) => {
+                    let took = env.clock.now().saturating_duration_since(began);
+                    self.boot_failed(fault, took, now)
+                }
+            };
+        }
         let tick = self.boot_attempt(env, now).await;
         self.keep_local(env, tick, now).await
+    }
+
+    /// Whether the boot's identity check is restoring the replica's state, across ticks: the
+    /// start is held for it as for the rest of the boot (`docs/decisions/D201.md`).
+    #[must_use]
+    pub fn checking_identity(&self) -> bool {
+        self.engine.identity.as_ref().is_some_and(Check::going)
     }
 
     /// Lists the replica, checks the pending staged files
@@ -1369,6 +1399,10 @@ impl Actor {
         // After the listing: it may have ended a local course, whose attempts wait elsewhere.
         let task = self.boot_task();
         let suspect = &mut self.kept.suspect_staged;
+        let checks = (
+            &mut self.engine.identity,
+            self.kept.cfg.upload.bytes_per_tick.get(),
+        );
         let Judged {
             staged:
                 BootStaged {
@@ -1386,7 +1420,7 @@ impl Actor {
                     page_size,
                     refused_through,
                 },
-        } = match boot_judge(env, listed, suspect, &unsent).await {
+        } = match boot_judge(env, listed, (suspect, checks), &unsent).await {
             Ok(found) => found,
             Err(step) => return self.boot_step(step, took(), now),
         };
@@ -2465,6 +2499,16 @@ impl Actor {
         if !self.maintain_ready(now) {
             return None;
         }
+        if let Some(reading) = self.engine.reading_back.take() {
+            let read = reading.slice(env.remote, self.kept.cfg.upload.bytes_per_tick.get());
+            let tick = self.read_back_unit(env.remote, read.await, now).await;
+            // Sound: the listing the read-back began on is ticks old, so the next one plans.
+            return Some(tick.unwrap_or_else(|| {
+                self.engine.maintain.stale = true;
+                self.maintained(now);
+                self.ran_maintained(MaintainedEvent::ReadBack, 0, now)
+            }));
+        }
         if let Some(job) = self.engine.maintain.snapshot_retry.take() {
             return Some(self.snapshot_job(env, &job, now, 0).await);
         }
@@ -2488,10 +2532,15 @@ impl Actor {
         if let Some(tick) = self.listing_regressed(&inventory, now) {
             return Some(tick);
         }
-        if self.engine.maintain.read_back_owed
-            && let Some(tick) = self.read_back_unit(env.remote, &inventory, now).await
-        {
-            return Some(tick);
+        if self.engine.maintain.read_back_owed {
+            let read = read_back(
+                env.remote,
+                &inventory,
+                self.kept.cfg.upload.bytes_per_tick.get(),
+            );
+            if let Some(tick) = self.read_back_unit(env.remote, read.await, now).await {
+                return Some(tick);
+            }
         }
         let published = self.engine.upload.confirmed();
         // The planner reads the kept restore point from its state: handed over here, where
@@ -2546,19 +2595,25 @@ impl Actor {
             .then(|| self.fault(Task::Upload, Fault::RemoteRegressed, now))
     }
 
-    /// The read-back a boot owes (see `maintain::audit`). `None` when every
-    /// newest file is sound: the same listing then plans the next job.
+    /// The tick a slice of the read-back a boot owes ends (see `maintain::audit`): `None` when
+    /// every newest file is sound, and the listing the slice was read on then plans the next job.
     async fn read_back_unit<R: Role>(
         &mut self,
         remote: &R,
-        inventory: &Inventory,
+        read: Result<ReadBack, Fault>,
         now: Timestamp,
     ) -> Option<Tick> {
-        let (key, covered) = match read_back(remote, inventory).await {
+        let (key, covered) = match read {
             Ok(ReadBack::Sound) => {
                 self.engine.maintain.read_back_owed = false;
                 self.engine.maintain.suspect = None;
                 return None;
+            }
+            Ok(ReadBack::Reading(reading)) => {
+                self.engine.reading_back = Some(reading);
+                self.engine.maintain.passed_over = 0;
+                self.maintained(now);
+                return Some(self.ran_maintained(MaintainedEvent::ReadBack, 0, now));
             }
             Ok(ReadBack::Rotten { key, covered }) => (key, covered),
             Err(fault) => return Some(self.fault(Task::Maintenance, fault, now)),
@@ -3052,7 +3107,7 @@ impl Actor {
             && !self.kept.cfg.maintenance.is_one_off()
             && self.kept.tasks.ready(Task::Maintenance, now)
             && turn
-            && maintain.wants_listing(now)
+            && (maintain.wants_listing(now) || self.engine.reading_back.is_some())
     }
 
     /// Whether prune and maintenance take the next unit ahead of uploads.
@@ -3123,6 +3178,9 @@ enum BootStep {
     /// The replica holds another writer's file through this transaction:
     /// the boot stops with `OtherWriter`.
     Refused(Txid),
+    /// The identity check's restore of the replica's state at this transaction has reads
+    /// left: the next ticks read on, and the boot after them compares.
+    Checking(Txid),
 }
 
 impl From<Fault> for BootStep {
@@ -3482,7 +3540,7 @@ async fn boot_seed<R: Role>(
 async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     env: &mut Env<'_, W, P, C, L, R>,
     listed: Listed,
-    suspect: &mut Option<FileKey>,
+    (suspect, checks): (&mut Option<FileKey>, Checks<'_>),
     unsent: &Unsent<'_>,
 ) -> Result<Judged, BootStep> {
     // The length first: a file that shrinks after it shows in the header or the wal-index read
@@ -3500,6 +3558,7 @@ async fn boot_judge<W: WalSource, P: PageSource, C, L: Role, R: Role>(
         (len, committed),
         (staged.upload.confirmed(), &staged.scanned),
         gate,
+        checks,
     )
     .await?;
     Ok(Judged { staged, booted })
@@ -3525,6 +3584,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     (len, committed): (Option<WalFileLen>, CommittedRead),
     (confirmed, scanned): (Option<Txid>, &Scanned),
     gate: BootGate,
+    (checks, budget): Checks<'_>,
 ) -> Result<Booted, BootStep> {
     let (staging, remote) = (env.staging, env.remote);
     let end = committed.end();
@@ -3568,14 +3628,27 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
     let (refused_through, ahead) = match refused {
         Some(tip) if resized.is_none() && gate.fresh() => match page_size {
             Some(page_size) => {
-                // Said in the tick that lists the replica: a tick of its own to announce it
-                // would list the replica again, and a crash between the two would leave the
-                // check unrun.
-                (env.notice)(&Event::CheckingIdentity { tip });
-                let local = identity::local_against_replica(
-                    env.wal, reader, committed, env.db, remote, tip, page_size,
-                )
-                .await?;
+                let check = match checks.take() {
+                    Some(check) if check.tip() == tip => check,
+                    // The replica's newest moved while this engine, which writes nothing to it
+                    // before it boots, restored it: another writer.
+                    Some(_) => Check::Unrestorable { tip },
+                    None => {
+                        // Said in the tick that lists the replica: a tick of its own to announce
+                        // it would list the replica again, and a crash between the two would
+                        // leave the check unrun.
+                        (env.notice)(&Event::CheckingIdentity { tip });
+                        let read = (committed, page_size);
+                        let wal = reader.as_deref_mut();
+                        Check::begin(wal, read, env.db, remote, (tip, budget)).await?
+                    }
+                };
+                if check.going() {
+                    *checks = Some(check);
+                    return Err(BootStep::Checking(tip));
+                }
+                let read = (committed, page_size);
+                let local = identity::local_against_replica(env.wal, reader, read, env.db, check)?;
                 match local {
                     Identity::Same => (None, None),
                     Identity::Ahead => (None, Some(tip)),

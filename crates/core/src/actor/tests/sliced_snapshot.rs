@@ -280,6 +280,75 @@ fn a_snapshot_leaves_the_wal_step_a_tick_after_each_share_of_slices() {
     actor.engine.sliced = None;
     rig.tick(&mut actor, T0);
 }
+
+/// After a boot the read-back of the newest file of each level reads the snapshot a slice a
+/// tick, never all of it in one: each tick reads at most a tick's bytes and one read past them.
+/// A commit made while it is part-way reaches the replica before it ends.
+#[test]
+fn a_boot_reads_back_a_long_snapshot_a_slice_a_tick() {
+    let (mut rig, mut actor) = before_a_long_snapshot();
+    for _ in 0..1_000 {
+        if newest(&rig, Level::SNAPSHOT).is_some() {
+            break;
+        }
+        rig.tick(&mut actor, T0);
+    }
+    let snapshot = *Rig::files(&rig.remote, Level::SNAPSHOT).last().unwrap();
+    assert!(snapshot.size > 20 * SLICE, "{snapshot:?}");
+    let mut config = cfg();
+    config.upload.bytes_per_tick = NonZeroU64::new(SLICE).unwrap();
+    let mut actor = Actor::new(config);
+    let reads = rig.remote.reads_of(&snapshot.key);
+    let (mut slices, mut committed, mut first) = (0, None, false);
+    for _ in 0..2_000 {
+        let before = rig.remote.read_bytes();
+        let tick = rig.tick(&mut actor, T0 + 1);
+        let read = rig.remote.read_bytes() - before;
+        // The boot's own tick compares the newest staged file with the replica's copy, whole.
+        if !actor.booted() || matches!(event(&tick), Some(Event::Booted { .. })) {
+            continue;
+        }
+        assert!(
+            read <= SLICE + 256 * 1024,
+            "{read} bytes in one tick: {tick:?}"
+        );
+        if !actor.engine.maintain.read_back_owed {
+            break;
+        }
+        if matches!(
+            event(&tick),
+            Some(Event::Maintained {
+                event: MaintainedEvent::ReadBack,
+                ..
+            })
+        ) {
+            slices += 1;
+        }
+        if committed.is_none() && slices == 1 {
+            rig.wal
+                .append_tx(&[(pg(PAGES), vec![0x42; PS.bytes()])], nz(PAGES));
+            committed = actor.staged().map(|txid| txid.get() + 1);
+        }
+        if committed.is_some() && newest(&rig, Level::ZERO) == committed {
+            first = true;
+        }
+    }
+    assert!(
+        !actor.engine.maintain.read_back_owed,
+        "the read-back never ended"
+    );
+    assert_eq!(
+        rig.remote.reads_of(&snapshot.key),
+        reads + 1,
+        "one stream of the snapshot"
+    );
+    assert!(slices >= 2, "{slices} slices");
+    assert!(
+        committed.is_some() && first,
+        "the commit waited for the read-back"
+    );
+}
+
 /// A file of many slices put in flight while the snapshot is part-way: the WAL step has staged
 /// it, and the next tick sends its first slice.
 fn file_in_flight_beside_the_snapshot(rig: &mut Rig, actor: &mut Actor) {
