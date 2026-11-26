@@ -1,0 +1,12 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -906,7 +906,7 @@
+         now: Timestamp,
+         ended: Timestamp,
+     ) -> Tick {
+-        let late = ended.saturating_duration_since(now);
++        let late = Duration::ZERO;
+         let mut moved = [None; 5];
+         for ((task, was), slot) in Task::ALL.into_iter().zip(before).zip(&mut moved) {
+             let retry = self.kept.tasks.get_mut(task);
