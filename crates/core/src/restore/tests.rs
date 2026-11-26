@@ -666,6 +666,22 @@ fn an_instant_past_the_first_page_lists_on_without_reading_a_created_at_twice() 
 }
 
 #[test]
+fn a_gap_only_the_first_pages_show_is_planned_again_over_the_whole_listing() {
+    let store = long_replica(1200, 2500);
+    // The first page of level 0 ends at 1000, and the only file past it in level 1 starts at
+    // 1100: over those pages alone the replica has a hole, which the rest of level 0 fills.
+    put(&store, 1, 1100, 1300, b"junk");
+    let (result, _) = run(
+        &store,
+        RestoreTarget::AsOf(Timestamp::from_unix_millis(1_200_500)),
+    );
+    let restored = result.unwrap();
+    assert_eq!((restored.reached(), restored.files()), (txid(1200), 1200));
+    // Level 0's second page, which reaches past the chain's end.
+    assert_eq!(store.list_calls(), 11);
+}
+
+#[test]
 fn a_hole_before_the_instant_in_a_long_replica_is_still_a_gap() {
     let store = long_replica(5, 2500);
     block_on(store.delete(&[key(0, 3, 3)])).unwrap();
