@@ -128,6 +128,14 @@ macro_rules! pass_through {
                 self.0.read_stream(key, offset)
             }
 
+            async fn hold_stream(
+                &self,
+                key: FileKey,
+                offset: u64,
+            ) -> Result<Option<Box<dyn ReadStream>>, StoreError> {
+                self.0.hold_stream(key, offset).await
+            }
+
             async fn open(&self, key: &FileKey) -> Result<Option<Box<dyn Opened>>, StoreError> {
                 self.0.open(key).await
             }

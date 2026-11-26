@@ -30,7 +30,9 @@
 //!    and the next listing waits with it. A snapshot read from the database goes a slice a
 //!    tick: its slices go first, the rest of the engine has the tick after each
 //!    [`state::FAIR_SHARE`] of them, no checkpoint runs and nothing is listed until it ends
-//!    (`docs/decisions/D255.md`).
+//!    (`docs/decisions/D255.md`). A compaction, and a snapshot merged from level 0, go a
+//!    slice a tick the same way; checkpoints run between their slices, and the staging prune
+//!    waits while one reads staged copies (`docs/decisions/D259.md`).
 //!
 //!    Fair share: after [`state::FAIR_SHARE`] uploads in a row, prune and
 //!    maintenance, when either has work, take the next unit ahead of uploads
@@ -108,7 +110,7 @@ use lsr_wal::{CommittedEnd, OpenError, WalReader};
 use clock::EngineClock;
 pub use once::{FinalSnapshot, FinalSnapshotFailure};
 pub use once_retention::FinalRetention;
-use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
+use parts::{Course, Engine, Kept, Sliced, Stop, Tail, TaskRestorePoint};
 use state::Live;
 pub use state::{Degraded, Phase, Task};
 
@@ -130,8 +132,8 @@ use crate::identity::{self, Identity};
 use crate::inventory::Inventory;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::maintain::{
-    Due, Job, MAX_DELETE, MaintainError, Maintenance, Outcome, ReadBack, RetentionHold, due_full,
-    listing_after_upload, read_back, run_compaction, run_delete,
+    Due, Job, MAX_DELETE, MaintainError, Maintenance, Merging, Outcome, ReadBack, RetentionHold,
+    due_full, listing_after_upload, read_back, run_delete,
 };
 use crate::pages::{PageChecksumTable, Seeding, snapshot_clears};
 use crate::position::{Position, SyncedThrough, WalFileLen};
@@ -607,9 +609,9 @@ impl Actor {
         self.engine.in_flight.waits()
             || self
                 .engine
-                .snapshot
+                .sliced
                 .as_ref()
-                .is_some_and(|(_, snapshot)| snapshot.waits)
+                .is_some_and(|(_, sliced)| sliced.waits())
     }
 
     /// What the actor is doing.
@@ -1143,7 +1145,7 @@ impl Actor {
         // No tick runs again to send the rest of a file in flight or to abort its upload: it is
         // dropped, and what it wrote is scratch the next boot clears.
         self.engine.in_flight = InFlight::default();
-        self.engine.snapshot = None;
+        self.engine.sliced = None;
         Tick::Stopped(cause)
     }
 
@@ -1352,7 +1354,7 @@ impl Actor {
         let takeover = self.boot_takeover();
         let doubted = self.kept.suspect_staged;
         // Nothing is in flight before a boot; the boot's drops of staged files ask all the same.
-        self.end_snapshot().await;
+        self.end_sliced().await;
         let mut in_flight = std::mem::take(&mut self.engine.in_flight);
         let unsent = in_flight.stop().await;
         let listed = match self.boot_listed(env, takeover, &unsent).await {
@@ -1433,8 +1435,8 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if self.snapshot_owed()
-            && let Some(tick) = self.snapshot_unit(env, now).await
+        if self.sliced_owed()
+            && let Some(tick) = self.sliced_unit(env, now, 0).await
         {
             return tick;
         }
@@ -1460,7 +1462,7 @@ impl Actor {
         if let Some(tick) = self.prune_unit(env, now).await {
             return tick;
         }
-        if let Some(tick) = self.snapshot_unit(env, now).await {
+        if let Some(tick) = self.sliced_unit(env, now, 0).await {
             return tick;
         }
         if let Some(tick) = self.maintain_unit(env, now).await {
@@ -1476,8 +1478,8 @@ impl Actor {
         now: Timestamp,
         deadline: Timestamp,
     ) -> Tick {
-        // A drain runs no maintenance: a snapshot part-way ends, its upload aborted.
-        self.end_snapshot().await;
+        // A drain runs no maintenance: a job part-way ends, its upload aborted.
+        self.end_sliced().await;
         // A retention pass the drain was asked to end with is not cut by the deadline once
         // everything is uploaded (`once_retention`).
         if now >= deadline {
@@ -1625,8 +1627,9 @@ impl Actor {
         let position = self.position().filter(|_| self.reset().is_none())?;
         // No checkpoint of the engine's under a snapshot part-way: it would end the read
         // transaction the snapshot reads under (`crate::snapshot::Snapshotting`).
+        let snapshot = matches!(&self.engine.sliced, Some((_, sliced)) if matches!(**sliced, Sliced::Snapshot(_)));
         let free = self.engine.gate.open(now)
-            && self.engine.snapshot.is_none()
+            && !snapshot
             && self.kept.tasks.ready(Task::Checkpoint, now)
             && self.kept.tasks.ready(Task::Sync, now);
         if !free {
@@ -2587,15 +2590,45 @@ impl Actor {
         now: Timestamp,
         created_at_read: u64,
     ) -> Tick {
-        // One call site for every merge, so the tick's future holds one compaction.
         let outcome = if let Some((inputs, level)) = job.merge() {
             let (sent, guard) = (&self.engine.sent, self.guard());
-            run_compaction(inputs, level, env.staging, env.remote, sent, guard).await
+            // Boxed, as the merge's slices are below: a merge's futures are the deepest the
+            // replicator thread polls (`lsr_replica::stack`).
+            let begun = Box::pin(Merging::begin(
+                inputs,
+                level,
+                (env.staging, env.remote),
+                sent,
+                guard,
+            ));
+            match begun.await {
+                Ok(merging) => {
+                    let sliced = Box::new(Sliced::Merge(merging));
+                    self.engine.sliced = Some((job.clone(), sliced));
+                    self.engine.job_slices = 0;
+                    return match self.sliced_unit(env, now, created_at_read).await {
+                        Some(tick) => tick,
+                        None => self.ran(Event::Sending { bytes: 0 }, now),
+                    };
+                }
+                Err(outcome) => outcome,
+            }
         } else if let Job::Delete(delete) = job {
             run_delete(delete, env.remote).await
         } else {
             return self.snapshot_job(env, job, now, created_at_read).await;
         };
+        self.job_ended(job, outcome, now, created_at_read)
+    }
+
+    /// The tick a job's `outcome` ends: what it records, and the event it reports.
+    fn job_ended(
+        &mut self,
+        job: &Job,
+        outcome: Outcome,
+        now: Timestamp,
+        created_at_read: u64,
+    ) -> Tick {
         if let Outcome::Failed(err) = &outcome
             && Fault::from_maintain(err) == Fault::CreateOnlyUnsupported
         {
@@ -2788,9 +2821,10 @@ impl Actor {
                 // The table as the snapshot's proof left it; the syncs between its slices
                 // record pages the database file does not hold yet.
                 self.engine.pages.pin();
-                self.engine.snapshot = Some((job.clone(), Box::new(snapshot)));
-                self.engine.snapshot_slices = 0;
-                match self.snapshot_unit(env, now).await {
+                let sliced = Box::new(Sliced::Snapshot(snapshot));
+                self.engine.sliced = Some((job.clone(), sliced));
+                self.engine.job_slices = 0;
+                match self.sliced_unit(env, now, 0).await {
                     Some(tick) => tick,
                     None => self.ran(Event::Sending { bytes: 0 }, now),
                 }
@@ -2803,34 +2837,72 @@ impl Actor {
         }
     }
 
-    /// The next slice of the snapshot part-way (`docs/decisions/D217.md` for a staged
-    /// file's): `None` when there is none, or when it waits for its upload's parts and
-    /// handed nothing over.
-    async fn snapshot_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
+    /// The next slice of the job part-way (`docs/decisions/D217.md` for a staged file's):
+    /// `None` when there is none, or when it waits for its upload's parts and handed nothing
+    /// over.
+    async fn sliced_unit<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
         &mut self,
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
+        created_at_read: u64,
     ) -> Option<Tick> {
-        let (job, mut snapshot) = self.engine.snapshot.take()?;
-        let sent = snapshot.sent;
+        let (job, sliced) = self.engine.sliced.take()?;
         let budget = self.kept.cfg.upload.bytes_per_tick.get();
+        let before = sliced.sent();
+        let going = match *sliced {
+            Sliced::Snapshot(snapshot) => {
+                self.snapshot_slice(env, &job, snapshot, budget, now).await
+            }
+            Sliced::Merge(merging) => {
+                // Boxed: on the heap, the merge's state is not part of every poll frame below
+                // `block_on`, which the half-stack headroom gate measures (`lsr_replica::stack`).
+                match Box::pin(merging.slice((env.staging, env.remote), budget, false)).await {
+                    Ok(merging) => Ok(Sliced::Merge(merging)),
+                    Err(outcome) => {
+                        let tick = self.job_ended(&job, outcome, now, created_at_read);
+                        self.after_job(&job, &tick, None, now);
+                        Err(tick)
+                    }
+                }
+            }
+        };
+        let sliced = match going {
+            Ok(sliced) => sliced,
+            Err(tick) => return Some(tick),
+        };
+        let (waited, bytes) = (sliced.waits(), sliced.sent());
+        self.engine.sliced = Some((job, Box::new(sliced)));
+        // A slice that handed bytes over before its parts were in the way is the tick's unit
+        // all the same: the tick has spent its bytes.
+        if waited && bytes == before {
+            return None;
+        }
+        self.engine.job_slices = self.engine.job_slices.saturating_add(1);
+        Some(self.ran(Event::Sending { bytes }, now))
+    }
+
+    /// A slice of the level-9 snapshot: the snapshot to go on with, or the tick it ended.
+    #[expect(
+        clippy::result_large_err,
+        reason = "its one caller returns the tick it ended at once"
+    )]
+    async fn snapshot_slice<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
+        &mut self,
+        env: &mut Env<'_, W, P, C, L, R>,
+        job: &Job,
+        mut snapshot: Snapshotting,
+        budget: u64,
+        now: Timestamp,
+    ) -> Result<Sliced, Tick> {
         let sources = (&mut *env.wal, &mut *env.db, &mut self.engine.pages);
         let sliced = snapshot.slice(sources, env.remote, budget, false).await;
         let state = &mut self.engine.maintain.state;
         match sliced {
-            Ok(None) => {
-                let (waited, bytes) = (snapshot.sent == sent, snapshot.sent);
-                self.engine.snapshot = Some((job, snapshot));
-                if waited {
-                    return None;
-                }
-                self.engine.snapshot_slices = self.engine.snapshot_slices.saturating_add(1);
-                Some(self.ran(Event::Sending { bytes }, now))
-            }
+            Ok(None) => Ok(Sliced::Snapshot(snapshot)),
             Ok(Some(info)) => {
                 state.record_snapshot(now, None);
                 self.engine.pages.unpin();
-                Some(self.snapshot_written(info, now, 0))
+                Err(self.snapshot_written(info, now, 0))
             }
             Err(fault) => {
                 state.record_snapshot(now, Some(&fault));
@@ -2838,35 +2910,36 @@ impl Actor {
                 snapshot.abort().await;
                 self.engine.pages.unpin();
                 let failed = SnapshotFailed { fault, key };
-                Some(self.snapshot_failed(env.remote, &job, failed, now).await)
+                Err(self.snapshot_failed(env.remote, job, failed, now).await)
             }
         }
     }
 
-    /// Ends the snapshot part-way, if any, and aborts its upload.
-    async fn end_snapshot(&mut self) {
-        if let Some((_, snapshot)) = self.engine.snapshot.take() {
-            snapshot.abort().await;
-            self.engine.pages.unpin();
+    /// Ends the job part-way, if any, and aborts its upload.
+    async fn end_sliced(&mut self) {
+        if let Some((_, sliced)) = self.engine.sliced.take() {
+            if matches!(*sliced, Sliced::Snapshot(_)) {
+                self.engine.pages.unpin();
+            }
+            sliced.abort().await;
         }
     }
 
-    /// Whether a snapshot part-way is work to tick for. One that waits for its upload's parts is
+    /// Whether a job part-way is work to tick for. One that waits for its upload's parts is
     /// not: a part that ends wakes the task, and the next tick's slice reads on, as for a send.
-    fn snapshot_ready(&self) -> bool {
+    fn sliced_ready(&self) -> bool {
         self.engine
-            .snapshot
+            .sliced
             .as_ref()
-            .is_some_and(|(_, snapshot)| !snapshot.waits)
+            .is_some_and(|(_, sliced)| !sliced.waits())
     }
 
-    /// Whether the snapshot's slice goes first this tick: until [`state::FAIR_SHARE`] of them
-    /// ran in a row, then the rest of the engine has a tick, as after a staged file's slices.
-    fn snapshot_owed(&mut self) -> bool {
-        let owed =
-            self.engine.snapshot.is_some() && self.engine.snapshot_slices < state::FAIR_SHARE;
+    /// Whether the job's slice goes first this tick: until [`state::FAIR_SHARE`] of them ran
+    /// in a row, then the rest of the engine has a tick, as after a staged file's slices.
+    fn sliced_owed(&mut self) -> bool {
+        let owed = self.engine.sliced.is_some() && self.engine.job_slices < state::FAIR_SHARE;
         if !owed {
-            self.engine.snapshot_slices = 0;
+            self.engine.job_slices = 0;
         }
         owed
     }
@@ -2921,7 +2994,7 @@ impl Actor {
                 // A send that waits for its upload's parts is not work to tick for: a part
                 // that ends wakes the task.
                 sync || (self.upload_ready(now) && !self.engine.in_flight.waits())
-                    || self.snapshot_ready()
+                    || self.sliced_ready()
                     || self.prune_ready(now).is_some()
                     || self.maintain_ready(now)
             }
@@ -2961,8 +3034,11 @@ impl Actor {
 
     /// The transaction the prune task may delete through, when it may run.
     fn prune_ready(&self, now: Timestamp) -> Option<Txid> {
+        // A merge part-way may read staged copies at or below the bound (a hole's repair):
+        // they stay until it ends.
+        let reads_staging = matches!(&self.engine.sliced, Some((_, sliced)) if matches!(&**sliced, Sliced::Merge(merging) if merging.reads_staging()));
         self.prune_bound()
-            .filter(|_| self.running() && self.kept.tasks.ready(Task::Prune, now))
+            .filter(|_| self.running() && !reads_staging && self.kept.tasks.ready(Task::Prune, now))
     }
 
     /// Whether maintenance may list the replica now: when a listing could change what is
@@ -2973,7 +3049,7 @@ impl Actor {
         let maintain = &self.engine.maintain;
         let turn = self.uploads_idle() || (self.fair_turn() && !maintain.snapshot_waits);
         self.running()
-            && self.engine.snapshot.is_none()
+            && self.engine.sliced.is_none()
             && !self.kept.cfg.maintenance.is_one_off()
             && self.kept.tasks.ready(Task::Maintenance, now)
             && turn

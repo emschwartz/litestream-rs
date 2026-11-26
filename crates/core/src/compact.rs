@@ -47,8 +47,15 @@
 //!
 //! The output level must be above every input's level
 //! ([InputsError::LevelNotAbove]), checked before any store call.
+//!
+//! [`Compacting`] is the same merge kept between the engine's ticks: each slice reads about a
+//! tick's bytes of its inputs and hands the destination at most a tick's bytes of output
+//! (`docs/decisions/D259.md`). A store that can hold a read open without borrowing itself
+//! ([`ObjectStore::hold_stream`]) keeps each input's one stream across slices; any other has a
+//! stream opened for each slice, at the offset the last one reached.
 
 use std::convert::Infallible;
+use std::num::NonZeroU64;
 
 use lsr_ltx::{
     DbChecksum, DbPages, DecodeError, EncodeError, Encoder, Event, Header, HeaderFields, PageNo,
@@ -59,8 +66,8 @@ use thiserror::Error;
 use crate::fault::role::{Replica, Role, STAGING_WINDOW};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::ltx_read::{BrokenLink, LinkEnd, LtxRead, Next, ReadFault, check_link};
-use crate::publish::Writer;
-use crate::store::{ObjectStore, ReadLen, ReadStream, StoreError, Upload, WriteMode};
+use crate::publish::{Open, Writer};
+use crate::store::{Flight, ObjectStore, ReadLen, ReadStream, Rest, StoreError, Upload, WriteMode};
 
 #[cfg(test)]
 #[expect(
@@ -355,6 +362,13 @@ impl Budget {
     }
 }
 
+/// The stream one call opened for an input whose store holds none ([`Reader`]): dropped when
+/// the call ends, so a store that cannot hold one is read through one stream a slice.
+type Slot<'s> = Option<Box<dyn ReadStream + 's>>;
+
+/// One [`Slot`] per input, in input order.
+type Slots<'s> = Vec<Slot<'s>>;
+
 /// What one decoder step found.
 enum Step {
     Header(Header),
@@ -364,20 +378,24 @@ enum Step {
 
 /// One input's bytes: one stream from the source (a single GET on a store that bills by
 /// request, as Go's compactor opens each input once), its pieces pushed through one decoder.
-struct Reader<'a> {
+/// The stream borrows nothing ([`ObjectStore::hold_stream`]), so the read goes on in the
+/// compaction's next slice; a store with none to hold is read where the read stands at each step.
+struct Reader {
     read: LtxRead,
-    stream: Box<dyn ReadStream + 'a>,
+    held: Option<Box<dyn ReadStream>>,
     /// The source role's error for a failed read.
     store_fault: fn(StoreError) -> CompactError,
 }
 
-impl<'a> Reader<'a> {
-    fn new<S: Role>(source: &'a S, key: FileKey, chunk: ReadLen) -> Self {
-        Self {
+impl Reader {
+    async fn new<S: Role>(source: &S, key: FileKey, chunk: ReadLen) -> Result<Self, CompactError> {
+        let held = source.hold_stream(key, 0).await;
+        let store_fault = S::compact_input;
+        Ok(Self {
             read: LtxRead::new(key, chunk),
-            stream: source.read_stream(key, 0),
-            store_fault: S::compact_input,
-        }
+            held: held.map_err(|err| read_fault(err, store_fault))?,
+            store_fault,
+        })
     }
 
     const fn key(&self) -> FileKey {
@@ -393,15 +411,20 @@ impl<'a> Reader<'a> {
 
     /// Advances to the next header, page or verified end, copying a page's
     /// bytes into `page`. Bytes read are added to `bytes_read` as they arrive.
-    async fn step(
+    async fn step<'s, S: ObjectStore>(
         &mut self,
+        (source, slot): (&'s S, &mut Slot<'s>),
         bytes_read: &mut u64,
         page: &mut Vec<u8>,
     ) -> Result<Step, CompactError> {
         let before = self.read.bytes_read();
+        let stream: &mut (dyn ReadStream + '_) = match self.held.as_mut() {
+            Some(held) => &mut **held,
+            None => &mut **slot.get_or_insert_with(|| source.read_stream(self.read.key(), before)),
+        };
         let next = self
             .read
-            .next(&mut *self.stream, |event| {
+            .next(stream, |event| {
                 Ok::<_, Infallible>(match event {
                     Event::Header(header) => Step::Header(header),
                     Event::Page(found) => {
@@ -417,10 +440,7 @@ impl<'a> Reader<'a> {
         match next {
             Ok(Next::Event(step)) => Ok(step),
             Ok(Next::End(verified)) => Ok(Step::End(verified)),
-            Err(ReadFault::Store(StoreError::NotFound { key })) => {
-                Err(CompactError::InputVanished { key })
-            }
-            Err(ReadFault::Store(err)) => Err((self.store_fault)(err)),
+            Err(ReadFault::Store(err)) => Err(read_fault(err, self.store_fault)),
             Err(ReadFault::Decode(err)) => Err(self.fault(InputFault::Decode(err))),
             Err(ReadFault::Rejected(never)) => match never {},
         }
@@ -432,30 +452,30 @@ impl<'a> Reader<'a> {
 }
 
 /// One input with its header read and its next page, if any, waiting.
-struct Input<'a> {
-    reader: Reader<'a>,
+struct Input {
+    reader: Reader,
     header: Header,
     page: Vec<u8>,
     head: Option<PageNo>,
     verified: Option<Verified>,
 }
 
-impl<'a> Input<'a> {
+impl Input {
     fn key(&self) -> FileKey {
         self.reader.key()
     }
 
     /// Reads the header. A decoder that yields anything else first has
     /// skipped it, which no valid decoder does; it is reported as poisoned.
-    async fn open<S: Role>(
-        source: &'a S,
+    async fn open<'s, S: Role>(
+        (source, slot): (&'s S, &mut Slot<'s>),
         budget: Budget,
         key: FileKey,
         bytes_read: &mut u64,
     ) -> Result<Self, CompactError> {
-        let mut reader = Reader::new(source, key, budget.chunk);
+        let mut reader = Reader::new(source, key, budget.chunk).await?;
         let mut page = Vec::new();
-        match reader.step(bytes_read, &mut page).await? {
+        match reader.step((source, slot), bytes_read, &mut page).await? {
             Step::Header(header) => Ok(Self {
                 reader,
                 header,
@@ -470,11 +490,15 @@ impl<'a> Input<'a> {
     }
 
     /// Fills the waiting page, or records the verified end.
-    async fn fill(&mut self, bytes_read: &mut u64) -> Result<(), CompactError> {
+    async fn fill<'s, S: ObjectStore>(
+        &mut self,
+        read: (&'s S, &mut Slot<'s>),
+        bytes_read: &mut u64,
+    ) -> Result<(), CompactError> {
         if self.head.is_some() || self.verified.is_some() {
             return Ok(());
         }
-        match self.reader.step(bytes_read, &mut self.page).await? {
+        match self.reader.step(read, bytes_read, &mut self.page).await? {
             Step::Page(pgno) => self.head = Some(pgno),
             Step::End(verified) => self.verified = Some(verified),
             Step::Header(_) => {
@@ -491,23 +515,33 @@ impl<'a> Input<'a> {
 
 /// All inputs, merged lazily. The first input is held apart so "the first" and
 /// "the last" exist by construction.
-struct Merge<'a> {
+struct Merge {
     budget: Budget,
-    first: Input<'a>,
-    rest: Vec<Input<'a>>,
+    first: Input,
+    rest: Vec<Input>,
     bytes_read: u64,
     peak: usize,
 }
 
-impl<'a> Merge<'a> {
+impl Merge {
     /// Opens every input and checks every header before anything is written.
-    async fn open<S: Role>(
-        source: &'a S,
+    async fn open<'s, S: Role>(
+        (source, slots): (&'s S, &mut Slots<'s>),
         inputs: &CompactionInputs,
         budget: Budget,
     ) -> Result<Self, CompactError> {
+        slots.resize_with(inputs.files.len(), || None);
+        let [first_slot, rest_slots @ ..] = slots.as_mut_slice() else {
+            return Err(InputsError::Empty.into());
+        };
         let mut bytes_read = 0;
-        let first = Input::open(source, budget, inputs.first.key, &mut bytes_read).await?;
+        let first = Input::open(
+            (source, first_slot),
+            budget,
+            inputs.first.key,
+            &mut bytes_read,
+        )
+        .await?;
         check_range(&first)?;
         let mut merge = Self {
             budget,
@@ -516,8 +550,9 @@ impl<'a> Merge<'a> {
             bytes_read,
             peak: 0,
         };
-        for info in inputs.files.iter().skip(1) {
-            let input = Input::open(source, budget, info.key, &mut merge.bytes_read).await?;
+        for (info, slot) in inputs.files.iter().skip(1).zip(rest_slots) {
+            let input =
+                Input::open((source, slot), budget, info.key, &mut merge.bytes_read).await?;
             check_range(&input)?;
             let (expected, found) = (merge.first.header.page_size(), input.header.page_size());
             if expected != found {
@@ -531,15 +566,15 @@ impl<'a> Merge<'a> {
         Ok(merge)
     }
 
-    fn all(&self) -> impl Iterator<Item = &Input<'a>> {
+    fn all(&self) -> impl Iterator<Item = &Input> {
         std::iter::once(&self.first).chain(self.rest.iter())
     }
 
-    fn all_mut(&mut self) -> impl Iterator<Item = &mut Input<'a>> {
+    fn all_mut(&mut self) -> impl Iterator<Item = &mut Input> {
         std::iter::once(&mut self.first).chain(self.rest.iter_mut())
     }
 
-    fn last(&self) -> &Input<'a> {
+    fn last(&self) -> &Input {
         self.rest.last().unwrap_or(&self.first)
     }
 
@@ -576,13 +611,15 @@ impl<'a> Merge<'a> {
     /// The next page to write: the lowest page number any input holds, and the
     /// newest input holding it. Every copy of it is consumed; the winner's
     /// bytes stay in place until the next call.
-    async fn next_page(
+    async fn next_page<'s, S: ObjectStore>(
         &mut self,
+        (source, slots): (&'s S, &mut Slots<'s>),
         buffered_output: usize,
     ) -> Result<Option<(PageNo, usize)>, CompactError> {
         let mut bytes_read = self.bytes_read;
-        for input in std::iter::once(&mut self.first).chain(self.rest.iter_mut()) {
-            input.fill(&mut bytes_read).await?;
+        let inputs = std::iter::once(&mut self.first).chain(self.rest.iter_mut());
+        for (input, slot) in inputs.zip(slots.iter_mut()) {
+            input.fill((source, slot), &mut bytes_read).await?;
         }
         self.bytes_read = bytes_read;
         self.observe(buffered_output);
@@ -665,7 +702,7 @@ fn first_unrewritten(lo: u32, hi: u32, shortest: DbPages, size: PageSize) -> Opt
 }
 
 /// The header's range must be the one in the file's name.
-fn check_range(input: &Input<'_>) -> Result<(), CompactError> {
+fn check_range(input: &Input) -> Result<(), CompactError> {
     if input.header.txids() == input.key().range() {
         return Ok(());
     }
@@ -674,54 +711,285 @@ fn check_range(input: &Input<'_>) -> Result<(), CompactError> {
     }))
 }
 
-/// Merges, encodes and uploads every page, then writes the tail. Returns the
-/// output trailer and page count; nothing is committed yet.
-async fn write_output<U: Upload>(
-    merge: &mut Merge<'_>,
-    mut encoder: Encoder<Vec<u8>>,
-    header: &Header,
-    upload: &mut Writer<U>,
-) -> Result<(Trailer, u32), CompactError> {
-    let flush = merge.budget.flush;
-    let mut pages = 0_u32;
-    let mut unchecked_from = 1_u32;
-    // The header sits in the encoder's buffer; it goes out with the first flush.
-    while let Some((pgno, winner)) = merge.next_page(encoder.writer_mut().len()).await? {
-        if !header.pages().contains(pgno) {
-            continue;
+/// A compaction part-way to its destination: what it holds between two slices, in memory
+/// only. Each input is read through its one held stream, so the output is one merge of the
+/// objects opened when it began, whatever the replica took meanwhile. Nothing of it is visible
+/// until [`Self::commit`], and that only after every input verified: a failure, a stop or a
+/// crash starts it again from its first page, and the next start clears the upload's scratch.
+pub(crate) struct Compacting {
+    merge: Merge,
+    header: Header,
+    /// `None` once the tail is written: `rest` holds the bytes still to hand over.
+    encoder: Option<Encoder<Vec<u8>>>,
+    rest: Vec<u8>,
+    trailer: Option<Trailer>,
+    upload: Open,
+    pages: u32,
+    /// The first page the regrow check has not looked at.
+    unchecked_from: u32,
+    paged: bool,
+    /// Bytes handed to the destination.
+    pub(crate) sent: u64,
+    /// The last slice stopped for the upload's parts (`docs/decisions/D233.md`).
+    pub(crate) waits: bool,
+}
+
+impl std::fmt::Debug for Compacting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Compacting")
+            .field("header", &self.header)
+            .field("sent", &self.sent)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Compacting {
+    /// Opens every input of `inputs`, read from `source` as its role, checks every header
+    /// and begins the output at `level` in `dest` under `mode`.
+    ///
+    /// # Errors
+    /// [`CompactError`]; nothing was written.
+    pub(crate) async fn begin<S: Role, D: ObjectStore>(
+        source: &S,
+        dest: &D,
+        inputs: &CompactionInputs,
+        level: Level,
+        mode: WriteMode,
+    ) -> Result<Self, CompactError> {
+        let budget = Budget::reading::<S>(inputs.files.len());
+        Self::begin_with(
+            (source, &mut Slots::new()),
+            dest,
+            inputs,
+            level,
+            mode,
+            budget,
+        )
+        .await
+    }
+
+    async fn begin_with<'s, S: Role, D: ObjectStore>(
+        read: (&'s S, &mut Slots<'s>),
+        dest: &D,
+        inputs: &CompactionInputs,
+        level: Level,
+        mode: WriteMode,
+        budget: Budget,
+    ) -> Result<Self, CompactError> {
+        if let Some(input) = inputs.level_not_below(level) {
+            return Err(InputsError::LevelNotAbove {
+                output: level,
+                input,
+            }
+            .into());
         }
-        merge.check_unheld(unchecked_from, pgno.get())?;
-        unchecked_from = pgno.get().saturating_add(1);
-        merge.check_survives_shrink(pgno, winner)?;
-        encoder
-            .write_page(pgno, merge.page(winner))
-            .map_err(CompactError::Encode)?;
-        pages = pages.saturating_add(1);
-        merge.observe(encoder.writer_mut().len());
-        if encoder.writer_mut().len() >= flush {
-            upload
-                .write(encoder.writer_mut())
+        let merge = Merge::open(read, inputs, budget).await?;
+        let header = merge.output_header(level, inputs.range())?;
+        // Room for the flush size and the page that crosses it, so the buffer never grows.
+        let out = Vec::with_capacity(
+            budget
+                .flush
+                .saturating_add(header.page_size().bytes().saturating_mul(2)),
+        );
+        let encoder = Encoder::new(out, header).map_err(CompactError::Encode)?;
+        let key = FileKey::new(level, inputs.range());
+        let created_at = header.fields().timestamp;
+        let upload = Writer::begin(dest, &key, created_at, mode, None)
+            .await
+            .map_err(CompactError::Dest)?
+            .boxed();
+        Ok(Self {
+            merge,
+            header,
+            encoder: Some(encoder),
+            rest: Vec::new(),
+            trailer: None,
+            upload,
+            pages: 0,
+            unchecked_from: 1,
+            paged: false,
+            sent: 0,
+            waits: false,
+        })
+    }
+
+    /// Hands the destination at most the next `budget` bytes of the output, reading at most
+    /// about `budget` bytes of input for them. The output's trailer once every byte is handed
+    /// over and the upload's parts are answered: [`Self::commit`] goes next. `None`: it goes
+    /// on in a later slice. `patient` waits for the upload's parts inside the call, as a
+    /// whole-file write does; otherwise a slice that finds them in the way stops, and
+    /// `waits` says so.
+    ///
+    /// # Errors
+    /// [`CompactError`]; the caller aborts ([`Self::abort`]).
+    pub(crate) async fn slice<S: ObjectStore>(
+        &mut self,
+        source: &S,
+        budget: u64,
+        patient: bool,
+    ) -> Result<Option<Trailer>, CompactError> {
+        let mut slots = Slots::new();
+        slots.resize_with(self.merge.rest.len().saturating_add(1), || None);
+        self.slice_in((source, &mut slots), budget, patient).await
+    }
+
+    async fn slice_in<'s, S: ObjectStore>(
+        &mut self,
+        (source, slots): (&'s S, &mut Slots<'s>),
+        budget: u64,
+        patient: bool,
+    ) -> Result<Option<Trailer>, CompactError> {
+        self.waits = false;
+        let read_until = self.merge.bytes_read.saturating_add(budget);
+        // Zero once the budget is spent, as a snapshot's slice counts it (`crate::snapshot`).
+        let mut left = NonZeroU64::new(budget);
+        while let Some(room) = left {
+            self.fill((source, &mut *slots), read_until).await?;
+            let (len, encoding) = (self.out().len(), self.encoder.is_some());
+            // Short of a flush, the slice read its share of the inputs.
+            if len == 0 || (encoding && len < self.merge.budget.flush) {
+                break;
+            }
+            if !patient
+                && self
+                    .upload
+                    .flight(Rest::More)
+                    .await
+                    .map_err(CompactError::Dest)?
+                    == Flight::Full
+            {
+                self.waits = true;
+                return Ok(None);
+            }
+            let n = len.min(usize::try_from(room.get()).unwrap_or(usize::MAX));
+            let out = match self.encoder.as_mut() {
+                Some(encoder) => encoder.writer_mut(),
+                None => &mut self.rest,
+            };
+            self.upload
+                .write(out.get(..n).unwrap_or_default())
                 .await
                 .map_err(CompactError::Dest)?;
-            encoder.writer_mut().clear();
+            out.drain(..n);
+            let n = u64::try_from(n).unwrap_or(u64::MAX);
+            (left, self.sent) = (
+                NonZeroU64::new(room.get().saturating_sub(n)),
+                self.sent.saturating_add(n),
+            );
         }
-    }
-    merge.check_unheld(unchecked_from, header.commit().saturating_add(1))?;
-    let last = merge.verified_chain()?;
-    let post_apply = last.trailer().post_apply().filter(|_| header.tracked());
-    // The index leaves in pieces, as the pages did, so it is never copied whole into the buffer.
-    while encoder.write_index_chunk().map_err(CompactError::Encode)? {
-        if encoder.writer_mut().len() >= flush {
-            upload
-                .write(encoder.writer_mut())
+        let Some(trailer) = self.trailer.filter(|_| self.rest.is_empty()) else {
+            return Ok(None);
+        };
+        if !patient
+            && self
+                .upload
+                .flight(Rest::None)
                 .await
-                .map_err(CompactError::Dest)?;
-            encoder.writer_mut().clear();
+                .map_err(CompactError::Dest)?
+                != Flight::Idle
+        {
+            self.waits = true;
+            return Ok(None);
+        }
+        Ok(Some(trailer))
+    }
+
+    /// The bytes waiting to be handed over: the encoder's, then the tail's.
+    fn out(&mut self) -> &mut Vec<u8> {
+        match self.encoder.as_mut() {
+            Some(encoder) => encoder.writer_mut(),
+            None => &mut self.rest,
         }
     }
-    let (tail, trailer) = encoder.finish(post_apply).map_err(CompactError::Encode)?;
-    upload.write(&tail).await.map_err(CompactError::Dest)?;
-    Ok((trailer, pages))
+
+    /// Merges and encodes until a flush's worth waits to be handed over, the tail is written,
+    /// or the inputs have been read to `read_until` bytes.
+    async fn fill<'s, S: ObjectStore>(
+        &mut self,
+        (source, slots): (&'s S, &mut Slots<'s>),
+        read_until: u64,
+    ) -> Result<(), CompactError> {
+        let flush = self.merge.budget.flush;
+        while let Some(encoder) = self.encoder.as_mut()
+            && encoder.writer_mut().len() < flush
+            && self.merge.bytes_read < read_until
+        {
+            if !self.paged {
+                let Some((pgno, winner)) = self
+                    .merge
+                    .next_page((source, &mut *slots), encoder.writer_mut().len())
+                    .await?
+                else {
+                    self.merge.check_unheld(
+                        self.unchecked_from,
+                        self.header.commit().saturating_add(1),
+                    )?;
+                    self.paged = true;
+                    continue;
+                };
+                if !self.header.pages().contains(pgno) {
+                    continue;
+                }
+                self.merge.check_unheld(self.unchecked_from, pgno.get())?;
+                self.unchecked_from = pgno.get().saturating_add(1);
+                self.merge.check_survives_shrink(pgno, winner)?;
+                encoder
+                    .write_page(pgno, self.merge.page(winner))
+                    .map_err(CompactError::Encode)?;
+                self.pages = self.pages.saturating_add(1);
+                self.merge.observe(encoder.writer_mut().len());
+                continue;
+            }
+            // The index leaves in pieces, as the pages did, so it is never copied whole into the buffer.
+            if encoder.write_index_chunk().map_err(CompactError::Encode)? {
+                continue;
+            }
+            let last = self.merge.verified_chain()?;
+            let post_apply = last
+                .trailer()
+                .post_apply()
+                .filter(|_| self.header.tracked());
+            let finished = self
+                .encoder
+                .take()
+                .map(|encoder| encoder.finish(post_apply));
+            if let Some(finished) = finished {
+                let (tail, trailer) = finished.map_err(CompactError::Encode)?;
+                (self.rest, self.trailer) = (tail, Some(trailer));
+            }
+        }
+        Ok(())
+    }
+
+    /// Publishes the output, `trailer` being what [`Self::slice`] answered.
+    ///
+    /// # Errors
+    /// [`CompactError::Dest`]: settled by listing, as for a whole compaction.
+    pub(crate) async fn commit<D: ObjectStore>(
+        self,
+        dest: &D,
+        trailer: Trailer,
+    ) -> Result<Compacted, CompactError> {
+        let info = self
+            .upload
+            .commit(dest)
+            .await
+            .map_err(|err| CompactError::Dest(err.into_error()))?
+            .info();
+        Ok(Compacted {
+            info,
+            header: self.header,
+            trailer,
+            pages: self.pages,
+            bytes_read: self.merge.bytes_read,
+            peak_buffered: self.merge.peak,
+        })
+    }
+
+    /// Ends the compaction: its upload is aborted, so nothing of it stays as scratch.
+    pub(crate) async fn abort(self) {
+        abort_quietly(self.upload).await;
+    }
 }
 
 /// Merges `inputs` read from `source` into one file at `level` in `dest`.
@@ -779,48 +1047,35 @@ async fn compact_with<S: Role, D: ObjectStore>(
     mode: WriteMode,
     budget: Budget,
 ) -> Result<Compacted, CompactError> {
-    if let Some(input) = inputs.level_not_below(level) {
-        return Err(InputsError::LevelNotAbove {
-            output: level,
-            input,
+    let mut slots = Slots::new();
+    let mut job =
+        Compacting::begin_with((source, &mut slots), dest, inputs, level, mode, budget).await?;
+    loop {
+        match job.slice_in((source, &mut slots), u64::MAX, true).await {
+            Ok(Some(trailer)) => return job.commit(dest, trailer).await,
+            Ok(None) => {}
+            Err(err) => {
+                job.abort().await;
+                return Err(err);
+            }
         }
-        .into());
     }
-    let mut merge = Merge::open(source, inputs, budget).await?;
-    let header = merge.output_header(level, inputs.range())?;
-    // Room for the flush size and the page that crosses it, so the buffer never grows.
-    let out = Vec::with_capacity(
-        budget
-            .flush
-            .saturating_add(header.page_size().bytes().saturating_mul(2)),
-    );
-    let encoder = Encoder::new(out, header).map_err(CompactError::Encode)?;
-    let key = FileKey::new(level, inputs.range());
-    let created_at = header.fields().timestamp;
-    let mut upload = Writer::begin(dest, &key, created_at, mode, None)
-        .await
-        .map_err(CompactError::Dest)?;
-    let written = write_output(&mut merge, encoder, &header, &mut upload).await;
-    let (trailer, pages) = match written {
-        Ok(done) => done,
-        Err(err) => {
-            abort_quietly(upload).await;
-            return Err(err);
-        }
-    };
-    let info = upload
-        .commit(dest)
-        .await
-        .map_err(|err| CompactError::Dest(err.into_error()))?
-        .info();
-    Ok(Compacted {
-        info,
-        header,
-        trailer,
-        pages,
-        bytes_read: merge.bytes_read,
-        peak_buffered: merge.peak,
-    })
+}
+
+/// A failed read of an input: gone, or the source role's error.
+fn read_fault(err: StoreError, store_fault: fn(StoreError) -> CompactError) -> CompactError {
+    match err {
+        StoreError::NotFound { key } => CompactError::InputVanished { key },
+        err @ (StoreError::Transient { .. }
+        | StoreError::Throttled { .. }
+        | StoreError::Denied { .. }
+        | StoreError::AlreadyExists { .. }
+        | StoreError::ScratchExhausted { .. }
+        | StoreError::Corrupt { .. }
+        | StoreError::CreateOnlyUnsupported { .. }
+        | StoreError::ObjectTooLarge { .. }
+        | StoreError::Refused { .. }) => store_fault(err),
+    }
 }
 
 /// An abort that fails leaves scratch the store cleans up; the error that made

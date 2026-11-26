@@ -1,0 +1,8 @@
+# The staging prune ignores a merge part-way that reads staged copies, and may delete a copy the
+# merge has still to read.
+name = "staging-prune-under-a-merge"
+fix = "plant"
+package = "lsr-core"
+tests = [
+    "actor::tests::sliced_compaction::the_staging_prune_waits_for_a_merge_reading_staged_copies",
+]

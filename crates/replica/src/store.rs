@@ -48,6 +48,13 @@ pub trait DynStore: Send + Sync {
     /// [`ObjectStore::read_stream`].
     fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_>;
 
+    /// [`ObjectStore::hold_stream`].
+    fn hold_stream_boxed(
+        &self,
+        key: FileKey,
+        offset: u64,
+    ) -> BoxFuture<'_, Result<Option<Box<dyn ReadStream>>, StoreError>>;
+
     /// [`ObjectStore::created_at`].
     fn created_at_boxed<'a>(
         &'a self,
@@ -118,6 +125,14 @@ where
 
     fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
         self.read_stream(key, offset)
+    }
+
+    fn hold_stream_boxed(
+        &self,
+        key: FileKey,
+        offset: u64,
+    ) -> BoxFuture<'_, Result<Option<Box<dyn ReadStream>>, StoreError>> {
+        Box::pin(self.hold_stream(key, offset))
     }
 
     fn created_at_boxed<'a>(
@@ -206,6 +221,14 @@ where
 
     fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
         self.0.read_stream_dyn(key, offset)
+    }
+
+    async fn hold_stream(
+        &self,
+        key: FileKey,
+        offset: u64,
+    ) -> Result<Option<Box<dyn ReadStream>>, StoreError> {
+        self.0.hold_stream_boxed(key, offset).await
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -353,8 +376,8 @@ async fn metered<T>(
 /// A stream counted as one read call ([`Metered::read_stream`]).
 struct MeteredStream<'a> {
     inner: Box<dyn ReadStream + 'a>,
-    meter: &'a OpMeter,
-    clock: &'a dyn Clock,
+    meters: Arc<Meters>,
+    clock: Arc<dyn Clock>,
 }
 
 impl ReadStream for MeteredStream<'_> {
@@ -362,7 +385,7 @@ impl ReadStream for MeteredStream<'_> {
         Box::pin(async move {
             let began = self.clock.now();
             let result = self.inner.next(len).await;
-            self.meter.note_more(&result, began, self.clock.now());
+            self.meters.read.note_more(&result, began, self.clock.now());
             result
         })
     }
@@ -474,9 +497,26 @@ impl ObjectStore for Metered {
         self.meters.read.calls.fetch_add(1, Ordering::Relaxed);
         Box::new(MeteredStream {
             inner: self.store.read_stream_dyn(key, offset),
-            meter: &self.meters.read,
-            clock: &*self.clock,
+            meters: Arc::clone(&self.meters),
+            clock: Arc::clone(&self.clock),
         })
+    }
+
+    /// Counted as [`Self::read_stream`] is.
+    async fn hold_stream(
+        &self,
+        key: FileKey,
+        offset: u64,
+    ) -> Result<Option<Box<dyn ReadStream>>, StoreError> {
+        let Some(inner) = self.store.hold_stream_boxed(key, offset).await? else {
+            return Ok(None);
+        };
+        self.meters.read.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(Box::new(MeteredStream {
+            inner,
+            meters: Arc::clone(&self.meters),
+            clock: Arc::clone(&self.clock),
+        })))
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -768,5 +808,31 @@ mod tests {
         assert_eq!(counted.commit.calls, 1);
         assert_eq!(counted.list.calls, 1);
         assert_eq!(counted.list.errors, 0);
+    }
+    /// A held stream through the meters is the store's held stream, counted as one read call
+    /// however many pieces it hands out, as a stream is.
+    #[test]
+    fn a_held_stream_is_metered_as_one_read() {
+        let store: Arc<dyn DynStore> = Arc::new(MemStore::new());
+        let meters = Arc::new(Meters::default());
+        let clock: Arc<dyn Clock> = Arc::new(FakeClock::new(Timestamp::from_unix_millis(0)));
+        let metered = Metered::new(store, Arc::clone(&meters), clock);
+        let key = FileKey::new(Level::ZERO, TxidRange::new(Txid::MIN, Txid::MIN).unwrap());
+        let got = block_on(async {
+            let mut upload = metered
+                .begin_upload(&key, Timestamp::from_unix_millis(0), WriteMode::Replace)
+                .await
+                .unwrap();
+            upload.write(b"abcdef").await.unwrap();
+            upload.commit().await.unwrap();
+            let mut stream = metered.hold_stream(key, 1).await.unwrap().unwrap();
+            let len = ReadLen::new(3).unwrap();
+            [
+                stream.next(len).await.unwrap(),
+                stream.next(len).await.unwrap(),
+            ]
+        });
+        assert_eq!(got, [b"bcd".to_vec(), b"ef".to_vec()]);
+        assert_eq!(meters.read().read.calls, 1);
     }
 }

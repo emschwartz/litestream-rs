@@ -536,6 +536,26 @@ pub trait ObjectStore: Send + Sync {
         })
     }
 
+    /// [`Self::read_stream`] borrowing nothing, for a reader that keeps it between ticks (a
+    /// compaction part-way): one read of the object however many ticks it spans. `None`: the
+    /// store has nothing to hold, and the caller opens a [`Self::read_stream`] where it stands
+    /// at each step, which costs what this store's reads cost. The default holds the object
+    /// open ([`Self::open`]) and reads on from where the last piece ended. A store that bills
+    /// by request overrides it with its one GET, and a wrapper forwards it.
+    ///
+    /// # Errors
+    /// As [`Self::open`].
+    fn hold_stream(
+        &self,
+        key: FileKey,
+        offset: u64,
+    ) -> impl Future<Output = Result<Option<Box<dyn ReadStream>>, StoreError>> + Send {
+        async move {
+            let held = self.open(&key).await?;
+            Ok(held.map(|opened| -> Box<dyn ReadStream> { Box::new(HeldOpen { opened, offset }) }))
+        }
+    }
+
     /// Opens `key` for a caller that reads it in many reads, one after another (a send of a
     /// staged file), when this store would otherwise open the object again for each:
     /// [`Opened`]. `None`, the default, is a store with nothing to keep open, and the
@@ -889,6 +909,23 @@ impl<S: ObjectStore + ?Sized> ReadStream for Ranged<'_, S> {
     fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
             let bytes = self.store.read(&self.key, self.offset, len).await?;
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.offset = self.offset.saturating_add(read);
+            Ok(bytes)
+        })
+    }
+}
+
+/// [`ObjectStore::hold_stream`]'s default: the object held open, read on by range.
+struct HeldOpen {
+    opened: Box<dyn Opened>,
+    offset: u64,
+}
+
+impl ReadStream for HeldOpen {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let bytes = self.opened.read(self.offset, len).await?;
             let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             self.offset = self.offset.saturating_add(read);
             Ok(bytes)

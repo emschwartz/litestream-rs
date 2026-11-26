@@ -35,7 +35,7 @@ use crate::created_at::Known;
 use crate::failstop::{Lag, WalMark};
 use crate::fault::{Next, SnapshotCause, SnapshotCounts, StopCause};
 use crate::layout::FileKey;
-use crate::maintain::Job;
+use crate::maintain::{Job, Merging};
 use crate::pages::PageChecksumTable;
 use crate::position::Position;
 use crate::snapshot::Snapshotting;
@@ -500,12 +500,52 @@ pub(super) struct Engine {
     /// [`super::state::FAIR_SHARE`] the WAL step goes first again. A file of many slices
     /// would otherwise keep every commit made meanwhile in the WAL until it is whole.
     pub(super) slices_ahead: u32,
-    /// The level-9 snapshot part-way to the replica, if any, and the job it is
-    /// (`crate::snapshot::Snapshotting`). In memory only, as a send is.
-    pub(super) snapshot: Option<(Job, Box<Snapshotting>)>,
-    /// Slices of the snapshot in a row: at [`super::state::FAIR_SHARE`] the rest of the engine
+    /// The maintenance job part-way to the replica, if any, and the job it is. In memory
+    /// only, as a send is.
+    pub(super) sliced: Option<(Job, Box<Sliced>)>,
+    /// Slices of that job in a row: at [`super::state::FAIR_SHARE`] the rest of the engine
     /// has the next tick, as it has after a staged file's slices.
-    pub(super) snapshot_slices: u32,
+    pub(super) job_slices: u32,
+}
+
+/// A maintenance job that goes to the replica a slice a tick, the engine syncing and uploading
+/// between (`docs/decisions/D255.md`, `docs/decisions/D256.md`).
+#[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the engine keeps it boxed, and it is built once a job"
+)]
+pub(super) enum Sliced {
+    /// A level-9 snapshot read from the database.
+    Snapshot(Snapshotting),
+    /// A compaction, or a snapshot merged from level-0 files.
+    Merge(Merging),
+}
+
+impl Sliced {
+    /// Whether its last slice stopped for its upload's parts.
+    pub(super) const fn waits(&self) -> bool {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.waits,
+            Self::Merge(merging) => merging.waits(),
+        }
+    }
+
+    /// Bytes handed to the replica so far.
+    pub(super) const fn sent(&self) -> u64 {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.sent,
+            Self::Merge(merging) => merging.sent(),
+        }
+    }
+
+    /// Ends it, its upload aborted.
+    pub(super) async fn abort(self) {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.abort().await,
+            Self::Merge(merging) => merging.abort().await,
+        }
+    }
 }
 
 impl Engine {
@@ -532,8 +572,8 @@ impl Engine {
             attempted: None,
             syncs_ahead: 0,
             slices_ahead: 0,
-            snapshot: None,
-            snapshot_slices: 0,
+            sliced: None,
+            job_slices: 0,
         }
     }
 }

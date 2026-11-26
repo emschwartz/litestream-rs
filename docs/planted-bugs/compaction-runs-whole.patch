@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index a8d8e023d..1f67e6891 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2856,7 +2856,7 @@ impl Actor {
+             Sliced::Merge(merging) => {
+                 // Boxed: on the heap, the merge's state is not part of every poll frame below
+                 // `block_on`, which the half-stack headroom gate measures (`lsr_replica::stack`).
+-                match Box::pin(merging.slice((env.staging, env.remote), budget, false)).await {
++                match Box::pin(merging.slice((env.staging, env.remote), u64::MAX, true)).await {
+                     Ok(merging) => Ok(Sliced::Merge(merging)),
+                     Err(outcome) => {
+                         let tick = self.job_ended(&job, outcome, now, created_at_read);

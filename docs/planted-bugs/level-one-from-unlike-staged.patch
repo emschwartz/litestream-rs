@@ -1,12 +1,13 @@
 diff --git a/crates/core/src/maintain.rs b/crates/core/src/maintain.rs
+index f0e7601c7..b3af954ec 100644
 --- a/crates/core/src/maintain.rs
 +++ b/crates/core/src/maintain.rs
-@@ -1125,7 +1125,7 @@
-     sent: &Sent,
-     mode: WriteMode,
- ) -> Result<Compacted, CompactError> {
--    if !local_is_replica(local, replica, inputs, sent).await? {
-+    if false && !local_is_replica(local, replica, inputs, sent).await? {
-         return compact_in(replica, replica, inputs, level, mode).await;
-     }
-     // The source is staging here, so a failed read is staging's error
+@@ -1124,7 +1124,7 @@ impl Merging {
+             .all(|info| info.key.level() == Level::ZERO);
+         let staged = zero
+             && match local_is_replica(local, replica, inputs, sent).await {
+-                Ok(staged) => staged,
++                Ok(_) => true,
+                 Err(err) => return Err(judge(Err(err), output, replica, mode).await),
+             };
+         match open(staged, inputs, level, (local, replica), mode).await {

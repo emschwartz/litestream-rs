@@ -1006,3 +1006,37 @@ fn a_store_with_a_budget_shows_it_in_debug_output() {
     assert!(shown.contains("ListingBudget"), "{shown}");
     assert!(shown.contains("500ms"), "{shown}");
 }
+
+/// A held stream through the retrying store is the inner store's held one, and a piece that
+/// fails is asked again of a new held stream from the bytes handed out, under the policy.
+#[test]
+fn a_held_stream_that_fails_goes_on_from_the_bytes_it_handed_out() {
+    let (mem, sleeper, store) = rig(SeededEntropy::new(3), policy(5));
+    let pieces = conformance::block_on(async {
+        let mut up = store
+            .begin_upload(&key(), created_at(), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(b"abcdefghi").await.unwrap();
+        up.commit().await.unwrap();
+        let mut stream = store.hold_stream(key(), 0).await.unwrap().unwrap();
+        let len = ReadLen::new(3).unwrap();
+        let mut pieces = vec![stream.next(len).await];
+        mem.inject_failure(StoreOp::Read, transient(ErrorKind::ConnectionReset));
+        for _ in 0..3 {
+            pieces.push(stream.next(len).await);
+        }
+        pieces
+    });
+    assert_eq!(
+        pieces,
+        [
+            Ok(b"abc".to_vec()),
+            Ok(b"def".to_vec()),
+            Ok(b"ghi".to_vec()),
+            Ok(Vec::new())
+        ]
+    );
+    assert_eq!(sleeper.waits().len(), 1);
+    assert_eq!(store.stats().retries, 1);
+}

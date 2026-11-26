@@ -1,0 +1,13 @@
+diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
+index c2b1e430a..473c47b2e 100644
+--- a/crates/core/src/actor.rs
++++ b/crates/core/src/actor.rs
+@@ -2864,7 +2864,7 @@ impl Actor {
+         self.engine.sliced = Some((job, Box::new(sliced)));
+         // A slice that handed bytes over before its parts were in the way is the tick's unit
+         // all the same: the tick has spent its bytes.
+-        if waited && bytes == before {
++        if waited {
+             return None;
+         }
+         self.engine.job_slices = self.engine.job_slices.saturating_add(1);
