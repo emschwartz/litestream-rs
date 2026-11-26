@@ -1,0 +1,9 @@
+# A drain's final retention pass deletes on the strength of newest files it never read back.
+name = "final-retention-skips-the-read-back"
+fix = "claude/drain-retention"
+package = "lsr-core"
+tests = [
+    "a_rotten_newest_snapshot_holds_the_pass_before_it_deletes_anything",
+    "a_failed_read_back_ends_the_pass_and_deletes_nothing",
+    "the_pass_reads_the_newest_files_back_once",
+]

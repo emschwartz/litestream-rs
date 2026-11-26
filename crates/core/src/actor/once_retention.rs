@@ -11,7 +11,12 @@
 //!   as [`FinalRetention::Held`], so the caller exits 1 naming it;
 //! - ages are measured from the replica's newest created-at time when that is behind the clock
 //!   (the planner's anchor), so on an idle replica snapshots Go would delete are kept;
-//! - each level's last file is kept, as Go keeps it.
+//! - each level's last file is kept, as Go keeps it;
+//! - the newest file of each level is read back before the first delete if the engine still
+//!   owes that read-back (a boot always does: a drain runs no maintenance). A file that does not
+//!   verify, or a read that fails, ends the pass as [`FinalRetention::Failed`] with nothing
+//!   deleted, because every delete here rests on the newest file of its level being sound
+//!   (docs/decisions/D291.md).
 //!
 //! With retention switched off nothing is deleted ([`FinalRetention::Off`]), as Go deletes
 //! nothing remote then. A failed listing, created-at read or delete ends the pass as
@@ -27,7 +32,10 @@ use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::inventory::Inventory;
 use crate::layout::FileKey;
-use crate::maintain::{OnceRetention, Outcome, RetentionHold, once_retention, run_delete};
+use crate::maintain::{
+    OnceRetention, Outcome, ReadBack, RetentionHold, RetentionMode, once_retention, read_back,
+    run_delete,
+};
 use crate::source::{Checkpointer, PageSource, WalSource};
 
 /// Delete jobs in a row that begin with the same key before the pass stops as stuck.
@@ -128,6 +136,23 @@ impl Actor {
                 return Some(self.retention_ended(FinalRetention::Failed { deleted, fault }));
             }
         };
+        // Extra requests beyond Go's, two small reads a level: Go deletes the older snapshots and
+        // lower levels on the strength of the newest file of each level without reading it, so
+        // a newest file a store took cut short or damaged costs the files that could still
+        // restore (D291). The daemon reads back before it plans from a listing as well.
+        let enforcing = self.kept.cfg.maintenance.retention() == RetentionMode::Enforce;
+        if enforcing && self.engine.maintain.read_back_owed {
+            match read_back(env.remote, &inventory).await {
+                Ok(ReadBack::Sound) => self.engine.maintain.read_back_owed = false,
+                Ok(ReadBack::Rotten { .. }) => {
+                    let fault = Fault::RemoteCorrupt;
+                    return Some(self.retention_ended(FinalRetention::Failed { deleted, fault }));
+                }
+                Err(fault) => {
+                    return Some(self.retention_ended(FinalRetention::Failed { deleted, fault }));
+                }
+            }
+        }
         let published = self.engine.upload.confirmed();
         self.engine
             .maintain
