@@ -808,6 +808,9 @@ pub fn dropped_multipart_is_invisible_then_aborted(h: &RealHarness) {
     });
     assert!(h.list_all(0, 10).files.is_empty());
     assert_eq!(h.open_uploads(), 1);
+    // The part the write started may still be on a sender thread; the id is orphaned when it
+    // lets go.
+    h.store.wait_for_parts();
     assert_eq!(h.store.pending_orphans(), 1);
     assert_eq!(h.store.abort_orphans().unwrap(), 1);
     assert_eq!(h.open_uploads(), 0);

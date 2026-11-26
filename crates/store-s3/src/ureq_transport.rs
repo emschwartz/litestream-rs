@@ -448,15 +448,22 @@ mod tests {
 
     /// A server that answers every request on a connection (keep-alive) and counts the
     /// connections it accepted.
-    fn serve_keep_alive() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    /// A keep-alive server that answers no request until `together` requests wait for an
+    /// answer at once, so a batch of that width is in flight whole, on as many connections,
+    /// however the client's threads are scheduled. Counts the connections it accepted.
+    fn serve_keep_alive(
+        together: usize,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let accepted = std::sync::Arc::new(AtomicUsize::new(0));
         let count = std::sync::Arc::clone(&accepted);
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(together));
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let _seen = count.fetch_add(1, Ordering::SeqCst);
+                let gate = std::sync::Arc::clone(&gate);
                 thread::spawn(move || {
                     let mut stream = stream;
                     let mut head = Vec::new();
@@ -465,6 +472,7 @@ mod tests {
                         head.push(byte[0]);
                         if head.ends_with(b"\r\n\r\n") {
                             head.clear();
+                            let _leader = gate.wait();
                             let reply = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
                             if stream.write_all(reply).is_err() {
                                 return;
@@ -483,9 +491,9 @@ mod tests {
     #[test]
     fn a_batch_reuses_the_connections_the_last_batch_left() {
         use std::sync::atomic::Ordering;
-        let (url, accepted) = serve_keep_alive();
-        let transport = UreqTransport::new(Duration::from_secs(5));
         let width = crate::READ_CONCURRENCY;
+        let (url, accepted) = serve_keep_alive(width.get());
+        let transport = UreqTransport::new(Duration::from_secs(5));
         for _round in 0..4 {
             let batch = (0..width.get()).map(|_| get(&url)).collect();
             let answers = transport.send_many(batch, width);
