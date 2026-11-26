@@ -100,7 +100,7 @@ Logs go to standard error in Go's `slog` text format, `time=... level=... msg=..
 | `writes blocked` with `held_by=refused_at_start` | The store refused a request the start needs (credentials, or a permission such as the two multipart ones). Writes stay held until it accepts |
 | `replicate refused: the replica holds transactions up to ...`, then `replication stopped` with `cause=OtherWriter` | The bucket holds files this database cannot account for. See "When it stops" |
 | `database drained` with `txid=` | At shutdown, everything committed reached the replica |
-| `database not drained: deadline reached` | Shutdown ran out of time (`shutdown-sync-timeout`, 30 seconds by default) with changes not uploaded |
+| `database not drained: deadline reached, the replica lacks every commit after last_replicated_txid` | Shutdown ran out of time (`shutdown-sync-timeout`, 30 seconds by default) with changes not uploaded. A restore lacks every commit after `last_replicated_txid` (`none`: no transaction of this database was confirmed on the replica) until the next start uploads them; `unsynced_wal_bytes` and `staged_not_uploaded` say how much, counted high |
 | `litestream shut down` with `clean=true` or `false` | The last line |
 
 ## Exit codes

@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -73,6 +73,8 @@ pub(crate) struct Shared {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) park: Arc<dyn Park>,
     pub(crate) database: DatabaseFile,
+    /// The WAL's path, for a stop cut off inside a tick: its length then bounds what is left.
+    wal: PathBuf,
     pub(crate) grace: Duration,
     pub(crate) readers: Arc<AtomicUsize>,
     pub(crate) meters: Arc<Meters>,
@@ -99,12 +101,15 @@ impl fmt::Debug for Shared {
 static ACTIVE: Mutex<BTreeMap<DatabaseFile, Arc<Shared>>> = Mutex::new(BTreeMap::new());
 
 impl Shared {
-    fn new(database: DatabaseFile, config: &Config, runtime: &Runtime) -> Self {
+    fn new(path: &Path, database: DatabaseFile, config: &Config, runtime: &Runtime) -> Self {
         let now = runtime.clock.now();
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
         Self {
             clock: Arc::clone(&runtime.clock),
             park: Arc::clone(&runtime.park),
             database,
+            wal: PathBuf::from(wal),
             grace: config.shutdown_grace,
             readers: Arc::new(AtomicUsize::new(0)),
             meters: Arc::new(Meters::default()),
@@ -369,7 +374,7 @@ impl Replicator {
         let meta = config
             .meta_dir_for(database)
             .ok_or(StartError::NoFileName)?;
-        let shared = Arc::new(Shared::new(file, &config, &runtime));
+        let shared = Arc::new(Shared::new(database, file, &config, &runtime));
         register(&shared)?;
         let started = Self::launch(&shared, database, &meta, store, config, runtime, events);
         if started.is_err() {
@@ -650,36 +655,55 @@ fn settle_boot(shared: &Shared, deadline: Timestamp) -> Readiness {
         .unwrap_or(Readiness::TimedOut)
 }
 
+/// How a stop's wait ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    /// The thread's own outcome.
+    Ended(StopOutcome),
+    /// The deadline passed inside a tick: what the tick before it left.
+    CutOff(Unfinished),
+}
+
 /// The end of a stop, as the thread reports it or, at the deadline, as the caller sees it.
-fn stop_answer(
-    state: &State,
-    died: bool,
-    now: Timestamp,
-    deadline: Timestamp,
-) -> Option<StopOutcome> {
+fn stop_answer(state: &State, died: bool, now: Timestamp, deadline: Timestamp) -> Option<Answer> {
     if let Some(outcome) = state.outcome {
-        return Some(outcome);
+        return Some(Answer::Ended(outcome));
     }
     if died {
-        return Some(StopOutcome::Gone(Gone::ThreadDied));
+        return Some(Answer::Ended(StopOutcome::Gone(Gone::ThreadDied)));
     }
     // Only a tick that began before the deadline and is still running is cut off: the thread
     // is inside a request. One that began at or after it does no store I/O and ends at once.
     let stuck = state.tick_began.is_some_and(|began| began < deadline);
-    (now >= deadline && stuck).then_some(StopOutcome::DeadlineReached {
-        unsynced_wal_bytes: state.left.unsynced_wal_bytes,
-        staged_not_uploaded: state.left.staged_not_uploaded,
-    })
+    (now >= deadline && stuck).then_some(Answer::CutOff(state.left))
 }
 
-/// [`stop_answer`], blocking the calling thread.
+/// What a stop cut off inside a tick reports. `left` was measured before that tick began, which
+/// may be minutes ago (one compaction is one tick), and everything committed since is past it:
+/// the WAL file's length `wal_len` bounds the unsynced bytes from above, so they are counted
+/// high, never low.
+fn cut_off(left: Unfinished, wal_len: u64) -> StopOutcome {
+    StopOutcome::DeadlineReached {
+        unsynced_wal_bytes: left.unsynced_wal_bytes.max(wal_len),
+        staged_not_uploaded: left.staged_not_uploaded,
+    }
+}
+
+/// [`stop_answer`], blocking the calling thread. The WAL is measured after the state's lock
+/// is let go.
 fn settle_stop(shared: &Shared, deadline: Timestamp) -> StopOutcome {
     let clock = Arc::clone(&shared.clock);
-    shared
-        .wait_for(None, |state, died| {
-            stop_answer(state, died, clock.now(), deadline)
-        })
-        .unwrap_or(StopOutcome::Gone(Gone::ThreadDied))
+    let answer = shared.wait_for(None, |state, died| {
+        stop_answer(state, died, clock.now(), deadline)
+    });
+    match answer {
+        Some(Answer::Ended(outcome)) => outcome,
+        Some(Answer::CutOff(left)) => cut_off(
+            left,
+            std::fs::metadata(&shared.wal).map_or(0, |meta| meta.len()),
+        ),
+        None => StopOutcome::Gone(Gone::ThreadDied),
+    }
 }
 
 #[derive(Debug)]
@@ -858,7 +882,7 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         let handle = |pid_offset: u32| {
             let file = DatabaseFile::of(&path).unwrap();
-            let mut shared = Shared::new(file, &Config::default(), &Runtime::system());
+            let mut shared = Shared::new(&path, file, &Config::default(), &Runtime::system());
             shared.pid = shared.pid.wrapping_add(pid_offset);
             let shared = Arc::new(shared);
             Replicator {
@@ -890,7 +914,12 @@ mod tests {
         let path = dir.path().join("db");
         std::fs::write(&path, b"").unwrap();
         let file = DatabaseFile::of(&path).unwrap();
-        let shared = Arc::new(Shared::new(file, &Config::default(), &Runtime::system()));
+        let shared = Arc::new(Shared::new(
+            &path,
+            file,
+            &Config::default(),
+            &Runtime::system(),
+        ));
         let handle = Replicator {
             _last: Arc::new(LastHandle {
                 shared: Arc::clone(&shared),
@@ -912,10 +941,10 @@ mod tests {
     #[test]
     fn a_stop_is_cut_off_only_by_a_tick_from_before_its_deadline() {
         let deadline = at(1_000);
-        let cut = Some(StopOutcome::DeadlineReached {
+        let cut = Some(Answer::CutOff(Unfinished {
             unsynced_wal_bytes: 7,
             staged_not_uploaded: 2,
-        });
+        }));
         let early = ticking_since(at(999));
         assert_eq!(stop_answer(&early, false, deadline, deadline), cut);
         assert_eq!(stop_answer(&early, false, at(999), deadline), None);
@@ -925,5 +954,31 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// A stop cut off inside a long tick reports the WAL committed since that tick began. The
+    /// last measure was taken before the tick, and a drill whose level-2 compaction held the
+    /// thread for minutes reported 325 KB unsynced against a WAL of 115 MB.
+    #[test]
+    fn a_stop_cut_off_inside_a_tick_counts_the_wal_written_since() {
+        let left = Unfinished {
+            unsynced_wal_bytes: 325_480,
+            staged_not_uploaded: 0,
+        };
+        assert_eq!(
+            cut_off(left, 115_009_832),
+            StopOutcome::DeadlineReached {
+                unsynced_wal_bytes: 115_009_832,
+                staged_not_uploaded: 0,
+            }
+        );
+        // A WAL cut back below the measure (a checkpoint the tick ran) keeps the measure.
+        assert_eq!(
+            cut_off(left, 4_096),
+            StopOutcome::DeadlineReached {
+                unsynced_wal_bytes: 325_480,
+                staged_not_uploaded: 0,
+            }
+        );
     }
 }

@@ -1,0 +1,7 @@
+# The daemon read a database's final snapshot outcome before its drain ended, so a
+# `-once -force-snapshot` whose snapshot failed was reported drained and the run exited 0.
+name = "drain-end-read-before-the-drain"
+fix = "claude/sync-stall"
+package = "lsr-cli"
+test_bin = "cli"
+tests = ["daemon::once_with_a_snapshot_that_cannot_be_written_is_not_clean"]

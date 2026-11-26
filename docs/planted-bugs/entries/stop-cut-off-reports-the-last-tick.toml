@@ -1,0 +1,9 @@
+# A stop whose deadline passes inside a tick reports what was left before that tick began: a
+# drill whose level-2 compaction held the engine's thread for minutes reported 325 KB unsynced
+# against a WAL of 115 MB, and the replica lacked 4,753 commits.
+name = "stop-cut-off-reports-the-last-tick"
+fix = "claude/sync-stall"
+package = "lsr-replica"
+tests = [
+    "replicator::tests::a_stop_cut_off_inside_a_tick_counts_the_wal_written_since",
+]

@@ -52,6 +52,10 @@ use crate::health::{Board, DbState, Entry};
 use crate::logging::{DbEvents, Logger, Value};
 use crate::signals;
 
+/// The line a drain that ran out of time logs: the replica holds nothing committed after the
+/// transaction it names, so a restore lacks those commits until the next start uploads them.
+const NOT_DRAINED: &str = "database not drained: deadline reached, the replica lacks every commit after last_replicated_txid";
+
 /// How one database ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum End {
@@ -523,16 +527,19 @@ impl Daemon {
         let mut dbs = Vec::new();
         for (slot, sync) in slots.iter().zip(syncs) {
             let path = slot.plan.path().to_owned();
+            let mut replicated = None;
             let end = match (sync, &slot.state) {
                 (Some(sync), Entry::Running(replicator)) => {
+                    let stopped = sync.wait();
                     let health = replicator.health();
-                    ending(sync.wait(), health.final_snapshot, health.final_retention)
+                    replicated = health.replicated.map(|(txid, _)| txid);
+                    ending(stopped, health.final_snapshot, health.final_retention)
                 }
                 (Some(sync), Entry::Waiting | Entry::Failed) => End::Stopped(sync.wait()),
                 (None, Entry::Waiting) => End::NeverAppeared,
                 (None, Entry::Failed | Entry::Running(_)) => End::DidNotStart,
             };
-            self.ended(&path, &end);
+            self.ended(&path, &end, replicated);
             dbs.push((path, end));
         }
         Finished {
@@ -580,7 +587,10 @@ impl Daemon {
         self.started.budget(self.grace.saturating_sub(spent))
     }
 
-    fn ended(&self, path: &Path, end: &End) {
+    /// Logs how the database at `path` ended. `replicated` is the newest transaction its replica
+    /// was confirmed to hold, which a drain that did not finish names: a restore lacks every
+    /// commit after it.
+    fn ended(&self, path: &Path, end: &End, replicated: Option<lsr_ltx::Txid>) {
         let at = ("path", Value::from(path));
         match end {
             End::Stopped(StopOutcome::Drained { txid }) => {
@@ -592,16 +602,17 @@ impl Daemon {
                 unsynced_wal_bytes,
                 staged_not_uploaded,
             }) => {
+                let replicated = replicated.map_or_else(|| "none".to_owned(), |t| t.to_string());
                 let fields = [
                     at,
+                    ("last_replicated_txid", replicated.into()),
                     ("unsynced_wal_bytes", (*unsynced_wal_bytes).into()),
                     (
                         "staged_not_uploaded",
                         u64::from(*staged_not_uploaded).into(),
                     ),
                 ];
-                self.log
-                    .error("database not drained: deadline reached", &fields);
+                self.log.error(NOT_DRAINED, &fields);
             }
             End::Stopped(StopOutcome::Stopped(cause)) => {
                 let fields = [at, ("cause", format!("{cause:?}").into())];
@@ -811,6 +822,65 @@ mod tests {
             Board::default(),
             Mode::Serving,
         )
+    }
+
+    /// Lines written to a buffer the test reads back.
+    #[derive(Clone, Default)]
+    struct Lines(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_poisoned| io::Error::other("poisoned"))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A drain cut by its deadline says in words that the replica lacks the newest commits,
+    /// and names the newest transaction the replica holds, so an operator knows what a restore
+    /// lacks.
+    #[test]
+    fn a_drain_cut_by_its_deadline_names_the_last_replicated_transaction() {
+        let lines = Lines::default();
+        let text = "dbs: []\n";
+        let loaded = GoConfig::parse(text, Expand::Off, &ProcessEnv).unwrap();
+        let plan = lsr_config::plan(&loaded.config, &ProcessEnv).unwrap();
+        let log = Arc::new(Logger::to(
+            lsr_config::LogLevel::Error,
+            lsr_config::LogFormat::Text,
+            Runtime::system().clock,
+            Box::new(lines.clone()),
+        ));
+        let daemon = Daemon::start(
+            &plan,
+            false,
+            log,
+            Started::default(),
+            Board::default(),
+            Mode::Serving,
+        );
+        let end = End::Stopped(StopOutcome::DeadlineReached {
+            unsynced_wal_bytes: 115_009_832,
+            staged_not_uploaded: 0,
+        });
+        daemon.ended(Path::new("/data/big.db"), &end, lsr_ltx::Txid::new(0xa67));
+        let out = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains(
+                "msg=\"database not drained: deadline reached, the replica lacks every commit after last_replicated_txid\""
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("last_replicated_txid=0000000000000a67"),
+            "{out}"
+        );
+        assert!(out.contains("unsynced_wal_bytes=115009832"), "{out}");
     }
 
     /// An application holding the write lock while the database opens makes the start busy.
