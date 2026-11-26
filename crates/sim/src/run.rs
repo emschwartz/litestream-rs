@@ -5,8 +5,8 @@
 //! every drain and once at the end. The actor is driven the way an application would
 //! drive it: each tick's future goes through [`World::run_tick`], the clock
 //! follows the `Next` it returns, and a crash drops the actor and builds a new
-//! one. A failure names the seed and the step; [`shrink`] finds the shortest
-//! prefix that still fails.
+//! one. A failure names the seed and the step; [`crate::shrink`] cuts it down to the
+//! operations that matter.
 
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -3029,7 +3029,18 @@ pub fn run_with(
     weights: &Weights,
     opts: &Opts,
 ) -> Result<RunReport, Failure> {
-    let opts = Opts {
+    run_ops(
+        seed,
+        &history(seed, steps, weights),
+        &drawn_opts(weights, opts),
+    )
+}
+
+/// `opts` with what drawn histories run under: the options a mix's weights carry, which
+/// [`run_with`] sets and a shrunk history must keep to fail again.
+#[must_use]
+pub fn drawn_opts(weights: &Weights, opts: &Opts) -> Opts {
+    Opts {
         drawn: true,
         block_crash_law: weights.block_crash_law,
         lying_wal_sync: weights.lying_wal_sync,
@@ -3045,8 +3056,7 @@ pub fn run_with(
         remote_parts: weights.remote_parts,
         no_create_only: weights.no_create_only,
         ..opts.clone()
-    };
-    run_ops(seed, &history(seed, steps, weights), &opts)
+    }
 }
 
 /// Runs the given operations, then the final drain and judgment.
@@ -3121,26 +3131,6 @@ pub fn run_ops(seed: Seed, ops: &[Op], opts: &Opts) -> Result<RunReport, Failure
             .extend(runner.w.remote_recorder.rejected());
     }
     Ok(runner.report)
-}
-
-/// The fewest operations of `seed`'s history that still fail, found by
-/// halving: a failure at step `k` reproduces in the first `k + 1` operations,
-/// and a shorter prefix either passes or fails earlier. `None` when the run
-/// passes.
-#[must_use]
-pub fn shrink(seed: Seed, steps: u32, weights: &Weights, opts: &Opts) -> Option<u32> {
-    let failed = run_with(seed, steps, weights, opts).err()?;
-    let mut high = failed.step.saturating_add(1).min(steps.max(1));
-    let mut low = 0_u32;
-    while low.saturating_add(1) < high {
-        let mid = low.saturating_add(high.saturating_sub(low) / 2);
-        if run_with(seed, mid, weights, opts).is_err() {
-            high = mid;
-        } else {
-            low = mid;
-        }
-    }
-    Some(high)
 }
 
 mod after_restart;

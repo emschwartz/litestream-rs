@@ -2,7 +2,7 @@
 //!
 //! A history is a pure function of its seed: it draws from one sequential
 //! stream and looks at no state, so the first `k` operations of a history of
-//! `n` are the history of `k` (what [`crate::shrink`] relies on). Whatever
+//! `n` are the history of `k` (what [`crate::shrink`] relies on to cut a failure to its prefix). Whatever
 //! needs the world's state (which pages a commit touches, which other process ends)
 //! is decided when the runner applies the operation, from the step number.
 //!

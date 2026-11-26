@@ -13,6 +13,16 @@ use lsr_sim::{Opts, Seed, Weights, run_with};
 
 const DEFAULT_STEPS: u32 = 300;
 
+/// The mix the replay and `just sim-shrink` run `seed` under: `LSR_SIM_WEIGHTS=default`, or the
+/// seed's own mix with the overrides of `unaided::weights`.
+pub fn weights(seed: Seed) -> Weights {
+    match std::env::var("LSR_SIM_WEIGHTS").as_deref() {
+        Ok("default") => Weights::default(),
+        Ok(other) => panic!("LSR_SIM_WEIGHTS is `default` or unset, not {other}"),
+        Err(_) => crate::unaided::weights(seed),
+    }
+}
+
 #[test]
 fn replay_the_named_run() {
     let Ok(text) = std::env::var("LSR_SIM_SEED") else {
@@ -28,11 +38,7 @@ fn replay_the_named_run() {
         trace: true,
         ..Opts::default()
     };
-    let weights = match std::env::var("LSR_SIM_WEIGHTS").as_deref() {
-        Ok("default") => Weights::default(),
-        Ok(other) => panic!("LSR_SIM_WEIGHTS is `default` or unset, not {other}"),
-        Err(_) => crate::unaided::weights(seed),
-    };
+    let weights = weights(seed);
     match run_with(seed, steps, &weights, &opts) {
         Ok(report) => {
             for line in &report.trace {
