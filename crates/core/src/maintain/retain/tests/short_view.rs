@@ -57,7 +57,9 @@ fn newest_per_level(inventory: &Inventory) -> Vec<FileInfo> {
         .collect()
 }
 
-/// One generated listing: the short rule's deletes are the whole rule's, or fewer, and
+/// One generated listing: the short rule's deletes are the whole rule's, or level-0 files that
+/// the level 1 to 8 files of the whole listing cover (the floor, which the short rule does not
+/// read, is what keeps the whole rule from deleting a covered file that straddles it), and
 /// restoring the newest state still works without them. Only a listing the whole gate lets
 /// through counts: the short rule runs only while the last whole listing passed it.
 fn check_short(data: &[u8], weird: bool, which: usize) {
@@ -102,10 +104,20 @@ fn check_short(data: &[u8], weird: bool, which: usize) {
     let view = view_of(&inventory, &mut b);
     let known = newest_per_level(&inventory);
     let zero = short(&view, &known, now, cfg, listing.published);
+    let upper: Vec<FileInfo> = Level::COMPACTION
+        .iter()
+        .flat_map(|l| inventory.level(*l))
+        .copied()
+        .collect();
+    let cover = merged_ranges(&[upper.as_slice()]);
     for key in &zero.keys {
+        let covered_whole = inventory
+            .level(Level::ZERO)
+            .iter()
+            .any(|f| f.key == *key && covered(&cover, f));
         assert!(
-            key.level() == Level::ZERO && (stale || allowed.contains(key)),
-            "the short view deletes {key}, the whole rules keep it: {allowed:?}"
+            key.level() == Level::ZERO && (stale || allowed.contains(key) || covered_whole),
+            "the short view deletes {key}, which the whole listing does not cover: {allowed:?}"
         );
     }
     let Some(newest) = inventory.newest() else {
@@ -209,11 +221,12 @@ fn a_pinned_restore_point_leaves_level_zero_to_the_whole_listing() {
 
 /// The reviewer's case: the newest level 1 file (a Go compaction stamped at compaction time) is
 /// younger than the newest level-0 file, so the whole rules' anchor is that file's time and the
-/// floor is 20. A short view that anchors on the level-0 file and the snapshots alone reads an
-/// earlier time, a floor of 10, and deletes level-0 files 18 to 21, which the whole rules
-/// keep. Reading the remembered newest level 1 file for its age makes the two agree.
+/// floor is 20. Level-0 files 18 to 21 straddle the floor and the level 1 files under it go
+/// with rule 2, so the whole rules keep them. The short rule reads no snapshot and no floor, and
+/// deletes them: level 1 files 11 to 30 cover them whole, nothing retained reads them (a restore
+/// from a retained snapshot starts above 20), and the newest state still plans without them.
 #[test]
-fn the_anchor_reads_the_newest_known_file_of_each_level_so_the_short_view_never_deletes_more() {
+fn a_level_zero_file_straddling_the_floor_is_deleted_by_the_short_rule_and_restores_plan() {
     let t = crate::maintain::tests::T0;
     let files = vec![
         crate::maintain::tests::file(9, 1, 10, t),
@@ -241,11 +254,9 @@ fn the_anchor_reads_the_newest_known_file_of_each_level_so_the_short_view_never_
     let view = inv(files.clone());
     let known = [crate::maintain::tests::file(1, 20, 30, t + 3 * DAY + HOUR)];
     let zero = short(&view, &known, now, &cfg, None);
-    assert!(
-        !zero.keys.contains(&key(0, 18, 21)),
-        "the short view deletes what the whole rules keep: {:?}",
-        zero.keys
-    );
+    assert!(zero.keys.contains(&key(0, 18, 21)), "{:?}", zero.keys);
+    let outcome = plan_without(&inv(files), &zero.keys, KeyTarget::Latest);
+    assert!(restores(&outcome, txid(31)), "{outcome:?}");
 }
 /// A listing behind what was published is a hold, and a hold leaves level 0 to the whole
 /// listing: the same files are deleted once the listing has caught up.
