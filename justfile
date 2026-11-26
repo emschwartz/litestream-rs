@@ -120,6 +120,10 @@ tsan:
         cargo +{{nightly}} test -Zbuild-std --target x86_64-unknown-linux-gnu --locked \
         -p lsr-sqlite -p lsr-replica --lib --tests
 
+# Miri cannot run the aarch64 crypto intrinsics crc-fast picks on Apple Silicon, so there it
+# interprets the x86_64 macOS build, whose carry-less multiply it does run. Empty elsewhere.
+miri-target := if arch() + "-" + os() == "aarch64-macos" { "--target x86_64-apple-darwin" } else { "" }
+
 # Miri over the pure crates (ltx, wal), the core's decision code (plan, retry, position,
 # layout, checkpoint, compact), and lsr-sqlite's tests that call no SQLite (the build check, result
 # codes, offsets, and the io_methods and wal-index checks on synthetic tables): no I/O, no FFI. Miri runs about 1000 times slower than native,
@@ -132,13 +136,13 @@ tsan:
 miri:
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
         PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
-        cargo +{{nightly}} miri test --locked -p lsr-ltx -p lsr-wal --lib
+        cargo +{{nightly}} miri test {{miri-target}} --locked -p lsr-ltx -p lsr-wal --lib
     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_DISABLE_FAILURE_PERSISTENCE" \
         PROPTEST_CASES=4 PROPTEST_DISABLE_FAILURE_PERSISTENCE=true CARGO_TARGET_DIR=target/miri \
-        cargo +{{nightly}} miri test --locked -p lsr-core --lib -- \
+        cargo +{{nightly}} miri test {{miri-target}} --locked -p lsr-core --lib -- \
         --skip actor:: plan:: retry:: position:: layout:: checkpoint:: compact::
     MIRIFLAGS="-Zmiri-strict-provenance" CARGO_TARGET_DIR=target/miri \
-        cargo +{{nightly}} miri test --locked -p lsr-sqlite --lib -- \
+        cargo +{{nightly}} miri test {{miri-target}} --locked -p lsr-sqlite --lib -- \
         version::tests::every version::tests::another version::tests::the_refusal error::tests \
         checkpoint::tests::checkpoint_results pages::tests::page_offsets pages::tests::a_missing \
         shm::tests::missing_methods identity::tests
