@@ -61,7 +61,8 @@ commit-check base="":
         exit 1
     fi
 
-# The S3 store's HTTP clients: each builds
+# The S3 store's HTTP clients, which link no TLS provider (its tree has neither ring nor
+# aws-lc-rs): each builds
 # alone, which `clippy` over all features cannot show. Their tests run in `test`, which has ureq,
 # reqwest and native-tls on at once. Then lsr-sqlite and lsr-replica without `bundled` and without
 # `rusqlite`, as an application linking its own SQLite builds them. Last, every crate's tests build
@@ -70,6 +71,8 @@ commit-check base="":
 features:
     cargo clippy -p lsr-store-s3 --no-default-features --lib --locked -- -D warnings
     cargo clippy -p lsr-store-s3 --no-default-features --features reqwest --lib --locked -- -D warnings
+    cargo clippy -p lsr-store-s3 --no-default-features --features ureq,reqwest --lib --locked -- -D warnings
+    test -z "$(cargo tree -p lsr-store-s3 --no-default-features --features ureq,reqwest -e normal --target all --locked -i ring 2>/dev/null; cargo tree -p lsr-store-s3 --no-default-features --features ureq,reqwest -e normal --target all --locked -i aws-lc-rs 2>/dev/null)"
     cargo clippy -p lsr-sqlite -p lsr-replica --no-default-features --lib --locked -- -D warnings
     for dir in crates/*/; do cargo check -p "lsr-$(basename "$dir")" --tests --locked || exit 1; done
 
@@ -196,6 +199,11 @@ planted-bugs *args:
 # entry (`docs/planted-bugs.md`). Reports; a plant no seed finds is a listed generator gap.
 planted-bugs-unaided seeds="1000" *args:
     uv run scripts/planted-bugs.py --unaided --seeds {{seeds}} {{args}}
+
+# Production lines per shipped crate (code, comment, blank; tests and the "testing" feature left
+# out) and the change in code lines against `base`. Pull requests write it to the CI job summary.
+prod-lines base="origin/main":
+    uv run scripts/prod-lines.py --base {{base}}
 
 # Mutation-tests the lines this branch changed in core and ltx against `base`; fails on a missed
 # mutant not in docs/mutants-escapes.txt. Runs on pull requests in CI.

@@ -99,6 +99,19 @@ fn the_first_start_reads_each_page_once() {
     assert_eq!(Rig::files(&rig.remote, Level::ZERO).len(), 1);
 }
 
+/// A first start reads nothing of the snapshot's key before it writes it, as Go reads nothing:
+/// the listing it planned from shows every file this engine wrote, so the key holds nothing.
+/// Before, a one-byte read of the key (a not-found GET on S3) went out ahead of every merge.
+#[test]
+fn the_first_start_sends_no_read_ahead_of_the_snapshot() {
+    let mut rig = quiet();
+    let mut actor = Actor::new(cfg());
+    rig.settle(&mut actor, T0);
+    let snapshot = FileKey::snapshot(Txid::new(1).unwrap());
+    assert_eq!(Rig::files(&rig.remote, Level::SNAPSHOT).len(), 1);
+    assert_eq!(rig.remote.reads_of(&snapshot), 0);
+}
+
 /// A first start moves the database twice, to level 0 and to level 9: the levels between hold
 /// nothing (they start above the snapshot), and the only download is the snapshot's own check.
 /// Before, the level-0 file was carried into levels 1, 2 and 3 (five uploads, two downloads).
@@ -194,6 +207,35 @@ fn a_first_file_sent_in_slices_does_not_let_the_levels_run() {
         }
     }
     assert!(!Rig::files(&rig.remote, Level::SNAPSHOT).is_empty());
+}
+
+/// The first snapshot starts when the first level-0 file is confirmed, not at the next
+/// window of some level: a send that took many ticks already let a listing see the empty
+/// replica, and the clock stands still from the confirmation on.
+#[test]
+fn the_first_snapshot_starts_as_the_first_level_zero_file_is_confirmed() {
+    let mut rig = big();
+    let mut actor = Actor::new(ActorConfig {
+        upload: UploadConfig {
+            bytes_per_tick: std::num::NonZeroU64::new(256 * 1024).unwrap(),
+            ..UploadConfig::default()
+        },
+        ..cfg()
+    });
+    let mut now = T0;
+    for _ in 0..400 {
+        rig.tick(&mut actor, now);
+        if !Rig::files(&rig.remote, Level::ZERO).is_empty() {
+            break;
+        }
+        now += SLICE_MILLIS;
+    }
+    assert!(!Rig::files(&rig.remote, Level::ZERO).is_empty());
+    rig.settle(&mut actor, now);
+    assert!(
+        !Rig::files(&rig.remote, Level::SNAPSHOT).is_empty(),
+        "no snapshot at the instant level 0 was confirmed"
+    );
 }
 
 /// A config that sends a quarter of a megabyte a tick.

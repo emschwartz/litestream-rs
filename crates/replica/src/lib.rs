@@ -5,6 +5,10 @@
 //! opens. The replicator owns one OS thread and three SQLite connections, holds a read
 //! transaction that pins the WAL from before the application's first write, and returns a handle.
 //!
+//! An `S3Store`'s TLS provider is the one the application installed as rustls's process default,
+//! else the one provider rustls's features enable in the application's build; `lsr-store-s3`
+//! enables none. When rustls cannot pick, building the store is `ConfigError::NoTlsProvider`.
+//!
 //! - Writes are held until the first boot is judged and while fail-stop holds
 //!   ([`Config::if_replication_stops`]): the replicator keeps the database's write lock, so every
 //!   writer, in this process or another, gets SQLite's "database is locked"
@@ -54,8 +58,8 @@
 //! The live heap of the library's own buffers peaks at the sum of the terms below. Each is
 //! pinned by a gate that fails when the buffer grows (the tests are named). The configuration
 //! terms are: part size `P` (`S3Config::with_part_size`, 5 MiB by default and 16 MiB on
-//! Tigris), upload concurrency `C` (`S3Config::with_concurrency`, 5), the compaction fan-in
-//! `F` (`MAX_INPUTS`, 32), and the restore read concurrency `R` (`READ_CONCURRENCY`, 8).
+//! Tigris), upload concurrency `C` (`S3Config::with_concurrency`, 5), and the compaction fan-in
+//! `F` (`MAX_INPUTS`, 32).
 //! Larger parts or more concurrency raise `C x P`, and nothing else.
 //!
 //! - **Upload:** `C x P` plus 4 MiB, the parts of the batch being sent. For a file over 10000
@@ -64,7 +68,7 @@
 //!   reference, so nothing holds it twice: 26 MiB at the defaults, at most 84 MiB on Tigris
 //!   (`crates/store-s3/tests/store-s3/memory.rs`, `an_upload_through_the_real_client_holds_five_parts`
 //!   and `the_bound_follows_part_size_and_concurrency`). A part is the one unit a request
-//!   must hold whole (its `Content-MD5` is signed before the body goes out), so this term
+//!   must hold whole (its SHA-256 is signed before the body goes out), so this term
 //!   grows with the part size the operator sets; see `docs/decisions/D212.md`.
 //! - **Compaction:** the inputs' windows plus a 256 KiB output buffer that is kept for the
 //!   file. A level-1 compaction reads each staged file in a 128 KiB window: 5 MiB at `F` = 32
@@ -77,8 +81,9 @@
 //!   about 30 MiB with the defaults (`a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts`).
 //!   A compaction above level 1 holds its 17 MiB of windows instead of 5, to about 42 MiB (the
 //!   sum of the two gates above).
-//! - **Restore:** `R x 4 MiB` plus 3 MiB: 35 MiB, whatever the database's size or the chain's
-//!   length (`a_restore_through_the_real_client_holds_one_read_window`; the same law at one
+//! - **Restore:** one 4 MiB chunk of the file being read plus 3 MiB: 7 MiB, whatever the
+//!   database's size or the chain's length, since each file is one GET whose body is read as the
+//!   decoder takes it (`a_restore_through_the_real_client_holds_one_chunk`; the same law at one
 //!   to four GiB in `crates/core/tests/core/mem_big.rs`).
 //! - **Idle:** a replicator on a quiet database holds about 1 MiB of live heap (the page
 //!   checksum table and the HTTP client's idle connections: up to 16, 160 KiB of buffers each, which only a
@@ -146,7 +151,7 @@ pub use restore::{
 };
 #[cfg(feature = "testing")]
 pub use runtime::FakeClockHandle;
-pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime};
+pub use runtime::{CALLER_SLICE, OsEntropy, Park, Runtime, lock};
 pub use store::{BoxFuture, DynStore, DynUpload};
 
 pub use lsr_core::{

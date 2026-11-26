@@ -1,0 +1,13 @@
+diff --git a/crates/store-s3/src/request.rs b/crates/store-s3/src/request.rs
+index 9fcc5a7..311286b 100644
+--- a/crates/store-s3/src/request.rs
++++ b/crates/store-s3/src/request.rs
+@@ -354,7 +354,7 @@ impl RequestBuilder {
+         url.set_query(Some(query.as_str()).filter(|query| !query.is_empty()));
+         let mut all = self.base_headers();
+         all.extend(headers);
+-        all.push(("x-amz-content-sha256", payload.to_hex()));
++        all.push(("x-amz-content-sha256", PayloadHash::EMPTY.to_hex()));
+         all.push(("x-amz-date", amz_date.clone()));
+         if let Some(token) = self.credentials.token().filter(|token| !token.is_empty()) {
+             all.push(("x-amz-security-token", token.to_owned()));

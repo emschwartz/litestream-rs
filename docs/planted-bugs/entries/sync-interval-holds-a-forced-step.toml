@@ -1,0 +1,9 @@
+# The interval holds a step that is not for new commits: an operator's snapshot and the
+# rest of a sync the byte cap cut short wait with them.
+name = "sync-interval-holds-a-forced-step"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::a_snapshot_asked_for_does_not_wait_for_the_interval",
+    "actor::tests::steady::the_rest_of_a_capped_sync_follows_at_once",
+]

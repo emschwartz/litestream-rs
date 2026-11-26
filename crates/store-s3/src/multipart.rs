@@ -1,13 +1,13 @@
 //! The multipart half of an upload: the three requests and what each answer
 //! must prove.
 //!
-//! Every part carries Content-MD5 and its returned ETag must be the quoted hex
-//! MD5 of the part (a mismatch or a missing ETag is `ChecksumMismatch` with the
-//! part number, F7). The completed object's ETag is `<32 hex>-<parts>` on S3,
-//! MinIO and Tigris, but nothing obliges a provider to that form, and it is no
-//! MD5 of the object in any case. Only an ETag of that form naming another part
-//! count is evidence of a wrong object; any other form is taken as it comes,
-//! because the part digests the object is made of were each verified already.
+//! Every part signs its SHA-256, which the store checks against the body it received
+//! (`XAmzContentSHA256Mismatch` otherwise), and must answer with an ETag, which the
+//! complete names it by (a missing one is `ChecksumMismatch` with the part number). What
+//! the ETag says is not compared with anything: as in Go, the signed hash is the check. The
+//! completed object's ETag is `<32 hex>-<parts>` on S3, MinIO and Tigris, but nothing obliges
+//! a provider to that form. Only an ETag of that form naming another part count is evidence
+//! of a wrong object; any other form is taken as it comes.
 //!
 //! A create-only upload sends `If-None-Match: *` on the complete, where S3
 //! checks it. The answers that are not plain:
@@ -26,21 +26,17 @@
 //!   `Transient`, so the caller lists and reads back rather than trusting
 //!   either answer.
 //!
-//! Parts go out as batches of up to the `concurrency` setting
-//! ([`Transport::send_many`]); each part is judged alone, exactly as when
-//! parts went one at a time, and the ETags are kept in part order.
+//! Parts are sent one request each on the store's lanes (`upload.rs`, `lanes.rs`); each is
+//! judged alone when its upload collects its answer, and its ETag is kept by its number.
 
-use std::io;
-
-use lsr_core::{CorruptCause, FileKey, PartNumber, Reread, StoreError, StoreOp, WriteMode};
+use lsr_core::{CorruptCause, FileKey, PartNumber, StoreError, StoreOp, WriteMode};
 use lsr_ltx::Timestamp;
 
-use crate::again::Sealed;
-use crate::classify::{S3Code, classify, error_in_ok_body, is_not_implemented};
+use crate::classify::{S3Code, classify, error_in_ok_body, invalid_data, is_not_implemented};
 use crate::request::{Precondition, UploadId};
-use crate::response::{EtagCheck, check_etag, parse_complete, parse_create, parse_head};
+use crate::response::{parse_complete, parse_create, parse_head};
 use crate::store::Inner;
-use crate::transport::{HttpResponse, StreamedRequest, Transport};
+use crate::transport::{HttpResponse, Transport};
 
 /// Whether a completed object's ETag can belong to an upload of `parts`
 /// parts: `false` only for the multipart form `<32 hex>-<n>` with another `n`.
@@ -71,26 +67,21 @@ pub(crate) struct Sent {
 /// would need more than 10000 parts.
 pub(crate) const PAYLOAD_TOO_LARGE: u16 = 413;
 
-/// What one UploadPart's answer must prove: a success status, and an ETag
-/// that is the quoted MD5 of the part sent.
-fn judge_part(
+/// What one UploadPart's answer must prove: a success status, and an ETag to name the part
+/// by in the complete.
+pub(crate) fn judge_part(
     key: &FileKey,
     number: PartNumber,
-    sent: [u8; 16],
     response: &HttpResponse,
 ) -> Result<String, StoreError> {
     classify(StoreOp::Upload, Some(key), Some(number), response)?;
-    let mismatch = || StoreError::Corrupt {
-        key: Some(*key),
-        cause: CorruptCause::ChecksumMismatch { part: Some(number) },
-    };
-    match check_etag(response, sent) {
-        EtagCheck::Matches | EtagCheck::NotMd5 => response
-            .header("etag")
-            .map(str::to_owned)
-            .ok_or_else(mismatch),
-        EtagCheck::Missing | EtagCheck::Mismatch => Err(mismatch()),
-    }
+    response
+        .header("etag")
+        .map(str::to_owned)
+        .ok_or(StoreError::Corrupt {
+            key: Some(*key),
+            cause: CorruptCause::ChecksumMismatch { part: Some(number) },
+        })
 }
 
 impl<T: Transport> Inner<T> {
@@ -105,98 +96,6 @@ impl<T: Transport> Inner<T> {
         let request = self.request(op, |b, now| b.create_multipart(now, key, created_at))?;
         let response = self.exec(op, Some(key), request)?;
         parse_create(&response).map_err(|err| err.into_store(op, Some(*key)))
-    }
-
-    /// UploadPart for each body, numbered from `first`, as one batch;
-    /// returns the ETags to list at completion, in part order. Every part is
-    /// judged alone (status, then its ETag against its MD5); the first failure
-    /// in part order is the result. A number past the part cap fails before
-    /// anything is sent.
-    pub(crate) fn put_parts(
-        &self,
-        key: &FileKey,
-        id: &UploadId,
-        first: usize,
-        bodies: Vec<Vec<u8>>,
-    ) -> Result<Vec<String>, StoreError> {
-        let op = StoreOp::Upload;
-        let last = first.saturating_add(bodies.len()).saturating_sub(1);
-        let number = |n: usize| {
-            PartNumber::new(u16::try_from(n).unwrap_or(0)).ok_or(StoreError::Refused {
-                op,
-                status: PAYLOAD_TOO_LARGE,
-            })
-        };
-        number(last)?;
-        let numbered = bodies
-            .into_iter()
-            .enumerate()
-            .map(|(at, body)| (first.saturating_add(at), body));
-        self.batch(
-            op,
-            self.concurrency,
-            numbered,
-            |(n, body)| {
-                let number = number(n)?;
-                let request =
-                    self.request(op, |b, now| b.upload_part(now, key, id, number, body))?;
-                let sent = request.md5();
-                Ok((request.into_request(), (number, sent)))
-            },
-            |(number, sent), response| judge_part(key, number, sent, &response),
-        )
-        .into_iter()
-        .collect()
-    }
-
-    /// [`Self::put_parts`] for parts the upload let go of: each request carries the length
-    /// and the MD5 taken when the part was first handed over, and its body is read again
-    /// through `again` while it is sent (`again.rs`). A part whose second read gave nothing
-    /// fails with the source's own error, whatever its request then came to; otherwise it is
-    /// judged as any part is. The first failure in part order is the result.
-    pub(crate) fn put_parts_from(
-        &self,
-        key: &FileKey,
-        id: &UploadId,
-        first: usize,
-        parts: &[Sealed],
-        again: &dyn Reread,
-    ) -> Result<Vec<String>, StoreError> {
-        let op = StoreOp::Upload;
-        let mut numbers = Vec::with_capacity(parts.len());
-        let mut requests = Vec::with_capacity(parts.len());
-        for (at, part) in parts.iter().enumerate() {
-            let raw = u16::try_from(first.saturating_add(at)).unwrap_or(0);
-            let number = PartNumber::new(raw).ok_or(StoreError::Refused {
-                op,
-                status: PAYLOAD_TOO_LARGE,
-            })?;
-            let sized = (part.len(), part.md5());
-            requests.push(self.request(op, |b, now| {
-                b.upload_part_streamed(now, key, id, number, sized)
-            })?);
-            numbers.push(number);
-        }
-        let mut bodies: Vec<_> = parts.iter().map(|part| part.body(again)).collect();
-        let streamed = requests
-            .into_iter()
-            .zip(parts)
-            .zip(bodies.iter_mut())
-            .map(|((request, part), body)| {
-                StreamedRequest::new(request.into_request(), part.len(), body)
-            })
-            .collect();
-        let sent = self.send_streamed(op, self.concurrency, streamed);
-        let mut etags = Vec::with_capacity(parts.len());
-        for (((response, body), part), number) in
-            sent.into_iter().zip(bodies).zip(parts).zip(numbers)
-        {
-            if let Some(unread) = body.failed() {
-                return Err(unread);
-            }
-            etags.push(judge_part(key, number, part.md5(), &response?)?);
-        }
-        Ok(etags)
     }
 
     /// CompleteMultipartUpload; returns the completed object's ETag. See the
@@ -248,10 +147,7 @@ impl<T: Transport> Inner<T> {
     /// for the caller to list and read back.
     fn settle_spent_upload(&self, key: &FileKey, sent: Sent) -> Result<String, StoreError> {
         let op = StoreOp::Upload;
-        let ambiguous = StoreError::Transient {
-            op,
-            kind: io::ErrorKind::InvalidData,
-        };
+        let ambiguous = invalid_data(op);
         let request = self.request(op, |b, now| b.head(now, key))?;
         let response = self.send(op, request)?;
         if !(200..300).contains(&response.status()) {

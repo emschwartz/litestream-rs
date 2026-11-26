@@ -15,6 +15,7 @@ const fn expected(fault: HttpFault) -> Option<Denied> {
         | HttpFault::AfterPublish(_)
         | HttpFault::TruncateBody(_)
         | HttpFault::WrongEtag(_)
+        | HttpFault::BodyMismatch(_)
         | HttpFault::ConnectionReset(_) => None,
     }
 }
@@ -23,7 +24,7 @@ use lsr_store_s3::{Fault, Shape};
 use lsr_core::{Degraded, Denied, Event, PersistentCause, StopCause, Task, Tick};
 
 use crate::failstop::{Fired, fired};
-use crate::generate::HttpFault;
+use crate::generate::{HttpFault, PartsOp};
 use crate::oracle::Violation;
 use crate::world::TickEnd;
 
@@ -31,10 +32,85 @@ impl Runner {
     /// Puts the replica on S3 when `opts` asks, before the first boot.
     pub(super) fn with_remote_s3(mut self, opts: &Opts) -> Self {
         if opts.remote_s3 {
-            self.w.use_s3_remote();
+            self.w.use_s3_remote(opts.remote_parts);
             self.report.reach.bump("remote_s3.runs");
+            if opts.remote_parts.is_some() {
+                self.report.reach.bump("remote_s3.parts.runs");
+            }
         }
         self
+    }
+
+    /// A scenario's step on the parts the S3 store has started; a step with nothing to act on
+    /// when the run does not send in parts, or when no part is started at the index.
+    pub(super) fn parts(&mut self, op: PartsOp) -> Result<(), Violation> {
+        let landing = self.w.remote_s3.as_ref().and_then(|s3| s3.landing());
+        let done = landing.is_some_and(|landing| match op {
+            PartsOp::ByHand => {
+                landing.by_hand(true);
+                true
+            }
+            PartsOp::BySeed => {
+                landing.by_hand(false);
+                true
+            }
+            PartsOp::Land(at) => landing.land(usize::from(at)),
+        });
+        self.scenario_bool("Parts", done)
+    }
+
+    /// The S3 bucket's own account of its multipart uploads, which no object listing shows:
+    /// no part arrived for an upload that was already completed or aborted (S3 may keep such
+    /// a part, and bill for it, with nothing left that names it), and a sweep of abandoned
+    /// uploads that succeeded left none open.
+    ///
+    /// # Errors
+    /// [`Violation::PartAfterTheEnd`] or [`Violation::UploadsLeftBySweep`].
+    pub(super) fn judge_parts(&mut self) -> Result<(), Violation> {
+        let Some(wire) = self.w.remote_raw.wire() else {
+            return Ok(());
+        };
+        if let parts @ 1.. = wire.inner().parts_after_the_end() {
+            return Err(Violation::PartAfterTheEnd { parts });
+        }
+        match self.w.remote_s3.as_ref().map_or(0, |s3| s3.left_by_sweep()) {
+            0 => Ok(()),
+            open => Err(Violation::UploadsLeftBySweep { open }),
+        }
+    }
+
+    /// Counts what became of the run's parts.
+    pub(super) fn tally_parts(&mut self) {
+        let Some(counts) = self
+            .w
+            .remote_s3
+            .as_ref()
+            .and_then(|s3| s3.landing())
+            .map(crate::remote::Landing::counts)
+        else {
+            return;
+        };
+        let reach = &mut self.report.reach;
+        for (key, count) in [
+            ("parts.landed", counts.landed),
+            ("parts.landed.out_of_order", counts.out_of_order),
+            ("parts.landed.faulted", counts.faulted),
+            ("parts.left_started", counts.left_started),
+            ("parts.full", counts.full),
+            ("parts.at_exit.landed", counts.landed_at_exit),
+            ("parts.at_exit.lost", counts.lost_at_exit),
+        ] {
+            reach.add(key, count);
+        }
+        let open = self
+            .w
+            .remote_raw
+            .wire()
+            .map_or(0, |wire| wire.inner().open_uploads());
+        reach.add(
+            "parts.uploads_open_at_the_end",
+            u64::try_from(open).unwrap_or(u64::MAX),
+        );
     }
 
     /// Pushes `fault` onto the S3 store's fault layer; a step with nothing to act on on
@@ -92,9 +168,7 @@ impl Runner {
             let refused = crate::remote::denial_of(fault).is_some();
             let doubtful = matches!(
                 fault,
-                Fault::AfterPublish { .. }
-                    | Fault::WrongEtag { on: Shape::Put }
-                    | Fault::TruncateBody { on: Shape::Put, .. }
+                Fault::AfterPublish { .. } | Fault::TruncateBody { on: Shape::Put, .. }
             );
             Fired {
                 all: was.all.saturating_add(1),

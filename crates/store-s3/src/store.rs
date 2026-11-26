@@ -6,13 +6,12 @@
 //! means is decided in one place. The store never retries.
 //!
 //! Batches: a call that needs several independent requests (the parts of an
-//! upload, reads ahead, the levels of a listing, a set of created-at times) builds them
+//! upload, the levels of a listing, a set of created-at times) builds them
 //! all, hands them to [`Transport::send_many`] with the limit of their kind,
 //! and judges each response alone, exactly as a single request. The kinds are
 //! limited apart, as Go does: multipart parts by the `concurrency` setting
 //! (provider defaults in [`S3Config::concurrency`]), HEADs by
-//! `CREATION_TIME_CONCURRENCY`, ranged reads and listing pages by
-//! `READ_CONCURRENCY`.
+//! `CREATION_TIME_CONCURRENCY`, listing pages by `READ_CONCURRENCY`.
 //!
 //! Deadlines: the transport bounds one request. A call that sends several (a
 //! listing, a large delete) also checks the `Clock` between them against four
@@ -25,15 +24,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lsr_core::{
     BatchKind, Clock, CreatedAt, CreatedAtSource, FileInfo, FileKey, Level, ListAt, ListedTime,
-    Listing, ObjectStore, PageLimit, ReadAt, ReadLen, StoreError, StoreOp, WriteMode,
+    Listing, ObjectStore, PageLimit, ReadLen, ReadStream, StoreError, StoreOp, WriteMode,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 
-use crate::classify::{classify, classify_delete_failures, classify_transport, is_range_past_end};
+use crate::classify::{
+    classify, classify_delete_failures, classify_transport, invalid_data, is_range_past_end,
+    transient_other,
+};
 use crate::config::{
     CREATION_TIME_CONCURRENCY, ConfigError, PartSize, Prefix, READ_CONCURRENCY, S3Config,
 };
 use crate::credentials::S3Credentials;
+use crate::lanes::{self, Lanes};
 use crate::orphans::Orphans;
 use crate::request::{HttpRequest, MAX_DELETE_KEYS, Precondition, RequestBuilder, RequestError};
 use crate::response::{Head, parse_created_at_header, parse_delete_failure_codes, parse_head};
@@ -43,6 +46,10 @@ use crate::transport::{HttpResponse, StreamedRequest, Transport};
 use crate::upload::S3Upload;
 #[cfg(feature = "ureq")]
 use crate::ureq_transport::UreqTransport;
+
+mod stream;
+
+use stream::S3Stream;
 
 /// What the created-at times read so far found, for the event layer (this crate emits no
 /// events). A listing reads none; each [`ObjectStore::created_at`] and
@@ -68,13 +75,13 @@ pub struct WriteStats {
 /// A replica on an S3-compatible bucket.
 #[cfg(feature = "ureq")]
 pub struct S3Store<T: Transport = UreqTransport> {
-    inner: Arc<Inner<T>>,
+    pub(crate) inner: Arc<Inner<T>>,
 }
 
 /// A replica on an S3-compatible bucket.
 #[cfg(not(feature = "ureq"))]
 pub struct S3Store<T: Transport> {
-    inner: Arc<Inner<T>>,
+    pub(crate) inner: Arc<Inner<T>>,
 }
 
 impl<T: Transport> std::fmt::Debug for S3Store<T> {
@@ -95,6 +102,12 @@ pub(crate) struct Inner<T> {
     stats: Mutex<ListStats>,
     writes: Mutex<WriteStats>,
     pub(crate) orphans: Orphans,
+    /// Where uploads send their parts (`lanes.rs`).
+    pub(crate) lanes: Arc<dyn Lanes>,
+    /// Parts started by any upload of this store that have not ended, and what wakes the
+    /// boot sweep when one does (`orphans.rs`).
+    pub(crate) parts: lanes::Mutex<usize>,
+    part_ended: lanes::Condvar,
 }
 
 /// The wall clock, for a store that talks to a real bucket (signatures expire
@@ -126,7 +139,7 @@ impl S3Store<UreqTransport> {
     /// # Errors
     /// [`ConfigError`] when the endpoint cannot address the bucket.
     pub fn new(config: S3Config, credentials: S3Credentials) -> Result<Self, ConfigError> {
-        let transport = UreqTransport::new(config.deadline());
+        let transport = UreqTransport::new(config.deadline())?;
         Self::over(config, credentials, transport)
     }
 
@@ -136,7 +149,7 @@ impl S3Store<UreqTransport> {
     /// # Errors
     /// [`ConfigError`] when the endpoint cannot address the bucket.
     pub fn resolved(config: S3Config, resolved: &crate::Resolved) -> Result<Self, ConfigError> {
-        let transport = UreqTransport::new(config.deadline());
+        let transport = UreqTransport::new(config.deadline())?;
         Self::refreshing(
             config,
             resolved.expiring(),
@@ -159,7 +172,7 @@ impl S3Store<UreqTransport> {
     /// # Errors
     /// [`ConfigError`] when the endpoint cannot address the bucket.
     pub fn deferred(config: S3Config, chain: crate::CredentialChain) -> Result<Self, ConfigError> {
-        let transport = UreqTransport::new(config.deadline());
+        let transport = UreqTransport::new(config.deadline())?;
         Self::deferred_over(config, chain, transport, SystemClock)
     }
 }
@@ -237,10 +250,14 @@ impl<T: Transport> S3Store<T> {
         clock: impl Clock + 'static,
     ) -> Result<Self, ConfigError> {
         let signer = Signer::new(&config, current, source)?;
+        let lanes = transport.lanes(config.concurrency());
         Ok(Self {
             inner: Arc::new(Inner {
                 signer,
                 transport,
+                lanes,
+                parts: lanes::Mutex::new(0),
+                part_ended: lanes::Condvar::new(),
                 clock: Arc::new(clock),
                 part_size: config.part_size(),
                 concurrency: config.concurrency(),
@@ -267,6 +284,21 @@ impl<T: Transport> S3Store<T> {
     #[must_use]
     pub fn pending_orphans(&self) -> usize {
         self.inner.orphans.len()
+    }
+
+    /// Waits until every part this store started has ended, as the boot sweep does first. A
+    /// dropped upload's id reaches the orphan list only when its last part lets go, and over a
+    /// transport with threads that can be after the drop returns.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn wait_for_parts(&self) {
+        self.inner.parts_ended();
+    }
+
+    /// Forgets the abandoned uploads that await an abort, as a process that died has: the
+    /// next boot's sweep then has only the bucket's listing to find them by. How many.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn forget_orphans(&self) -> usize {
+        self.inner.orphans.take().len()
     }
 
     /// What create-only writes met since the store was made.
@@ -304,6 +336,11 @@ impl<T: Transport> ObjectStore for S3Store<T> {
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.inner.read(key, offset, len)
+    }
+
+    /// One GET for the rest of the object, its body read as the pieces are asked for.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(S3Stream::new(&self.inner, key, offset))
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -346,10 +383,6 @@ impl<T: Transport> ObjectStore for S3Store<T> {
         Inner::<T>::width(kind)
     }
 
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        self.inner.read_many(reads)
-    }
-
     async fn list_many(
         &self,
         pages: &[ListAt],
@@ -373,10 +406,7 @@ fn created_at_from_head(
     last_modified: Timestamp,
 ) -> Result<CreatedAt, StoreError> {
     if head.size != size {
-        return Err(StoreError::Transient {
-            op,
-            kind: io::ErrorKind::InvalidData,
-        });
+        return Err(invalid_data(op));
     }
     Ok(match head.created_at {
         Some(created_at) => CreatedAt::metadata(created_at),
@@ -403,6 +433,23 @@ fn content_range_start(value: &str) -> Option<u64> {
         .trim()
         .parse()
         .ok()
+}
+
+impl<T> Inner<T> {
+    /// Counts a part handed to the lanes.
+    pub(crate) fn part_started(&self) {
+        let mut parts = lanes::lock(&self.parts);
+        *parts = parts.saturating_add(1);
+    }
+
+    /// Counts a part that ended, however it did.
+    pub(crate) fn part_ended(&self) {
+        {
+            let mut parts = lanes::lock(&self.parts);
+            *parts = parts.saturating_sub(1);
+        }
+        self.part_ended.notify_all();
+    }
 }
 
 impl<T: Transport> Inner<T> {
@@ -459,7 +506,7 @@ impl<T: Transport> Inner<T> {
     /// ([`ObjectStore::batch_width`]) and the batches themselves use.
     pub(crate) const fn width(kind: BatchKind) -> NonZeroUsize {
         match kind {
-            BatchKind::Reads | BatchKind::Lists => READ_CONCURRENCY,
+            BatchKind::Lists => READ_CONCURRENCY,
             BatchKind::ResolvedCreatedAt => CREATION_TIME_CONCURRENCY,
         }
     }
@@ -479,18 +526,37 @@ impl<T: Transport> Inner<T> {
             .collect()
     }
 
-    /// [`Self::send_many`] for requests whose bodies are read while they are sent.
+    /// [`Self::send`] for a request whose body is read while it is sent.
     pub(crate) fn send_streamed(
         &self,
         op: StoreOp,
-        limit: NonZeroUsize,
-        requests: Vec<StreamedRequest<'_>>,
-    ) -> Vec<Result<HttpResponse, StoreError>> {
+        request: StreamedRequest<'_>,
+    ) -> Result<HttpResponse, StoreError> {
         self.transport
-            .send_streamed(requests, limit)
-            .into_iter()
-            .map(|sent| sent.map_err(|err| classify_transport(op, &err)))
-            .collect()
+            .send_streamed(request)
+            .map_err(|err| classify_transport(op, &err))
+    }
+
+    /// Waits until no part of any upload of this store is started and not ended: after it,
+    /// with no upload alive, nothing of this store's is on the wire. Lanes with no thread
+    /// run the parts on this one.
+    pub(crate) fn parts_ended(&self) {
+        loop {
+            if *lanes::lock(&self.parts) == 0 {
+                return;
+            }
+            if self.lanes.help() {
+                continue;
+            }
+            let parts = lanes::lock(&self.parts);
+            if *parts > 0 {
+                drop(
+                    self.part_ended
+                        .wait(parts)
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
+            }
+        }
     }
 
     /// Sends, and turns a failure status into its [`StoreError`].
@@ -537,23 +603,6 @@ impl<T: Transport> Inner<T> {
         });
     }
 
-    /// Builds every request, sends the batch, and judges each response
-    /// as [`Self::read`] does. A request that cannot be built fails its slot.
-    fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        let op = StoreOp::Read;
-        self.batch(
-            op,
-            Self::width(BatchKind::Reads),
-            reads.iter().copied(),
-            |at| {
-                let request =
-                    self.request(op, |b, now| b.get_range(now, &at.key, at.offset, at.len))?;
-                Ok((request, at))
-            },
-            |at, response| Self::range_body(&at.key, at.offset, at.len, response),
-        )
-    }
-
     /// One request per item, sent as one batch. `build` makes an item's
     /// request and what judging its answer needs; `judge` turns each response
     /// into the item's result. An item whose request could not be built keeps
@@ -582,10 +631,7 @@ impl<T: Transport> Inner<T> {
             .into_iter()
             .map(|context| {
                 let context = context?;
-                let response = sent.next().unwrap_or(Err(StoreError::Transient {
-                    op,
-                    kind: io::ErrorKind::Other,
-                }))?;
+                let response = sent.next().unwrap_or(Err(transient_other(op)))?;
                 judge(context, response)
             })
             .collect()
@@ -681,32 +727,42 @@ impl<T: Transport> Inner<T> {
         }
     }
 
+    /// A ranged GET's answer judged by its head: `None` past the end of the object, else
+    /// whether it is the range asked for (a 206) rather than the whole object.
+    pub(crate) fn range_head(
+        key: &FileKey,
+        offset: u64,
+        response: &HttpResponse,
+    ) -> Result<Option<bool>, StoreError> {
+        let op = StoreOp::Read;
+        if is_range_past_end(response) {
+            return Ok(None);
+        }
+        classify(op, Some(key), None, response)?;
+        let partial = response.status() == 206;
+        // A 206 for another range would hand back the wrong bytes under the right key.
+        if partial
+            && response
+                .header("content-range")
+                .and_then(content_range_start)
+                != Some(offset)
+        {
+            return Err(invalid_data(op));
+        }
+        Ok(Some(partial))
+    }
+
     /// The bytes a ranged GET answered, taken out of the response, not copied: the body was
-    /// sized to its length when it was read, and a restore holds eight of them at once.
+    /// sized to its length when it was read.
     fn range_body(
         key: &FileKey,
         offset: u64,
         len: ReadLen,
         response: HttpResponse,
     ) -> Result<Vec<u8>, StoreError> {
-        let op = StoreOp::Read;
-        if is_range_past_end(&response) {
+        let Some(partial) = Self::range_head(key, offset, &response)? else {
             return Ok(Vec::new());
-        }
-        classify(op, Some(key), None, &response)?;
-        let partial = response.status() == 206;
-        if partial {
-            // A 206 for another range would hand back the wrong bytes under the right key.
-            let starts = response
-                .header("content-range")
-                .and_then(content_range_start);
-            if starts != Some(offset) {
-                return Err(StoreError::Transient {
-                    op,
-                    kind: io::ErrorKind::InvalidData,
-                });
-            }
-        }
+        };
         let mut body = response.into_body();
         if !partial {
             // A server that ignored the Range header sent the whole object.
@@ -738,71 +794,5 @@ impl<T: Transport> Inner<T> {
             classify_delete_failures(op, &failed)?;
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-#[cfg(feature = "testing")]
-mod part_cap_tests {
-    use lsr_core::FakeClock;
-
-    use super::*;
-    use crate::config::{BucketName, Endpoint, Prefix};
-    use crate::credentials::SecretString;
-    use crate::fake::FakeS3;
-    use crate::multipart::PAYLOAD_TOO_LARGE;
-    use crate::request::UploadId;
-
-    fn store() -> S3Store<FakeS3> {
-        let config = S3Config::new(
-            Endpoint::new("http://localhost:9000").unwrap(),
-            BucketName::new("bucket").unwrap(),
-            Prefix::new("db").unwrap(),
-        );
-        let credentials = S3Credentials::new(
-            "AKIAIOSFODNN7EXAMPLE".to_owned(),
-            SecretString::new("secret".to_owned()),
-        );
-        let at = Timestamp::from_unix_millis(1_369_353_600_000);
-        let fake = FakeS3::new(&config, FakeClock::new(at));
-        S3Store::with_transport(config, credentials, fake, FakeClock::new(at)).unwrap()
-    }
-
-    fn refused_as_too_large(first: usize, parts: usize) -> bool {
-        let key = FileKey::new(
-            Level::ZERO,
-            lsr_ltx::TxidRange::new(
-                lsr_ltx::Txid::new(1).unwrap(),
-                lsr_ltx::Txid::new(1).unwrap(),
-            )
-            .unwrap(),
-        );
-        let id = UploadId::new("no-such-upload".to_owned());
-        let result = store()
-            .inner
-            .put_parts(&key, &id, first, vec![Vec::new(); parts]);
-        matches!(
-            result,
-            Err(StoreError::Refused {
-                status: PAYLOAD_TOO_LARGE,
-                ..
-            })
-        )
-    }
-
-    /// A part number past 10000 is refused before any request is sent; 10000 is
-    /// sent (and then fails here only because the upload id does not exist).
-    #[test]
-    fn part_numbers_stop_at_the_cap() {
-        assert!(!refused_as_too_large(10_000, 1), "part 10000 is allowed");
-        assert!(refused_as_too_large(10_001, 1), "part 10001 is refused");
-        assert!(
-            !refused_as_too_large(9_999, 2),
-            "parts up to 10000 are allowed"
-        );
-        assert!(
-            refused_as_too_large(10_000, 2),
-            "a batch ending at 10001 is refused"
-        );
     }
 }

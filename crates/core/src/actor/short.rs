@@ -91,7 +91,7 @@ impl Actor {
             let mut step = |resolved: &ResolvedCreatedAt| {
                 due_short(&tail, now, cfg, confirmed, state, resolved)
             };
-            resolve(env.remote, &mut step).await
+            resolve_knowing(env.remote, &mut self.engine.known, &mut step).await
         };
         let decided = match decided {
             Ok(decided) => decided,
@@ -107,8 +107,7 @@ impl Actor {
         if decided.value.whole {
             // Nothing was planned from this listing and nothing is learned from it: the
             // next tick lists the whole replica and decides there.
-            maintain.remembered.owe_full();
-            maintain.stale = true;
+            maintain.relist();
             return Ok(ShortPass {
                 due: decided.value.due,
                 after_delete: None,
@@ -137,7 +136,7 @@ impl Actor {
         maintain.stale = false;
         maintain.passed_over = 0;
         maintain.snapshot_waits = false;
-        maintain.level_one = maintain.remembered.newest_txid(1);
+        maintain.level_one = maintain.remembered.newest_txid(Level::ONE);
         Ok(ShortPass {
             due,
             after_delete: Some(until),
@@ -161,22 +160,18 @@ impl Actor {
                 self.maintained(now);
                 let wake = self.engine.maintain.remembered.retention_wake();
                 self.engine.maintain.until = [until, wake].into_iter().flatten().min();
-                let event = Event::Maintained {
-                    event: MaintainedEvent::Waiting { held },
-                    created_at_read,
-                };
-                self.ran(event, now)
+                self.ran_maintained(MaintainedEvent::Waiting { held }, created_at_read, now)
             }
             // A snapshot's last transaction must be at most what was published: with
             // uploads busy it waits, and the next listing with them.
             Due::Run(Job::Snapshot(_)) if !self.uploads_idle() => {
                 self.engine.maintain.stale = true;
                 self.engine.maintain.snapshot_waits = true;
-                let event = Event::Maintained {
-                    event: MaintainedEvent::Waiting { held: None },
+                self.ran_maintained(
+                    MaintainedEvent::Waiting { held: None },
                     created_at_read,
-                };
-                self.ran(event, now)
+                    now,
+                )
             }
             Due::Run(job) => {
                 // Whatever the job does, the next listing is what to plan from.

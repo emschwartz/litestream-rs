@@ -38,7 +38,9 @@ use std::future::Future;
 use lsr_ltx::Timestamp;
 
 use crate::layout::{FileInfo, FileKey};
-use crate::store::{CorruptCause, DynUpload, ObjectStore, Reread, StoreError, Upload, WriteMode};
+use crate::store::{
+    CorruptCause, DynUpload, Flight, ObjectStore, Reread, Rest, StoreError, Upload, WriteMode,
+};
 use crate::upload::Unsent;
 
 /// An upload whose commit is checked against the bytes written. It borrows no store, so one
@@ -189,6 +191,14 @@ impl<U: Upload> Writer<U> {
         Ok(())
     }
 
+    /// Where the upload's parts are ([`Upload::flight`]).
+    ///
+    /// # Errors
+    /// What the store's answer was.
+    pub(crate) async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        self.upload.flight(rest).await
+    }
+
     fn wrote(&mut self, chunk: &[u8]) {
         let len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.written = self.written.saturating_add(len);
@@ -208,37 +218,13 @@ impl<U: Upload> Writer<U> {
     /// # Errors
     /// [`Unpublished`], saying what the store left under the key.
     pub(crate) async fn commit<S: ObjectStore>(self, store: &S) -> Result<Published, Unpublished> {
-        self.commit_with(store, None).await
-    }
-
-    /// [`Self::commit`] of an upload written with [`Self::write_from`].
-    ///
-    /// # Errors
-    /// As [`Self::commit`].
-    pub(crate) async fn commit_from<S: ObjectStore>(
-        self,
-        store: &S,
-        again: &dyn Reread,
-    ) -> Result<Published, Unpublished> {
-        self.commit_with(store, Some(again)).await
-    }
-
-    async fn commit_with<S: ObjectStore>(
-        self,
-        store: &S,
-        again: Option<&dyn Reread>,
-    ) -> Result<Published, Unpublished> {
         let Self {
             key,
             upload,
             written,
             mode,
         } = self;
-        let committed = match again {
-            Some(again) => upload.commit_from(again).await,
-            None => upload.commit().await,
-        };
-        let info = match committed {
+        let info = match upload.commit().await {
             Ok(info) => info,
             Err(err) => return Err(unpublished(err, key, mode)),
         };

@@ -626,7 +626,7 @@ fn listing_order_of_names_that_extend_one_another_is_recorded() {
 fn store_with(h: &RealHarness, access: &str, secret: &str, bucket: &str) -> S3Store<UreqTransport> {
     let config = other_config(h, bucket);
     let credentials = S3Credentials::new(access.to_owned(), SecretString::new(secret.to_owned()));
-    let transport = UreqTransport::new(config.deadline());
+    let transport = UreqTransport::new(config.deadline()).expect("a TLS provider");
     S3Store::with_transport(config, credentials, transport, WallClock).unwrap()
 }
 
@@ -644,6 +644,7 @@ fn get_as(h: &RealHarness, what: &str, access: &str, secret: &str, bucket: &str)
     let config = other_config(h, bucket);
     let credentials = S3Credentials::new(access.to_owned(), SecretString::new(secret.to_owned()));
     let answer = UreqTransport::new(config.deadline())
+        .expect("a TLS provider")
         .send(
             RequestBuilder::new(&config, &credentials)
                 .unwrap()
@@ -738,6 +739,7 @@ fn a_missing_bucket_is_denied_as_bucket_missing() {
         SecretString::new(h.server.secret.clone()),
     );
     let head = UreqTransport::new(config.deadline())
+        .expect("a TLS provider")
         .send(
             RequestBuilder::new(&config, &credentials)
                 .unwrap()
@@ -812,7 +814,7 @@ fn a_wrong_signature_is_denied_as_credentials_and_a_malformed_one_is_never_retri
             .builder()
             .get_range(WallClock.now(), &key, 0, ReadLen::new(16).unwrap())
             .unwrap()
-            .tamper_query("X-Amz-Signature", signature);
+            .tamper_signature(signature);
         let response = h.send(request);
         obs_response(&h, &format!("GET with signature {signature:?}"), &response);
         classify(StoreOp::Read, Some(&key), None, &response).unwrap_err()
@@ -836,7 +838,7 @@ fn abandoned_multipart_uploads_are_listed_by_prefix_and_swept_by_the_next_boot()
         open_with_one_part(&h, &k1, b"two"),
         open_with_one_part(&h, &k2, b"three"),
     ];
-    let transport = UreqTransport::new(h.config.deadline());
+    let transport = UreqTransport::new(h.config.deadline()).expect("a TLS provider");
     let prefix = format!("{}/", h.prefix.as_str());
     let listed =
         |h: &RealHarness| open_uploads(&transport, &h.builder(), &WallClock, &prefix).unwrap();

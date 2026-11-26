@@ -39,6 +39,8 @@ mod marks;
 #[cfg(test)]
 mod needless_snapshot;
 #[cfg(test)]
+mod parts;
+#[cfg(test)]
 mod remote_s3;
 #[cfg(test)]
 mod replay;
@@ -46,6 +48,8 @@ mod replay;
 mod restored_staging;
 #[cfg(test)]
 mod retention;
+#[cfg(test)]
+mod retention_windows;
 #[cfg(test)]
 mod short_write;
 #[cfg(test)]

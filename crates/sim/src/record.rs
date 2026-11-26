@@ -82,6 +82,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "HttpShape",
             "MetaOp",
             "Op",
+            "PartsOp",
             "RemoteOp",
             "Target",
             "WalOp",
@@ -143,6 +144,7 @@ pub fn op(op: &Op) -> Result<String, Unprintable> {
         Op::Remote(remote) => format!("Op::Remote({})", self::remote(*remote)),
         Op::AppAutocheckpoint(frames) => format!("Op::AppAutocheckpoint({frames:?})"),
         Op::HttpFault(fault) => format!("Op::HttpFault({})", http_fault(*fault)),
+        Op::Parts(parts) => format!("Op::Parts(PartsOp::{parts:?})"),
         Op::Shrink { pages } => format!("Op::Shrink {{ pages: {pages} }}"),
         Op::SecondWriter { ticks } => format!("Op::SecondWriter {{ ticks: {ticks} }}"),
         Op::StagingDamage(meta) => format!("Op::StagingDamage({})", self::meta(*meta)),
@@ -318,6 +320,7 @@ fn http_fault(fault: HttpFault) -> String {
         HttpFault::AfterPublish(shape) => ("AfterPublish", shape),
         HttpFault::TruncateBody(shape) => ("TruncateBody", shape),
         HttpFault::WrongEtag(shape) => ("WrongEtag", shape),
+        HttpFault::BodyMismatch(shape) => ("BodyMismatch", shape),
         HttpFault::ConnectionReset(shape) => ("ConnectionReset", shape),
         HttpFault::Denied(shape, code) => {
             return format!("HttpFault::Denied(HttpShape::{shape:?}, DenialCode::{code:?})");

@@ -4,14 +4,18 @@
 //! whatever the status. Only a failure to get a response at all is an error,
 //! and [`TransportError`] carries kinds only, never a URL, a header or a body.
 //!
-//! [`Transport::send_many`] sends a batch with at most `limit` requests in
-//! flight and returns one result per request, in order. Its default sends them
-//! one after another, so the in-memory and fault-injecting transports stay
-//! deterministic; the socket clients override it. A blocking client gets
-//! concurrency from [`send_on_threads`]: up to `limit` scoped threads for the
-//! batch, all joined before it returns, so no thread outlives the call and no
-//! pool idles between batches. Each request keeps its own deadline, and what
-//! a status means is still judged per request by the layers above.
+//! [`Transport::send_many`] sends a batch of reads, listings or HEADs with at most
+//! `limit` requests in flight and returns one result per request, in order. Its
+//! default sends them one after another, so the in-memory and fault-injecting
+//! transports stay deterministic; the socket clients override it. A blocking client
+//! gets concurrency from [`send_on_threads`]: up to `limit` scoped threads for the
+//! batch, all joined before it returns, so no thread outlives the call. Each request
+//! keeps its own deadline, and what a status means is still judged per request by
+//! the layers above.
+//!
+//! The parts of an upload are not a batch: each is sent when it is whole, on the
+//! lanes [`Transport::lanes`] gives the store (`lanes.rs`), while the upload builds
+//! the next.
 
 use std::fmt;
 use std::io;
@@ -19,7 +23,7 @@ use std::io;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 #[cfg(any(feature = "ureq", feature = "reqwest"))]
 use std::time::Duration;
 
@@ -34,6 +38,7 @@ use std::thread;
 
 use thiserror::Error;
 
+use crate::lanes::{Inline, Lanes};
 use crate::request::HttpRequest;
 
 /// A write whose body is read while it is sent: a part, or a small object, that the upload
@@ -193,6 +198,28 @@ impl fmt::Debug for HttpResponse {
     }
 }
 
+/// A response body read while the caller uses it ([`Transport::open`]).
+pub trait Body: Send {
+    /// Up to `buf.len()` more bytes; 0 only at the end of the body, which may be short of the
+    /// length the response declared when the connection ended early.
+    ///
+    /// # Errors
+    /// [`TransportError`]: the connection failed, or the body passed its time bound.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError>;
+}
+
+/// A body already held whole: [`Transport::open`]'s default.
+struct Held(io::Cursor<Vec<u8>>);
+
+impl Body for Held {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        io::Read::read(&mut self.0, buf).map_err(|err| TransportError::Io(err.kind()))
+    }
+}
+
+/// What [`Transport::open`] got: the status and headers (an empty body), and the body to read.
+pub type Opened<'a> = (HttpResponse, Box<dyn Body + 'a>);
+
 /// Why no response came back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
 pub enum TransportError {
@@ -268,9 +295,9 @@ impl Bounds {
     }
 }
 
-/// The largest response body read: twice the largest ranged read (a test pins
-/// the relation), which is room for a listing page or a delete result and no more.
-#[cfg(any(feature = "ureq", feature = "reqwest"))]
+/// The largest response body held whole: twice the largest ranged read (a test pins
+/// the relation), which is room for a listing page or a delete result and no more. A
+/// streamed body ([`Transport::open`]) is read a piece at a time and has no such limit.
 pub(crate) const MAX_BODY: u64 = 33_554_432;
 
 /// Maps an I/O failure kind to a transport kind, for every [`Transport`] built on sockets.
@@ -307,6 +334,22 @@ pub trait Transport: Send + Sync + 'static {
     /// [`TransportError`] when no response arrived.
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError>;
 
+    /// Sends a GET whose answer's body the caller reads as it uses it, however long it is: a
+    /// restore's whole object. A transport over sockets overrides it, so the body is read from
+    /// the connection, bounded by progress and by its declared length at the floor rate, never
+    /// by `MAX_BODY`. The default answers with [`Self::send`], the body held whole: what the
+    /// in-memory and fault-injecting transports need.
+    ///
+    /// # Errors
+    /// [`TransportError`] when no response arrived.
+    fn open(&self, request: HttpRequest) -> Result<Opened<'_>, TransportError> {
+        let mut response = self.send(request)?;
+        let body = std::mem::take(&mut response.body);
+        // The head is whole; a body cut short shows as fewer bytes than declared.
+        response.body_complete = true;
+        Ok((response, Box::new(Held(io::Cursor::new(body)))))
+    }
+
     /// Sends every request with at most `limit` in flight and returns their
     /// results in request order. The default sends them one at a time.
     fn send_many(
@@ -320,37 +363,24 @@ pub trait Transport: Send + Sync + 'static {
             .collect()
     }
 
-    /// [`Self::send_many`] for requests whose bodies are read while they are sent. The
-    /// default reads every body whole and hands the batch to [`Self::send_many`], so a
-    /// transport that does not override it sends what it always sent and holds what it always
-    /// held, one body for each request of the batch. A request whose body fails is not sent,
-    /// and its result is that failure.
-    fn send_streamed(
-        &self,
-        requests: Vec<StreamedRequest<'_>>,
-        limit: NonZeroUsize,
-    ) -> Vec<Result<HttpResponse, TransportError>> {
-        let mut whole = Vec::with_capacity(requests.len());
-        let mut failed = Vec::with_capacity(requests.len());
-        for request in requests {
-            match request.into_buffered() {
-                Ok(request) => {
-                    whole.push(request);
-                    failed.push(None);
-                }
-                Err(err) => failed.push(Some(err)),
-            }
-        }
-        let mut sent = self.send_many(whole, limit).into_iter();
-        failed
-            .into_iter()
-            .map(|failed| match failed {
-                Some(err) => Err(err),
-                None => sent
-                    .next()
-                    .unwrap_or(Err(TransportError::Io(io::ErrorKind::Other))),
-            })
-            .collect()
+    /// [`Self::send`] for a request whose body is read while it is sent. The default reads
+    /// the body whole and sends it as any request, so a transport that does not override it
+    /// sends what it always sent and holds one body for it.
+    ///
+    /// # Errors
+    /// [`TransportError`] when no response arrived, or the body's own failure: the request is
+    /// then not sent, or ends short of the length it declared.
+    fn send_streamed(&self, request: StreamedRequest<'_>) -> Result<HttpResponse, TransportError> {
+        self.send(request.into_buffered()?)
+    }
+
+    /// The lanes the parts of this store's uploads are sent on, at most `most` at once
+    /// (`lanes.rs`). The default has no thread: a part is sent by the call that started it,
+    /// so the in-memory and fault-injecting transports stay deterministic. The socket clients
+    /// give a [`Sender`](crate::Sender).
+    fn lanes(&self, most: NonZeroUsize) -> Arc<dyn Lanes> {
+        let _ = most;
+        Arc::new(Inline)
     }
 }
 
@@ -398,15 +428,7 @@ pub fn send_on_threads<T: Transport + ?Sized>(
     requests: Vec<HttpRequest>,
     limit: NonZeroUsize,
 ) -> Vec<Result<HttpResponse, TransportError>> {
-    on_threads(requests, limit, |request| transport.send(request))
-}
-
-/// [`send_on_threads`] for any kind of request: `send` is what one thread does with one.
-pub(crate) fn on_threads<R: Send>(
-    requests: Vec<R>,
-    limit: NonZeroUsize,
-    send: impl Fn(R) -> Result<HttpResponse, TransportError> + Sync,
-) -> Vec<Result<HttpResponse, TransportError>> {
+    let send = |request| transport.send(request);
     let count = requests.len();
     let helpers = limit.get().min(count).saturating_sub(1);
     if helpers == 0 {
@@ -474,6 +496,9 @@ mod tests {
         assert_eq!(bounds.cap(5 * 1024 * 1024), Duration::from_secs(380));
         let fast = bounds.with_floor(NonZeroU64::new(1_000_000).expect("nonzero"));
         assert_eq!(fast.cap(1_500_000), Duration::from_millis(61_500));
+        // A restore streams a 4 GiB snapshot in one GET: 2^32 bytes at 16 KiB a second is
+        // 262 144 s (about 73 hours) past the stall bound, so only a stall or a crawl cuts it.
+        assert_eq!(bounds.cap(4 << 30), Duration::from_secs(60 + 262_144));
         // A length no body has saturates instead of wrapping.
         assert!(fast.cap(u64::MAX) > Duration::from_secs(1_000_000_000));
     }

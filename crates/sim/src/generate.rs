@@ -67,7 +67,9 @@ pub enum EnvFault {
 }
 
 /// The request an [`HttpFault`] waits for: the shapes the S3 store sends for the simulator's
-/// files, all of them small enough for a single PUT.
+/// files. At the store's own part size all of them are small enough for a single PUT; the
+/// four multipart shapes are sent, and drawn, only by a run that sends in parts
+/// ([`Weights::remote_parts`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HttpShape {
     /// ListObjectsV2.
@@ -82,6 +84,28 @@ pub enum HttpShape {
     DeleteObjects,
     /// ListMultipartUploads (the boot's sweep of abandoned uploads).
     ListUploads,
+    /// CreateMultipartUpload.
+    CreateMultipart,
+    /// One part of a multipart upload.
+    UploadPart,
+    /// CompleteMultipartUpload.
+    Complete,
+    /// AbortMultipartUpload.
+    Abort,
+}
+
+/// A step on the parts the S3 store has started (`crate::remote::Landing`). Scenarios only: a
+/// drawn run's parts land by its seed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartsOp {
+    /// From now on a part lands only by [`PartsOp::Land`], or when the store itself waits for
+    /// one (then oldest first).
+    ByHand,
+    /// The started part at this index, counted from zero in the order they were started,
+    /// lands: its request is sent and answered.
+    Land(u8),
+    /// From now on parts land by the seed's draw again.
+    BySeed,
 }
 
 /// A provider behaviour the S3 store's fault layer answers the next request of a shape with
@@ -100,9 +124,12 @@ pub enum HttpFault {
     AfterPublish(HttpShape),
     /// The response body ends after 16 bytes, before its `Content-Length`.
     TruncateBody(HttpShape),
-    /// The ETag answered belongs to other bytes: a provider that accepted a digest it did not
-    /// verify.
+    /// The ETag answered belongs to other bytes. Neither Go nor the store judges a write by its
+    /// ETag (the signed SHA-256 is the check), so this must change nothing.
     WrongEtag(HttpShape),
+    /// 400 `XAmzContentSHA256Mismatch`: the body that arrived is not the one whose SHA-256
+    /// was signed, so the store published nothing.
+    BodyMismatch(HttpShape),
     /// No response: the connection is reset.
     ConnectionReset(HttpShape),
     /// The provider refuses the request with `code`'s status and S3 error code.
@@ -272,6 +299,8 @@ pub enum Op {
     /// The S3 store's fault layer answers a request with a provider fault. Skipped with the
     /// replica on `MemStore`.
     HttpFault(HttpFault),
+    /// A step on the parts the S3 store has started. Scenarios only.
+    Parts(PartsOp),
     /// The app shrinks the database by up to this many pages (it keeps at
     /// least one): a commit of page 1 with a smaller size.
     Shrink {
@@ -581,6 +610,12 @@ pub struct Weights {
     pub truncate_pages: Option<std::num::NonZeroU32>,
     /// [`Op::HttpFault`]: a step that does anything only with the replica on S3.
     pub http_fault: u32,
+    /// With the replica on S3, the store sends in parts of this size, this many at once, and
+    /// the seed draws when each lands (`crate::remote`); the provider faults drawn then
+    /// include the multipart requests. Without it every file here is one PUT, and nothing of
+    /// a multipart upload is exercised. Not an operation, for the same reason as
+    /// `block_crash_law`; drawn last in the swarm mix.
+    pub remote_parts: Option<crate::remote::Parts>,
     /// The bytes of staged files the engine sends in one tick, when not its own 8 MiB (which
     /// no file here reaches): a level-0 file larger than this goes up a slice a tick, and
     /// whatever the history does next lands between two slices (`docs/decisions/D217.md`).
@@ -684,6 +719,7 @@ impl Default for Weights {
             verify: 0,
             truncate_pages: None,
             http_fault: 0,
+            remote_parts: None,
             // Off in the default mix so its recorded histories keep their
             // shape; swarm mixes draw it.
             slice_bytes: None,
@@ -827,6 +863,7 @@ impl Weights {
             verify: 0,
             truncate_pages: None,
             http_fault: 0,
+            remote_parts: None,
             slice_bytes: None,
         };
         // Drawn last, so every other kind keeps the weight it had before
@@ -889,6 +926,17 @@ impl Weights {
         mix.slice_bytes = (below(&entropy, 2) == 0)
             .then(|| if below(&entropy, 2) == 0 { 256 } else { 1024 })
             .and_then(std::num::NonZeroU64::new);
+        // And after that: half the swarm's S3 replicas send in parts, of 64 or 256 bytes with
+        // even odds, one to three at once (a staged file is a few hundred bytes, so most are
+        // then two parts or more). Drawn whatever the replica is on, so a draw added after
+        // these does not depend on it.
+        let part = if below(&entropy, 2) == 0 { 64 } else { 256 };
+        let lanes = usize::try_from(below(&entropy, 3))
+            .unwrap_or(0)
+            .saturating_add(1);
+        mix.remote_parts = (below(&entropy, 2) == 0)
+            .then(|| crate::remote::Parts::new(part, lanes))
+            .flatten();
         mix
     }
 
@@ -931,19 +979,26 @@ fn small(entropy: &SeededEntropy, upper: u64) -> u8 {
     u8::try_from(below(entropy, upper)).unwrap_or(u8::MAX)
 }
 
-fn http_fault(entropy: &SeededEntropy) -> HttpFault {
-    let shape = choose(
-        entropy,
-        &[
-            HttpShape::List,
-            HttpShape::Head,
-            HttpShape::Get,
-            HttpShape::Put,
-            HttpShape::DeleteObjects,
-            HttpShape::ListUploads,
-        ],
-    )
-    .unwrap_or(HttpShape::Put);
+/// The shapes a run draws faults for: with `parts`, the multipart requests too, which a run
+/// that sends every file in one PUT never makes.
+const fn http_shapes(parts: bool) -> &'static [HttpShape] {
+    const ALL: [HttpShape; 10] = [
+        HttpShape::List,
+        HttpShape::Head,
+        HttpShape::Get,
+        HttpShape::Put,
+        HttpShape::DeleteObjects,
+        HttpShape::ListUploads,
+        HttpShape::CreateMultipart,
+        HttpShape::UploadPart,
+        HttpShape::Complete,
+        HttpShape::Abort,
+    ];
+    if parts { &ALL } else { ALL.split_at(6).0 }
+}
+
+fn http_fault(entropy: &SeededEntropy, parts: bool) -> HttpFault {
+    let shape = choose(entropy, http_shapes(parts)).unwrap_or(HttpShape::Put);
     let make = choose(
         entropy,
         &[
@@ -954,14 +1009,18 @@ fn http_fault(entropy: &SeededEntropy) -> HttpFault {
             HttpFault::AfterPublish,
             HttpFault::TruncateBody,
             HttpFault::WrongEtag,
+            HttpFault::BodyMismatch,
             HttpFault::ConnectionReset,
         ],
     )
     .unwrap_or(HttpFault::Internal);
     match below(entropy, 4) {
         // A refused DeleteObjects comes from `DenyDeletes`: a whole one refused may be the
-        // store's own best-effort cleanup, whose failure it rightly does not report.
-        0 if shape != HttpShape::DeleteObjects => HttpFault::Denied(shape, denial(entropy)),
+        // store's own best-effort cleanup, whose failure it rightly does not report. So is
+        // every abort of an upload outside the boot's sweep.
+        0 if !matches!(shape, HttpShape::DeleteObjects | HttpShape::Abort) => {
+            HttpFault::Denied(shape, denial(entropy))
+        }
         1 if below(entropy, 4) == 0 => HttpFault::DenyDeletes,
         _ => make(shape),
     }
@@ -1210,7 +1269,7 @@ fn draw(weights: &Weights, entropy: &SeededEntropy) -> Op {
         Kind::OtherConnectionCommit => Op::OtherConnectionCommit {
             pages: small(entropy, 4).saturating_add(1),
         },
-        Kind::HttpFault => Op::HttpFault(http_fault(entropy)),
+        Kind::HttpFault => Op::HttpFault(http_fault(entropy, weights.remote_parts.is_some())),
         Kind::Vacuum => vacuum(entropy, weights.vacuum_resizes),
         Kind::OtherProcessReader => Op::OtherProcessReader {
             begin: below(entropy, 2) == 0,

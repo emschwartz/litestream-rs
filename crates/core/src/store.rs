@@ -27,12 +27,12 @@
 //! - Retrying is the caller's decision, made from the [`StoreError`] variant.
 //! - Every method returns within a deadline the implementation enforces, failing as
 //!   `Transient`; core holds no timer.
-//! - The batch methods (`read_many`, `list_many`, `created_at_many`) answer
+//! - The batch methods (`list_many`, `created_at_many`) answer
 //!   each item exactly as the single method would, one result per item in
 //!   order. Their defaults call the single method item by item, so a store
 //!   that is not concurrent (the simulator's, a directory) needs nothing.
 //!   [`ObjectStore::batch_width`] says how many items of a [`BatchKind`] a
-//!   store runs at once (a store may allow more HEADs than ranged reads);
+//!   store runs at once (a store may allow more HEADs than listings);
 //!   callers size their batches by it, so at width one nothing is fetched
 //!   ahead of need and the call sequence is the one sequential code makes.
 
@@ -47,7 +47,6 @@ use lsr_ltx::{Timestamp, TxidRange};
 use thiserror::Error;
 
 use crate::layout::{CreatedAt, FileInfo, FileKey, Level, cmp_range, file_name, is_scratch_name};
-use crate::witness::ByteTally;
 
 /// How many entries one listing page may hold: 1 to 1000, S3's own cap, so
 /// every backend can return exactly the page asked for.
@@ -434,17 +433,6 @@ impl StoreError {
     }
 }
 
-/// One ranged read of a batch: up to `len` bytes of `key` from `offset`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ReadAt {
-    /// The object.
-    pub key: FileKey,
-    /// The first byte.
-    pub offset: u64,
-    /// How many bytes, at most.
-    pub len: ReadLen,
-}
-
 /// One listing of a batch: the page of `level` strictly after `after`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ListAt {
@@ -500,8 +488,6 @@ impl ListAt {
 /// because a backend's limits differ per kind of request.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BatchKind {
-    /// [`ObjectStore::read_many`].
-    Reads,
     /// [`ObjectStore::list_many`].
     Lists,
     /// [`ObjectStore::created_at_many`].
@@ -533,6 +519,22 @@ pub trait ObjectStore: Send + Sync {
         offset: u64,
         len: ReadLen,
     ) -> impl Future<Output = Result<Vec<u8>, StoreError>> + Send;
+
+    /// The object `key` from `offset` to its end, as one read the store keeps open and the
+    /// caller takes a piece at a time ([`ReadStream`]): on S3 one GET whose body is read as it
+    /// is used, so an object of any size costs one request and the memory of one piece. Nothing
+    /// is asked of the store before the first [`ReadStream::next`].
+    ///
+    /// The default reads each piece with [`Self::read`], one request a piece: what a store
+    /// whose reads cost nothing needs (memory, a directory). A store that bills by request
+    /// overrides it, and a wrapper forwards it, or its reads go back to one request a piece.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Ranged {
+            store: self,
+            key,
+            offset,
+        })
+    }
 
     /// Opens `key` for a caller that reads it in many reads, one after another (a send of a
     /// staged file), when this store would otherwise open the object again for each:
@@ -612,20 +614,6 @@ pub trait ObjectStore: Send + Sync {
         NonZeroUsize::MIN
     }
 
-    /// [`Self::read`] for each item, one result per item, in order.
-    fn read_many(
-        &self,
-        reads: &[ReadAt],
-    ) -> impl Future<Output = Vec<Result<Vec<u8>, StoreError>>> + Send {
-        async move {
-            let mut out = Vec::with_capacity(reads.len());
-            for at in reads {
-                out.push(self.read(&at.key, at.offset, at.len).await);
-            }
-            out
-        }
-    }
-
     /// [`Self::created_at`] for each file, one result per file, in order.
     fn created_at_many(
         &self,
@@ -673,25 +661,147 @@ pub trait Opened: Send + fmt::Debug {
     fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>>;
 }
 
-/// The object an upload is being handed, read again: what lets a store with parts keep a
-/// digest of the bytes it was given instead of the bytes, and read each part back when it
-/// sends it (`docs/decisions/D222.md`).
+/// How many bytes a store was handed and their CRC-64: what it keeps of bytes it lets go
+/// of, and what a second read of them must equal before a byte of it is used
+/// ([`Again::read`]). The CRC is the LTX format's polynomial on carry-less multiply
+/// (`docs/decisions/D223.md`), so taking it costs the engine's first read next to nothing,
+/// and two different runs of bytes of one length share it once in 2^64 by accident and
+/// never when they differ in a burst of 64 bits or fewer (`docs/decisions/D233.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Seen {
+    len: u64,
+    crc: u64,
+}
+
+impl Seen {
+    /// Of `bytes`.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Self {
+        let mut seeing = Seeing::new();
+        seeing.add(bytes);
+        seeing.seen()
+    }
+
+    /// How many bytes it is of.
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether it is of no bytes.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// A [`Seen`] being taken over bytes as they pass.
+#[derive(Clone, Copy, Debug)]
+pub struct Seeing {
+    len: u64,
+    crc: crc_fast::Digest,
+}
+
+impl Default for Seeing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Seeing {
+    /// No bytes yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            len: 0,
+            crc: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc64GoIso),
+        }
+    }
+
+    /// Takes in the next bytes.
+    pub fn add(&mut self, bytes: &[u8]) {
+        self.len = self
+            .len
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        self.crc.update(bytes);
+    }
+
+    /// How many bytes were taken in.
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether no byte was taken in.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// What was taken in so far.
+    #[must_use]
+    pub fn seen(&self) -> Seen {
+        Seen {
+            len: self.len,
+            crc: self.crc.finalize(),
+        }
+    }
+}
+
+/// The object an upload is being handed, to read again: what lets a store with parts keep
+/// a [`Seen`] of the bytes it was given instead of the bytes, and read each part back on
+/// the thread that sends it (`docs/decisions/D222.md`, `docs/decisions/D233.md`).
+///
+/// The source is borrowed for one call; what it opens is owned, so a part started in one
+/// tick can be read in the ticks after it.
+pub trait Reread: Send + Sync {
+    /// A reader of the object that outlives this call: a store asks for one when a part's
+    /// first byte arrives and moves it to the thread that sends the part.
+    ///
+    /// # Errors
+    /// The source's own error when it has no reader to give. The upload it was for cannot
+    /// go on: its caller fails it.
+    fn open(&self) -> BoxFuture<'_, Result<Box<dyn Again>, StoreError>>;
+}
+
+/// One reader of an object being uploaded ([`Reread::open`]). It borrows nothing.
 ///
 /// A read answers with bytes only when they are the bytes `was` was taken over, so nothing
-/// read a second time reaches a store unverified. Offsets are offsets in the object. The
+/// read a second time is hashed or sent unverified. Offsets are offsets in the object. The
 /// future completes on any executor, as a store's do.
-pub trait Reread: Send + Sync {
-    /// The bytes of the object from `offset` that `was` tallied when they were first handed
-    /// over: as many as it counted, at most one read's worth ([`ReadLen::MAX_RAW`]).
+pub trait Again: Send {
+    /// The bytes of the object from `offset` that `was` was taken over when they were first
+    /// handed over: as many as it counted, at most one read's worth ([`ReadLen::MAX_RAW`]).
     ///
     /// # Errors
     /// The read's own error when it fails, and an error when the bytes read are fewer or
     /// other than `was` holds. The upload they were for cannot go on: its caller fails it.
     fn read<'a>(
-        &'a self,
+        &'a mut self,
         offset: u64,
-        was: &'a ByteTally,
+        was: &'a Seen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>>;
+}
+
+/// Where the parts an upload has started are ([`Upload::flight`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Flight {
+    /// No part is in flight and none waits to start.
+    Idle,
+    /// Parts are in flight, and a write of one read's worth will not wait for one.
+    Room,
+    /// A whole part waits for a part in flight to end: a write now would wait with it.
+    Full,
+}
+
+/// Whether an upload will be handed more bytes ([`Upload::flight`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Rest {
+    /// More may follow.
+    More,
+    /// Every byte was handed over, and the caller has verified the object whole: the
+    /// upload may start its last part.
+    None,
 }
 
 /// One object being written. See the module docs for visibility.
@@ -699,14 +809,13 @@ pub trait Upload: Send {
     /// Appends a chunk.
     fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// [`Self::write`] for a caller that can produce the object's bytes again: `again` reads
-    /// any of them already handed over, `chunk` included. A store that cuts an object into
-    /// parts may then keep a [`ByteTally`] of what it was given in place of the bytes and
-    /// read them back through `again` when it sends them. The default keeps the bytes, as
-    /// [`Self::write`] does, and a store with no parts needs no other.
+    /// [`Self::write`] for a caller that can produce the object's bytes again: `again` opens
+    /// readers of them. A store that cuts an object into parts may then keep a [`Seen`] of
+    /// what it was given in place of the bytes and read them back through a reader of its
+    /// own when it sends them. The default keeps the bytes, as [`Self::write`] does, and a
+    /// store with no parts needs no other.
     ///
-    /// An upload is written through this method and [`Self::commit_from`] or through
-    /// [`Self::write`] and [`Self::commit`], never both. A wrapper forwards both pairs.
+    /// An upload is written through this method or through [`Self::write`], never both.
     fn write_from(
         &mut self,
         chunk: &[u8],
@@ -722,18 +831,19 @@ pub trait Upload: Send {
     /// or may not be visible (see the module docs): list again.
     fn commit(self) -> impl Future<Output = Result<FileInfo, StoreError>> + Send;
 
-    /// [`Self::commit`] of an upload written with [`Self::write_from`]: what the store let
-    /// go of and has not sent yet is read back through `again` first. An error from
-    /// `again` fails the commit before anything is published.
-    fn commit_from(
-        self,
-        again: &dyn Reread,
-    ) -> impl Future<Output = Result<FileInfo, StoreError>> + Send
-    where
-        Self: Sized,
-    {
-        let _ = again;
-        self.commit()
+    /// Where the parts this upload has started are, for a caller that must not wait for
+    /// one: it collects those that ended, starts one that waited, and returns at once. With
+    /// [`Rest::None`] the caller says no byte follows, so a store with parts starts the
+    /// last one and [`Self::commit`] has only to complete the object once this answers
+    /// [`Flight::Idle`]. The task that asks is woken when a part ends. The default is a
+    /// store that sends nothing beside its caller: always idle.
+    ///
+    /// # Errors
+    /// The failure of a part that ended: the same error the next write would return. The
+    /// upload cannot go on.
+    fn flight(&mut self, rest: Rest) -> impl Future<Output = Result<Flight, StoreError>> + Send {
+        let _ = rest;
+        async { Ok(Flight::Idle) }
     }
 
     /// Discards the written bytes; a prior object under the key is untouched.
@@ -742,6 +852,40 @@ pub trait Upload: Send {
 
 /// A boxed future that may move between threads.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// One object read in order from an offset to its end ([`ObjectStore::read_stream`]).
+///
+/// The pieces follow each other: each starts where the one before ended. A piece is exactly
+/// the length asked for unless the object ends inside it, so a short piece is the end, as for
+/// [`ObjectStore::read`], and no read follows to learn it. A body cut off before the length
+/// the store declared for it is an error (`Transient`), never a short piece: only the end of
+/// the object is one.
+pub trait ReadStream: Send {
+    /// The next `len` bytes: fewer only at the end of the object, none past it.
+    ///
+    /// # Errors
+    /// The store's error. After one the stream is spent: a caller that goes on opens another
+    /// at the offset it reached.
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>>;
+}
+
+/// [`ObjectStore::read_stream`]'s default: one [`ObjectStore::read`] a piece.
+struct Ranged<'a, S: ?Sized> {
+    store: &'a S,
+    key: FileKey,
+    offset: u64,
+}
+
+impl<S: ObjectStore + ?Sized> ReadStream for Ranged<'_, S> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let bytes = self.store.read(&self.key, self.offset, len).await?;
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.offset = self.offset.saturating_add(read);
+            Ok(bytes)
+        })
+    }
+}
 
 /// [`Upload`] with boxed futures, so an upload of any store can be held as one type: the
 /// engine keeps a file part-way sent between ticks without naming its store. Every `Upload`
@@ -757,11 +901,8 @@ pub trait DynUpload: Send {
     ) -> BoxFuture<'a, Result<(), StoreError>>;
     /// [`Upload::commit`].
     fn commit_boxed(self: Box<Self>) -> BoxFuture<'static, Result<FileInfo, StoreError>>;
-    /// [`Upload::commit_from`].
-    fn commit_from_boxed<'a>(
-        self: Box<Self>,
-        again: &'a dyn Reread,
-    ) -> BoxFuture<'a, Result<FileInfo, StoreError>>;
+    /// [`Upload::flight`].
+    fn flight_boxed(&mut self, rest: Rest) -> BoxFuture<'_, Result<Flight, StoreError>>;
     /// [`Upload::abort`].
     fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>>;
 }
@@ -783,11 +924,8 @@ impl<U: Upload + 'static> DynUpload for U {
         Box::pin((*self).commit())
     }
 
-    fn commit_from_boxed<'a>(
-        self: Box<Self>,
-        again: &'a dyn Reread,
-    ) -> BoxFuture<'a, Result<FileInfo, StoreError>> {
-        Box::pin((*self).commit_from(again))
+    fn flight_boxed(&mut self, rest: Rest) -> BoxFuture<'_, Result<Flight, StoreError>> {
+        Box::pin(self.flight(rest))
     }
 
     fn abort_boxed(self: Box<Self>) -> BoxFuture<'static, Result<(), StoreError>> {
@@ -814,9 +952,9 @@ impl Upload for Box<dyn DynUpload> {
         DynUpload::commit_boxed(upload).await
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        let upload: Box<dyn DynUpload> = self;
-        DynUpload::commit_from_boxed(upload, again).await
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        let upload: &mut dyn DynUpload = &mut **self;
+        upload.flight_boxed(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
@@ -826,7 +964,7 @@ impl Upload for Box<dyn DynUpload> {
 }
 
 /// Whether the store holds an object under `key`, by a one-byte read. Used where one key is
-/// named without a listing: a compaction's output key, a torn tail's key.
+/// named without a listing: a boot's refused staged file.
 ///
 /// # Errors
 /// The store's error for a read that fails other than as not found.
@@ -860,6 +998,23 @@ mod tests {
             size: 1,
             listed: ListedTime::Created(CreatedAt::mtime(Timestamp::from_unix_millis(0))),
         }
+    }
+
+    /// What a store keeps of bytes it let go of counts them as they pass, says when there are
+    /// none, and is the same however the bytes were cut.
+    #[test]
+    fn a_seen_counts_its_bytes_and_does_not_depend_on_how_they_were_cut() {
+        let mut seeing = Seeing::new();
+        assert_eq!((seeing.len(), seeing.is_empty()), (0, true));
+        assert!(Seen::of(&[]).is_empty());
+        seeing.add(b"abc");
+        assert_eq!((seeing.len(), seeing.is_empty()), (3, false));
+        seeing.add(b"defg");
+        assert_eq!(seeing.len(), 7);
+        let whole = Seen::of(b"abcdefg");
+        assert_eq!(seeing.seen(), whole);
+        assert_eq!((whole.len(), whole.is_empty()), (7, false));
+        assert_ne!(whole, Seen::of(b"abcdefh"));
     }
 
     #[test]

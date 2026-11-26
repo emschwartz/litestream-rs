@@ -34,7 +34,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -42,7 +42,7 @@ use lsr_config::{DbPlan, Plan, ReplicaPlan};
 use lsr_core::{Clock, PlanOutcome, RestoreError as CoreRestoreError};
 use lsr_replica::{
     Config, DynStore, FinalRetention, FinalSnapshot, FinalSnapshotFailure, Gate,
-    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, Stopped, Trip,
+    IfReplicationStops, Replicator, RestoreError, Runtime, StartError, Stopped, Trip, lock,
     record_takeover, restore_if_missing,
 };
 
@@ -116,28 +116,11 @@ impl Finished {
     }
 }
 
-/// Where one database stands.
-enum State {
-    Waiting,
-    Running(Replicator),
-    Failed,
-}
-
-impl State {
-    fn entry(&self) -> Entry {
-        match self {
-            Self::Waiting => Entry::Waiting,
-            Self::Running(replicator) => Entry::Running(replicator.clone()),
-            Self::Failed => Entry::Failed,
-        }
-    }
-}
-
 struct Slot {
     plan: DbPlan,
     store: Option<Arc<dyn DynStore>>,
     restore: bool,
-    state: State,
+    state: Entry,
     /// The last start failure logged, so a retried database logs each error once.
     last_error: Option<String>,
 }
@@ -148,11 +131,6 @@ struct Failure {
     error: String,
     /// Whether the cause can pass by itself, so the start is tried again as Go's next sync does.
     transient: bool,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Each critical section leaves plain data behind.
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Every replicator started so far, and whether a second signal has cut the drains.
@@ -262,7 +240,7 @@ impl Daemon {
             let restore = db.restore_if_missing() || (restore_all && !db.from_dir());
             let slot = daemon.open(db.clone(), restore);
             let (path, kind) = (db.path().to_owned(), db.replica().kind());
-            daemon.board.push(path, kind, slot.state.entry());
+            daemon.board.push(path, kind, slot.state.clone());
             lock(&daemon.slots).push(slot);
         }
         daemon
@@ -297,7 +275,7 @@ impl Daemon {
             plan,
             store,
             restore,
-            state: State::Failed,
+            state: Entry::Failed,
             last_error: None,
         };
         if slot.store.is_some() {
@@ -311,7 +289,7 @@ impl Daemon {
                         ..failure
                     };
                     if failure.transient {
-                        slot.state = State::Waiting;
+                        slot.state = Entry::Waiting;
                     }
                     self.failed(&mut slot, failure, false);
                 }
@@ -321,10 +299,10 @@ impl Daemon {
     }
 
     /// Starts one database if its file exists; `first` logs the wait the first time.
-    fn try_start(&self, slot: &Slot, first: bool) -> Result<State, Failure> {
+    fn try_start(&self, slot: &Slot, first: bool) -> Result<Entry, Failure> {
         let path = slot.plan.path();
         let Some(store) = &slot.store else {
-            return Ok(State::Failed);
+            return Ok(Entry::Failed);
         };
         if slot.restore && !exists(path) {
             self.restore(path, store, slot.plan.config())?;
@@ -334,7 +312,7 @@ impl Daemon {
                 self.log
                     .info("waiting for database", &[("path", path.into())]);
             }
-            return Ok(State::Waiting);
+            return Ok(Entry::Waiting);
         }
         // The log sink goes in with the start: one set afterwards can miss the boot's line.
         let mut config = slot.plan.config().clone();
@@ -352,7 +330,7 @@ impl Daemon {
             Ok(replicator) => {
                 self.started.add(&replicator);
                 self.initialized(&slot.plan);
-                Ok(State::Running(replicator))
+                Ok(Entry::Running(replicator))
             }
             Err(error) => Err(Failure {
                 msg: "cannot start database",
@@ -458,7 +436,7 @@ impl Daemon {
             let slots = lock(&self.slots);
             slots
                 .iter()
-                .filter(|s| matches!(s.state, State::Waiting))
+                .filter(|s| matches!(s.state, Entry::Waiting))
                 .map(|s| s.plan.config().poll_interval.get())
                 .min()?
         };
@@ -496,25 +474,25 @@ impl Daemon {
         let mut slots = lock(&self.slots);
         let mut left = false;
         for (index, slot) in slots.iter_mut().enumerate() {
-            if matches!(slot.state, State::Waiting) {
+            if matches!(slot.state, Entry::Waiting) {
                 // A file that appears mid-creation may not open yet, nor one the application
                 // holds locked: retry, as Go does.
                 match self.try_start(slot, false) {
                     Ok(state) => slot.state = state,
                     Err(failure) => self.failed(slot, failure, true),
                 }
-                self.board.set(index, slot.state.entry());
-                left |= matches!(slot.state, State::Waiting);
+                self.board.set(index, slot.state.clone());
+                left |= matches!(slot.state, Entry::Waiting);
             }
         }
         left
     }
 
     /// Drains every running database within what is left of the one deadline begun at
-    /// `begun` (the signal, the child's exit, or now), and reports each.
+    /// `begun` (the signal, the child's exit, or now), and reports each. Each running one
+    /// ends, as asked, with a level-9 snapshot (`-once -force-snapshot`) and then a
+    /// retention pass (`-once -enforce-retention`).
     #[must_use]
-    /// Drains every database; each running one ends, as asked, with a level-9 snapshot
-    /// (`-once -force-snapshot`) and then a retention pass (`-once -enforce-retention`).
     pub(crate) fn stop(
         &self,
         waiter: Option<Waiter>,
@@ -529,7 +507,7 @@ impl Daemon {
         let syncs: Vec<_> = slots
             .iter()
             .map(|slot| match &slot.state {
-                State::Running(replicator) => {
+                Entry::Running(replicator) => {
                     if snapshot {
                         replicator.request_final_snapshot();
                     }
@@ -538,20 +516,20 @@ impl Daemon {
                     }
                     Some(replicator.stop(self.left(begun)))
                 }
-                State::Waiting | State::Failed => None,
+                Entry::Waiting | Entry::Failed => None,
             })
             .collect();
         let mut dbs = Vec::new();
         for (slot, sync) in slots.iter().zip(syncs) {
             let path = slot.plan.path().to_owned();
             let end = match (sync, &slot.state) {
-                (Some(sync), State::Running(replicator)) => {
+                (Some(sync), Entry::Running(replicator)) => {
                     let health = replicator.health();
                     ending(sync.wait(), health.final_snapshot, health.final_retention)
                 }
-                (Some(sync), State::Waiting | State::Failed) => End::Stopped(sync.wait()),
-                (None, State::Waiting) => End::NeverAppeared,
-                (None, State::Failed | State::Running(_)) => End::DidNotStart,
+                (Some(sync), Entry::Waiting | Entry::Failed) => End::Stopped(sync.wait()),
+                (None, Entry::Waiting) => End::NeverAppeared,
+                (None, Entry::Failed | Entry::Running(_)) => End::DidNotStart,
             };
             self.ended(&path, &end);
             dbs.push((path, end));
@@ -563,8 +541,6 @@ impl Daemon {
         }
     }
 
-    /// The daemon's clock, read now.
-    #[must_use]
     /// Every running database's fail-stop gate (`crate::failstop`): the `-exec` child's start
     /// and stop wait on them. A database waiting for its file, or that failed to start, has
     /// none: it does not hold the child, as it does not in Go.
@@ -584,6 +560,8 @@ impl Daemon {
         self.stop_app
     }
 
+    /// The daemon's clock, read now.
+    #[must_use]
     pub(crate) fn now(&self) -> lsr_ltx::Timestamp {
         self.clock.now()
     }

@@ -19,9 +19,8 @@
 //! - An upload written from a file it can read again (`Upload::write_from`) holds no part:
 //!   a digest and a few tallies for each, and one 256 KiB read for each request being sent,
 //!   whatever the part size.
-//! - A restore holds one read window: `READ_CONCURRENCY` responses of the 4 MiB the engine
-//!   asks for, whatever the database's size, so each response holds its length and not the
-//!   capacity a read grown from empty ends with.
+//! - A restore holds one chunk: each file is one GET whose body is read from the connection
+//!   4 MiB at a time as the decoder takes it, whatever the database's size.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -42,9 +41,9 @@ use std::thread;
 use lsr_core::WriteMode;
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    BoxFuture, ByteTally, CompactionInputs, DatabaseSink, FakeClock, FileKey, Level, MAX_INPUTS,
-    ObjectStore, PageLimit, Reread, RestoreTarget, StoreError, StoreOp, Upload, compact_staged,
-    restore,
+    Again, BoxFuture, CompactionInputs, DatabaseSink, FakeClock, FileKey, Level, MAX_INPUTS,
+    ObjectStore, PageLimit, Reread, RestoreTarget, Seen, StoreError, StoreOp, Upload,
+    compact_staged, restore,
 };
 use lsr_ltx::{
     DbChecksum, DbPages, Encoder, Header, HeaderFields, PageNo, PageRef, PageSize, Timestamp, Txid,
@@ -52,8 +51,8 @@ use lsr_ltx::{
 };
 use lsr_store_fs::FsStore;
 use lsr_store_s3::{
-    BucketName, Endpoint, FakeS3, HttpRequest, Method, PartSize, Prefix, READ_CONCURRENCY,
-    S3Config, S3Store, Transport, object_key,
+    BucketName, Endpoint, FakeS3, HttpRequest, Method, PartSize, Prefix, S3Config, S3Store,
+    Transport, object_key,
 };
 use url::Url;
 
@@ -127,10 +126,16 @@ fn serve_one(mut stream: TcpStream, port: u16, fake: &FakeS3) -> io::Result<()> 
     };
     let target = request_line.next().unwrap_or("/");
     let url = Url::parse(&format!("http://127.0.0.1:{port}{target}")).map_err(io::Error::other)?;
-    let signed: BTreeSet<String> = url
-        .query_pairs()
-        .find(|(name, _)| name == "X-Amz-SignedHeaders")
-        .map(|(_, value)| value.split(';').map(str::to_owned).collect())
+    let lines: Vec<&str> = lines.collect();
+    // The headers the client added itself (its own user-agent, accept-encoding) are not the
+    // store's: only those its Authorization signs, and the Authorization, reach the fake.
+    let signed: BTreeSet<String> = lines
+        .iter()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, value)| value.split_once("SignedHeaders="))
+        .and_then(|(_, rest)| rest.split(',').next())
+        .map(|list| list.split(';').map(str::to_owned).collect())
         .unwrap_or_default();
     let mut headers = Vec::new();
     let mut declared = 0_usize;
@@ -142,7 +147,7 @@ fn serve_one(mut stream: TcpStream, port: u16, fake: &FakeS3) -> io::Result<()> 
         if name == "content-length" {
             declared = value.parse().unwrap_or(0);
         }
-        if name != "host" && signed.contains(&name) {
+        if name == "authorization" || (name != "host" && signed.contains(&name)) {
             headers.push((leak(&name), value));
         }
     }
@@ -218,7 +223,7 @@ fn fake() -> Arc<FakeS3> {
 
 /// Uploads `total` bytes in mebibyte writes and checks the peak against the law for a
 /// store of this part size and concurrency.
-fn assert_upload_holds_one_batch(part: usize, concurrency: usize, total: usize) {
+fn assert_upload_holds_its_parts(part: usize, concurrency: usize, total: usize) {
     let fake = fake();
     let store = store_on(serve(&fake), part, concurrency);
     let key = FileKey::snapshot(txid(1));
@@ -246,7 +251,8 @@ fn assert_upload_holds_one_batch(part: usize, concurrency: usize, total: usize) 
         fake.size_of(&object_key(config().prefix(), &key)),
         Some(total)
     );
-    let bound = concurrency * part + MARGIN;
+    // The parts in flight and the one more that fills or waits.
+    let bound = (concurrency + 1) * part + MARGIN;
     eprintln!(
         "upload part {} MiB x {concurrency}: {} KiB (bound {} KiB)",
         part / MIB,
@@ -255,7 +261,7 @@ fn assert_upload_holds_one_batch(part: usize, concurrency: usize, total: usize) 
     );
     assert!(
         peak.extra <= bound,
-        "upload held {} bytes, over {bound} ({concurrency} parts x {part} + {MARGIN})",
+        "upload held {} bytes, over {bound} ({concurrency} parts in flight and one more x {part} + {MARGIN})",
         peak.extra
     );
     assert!(
@@ -278,44 +284,56 @@ fn assert_upload_holds_one_batch(part: usize, concurrency: usize, total: usize) 
 }
 
 #[test]
-fn an_upload_through_the_real_client_holds_five_parts() {
-    assert_upload_holds_one_batch(PartSize::MIN.get().try_into().unwrap(), 5, 56 * MIB);
+fn an_upload_through_the_real_client_holds_five_parts_in_flight_and_one_more() {
+    assert_upload_holds_its_parts(PartSize::MIN.get().try_into().unwrap(), 5, 56 * MIB);
 }
 
 /// A part size above the default and an object of many more parts than the concurrency, the
 /// shape where a per-part cost multiplies: twelve parts of 16 MiB, three at a time.
 #[test]
-fn a_long_upload_at_a_large_part_size_holds_one_batch_and_allocates_each_part_once() {
-    assert_upload_holds_one_batch(16 * MIB, 3, 12 * 16 * MIB);
+fn a_long_upload_at_a_large_part_size_holds_its_parts_and_allocates_each_once() {
+    assert_upload_holds_its_parts(16 * MIB, 3, 12 * 16 * MIB);
 }
 
 #[test]
 fn the_bound_follows_part_size_and_concurrency() {
-    assert_upload_holds_one_batch(8 * MIB, 3, 56 * MIB);
+    assert_upload_holds_its_parts(8 * MIB, 3, 56 * MIB);
 }
 
 /// A file on disk as an upload reads it again: the bytes at an offset, given only when they
-/// tally as they did when the upload was first handed them.
+/// are what was seen when the upload was first handed them. Each part gets a handle of its
+/// own.
 struct OnDisk(File);
 
 impl Reread for OnDisk {
+    fn open(&self) -> BoxFuture<'_, Result<Box<dyn Again>, StoreError>> {
+        let opened = self.0.try_clone().map_err(|err| StoreError::Transient {
+            op: StoreOp::Read,
+            kind: err.kind(),
+        });
+        Box::pin(async move {
+            let reader: Box<dyn Again> = Box::new(Self(opened?));
+            Ok(reader)
+        })
+    }
+}
+
+impl Again for OnDisk {
     fn read<'a>(
-        &'a self,
+        &'a mut self,
         offset: u64,
-        was: &'a ByteTally,
+        was: &'a Seen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
             let failed = |kind| StoreError::Transient {
                 op: StoreOp::Read,
                 kind,
             };
-            let mut bytes = vec![0_u8; usize::try_from(was.size()).unwrap()];
+            let mut bytes = vec![0_u8; usize::try_from(was.len()).unwrap()];
             self.0
                 .read_exact_at(&mut bytes, offset)
                 .map_err(|err| failed(err.kind()))?;
-            let mut now = ByteTally::new();
-            now.add(&bytes);
-            if now == *was {
+            if Seen::of(&bytes) == *was {
                 Ok(bytes)
             } else {
                 Err(failed(io::ErrorKind::InvalidData))
@@ -372,7 +390,7 @@ fn assert_upload_from_a_file_holds_no_part(part: usize, concurrency: usize, tota
                 first.read_exact(&mut chunk).unwrap();
                 upload.write_from(&chunk, &again).await.unwrap();
             }
-            upload.commit_from(&again).await
+            upload.commit().await
         })
     });
     assert_eq!(done.unwrap().size, u64::try_from(total).unwrap());
@@ -510,35 +528,60 @@ fn restore_peak(mib: usize) -> usize {
 /// result. Tighter than `MARGIN` so that one more chunk, a copy of a body, is over the bound.
 const RESTORE_MARGIN: usize = 3 * MIB;
 
-/// The most a restore may hold: `READ_CONCURRENCY` responses of the chunk it asks for in
-/// flight, and the margin.
+/// The most a restore may hold: the one chunk it takes from a file's stream, and the margin.
 fn restore_bound() -> usize {
-    READ_CONCURRENCY.get() * RESTORE_CHUNK + RESTORE_MARGIN
+    RESTORE_CHUNK + RESTORE_MARGIN
 }
 
-/// A restore through the real client holds its read window, and no more as the database
-/// grows from 72 MiB to 144 MiB.
+/// A restore through the real client streams each file through one GET and holds one chunk of
+/// it, and no more as the database grows from 72 MiB to 144 MiB: the body is read from the
+/// connection as the decoder takes it, never held whole.
 #[test]
-fn a_restore_through_the_real_client_holds_one_read_window() {
-    let window = READ_CONCURRENCY.get() * RESTORE_CHUNK;
-    assert!(
-        72 * MIB > window,
-        "the database must be larger than the window"
-    );
+fn a_restore_through_the_real_client_holds_one_chunk() {
     let few = restore_peak(72);
+    let many = restore_peak(144);
     eprintln!(
-        "restore 72 MiB: {} KiB (bound {} KiB)",
+        "restore 72 MiB: {} KiB, 144 MiB: {} KiB (bound {} KiB)",
         few >> 10,
+        many >> 10,
         restore_bound() >> 10
     );
-    assert!(
-        few <= restore_bound(),
-        "restore held {few} bytes, over {}",
-        restore_bound()
+    for peak in [few, many] {
+        assert!(
+            peak <= restore_bound(),
+            "restore held {peak} bytes, over {}",
+            restore_bound()
+        );
+        assert!(
+            peak >= RESTORE_CHUNK,
+            "the gate saw {peak} bytes: it cannot see the chunk"
+        );
+    }
+}
+
+/// A ranged read of 12 MiB (a compaction's replica reads are a mebibyte; the largest a
+/// `ReadLen` allows is 16): the response body is held once, at its length. A body copied out of
+/// the response, or read into a buffer grown from empty (16 MiB of capacity and an 8 MiB block
+/// beside it while it grows), is over the bound.
+#[test]
+fn a_ranged_read_through_the_real_client_holds_its_body_once() {
+    let fake = fake();
+    let len = 12 * MIB;
+    let key = FileKey::snapshot(txid(1));
+    fake.put_raw(
+        &object_key(config().prefix(), &key),
+        vec![7; len + MIB],
+        &[("x-amz-meta-litestream-timestamp", &now().to_string())],
     );
+    let store = store_on(serve(&fake), PartSize::MIN.get().try_into().unwrap(), 5);
+    let want = lsr_core::ReadLen::new(u32::try_from(len).unwrap()).unwrap();
+    let (read, peak) = process_peak_of(|| block_on(store.read(&key, 0, want)));
+    assert_eq!(read.unwrap().len(), len);
+    eprintln!("ranged read of {} KiB: {} KiB", len >> 10, peak.extra >> 10);
     assert!(
-        few >= window - RESTORE_CHUNK,
-        "the gate saw {few} bytes: it cannot see the window"
+        peak.extra <= len + RESTORE_MARGIN,
+        "a read of {len} bytes held {}",
+        peak.extra
     );
 }
 
@@ -556,18 +599,18 @@ const FLUSH: usize = MIB;
 /// `MAX_INPUTS` staged files while its output goes up as a multipart upload through the
 /// real client. The two bounds add: the inputs' windows and one batch of parts.
 #[test]
-fn a_compaction_into_s3_holds_its_inputs_and_one_batch_of_parts() {
-    assert_compaction_holds_one_batch(PartSize::MIN.get().try_into().unwrap(), 5);
+fn a_compaction_into_s3_holds_its_inputs_and_its_parts() {
+    assert_compaction_holds_its_parts(PartSize::MIN.get().try_into().unwrap(), 5);
 }
 
 /// The same at a part size above the default and a concurrency below it: the output is four
 /// parts, two batches, so a part held past its batch shows.
 #[test]
-fn a_compaction_into_s3_at_a_large_part_size_holds_one_batch_of_parts() {
-    assert_compaction_holds_one_batch(16 * MIB, 2);
+fn a_compaction_into_s3_at_a_large_part_size_holds_its_parts() {
+    assert_compaction_holds_its_parts(16 * MIB, 2);
 }
 
-fn assert_compaction_holds_one_batch(part: usize, concurrency: usize) {
+fn assert_compaction_holds_its_parts(part: usize, concurrency: usize) {
     let from = tempfile::tempdir().unwrap();
     let staging = FsStore::new(from.path());
     let commit = INPUT_PAGES * u32::try_from(MAX_INPUTS).unwrap();
@@ -606,7 +649,7 @@ fn assert_compaction_holds_one_batch(part: usize, concurrency: usize) {
     let done = done.unwrap();
     assert_eq!(done.pages(), commit);
     assert!(done.info().size > u64::try_from(concurrency * part).unwrap());
-    let bound = MAX_INPUTS * (STAGED_WINDOW + PAGE) + FLUSH + concurrency * part + MARGIN;
+    let bound = MAX_INPUTS * (STAGED_WINDOW + PAGE) + FLUSH + (concurrency + 1) * part + MARGIN;
     eprintln!(
         "compaction into s3: {} KiB (bound {} KiB)",
         peak.extra >> 10,
@@ -614,7 +657,7 @@ fn assert_compaction_holds_one_batch(part: usize, concurrency: usize) {
     );
     assert!(
         peak.extra <= bound,
-        "compaction held {} bytes, over {bound} ({MAX_INPUTS} inputs x ({STAGED_WINDOW} + {PAGE}) + {FLUSH} + {concurrency} parts x {part} + {MARGIN})",
+        "compaction held {} bytes, over {bound} ({MAX_INPUTS} inputs x ({STAGED_WINDOW} + {PAGE}) + {FLUSH} + {concurrency} parts in flight and one more x {part} + {MARGIN})",
         peak.extra
     );
 }

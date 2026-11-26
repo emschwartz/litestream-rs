@@ -47,6 +47,12 @@ pub enum ConfigError {
     /// SigV4 credential scope cannot carry.
     #[error("bad region")]
     BadRegion,
+    /// No TLS crypto provider: the application installed none and rustls's features enable none
+    /// or two, so rustls cannot pick one.
+    #[error(
+        "no TLS crypto provider: install one with rustls::crypto::CryptoProvider::install_default, or enable exactly one of rustls's `ring` and `aws-lc-rs` features"
+    )]
+    NoTlsProvider,
 }
 
 /// How the bucket is addressed in the URL.
@@ -280,6 +286,15 @@ impl PartSize {
         }
     }
 
+    /// A size below S3's minimum, for a simulator whose files are a few hundred bytes and
+    /// whose bucket takes parts of any size (`FakeS3::accept_small_parts`): at 5 MiB nothing
+    /// there is ever sent in parts.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub const fn below_the_minimum(bytes: std::num::NonZeroU64) -> Self {
+        Self(bytes.get())
+    }
+
     /// The size in bytes.
     #[must_use]
     pub const fn get(self) -> u64 {
@@ -330,9 +345,9 @@ pub(crate) const R2_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add
 /// small responses.
 pub const CREATION_TIME_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(15);
 
-/// Ranged reads (a restore reading ahead) and listing pages (the levels of an
-/// inventory) in flight at once. Go does neither side by side, so there is no
-/// Go value; not configurable. Memory is this many read lengths for reads.
+/// Listing pages (the levels of an inventory) in flight at once. Go lists one at a
+/// time, so there is no Go value; not configurable. A restore reads each file through
+/// one GET, never side by side.
 pub const READ_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(7);
 
 /// A count as bytes, for the memory bounds below; a `usize` fits a `u64` on every target
@@ -345,15 +360,6 @@ const fn widen(n: usize) -> u64 {
     n as u64
 }
 
-/// A length as bytes, for the same bounds.
-#[expect(
-    clippy::as_conversions,
-    reason = "const context has no From for u32; the conversion is lossless"
-)]
-const fn widen_len(n: u32) -> u64 {
-    n as u64
-}
-
 // What a multipart upload and its batches may hold, stated where the constants are.
 // S3 refuses a part under 5 MiB (EntityTooSmall) except the last.
 const _: () = assert!(PartSize::MIN.get() >= 5 * 1024 * 1024);
@@ -362,14 +368,11 @@ const _: () = assert!(PartSize::TIGRIS.get() >= PartSize::MIN.get());
 const _: () = assert!(R2_CONCURRENCY.get() <= DEFAULT_CONCURRENCY.get());
 // One batch of read-ahead HEADs never asks for more than a decision names ahead.
 const _: () = assert!(CREATION_TIME_CONCURRENCY.get() <= lsr_core::MAX_AHEAD);
-// Memory in the worst case with the defaults: an upload buffers at most `concurrency`
-// parts (5 x 16 MiB on Tigris, 80 MiB), and a restore holds at most `READ_CONCURRENCY`
-// reads of the largest length (8 x 16 MiB, 128 MiB). Both stay under 128 MiB. What each
-// really holds, parts and bodies copied nowhere, is pinned through the real client by
-// `tests/store-s3/memory.rs`.
-const _: () = assert!(widen(DEFAULT_CONCURRENCY.get()) * PartSize::TIGRIS.get() <= 128 << 20);
-const _: () =
-    assert!(widen(READ_CONCURRENCY.get()) * widen_len(lsr_core::ReadLen::MAX_RAW) <= 128 << 20);
+// Memory in the worst case with the defaults: an upload that buffers its parts holds
+// `concurrency` of them in flight and one more (6 x 16 MiB on Tigris, 96 MiB), under 128 MiB.
+// What it and a read really hold, parts and bodies copied nowhere, is pinned through the real
+// client by `tests/store-s3/memory.rs`.
+const _: () = assert!(widen(DEFAULT_CONCURRENCY.get() + 1) * PartSize::TIGRIS.get() <= 128 << 20);
 
 impl S3Config {
     /// A configuration with the defaults the endpoint's provider gets:
@@ -435,9 +438,13 @@ impl S3Config {
 
     /// Replaces how many parts of one multipart upload may be in flight at
     /// once, Go's `concurrency`. It governs nothing else: reads, listings and
-    /// HEADs have their own fixed limits. Memory held by an upload is at most
-    /// this many parts (`concurrency` times the part size). One sends every
-    /// part after the one before it.
+    /// HEADs have their own fixed limits. One sends every part after the one
+    /// before it.
+    ///
+    /// Memory: an upload of a staged file holds no part, each is read from the
+    /// file as it is sent. An upload with no file behind it holds the parts in
+    /// flight and one more, and has fewer in flight than this when that many
+    /// would pass 256 MiB (`part_plan.rs`, `docs/decisions/D232.md`).
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
         self.concurrency = Some(concurrency);

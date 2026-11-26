@@ -76,7 +76,7 @@ fn txid(n: u64) -> Txid {
 }
 
 fn key(n: u64) -> FileKey {
-    staged_key(txid(n))
+    FileKey::staged(txid(n))
 }
 
 fn ps() -> PageSize {
@@ -200,6 +200,9 @@ struct Log {
     held_reads: u32,
     /// The read through a held file, counted from one over all of them, that fails.
     fail_held_read: Option<(u32, StoreError)>,
+    /// The read through a held file, counted the same way, that comes back with a byte
+    /// flipped.
+    flip_held_read: Option<u32>,
 }
 
 /// A [MemStore] that counts calls and can fail a commit before it publishes
@@ -236,11 +239,12 @@ impl std::fmt::Debug for ProbeOpened {
 
 impl Opened for ProbeOpened {
     fn read(&mut self, offset: u64, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
-        let failed = {
+        let (failed, flip) = {
             let mut log = self.log.lock().unwrap_or_else(PoisonError::into_inner);
             log.held_reads = log.held_reads.saturating_add(1);
             let nth = log.held_reads;
-            log.fail_held_read.take_if(|(at, _)| *at == nth)
+            let flip = log.flip_held_read.take_if(|at| *at == nth).is_some();
+            (log.fail_held_read.take_if(|(at, _)| *at == nth), flip)
         };
         let from = usize::try_from(offset).unwrap().min(self.bytes.len());
         let to = from
@@ -248,7 +252,14 @@ impl Opened for ProbeOpened {
             .min(self.bytes.len());
         let read = match failed {
             Some((_, err)) => Err(err),
-            None => Ok(self.bytes[from..to].to_vec()),
+            None => {
+                let mut bytes = self.bytes[from..to].to_vec();
+                let middle = bytes.len() / 2;
+                if flip && let Some(byte) = bytes.get_mut(middle) {
+                    *byte ^= 0x40;
+                }
+                Ok(bytes)
+            }
         };
         Box::pin(std::future::ready(read))
     }
@@ -1183,13 +1194,7 @@ fn a_verifying_listed_key_unlike_the_staged_file_is_never_written_over() {
     put_bytes(&remote.inner, key(2), &theirs);
     let listed = next(UploadState::Unknown, &staging, &remote, 2).unwrap();
     assert_eq!(listed.state, UploadState::At(Some(txid(2))));
-    assert_eq!(
-        listed.did,
-        Did::Diverged {
-            confirmed: txid(2),
-            from: txid(2)
-        }
-    );
+    assert_eq!(listed.did, Did::Diverged { confirmed: txid(2) });
     next(listed.state, &staging, &remote, 2).unwrap();
     assert!(remote.log().begins.is_empty());
     assert_eq!(read_all(&remote.inner, &key(2)), theirs);
@@ -1450,13 +1455,7 @@ fn a_refused_upload_of_other_verifying_bytes_is_never_written_over() {
         .unwrap()
         .state;
     let step = next(state, &staging, &remote, 2).unwrap();
-    assert_eq!(
-        step.did,
-        Did::Diverged {
-            confirmed: txid(2),
-            from: txid(2)
-        }
-    );
+    assert_eq!(step.did, Did::Diverged { confirmed: txid(2) });
     assert_eq!(step.state, UploadState::At(Some(txid(2))));
     assert_eq!(read_all(&remote.inner, &key(2)), theirs);
 }
@@ -1523,13 +1522,7 @@ fn one_torn_read_of_the_staged_copy_confirms_no_differing_replica_object() {
     // whole; the read after it (its own verification) is the torn one.
     staging.log().flip_read = Some((key(1), 1));
     let listed = next_with(UploadState::Unknown, &staging, &remote, 1, &witnesses).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Diverged {
-            confirmed: txid(1),
-            from: txid(1)
-        }
-    );
+    assert_eq!(listed.did, Did::Diverged { confirmed: txid(1) });
 }
 
 /// The same with the replica's copy: its first verifying read comes back
@@ -1546,13 +1539,7 @@ fn one_torn_read_of_the_replica_copy_does_not_write_over_it() {
     // (its own verification) is the torn one.
     remote.log().flip_read = Some((key(1), 1));
     let listed = next(UploadState::Unknown, &staging, &remote, 1).unwrap();
-    assert_eq!(
-        listed.did,
-        Did::Diverged {
-            confirmed: txid(1),
-            from: txid(1)
-        }
-    );
+    assert_eq!(listed.did, Did::Diverged { confirmed: txid(1) });
     assert_eq!(read_all(&remote.inner, &key(1)), theirs);
 }
 
@@ -1654,6 +1641,7 @@ fn a_put_that_lands_after_the_relist_found_nothing_is_confirmed_not_written_twic
 }
 
 mod endless;
+mod parts;
 mod reread;
 mod slices;
 

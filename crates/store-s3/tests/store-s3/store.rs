@@ -92,7 +92,7 @@ mod cases {
     }
 
     #[test]
-    fn a_failed_read_in_a_batch_is_retried_alone() {
+    fn a_stream_whose_get_is_throttled_is_sent_again_after_the_wait() {
         let (wire, sleeper, store) = retried(FakeHarness::new());
         let k = key(0, 1, 1);
         put_through(&store, &k, b"abcdefghi").unwrap();
@@ -102,25 +102,105 @@ mod cases {
             code: Some("SlowDown"),
             retry_after: Some("1"),
         });
-        let len = ReadLen::new(3).unwrap();
-        let reads: Vec<lsr_core::ReadAt> = [0, 3, 6]
-            .map(|offset| lsr_core::ReadAt {
-                key: k,
-                offset,
-                len,
-            })
-            .to_vec();
-        let got = block_on(store.read_many(&reads));
+        let got = pieces(&store, k, 0, 3);
         assert_eq!(
             got,
-            vec![
-                Ok(b"abc".to_vec()),
-                Ok(b"def".to_vec()),
-                Ok(b"ghi".to_vec())
+            [
+                b"abc".to_vec(),
+                b"def".to_vec(),
+                b"ghi".to_vec(),
+                Vec::new()
             ]
         );
         assert_eq!(sleeper.waits(), [Duration::from_secs(1)]);
-        assert_eq!(count(&wire, Shape::Get), 4);
+        assert_eq!(count(&wire, Shape::Get), 2);
+    }
+
+    /// The pieces of a stream, `len` bytes asked each time, until one comes back short.
+    fn pieces(store: &impl ObjectStore, k: FileKey, offset: u64, len: u32) -> Vec<Vec<u8>> {
+        let mut stream = store.read_stream(k, offset);
+        let len = ReadLen::new(len).unwrap();
+        let mut out = Vec::new();
+        loop {
+            let piece = block_on(stream.next(len)).unwrap();
+            let short = u64::try_from(piece.len()).unwrap() < len.get();
+            out.push(piece);
+            if short {
+                return out;
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_is_one_get_however_many_pieces_it_hands_out() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abcdefghi").unwrap();
+        let before = count(&h.wire, Shape::Get);
+        let got = pieces(&h.store, k, 0, 3);
+        assert_eq!(got, [&b"abc"[..], b"def", b"ghi", b""]);
+        assert_eq!(count(&h.wire, Shape::Get), before + 1);
+        assert_eq!(pieces(&h.store, k, 4, 4), [&b"efgh"[..], b"i"]);
+    }
+
+    #[test]
+    fn a_stream_from_past_the_end_hands_out_nothing() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abc").unwrap();
+        assert_eq!(pieces(&h.store, k, 3, 3), [Vec::<u8>::new()]);
+        assert_eq!(pieces(&h.store, k, 30, 3), [Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn a_stream_of_a_missing_object_is_not_found() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        let mut stream = h.store.read_stream(k, 0);
+        assert!(matches!(
+            block_on(stream.next(ReadLen::new(3).unwrap())),
+            Err(StoreError::NotFound { .. })
+        ));
+    }
+
+    /// A body that ends before its declared length is a failure, never the end of the object:
+    /// taken as the end, it would be a short file.
+    #[test]
+    fn a_stream_cut_short_fails_where_the_body_ends() {
+        let h = FakeHarness::new();
+        let k = key(0, 1, 1);
+        put_through(&h.store, &k, b"abcdefghi").unwrap();
+        h.wire.push(Fault::TruncateBody {
+            on: Shape::Get,
+            keep: 4,
+        });
+        let mut stream = h.store.read_stream(k, 0);
+        let len = ReadLen::new(3).unwrap();
+        assert_eq!(block_on(stream.next(len)).unwrap(), b"abc");
+        assert_eq!(
+            block_on(stream.next(len)),
+            Err(StoreError::Transient {
+                op: StoreOp::Read,
+                kind: io::ErrorKind::UnexpectedEof,
+            })
+        );
+    }
+
+    /// Through the retry layer a stream cut short goes on with a second GET from the bytes it
+    /// handed out, so the pieces are the object's.
+    #[test]
+    fn a_stream_cut_short_goes_on_from_where_it_stopped_under_retrying() {
+        let (wire, sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        put_through(&store, &k, b"abcdefghi").unwrap();
+        wire.push(Fault::TruncateBody {
+            on: Shape::Get,
+            keep: 4,
+        });
+        let before = count(&wire, Shape::Get);
+        assert_eq!(pieces(&store, k, 0, 3), [&b"abc"[..], b"def", b"ghi", b""]);
+        assert_eq!(count(&wire, Shape::Get), before + 2);
+        assert_eq!(sleeper.waits().len(), 1);
     }
 
     #[test]
@@ -330,11 +410,18 @@ mod cases {
         assert_eq!(count(&h.wire, Shape::Head), heads + 1);
     }
 
+    /// A PUT whose body the store refuses against its signed SHA-256 is a checksum mismatch:
+    /// not retried here, and nothing to delete, since the store published nothing.
     #[test]
-    fn wrong_etag_on_put_is_corrupt() {
+    fn a_put_refused_against_its_signed_hash_is_corrupt() {
         let (wire, sleeper, store) = retried(FakeHarness::new());
         let k = key(0, 1, 1);
-        wire.push(Fault::WrongEtag { on: Shape::Put });
+        wire.push(Fault::Status {
+            on: Shape::Put,
+            status: 400,
+            code: Some("XAmzContentSHA256Mismatch"),
+            retry_after: None,
+        });
         assert_eq!(
             put_through(&store, &k, b"abc").unwrap_err(),
             StoreError::Corrupt {
@@ -347,8 +434,20 @@ mod cases {
             1,
             "a corrupt commit is not retried"
         );
+        assert_eq!(count(&wire, Shape::DeleteObjects), 0);
         assert!(sleeper.waits().is_empty());
-        assert!(wire.inner().keys().is_empty(), "the bad object was deleted");
+        assert!(wire.inner().keys().is_empty());
+    }
+
+    /// A PUT answered with the ETag of other bytes is written: as in Go, the ETag is not
+    /// compared with anything (the store checked the body against its signed hash).
+    #[test]
+    fn a_wrong_etag_on_put_is_taken_as_it_comes() {
+        let (wire, _sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        wire.push(Fault::WrongEtag { on: Shape::Put });
+        put_through(&store, &k, b"abc").unwrap();
+        assert_eq!(wire.inner().keys().len(), 1);
     }
 
     #[test]
@@ -483,15 +582,41 @@ mod cases {
         assert_eq!(h.store.pending_orphans(), 0);
     }
 
+    /// A part answered with the ETag of other bytes is taken as it comes; the store refuses the
+    /// completion that names it (`InvalidPart`), which is a checksum mismatch: nothing is
+    /// published and the engine redoes the upload.
     #[test]
-    fn wrong_part_etag_is_corrupt_and_not_retried() {
+    fn a_wrong_part_etag_fails_the_completion_as_corrupt() {
+        let (wire, sleeper, store) = retried(FakeHarness::new());
+        let k = key(0, 1, 1);
+        wire.push(Fault::WrongEtag {
+            on: Shape::UploadPart,
+        });
+        let err = write_all(&store, &k, &body(PART * 2), PART).unwrap_err();
+        assert_eq!(
+            err,
+            StoreError::Corrupt {
+                key: Some(k),
+                cause: CorruptCause::ChecksumMismatch { part: None }
+            }
+        );
+        assert_eq!(count(&wire, Shape::Complete), 1, "not retried here");
+        assert!(sleeper.waits().is_empty());
+        assert!(list_all(&store).unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn a_part_refused_against_its_signed_hash_is_corrupt_and_not_retried() {
         let (wire, sleeper, store) = retried(FakeHarness::new());
         let k = key(0, 1, 1);
         wire.push(Fault::Pass {
             on: Shape::UploadPart,
         });
-        wire.push(Fault::WrongEtag {
+        wire.push(Fault::Status {
             on: Shape::UploadPart,
+            status: 400,
+            code: Some("XAmzContentSHA256Mismatch"),
+            retry_after: None,
         });
         let err = write_all(&store, &k, &body(PART * 3), PART).unwrap_err();
         assert_eq!(
@@ -501,11 +626,7 @@ mod cases {
                 cause: CorruptCause::ChecksumMismatch { part: part(2) }
             }
         );
-        assert_eq!(
-            count(&wire, Shape::UploadPart),
-            3,
-            "the third went in the same batch; no fourth follows"
-        );
+        assert_eq!(count(&wire, Shape::UploadPart), 2, "no third follows");
         assert_eq!(count(&wire, Shape::Complete), 0);
         assert!(sleeper.waits().is_empty());
         assert!(list_all(&store).unwrap().files.is_empty());
@@ -700,7 +821,7 @@ mod cases {
         assert_eq!(h.store.pending_orphans(), 0);
     }
 
-    /// A store over a fresh fake with this many requests per batch.
+    /// A store over a fresh fake with this many parts in flight at most.
     fn store_with(concurrency: usize) -> (Arc<FaultTransport<FakeS3>>, S3Store<Shared>) {
         let wire = Arc::new(FaultTransport::new(fake()));
         let config = config().with_concurrency(std::num::NonZeroUsize::new(concurrency).unwrap());
@@ -715,32 +836,7 @@ mod cases {
     }
 
     #[test]
-    fn memory_is_at_most_the_concurrency_in_parts() {
-        for concurrency in [1, 3] {
-            let (wire, store) = store_with(concurrency);
-            let k = key(0, 1, 1);
-            let bytes = body(PART * 4);
-            block_on(async {
-                let mut up = store
-                    .begin_upload(&k, Timestamp::from_unix_millis(5), WriteMode::Replace)
-                    .await
-                    .unwrap();
-                let mut high = 0;
-                for piece in bytes.chunks(1_500_003) {
-                    up.write(piece).await.unwrap();
-                    high = high.max(up.buffer_capacity());
-                    assert!(up.buffer_capacity() <= PART * concurrency);
-                }
-                assert!(high > PART * (concurrency - 1), "{concurrency}: {high}");
-                up.commit().await.unwrap();
-            });
-            assert_eq!(count(&wire, Shape::UploadPart), 4);
-            assert!(read_back(&store, &k, PART * 2)[..] == bytes[..PART * 2]);
-        }
-    }
-
-    #[test]
-    fn parts_in_a_batch_still_assemble_the_same_object_in_order() {
+    fn many_parts_assemble_the_same_object_in_order() {
         let (wire, store) = store_with(3);
         let k = key(0, 1, 1);
         let bytes = body(PART * 7 + 11);
@@ -758,7 +854,7 @@ mod cases {
     }
 
     #[test]
-    fn a_failed_part_in_a_batch_fails_the_upload_and_orphans_its_id() {
+    fn a_failed_part_fails_the_upload_and_orphans_its_id() {
         let (wire, store) = store_with(3);
         wire.push(Fault::Pass {
             on: Shape::UploadPart,
@@ -773,8 +869,8 @@ mod cases {
         assert!(matches!(err, StoreError::Transient { .. }), "{err:?}");
         assert_eq!(
             count(&wire, Shape::UploadPart),
-            3,
-            "one batch, then nothing"
+            2,
+            "the part that failed, then nothing"
         );
         assert_eq!(count(&wire, Shape::Complete), 0);
         assert_eq!(store.pending_orphans(), 1);

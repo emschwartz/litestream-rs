@@ -1,6 +1,8 @@
---- a/crates/core/src/maintain/short.rs	2026-11-24 18:05:02
-+++ b/crates/core/src/maintain/short.rs	2026-11-24 18:05:02
-@@ -195,7 +195,7 @@
+diff --git a/crates/core/src/maintain/short.rs b/crates/core/src/maintain/short.rs
+index ac226d6ae..e2f61c313 100644
+--- a/crates/core/src/maintain/short.rs
++++ b/crates/core/src/maintain/short.rs
+@@ -228,7 +228,7 @@ impl Remembered {
          config: &Maintenance,
          decided: &Decided,
      ) {
@@ -8,4 +10,4 @@
 +        // planted: a whole listing keeps the record of a level it found empty
          // Every level 1 to 8, not only the configured ones: the retention anchor reads the
          // newest file of each, and a short pass cannot list the levels above the top.
-         for level in (1..=8).filter_map(Level::new) {
+         for level in Level::COMPACTION {

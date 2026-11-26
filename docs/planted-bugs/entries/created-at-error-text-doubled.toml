@@ -1,0 +1,5 @@
+# The bad created-at error text named the header as "litestream-timelitestream-timestamp".
+name = "created-at-error-text-doubled"
+fix = "claude/concise-defects"
+package = "lsr-store-s3"
+tests = ["the_bad_created_at_text_names_the_header"]

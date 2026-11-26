@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lsr_core::{
-    BatchKind, Clock, CreatedAt, FileInfo, FileKey, Level, ListAt, Listing, ObjectStore, PageLimit,
-    ReadAt, ReadLen, Reread, StoreError, Upload,
+    BatchKind, Clock, CreatedAt, FileInfo, FileKey, Flight, Level, ListAt, Listing, ObjectStore,
+    PageLimit, ReadLen, ReadStream, Reread, Rest, StoreError, Upload,
 };
 pub use lsr_core::{BoxFuture, DynUpload};
 use lsr_ltx::{Timestamp, TxidRange};
@@ -44,6 +44,9 @@ pub trait DynStore: Send + Sync {
         offset: u64,
         len: ReadLen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>>;
+
+    /// [`ObjectStore::read_stream`].
+    fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_>;
 
     /// [`ObjectStore::created_at`].
     fn created_at_boxed<'a>(
@@ -75,12 +78,6 @@ pub trait DynStore: Send + Sync {
 
     /// [`ObjectStore::batch_width`].
     fn batch_width_dyn(&self, kind: BatchKind) -> NonZeroUsize;
-
-    /// [`ObjectStore::read_many`].
-    fn read_many_boxed<'a>(
-        &'a self,
-        reads: &'a [ReadAt],
-    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>>;
 
     /// [`ObjectStore::created_at_many`].
     fn created_at_many_boxed<'a>(
@@ -117,6 +114,10 @@ where
         len: ReadLen,
     ) -> BoxFuture<'a, Result<Vec<u8>, StoreError>> {
         Box::pin(self.read(key, offset, len))
+    }
+
+    fn read_stream_dyn(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.read_stream(key, offset)
     }
 
     fn created_at_boxed<'a>(
@@ -160,13 +161,6 @@ where
         self.batch_width(kind)
     }
 
-    fn read_many_boxed<'a>(
-        &'a self,
-        reads: &'a [ReadAt],
-    ) -> BoxFuture<'a, Vec<Result<Vec<u8>, StoreError>>> {
-        Box::pin(self.read_many(reads))
-    }
-
     fn list_many_boxed<'a>(
         &'a self,
         pages: &'a [ListAt],
@@ -188,7 +182,13 @@ where
 #[derive(Clone, Copy)]
 pub(crate) struct Erased<P>(pub(crate) P);
 
-impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Erased<P> {
+// Bounded by `P::Target`, not by a named `dyn DynStore + 'a`: a borrow of the target then
+// lives as long as `P` does, which is what a stream that borrows the store needs.
+impl<P> ObjectStore for Erased<P>
+where
+    P: Deref + Send + Sync,
+    P::Target: DynStore,
+{
     type Upload = Box<dyn DynUpload>;
 
     async fn list(
@@ -202,6 +202,10 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         self.0.read_boxed(key, offset, len).await
+    }
+
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.0.read_stream_dyn(key, offset)
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -238,10 +242,6 @@ impl<'a, P: Deref<Target = dyn DynStore + 'a> + Send + Sync> ObjectStore for Era
         self.0.batch_width_dyn(kind)
     }
 
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        self.0.read_many_boxed(reads).await
-    }
-
     async fn list_many(
         &self,
         pages: &[ListAt],
@@ -266,6 +266,11 @@ pub(crate) struct OpMeter {
 impl OpMeter {
     fn note<T>(&self, result: &Result<T, StoreError>, began: Timestamp, ended: Timestamp) {
         self.calls.fetch_add(1, Ordering::Relaxed);
+        self.note_more(result, began, ended);
+    }
+
+    /// [`Self::note`] for a later part of a call already counted: its time and its error.
+    fn note_more<T>(&self, result: &Result<T, StoreError>, began: Timestamp, ended: Timestamp) {
         if result.is_err() {
             self.errors.fetch_add(1, Ordering::Relaxed);
         }
@@ -345,6 +350,39 @@ async fn metered<T>(
     result
 }
 
+/// A stream counted as one read call ([`Metered::read_stream`]).
+struct MeteredStream<'a> {
+    inner: Box<dyn ReadStream + 'a>,
+    meter: &'a OpMeter,
+    clock: &'a dyn Clock,
+}
+
+impl ReadStream for MeteredStream<'_> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let began = self.clock.now();
+            let result = self.inner.next(len).await;
+            self.meter.note_more(&result, began, self.clock.now());
+            result
+        })
+    }
+}
+
+/// Runs a batch `call`, counting each result as one call timed as the whole batch.
+async fn metered_many<T>(
+    clock: &dyn Clock,
+    meter: &OpMeter,
+    call: impl Future<Output = Vec<Result<T, StoreError>>>,
+) -> Vec<Result<T, StoreError>> {
+    let began = clock.now();
+    let results = call.await;
+    let ended = clock.now();
+    for result in &results {
+        meter.note(result, began, ended);
+    }
+    results
+}
+
 /// An upload whose writes and commit are counted; the bytes count once committed.
 pub(crate) struct MeteredUpload {
     inner: Box<dyn DynUpload>,
@@ -373,21 +411,6 @@ impl MeteredUpload {
         }
         result
     }
-
-    /// The commit, through the source the engine gave when it gave one.
-    async fn commit_with(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
-        let commit = match again {
-            Some(again) => DynUpload::commit_from_boxed(self.inner, again),
-            None => DynUpload::commit_boxed(self.inner),
-        };
-        let result = metered(&*self.clock, &self.meters.commit, commit).await;
-        if result.is_ok() {
-            self.meters
-                .bytes_uploaded
-                .fetch_add(self.written, Ordering::Relaxed);
-        }
-        result
-    }
 }
 
 impl Upload for MeteredUpload {
@@ -400,11 +423,21 @@ impl Upload for MeteredUpload {
     }
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        self.commit_with(None).await
+        let commit = DynUpload::commit_boxed(self.inner);
+        let result = metered(&*self.clock, &self.meters.commit, commit).await;
+        if result.is_ok() {
+            self.meters
+                .bytes_uploaded
+                .fetch_add(self.written, Ordering::Relaxed);
+        }
+        result
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        self.commit_with(Some(again)).await
+    /// Not a call to count: the question sends nothing. A layer that took the default would
+    /// answer that nothing is in flight, and the engine would commit beside its own parts'
+    /// requests, waiting inside its tick.
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        DynUpload::flight_boxed(&mut *self.inner, rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {
@@ -433,6 +466,17 @@ impl ObjectStore for Metered {
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         let call = self.store.read_boxed(key, offset, len);
         metered(&*self.clock, &self.meters.read, call).await
+    }
+
+    /// One call for the stream, as for the one request it is; every piece's time and failure
+    /// count toward it.
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        self.meters.read.calls.fetch_add(1, Ordering::Relaxed);
+        Box::new(MeteredStream {
+            inner: self.store.read_stream_dyn(key, offset),
+            meter: &self.meters.read,
+            clock: &*self.clock,
+        })
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
@@ -479,42 +523,20 @@ impl ObjectStore for Metered {
         self.store.batch_width_dyn(kind)
     }
 
-    /// Each read of the batch counts as one call, timed as the whole batch:
-    /// the reads ran side by side, so each took about that long.
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        let began = self.clock.now();
-        let results = self.store.read_many_boxed(reads).await;
-        let ended = self.clock.now();
-        for result in &results {
-            self.meters.read.note(result, began, ended);
-        }
-        results
-    }
-
     /// Each listing of the batch counts as one call, timed as the whole batch.
     async fn list_many(
         &self,
         pages: &[ListAt],
         limit: PageLimit,
     ) -> Vec<Result<Listing, StoreError>> {
-        let began = self.clock.now();
-        let results = self.store.list_many_boxed(pages, limit).await;
-        let ended = self.clock.now();
-        for result in &results {
-            self.meters.list.note(result, began, ended);
-        }
-        results
+        let call = self.store.list_many_boxed(pages, limit);
+        metered_many(&*self.clock, &self.meters.list, call).await
     }
 
     /// Each created-at time of the batch counts as one call, timed as the whole batch.
     async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
-        let began = self.clock.now();
-        let results = self.store.created_at_many_boxed(files).await;
-        let ended = self.clock.now();
-        for result in &results {
-            self.meters.created_at.note(result, began, ended);
-        }
-        results
+        let call = self.store.created_at_many_boxed(files);
+        metered_many(&*self.clock, &self.meters.created_at, call).await
     }
 }
 
@@ -616,7 +638,7 @@ mod tests {
         assert_eq!(mem.scratch(), 0);
     }
 
-    /// An upload that notes which way it was written and committed.
+    /// An upload that notes which way it was written and what it was asked.
     struct Noting {
         inner: <MemStore as ObjectStore>::Upload,
         calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
@@ -648,9 +670,12 @@ mod tests {
             self.inner.commit().await
         }
 
-        async fn commit_from(self, _again: &dyn Reread) -> Result<FileInfo, StoreError> {
-            self.note("commit_from");
-            self.inner.commit().await
+        async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+            self.note(match rest {
+                Rest::More => "flight, more to come",
+                Rest::None => "flight, nothing more",
+            });
+            Ok(Flight::Full)
         }
 
         async fn abort(self) -> Result<(), StoreError> {
@@ -662,20 +687,22 @@ mod tests {
     struct Unread;
 
     impl Reread for Unread {
-        fn read<'a>(
-            &'a self,
-            _offset: u64,
-            _was: &'a lsr_core::ByteTally,
-        ) -> lsr_core::BoxFuture<'a, Result<Vec<u8>, StoreError>> {
-            Box::pin(async { Ok(Vec::new()) })
+        fn open(&self) -> lsr_core::BoxFuture<'_, Result<Box<dyn lsr_core::Again>, StoreError>> {
+            Box::pin(async {
+                Err(StoreError::Refused {
+                    op: lsr_core::StoreOp::Read,
+                    status: 0,
+                })
+            })
         }
     }
 
     /// The meters sit between the engine and the S3 store in the sidecar. A layer that took
     /// the defaults would turn every write from a staged file into a plain one, and the store
-    /// would hold its parts again with nothing failing.
+    /// would hold its parts again with nothing failing; and it would answer the engine that
+    /// no part is in flight when the store says every lane is taken.
     #[test]
-    fn the_meters_hand_the_source_of_a_write_and_a_commit_on() {
+    fn the_meters_hand_the_source_of_a_write_and_the_stores_answers_on() {
         let mem = MemStore::new();
         let meters = Arc::new(Meters::default());
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -697,11 +724,19 @@ mod tests {
             };
             upload.write_from(b"abc", &Unread).await.unwrap();
             upload.write(b"de").await.unwrap();
-            upload.commit_from(&Unread).await.unwrap();
+            assert_eq!(upload.flight(Rest::More).await, Ok(Flight::Full));
+            assert_eq!(upload.flight(Rest::None).await, Ok(Flight::Full));
+            upload.commit().await.unwrap();
         });
         assert_eq!(
             *calls.lock().unwrap(),
-            ["write_from", "write", "commit_from"]
+            [
+                "write_from",
+                "write",
+                "flight, more to come",
+                "flight, nothing more",
+                "commit"
+            ]
         );
         let counted = meters.read();
         assert_eq!(counted.bytes_uploaded, 5);

@@ -1,37 +1,31 @@
 //! Requests as data: what to send, already signed, with no I/O.
 //!
-//! Every request is presigned by rusty-s3 (query-string signature, payload
-//! `UNSIGNED-PAYLOAD`; Go signs the payload, rc.go:132-139, so a body altered
-//! in flight is caught only by the Content-MD5 each write carries) with a
-//! 300 s expiry from the `now` the caller read off its clock. Every header
-//! sent is one inserted through the signer, so every header is signed; the
-//! tests check that for every builder. No `x-amz-checksum-*` header and no
-//! aws-chunked encoding is ever sent (Go removes the trailer: rc.go:1039-1041).
-//!
-//! A write (a PUT or one part of a multipart upload) is a [`WriteRequest`]: the
-//! request plus the MD5 its `Content-MD5` header promises. The store's `ETag`
-//! is checked against that digest, and a write request cannot exist without
-//! one, so "no digest was sent" cannot pass as "the `ETag` is not an MD5".
+//! Every request is signed in its `Authorization` header (`sigv4.rs`) at the `now` the
+//! caller read off its clock, with the SHA-256 of its body in `x-amz-content-sha256` and in
+//! the signature, as Go's SDK signs by default (rc.go:132-139). The store checks the body
+//! against that hash, so a body altered in flight is refused (`XAmzContentSHA256Mismatch`);
+//! a request with no body signs the empty body's hash. Every header sent but
+//! `authorization` is signed; the tests check that for every builder. No
+//! `x-amz-checksum-*` header and no aws-chunked encoding is ever sent (Go removes the
+//! trailer: rc.go:1039-1041), and `Content-MD5` only on a DeleteObjects, where S3 requires
+//! one and Go sends it.
 //!
 //! Nothing here prints a URL, a header value or a body: [`HttpRequest`]'s
-//! `Debug` is the method and the path, because the query holds the signature
+//! `Debug` is the method and the path, because the headers hold the signature
 //! and, for temporary credentials, the session token.
 
 use std::fmt;
-use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use lsr_core::{FileKey, Level, PageLimit, PartNumber, ReadLen};
 use lsr_ltx::{Timestamp, TxidRange};
-use md5::{Digest as _, Md5};
 use rusty_s3::actions::ObjectIdentifier;
-use rusty_s3::{Bucket, Credentials, S3Action};
+use rusty_s3::{Bucket, Credentials};
 use thiserror::Error;
 use url::Url;
 
 use crate::config::{ConfigError, Prefix, Provider, S3Config};
 use crate::credentials::S3Credentials;
+use crate::sigv4::{Key, PayloadHash, authorization, canonical_query};
 
 #[cfg(feature = "testing")]
 mod raw;
@@ -40,9 +34,6 @@ mod tamper;
 
 #[cfg(feature = "testing")]
 pub use raw::{OpenUpload, abandon_upload, abort_upload, open_uploads};
-
-/// How long a presigned URL stays valid.
-const EXPIRES_IN: Duration = Duration::from_secs(300);
 
 /// Go's `MaxKeys`: the most one DeleteObjects may name.
 pub(crate) const MAX_DELETE_KEYS: usize = 1000;
@@ -53,7 +44,7 @@ const _: () = assert!(MAX_DELETE_KEYS <= 1000);
 const _: () = assert!(MAX_DELETE_KEYS >= lsr_core::MAX_DELETE);
 
 /// The object metadata key Go stores a file's timestamp under.
-const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
+pub(crate) const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
 
 const USER_AGENT: &str = concat!("litestream-rs/", env!("CARGO_PKG_VERSION"));
 
@@ -179,52 +170,6 @@ impl fmt::Debug for HttpRequest {
     }
 }
 
-/// A write: the request and the MD5 of its body that its `Content-MD5` header
-/// carries. Only the builders of writes make one, and a plain request has no
-/// digest to offer in its place:
-///
-/// ```compile_fail
-/// # use lsr_store_s3::HttpRequest;
-/// fn sent(request: &HttpRequest) -> Option<[u8; 16]> {
-///     request.content_md5()
-/// }
-/// ```
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct WriteRequest {
-    request: HttpRequest,
-    md5: [u8; 16],
-}
-
-impl WriteRequest {
-    /// The MD5 of the body the request promises. Read it before the request
-    /// is sent: it is what the store's `ETag` is checked against.
-    #[must_use]
-    pub const fn md5(&self) -> [u8; 16] {
-        self.md5
-    }
-
-    /// The request, to send.
-    #[must_use]
-    pub fn into_request(self) -> HttpRequest {
-        self.request
-    }
-}
-
-/// A write is a request with a digest: everything a request shows, it shows.
-impl std::ops::Deref for WriteRequest {
-    type Target = HttpRequest;
-
-    fn deref(&self) -> &HttpRequest {
-        &self.request
-    }
-}
-
-impl From<WriteRequest> for HttpRequest {
-    fn from(write: WriteRequest) -> Self {
-        write.request
-    }
-}
-
 /// The id a store gave a multipart upload.
 #[derive(Clone, PartialEq, Eq)]
 pub struct UploadId(String);
@@ -293,10 +238,6 @@ pub(crate) fn range_header(offset: u64, len: ReadLen) -> String {
     format!("bytes={offset}-{end}")
 }
 
-fn md5_of(body: &[u8]) -> [u8; 16] {
-    Md5::digest(body).into()
-}
-
 type Headers = Vec<(&'static str, String)>;
 
 /// A condition a write asks the bucket to check before it publishes.
@@ -319,13 +260,13 @@ impl Precondition {
 }
 
 impl Method {
-    const fn to_signer(self) -> rusty_s3::Method {
+    const fn as_str(self) -> &'static str {
         match self {
-            Self::Get => rusty_s3::Method::Get,
-            Self::Head => rusty_s3::Method::Head,
-            Self::Put => rusty_s3::Method::Put,
-            Self::Post => rusty_s3::Method::Post,
-            Self::Delete => rusty_s3::Method::Delete,
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+            Self::Put => "PUT",
+            Self::Post => "POST",
+            Self::Delete => "DELETE",
         }
     }
 }
@@ -385,114 +326,57 @@ impl RequestBuilder {
         headers
     }
 
-    /// Signs `action` with the base headers and `extra`, returning the URL
-    /// and the headers that must accompany it.
-    fn sign<'a, A: S3Action<'a>>(
-        &self,
-        action: &mut A,
-        now: Timestamp,
-        extra: Headers,
-    ) -> Result<(Url, Headers), RequestError> {
-        let at = jiff::Timestamp::from_millisecond(now.unix_millis())
-            .map_err(|_range| RequestError::ClockOutOfRange)?;
-        let mut headers = self.base_headers();
-        headers.extend(extra);
-        for (name, value) in &headers {
-            action.headers_mut().insert(*name, value.clone());
-        }
-        Ok((action.sign_with_time(EXPIRES_IN, &at), headers))
-    }
-
-    fn finish(method: Method, (url, headers): (Url, Headers), body: Vec<u8>) -> HttpRequest {
-        HttpRequest {
-            method,
-            url,
-            headers,
-            body,
-        }
-    }
-
-    /// A PUT of `body` with `Content-Length` and `Content-MD5` added to `extra`.
-    fn write<'a, A: S3Action<'a>>(
-        &self,
-        action: &mut A,
-        now: Timestamp,
-        body: Vec<u8>,
-        extra: Headers,
-    ) -> Result<WriteRequest, RequestError> {
-        let md5 = md5_of(&body);
-        let len = u64::try_from(body.len()).unwrap_or(u64::MAX);
-        self.write_of(action, now, (len, md5), body, extra)
-    }
-
-    /// A PUT that declares a body of `len` bytes with the digest `md5`: `body` is that body,
-    /// or empty when it is read while the request is sent
-    /// ([`StreamedRequest`](crate::StreamedRequest)).
-    fn write_of<'a, A: S3Action<'a>>(
-        &self,
-        action: &mut A,
-        now: Timestamp,
-        (len, md5): (u64, [u8; 16]),
-        body: Vec<u8>,
-        mut extra: Headers,
-    ) -> Result<WriteRequest, RequestError> {
-        extra.splice(
-            0..0,
-            [
-                ("content-length", len.to_string()),
-                ("content-md5", STANDARD.encode(md5)),
-            ],
-        );
-        let signed = self.sign(action, now, extra)?;
-        Ok(WriteRequest {
-            request: Self::finish(Method::Put, signed, body),
-            md5,
-        })
-    }
-
     fn object(&self, key: &FileKey) -> String {
         object_key(&self.prefix, key)
     }
 
-    /// Signs a request rusty-s3 has no action for: any method and query, `headers` after the
-    /// store's own, each one signed. `object` is a full key; `None` addresses the bucket.
-    pub(crate) fn sign_raw(
+    /// Signs a request: `method` on `object` (a full key; `None` addresses the bucket) with
+    /// `query`, the store's own headers and `headers`, and a body whose SHA-256 is `payload`
+    /// (`body` itself, or empty when it is read while the request is sent,
+    /// [`StreamedRequest`](crate::StreamedRequest)). Every header sent but `authorization` is
+    /// signed, `host` too, which the client sends from the URL.
+    pub(crate) fn sign(
         &self,
         now: Timestamp,
-        method: Method,
-        object: Option<&str>,
+        (method, object): (Method, Option<&str>),
         query: &[(&str, &str)],
         headers: Headers,
-        body: Vec<u8>,
+        (payload, body): (PayloadHash, Vec<u8>),
     ) -> Result<HttpRequest, RequestError> {
         let at = jiff::Timestamp::from_millisecond(now.unix_millis())
             .map_err(|_range| RequestError::ClockOutOfRange)?;
-        let base = match object {
+        let amz_date = at.strftime("%Y%m%dT%H%M%SZ").to_string();
+        let mut url = match object {
             Some(key) => self.bucket.object_url(key),
             None => self.bucket.base_url().clone(),
         };
+        let query = canonical_query(query);
+        url.set_query(Some(query.as_str()).filter(|query| !query.is_empty()));
         let mut all = self.base_headers();
         all.extend(headers);
-        // The signer writes the signed headers in the order given and a server rebuilds them
-        // sorted by name (AWS does; the store's own path sorts through the action's map), so an
-        // unsorted list signs a request AWS refuses with SignatureDoesNotMatch.
+        all.push(("x-amz-content-sha256", payload.to_hex()));
+        all.push(("x-amz-date", amz_date.clone()));
+        if let Some(token) = self.credentials.token().filter(|token| !token.is_empty()) {
+            all.push(("x-amz-security-token", token.to_owned()));
+        }
         all.sort_by_key(|(name, _)| *name);
-        // The signer merges the query with its own sorted `X-Amz-*` pairs and assumes both
-        // are sorted; an unsorted one signs a canonical request the server does not rebuild.
-        let mut query = query.to_vec();
-        query.sort_unstable();
-        let url = rusty_s3::signing::sign(
-            &at,
-            method.to_signer(),
-            base,
-            self.credentials.key(),
-            self.credentials.secret(),
-            self.credentials.token(),
-            self.bucket.region(),
-            EXPIRES_IN.as_secs(),
-            query.iter().copied(),
-            all.iter().map(|(name, value)| (*name, value.as_str())),
-        );
+        let host = match url.port() {
+            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+            None => url.host_str().unwrap_or_default().to_owned(),
+        };
+        let mut signed: Vec<(&str, &str)> = all
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        signed.push(("host", host.as_str()));
+        signed.sort_by_key(|(name, _)| *name);
+        let key = Key {
+            id: self.credentials.key(),
+            secret: self.credentials.secret(),
+            region: self.bucket.region(),
+        };
+        let authorization = authorization(&key, &amz_date, method.as_str(), &url, &signed, payload);
+        all.push(("authorization", authorization));
         Ok(HttpRequest {
             method,
             url,
@@ -501,10 +385,63 @@ impl RequestBuilder {
         })
     }
 
+    /// A PUT of `body` to `object`: [`Self::write_of`] with the body's own length and hash.
+    #[cfg(any(test, feature = "testing"))]
+    fn write(
+        &self,
+        now: Timestamp,
+        (object, query): (&str, &[(&str, &str)]),
+        body: Vec<u8>,
+        extra: Headers,
+    ) -> Result<HttpRequest, RequestError> {
+        let sized = (
+            u64::try_from(body.len()).unwrap_or(u64::MAX),
+            PayloadHash::of(&body),
+        );
+        self.write_of(now, (object, query), sized, body, extra)
+    }
+
+    /// A PUT that declares a body of `len` bytes whose SHA-256 is `payload`: `body` is that
+    /// body, or empty when it is read while the request is sent.
+    fn write_of(
+        &self,
+        now: Timestamp,
+        (object, query): (&str, &[(&str, &str)]),
+        (len, payload): (u64, PayloadHash),
+        body: Vec<u8>,
+        mut extra: Headers,
+    ) -> Result<HttpRequest, RequestError> {
+        extra.push(("content-length", len.to_string()));
+        self.sign(
+            now,
+            (Method::Put, Some(object)),
+            query,
+            extra,
+            (payload, body),
+        )
+    }
+
+    /// A request with no body.
+    fn bare(
+        &self,
+        now: Timestamp,
+        target: (Method, Option<&str>),
+        query: &[(&str, &str)],
+        headers: Headers,
+    ) -> Result<HttpRequest, RequestError> {
+        self.sign(
+            now,
+            target,
+            query,
+            headers,
+            (PayloadHash::EMPTY, Vec::new()),
+        )
+    }
+
     /// ListMultipartUploads under this store's prefix (`<prefix>/`), after `markers`
-    /// (`key-marker`, `upload-id-marker`) when given. rusty-s3 has no action for it. MinIO
-    /// answers a prefix that is not a whole object key with no uploads, so it is asked for
-    /// the bucket's uploads and the caller keeps its own.
+    /// (`key-marker`, `upload-id-marker`) when given. MinIO answers a prefix that is not a
+    /// whole object key with no uploads, so it is asked for the bucket's uploads and the
+    /// caller keeps its own.
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
@@ -522,7 +459,31 @@ impl RequestBuilder {
             query.push(("key-marker", key));
             query.push(("upload-id-marker", id));
         }
-        self.sign_raw(now, Method::Get, None, &query, Vec::new(), Vec::new())
+        self.bare(now, (Method::Get, None), &query, Vec::new())
+    }
+
+    /// ListObjectsV2 of one level, `max_keys` entries, after `after` when given, or from
+    /// `token`, the previous page's `NextContinuationToken` (which already holds the
+    /// position, so no `start-after` goes with it). Keys come url-encoded.
+    fn list(
+        &self,
+        now: Timestamp,
+        level: Level,
+        (after, token): (Option<TxidRange>, Option<&str>),
+        max_keys: PageLimit,
+    ) -> Result<HttpRequest, RequestError> {
+        let prefix = level_prefix(&self.prefix, level);
+        let max = max_keys.get().to_string();
+        let after = after.map(|cursor| start_after(&self.prefix, level, cursor));
+        let mut query = vec![
+            ("list-type", "2"),
+            ("encoding-type", "url"),
+            ("prefix", prefix.as_str()),
+            ("max-keys", max.as_str()),
+        ];
+        query.extend(after.as_deref().map(|after| ("start-after", after)));
+        query.extend(token.map(|token| ("continuation-token", token)));
+        self.bare(now, (Method::Get, None), &query, Vec::new())
     }
 
     /// ListObjectsV2 of one level, `max_keys` entries, after `after` when given.
@@ -538,19 +499,11 @@ impl RequestBuilder {
         after: Option<TxidRange>,
         max_keys: PageLimit,
     ) -> Result<HttpRequest, RequestError> {
-        let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
-        action.with_prefix(level_prefix(&self.prefix, level));
-        action.with_max_keys(max_keys.get());
-        if let Some(cursor) = after {
-            action.with_start_after(start_after(&self.prefix, level, cursor));
-        }
-        let signed = self.sign(&mut action, now, Vec::new())?;
-        Ok(Self::finish(Method::Get, signed, Vec::new()))
+        self.list(now, level, (after, None), max_keys)
     }
 
     /// The next page of a listing: `token` is the previous page's
-    /// `NextContinuationToken`. It carries no `start-after`: the token already
-    /// holds the position.
+    /// `NextContinuationToken`.
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
@@ -561,12 +514,7 @@ impl RequestBuilder {
         token: &str,
         max_keys: PageLimit,
     ) -> Result<HttpRequest, RequestError> {
-        let mut action = self.bucket.list_objects_v2(Some(&self.credentials));
-        action.with_prefix(level_prefix(&self.prefix, level));
-        action.with_max_keys(max_keys.get());
-        action.with_continuation_token(token);
-        let signed = self.sign(&mut action, now, Vec::new())?;
-        Ok(Self::finish(Method::Get, signed, Vec::new()))
+        self.list(now, level, (None, Some(token)), max_keys)
     }
 
     /// HEAD of one object: its size and stored created-at time.
@@ -575,9 +523,28 @@ impl RequestBuilder {
     /// [`RequestError::ClockOutOfRange`].
     pub fn head(&self, now: Timestamp, key: &FileKey) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
-        let mut action = self.bucket.head_object(Some(&self.credentials), &object);
-        let signed = self.sign(&mut action, now, Vec::new())?;
-        Ok(Self::finish(Method::Head, signed, Vec::new()))
+        self.bare(now, (Method::Head, Some(&object)), &[], Vec::new())
+    }
+
+    /// A GET of the object from `offset` to its end: no `Range` header from the first byte, as
+    /// Go's whole-object GET sends, else `bytes=offset-`.
+    ///
+    /// # Errors
+    /// [`RequestError::ClockOutOfRange`].
+    pub fn get_from(
+        &self,
+        now: Timestamp,
+        key: &FileKey,
+        offset: u64,
+    ) -> Result<HttpRequest, RequestError> {
+        let object = self.object(key);
+        let range = (offset > 0).then(|| ("range", format!("bytes={offset}-")));
+        self.bare(
+            now,
+            (Method::Get, Some(&object)),
+            &[],
+            range.into_iter().collect(),
+        )
     }
 
     /// A ranged GET of `len` bytes from `offset`.
@@ -592,25 +559,24 @@ impl RequestBuilder {
         len: ReadLen,
     ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
-        let mut action = self.bucket.get_object(Some(&self.credentials), &object);
         let extra = vec![("range", range_header(offset, len))];
-        let signed = self.sign(&mut action, now, extra)?;
-        Ok(Self::finish(Method::Get, signed, Vec::new()))
+        self.bare(now, (Method::Get, Some(&object)), &[], extra)
     }
 
-    /// A single PUT with `Content-Length` (also when 0), `Content-MD5` and the
+    /// A single PUT with `Content-Length` (also when 0), the body's SHA-256 and the
     /// created-at time. The created-at time is millisecond RFC 3339 with `Z`: the same instant Go's
     /// RFC3339Nano writes (rc.go:892-898), and Go's parser reads it.
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn put_object(
         &self,
         now: Timestamp,
         key: &FileKey,
         body: Vec<u8>,
         created_at: Timestamp,
-    ) -> Result<WriteRequest, RequestError> {
+    ) -> Result<HttpRequest, RequestError> {
         self.put_object_if(now, key, body, created_at, Precondition::None)
     }
 
@@ -619,6 +585,7 @@ impl RequestBuilder {
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn put_object_if(
         &self,
         now: Timestamp,
@@ -626,33 +593,31 @@ impl RequestBuilder {
         body: Vec<u8>,
         created_at: Timestamp,
         precondition: Precondition,
-    ) -> Result<WriteRequest, RequestError> {
+    ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
-        let mut action = self.bucket.put_object(Some(&self.credentials), &object);
         let mut extra = vec![(CREATED_AT_HEADER, created_at.to_string())];
         extra.extend(precondition.header());
-        self.write(&mut action, now, body, extra)
+        self.write(now, (&object, &[]), body, extra)
     }
 
     /// [`Self::put_object_if`] for a body read while the request is sent: `len` bytes whose
-    /// MD5 is `md5`, taken when the bytes were first handed over. The request has no body
-    /// of its own ([`StreamedRequest`](crate::StreamedRequest)).
+    /// SHA-256 is `payload`, taken over a read checked against the first one. The request
+    /// has no body of its own ([`StreamedRequest`](crate::StreamedRequest)).
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
-    pub fn put_object_streamed_if(
+    pub fn put_object_of(
         &self,
         now: Timestamp,
         key: &FileKey,
-        (len, md5): (u64, [u8; 16]),
+        sized: (u64, PayloadHash),
         created_at: Timestamp,
         precondition: Precondition,
-    ) -> Result<WriteRequest, RequestError> {
+    ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
-        let mut action = self.bucket.put_object(Some(&self.credentials), &object);
         let mut extra = vec![(CREATED_AT_HEADER, created_at.to_string())];
         extra.extend(precondition.header());
-        self.write_of(&mut action, now, (len, md5), Vec::new(), extra)
+        self.write_of(now, (&object, &[]), sized, Vec::new(), extra)
     }
 
     /// Starts a multipart upload; the created-at time is set here, on the object.
@@ -666,21 +631,20 @@ impl RequestBuilder {
         created_at: Timestamp,
     ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
-        let mut action = self
-            .bucket
-            .create_multipart_upload(Some(&self.credentials), &object);
-        let signed = self.sign(
-            &mut action,
+        let extra = vec![(CREATED_AT_HEADER, created_at.to_string())];
+        self.bare(
             now,
-            vec![(CREATED_AT_HEADER, created_at.to_string())],
-        )?;
-        Ok(Self::finish(Method::Post, signed, Vec::new()))
+            (Method::Post, Some(&object)),
+            &[("uploads", "1")],
+            extra,
+        )
     }
 
-    /// One part, with `Content-Length` and `Content-MD5`.
+    /// One part, with `Content-Length` and the body's SHA-256.
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn upload_part(
         &self,
         now: Timestamp,
@@ -688,38 +652,36 @@ impl RequestBuilder {
         upload: &UploadId,
         part: PartNumber,
         body: Vec<u8>,
-    ) -> Result<WriteRequest, RequestError> {
+    ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
-        let mut action = self.bucket.upload_part(
-            Some(&self.credentials),
-            &object,
-            part.get(),
-            upload.as_str(),
-        );
-        self.write(&mut action, now, body, Vec::new())
+        let number = part.get().to_string();
+        let query = [
+            ("partNumber", number.as_str()),
+            ("uploadId", upload.as_str()),
+        ];
+        self.write(now, (&object, &query), body, Vec::new())
     }
 
     /// [`Self::upload_part`] for a body read while the request is sent: `len` bytes whose
-    /// MD5 is `md5`, taken when the bytes were first handed over.
+    /// SHA-256 is `payload`, taken over a read checked against the first one.
     ///
     /// # Errors
     /// [`RequestError::ClockOutOfRange`].
-    pub fn upload_part_streamed(
+    pub fn upload_part_of(
         &self,
         now: Timestamp,
         key: &FileKey,
         upload: &UploadId,
         part: PartNumber,
-        (len, md5): (u64, [u8; 16]),
-    ) -> Result<WriteRequest, RequestError> {
+        sized: (u64, PayloadHash),
+    ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
-        let mut action = self.bucket.upload_part(
-            Some(&self.credentials),
-            &object,
-            part.get(),
-            upload.as_str(),
-        );
-        self.write_of(&mut action, now, (len, md5), Vec::new(), Vec::new())
+        let number = part.get().to_string();
+        let query = [
+            ("partNumber", number.as_str()),
+            ("uploadId", upload.as_str()),
+        ];
+        self.write_of(now, (&object, &query), sized, Vec::new(), Vec::new())
     }
 
     /// Completes an upload from its parts' ETags, in part order (the n-th is part n).
@@ -727,6 +689,7 @@ impl RequestBuilder {
     /// # Errors
     /// [`RequestError::BadBatch`] for no parts or more than 10000;
     /// [`RequestError::ClockOutOfRange`].
+    #[cfg(any(test, feature = "testing"))]
     pub fn complete_multipart(
         &self,
         now: Timestamp,
@@ -760,23 +723,25 @@ impl RequestBuilder {
             });
         }
         let object = self.object(key);
-        let mut action = self.bucket.complete_multipart_upload(
-            Some(&self.credentials),
-            &object,
-            upload.as_str(),
-            etags.iter().map(String::as_str),
-        );
-        let signed = {
-            let size = action.clone().body().len();
-            let mut extra = vec![("content-length", size.to_string())];
-            extra.extend(precondition.header());
-            self.sign(&mut action, now, extra)?
-        };
-        Ok(Self::finish(
-            Method::Post,
-            signed,
-            action.body().into_bytes(),
-        ))
+        let body = self
+            .bucket
+            .complete_multipart_upload(
+                None,
+                &object,
+                upload.as_str(),
+                etags.iter().map(String::as_str),
+            )
+            .body()
+            .into_bytes();
+        let mut extra = vec![("content-length", body.len().to_string())];
+        extra.extend(precondition.header());
+        self.sign(
+            now,
+            (Method::Post, Some(&object)),
+            &[("uploadId", upload.as_str())],
+            extra,
+            (PayloadHash::of(&body), body),
+        )
     }
 
     /// Abandons an upload.
@@ -790,15 +755,13 @@ impl RequestBuilder {
         upload: &UploadId,
     ) -> Result<HttpRequest, RequestError> {
         let object = self.object(key);
-        let mut action =
-            self.bucket
-                .abort_multipart_upload(Some(&self.credentials), &object, upload.as_str());
-        let signed = self.sign(&mut action, now, Vec::new())?;
-        Ok(Self::finish(Method::Delete, signed, Vec::new()))
+        let query = [("uploadId", upload.as_str())];
+        self.bare(now, (Method::Delete, Some(&object)), &query, Vec::new())
     }
 
-    /// Deletes up to `MAX_DELETE_KEYS` objects in quiet mode, `Content-MD5`
-    /// over the XML body (rc.go:921-954, :1066-1105).
+    /// Deletes up to `MAX_DELETE_KEYS` objects in quiet mode. S3 requires a digest on this
+    /// request whatever the payload signing, and Go sends `Content-MD5` over the XML body
+    /// (rc.go:921-954, :1066-1105), so this does too.
     ///
     /// # Errors
     /// [`RequestError::BadBatch`] for none or more than 1000;
@@ -818,17 +781,21 @@ impl RequestBuilder {
             .iter()
             .map(|key| ObjectIdentifier::new(self.object(key)))
             .collect();
-        let mut action = self
-            .bucket
-            .delete_objects(Some(&self.credentials), objects.iter());
+        let mut action = self.bucket.delete_objects(None, objects.iter());
         action.set_quiet(true);
-        let (body, content_md5) = action.clone().body_with_md5();
+        let (body, content_md5) = action.body_with_md5();
         let extra = vec![
             ("content-length", body.len().to_string()),
             ("content-md5", content_md5),
         ];
-        let signed = self.sign(&mut action, now, extra)?;
-        Ok(Self::finish(Method::Post, signed, body.into_bytes()))
+        let body = body.into_bytes();
+        self.sign(
+            now,
+            (Method::Post, None),
+            &[("delete", "1")],
+            extra,
+            (PayloadHash::of(&body), body),
+        )
     }
 }
 
@@ -886,9 +853,7 @@ mod tests {
             b.head(now(), &k).unwrap(),
             b.get_range(now(), &k, 10, ReadLen::new(100).unwrap())
                 .unwrap(),
-            b.put_object(now(), &k, b"hello".to_vec(), now())
-                .unwrap()
-                .into(),
+            b.put_object(now(), &k, b"hello".to_vec(), now()).unwrap(),
             b.create_multipart(now(), &k, now()).unwrap(),
             b.upload_part(
                 now(),
@@ -897,8 +862,7 @@ mod tests {
                 PartNumber::new(1).unwrap(),
                 vec![1, 2, 3],
             )
-            .unwrap()
-            .into(),
+            .unwrap(),
             b.complete_multipart(now(), &k, &upload(), &etags).unwrap(),
             b.abort_multipart(now(), &k, &upload()).unwrap(),
             b.delete_objects(now(), &[k]).unwrap(),
@@ -1021,13 +985,10 @@ mod tests {
             let objects = [
                 b.head(now(), &k).unwrap(),
                 b.get_range(now(), &k, 0, ReadLen::new(1).unwrap()).unwrap(),
-                b.put_object(now(), &k, b"x".to_vec(), now())
-                    .unwrap()
-                    .into(),
+                b.put_object(now(), &k, b"x".to_vec(), now()).unwrap(),
                 b.create_multipart(now(), &k, now()).unwrap(),
                 b.upload_part(now(), &k, &upload(), PartNumber::new(1).unwrap(), vec![1])
-                    .unwrap()
-                    .into(),
+                    .unwrap(),
                 b.complete_multipart(now(), &k, &upload(), &etags).unwrap(),
                 b.abort_multipart(now(), &k, &upload()).unwrap(),
             ];
@@ -1044,29 +1005,38 @@ mod tests {
         }
     }
 
+    /// The `Authorization` a request would carry if it were signed again from what it sends:
+    /// its URL, every header but `authorization`, and `host` from the URL.
+    fn resign(req: &HttpRequest, url: &Url, headers: &[(&str, &str)]) -> String {
+        let host = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+        let mut all: Vec<(&str, &str)> = headers.to_vec();
+        all.push(("host", host.as_str()));
+        all.sort_by_key(|(name, _)| *name);
+        let key = Key {
+            id: "AKIAIOSFODNN7EXAMPLE",
+            secret: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            region: "us-east-1",
+        };
+        let payload = PayloadHash::of(req.body());
+        let date = req.header("x-amz-date").unwrap();
+        authorization(&key, date, req.method().as_str(), url, &all, payload)
+    }
+
+    fn sent_headers(req: &HttpRequest) -> Vec<(&str, &str)> {
+        req.headers()
+            .iter()
+            .filter(|(name, _)| *name != "authorization")
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect()
+    }
+
     /// SigV4 signs the path as sent, and S3 does not normalise it, so the empty segment must be
     /// in the canonical URI. The signature of the URL with the slash collapsed is another one.
     #[test]
     fn the_signature_covers_the_empty_segment() {
         let b = bare(UrlStyle::Path);
-        let sign = |url: &Url, headers: &Headers| {
-            let at = jiff::Timestamp::from_millisecond(now().unix_millis()).unwrap();
-            let signed = rusty_s3::signing::sign(
-                &at,
-                rusty_s3::Method::Get,
-                url.clone(),
-                "AKIAIOSFODNN7EXAMPLE",
-                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-                None,
-                "us-east-1",
-                EXPIRES_IN.as_secs(),
-                std::iter::empty(),
-                headers.iter().map(|(name, value)| (*name, value.as_str())),
-            );
-            query_value(&signed, "X-Amz-Signature")
-        };
         let sent = b
-            .sign_raw(
+            .raw(
                 now(),
                 Method::Get,
                 Some("/0000/f.ltx"),
@@ -1076,67 +1046,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sent.url().path(), "/examplebucket//0000/f.ltx");
-        let headers = b.base_headers();
-        let signature = query_value(sent.url(), "X-Amz-Signature");
-        assert_eq!(sign(sent.url(), &headers), signature, "signed as sent");
+        let headers = sent_headers(&sent);
+        let auth = sent.header("authorization").unwrap();
+        assert_eq!(resign(&sent, sent.url(), &headers), auth, "signed as sent");
         let mut collapsed = sent.url().clone();
         collapsed.set_path("/examplebucket/0000/f.ltx");
-        assert_ne!(sign(&collapsed, &headers), signature, "the path is signed");
+        assert_ne!(
+            resign(&sent, &collapsed, &headers),
+            auth,
+            "the path is signed"
+        );
     }
 
-    /// A server rebuilds the signed headers sorted by name and the signer writes them as given,
-    /// so the raw signer sorts first: an unsorted list made AWS answer SignatureDoesNotMatch.
+    /// A server rebuilds the signed headers sorted by name, so the signer sorts them first: an
+    /// unsorted list made AWS answer SignatureDoesNotMatch.
     #[test]
     fn a_raw_request_signs_its_headers_in_name_order() {
         let b = bare(UrlStyle::Path);
-        let sign = |url: &Url, headers: &[(&'static str, String)]| {
-            let at = jiff::Timestamp::from_millisecond(now().unix_millis()).unwrap();
-            let signed = rusty_s3::signing::sign(
-                &at,
-                rusty_s3::Method::Put,
-                url.clone(),
-                "AKIAIOSFODNN7EXAMPLE",
-                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-                None,
-                "us-east-1",
-                EXPIRES_IN.as_secs(),
-                std::iter::empty(),
-                headers.iter().map(|(name, value)| (*name, value.as_str())),
-            );
-            query_value(&signed, "X-Amz-Signature")
-        };
         let given = vec![
             ("x-amz-meta-a", "1".to_owned()),
             ("if-none-match", "*".to_owned()),
         ];
         let sent = b
-            .sign_raw(
-                now(),
-                Method::Put,
-                Some("k"),
-                &[],
-                given.clone(),
-                Vec::new(),
-            )
+            .raw(now(), Method::Put, Some("k"), &[], given, b"x".to_vec())
             .unwrap();
-        let names: Vec<&str> = sent.headers().iter().map(|(name, _)| *name).collect();
+        let names: Vec<&str> = sent_headers(&sent).iter().map(|(name, _)| *name).collect();
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted, "sent in name order");
-        let mut all = b.base_headers();
-        all.extend(given);
-        let signature = query_value(sent.url(), "X-Amz-Signature");
-        all.sort_by_key(|(name, _)| *name);
-        assert_eq!(sign(sent.url(), &all), signature, "signed in name order");
-        all.reverse();
-        assert_ne!(sign(sent.url(), &all), signature, "the order is signed");
-    }
-
-    fn query_value(url: &Url, name: &str) -> String {
-        url.query_pairs()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.into_owned())
-            .unwrap()
+        assert_eq!(
+            sent.headers().last().map(|(name, _)| *name),
+            Some("authorization")
+        );
+        let auth = sent.header("authorization").unwrap();
+        let mut signed = sent_headers(&sent);
+        assert_eq!(
+            resign(&sent, sent.url(), &signed),
+            auth,
+            "signed in name order"
+        );
+        // The same headers named in another order sign another request.
+        signed.reverse();
+        let mut url = sent.url().clone();
+        url.set_query(None);
+        let host = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+        signed.push(("host", host.as_str()));
+        let key = Key {
+            id: "AKIAIOSFODNN7EXAMPLE",
+            secret: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            region: "us-east-1",
+        };
+        let date = sent.header("x-amz-date").unwrap();
+        let reordered = authorization(&key, date, "PUT", &url, &signed, PayloadHash::of(b"x"));
+        assert_ne!(reordered, auth, "the order is signed");
     }
 
     #[test]
@@ -1161,19 +1123,71 @@ mod tests {
     }
 
     #[test]
-    fn presigned_query_has_the_fixed_clock_and_expiry() {
+    fn every_request_is_signed_in_its_header_at_the_fixed_clock() {
         for req in every_request(&minio()) {
-            assert_eq!(
-                query(&req, "X-Amz-Date").as_deref(),
-                Some("20130524T000000Z")
+            assert_eq!(req.header("x-amz-date"), Some("20130524T000000Z"));
+            let auth = req.header("authorization").unwrap();
+            assert!(
+                auth.starts_with(
+                    "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders="
+                ),
+                "{auth}"
             );
-            assert_eq!(query(&req, "X-Amz-Expires").as_deref(), Some("300"));
             assert_eq!(
-                query(&req, "X-Amz-Algorithm").as_deref(),
-                Some("AWS4-HMAC-SHA256")
+                auth.rsplit_once("Signature=").map(|(_, s)| s.len()),
+                Some(64)
             );
-            assert_eq!(query(&req, "X-Amz-Signature").map(|s| s.len()), Some(64));
+            // Nothing of the signature rides in the URL.
+            assert!(
+                req.url()
+                    .query_pairs()
+                    .all(|(name, _)| !name.starts_with("X-Amz-"))
+            );
+            assert_eq!(
+                resign(&req, req.url(), &sent_headers(&req)),
+                auth,
+                "{req:?}"
+            );
         }
+    }
+
+    /// Every request signs the SHA-256 of the body it sends; one with no body signs the empty
+    /// body's hash.
+    #[test]
+    fn every_request_signs_the_hash_of_its_own_body() {
+        for req in every_request(&minio()) {
+            let want = PayloadHash::of(req.body()).to_hex();
+            assert_eq!(
+                req.header("x-amz-content-sha256"),
+                Some(want.as_str()),
+                "{req:?}"
+            );
+            if req.body().is_empty() {
+                assert_eq!(want, PayloadHash::EMPTY.to_hex());
+            }
+        }
+    }
+
+    /// Temporary credentials put their session token in a signed header, never in the URL.
+    #[test]
+    fn a_session_token_is_a_signed_header() {
+        let config = S3Config::new(
+            crate::config::Endpoint::new("http://localhost:9000").unwrap(),
+            crate::config::BucketName::new("examplebucket").unwrap(),
+            Prefix::new("db/one").unwrap(),
+        );
+        let credentials = S3Credentials::new(
+            "AKIAIOSFODNN7EXAMPLE".to_owned(),
+            SecretString::new("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_owned()),
+        )
+        .with_session_token(SecretString::new("the-token".to_owned()));
+        let b = RequestBuilder::new(&config, &credentials).unwrap();
+        let req = b.head(now(), &key(0, 1, 1)).unwrap();
+        assert_eq!(req.header("x-amz-security-token"), Some("the-token"));
+        assert!(!req.url().as_str().contains("the-token"));
+        assert!(req.signed_headers().contains(&"x-amz-security-token"));
+        let plain = minio().head(now(), &key(0, 1, 1)).unwrap();
+        assert_eq!(plain.header("x-amz-security-token"), None);
     }
 
     #[test]
@@ -1184,23 +1198,19 @@ mod tests {
         let one = b.get_range(now(), &k, 0, len).unwrap();
         let again = b.get_range(now(), &k, 0, len).unwrap();
         let other = b.get_range(now(), &k, 1, len).unwrap();
-        assert_eq!(one.url(), again.url());
-        assert_ne!(
-            query(&one, "X-Amz-Signature"),
-            query(&other, "X-Amz-Signature")
-        );
+        assert_eq!(one, again);
+        assert_ne!(one.header("authorization"), other.header("authorization"));
     }
 
     #[test]
     fn every_header_sent_is_signed() {
         for builder in [minio(), builder("https://fly.storage.tigris.dev")] {
             for req in every_request(&builder) {
-                let signed = query(&req, "X-Amz-SignedHeaders").unwrap();
-                let signed: Vec<&str> = signed.split(';').collect();
+                let signed = req.signed_headers();
                 assert!(signed.contains(&"host"));
                 for (name, _) in req.headers() {
                     assert!(
-                        signed.contains(name),
+                        *name == "authorization" || signed.contains(name),
                         "{name} is sent but not signed ({:?})",
                         req.method()
                     );
@@ -1226,36 +1236,36 @@ mod tests {
         }
     }
 
-    /// The digest an `ETag` is checked against is the MD5 of the body that
-    /// goes out, and the `Content-MD5` header the store checks says the same.
+    /// A body read while it is sent signs the hash it was given, and says so in its header;
+    /// a buffered one signs its own. Neither carries `Content-MD5`, as Go's do not.
     #[test]
-    fn every_write_carries_the_digest_of_its_own_body() {
+    fn a_streamed_write_signs_the_hash_it_was_given() {
         let b = minio();
         let k = key(1, 1, 5);
-        for body in [Vec::new(), b"hello".to_vec(), vec![7; 70_000]] {
-            let put = b.put_object(now(), &k, body.clone(), now()).unwrap();
-            let part = b
-                .upload_part(
-                    now(),
-                    &k,
-                    &upload(),
-                    PartNumber::new(2).unwrap(),
-                    body.clone(),
-                )
-                .unwrap();
-            for write in [put, part] {
-                assert_eq!(write.md5(), md5_of(&body));
-                assert_eq!(write.body(), &body[..]);
-                let header = STANDARD.encode(write.md5());
-                assert_eq!(write.header("content-md5"), Some(header.as_str()));
-                let sent: HttpRequest = write.clone().into();
-                assert_eq!(sent, write.into_request());
-            }
+        let hash = PayloadHash::of(b"the part");
+        let part = b
+            .upload_part_of(now(), &k, &upload(), PartNumber::new(2).unwrap(), (8, hash))
+            .unwrap();
+        let put = b
+            .put_object_of(now(), &k, (8, hash), now(), Precondition::KeyIsFree)
+            .unwrap();
+        for write in [part, put] {
+            assert!(write.body().is_empty());
+            assert_eq!(write.header("content-length"), Some("8"));
+            assert_eq!(
+                write.header("x-amz-content-sha256"),
+                Some(hash.to_hex().as_str())
+            );
+            assert_eq!(write.header("content-md5"), None);
+            let mut sent = write.clone();
+            sent.set_body(b"the part".to_vec());
+            let auth = write.header("authorization").unwrap();
+            assert_eq!(resign(&sent, sent.url(), &sent_headers(&sent)), auth);
         }
     }
 
     #[test]
-    fn put_carries_length_md5_and_created_at() {
+    fn put_carries_length_hash_and_created_at() {
         let k = key(0, 1, 1);
         let created_at = Timestamp::from_unix_millis(1_795_182_585_566);
         let req = minio()
@@ -1263,14 +1273,14 @@ mod tests {
             .unwrap();
         assert_eq!(req.method(), Method::Put);
         assert_eq!(req.header("content-length"), Some("5"));
-        assert_eq!(req.header("content-md5"), Some("XUFAKrxLKna5cZ2REBfFkg=="));
+        assert_eq!(
+            req.header("x-amz-content-sha256"),
+            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
+        assert_eq!(req.header("content-md5"), None);
         assert_eq!(
             req.header(CREATED_AT_HEADER),
             Some("2026-11-20T13:49:45.566Z")
-        );
-        assert_eq!(
-            crate::response::hex(&req.md5()),
-            "5d41402abc4b2a76b9719d911017c592"
         );
         assert_eq!(req.body(), b"hello");
         let empty = minio()
@@ -1278,8 +1288,8 @@ mod tests {
             .unwrap();
         assert_eq!(empty.header("content-length"), Some("0"));
         assert_eq!(
-            empty.header("content-md5"),
-            Some("1B2M2Y8AsgTpgAmY7PhCfg==")
+            empty.header("x-amz-content-sha256"),
+            Some(PayloadHash::EMPTY.to_hex().as_str())
         );
     }
 
@@ -1317,7 +1327,7 @@ mod tests {
             .unwrap();
         assert_eq!(query(&part, "partNumber").as_deref(), Some("3"));
         assert_eq!(query(&part, "uploadId").as_deref(), Some("abc"));
-        assert!(part.header("content-md5").is_some());
+        assert_eq!(part.header("content-md5"), None);
         let etags = vec!["\"a\"".to_owned(), "\"b\"".to_owned()];
         let done = b.complete_multipart(now(), &k, &upload(), &etags).unwrap();
         let body = String::from_utf8(done.body().to_vec()).unwrap();

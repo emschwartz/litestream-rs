@@ -99,15 +99,15 @@ use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use lsr_ltx::{PageSize, Timestamp, Txid, TxidRange};
+use lsr_ltx::{PageSize, Timestamp, Txid};
 use lsr_wal::{CommittedEnd, OpenError, WalReader};
 
 use clock::EngineClock;
 pub use once::{FinalSnapshot, FinalSnapshotFailure};
 pub use once_retention::FinalRetention;
 use parts::{Course, Engine, Kept, Stop, Tail, TaskRestorePoint};
+use state::Live;
 pub use state::{Degraded, Phase, Task};
-use state::{Gate, Live};
 
 use crate::app::AppCheckpoints;
 use crate::checkpoint::{
@@ -115,7 +115,7 @@ use crate::checkpoint::{
     Staged, after_checkpoint, after_sync, checkpoint, decide, lock_busy_wait, next_wake,
 };
 use crate::counts::{Counted, WorkCounts};
-use crate::created_at::{ResolvedCreatedAt, resolve};
+use crate::created_at::{ResolvedCreatedAt, resolve_knowing};
 use crate::env::Clock;
 use crate::failstop::MaxUnreplicatedAge;
 use crate::fault::role::{Replica, Role, Staging};
@@ -140,11 +140,11 @@ use crate::recover::{
 };
 use crate::snapshot::{SnapshotFailed, read_live, write_snapshot};
 use crate::source::{CheckpointMode, Checkpointer, CommittedRead, PageSource, WalSource};
-use crate::store::{Denied, ObjectStore, PageLimit, StoreError};
+use crate::store::{Denied, ObjectStore, PageLimit, StoreError, WriteMode};
 use crate::sync::{Step, StepEnd, SyncConfig, Synced, sync_step, wal_barrier};
 use crate::takeover::TakeoverRecord;
 use crate::upload::{
-    Did, Guard, InFlight, Unsent, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
+    Did, InFlight, Unsent, UploadConfig, UploadFailed, UploadPlan, UploadState, Uploaded,
     drop_staged_from, inventory_fault, plan_upload, upload_next, upload_step,
 };
 use crate::verify::LivePages;
@@ -201,6 +201,12 @@ impl<
 pub struct ActorConfig {
     /// What a sync step may do.
     pub sync: SyncConfig,
+    /// The least time between two sync steps that only new commits ask for, so a steady
+    /// writer costs one level-0 file an interval however often the engine ticks: Go's
+    /// monitor interval (`db.go`, one `Sync` per tick of its ticker). Zero syncs on every
+    /// tick that finds the WAL moved. A step something else asks for is never held: the
+    /// rest of a sync the byte cap cut short, a snapshot, a checkpoint's proof, a drain.
+    pub sync_interval: Duration,
     /// When to checkpoint.
     pub checkpoint: CheckpointConfig,
     /// Upload limits.
@@ -366,6 +372,19 @@ pub enum Tick {
     DeadlineReached(Unfinished),
 }
 
+impl Tick {
+    /// The tick with its wake rewritten by `f`; a tick that stopped has none.
+    fn map_next(self, f: impl FnOnce(Next) -> Next) -> Self {
+        match self {
+            Self::Ran { event, next } => Self::Ran {
+                event,
+                next: f(next),
+            },
+            other @ (Self::Stopped(_) | Self::Drained { .. } | Self::DeadlineReached(_)) => other,
+        }
+    }
+}
+
 /// What a drain left when its deadline passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unfinished {
@@ -425,6 +444,19 @@ const fn mode_of(decision: Decision) -> Option<CheckpointMode> {
         Decision::Passive(_) => Some(CheckpointMode::Passive),
         Decision::Truncate => Some(CheckpointMode::Truncate),
     }
+}
+
+/// Whether the WAL file is now shorter than `was`, the length statted before its frames were
+/// read: a file that shrank under a read was truncated by a checkpoint, not damaged.
+fn wal_shrank<W: WalSource>(wal: &mut W, was: Option<WalFileLen>) -> Result<bool, Fault> {
+    let Some(was) = was else {
+        return Ok(false);
+    };
+    Ok(wal
+        .len()
+        .map_err(Fault::from_source)?
+        .map_or(0, WalFileLen::bytes)
+        < was.bytes())
 }
 
 /// A WAL reader, or `None` when there is no file or its header is torn
@@ -550,6 +582,15 @@ impl Actor {
     #[must_use]
     pub const fn booted(&self) -> bool {
         self.engine.course.booted()
+    }
+
+    /// Whether the send in flight stopped for parts its upload has in flight. A tick has
+    /// nothing to do on it until one ends, and says nothing of it in its [`Next`]: the store
+    /// wakes the waker of the tick that asked (`docs/decisions/D233.md`). A driver that does
+    /// not wait on that waker asks here, and steps again instead of waiting for the WAL.
+    #[must_use]
+    pub fn awaits_parts(&self) -> bool {
+        self.engine.in_flight.waits()
     }
 
     /// What the actor is doing.
@@ -730,8 +771,7 @@ impl Actor {
         let released = self.kept.verify_restore_point.is_some() && txid.is_none();
         self.kept.verify_restore_point = txid;
         if released {
-            self.engine.maintain.stale = true;
-            self.engine.maintain.remembered.owe_full();
+            self.engine.maintain.relist();
         }
     }
 
@@ -892,19 +932,13 @@ impl Actor {
 
     /// The tick with its wake moved to the wall clock the host sleeps on.
     fn wake_on_wall(&self, tick: Tick) -> Tick {
-        match (tick, self.kept.clock) {
-            (
-                Tick::Ran {
-                    event,
-                    next: Next::At(at),
-                },
-                Some(clock),
-            ) => Tick::Ran {
-                event,
-                next: Next::At(clock.wall_at(at)),
-            },
-            (tick, _) => tick,
-        }
+        let Some(clock) = self.kept.clock else {
+            return tick;
+        };
+        tick.map_next(|next| match next {
+            Next::At(at) => Next::At(clock.wall_at(at)),
+            Next::Now | Next::OnWalChange => next,
+        })
     }
 
     /// Routes a fault by its policy. The only place `policy` is called.
@@ -1045,8 +1079,7 @@ impl Actor {
         if self.kept.task_restore_point != TaskRestorePoint::Free && !self.kept.tasks.any_degraded()
         {
             self.kept.task_restore_point = TaskRestorePoint::Free;
-            self.engine.maintain.stale = true;
-            self.engine.maintain.remembered.owe_full();
+            self.engine.maintain.relist();
         }
     }
 
@@ -1104,6 +1137,16 @@ impl Actor {
         }
     }
 
+    fn ran_maintained(&self, event: MaintainedEvent, created_at_read: u64, now: Timestamp) -> Tick {
+        self.ran(
+            Event::Maintained {
+                event,
+                created_at_read,
+            },
+            now,
+        )
+    }
+
     /// A boot that could not finish: a fault, or a takeover it needs durable
     /// before it drops staged files.
     fn boot_step(&mut self, step: BootStep, took: Duration, now: Timestamp) -> Tick {
@@ -1157,11 +1200,17 @@ impl Actor {
                 return false;
             }
             Did::Listed { .. } => {
-                self.engine.maintain.stale = true;
-                self.engine.maintain.remembered.owe_full();
+                self.engine.maintain.relist();
             }
             Did::Put(FileInfo { key, .. }) | Did::AlreadyPut(key) => {
-                let at = listing_after_upload(now, &self.kept.cfg.maintenance);
+                // While the first snapshot is owed, the file just confirmed is what it waits
+                // for (Go's snapshot monitor starts it as soon as the database is ready): no
+                // window of any level has to open first.
+                let at = if self.engine.maintain.remembered.first_snapshot_owed() {
+                    now
+                } else {
+                    listing_after_upload(now, &self.kept.cfg.maintenance)
+                };
                 self.engine.maintain.list_by(at);
                 self.spend_takeover(key.range().max());
             }
@@ -1219,7 +1268,7 @@ impl Actor {
                 ..
             }
         );
-        let key = FileKey::new(Level::ZERO, TxidRange::single(newest?.txid()));
+        let key = FileKey::staged(newest?.txid());
         if !read_disagreed || doubted == Some(key) {
             return None;
         }
@@ -1353,7 +1402,8 @@ impl Actor {
         env: &mut Env<'_, W, P, C, L, R>,
         now: Timestamp,
     ) -> Tick {
-        if let Some(tick) = self.owed_upload(env, now).await {
+        let owed = self.owed_upload();
+        if owed && let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
         if let Some(tick) = self.wal_unit(env, now, true).await {
@@ -1367,7 +1417,8 @@ impl Actor {
                 return tick;
             }
         }
-        if let Some(tick) = self.upload_unit(env, now).await {
+        // Once a tick: an upload that waits for its parts is asked about them once.
+        if !owed && let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
         if let Some(tick) = self.prune_unit(env, now).await {
@@ -1395,13 +1446,14 @@ impl Actor {
                 self.missed(env, now).await
             };
         }
-        if let Some(tick) = self.owed_upload(env, now).await {
+        let owed = self.owed_upload();
+        if owed && let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
         if let Some(tick) = self.wal_unit(env, now, false).await {
             return self.passed_over_uploads(tick);
         }
-        if let Some(tick) = self.upload_unit(env, now).await {
+        if !owed && let Some(tick) = self.upload_unit(env, now).await {
             return tick;
         }
         if self.settled(env.wal) {
@@ -1552,6 +1604,9 @@ impl Actor {
         now: Timestamp,
         may_checkpoint: bool,
     ) -> Option<Tick> {
+        // A held sync is held by this tick or not at all: a wake left from an earlier tick
+        // would be a deadline nothing acts on.
+        self.engine.sync_due = None;
         if !self.kept.tasks.ready(Task::Sync, now) {
             return None;
         }
@@ -1562,10 +1617,20 @@ impl Actor {
         self.kept.app.poll(committed);
         let wants_live = may_checkpoint && self.kept.live.wanted() && self.caught_up();
         let wants_proof = may_checkpoint && (self.checkpoint_decision(now).is_some() || wants_live);
-        let quiet = !self.wal_moved(committed) && self.pending().is_none() && !self.more_wal();
-        if quiet && !wants_proof {
-            return None;
+        // Without one of these a step has only new commits to stage, and those wait out the
+        // sync interval: every tick that follows another at once (a file to upload, a
+        // compaction) would else stage the commits made since the last as a file of their own.
+        let forced = wants_proof || self.pending().is_some() || self.more_wal();
+        if !forced {
+            if !self.wal_moved(committed) {
+                return None;
+            }
+            if let Some(due) = self.sync_held_until(now) {
+                self.engine.sync_due = Some(due);
+                return None;
+            }
         }
+        self.engine.synced_at = Some(now);
         let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
         self.step_ended(env.clock, began, &stepped);
@@ -1584,6 +1649,16 @@ impl Actor {
             return Some(self.checkpoint_unit(env, proof, decision, mode, now).await);
         }
         (files > 0).then(|| self.ran(Event::Synced { files }, now))
+    }
+
+    /// When a sync step that only new commits ask for may run, if not yet: one
+    /// [`ActorConfig::sync_interval`] after the last step began. Engine time never reads
+    /// earlier than it did (`actor/clock.rs`), so the wait is never longer than the
+    /// interval. A drain waits for nothing.
+    fn sync_held_until(&self, now: Timestamp) -> Option<Timestamp> {
+        let last = self.engine.synced_at?;
+        let due = last.checked_add(self.kept.cfg.sync_interval)?;
+        (self.running() && now < due).then_some(due)
     }
 
     /// Whether everything staged is on the replica.
@@ -1694,13 +1769,7 @@ impl Actor {
                 if matches!(
                     verdict,
                     Stepped::Resnapshot(SnapshotCause::LocalRewound { .. })
-                ) && let Some(was) = len
-                    && env
-                        .wal
-                        .len()
-                        .map_err(Fault::from_source)?
-                        .map_or(0, WalFileLen::bytes)
-                        < was.bytes()
+                ) && wal_shrank(&mut *env.wal, len)?
                 {
                     return Err(Fault::WalMoved);
                 }
@@ -1877,8 +1946,8 @@ impl Actor {
                     self.kept.snapshot_asked = false;
                     self.kept.snapshots.count(&cause);
                 }
-                if self.engine.gate == Gate::NextWrite {
-                    self.engine.gate = Gate::Open;
+                if self.engine.gate == Next::OnWalChange {
+                    self.engine.gate = Next::Now;
                 }
                 (1, txs, end)
             }
@@ -1963,7 +2032,7 @@ impl Actor {
             &self.kept.cfg.checkpoint,
         );
         self.engine.checkpoint = state;
-        self.engine.gate = Gate::of(next);
+        self.engine.gate = next;
         self.kept.tasks.get_mut(Task::Checkpoint).succeed();
         // An overtaken checkpoint did not look at the WAL again: SQLite's own word stands.
         let busy = match done.outcome {
@@ -1986,7 +2055,7 @@ impl Actor {
         let skips = skips.map_or(NonZeroU32::MIN, |skips| skips.saturating_add(1));
         self.engine.lock_busy = Some(skips);
         let until = now.saturating_add(lock_busy_wait(skips, self.kept.cfg.retry_interval));
-        self.engine.gate = Gate::Until(until);
+        self.engine.gate = Next::At(until);
         self.ran(Event::CheckpointDeferred { until }, now)
     }
 
@@ -2028,6 +2097,8 @@ impl Actor {
         if !self.upload_ready(now) {
             return None;
         }
+        let turns = (self.engine.syncs_ahead, self.engine.maintain.passed_over);
+        let sent = self.engine.in_flight.sent();
         self.engine.syncs_ahead = 0;
         // Owed or in its own turn, an upload tick is one that passed prune and maintenance over.
         let maintain = &mut self.engine.maintain;
@@ -2054,6 +2125,17 @@ impl Actor {
             )
             .await;
             match uploaded {
+                // The send stopped for parts its upload has in flight and read nothing: not a
+                // slice, and no turn taken. The tick goes on to its other work; the upload
+                // wakes this task when a part ends (`docs/decisions/D233.md`).
+                Ok(None)
+                    if last == Did::Nothing
+                        && self.engine.in_flight.waits()
+                        && self.engine.in_flight.sent() == sent =>
+                {
+                    (self.engine.syncs_ahead, self.engine.maintain.passed_over) = turns;
+                    return None;
+                }
                 Ok(None) if last == Did::Nothing => {
                     self.engine.slices_ahead = self.engine.slices_ahead.saturating_add(1);
                     let bytes = self.engine.in_flight.sent().unwrap_or_default();
@@ -2062,8 +2144,15 @@ impl Actor {
                 // The tick published a file before this one ran out of budget: it says that.
                 Ok(None) => break,
                 Ok(Some(uploaded)) => {
-                    if let Did::Diverged { from, .. } = uploaded.did {
-                        return Some(self.diverged(env, uploaded.state, from, now).await);
+                    if let Did::Diverged { confirmed } = uploaded.did {
+                        return Some(self.diverged(env, uploaded.state, confirmed, now).await);
+                    }
+                    // Before the confirmed position lets the token go.
+                    if let Did::Put(info) = &uploaded.did {
+                        self.engine.known.put(*info);
+                        if let Some(token) = self.engine.witnesses.get(&info.key) {
+                            self.engine.sent.put(*token);
+                        }
                     }
                     self.set_upload(uploaded.state);
                     last = uploaded.did;
@@ -2096,11 +2185,12 @@ impl Actor {
         }
     }
 
-    /// How level-0 uploads write: create-only until the store said it cannot (D79).
-    const fn guard(&self) -> Guard {
+    /// How level-0 uploads and compaction outputs write: create-only until the store said it
+    /// cannot (D79).
+    const fn guard(&self) -> WriteMode {
         match self.kept.unguarded {
-            Some(_) => Guard::Unguarded,
-            None => Guard::BucketRefuses,
+            Some(_) => WriteMode::Replace,
+            None => WriteMode::New,
         }
     }
 
@@ -2152,7 +2242,7 @@ impl Actor {
         from: Txid,
         now: Timestamp,
     ) -> Tick {
-        let key = FileKey::new(Level::ZERO, TxidRange::single(from));
+        let key = FileKey::staged(from);
         let token = self.engine.witnesses.get(&key).copied();
         // An id one of this engine's own drops vouched for holds its own
         // earlier upload on the replica (one whose answer was lost), not
@@ -2267,15 +2357,12 @@ impl Actor {
         }
         self.kept.tasks.get_mut(Task::Prune).succeed();
         self.engine.pruned = Some(through);
+        self.engine.sent.pruned_through(through);
         if keys.is_empty() {
             return None;
         }
         self.engine.maintain.passed_over = 0;
-        let event = Event::Maintained {
-            event: MaintainedEvent::Deleted(keys.len()),
-            created_at_read: 0,
-        };
-        Some(self.ran(event, now))
+        Some(self.ran_maintained(MaintainedEvent::Deleted(keys.len()), 0, now))
     }
 
     /// The newest staged transaction a prune may delete through, when it is
@@ -2304,6 +2391,9 @@ impl Actor {
     ) -> Option<Tick> {
         if !self.maintain_ready(now) {
             return None;
+        }
+        if let Some(job) = self.engine.maintain.snapshot_retry.take() {
+            return Some(self.snapshot_job(env, &job, now, 0).await);
         }
         if self.short_pass_ok(now) {
             return Some(match self.maintain_short(env, now).await {
@@ -2342,7 +2432,7 @@ impl Actor {
             let mut step = |resolved: &ResolvedCreatedAt| {
                 due_full(&inventory, now, cfg, published, state, resolved)
             };
-            resolve(env.remote, &mut step).await
+            resolve_knowing(env.remote, &mut self.engine.known, &mut step).await
         };
         // A failed created-at time read leaves the listing owed: the next tick lists again.
         let decided = match decided {
@@ -2356,8 +2446,9 @@ impl Actor {
         self.engine.maintain.snapshot_waits = false;
         // Level 1 starts above the newest snapshot when it is empty (D224), so what the
         // snapshot holds is as compacted as level 1 would make it.
-        self.engine.maintain.level_one = Level::new(1)
-            .and_then(|level| inventory.level(level).last())
+        self.engine.maintain.level_one = inventory
+            .level(Level::ONE)
+            .last()
             .map(|info| info.key.range().max())
             .or_else(|| crate::maintain::snapshot_end(&inventory));
         self.engine.maintain.remembered.learn_full(
@@ -2414,11 +2505,7 @@ impl Actor {
         // The listing no longer holds: the next tick lists and reads back again.
         self.engine.maintain.stale = true;
         self.maintained(now);
-        let event = Event::Maintained {
-            event: MaintainedEvent::Repaired(key),
-            created_at_read: 0,
-        };
-        Some(self.ran(event, now))
+        Some(self.ran_maintained(MaintainedEvent::Repaired(key), 0, now))
     }
 
     async fn run_job<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
@@ -2430,19 +2517,40 @@ impl Actor {
     ) -> Tick {
         // One call site for every merge, so the tick's future holds one compaction.
         let outcome = if let Some((inputs, level)) = job.merge() {
-            run_compaction(inputs, level, env.staging, env.remote).await
+            let (sent, guard) = (&self.engine.sent, self.guard());
+            run_compaction(inputs, level, env.staging, env.remote, sent, guard).await
         } else if let Job::Delete(delete) = job {
             run_delete(delete, env.remote).await
         } else {
             return self.snapshot_job(env, job, now, created_at_read).await;
         };
+        if let Outcome::Failed(err) = &outcome
+            && Fault::from_maintain(err) == Fault::CreateOnlyUnsupported
+        {
+            // Nothing was published. The fault degrades the task (or stops), and from here
+            // on outputs and level-0 uploads replace, as after a refused upload (D79), so the
+            // upload task says so now, not after its first replacing write.
+            let since = *self.kept.unguarded.get_or_insert(now);
+            self.kept
+                .tasks
+                .get_mut(Task::Upload)
+                .stand(PersistentCause::ConditionalWritesUnsupported, since);
+        }
         if let Job::Snapshot(_) = job {
             return self.snapshot_merged(job, outcome, now, created_at_read);
         }
         self.engine.maintain.state.record(now, job, &outcome);
         let event = match outcome {
-            Outcome::Compacted { info, .. } => MaintainedEvent::Compacted(info),
-            Outcome::Deleted { count } => MaintainedEvent::Deleted(count),
+            Outcome::Compacted { info, .. } => {
+                self.engine.known.put(info);
+                MaintainedEvent::Compacted(info)
+            }
+            Outcome::Deleted { count } => {
+                if let Job::Delete(delete) = job {
+                    self.engine.known.deleted(delete.keys());
+                }
+                MaintainedEvent::Deleted(count)
+            }
             Outcome::Replan { .. } => MaintainedEvent::Replan,
             Outcome::Failed(err) => {
                 let waiter = self.job_waiter(job, now);
@@ -2450,13 +2558,7 @@ impl Actor {
             }
         };
         self.maintained(now);
-        self.ran(
-            Event::Maintained {
-                event,
-                created_at_read,
-            },
-            now,
-        )
+        self.ran_maintained(event, created_at_read, now)
     }
 
     /// What ends a maintenance tick before anything is planned from a listing whose newest
@@ -2490,11 +2592,7 @@ impl Actor {
         self.engine.maintain.stale = false;
         self.engine.maintain.until = Some(again);
         self.maintained(now);
-        let event = Event::Maintained {
-            event: MaintainedEvent::Waiting { held: None },
-            created_at_read: 0,
-        };
-        self.ran(event, now)
+        self.ran_maintained(MaintainedEvent::Waiting { held: None }, 0, now)
     }
 
     /// A maintenance step went well. The task's degraded state goes unless a
@@ -2528,14 +2626,9 @@ impl Actor {
     /// A snapshot the store took.
     fn snapshot_written(&mut self, info: FileInfo, now: Timestamp, created_at_read: u64) -> Tick {
         self.maintained(now);
+        self.engine.known.put(info);
         let event = MaintainedEvent::Snapshot(info);
-        self.ran(
-            Event::Maintained {
-                event,
-                created_at_read,
-            },
-            now,
-        )
+        self.ran_maintained(event, created_at_read, now)
     }
 
     /// How a snapshot built from the replica's level-0 files ended ([`Job::merge`]): no step, no
@@ -2559,13 +2652,7 @@ impl Actor {
                 self.engine.maintain.remembered.owe_full();
                 self.maintained(now);
                 let event = MaintainedEvent::Replan;
-                self.ran(
-                    Event::Maintained {
-                        event,
-                        created_at_read,
-                    },
-                    now,
-                )
+                self.ran_maintained(event, created_at_read, now)
             }
             Outcome::Failed(err) => {
                 if let MaintainError::OutputDistrusted { key, .. } = &err {
@@ -2593,13 +2680,7 @@ impl Actor {
         if !self.kept.tasks.ready(Task::Sync, now) {
             self.wait_for_sync();
             let event = MaintainedEvent::Waiting { held: None };
-            return self.ran(
-                Event::Maintained {
-                    event,
-                    created_at_read,
-                },
-                now,
-            );
+            return self.ran_maintained(event, created_at_read, now);
         }
         let began = self.step_began(env.clock);
         let stepped = self.step(env, now).await;
@@ -2613,15 +2694,12 @@ impl Actor {
                 self.engine.maintain.stale = false;
                 self.engine.maintain.until = None;
                 let event = MaintainedEvent::Waiting { held: None };
-                return self.ran(
-                    Event::Maintained {
-                        event,
-                        created_at_read,
-                    },
-                    now,
-                );
+                return self.ran_maintained(event, created_at_read, now);
             }
-            Ok((files, _)) => return self.ran(Event::Synced { files }, now),
+            Ok((files, _)) => {
+                self.engine.maintain.snapshot_retry = Some(job.clone());
+                return self.ran(Event::Synced { files }, now);
+            }
             // A failed step waits on the sync task, and the listing with it:
             // the next is due when the step may run again, not at once.
             Err(Tick::Ran { event, .. }) => {
@@ -2698,7 +2776,9 @@ impl Actor {
             // A local course syncs between boot attempts, which wait on the upload task.
             Course::Local(_) => sync || self.kept.tasks.ready(Task::Upload, now),
             Course::Snapshot { .. } | Course::At { .. } => {
-                sync || self.upload_ready(now)
+                // A send that waits for its upload's parts is not work to tick for: a part
+                // that ends wakes the task.
+                sync || (self.upload_ready(now) && !self.engine.in_flight.waits())
                     || self.prune_ready(now).is_some()
                     || self.maintain_ready(now)
             }
@@ -2711,26 +2791,22 @@ impl Actor {
         self.kept.tasks.ready(Task::Upload, now) && !self.uploads_idle()
     }
 
-    /// The upload step, ahead of the WAL step, once [`state::FAIR_SHARE`] ticks in a row ended
-    /// in the WAL step; it runs only when uploads are ready, and resets the count when it does.
+    /// Whether the upload step goes ahead of the WAL step this tick: once
+    /// [`state::FAIR_SHARE`] ticks in a row ended in the WAL step. The step runs only when
+    /// uploads are ready, and resets the count when it does.
     /// A file in flight turns the share around: its slices go first, and the WAL step (and
     /// with it prune and maintenance) has the tick after each [`state::FAIR_SHARE`] of them.
     /// A turn after every slice would have an application that commits before each tick pay
     /// a sync, and stage a file, for every slice (`docs/decisions/D217.md`).
-    async fn owed_upload<W: WalSource, P: PageSource, C: Checkpointer, L: Role, R: Role>(
-        &mut self,
-        env: &mut Env<'_, W, P, C, L, R>,
-        now: Timestamp,
-    ) -> Option<Tick> {
+    fn owed_upload(&mut self) -> bool {
         let owed = match self.engine.in_flight.sent() {
             Some(_) => self.engine.slices_ahead < state::FAIR_SHARE,
             None => self.engine.syncs_ahead >= state::FAIR_SHARE,
         };
         if !owed {
             self.engine.slices_ahead = 0;
-            return None;
         }
-        self.upload_unit(env, now).await
+        owed
     }
 
     /// `tick`, from the WAL step, counted: the upload step resets the count when it runs, and
@@ -2766,9 +2842,9 @@ impl Actor {
     }
 
     /// Every deadline a task holds: retry waits, the checkpoint gate, the
-    /// maintenance schedule (whose `Due::Wait` includes each level's backoff)
-    /// and the drain's end. Tasks a draining actor does not run hold none, nor do those an
-    /// engine that has not booted does not run.
+    /// maintenance schedule (whose `Due::Wait` includes each level's backoff),
+    /// the drain's end and a sync this tick held for its interval. Tasks a draining actor does
+    /// not run hold none, nor do those an engine that has not booted does not run.
     fn deadlines(&self) -> impl Iterator<Item = Timestamp> {
         let (running, checkpoints) = (self.running(), self.checkpoints());
         let task = |task: Task| self.kept.tasks.get(task).until();
@@ -2779,7 +2855,8 @@ impl Actor {
             task(Task::Maintenance),
             self.engine.maintain.until,
         ];
-        [task(Task::Sync), task(Task::Upload), deadline]
+        let held = self.engine.sync_due;
+        [task(Task::Sync), task(Task::Upload), deadline, held]
             .into_iter()
             .chain(only_checkpointing.into_iter().filter(move |_| checkpoints))
             .chain(only_running.into_iter().filter(move |_| running))
@@ -2986,7 +3063,7 @@ async fn boot_listing<L: Role, R: Role>(
     let (upload, diverged) = match listed {
         Ok(Uploaded {
             state,
-            did: Did::Diverged { from, .. },
+            did: Did::Diverged { confirmed: from },
         }) => (state, Some(from)),
         Ok(listed) => (listed.state, None),
         Err(failed) => return Err(failed.fault.into()),
@@ -3321,13 +3398,7 @@ async fn boot_recover<W: WalSource, P: PageSource, C, L: Role, R: Role>(
             cause: SnapshotCause::LocalRewound { .. },
             ..
         }
-    ) && let Some(was) = len
-        && env
-            .wal
-            .len()
-            .map_err(Fault::from_source)?
-            .map_or(0, WalFileLen::bytes)
-            < was.bytes()
+    ) && wal_shrank(&mut *env.wal, len)?
     {
         return Err(Fault::WalMoved.into());
     }

@@ -13,19 +13,43 @@
 //! metadata, last-modified times) and answers as `MemStore` would over the same objects, so the
 //! judges see what the bucket holds even when the client would read it wrongly. Keys follow the replica layout (`<prefix>/<level as 4 hex digits>/<name>`), parsed
 //! here from the bucket's names.
+//!
+//! # Parts
+//!
+//! At its own part size the store sends every file here in one PUT: the files are a few hundred
+//! bytes and a part is 5 MiB. With [`Parts`] the store is built with a part of a few dozen
+//! bytes over a bucket that takes them, and its parts go to lanes the simulator drives
+//! ([`Landing`], over `lsr_store_s3::Manual`), so a multipart upload is a deterministic
+//! sequence of requests the run's seed orders. The law, from what the S3 API says of
+//! UploadPart (each part is its own request; parts may be sent in any order and in parallel;
+//! a part's request may fail while the others succeed):
+//!
+//! - A part the store started stays started until the engine next asks its upload about its
+//!   parts, or the store waits for one itself. At each question the seed lands none, some or
+//!   all of the parts started, in an order it draws; never none twice running, so an upload
+//!   always ends. Until a part lands the engine sees nothing of it, so landing at the
+//!   question is every order of events the engine could tell apart, without a clock.
+//! - A landing whose request met a provider fault ends that question's landings: one fault
+//!   fires for one question, and the engine's report of that tick is judged against it.
+//! - When the process ends (a stop, a kill, a power loss), each part still started either
+//!   reached the bucket or was never sent, by the seed; and what the store remembered of
+//!   uploads to abort is gone, so the next boot has only the bucket's listing.
 
-use std::sync::Arc;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use lsr_core::conformance::block_on;
 use lsr_core::{
-    BatchKind, Clock, CreatedAt, FakeClock, FileInfo, FileKey, Level, ListAt, Listing, MemStore,
-    ObjectStore, PageLimit, ReadAt, ReadLen, Reread, StoreError, Upload, WriteMode,
-    parse_file_name,
+    BatchKind, Clock, CreatedAt, Entropy, FakeClock, FileInfo, FileKey, Flight, Level, ListAt,
+    Listing, MemStore, ObjectStore, PageLimit, ReadLen, Reread, Rest, SeededEntropy, StoreError,
+    Upload, WriteMode, parse_file_name,
 };
 use lsr_ltx::{Timestamp, TxidRange};
 use lsr_store_s3::{
-    BucketName, Endpoint, FakeS3, Fault, FaultTransport, HttpRequest, HttpResponse, Prefix,
-    S3Config, S3Credentials, S3Store, S3Upload, SecretString, Shape, Transport, TransportError,
+    BucketName, Endpoint, FakeS3, Fault, FaultTransport, HttpRequest, HttpResponse, Inline, Lanes,
+    Manual, PartSize, Prefix, S3Config, S3Credentials, S3Store, S3Upload, SecretString, Shape,
+    Transport, TransportError,
 };
 
 use crate::generate::{DenialCode, HttpFault, HttpShape};
@@ -34,13 +58,221 @@ use crate::generate::{DenialCode, HttpFault, HttpShape};
 /// scripts faults and reads the bucket.
 pub type Wire = Arc<FaultTransport<FakeS3>>;
 
-/// The store's transport: the shared [`Wire`].
+/// The store's transport: the shared [`Wire`], and the lanes its parts go to when the run
+/// sends in parts.
 #[derive(Debug, Clone)]
-pub struct WireTransport(Wire);
+pub struct WireTransport {
+    wire: Wire,
+    lanes: Option<Arc<Manual>>,
+}
 
 impl Transport for WireTransport {
     fn send(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
-        self.0.send(request)
+        self.wire.send(request)
+    }
+
+    fn lanes(&self, _most: NonZeroUsize) -> Arc<dyn Lanes> {
+        match &self.lanes {
+            Some(lanes) => Arc::<Manual>::clone(lanes),
+            None => Arc::new(Inline),
+        }
+    }
+}
+
+/// How the S3 replica sends in parts (module doc).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Parts {
+    /// The bytes of a part.
+    pub part: NonZeroU64,
+    /// How many parts of one upload may be started at once.
+    pub lanes: NonZeroUsize,
+}
+
+impl Parts {
+    /// A part of `part` bytes, `lanes` at once; `None` for a zero.
+    #[must_use]
+    pub fn new(part: u64, lanes: usize) -> Option<Self> {
+        Some(Self {
+            part: NonZeroU64::new(part)?,
+            lanes: NonZeroUsize::new(lanes)?,
+        })
+    }
+}
+
+/// What became of the parts of a run, for its reach counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PartCounts {
+    /// Parts that landed at a question or a wait.
+    pub landed: u64,
+    /// Of those, the ones that landed ahead of a part started before them.
+    pub out_of_order: u64,
+    /// Of those, the ones whose request met a provider fault.
+    pub faulted: u64,
+    /// Questions that left a part started.
+    pub left_started: u64,
+    /// Questions the upload answered with every lane taken and a part waiting.
+    pub full: u64,
+    /// Parts that reached the bucket as their process ended.
+    pub landed_at_exit: u64,
+    /// Parts never sent because their process ended.
+    pub lost_at_exit: u64,
+}
+
+/// What the lanes' own pick and the handle share.
+struct Lands {
+    chance: SeededEntropy,
+    /// A scenario lands the parts itself: a question lands none.
+    by_hand: AtomicBool,
+    /// The last question landed nothing with a part started.
+    landed_none: AtomicBool,
+    counts: Mutex<PartCounts>,
+}
+
+impl Lands {
+    /// One of `started`, counted from zero.
+    fn one_of(&self, started: usize) -> usize {
+        let upper = u64::try_from(started).unwrap_or(u64::MAX).max(1);
+        usize::try_from(self.chance.below(upper)).unwrap_or(0)
+    }
+
+    fn count(&self, bump: impl FnOnce(&mut PartCounts)) {
+        bump(&mut self.counts.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+}
+
+/// The parts the S3 store has started and not yet sent, and when each lands (module doc).
+#[derive(Clone)]
+pub struct Landing {
+    lands: Arc<Lands>,
+    lanes: Arc<Manual>,
+    wire: Wire,
+}
+
+impl std::fmt::Debug for Landing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Landing")
+            .field("started", &self.started())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Landing {
+    fn new(wire: &Wire, seed: u64) -> Self {
+        let lands = Arc::new(Lands {
+            chance: SeededEntropy::new(seed),
+            by_hand: AtomicBool::new(false),
+            landed_none: AtomicBool::new(false),
+            counts: Mutex::new(PartCounts::default()),
+        });
+        let pick = Arc::clone(&lands);
+        // A store that waits for a part lands them one at a time, in the order the seed
+        // draws; oldest first for a scenario that lands its own.
+        let lanes = Manual::new(move |started| {
+            pick.count(|counts| counts.landed = counts.landed.saturating_add(1));
+            if pick.by_hand.load(Ordering::SeqCst) {
+                0
+            } else {
+                pick.one_of(started)
+            }
+        });
+        Self {
+            lands,
+            lanes: Arc::new(lanes),
+            wire: Arc::clone(wire),
+        }
+    }
+
+    /// How many parts are started and not sent.
+    #[must_use]
+    pub fn started(&self) -> usize {
+        self.lanes.started()
+    }
+
+    /// What became of the run's parts so far.
+    #[must_use]
+    pub fn counts(&self) -> PartCounts {
+        *self
+            .lands
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// From now on a question lands nothing (`true`), or the seed's draw again.
+    pub fn by_hand(&self, on: bool) {
+        self.lands.by_hand.store(on, Ordering::SeqCst);
+    }
+
+    /// Lands the part at `at`, counted from zero in the order they were started; `false`
+    /// when there is none. Whether its request met a provider fault is counted.
+    pub fn land(&self, at: usize) -> bool {
+        let fired = self.wire.fired().len();
+        if !self.lanes.land(at) {
+            return false;
+        }
+        let faulted = self.wire.fired().len() > fired;
+        self.lands.count(|counts| {
+            counts.landed = counts.landed.saturating_add(1);
+            counts.out_of_order = counts.out_of_order.saturating_add(u64::from(at > 0));
+            counts.faulted = counts.faulted.saturating_add(u64::from(faulted));
+        });
+        true
+    }
+
+    /// The engine asks an upload about its parts: the seed lands none, some or all of the
+    /// parts started (module doc).
+    fn at_question(&self) {
+        let started = self.started();
+        if started == 0 || self.lands.by_hand.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut most = self.lands.one_of(started.saturating_add(1));
+        if most == 0 && self.lands.landed_none.swap(true, Ordering::SeqCst) {
+            most = 1;
+        }
+        if most > 0 {
+            self.lands.landed_none.store(false, Ordering::SeqCst);
+        }
+        for _ in 0..most {
+            let fired = self.wire.fired().len();
+            let left = self.started();
+            if left == 0 || !self.land(self.lands.one_of(left)) {
+                break;
+            }
+            // One provider fault for one question (module doc).
+            if self.wire.fired().len() > fired {
+                break;
+            }
+        }
+    }
+
+    /// What the upload answered the question with.
+    fn answered(&self, flight: Result<Flight, &StoreError>) {
+        let left = self.started() > 0;
+        self.lands.count(|counts| {
+            counts.left_started = counts.left_started.saturating_add(u64::from(left));
+            counts.full = counts
+                .full
+                .saturating_add(u64::from(flight == Ok(Flight::Full)));
+        });
+    }
+
+    /// The process ends: each part still started reached the bucket or was never sent, by
+    /// the seed, whatever a scenario held by hand.
+    pub fn at_exit(&self) {
+        while self.started() > 0 {
+            if self.lands.chance.below(2) == 0 {
+                self.lanes.land(0);
+                self.lands.count(|counts| {
+                    counts.landed_at_exit = counts.landed_at_exit.saturating_add(1)
+                });
+            } else {
+                self.lanes.lose(0);
+                self.lands
+                    .count(|counts| counts.lost_at_exit = counts.lost_at_exit.saturating_add(1));
+            }
+        }
+        self.by_hand(false);
     }
 }
 
@@ -58,13 +290,67 @@ impl Clock for SharedClock {
 /// The key prefix the replica lives under in the bucket.
 const PREFIX: &str = "db";
 
-/// The bucket, its address and the prefix, as the store is configured.
-fn config() -> Option<S3Config> {
-    Some(S3Config::new(
+/// The bucket, its address and the prefix, as the store is configured; with `parts`, their
+/// size and how many go at once.
+fn config(parts: Option<Parts>) -> Option<S3Config> {
+    let config = S3Config::new(
         Endpoint::new("http://sim.invalid:9000").ok()?,
         BucketName::new("sim").ok()?,
         Prefix::new(PREFIX).ok()?,
-    ))
+    );
+    Some(match parts {
+        Some(parts) => config
+            .with_part_size(PartSize::below_the_minimum(parts.part))
+            .with_concurrency(parts.lanes),
+        None => config,
+    })
+}
+
+/// The S3 store, and its parts' lanes when the run sends in parts.
+#[derive(Debug)]
+pub struct S3Remote {
+    store: S3Store<WireTransport>,
+    landing: Option<Landing>,
+    wire: Wire,
+    /// The most multipart uploads the bucket held open right after a sweep that succeeded.
+    left_by_sweep: AtomicU64,
+}
+
+impl S3Remote {
+    /// The parts started and when they land, when the run sends in parts.
+    #[must_use]
+    pub const fn landing(&self) -> Option<&Landing> {
+        self.landing.as_ref()
+    }
+
+    /// The process is ending (module doc): each part it has started lands or is lost. Call
+    /// while the engine still holds its uploads: one already dropped sends nothing more.
+    pub fn process_ending(&self) {
+        if let Some(landing) = &self.landing {
+            landing.at_exit();
+        }
+    }
+
+    /// The process is gone, and with it every upload: the ids it meant to abort are
+    /// forgotten, so the next boot's sweep has only the bucket's listing.
+    pub fn process_ended(&self) {
+        self.store.forget_orphans();
+    }
+
+    /// The most multipart uploads the bucket held open right after a sweep of abandoned
+    /// uploads that reported success. A sweep runs at boot, before the process starts an
+    /// upload of its own, and aborts every upload open under the prefix: none is left.
+    #[must_use]
+    pub fn left_by_sweep(&self) -> u64 {
+        self.left_by_sweep.load(Ordering::SeqCst)
+    }
+
+    async fn sweep(&self) -> Result<u64, StoreError> {
+        let swept = self.store.remove_scratch().await?;
+        let open = u64::try_from(self.wire.inner().open_uploads()).unwrap_or(u64::MAX);
+        self.left_by_sweep.fetch_max(open, Ordering::SeqCst);
+        Ok(swept)
+    }
 }
 
 /// The replica store the engine talks to, under the world's wrappers.
@@ -73,7 +359,7 @@ pub enum RemoteBackend {
     /// The simulator's in-memory store.
     Mem(MemStore),
     /// The S3 store over the in-memory bucket behind the fault layer.
-    S3(Arc<S3Store<WireTransport>>),
+    S3(Arc<S3Remote>),
 }
 
 /// An upload through [`RemoteBackend`].
@@ -81,8 +367,9 @@ pub enum RemoteBackend {
 pub enum RemoteUpload {
     /// Through `MemStore`.
     Mem(<MemStore as ObjectStore>::Upload),
-    /// Through the S3 store.
-    S3(S3Upload<WireTransport>),
+    /// Through the S3 store, with its parts' lanes when the run sends in parts. Boxed: the
+    /// S3 upload is several times the size of the other.
+    S3(Box<(S3Upload<WireTransport>, Option<Landing>)>),
 }
 
 /// The replica as the harness reads and edits it (module doc).
@@ -95,21 +382,36 @@ pub enum Bucket {
 }
 
 /// The S3 backend: the engine's store over a fresh bucket, and the harness's view of the same
-/// bucket. `None` only if the fixed configuration were refused.
+/// bucket. With `parts` (and the seed their landings are drawn from) the store sends in parts
+/// (module doc). `None` only if the fixed configuration were refused.
 #[must_use]
-pub fn s3(clock: &Arc<FakeClock>) -> Option<(RemoteBackend, Bucket)> {
-    let config = config()?;
+pub fn s3(clock: &Arc<FakeClock>, parts: Option<(Parts, u64)>) -> Option<(RemoteBackend, Bucket)> {
+    let config = config(parts.map(|(parts, _)| parts))?;
     let fake = FakeS3::new(&config, SharedClock(Arc::clone(clock)));
+    if parts.is_some() {
+        fake.accept_small_parts();
+    }
     let wire: Wire = Arc::new(FaultTransport::new(fake));
+    let landing = parts.map(|(_, seed)| Landing::new(&wire, seed));
     let credentials = S3Credentials::new("SIMKEY".to_owned(), SecretString::new("sim".to_owned()));
+    let transport = WireTransport {
+        wire: Arc::clone(&wire),
+        lanes: landing.as_ref().map(|landing| Arc::clone(&landing.lanes)),
+    };
     let store = S3Store::with_transport(
         config,
         credentials,
-        WireTransport(Arc::clone(&wire)),
+        transport,
         SharedClock(Arc::clone(clock)),
     )
     .ok()?;
-    Some((RemoteBackend::S3(Arc::new(store)), Bucket::S3(wire)))
+    let remote = S3Remote {
+        store,
+        landing,
+        wire: Arc::clone(&wire),
+        left_by_sweep: AtomicU64::new(0),
+    };
+    Some((RemoteBackend::S3(Arc::new(remote)), Bucket::S3(wire)))
 }
 
 /// The store's fault layer's form of a drawn provider fault; `None` for a bucket policy
@@ -141,6 +443,7 @@ pub fn provider_fault(fault: HttpFault) -> Option<Fault> {
             keep: 16,
         },
         HttpFault::WrongEtag(on) => Fault::WrongEtag { on: shape(on) },
+        HttpFault::BodyMismatch(on) => status(shape(on), 400, "XAmzContentSHA256Mismatch"),
         HttpFault::ConnectionReset(on) => Fault::Transport {
             on: shape(on),
             err: TransportError::ConnectionReset,
@@ -245,6 +548,10 @@ const fn shape(on: HttpShape) -> Shape {
         HttpShape::Put => Shape::Put,
         HttpShape::DeleteObjects => Shape::DeleteObjects,
         HttpShape::ListUploads => Shape::ListUploads,
+        HttpShape::CreateMultipart => Shape::CreateMultipart,
+        HttpShape::UploadPart => Shape::UploadPart,
+        HttpShape::Complete => Shape::Complete,
+        HttpShape::Abort => Shape::Abort,
     }
 }
 
@@ -617,21 +924,21 @@ impl ObjectStore for RemoteBackend {
     ) -> Result<Listing, StoreError> {
         match self {
             Self::Mem(s) => s.list(level, after, limit).await,
-            Self::S3(s) => s.list(level, after, limit).await,
+            Self::S3(s) => s.store.list(level, after, limit).await,
         }
     }
 
     async fn read(&self, key: &FileKey, offset: u64, len: ReadLen) -> Result<Vec<u8>, StoreError> {
         match self {
             Self::Mem(s) => s.read(key, offset, len).await,
-            Self::S3(s) => s.read(key, offset, len).await,
+            Self::S3(s) => s.store.read(key, offset, len).await,
         }
     }
 
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         match self {
             Self::Mem(s) => s.created_at(file).await,
-            Self::S3(s) => s.created_at(file).await,
+            Self::S3(s) => s.store.created_at(file).await,
         }
     }
 
@@ -642,7 +949,7 @@ impl ObjectStore for RemoteBackend {
     ) -> Result<(Vec<u8>, CreatedAt), StoreError> {
         match self {
             Self::Mem(s) => s.read_with_created_at(file, len).await,
-            Self::S3(s) => s.read_with_created_at(file, len).await,
+            Self::S3(s) => s.store.read_with_created_at(file, len).await,
         }
     }
 
@@ -659,44 +966,38 @@ impl ObjectStore for RemoteBackend {
                 .await
                 .map(RemoteUpload::Mem),
             Self::S3(s) => s
+                .store
                 .begin_sized_upload(key, created_at, mode, len)
                 .await
-                .map(RemoteUpload::S3),
+                .map(|upload| RemoteUpload::S3(Box::new((upload, s.landing.clone())))),
         }
     }
 
     async fn delete(&self, keys: &[FileKey]) -> Result<(), StoreError> {
         match self {
             Self::Mem(s) => s.delete(keys).await,
-            Self::S3(s) => s.delete(keys).await,
+            Self::S3(s) => s.store.delete(keys).await,
         }
     }
 
     async fn remove_scratch(&self) -> Result<u64, StoreError> {
         match self {
             Self::Mem(s) => s.remove_scratch().await,
-            Self::S3(s) => s.remove_scratch().await,
+            Self::S3(s) => s.sweep().await,
         }
     }
 
     fn batch_width(&self, kind: BatchKind) -> std::num::NonZeroUsize {
         match self {
             Self::Mem(s) => s.batch_width(kind),
-            Self::S3(s) => s.batch_width(kind),
-        }
-    }
-
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        match self {
-            Self::Mem(s) => s.read_many(reads).await,
-            Self::S3(s) => s.read_many(reads).await,
+            Self::S3(s) => s.store.batch_width(kind),
         }
     }
 
     async fn created_at_many(&self, files: &[FileInfo]) -> Vec<Result<CreatedAt, StoreError>> {
         match self {
             Self::Mem(s) => s.created_at_many(files).await,
-            Self::S3(s) => s.created_at_many(files).await,
+            Self::S3(s) => s.store.created_at_many(files).await,
         }
     }
 
@@ -707,7 +1008,7 @@ impl ObjectStore for RemoteBackend {
     ) -> Vec<Result<Listing, StoreError>> {
         match self {
             Self::Mem(s) => s.list_many(pages, limit).await,
-            Self::S3(s) => s.list_many(pages, limit).await,
+            Self::S3(s) => s.store.list_many(pages, limit).await,
         }
     }
 }
@@ -716,35 +1017,45 @@ impl Upload for RemoteUpload {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
         match self {
             Self::Mem(u) => u.write(chunk).await,
-            Self::S3(u) => u.write(chunk).await,
+            Self::S3(u) => u.0.write(chunk).await,
         }
     }
 
     async fn write_from(&mut self, chunk: &[u8], again: &dyn Reread) -> Result<(), StoreError> {
         match self {
             Self::Mem(u) => u.write_from(chunk, again).await,
-            Self::S3(u) => u.write_from(chunk, again).await,
+            Self::S3(u) => u.0.write_from(chunk, again).await,
         }
     }
 
     async fn commit(self) -> Result<FileInfo, StoreError> {
         match self {
             Self::Mem(u) => u.commit().await,
-            Self::S3(u) => u.commit().await,
+            Self::S3(u) => u.0.commit().await,
         }
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
         match self {
-            Self::Mem(u) => u.commit_from(again).await,
-            Self::S3(u) => u.commit_from(again).await,
+            Self::Mem(u) => u.flight(rest).await,
+            Self::S3(u) => {
+                let (upload, landing) = &mut **u;
+                if let Some(landing) = landing {
+                    landing.at_question();
+                }
+                let flight = upload.flight(rest).await;
+                if let Some(landing) = landing {
+                    landing.answered(flight.as_ref().copied());
+                }
+                flight
+            }
         }
     }
 
     async fn abort(self) -> Result<(), StoreError> {
         match self {
             Self::Mem(u) => u.abort().await,
-            Self::S3(u) => u.abort().await,
+            Self::S3(u) => u.0.abort().await,
         }
     }
 }

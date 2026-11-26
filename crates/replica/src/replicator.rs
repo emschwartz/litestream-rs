@@ -21,7 +21,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -37,14 +37,9 @@ use crate::events::EventSink;
 use crate::health::{Booted, Gone, Health, Phase, Stopped, Writes};
 use crate::meta::{MetaLock, read_takeover};
 use crate::readers::ReaderGuard;
-use crate::runtime::{CALLER_SLICE, Park, Runtime, later};
+use crate::runtime::{CALLER_SLICE, Park, Runtime, later, lock};
 use crate::store::{DynStore, Meters};
 use crate::thread::Worker;
-
-pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    // Every critical section leaves plain data behind, so a poisoned lock is still usable.
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// What the thread writes and the handles read.
 #[derive(Debug)]
@@ -191,6 +186,35 @@ impl Shared {
         }
     }
 
+    /// Waits until `done` holds for a health snapshot or `deadline` passes. The predicate runs
+    /// with no lock held, so it may call any method of the handle, `health()` included.
+    fn wait_for_health(
+        &self,
+        deadline: Timestamp,
+        done: impl Fn(&Health) -> bool,
+    ) -> Option<Health> {
+        loop {
+            let health = {
+                let state = lock(&self.state);
+                let died = state.outcome.is_none() && self.thread_died();
+                snapshot(&state, died, &self.meters)
+            };
+            if done(&health) {
+                return Some(health);
+            }
+            if self.clock.now() >= deadline {
+                return None;
+            }
+            // A change between the snapshot and this wait is seen at the latest after one slice.
+            let state = lock(&self.state);
+            drop(
+                self.changed
+                    .wait_timeout(state, CALLER_SLICE)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+        }
+    }
+
     /// Takes this replicator out of the registry, if it is the one registered.
     pub(crate) fn unregister(self: &Arc<Self>) {
         let mut active = lock(&ACTIVE);
@@ -251,16 +275,6 @@ impl Shared {
             self.unregister();
         }
     }
-}
-
-/// What [`Replicator::launch`] hands the thread.
-struct Launch<'a> {
-    database: &'a Path,
-    meta: &'a Path,
-    store: Arc<dyn DynStore>,
-    config: Config,
-    runtime: Runtime,
-    events: Option<Box<dyn EventSink>>,
 }
 
 /// One replicated database. Cheap to clone: every clone is the same thread.
@@ -355,15 +369,7 @@ impl Replicator {
         })?;
         let shared = Arc::new(Shared::new(file, &config, &runtime));
         register(&shared)?;
-        let launch = Launch {
-            database,
-            meta: &meta,
-            store,
-            config,
-            runtime,
-            events,
-        };
-        let started = Self::launch(&shared, launch);
+        let started = Self::launch(&shared, database, &meta, store, config, runtime, events);
         if started.is_err() {
             shared.unregister();
         }
@@ -376,15 +382,15 @@ impl Replicator {
         })
     }
 
-    fn launch(shared: &Arc<Shared>, launch: Launch<'_>) -> Result<(), StartError> {
-        let Launch {
-            database,
-            meta,
-            store,
-            config,
-            runtime,
-            events,
-        } = launch;
+    fn launch(
+        shared: &Arc<Shared>,
+        database: &Path,
+        meta: &Path,
+        store: Arc<dyn DynStore>,
+        config: Config,
+        runtime: Runtime,
+        events: Option<Box<dyn EventSink>>,
+    ) -> Result<(), StartError> {
         std::fs::create_dir_all(meta).map_err(|err| StartError::MetaDir { kind: err.kind() })?;
         let meta_lock = MetaLock::take(meta)?;
         let takeover = read_takeover(meta);
@@ -422,9 +428,10 @@ impl Replicator {
             store,
             config,
             runtime,
-        )
-        .with_sink(events)
-        .with_meta(meta_lock, takeover);
+            events,
+            meta_lock,
+            takeover,
+        );
         let handle = crate::stack::spawn("lsr-replica", crate::stack::ENGINE_STACK, move || {
             worker.run()
         })
@@ -483,11 +490,7 @@ impl Replicator {
             return None;
         }
         let deadline = later(self.shared.clock.now(), within);
-        let meters = Arc::clone(&self.shared.meters);
-        self.shared.wait_for(Some(deadline), |state, died| {
-            let health = snapshot(state, died, &meters);
-            done(&health).then_some(health)
-        })
+        self.shared.wait_for_health(deadline, done)
     }
 
     /// Stops after syncing and uploading everything committed. The deadline is the earlier of
@@ -869,6 +872,31 @@ mod tests {
         assert_eq!(
             forked.stop(Duration::from_secs(60)).wait(),
             Stopped::Gone(Gone::Forked)
+        );
+    }
+
+    /// A predicate may read the handle: it runs with no lock held, so `health()` inside it
+    /// answers instead of waiting on the lock the wait itself holds.
+    #[test]
+    fn a_wait_until_predicate_may_call_health() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("db");
+        std::fs::write(&path, b"").unwrap();
+        let file = DatabaseFile::of(&path).unwrap();
+        let shared = Arc::new(Shared::new(file, &Config::default(), &Runtime::system()));
+        let handle = Replicator {
+            _last: Arc::new(LastHandle {
+                shared: Arc::clone(&shared),
+            }),
+            shared,
+        };
+        let seen = handle.wait_until(Duration::from_secs(60), |_| {
+            handle.health().phase == Phase::Booting
+        });
+        assert_eq!(seen.map(|health| health.phase), Some(Phase::Booting));
+        assert_eq!(
+            handle.wait_until(Duration::ZERO, |_| handle.health().phase != Phase::Booting),
+            None
         );
     }
 

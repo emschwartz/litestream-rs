@@ -1,0 +1,19 @@
+diff --git a/crates/core/src/retry.rs b/crates/core/src/retry.rs
+--- a/crates/core/src/retry.rs
++++ b/crates/core/src/retry.rs
+@@ -534,7 +534,7 @@
+         Box::pin(async move {
+             let (core, key, offset) = (self.core, self.key, self.offset);
+             let reopen = move || async move {
+-                let mut fresh = core.inner.read_stream(key, offset);
++                let mut fresh = core.inner.read_stream(key, 0);
+                 let bytes = fresh.next(len).await?;
+                 Ok((fresh, bytes))
+             };
+@@ -622,4 +622,4 @@
+ }
+ 
+ #[cfg(test)]
+-mod tests;
++mod tests;
+\ No newline at end of file

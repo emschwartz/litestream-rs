@@ -18,7 +18,7 @@ pub(super) fn step<L: ObjectStore, S: ObjectStore>(
         state,
         (&Staging(staging), &Replica(remote)),
         Some(txid(2)),
-        (witnesses, Guard::BucketRefuses),
+        (witnesses, WriteMode::New),
         (in_flight, &mut left),
     ));
     (stepped, left)

@@ -31,8 +31,6 @@ pub mod defaults {
     pub const L0_RETENTION_CHECK_INTERVAL: GoDuration = GoDuration::from_secs(15);
     /// `shutdown-sync-timeout`: 30s (`DefaultShutdownSyncTimeout`).
     pub const SHUTDOWN_SYNC_TIMEOUT: GoDuration = GoDuration::from_secs(30);
-    /// `shutdown-sync-interval`: 500ms (`DefaultShutdownSyncInterval`); read, not used.
-    pub const SHUTDOWN_SYNC_INTERVAL: GoDuration = GoDuration::from_millis(500);
 }
 
 /// A Go config file as litestream-rs runs it.
@@ -43,10 +41,9 @@ pub struct GoConfig {
     pub(crate) levels: Vec<GoDuration>,
     pub(crate) snapshot: Snapshot,
     pub(crate) l0_retention: GoDuration,
-    pub(crate) l0_retention_check_interval: GoDuration,
-    /// Whether the file set `l0-retention-check-interval`: a set value is the interval the
-    /// check runs at, exactly; only the unset default is stretched (D193).
-    pub(crate) l0_check_set: bool,
+    /// `None` when the file leaves it unset: a set value is the interval the check runs at,
+    /// exactly; only the unset default is stretched (D193).
+    pub(crate) l0_retention_check_interval: Option<GoDuration>,
     pub(crate) retention_enabled: bool,
     pub(crate) shutdown_sync_timeout: GoDuration,
     pub(crate) validation_interval: Option<GoDuration>,
@@ -96,15 +93,10 @@ impl GoConfig {
     pub fn l0_retention(&self) -> GoDuration {
         self.l0_retention
     }
-    /// Whether the file set `l0-retention-check-interval`.
+    /// `l0-retention-check-interval`: `None` when the file leaves it unset (Go's default is
+    /// `defaults::L0_RETENTION_CHECK_INTERVAL`).
     #[must_use]
-    pub fn l0_retention_check_interval_is_set(&self) -> bool {
-        self.l0_check_set
-    }
-
-    /// `l0-retention-check-interval`.
-    #[must_use]
-    pub fn l0_retention_check_interval(&self) -> GoDuration {
+    pub fn l0_retention_check_interval(&self) -> Option<GoDuration> {
         self.l0_retention_check_interval
     }
     /// `retention.enabled`: whether litestream-rs deletes what retention expires (Go's default, true).
@@ -500,68 +492,12 @@ pub enum AppReaders {
     None,
 }
 
-/// A response to a persistent cause.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResponseSetting {
-    /// `keep-trying`.
-    KeepTrying,
-    /// `stop`.
-    Stop,
-}
-
-/// The response to another writer in the replica.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OtherWriterSetting {
-    /// `stop`.
-    Stop,
-    /// `continue-and-interleave-histories`.
-    ContinueAndInterleaveHistories,
-}
-
-/// `litestream-rs.responses`; `None` keeps the Go-like default.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ResponseSettings {
-    /// `credentials`.
-    pub credentials: Option<ResponseSetting>,
-    /// `permission-denied`.
-    pub permission_denied: Option<ResponseSetting>,
-    /// `clock-skew`.
-    pub clock_skew: Option<ResponseSetting>,
-    /// `bucket-missing`.
-    pub bucket_missing: Option<ResponseSetting>,
-    /// `tls`.
-    pub tls: Option<ResponseSetting>,
-    /// `store-refused`.
-    pub store_refused: Option<ResponseSetting>,
-    /// `remote-corrupt`.
-    pub remote_corrupt: Option<ResponseSetting>,
-    /// `remote-regressed`.
-    pub remote_regressed: Option<ResponseSetting>,
-    /// `wal-corrupt`.
-    pub wal_corrupt: Option<ResponseSetting>,
-    /// `wal-truncated`.
-    pub wal_truncated: Option<ResponseSetting>,
-    /// `wal-unlinked`.
-    pub wal_unlinked: Option<ResponseSetting>,
-    /// `wal-sync-failed`.
-    pub wal_sync_failed: Option<ResponseSetting>,
-    /// `page-size-changed`.
-    pub page_size_changed: Option<ResponseSetting>,
-    /// `conditional-writes-unsupported`: the replica's store cannot make create-only writes
-    /// (`docs/decisions.md` D79).
-    pub conditional_writes_unsupported: Option<ResponseSetting>,
-    /// `bug`.
-    pub bug: Option<ResponseSetting>,
-    /// `other-writer`.
-    pub other_writer: Option<OtherWriterSetting>,
-}
-
 /// The `litestream-rs` section, which Go ignores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RustSettings {
     pub(crate) app_readers: AppReaders,
     pub(crate) app_autocheckpoint: Option<std::num::NonZeroU32>,
-    pub(crate) responses: ResponseSettings,
+    pub(crate) responses: lsr_core::Responses,
     pub(crate) if_replication_stops: lsr_replica::IfReplicationStops,
     pub(crate) max_unreplicated_age: lsr_replica::MaxUnreplicatedAge,
 }
@@ -581,7 +517,7 @@ impl RustSettings {
     }
     /// `responses`.
     #[must_use]
-    pub fn responses(self) -> ResponseSettings {
+    pub fn responses(self) -> lsr_core::Responses {
         self.responses
     }
     /// `if-replication-stops`: `report`, `hold-start` (the default) or `stop-app`.

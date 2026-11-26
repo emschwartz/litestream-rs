@@ -14,6 +14,8 @@ mod fake;
 #[cfg(test)]
 mod faults;
 #[cfg(test)]
+mod flight;
+#[cfg(test)]
 mod gates;
 #[cfg(test)]
 mod latency;
@@ -41,6 +43,8 @@ mod rig;
 mod sourced;
 #[cfg(test)]
 mod store;
+#[cfg(test)]
+mod stream;
 #[cfg(test)]
 mod tigris;
 #[cfg(test)]

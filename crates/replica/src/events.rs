@@ -6,12 +6,13 @@
 
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use lsr_core::{AppCheckpoint, StopCause, WhyBlocked};
 use lsr_ltx::Txid;
 
 use crate::health::VerifyOutcome;
+use crate::runtime::lock;
 
 /// Something the replicator did or found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,12 +111,6 @@ struct Channel {
     ready: Condvar,
 }
 
-impl Channel {
-    fn lock(&self) -> MutexGuard<'_, Queue> {
-        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
 /// A bounded queue of events: when it is full the oldest event goes, and the drop is counted.
 #[derive(Debug)]
 pub struct ChannelSink {
@@ -150,7 +145,7 @@ impl ChannelSink {
 
 impl EventSink for ChannelSink {
     fn event(&mut self, event: &Event) {
-        let mut queue = self.channel.lock();
+        let mut queue = lock(&self.channel.queue);
         if queue.events.len() >= self.channel.capacity.get() {
             queue.events.pop_front();
             queue.dropped = queue.dropped.saturating_add(1);
@@ -163,7 +158,7 @@ impl EventSink for ChannelSink {
 
 impl Drop for ChannelSink {
     fn drop(&mut self) {
-        self.channel.lock().closed = true;
+        lock(&self.channel.queue).closed = true;
         self.channel.ready.notify_all();
     }
 }
@@ -172,14 +167,14 @@ impl EventReceiver {
     /// The oldest event, if one is queued.
     #[must_use]
     pub fn try_recv(&self) -> Option<Event> {
-        self.channel.lock().events.pop_front()
+        lock(&self.channel.queue).events.pop_front()
     }
 
     /// The oldest event, waiting for one; `None` once the sink is gone (the replicator
     /// stopped or took another sink) and the queue is empty.
     #[must_use]
     pub fn recv(&self) -> Option<Event> {
-        let mut queue = self.channel.lock();
+        let mut queue = lock(&self.channel.queue);
         loop {
             if let Some(event) = queue.events.pop_front() {
                 return Some(event);
@@ -198,13 +193,13 @@ impl EventReceiver {
     /// Every queued event, oldest first.
     #[must_use]
     pub fn drain(&self) -> Vec<Event> {
-        self.channel.lock().events.drain(..).collect()
+        lock(&self.channel.queue).events.drain(..).collect()
     }
 
     /// Events dropped because the queue was full.
     #[must_use]
     pub fn dropped(&self) -> u64 {
-        self.channel.lock().dropped
+        lock(&self.channel.queue).dropped
     }
 }
 

@@ -36,7 +36,7 @@ use std::io::{Read, Seek};
 
 use crate::fault::role::{Role, Staging};
 use crate::fault::{BugSite, Clamped, Fault, SnapshotCause};
-use crate::layout::{FileInfo, FileKey, Level};
+use crate::layout::{FileInfo, FileKey};
 use crate::pages::{PageChecksumTable, snapshot_clears};
 use crate::position::{Continuity, LastPage, Position, ReachedEnd, ReadLockHold};
 use crate::publish::Writer;
@@ -297,60 +297,68 @@ pub fn clamp(prev: Option<Timestamp>, now: Timestamp) -> (Timestamp, Option<Clam
     }
 }
 
-/// What a step starts from.
+/// What a step starts from. A snapshot holds no position.
 struct Start {
     cursor: FrameCursor,
     begin: u64,
     txid: Txid,
-    prev_commit: Option<u32>,
     prev_timestamp: Option<Timestamp>,
     held: Option<Position>,
-    snapshot: bool,
 }
 
 impl Start {
     fn of<R: Read + Seek>(step: &Step, wal: &WalReader<R>) -> Result<Self, Fault> {
         let from_start = wal.cursor_at_start();
-        let next = |txid: Option<Txid>| {
-            txid.and_then(Txid::next)
-                .ok_or_else(|| BugSite::TxidExhausted.hit())
+        let held = |position: &Position, cursor: FrameCursor| {
+            Ok(Self {
+                cursor,
+                begin: cursor.next().get(),
+                txid: position
+                    .txid()
+                    .next()
+                    .ok_or_else(|| BugSite::TxidExhausted.hit())?,
+                prev_timestamp: Some(position.timestamp()),
+                held: Some(*position),
+            })
         };
         match step {
-            Step::Incremental(position) => Ok(Self {
-                cursor: seeded(position.cursor(), from_start),
-                begin: position.cursor().next().get(),
-                txid: next(Some(position.txid()))?,
-                prev_commit: Some(position.commit().get()),
-                prev_timestamp: Some(position.timestamp()),
-                held: Some(*position),
-                snapshot: false,
-            }),
-            Step::NewGeneration(position) => Ok(Self {
-                cursor: from_start,
-                begin: from_start.next().get(),
-                txid: next(Some(position.txid()))?,
-                prev_commit: Some(position.commit().get()),
-                prev_timestamp: Some(position.timestamp()),
-                held: Some(*position),
-                snapshot: false,
-            }),
+            Step::Incremental(position) => held(position, seeded(position.cursor(), from_start)),
+            Step::NewGeneration(position) => held(position, from_start),
             Step::Snapshot {
                 after,
                 prev_timestamp,
                 ..
-            } => Ok(Self {
-                cursor: from_start,
-                begin: from_start.next().get(),
-                txid: match after {
-                    Some(after) => next(Some(*after))?,
-                    None => Txid::MIN,
-                },
-                prev_commit: None,
-                prev_timestamp: *prev_timestamp,
-                held: None,
-                snapshot: true,
-            }),
+            } => Self::snapshot(wal, *after, *prev_timestamp),
         }
+    }
+
+    /// A start with nothing held: from the WAL's first frame, after `after`.
+    fn snapshot<R: Read + Seek>(
+        wal: &WalReader<R>,
+        after: Option<Txid>,
+        prev_timestamp: Option<Timestamp>,
+    ) -> Result<Self, Fault> {
+        let cursor = wal.cursor_at_start();
+        Ok(Self {
+            cursor,
+            begin: cursor.next().get(),
+            txid: match after {
+                Some(after) => after.next().ok_or_else(|| BugSite::TxidExhausted.hit())?,
+                None => Txid::MIN,
+            },
+            prev_timestamp,
+            held: None,
+        })
+    }
+
+    /// The commit size the file chains on from: none for a snapshot.
+    fn prev_commit(&self) -> Option<u32> {
+        self.held.map(|held| held.commit().get())
+    }
+
+    /// Whether the file is a snapshot of every page.
+    fn is_snapshot(&self) -> bool {
+        self.held.is_none()
     }
 }
 
@@ -376,16 +384,7 @@ pub(crate) fn scan_whole<R: Read + Seek>(
     wal: &mut WalReader<R>,
     upto: CommittedRead,
 ) -> Result<PageMap, Fault> {
-    let cursor = wal.cursor_at_start();
-    let start = Start {
-        cursor,
-        begin: cursor.next().get(),
-        txid: Txid::MIN,
-        prev_commit: None,
-        prev_timestamp: None,
-        held: None,
-        snapshot: true,
-    };
+    let start = Start::snapshot(wal, None, None)?;
     scan(wal, &start, upto, None).map(|scanned| scanned.map)
 }
 
@@ -468,7 +467,7 @@ fn scan<R: Read + Seek>(
                 txs = txs.saturating_add(1);
                 last_frame = tx.frames().last().copied();
                 let bytes = cursor.next().get().saturating_sub(start.begin);
-                if !start.snapshot && cap.is_some_and(|cap| bytes >= cap.get()) {
+                if !start.is_snapshot() && cap.is_some_and(|cap| bytes >= cap.get()) {
                     limited = true;
                     break;
                 }
@@ -669,8 +668,8 @@ pub(crate) async fn stage<R: Read + Seek, P: PageSource, L: Role>(
 /// counts, so callers take the read first and call this before staging.
 ///
 /// # Errors
-/// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing, and no later sync
-/// of that WAL generation is trusted (`actor::unproven`).
+/// [`Fault::WalSyncFailed`] when the sync failed; the step stages nothing and the next step
+/// syncs again, remembering nothing (`docs/decisions/D173.md`).
 pub(crate) fn wal_barrier<W: WalSource>(wal: &mut W) -> Result<(), Fault> {
     wal.sync().map_err(Fault::from_source)
 }
@@ -701,16 +700,29 @@ pub async fn sync_step<R: Read + Seek, P: PageSource, L: ObjectStore>(
     cfg: &SyncConfig,
     now: Timestamp,
 ) -> Result<Synced, StepFailed> {
-    sync_step_in(step, wal, committed, db, pages, &Staging(staging), cfg, now).await
+    match run(
+        &step,
+        wal,
+        committed,
+        db,
+        pages,
+        &Staging(staging),
+        cfg,
+        now,
+    )
+    .await
+    {
+        Ok(synced) => Ok(synced),
+        Err(fault) => Err(StepFailed { fault, retry: step }),
+    }
 }
 
-/// [`sync_step`] with each store as its role.
 #[expect(
     clippy::too_many_arguments,
     reason = "the plan fixes this signature; each argument is a distinct source of the step"
 )]
-pub(crate) async fn sync_step_in<R: Read + Seek, P: PageSource, L: Role>(
-    step: Step,
+async fn run<R: Read + Seek, P: PageSource, L: Role>(
+    step: &Step,
     wal: &mut WalReader<R>,
     committed: CommittedRead,
     db: &mut P,
@@ -718,24 +730,7 @@ pub(crate) async fn sync_step_in<R: Read + Seek, P: PageSource, L: Role>(
     staging: &L,
     cfg: &SyncConfig,
     now: Timestamp,
-) -> Result<Synced, StepFailed> {
-    let source = Source { db, pages };
-    match run(&step, wal, committed, source, staging, cfg, now).await {
-        Ok(synced) => Ok(synced),
-        Err(fault) => Err(StepFailed { fault, retry: step }),
-    }
-}
-
-async fn run<R: Read + Seek, P: PageSource, L: Role>(
-    step: &Step,
-    wal: &mut WalReader<R>,
-    committed: CommittedRead,
-    source: Source<'_, P>,
-    staging: &L,
-    cfg: &SyncConfig,
-    now: Timestamp,
 ) -> Result<Synced, Fault> {
-    let Source { db, pages } = source;
     let epoch = committed.epoch();
     let start = Start::of(step, wal)?;
     forget(pages, step, wal.header().page_size());
@@ -765,9 +760,9 @@ async fn run<R: Read + Seek, P: PageSource, L: Role>(
     }
     let page_size = wal.header().page_size();
     let commit = commit_of(&scanned.map, db)?;
-    let plan = Plan::new(&scanned.map, start.prev_commit, commit, page_size);
+    let plan = Plan::new(&scanned.map, start.prev_commit(), commit, page_size);
     let header = created_at(&start, &scanned, wal, commit, cfg.node_id, now)?;
-    let key = FileKey::new(Level::ZERO, TxidRange::single(start.txid));
+    let key = FileKey::staged(start.txid);
     let (file, last_written, witness, changes) = stage_recorded(
         staging,
         &key,
@@ -776,7 +771,7 @@ async fn run<R: Read + Seek, P: PageSource, L: Role>(
         wal,
         db,
         pages,
-        start.prev_commit,
+        start.prev_commit(),
     )
     .await?;
     let last_page = match (scanned.last_frame, last_written) {
@@ -802,12 +797,6 @@ async fn run<R: Read + Seek, P: PageSource, L: Role>(
         txs: scanned.txs,
         changes,
     })
-}
-
-/// The database file and its page checksum table, as one argument.
-struct Source<'a, P> {
-    db: &'a mut P,
-    pages: &'a mut PageChecksumTable,
 }
 
 /// How far a staged position can be trusted: not at all under a reset

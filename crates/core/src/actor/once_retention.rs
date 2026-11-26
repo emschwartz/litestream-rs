@@ -21,8 +21,8 @@
 
 use lsr_ltx::Timestamp;
 
-use super::{Actor, Env, Event, MaintainedEvent, Tick};
-use crate::created_at::{ResolvedCreatedAt, resolve};
+use super::{Actor, Env, MaintainedEvent, Tick};
+use crate::created_at::{ResolvedCreatedAt, resolve_knowing};
 use crate::fault::Fault;
 use crate::fault::role::Role;
 use crate::inventory::Inventory;
@@ -138,7 +138,7 @@ impl Actor {
             let mut step = |resolved: &ResolvedCreatedAt| {
                 once_retention(&inventory, now, cfg, published, state, resolved)
             };
-            resolve(env.remote, &mut step).await
+            resolve_knowing(env.remote, &mut self.engine.known, &mut step).await
         };
         let decided = match decided {
             Ok(decided) => decided.value,
@@ -187,13 +187,7 @@ impl Actor {
                     deleted: deleted.saturating_add(count64),
                     repeated,
                 };
-                self.ran(
-                    Event::Maintained {
-                        event: MaintainedEvent::Deleted(count),
-                        created_at_read: 0,
-                    },
-                    now,
-                )
+                self.ran_maintained(MaintainedEvent::Deleted(count), 0, now)
             }
             Outcome::Failed(err) => {
                 let fault = Fault::from_maintain(&err);
@@ -210,12 +204,6 @@ impl Actor {
     }
 
     fn retention_waiting(&mut self, held: Option<RetentionHold>, now: Timestamp) -> Tick {
-        self.ran(
-            Event::Maintained {
-                event: MaintainedEvent::Waiting { held },
-                created_at_read: 0,
-            },
-            now,
-        )
+        self.ran_maintained(MaintainedEvent::Waiting { held }, 0, now)
     }
 }

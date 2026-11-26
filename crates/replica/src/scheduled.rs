@@ -29,7 +29,7 @@
 //! (nothing to compare), and a failed listing or read says nothing about the replica.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use lsr_core::{Actor, Compared, LivePages, Severity, Verified, VerifyError, verify_against};
@@ -38,7 +38,7 @@ use lsr_ltx::{Timestamp, Txid};
 use crate::events::Event;
 use crate::exec::block_on;
 use crate::health::{Mismatch, Verification, VerifyFailure, VerifyOutcome};
-use crate::runtime::{Park, later};
+use crate::runtime::{Park, later, lock};
 use crate::store::Metered;
 
 /// The verify thread's name.
@@ -73,13 +73,9 @@ struct Job {
 }
 
 impl Job {
-    fn lock(&self) -> MutexGuard<'_, Slot> {
-        self.slot.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// The next pages to verify; `None` once closed.
     fn next(&self) -> Option<LivePages> {
-        let mut slot = self.lock();
+        let mut slot = lock(&self.slot);
         loop {
             if slot.closed {
                 return None;
@@ -99,7 +95,7 @@ impl Job {
 fn serve(job: &Job, store: &Metered, park: &dyn Park) {
     while let Some(live) = job.next() {
         let result = catch_unwind(AssertUnwindSafe(|| block_on(verify_against(store, &live)))).ok();
-        job.lock().done = Some((live.txid(), result));
+        lock(&job.slot).done = Some((live.txid(), result));
         park.unpark();
     }
 }
@@ -164,7 +160,7 @@ impl Scheduled {
         if let Some(live) = actor.take_live_pages() {
             self.hand_over(live, now);
         }
-        let (txid, result) = self.job.lock().done.take()?;
+        let (txid, result) = lock(&self.job.slot).done.take()?;
         self.stage = Stage::Due(later(now, self.interval));
         let outcome = self.record(txid, result, now);
         Some(Event::Verified { txid, outcome })
@@ -189,7 +185,7 @@ impl Scheduled {
                 return;
             }
         }
-        let mut slot = self.job.lock();
+        let mut slot = lock(&self.job.slot);
         slot.live = Some(live);
         drop(slot);
         self.job.ready.notify_all();
@@ -239,7 +235,7 @@ impl Scheduled {
 impl Drop for Scheduled {
     /// The verify thread ends after the run it is in, if any; nobody waits for it.
     fn drop(&mut self) {
-        self.job.lock().closed = true;
+        lock(&self.job.slot).closed = true;
         self.job.ready.notify_all();
     }
 }

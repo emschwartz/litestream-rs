@@ -6,10 +6,11 @@
 # test in `just check` takes 38 s (lsr-sqlite faults::a_read_error_at_each_step_of_a_cycle...) and
 # the next 37 s (lsr-sim fixed_seeds batches; the planner sweeps in lsr-core plan_exhaustive take about 11 CPU-seconds since they were split), so the limit
 # is about five times the slowest. On a 12-core Mac the slowest two, the
-# lsr-sqlite sync-error and read-error fault tests, take 110 s and 78 s in a full run (the read
-# case takes 28 s alone; it took 88 s before the harness's stores used plain fsync, see
-# crates/sqlite/src/testing/host_fs.rs). The rest is the engine's own full sync of the WAL, 8 ms a
-# call there, so the limit is 1.6 times the slowest on that machine. It is also above the 60 s `PATIENCE` of the cli and replica
+# lsr-sqlite sync-error and read-error fault tests, took 110 s and 78 s in a full run and timed out
+# under load. Most of it was fsync: the harness's stores now use plain fsync
+# (crates/sqlite/src/testing/host_fs.rs) and the fault VFS turns the engine's FULL sync of the WAL
+# into a NORMAL one (without_drive_flush in crates/sqlite/src/testing/vfs.rs), where macOS paid
+# F_FULLFSYNC at 8 ms a call. Both tests now take 23 s alone there. It is also above the 60 s `PATIENCE` of the cli and replica
 # tests (their own bounded wait fails first, with its own message) and far below every CI job's
 # `timeout-minutes`. The overrides below are for the tests that only run from a recipe, each
 # below the timeout of the job that runs it.

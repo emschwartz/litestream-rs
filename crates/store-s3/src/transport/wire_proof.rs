@@ -106,9 +106,7 @@ fn every_form(style: UrlStyle) -> Vec<(&'static str, HttpRequest)> {
         ("ranged get", b.get_range(now, &key, 0, one).expect("get")),
         (
             "put",
-            b.put_object(now, &key, b"x".to_vec(), now)
-                .expect("put")
-                .into(),
+            b.put_object(now, &key, b"x".to_vec(), now).expect("put"),
         ),
         (
             "create multipart",
@@ -117,8 +115,7 @@ fn every_form(style: UrlStyle) -> Vec<(&'static str, HttpRequest)> {
         (
             "upload part",
             b.upload_part(now, &key, &upload, part, vec![1, 2, 3])
-                .expect("part")
-                .into(),
+                .expect("part"),
         ),
         (
             "complete multipart",

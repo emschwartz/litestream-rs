@@ -5,11 +5,12 @@
 
 use std::io::Cursor;
 
-use lsr_ltx::{Encoder, HeaderFields, PageNo, PageSize, Timestamp, WalOrigin};
+use lsr_ltx::{Encoder, HeaderFields, PageNo, PageSize, Timestamp, TxidRange, WalOrigin};
 
 use super::*;
 use crate::conformance::block_on;
 use crate::fault::role::{Replica, Role, Staging};
+use crate::layout::Level;
 use crate::mem::MemStore;
 
 fn txid(n: u64) -> Txid {
@@ -154,6 +155,58 @@ fn room_runs_out_at_the_cap() {
 
 /// A staged file longer than one read decodes whole: only a short read ends
 /// the file.
+/// What the set of sent tokens keeps: a token under its own key only, none of a pruned
+/// file, and no more than its cap, the newest staying.
+#[test]
+fn sent_tokens_go_with_their_staged_files_and_at_the_cap() {
+    let mut sent: Sent = Sent::default();
+    for n in 1..=5 {
+        sent.put(token(n, 1));
+    }
+    assert_eq!(sent.get(&key(3)), Some(&token(3, 1)));
+    // Another file that ends at the same transaction is another key.
+    let wider = FileKey::new(Level::ZERO, TxidRange::new(txid(2), txid(3)).unwrap());
+    assert_eq!(sent.get(&wider), None);
+    // A put for the same transaction replaces the token.
+    sent.put(token(3, 9));
+    assert_eq!(sent.get(&key(3)), Some(&token(3, 9)));
+    assert_eq!(sent.len(), 5);
+    sent.pruned_through(txid(2));
+    assert_eq!(sent.get(&key(2)), None);
+    assert!(sent.get(&key(3)).is_some());
+    assert_eq!(sent.len(), 3);
+    // At the cap the oldest goes for the newest.
+    let mut full = Sent::default();
+    for n in 1..=u64::try_from(MAX_SENT).unwrap() {
+        full.put(token(n, 1));
+    }
+    assert_eq!(full.len(), MAX_SENT);
+    assert!(full.get(&key(1)).is_some());
+    let one_more = u64::try_from(MAX_SENT).unwrap() + 1;
+    full.put(token(one_more, 1));
+    assert_eq!(full.len(), MAX_SENT);
+    assert_eq!(full.get(&key(1)), None);
+    assert!(full.get(&key(2)).is_some());
+    assert!(full.get(&key(one_more)).is_some());
+}
+
+/// A token tells a file's end from another's by its length and by the checksum its trailer
+/// ends in, and from nothing shorter than a checksum.
+#[test]
+fn a_token_knows_how_its_file_ends() {
+    let bytes = file(1, 1);
+    let ours = token(1, 1);
+    let size = u64::try_from(bytes.len()).unwrap();
+    let trailer = &bytes[bytes.len() - lsr_ltx::TRAILER_LEN..];
+    assert!(ours.ends_as(size, trailer));
+    assert!(!ours.ends_as(size + 1, trailer));
+    let other = file(1, 2);
+    assert_eq!(other.len(), bytes.len());
+    assert!(!ours.ends_as(size, &other[other.len() - lsr_ltx::TRAILER_LEN..]));
+    assert!(!ours.ends_as(size, &trailer[9..]));
+    assert!(!ours.ends_as(size, &[]));
+}
+
 #[test]
 fn a_file_longer_than_one_read_is_decoded_whole() {
     let page_size = PageSize::new(4096).unwrap();

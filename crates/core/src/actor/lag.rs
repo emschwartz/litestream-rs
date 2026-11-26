@@ -192,23 +192,23 @@ impl Actor {
         (at >= first).then_some(at)
     }
 
-    /// Notes the snapshot a step just staged as `key` as quiet when it was staged while nothing
-    /// was known off the replica, for a cause that is a doubt about the WAL's continuity rather
-    /// than a finding of unstaged frames, and the WAL held nothing past the synced position: it
-    /// holds what the replica already holds, as far as the engine can tell. A commit the engine never saw (made and checkpointed away by
-    /// another process between two ticks) would be missed until the next commit starts the
-    /// clock: a late trip, never a false one.
+    /// Notes the snapshot a step just staged as `key` as quiet when it was staged for a cause
+    /// that is a doubt about the WAL's continuity rather than a finding of unstaged frames, and
+    /// the WAL held nothing past the synced position (or past the doubt's baseline): it holds no
+    /// commit the staged files before it do not, as far as the engine can tell. Whether those
+    /// files are on the replica yet does not matter, as it does not for the files a boot finds
+    /// quiet (`crate::pages`): while one is pending the clock runs for it, and once the replica
+    /// holds them a quiet snapshot is no lag. A commit the engine never saw (made and
+    /// checkpointed away by another process between two ticks) would be missed until the next
+    /// commit starts the clock: a late trip, never a false one.
     pub(super) fn note_quiet_snapshot(
         &mut self,
         cause: SnapshotCause,
         key: FileKey,
         end: &StepEnd,
     ) {
-        // No clock running: the last observation found every staged file on the replica, or
-        // only quiet ones.
-        let caught_up = self.kept.lag.since().is_none();
         let quiet_end = self.ended_where_synced(end) || self.ended_at_doubt_baseline(end);
-        if doubt_only(cause) && caught_up && quiet_end {
+        if doubt_only(cause) && quiet_end {
             self.kept.quiet.insert(key.range().max());
         }
     }
@@ -274,17 +274,11 @@ impl Actor {
         let Some(probe) = probe.into_iter().chain(overdue).min() else {
             return tick;
         };
-        match tick {
-            Tick::Ran { event, next } => {
-                let next = match next {
-                    Next::Now => Next::Now,
-                    Next::At(at) => Next::At(at.min(probe)),
-                    Next::OnWalChange => Next::At(probe),
-                };
-                Tick::Ran { event, next }
-            }
-            other @ (Tick::Stopped(_) | Tick::Drained { .. } | Tick::DeadlineReached(_)) => other,
-        }
+        tick.map_next(|next| match next {
+            Next::Now => Next::Now,
+            Next::At(at) => Next::At(at.min(probe)),
+            Next::OnWalChange => Next::At(probe),
+        })
     }
 
     /// Why fail-stop trips for this engine now, if it does (`crate::failstop`).

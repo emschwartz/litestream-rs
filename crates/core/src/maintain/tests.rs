@@ -18,6 +18,7 @@ use crate::mem::MemStore;
 use crate::plan::{KeyTarget, PlanOutcome, plan};
 use crate::store::WriteMode;
 use crate::store::{PageLimit, StoreOp, Upload};
+use crate::witness::{Sent, Witnessed};
 
 /// A day-aligned instant (2023-11-15), so every default window starts on it.
 pub(super) const T0: i64 = 1_700_006_400_000;
@@ -109,7 +110,18 @@ pub(super) async fn run_compact<L: Role, R: Role>(
     local: &L,
     replica: &R,
 ) -> Outcome {
-    run_compaction(job.inputs(), job.level(), local, replica).await
+    run_compact_as(job, local, replica, WriteMode::New).await
+}
+
+/// [`run_compact`] writing its output as `guard` says.
+async fn run_compact_as<L: Role, R: Role>(
+    job: &CompactJob,
+    local: &L,
+    replica: &R,
+    guard: WriteMode,
+) -> Outcome {
+    let sent = Sent::default();
+    run_compaction(job.inputs(), job.level(), local, replica, &sent, guard).await
 }
 
 /// `due` for a replica whose first snapshot is backing off, so the levels are planned as they
@@ -1696,6 +1708,30 @@ fn ltx_filled(min: u64, max: u64, created: i64, fill: u8) -> Vec<u8> {
     encoder.finish(None).unwrap().0
 }
 
+/// Transaction `n` as a file of `pages` pages: a longer file than [`ltx`] makes.
+fn ltx_pages(n: u64, created: i64, pages: u32) -> Vec<u8> {
+    let page_size = PageSize::new(PAGE).unwrap();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size,
+        commit: pages,
+        txids: range(n, n),
+        timestamp: at(created),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for page in 1..=pages {
+        let data = vec![u8::try_from(page % 251).unwrap(); page_size.bytes()];
+        encoder
+            .write_page(PageNo::new(page, page_size).unwrap(), &data)
+            .unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
 fn put(store: &MemStore, l: u8, n: u64, created: i64) {
     block_on(async {
         let k = key(l, n, n);
@@ -1842,6 +1878,149 @@ fn level_one_is_built_from_the_replica_when_the_local_copy_differs() {
     );
 }
 
+/// Tokens for the level-0 files `store` holds under `ids`: what the uploader would hold
+/// after it put those very bytes on the replica.
+fn sent_of(store: &MemStore, ids: &[u64]) -> Sent {
+    let mut sent = Sent::default();
+    for n in ids {
+        let k = key(0, *n, *n);
+        sent.put(Witnessed::of_bytes(k, &whole(store, &k)).unwrap());
+    }
+    sent
+}
+
+/// What level 1 holds when it is built from the files [`three_l0`] makes.
+fn level_one_of_three() -> Vec<u8> {
+    let want = MemStore::new();
+    three_l0(&MemStore::new(), &want);
+    let job = l1_job(&want);
+    let built = block_on(run_compact(
+        &job,
+        &Staging(&MemStore::new()),
+        &Replica(&want),
+    ));
+    assert!(matches!(built, Outcome::Compacted { .. }), "{built:?}");
+    whole(&want, &job.output_key())
+}
+
+/// A level-0 file this process put on the replica itself is compacted from staging with no
+/// read of the replica's copy: the token the put was checked against says what the replica
+/// holds. The replica's objects here are other files of the same size, which a read of
+/// their trailers would have told apart, and level 1 holds the staged content all the same.
+#[test]
+fn a_file_this_process_sent_is_compacted_from_staging_with_no_read_of_the_replica() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &MemStore::new());
+    for n in 1..=3 {
+        let created = T0 - 100_000 + i64::try_from(n).unwrap();
+        block_on(async {
+            let mut up = replica
+                .begin_upload(&key(0, n, n), at(created), WriteMode::Replace)
+                .await
+                .unwrap();
+            up.write(&ltx_filled(n, n, created, 0xee)).await.unwrap();
+            up.commit().await.unwrap();
+        });
+    }
+    let job = l1_job(&replica);
+    let sent = sent_of(&local, &[1, 2, 3]);
+    let out = block_on(run_compaction(
+        job.inputs(),
+        job.level(),
+        &Staging(&local),
+        &Replica(&replica),
+        &sent,
+        WriteMode::New,
+    ));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_eq!(whole(&replica, &job.output_key()), level_one_of_three());
+    // One file with no token is enough for the replica to be asked: the trailers differ,
+    // and level 1 is built from what the replica holds.
+    let fresh = MemStore::new();
+    three_l0(&MemStore::new(), &fresh);
+    block_on(async {
+        let created = T0 - 100_000 + 3;
+        let mut up = fresh
+            .begin_upload(&key(0, 3, 3), at(created), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&ltx_filled(3, 3, created, 0xee)).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let out = block_on(run_compaction(
+        job.inputs(),
+        job.level(),
+        &Staging(&local),
+        &Replica(&fresh),
+        &sent_of(&local, &[1, 2]),
+        WriteMode::New,
+    ));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_ne!(whole(&fresh, &job.output_key()), level_one_of_three());
+}
+
+/// A staged file that changed after it was sent (a staging backup put back under a running
+/// engine) no longer ends as its token says: level 1 is built from the replica's copies.
+#[test]
+fn a_staged_copy_that_changed_since_it_was_sent_is_not_compacted_from() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let sent = sent_of(&local, &[1, 2, 3]);
+    let created = T0 - 100_000 + 3;
+    block_on(async {
+        let mut up = local
+            .begin_upload(&key(0, 3, 3), at(created), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&ltx_filled(3, 3, created, 0xee)).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let job = l1_job(&replica);
+    let out = block_on(run_compaction(
+        job.inputs(),
+        job.level(),
+        &Staging(&local),
+        &Replica(&replica),
+        &sent,
+        WriteMode::New,
+    ));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_eq!(whole(&replica, &job.output_key()), level_one_of_three());
+}
+
+/// A replica object of another length than the file this process sent is not that file
+/// (another hand wrote the key since): the listing shows it, and level 1 is built from
+/// what the replica holds, not from the staged copy.
+#[test]
+fn a_replica_object_of_another_size_than_was_sent_is_read_from_the_replica() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let sent = sent_of(&local, &[1, 2, 3]);
+    // Transaction 3 on the replica now spans two pages: a longer file than was sent.
+    let created = T0 - 100_000 + 3;
+    let longer = ltx_pages(3, created, 2);
+    assert_ne!(longer.len(), whole(&local, &key(0, 3, 3)).len());
+    block_on(async {
+        let mut up = replica
+            .begin_upload(&key(0, 3, 3), at(created), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&longer).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let job = l1_job(&replica);
+    let out = block_on(run_compaction(
+        job.inputs(),
+        job.level(),
+        &Staging(&local),
+        &Replica(&replica),
+        &sent,
+        WriteMode::New,
+    ));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_ne!(whole(&replica, &job.output_key()), level_one_of_three());
+}
+
 #[test]
 fn an_input_missing_everywhere_is_a_replan() {
     let (local, replica) = (MemStore::new(), MemStore::new());
@@ -1915,23 +2094,105 @@ fn a_local_source_read_error_is_failed_and_publishes_nothing() {
     assert!(listed(&replica, 1).is_empty());
 }
 
+/// A compaction reads nothing of its output key before it writes: the listing it was planned
+/// from shows every file this engine wrote, so the key holds nothing (Go reads nothing either).
+/// Run twice by hand, create-only the bucket refuses the second write; on a store that cannot
+/// make create-only writes the second run writes the same file over the first.
 #[test]
 fn running_a_job_twice_leaves_one_file_at_the_key() {
+    for guard in [WriteMode::New, WriteMode::Replace] {
+        let (local, replica) = (MemStore::new(), MemStore::new());
+        three_l0(&local, &replica);
+        let job = l1_job(&replica);
+        let (from, to) = (Staging(&local), Replica(&replica));
+        let out = block_on(run_compact_as(&job, &from, &to, guard));
+        assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+        let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+        let again = block_on(run_compact_as(&job, &from, &to, guard));
+        match guard {
+            WriteMode::New => assert!(
+                matches!(again, Outcome::Replan { key } if key == job.output_key()),
+                "{guard:?}: {again:?}"
+            ),
+            WriteMode::Replace => {
+                assert!(matches!(again, Outcome::Compacted { .. }), "{again:?}");
+            }
+        }
+        assert_eq!(listed(&replica, 1), vec![job.output_key()]);
+        let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
+        assert_eq!(first, after);
+    }
+}
+
+/// On a store that cannot make create-only writes, a compaction still reads nothing of its
+/// output key first: the second run writes the same file over the first (Go reads nothing
+/// either).
+#[test]
+fn a_compaction_writes_its_output_without_reading_the_key_first() {
     let (local, replica) = (MemStore::new(), MemStore::new());
     three_l0(&local, &replica);
     let job = l1_job(&replica);
-    let out = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let out = block_on(run_compact_as(&job, &from, &to, WriteMode::Replace));
     assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
-    let first = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    // The second run finds the output there and writes nothing over it.
-    let again = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
-    assert!(
-        matches!(again, Outcome::Replan { key } if key == job.output_key()),
-        "{again:?}"
-    );
+    let again = block_on(run_compact_as(&job, &from, &to, WriteMode::Replace));
+    assert!(matches!(again, Outcome::Compacted { .. }), "{again:?}");
     assert_eq!(listed(&replica, 1), vec![job.output_key()]);
-    let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
-    assert_eq!(first, after);
+}
+
+/// An output key that holds something other than this run would write is left as it is:
+/// the bucket refuses the create-only commit, and the job is planned again from a listing
+/// that shows what is there. A store without create-only writes has no such refusal.
+#[test]
+fn an_output_key_that_holds_another_file_is_not_written_over() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let job = l1_job(&replica);
+    let other = b"another hand's output".to_vec();
+    block_on(async {
+        let mut up = replica
+            .begin_upload(&job.output_key(), at(T0), WriteMode::Replace)
+            .await
+            .unwrap();
+        up.write(&other).await.unwrap();
+        up.commit().await.unwrap();
+    });
+    let out = block_on(run_compact_as(
+        &job,
+        &Staging(&local),
+        &Replica(&replica),
+        WriteMode::New,
+    ));
+    assert!(
+        matches!(out, Outcome::Replan { key } if key == job.output_key()),
+        "{out:?}"
+    );
+    assert_eq!(whole(&replica, &job.output_key()), other);
+}
+
+/// A store that cannot make create-only writes fails the output's commit and publishes
+/// nothing; told so, the compaction reads the key and replaces.
+#[test]
+fn a_store_without_create_only_writes_takes_no_create_only_output() {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    three_l0(&local, &replica);
+    let job = l1_job(&replica);
+    replica.refuse_create_only();
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let out = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
+    assert!(
+        matches!(
+            &out,
+            Outcome::Failed(MaintainError::Compact(CompactError::Dest(
+                StoreError::CreateOnlyUnsupported { .. }
+            )))
+        ),
+        "{out:?}"
+    );
+    assert!(listed(&replica, 1).is_empty());
+    let out = block_on(run_compact_as(&job, &from, &to, WriteMode::Replace));
+    assert!(matches!(out, Outcome::Compacted { .. }), "{out:?}");
+    assert_eq!(listed(&replica, 1), vec![job.output_key()]);
 }
 
 /// A compaction whose output key already holds an object (an earlier run's
@@ -1941,20 +2202,51 @@ fn running_a_job_twice_leaves_one_file_at_the_key() {
 #[test]
 fn a_rejected_compaction_never_deletes_an_output_that_was_already_there() {
     let (local, replica, _, job) = rejected_setup();
-    let first = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let first = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
     assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
     let held = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
     replica.inject_failure_after_publish(StoreError::Corrupt {
         key: None,
         cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
     });
-    let again = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+    let again = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
     assert!(
         matches!(again, Outcome::Replan { key } if key == job.output_key()),
         "{again:?}"
     );
     let after = block_on(replica.read(&job.output_key(), 0, ReadLen::CHUNK)).unwrap();
     assert_eq!(after, held, "the output that was there is untouched");
+}
+
+/// A create-only output asked nobody whether its key was free. A part the store rejects
+/// ends the upload before its commit asks the bucket for the key, so what the key holds
+/// then is an earlier output, and the failed attempt deletes nothing.
+#[test]
+fn a_rejected_part_of_a_create_only_output_deletes_nothing_under_its_key() {
+    let (local, replica, _, job) = rejected_setup();
+    let (from, to) = (Staging(&local), Replica(&replica));
+    let first = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
+    assert!(matches!(first, Outcome::Compacted { .. }), "{first:?}");
+    let held = whole(&replica, &job.output_key());
+    replica.inject_failure(
+        StoreOp::Upload,
+        StoreError::Corrupt {
+            key: None,
+            cause: crate::store::CorruptCause::ChecksumMismatch {
+                part: crate::store::PartNumber::new(1),
+            },
+        },
+    );
+    let again = block_on(run_compact_as(&job, &from, &to, WriteMode::New));
+    assert!(
+        matches!(
+            again,
+            Outcome::Failed(MaintainError::Compact(CompactError::Dest(_)))
+        ),
+        "{again:?}"
+    );
+    assert_eq!(whole(&replica, &job.output_key()), held);
 }
 
 #[test]
@@ -2180,21 +2472,36 @@ fn rejected_setup() -> (MemStore, MemStore, MaintainState, CompactJob) {
 
 #[test]
 fn a_rejected_compaction_output_is_deleted_by_the_executor() {
-    for mismatch in [
-        corrupt_output_error(false),
-        StoreError::Corrupt {
-            key: None,
-            cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+    let whole_object = StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::ChecksumMismatch { part: None },
+    };
+    // A replacing write read its key as free first, so a rejected part's leavings are its own.
+    let a_part = StoreError::Corrupt {
+        key: None,
+        cause: crate::store::CorruptCause::ChecksumMismatch {
+            part: crate::store::PartNumber::new(1),
         },
+    };
+    for (mismatch, guard) in [
+        (corrupt_output_error(false), WriteMode::New),
+        (whole_object.clone(), WriteMode::New),
+        (whole_object, WriteMode::Replace),
+        (a_part, WriteMode::Replace),
     ] {
         let (local, replica, _, job) = rejected_setup();
         replica.inject_failure_after_publish(mismatch);
-        let ran = block_on(run_compact(&job, &Staging(&local), &Replica(&replica)));
+        let ran = block_on(run_compact_as(
+            &job,
+            &Staging(&local),
+            &Replica(&replica),
+            guard,
+        ));
         assert!(
             matches!(ran, Outcome::Failed(MaintainError::Compact(_))),
-            "{ran:?}"
+            "{guard:?}: {ran:?}"
         );
-        assert!(load(&replica).level(level(1)).is_empty());
+        assert!(load(&replica).level(level(1)).is_empty(), "{guard:?}");
     }
 }
 
@@ -2289,6 +2596,136 @@ fn a_distrusted_output_gone_from_the_listing_is_forgotten() {
     );
 }
 
+/// The range of the level-1 compaction `due` is, when it is one.
+fn level_one_run(due: &Due) -> Option<(u64, u64)> {
+    if let Due::Run(Job::Compact(job)) = due
+        && job.level() == level(1)
+    {
+        let range = job.inputs().range();
+        Some((range.min().get(), range.max().get()))
+    } else {
+        None
+    }
+}
+
+/// A snapshot at 1 and level-0 files 2 to `last`, staged and on the replica, all an hour
+/// older than the tests' level-1 window.
+fn hour_old_level_zero(last: u64) -> (MemStore, MemStore) {
+    let (local, replica) = (MemStore::new(), MemStore::new());
+    put(&replica, 9, 1, T0 + 1);
+    for n in 2..=last {
+        let created = T0 + i64::try_from(n).unwrap() * 1000;
+        put(&local, 0, n, created);
+        put(&replica, 0, n, created);
+    }
+    (local, replica)
+}
+
+/// Runs the level-1 compaction due at `now` and records it; returns its range.
+fn compact_level_one(
+    local: &MemStore,
+    replica: &MemStore,
+    state: &mut MaintainState,
+    now: i64,
+) -> (u64, u64) {
+    let due = due_state(&load(replica), at(now), &defaults(), None, state);
+    let range = level_one_run(&due).unwrap_or_else(|| panic!("no level-1 job: {due:?}"));
+    let Due::Run(job @ Job::Compact(_)) = due else {
+        panic!("no compaction")
+    };
+    let (inputs, to) = job.merge().unwrap();
+    let ran = block_on(run_compaction(
+        inputs,
+        to,
+        &Staging(local),
+        &Replica(replica),
+        &Sent::default(),
+        WriteMode::New,
+    ));
+    assert!(matches!(ran, Outcome::Compacted { .. }), "{ran:?}");
+    state.record(at(now), &job, &ran);
+    range
+}
+
+/// Level 1's 30 second window that opens an hour after `T0`.
+const OPENS: i64 = T0 + 3_600_000;
+
+/// A level this engine compacted waits for its next window, as Go's level monitor fires
+/// once per window. The output cannot say so: it carries its last input's time, from before
+/// the window, so a process that remembers nothing compacts the next file at once.
+#[test]
+fn a_level_this_engine_compacted_waits_for_its_next_window() {
+    let (local, replica) = hour_old_level_zero(3);
+    let mut state = MaintainState::default();
+    // At the window's first instant, which is inside it.
+    assert_eq!(
+        compact_level_one(&local, &replica, &mut state, OPENS),
+        (2, 3)
+    );
+    put(&local, 0, 4, OPENS + 500);
+    put(&replica, 0, 4, OPENS + 500);
+    let ask = |state: &mut MaintainState, now: i64| {
+        level_one_run(&due_state(
+            &load(&replica),
+            at(now),
+            &defaults(),
+            None,
+            state,
+        ))
+    };
+    assert_eq!(
+        ask(&mut MaintainState::default(), OPENS + 1000),
+        Some((4, 4))
+    );
+    assert_eq!(ask(&mut state, OPENS + 1000), None);
+    assert_eq!(ask(&mut state, OPENS + 29_999), None);
+    assert_eq!(ask(&mut state, OPENS + 30_000), Some((4, 4)));
+}
+
+/// What closes a window is a compaction inside it: one in the window before does not.
+#[test]
+fn a_compaction_in_the_window_before_leaves_this_one_open() {
+    let (local, replica) = hour_old_level_zero(3);
+    let mut state = MaintainState::default();
+    assert_eq!(
+        compact_level_one(&local, &replica, &mut state, OPENS - 1),
+        (2, 3)
+    );
+    put(&local, 0, 4, OPENS - 1);
+    put(&replica, 0, 4, OPENS - 1);
+    let due = due_state(&load(&replica), at(OPENS), &defaults(), None, &mut state);
+    assert_eq!(level_one_run(&due), Some((4, 4)));
+}
+
+/// A compaction that took as many files as one job may did not take all there was: the
+/// backlog drains in the same window, and the job that ends it closes the window.
+#[test]
+fn a_full_compaction_leaves_the_window_open_for_the_backlog() {
+    let last = u64::try_from(MAX_INPUTS).unwrap() + 8;
+    let (local, replica) = hour_old_level_zero(last);
+    let mut state = MaintainState::default();
+    let full = u64::try_from(MAX_INPUTS).unwrap() + 1;
+    assert_eq!(
+        compact_level_one(&local, &replica, &mut state, OPENS),
+        (2, full)
+    );
+    let rest = compact_level_one(&local, &replica, &mut state, OPENS + 1000);
+    assert_eq!(rest, (full + 1, last));
+    put(&local, 0, last + 1, OPENS + 2000);
+    put(&replica, 0, last + 1, OPENS + 2000);
+    let ask = |state: &mut MaintainState, now: i64| {
+        level_one_run(&due_state(
+            &load(&replica),
+            at(now),
+            &defaults(),
+            None,
+            state,
+        ))
+    };
+    assert_eq!(ask(&mut state, OPENS + 3000), None);
+    assert_eq!(ask(&mut state, OPENS + 30_000), Some((last + 1, last + 1)));
+}
+
 #[test]
 fn a_failing_level_backs_off_and_others_run() {
     let (_local, replica, mut state, job) = rejected_setup();
@@ -2327,7 +2764,10 @@ fn a_failing_level_backs_off_and_others_run() {
         bytes_read: 0,
     };
     state.record(now, &Job::Compact(job), &ok);
-    assert!(matches!(ask(&mut state, now), Due::Run(Job::Compact(_))));
+    // The listing does not hold the output it records, so the level is due again: in its
+    // next window, since this engine's own compaction closed the one it ran in.
+    let next = ask(&mut state, at(T0 + 3_630_000));
+    assert!(level_one_run(&next).is_some(), "{next:?}");
 }
 
 #[test]

@@ -35,18 +35,21 @@
 //! for the page checksum table (`crate::pages`). Nothing is taken from a file
 //! that did not verify whole on that read. The live WAL is not the proof that
 //! a file's bytes are the commits' bytes: the token is.
+//!
+//! A token outlives its upload in [`Sent`]: once the replica has acknowledged this
+//! process's put of a file, the token says what the replica holds under that key, and the
+//! level-1 compaction that reads the staged copy compares it with the token where it once
+//! read the replica's copy back (`crate::maintain`, `docs/decisions/D236.md`).
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 
-use lsr_ltx::{
-    Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Timestamp, Txid, TxidRange,
-};
+use lsr_ltx::{Decoder, Event, FileChecksum, Header, PageChecksum, PageNo, Timestamp, Txid};
 use lsr_wal::{Salts, WalOffset};
 
 use crate::fault::role::Role;
 use crate::fault::{BugSite, Fault};
-use crate::layout::{FileKey, Level};
+use crate::layout::FileKey;
 use crate::pages::Seeding;
 use crate::recover::{BootWal, Compare, NewestStagedFile, Origin, Scanned};
 use crate::store::{ObjectStore, ReadLen, StoreError};
@@ -248,6 +251,16 @@ impl Witnessed {
         self.key
     }
 
+    /// Whether a file `size` bytes long whose last bytes are `trailer` ends as the file this
+    /// token was minted for does: the same length, and the same file checksum, which a
+    /// trailer holds in its last eight bytes and which covers the file's whole content.
+    pub(crate) fn ends_as(&self, size: u64, trailer: &[u8]) -> bool {
+        self.len() == size
+            && trailer
+                .last_chunk::<8>()
+                .is_some_and(|raw| u64::from_be_bytes(*raw) == self.checksum.get())
+    }
+
     /// Whether a read of the file that verified whole, tallied as `bytes` and
     /// ending in `checksum`, read the bytes this token was minted for.
     pub(crate) fn matches(&self, bytes: ByteTally, checksum: FileChecksum) -> bool {
@@ -354,12 +367,14 @@ impl Witnesses {
 
     /// How many tokens are held.
     #[must_use]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.by_txid.len()
     }
 
     /// Whether none is.
     #[must_use]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.by_txid.is_empty()
     }
@@ -387,6 +402,57 @@ impl Witnesses {
             }
         }
         all
+    }
+}
+
+/// The most tokens [`Sent`] holds, at about 40 bytes each. Staged files are pruned once
+/// level 1 covers them, so a healthy engine holds a compaction window's worth; past the cap
+/// (level 1 has not compacted for that many files) the oldest token goes, and its file is
+/// compared with the replica's object by a read instead.
+pub(crate) const MAX_SENT: usize = MAX_WITNESSED;
+
+/// The tokens of the staged files this process put on the replica itself and still holds in
+/// staging, by transaction. The store acknowledged each put with the size sent, and the send
+/// was of bytes that matched the token on the read that produced them (`crate::upload`), so
+/// a token here says what the replica holds under its key: a compaction that reads the staged
+/// copy compares it with the token and asks the replica nothing (`crate::maintain`). In
+/// memory only: a new engine holds none, and compares by reading the replica.
+///
+/// A token whose staged file was deleted and staged again (a divergence drops the staged
+/// files from an id on) is left to the next put under its id or the next prune: it does not
+/// match the new file unless that file is the old one, and a file that does not match is
+/// compared by a read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Sent {
+    by_txid: BTreeMap<Txid, Witnessed>,
+}
+
+impl Sent {
+    /// Keeps the token of a file the replica just took, replacing one for the same
+    /// transaction; past [`MAX_SENT`] the oldest goes.
+    pub(crate) fn put(&mut self, token: Witnessed) {
+        self.by_txid.insert(token.key.range().max(), token);
+        while self.by_txid.len() > MAX_SENT {
+            self.by_txid.pop_first();
+        }
+    }
+
+    /// The token of the file put under `key`, if this process put it and still holds it.
+    pub(crate) fn get(&self, key: &FileKey) -> Option<&Witnessed> {
+        self.by_txid
+            .get(&key.range().max())
+            .filter(|token| token.key == *key)
+    }
+
+    /// Lets go of every token through `through`: those staged files were pruned.
+    pub(crate) fn pruned_through(&mut self, through: Txid) {
+        self.by_txid.retain(|txid, _| *txid > through);
+    }
+
+    /// How many tokens are held.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.by_txid.len()
     }
 }
 
@@ -490,11 +556,11 @@ pub(crate) async fn scan<L: Role, S: Role, R: Read + Seek>(
                 confirmed = Some(info.key.range().max());
                 expect = info.key.range().max().next();
             }
-            let tail = confirmed.map(|tail| FileKey::new(Level::ZERO, TxidRange::single(tail)));
+            let tail = confirmed.map(FileKey::staged);
             let pending = confirmed.is_none_or(|tip| info.key.range().max() > tip);
             // Past the cap a file could get no token: it goes as a file that leaves a gap
             // does, unread, and the WAL stages it again once uploads make room.
-            let wanted = expect.map(|txid| FileKey::new(Level::ZERO, TxidRange::single(txid)));
+            let wanted = expect.map(FileKey::staged);
             if pending && (scan.tokens.len() >= MAX_WITNESSED || Some(info.key) != wanted) {
                 scan.bad = Some((info.key, Bad::Unchained));
                 return Ok(scan);

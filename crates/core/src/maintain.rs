@@ -1,8 +1,8 @@
 //! The maintenance planner and its executor.
 //!
 //! [`due`] is a function of a listing, an instant, a schedule and a small
-//! [`MaintainState`] (backoff and distrusted outputs; see `state`). A fresh
-//! state plans from the listing alone,
+//! [`MaintainState`] (backoff, distrusted outputs and the windows this engine's
+//! own compactions closed; see `state`). A fresh state plans from the listing alone,
 //! so a restarted process reading the same listing plans the same job. It
 //! returns one job; the caller runs it, records the outcome, lists again and
 //! asks again.
@@ -25,12 +25,19 @@
 //! the base of every restore between it and the next one.
 //!
 //! A level compacts when its destination's newest file was not created inside
-//! the current window (`go_truncate(now, interval)`), and then only the source
+//! the current window (`go_truncate(now, interval)`) and this engine has not
+//! compacted it inside that window, and then only the source
 //! files above the destination's max, as one strictly contiguous run of at
 //! most [`MAX_INPUTS`]. The output carries the last input's timestamp
-//! (so a compaction never makes its output look older than its inputs), so a backlog keeps passing the window test until a run's last
-//! input is newer than the window start: 100 source files drain as four jobs
-//! in one window and the last one closes it.
+//! (so a compaction never makes its output look older than its inputs), which a
+//! compaction at the start of a window finds in the window before: the file's own
+//! time cannot close the window, so the engine remembers, in memory, that its
+//! compaction did ([`MaintainState::drained_since`], `docs/decisions/D242.md`).
+//! A job of [`MAX_INPUTS`] files may have left a backlog and closes nothing:
+//! 100 source files drain as four jobs in one window and the last one closes it.
+//! A level is so compacted once per window, as Go's level monitor fires once per
+//! window; a new process, which remembers nothing, may compact once more in the
+//! window it starts in.
 //! When the source has nothing above the destination the level is idle: no
 //! write, no job, no wake time.
 //!
@@ -106,7 +113,8 @@ use crate::fault::role::Role;
 use crate::inventory::{Inventory, is_snapshot_start};
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::plan::PlanOutcome;
-use crate::store::{CorruptCause, ObjectStore, ReadLen, StoreError};
+use crate::store::{CorruptCause, ObjectStore, ReadLen, StoreError, WriteMode};
+use crate::witness::Sent;
 use retain::{Retention, retention};
 
 pub use config::{
@@ -229,7 +237,7 @@ impl CompactJob {
     /// [`JobError::InputAtWrongLevel`] for the first input not at `level - 1`.
     pub fn new(inputs: CompactionInputs, level: Level) -> Result<Self, JobError> {
         let expected = Level::new(level.get().saturating_sub(1))
-            .filter(|_| (1..=8).contains(&level.get()))
+            .filter(|_| Level::COMPACTION.contains(&level))
             .ok_or(JobError::LevelOutOfRange { level })?;
         if let Some(wrong) = inputs
             .files()
@@ -258,6 +266,7 @@ impl CompactJob {
 
     /// The key the output is published under.
     #[must_use]
+    #[cfg(test)]
     pub fn output_key(&self) -> FileKey {
         FileKey::new(self.level, self.inputs.range())
     }
@@ -564,10 +573,7 @@ pub(crate) fn due_full(
     state: &mut MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Decided> {
-    match decide(inventory, now, config, published, state, resolved) {
-        Ok(decided) => Resolve::Done(decided),
-        Err(file) => Resolve::Need(file),
-    }
+    decide(inventory, now, config, published, state, resolved).into()
 }
 
 /// A decision on a whole listing, with what the short listings that follow it rely on.
@@ -613,17 +619,15 @@ fn decide(
     let mut until: Option<Timestamp> = None;
     // With no snapshot and no level 1 file yet, the first snapshot goes before any level, so
     // the levels start above it (D224) and the database is not carried through levels 1 to 3.
-    let first = (snapshot_end(inventory).is_none()
-        && Level::new(1).is_some_and(|one| inventory.level(one).is_empty()))
-    .then(|| snapshot_step(inventory, now, config, published, state, resolved))
-    .transpose()?;
+    let first = (snapshot_end(inventory).is_none() && inventory.level(Level::ONE).is_empty())
+        .then(|| snapshot_step(inventory, now, config, published, state, resolved))
+        .transpose()?;
     let first_planned = first.is_some();
     if let Some(job) = first.and_then(|step| absorb(step, &mut until)) {
         return Ok(Decided::job(job, gate));
     }
-    let levels = Level::ALL
+    let levels = Level::COMPACTION
         .iter()
-        .skip(1)
         .take(usize::from(config.top().get()));
     // A hole is closed before any other job, at whatever level it is: the next passes see
     // only tails, where a hole that is not right above a level's newest file does not show.
@@ -782,6 +786,10 @@ fn plan_level(
         return Ok(step);
     }
     let (start, next) = next_window(now, interval);
+    // This engine's own compaction closed the window, whatever time its output carries.
+    if state.drained_since(dst, start) {
+        return Ok(Step::Wait(next));
+    }
     if let Some(info) = dst_last
         && created_after(resolved, info, start)?
     {
@@ -1030,10 +1038,10 @@ pub enum Outcome {
         /// How many keys the call named.
         count: usize,
     },
-    /// An input is gone from the replica, or the output's key already holds
-    /// an object the listing did not show: list again and plan again.
+    /// An input is gone from the replica, or the output's key is taken by an
+    /// object the listing did not show: list again and plan again.
     Replan {
-        /// The missing input, or the output found already there.
+        /// The missing input, or the taken output key.
         key: FileKey,
     },
     /// The job failed; nothing was retried here.
@@ -1042,37 +1050,44 @@ pub enum Outcome {
 
 /// Runs one merge of `inputs` into `level`: a compaction, or the first snapshot (D205). A merge
 /// of level-0 files reads `local` when every input's local copy is the replica's object
-/// ([`local_is_replica`]), and the replica otherwise or once when an input is missing or does not
+/// ([`local_is_replica`], which asks the replica nothing about a file `sent` holds a token
+/// for), and the replica otherwise or once when an input is missing or does not
 /// decode locally (the local copy may be gone after a restart, or rotten); every other level
 /// reads the replica. The output always goes to the replica. Inputs are never
 /// deleted.
 ///
+/// An output key that already holds an object (an earlier run's output a listing did not
+/// show, Go's output for the same range) is never written over, and the job is planned
+/// again from a fresh listing. The bucket says so: the output is a create-only write
+/// ([`WriteMode::New`]), so a taken key refuses the commit and costs no request to
+/// find out (`docs/decisions/D239.md`). Go writes over whatever the key holds. On a store
+/// that said it cannot make create-only writes ([`WriteMode::Replace`]) the output replaces.
+///
 /// When the store rejected the output's commit, the output key is deleted
 /// before returning: a listing would otherwise show it as coverage. That
 /// delete may only take the object this attempt wrote, never one the key held
-/// before (an earlier run's output that retention may already count as
-/// cover): an output key a read finds taken before the write is not written
-/// over, and the job is planned again from a fresh listing.
+/// before, see [`leaves_bad_output`]. The key is not read first on any store: Go
+/// writes its compaction output with no read either (`compactor.go:104`,
+/// `Compactor::Compact`), and the job was planned from a listing that shows every
+/// file this engine wrote (a store whose listings lag is unsupported,
+/// `docs/decisions/D173.md`, `docs/decisions/D246.md`).
 pub(crate) async fn run_compaction<L: Role, R: Role>(
     inputs: &CompactionInputs,
     level: Level,
     local: &L,
     replica: &R,
+    sent: &Sent,
+    mode: WriteMode,
 ) -> Outcome {
     let output = FileKey::new(level, inputs.range());
-    match crate::store::exists(replica, &output).await {
-        Ok(true) => return Outcome::Replan { key: output },
-        Ok(false) => {}
-        Err(err) => return Outcome::Failed(MaintainError::Compact(CompactError::Dest(err))),
-    }
     let result = if inputs
         .files()
         .iter()
         .all(|info| info.key.level() == Level::ZERO)
     {
-        compact_from_level_zero(inputs, level, local, replica).await
+        compact_from_level_zero(inputs, level, local, replica, sent, mode).await
     } else {
-        compact_in(replica, replica, inputs, level).await
+        compact_in(replica, replica, inputs, level, mode).await
     };
     match result {
         Ok(done) => Outcome::Compacted {
@@ -1080,7 +1095,11 @@ pub(crate) async fn run_compaction<L: Role, R: Role>(
             bytes_read: done.bytes_read(),
         },
         Err(CompactError::InputVanished { key }) => Outcome::Replan { key },
-        Err(CompactError::Dest(err)) if leaves_bad_output(&err) => {
+        // The key is taken, and what it holds stands: the answer a read of the key gives.
+        Err(CompactError::Dest(StoreError::AlreadyExists { .. })) => {
+            Outcome::Replan { key: output }
+        }
+        Err(CompactError::Dest(err)) if leaves_bad_output(&err, mode) => {
             remove_rejected(replica, output, err).await
         }
         Err(
@@ -1102,15 +1121,17 @@ async fn compact_from_level_zero<L: Role, R: Role>(
     level: Level,
     local: &L,
     replica: &R,
+    sent: &Sent,
+    mode: WriteMode,
 ) -> Result<Compacted, CompactError> {
-    if !local_is_replica(local, replica, inputs).await? {
-        return compact_in(replica, replica, inputs, level).await;
+    if !local_is_replica(local, replica, inputs, sent).await? {
+        return compact_in(replica, replica, inputs, level, mode).await;
     }
     // The source is staging here, so a failed read is staging's error
     // (`CompactError::Local`), by its role.
-    match compact_in(local, replica, inputs, level).await {
+    match compact_in(local, replica, inputs, level, mode).await {
         Err(CompactError::InputVanished { .. } | CompactError::Input { .. }) => {
-            compact_in(replica, replica, inputs, level).await
+            compact_in(replica, replica, inputs, level, mode).await
         }
         other => other,
     }
@@ -1127,13 +1148,26 @@ const _: () = assert!(matches!(TRAILER_LEN.checked_add(1), Some(17)));
 /// differ (a staging backup put back, a file staged again after the replica
 /// took the first): building level 1 from it would leave the replica with two
 /// contents for one transaction, since restores read level 0 from the
-/// replica. One read of 17 bytes per input from each store; a local copy that
-/// is gone or differs answers false, and a replica object that is gone is
+/// replica. One read of 17 bytes per input from staging; a local copy that
+/// is gone or differs answers false.
+///
+/// What the replica holds under a key is not read back when this process put it there
+/// itself: `sent` holds the token the put was checked against, on the read that produced
+/// the bytes, and the store acknowledged the put (`docs/decisions/D236.md`). A file with no
+/// token (a process before this one staged and sent it, or the put's answer was lost) costs
+/// one read of 17 bytes from the replica, where an object that is gone is
 /// [`CompactError::InputVanished`].
+///
+/// That replica read is the one request here Go does not make. Go merges any
+/// local level-0 file that opens (`compactor.go:139-147`, `LocalFileOpener`),
+/// with no check that it is the object the replica holds, so a stale staged copy
+/// becomes the level-1 file restores read while the replica's level 0 says
+/// otherwise. One 17-byte read per input is what tells the two apart.
 async fn local_is_replica<L: Role, R: Role>(
     local: &L,
     replica: &R,
     inputs: &CompactionInputs,
+    sent: &Sent,
 ) -> Result<bool, CompactError> {
     let trailer = u64::try_from(TRAILER_LEN).unwrap_or(u64::MAX);
     for info in inputs.files() {
@@ -1146,6 +1180,14 @@ async fn local_is_replica<L: Role, R: Role>(
             Err(err) => return Err(L::compact_input(err)),
         };
         if ours.len() != TRAILER_LEN {
+            return Ok(false);
+        }
+        if let Some(token) = sent.get(&info.key) {
+            // The listed size is the replica's: an object another hand replaced with one of
+            // another length is read from the replica, as is a staged copy that changed.
+            if token.ends_as(info.size, &ours) {
+                continue;
+            }
             return Ok(false);
         }
         let theirs = match replica.read(&info.key, at, TAIL).await {
@@ -1162,13 +1204,23 @@ async fn local_is_replica<L: Role, R: Role>(
     Ok(true)
 }
 
-/// Whether a failed destination commit may have left an object under the output
-/// key that a listing would show and that does not decode.
-const fn leaves_bad_output(err: &StoreError) -> bool {
+/// Whether a failed destination commit, of an output written under `mode`, may have left
+/// an object of this attempt under the output key that a listing would show and that does
+/// not decode.
+///
+/// A replacing write began after a read found the key free, so whatever a rejected commit
+/// left there is taken for this attempt's. A create-only write asked nobody first: only a
+/// commit the bucket let into the key can have left something, and a part the store
+/// rejected ended the upload before its commit asked for the key, so what the key holds
+/// then is an earlier object, never this attempt's to delete.
+const fn leaves_bad_output(err: &StoreError, mode: WriteMode) -> bool {
     match err {
         StoreError::Corrupt { cause, .. } => match cause {
             CorruptCause::CommitSizeMismatch { removed, .. } => !*removed,
-            CorruptCause::ChecksumMismatch { .. } => true,
+            CorruptCause::ChecksumMismatch { part } => match mode {
+                WriteMode::Replace => true,
+                WriteMode::New => part.is_none(),
+            },
             CorruptCause::NotARegularFile
             | CorruptCause::TimestampOutOfRange
             | CorruptCause::BadCreatedAt => false,

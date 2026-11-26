@@ -1,0 +1,21 @@
+diff --git a/crates/store-s3/src/upload.rs b/crates/store-s3/src/upload.rs
+index 7ce6bde..7166c71 100644
+--- a/crates/store-s3/src/upload.rs
++++ b/crates/store-s3/src/upload.rs
+@@ -528,7 +528,6 @@ impl<T: Transport> S3Upload<T> {
+             return Ok(());
+         };
+         let mut done = std::mem::take(&mut multi.shared.ends().done);
+-        done.sort_by_key(|part| part.number.get());
+         let mut failed = None;
+         for part in done {
+             multi.flying = multi.flying.saturating_sub(1);
+@@ -536,7 +535,7 @@ impl<T: Transport> S3Upload<T> {
+             let judged = part
+                 .sent
+                 .and_then(|response| judge_part(&self.key, part.number, &response));
+-            let slot = usize::from(part.number.get()).checked_sub(1);
++            let slot = multi.etags.iter().position(Option::is_none);
+             match (judged, slot.and_then(|at| multi.etags.get_mut(at))) {
+                 (Ok(etag), Some(slot)) => *slot = Some(etag),
+                 (Ok(_), None) => failed = failed.or_else(|| Some(ended())),

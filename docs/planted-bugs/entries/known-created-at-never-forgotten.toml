@@ -1,0 +1,7 @@
+# The created-at times of deleted level-0 files are kept, so the memory grows to its cap.
+name = "known-created-at-never-forgotten"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::retention_reads_no_created_at_time_of_a_file_this_process_put",
+]

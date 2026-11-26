@@ -142,9 +142,9 @@ pub use source::{
     CheckpointCall, CheckpointEffect, CheckpointScript, FakeCheckpointer, FakeDb, FakeWal, SourceOp,
 };
 pub use store::{
-    BatchKind, BoxFuture, CorruptCause, Denied, DynUpload, ListAt, Listing, ListingStalled,
-    ObjectStore, Opened, PageLimit, PartNumber, ReadAt, ReadLen, Reread, StoreError, StoreOp,
-    Upload, WriteMode, build_listing,
+    Again, BatchKind, BoxFuture, CorruptCause, Denied, DynUpload, Flight, ListAt, Listing,
+    ListingStalled, ObjectStore, Opened, PageLimit, PartNumber, ReadLen, ReadStream, Reread, Rest,
+    Seeing, Seen, StoreError, StoreOp, Upload, WriteMode, build_listing,
 };
 pub use sync::{PageFrom, Step, StepEnd, StepFailed, SyncConfig, Synced, clamp, sync_step};
 pub use takeover::{TakeoverRecord, TakeoverRecordError};

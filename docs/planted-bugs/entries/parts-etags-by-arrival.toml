@@ -1,0 +1,8 @@
+# An upload places each part's ETag in the order the answers arrived, not by part number, so
+# parts that end out of order complete an object whose parts are in the wrong order.
+name = "parts-etags-by-arrival"
+fix = "plant"
+package = "lsr-store-s3"
+tests = [
+    "flight::parts_that_end_out_of_order_make_the_same_object",
+]

@@ -34,8 +34,8 @@ use crate::env::{Clock, Entropy, Sleeper};
 use crate::layout::CreatedAt;
 use crate::layout::{FileInfo, FileKey, Level};
 use crate::store::{
-    BatchKind, ListAt, Listing, ObjectStore, PageLimit, ReadAt, ReadLen, Reread, StoreError,
-    Upload, WriteMode,
+    BatchKind, BoxFuture, Flight, ListAt, Listing, ObjectStore, PageLimit, ReadLen, ReadStream,
+    Reread, Rest, StoreError, Upload, WriteMode,
 };
 
 /// How a [`StoreError`] should be handled.
@@ -419,6 +419,15 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         core.run(|| core.inner.read(key, offset, len)).await
     }
 
+    fn read_stream(&self, key: FileKey, offset: u64) -> Box<dyn ReadStream + '_> {
+        Box::new(Resuming {
+            core: &self.core,
+            key,
+            offset,
+            open: None,
+        })
+    }
+
     async fn created_at(&self, file: &FileInfo) -> Result<CreatedAt, StoreError> {
         let core = &*self.core;
         core.run(|| core.inner.created_at(file)).await
@@ -506,21 +515,43 @@ impl<S: ObjectStore + 'static, P: Sleeper + 'static, E: Entropy + 'static> Objec
         }
         out
     }
+}
 
-    /// One batch through the inner store, then each failed read retried
-    /// alone under the policy, in order.
-    async fn read_many(&self, reads: &[ReadAt]) -> Vec<Result<Vec<u8>, StoreError>> {
-        let core = &*self.core;
-        let firsts = core.inner.read_many(reads).await;
-        let mut out = Vec::with_capacity(firsts.len());
-        for (at, first) in reads.iter().zip(firsts) {
-            Counters::bump(&core.counters.calls);
-            let settled = core
-                .settle(first, || core.inner.read(&at.key, at.offset, at.len), false)
-                .await;
-            out.push(settled);
-        }
-        out
+/// A stream through a [`Retrying`] store. A piece that fails is asked again of a new stream
+/// from the offset the pieces before it reached, under the policy as a read would be, so a
+/// connection lost a gigabyte into a file costs one request more, not the file.
+struct Resuming<'a, S, P, E> {
+    core: &'a Core<S, P, E>,
+    key: FileKey,
+    /// Where the next piece starts: the bytes handed out so far.
+    offset: u64,
+    /// The inner stream, once one answered; `None` before the first piece and after a failure.
+    open: Option<Box<dyn ReadStream + 'a>>,
+}
+
+impl<S: ObjectStore, P: Sleeper, E: Entropy> ReadStream for Resuming<'_, S, P, E> {
+    fn next(&mut self, len: ReadLen) -> BoxFuture<'_, Result<Vec<u8>, StoreError>> {
+        Box::pin(async move {
+            let (core, key, offset) = (self.core, self.key, self.offset);
+            let reopen = move || async move {
+                let mut fresh = core.inner.read_stream(key, offset);
+                let bytes = fresh.next(len).await?;
+                Ok((fresh, bytes))
+            };
+            // A stream that failed is dropped here: the retry opens another.
+            let first = match self.open.take() {
+                Some(mut open) => open.next(len).await.map(|bytes| (open, bytes)),
+                None => {
+                    Counters::bump(&core.counters.calls);
+                    reopen().await
+                }
+            };
+            let (open, bytes) = core.settle(first, reopen, false).await?;
+            self.open = Some(open);
+            let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            self.offset = offset.saturating_add(read);
+            Ok(bytes)
+        })
     }
 }
 
@@ -541,24 +572,6 @@ pub struct RetryingUpload<S: ObjectStore, P, E> {
     core: Arc<Core<S, P, E>>,
 }
 
-impl<S: ObjectStore, P: Sleeper, E: Entropy> RetryingUpload<S, P, E> {
-    /// Commits the inner upload, through `again` when the upload was written from a source,
-    /// and checks the answer against the bytes written.
-    async fn commit_with(self, again: Option<&dyn Reread>) -> Result<FileInfo, StoreError> {
-        Counters::bump(&self.core.counters.calls);
-        let info = match again {
-            Some(again) => self.inner.commit_from(again).await?,
-            None => self.inner.commit().await?,
-        };
-        let core = &*self.core;
-        let keys = [self.key];
-        crate::publish::settle(info, self.key, self.written, self.mode, || {
-            core.run(|| core.inner.delete(&keys))
-        })
-        .await
-    }
-}
-
 impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> {
     async fn write(&mut self, chunk: &[u8]) -> Result<(), StoreError> {
         Counters::bump(&self.core.counters.calls);
@@ -576,12 +589,21 @@ impl<S: ObjectStore, P: Sleeper, E: Entropy> Upload for RetryingUpload<S, P, E> 
         Ok(())
     }
 
+    /// Commits the inner upload and checks the answer against the bytes written.
     async fn commit(self) -> Result<FileInfo, StoreError> {
-        self.commit_with(None).await
+        Counters::bump(&self.core.counters.calls);
+        let info = self.inner.commit().await?;
+        let core = &*self.core;
+        let keys = [self.key];
+        crate::publish::settle(info, self.key, self.written, self.mode, || {
+            core.run(|| core.inner.delete(&keys))
+        })
+        .await
     }
 
-    async fn commit_from(self, again: &dyn Reread) -> Result<FileInfo, StoreError> {
-        self.commit_with(Some(again)).await
+    /// Not a call of its own: it sends nothing, and a part's failure is the upload's.
+    async fn flight(&mut self, rest: Rest) -> Result<Flight, StoreError> {
+        self.inner.flight(rest).await
     }
 
     async fn abort(self) -> Result<(), StoreError> {

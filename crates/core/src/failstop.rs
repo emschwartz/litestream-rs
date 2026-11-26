@@ -132,6 +132,7 @@ impl Trip {
     /// Whether the trip ends without an operator: the age falling to zero, or the first
     /// listing. A stop never does.
     #[must_use]
+    #[cfg(test)]
     pub const fn clears_by_itself(self) -> bool {
         match self {
             Self::Stopped(_) => false,

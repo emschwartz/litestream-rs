@@ -1,0 +1,9 @@
+# The WAL step stages new commits on every tick, so a commit that lands while the poll's
+# file is written or uploaded becomes a second level-0 file in the same interval.
+name = "sync-interval-ignored"
+fix = "claude/steady-requests"
+package = "lsr-core"
+tests = [
+    "actor::tests::steady::a_steady_writer_stages_one_file_per_poll_interval",
+    "actor::tests::steady::a_commit_inside_the_interval_waits_for_it_and_the_tick_names_the_wake",
+]

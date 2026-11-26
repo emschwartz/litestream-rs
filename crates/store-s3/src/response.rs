@@ -5,25 +5,23 @@
 //! [`ResponseError`], which converts to a retryable or corrupt [`StoreError`].
 
 use std::collections::BTreeSet;
-use std::io;
 
 use lsr_core::{
     CorruptCause, FileKey, Level, StoreError, StoreOp, is_scratch_name, parse_file_name,
 };
 use lsr_ltx::Timestamp;
+#[cfg(feature = "testing")]
 use md5::{Digest as _, Md5};
 use rusty_s3::actions::{
     CompleteMultipartUploadResponse, CreateMultipartUpload, DeleteObjectsResponse, ListObjectsV2,
 };
 use thiserror::Error;
 
-use crate::classify::S3Code;
+use crate::classify::{S3Code, invalid_data};
 use crate::config::Prefix;
+use crate::request::CREATED_AT_HEADER;
 use crate::request::{UploadId, level_prefix, object_key};
 use crate::transport::HttpResponse;
-
-/// The metadata header a file's created-at time is stored in.
-const CREATED_AT_HEADER: &str = "x-amz-meta-litestream-timestamp";
 
 /// Why a 2xx response could not be used.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -39,7 +37,7 @@ pub enum ResponseError {
     #[error("listing repeats a key or goes back")]
     RepeatedKey,
     /// The created-at time header is present and does not parse.
-    #[error("litestream-timelitestream-timestamp header does not parse")]
+    #[error("litestream-timestamp header does not parse")]
     BadCreatedAt,
 }
 
@@ -53,10 +51,7 @@ impl ResponseError {
                 key,
                 cause: CorruptCause::BadCreatedAt,
             },
-            Self::Malformed | Self::KeyOutsidePrefix | Self::RepeatedKey => StoreError::Transient {
-                op,
-                kind: io::ErrorKind::InvalidData,
-            },
+            Self::Malformed | Self::KeyOutsidePrefix | Self::RepeatedKey => invalid_data(op),
         }
     }
 }
@@ -217,6 +212,7 @@ pub fn parse_complete(r: &HttpResponse) -> Result<String, ResponseError> {
 ///
 /// # Errors
 /// [`ResponseError::Malformed`].
+#[cfg(any(test, feature = "testing"))]
 pub fn parse_delete_failures(r: &HttpResponse) -> Result<usize, ResponseError> {
     parse_delete_failure_codes(r).map(|codes| codes.len())
 }
@@ -238,37 +234,6 @@ pub fn parse_delete_failure_codes(r: &HttpResponse) -> Result<Vec<S3Code>, Respo
         .collect())
 }
 
-/// How a response's ETag compares with the MD5 that was sent.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum EtagCheck {
-    /// The ETag is the quoted hex MD5 of the body.
-    Matches,
-    /// The ETag has the shape of an MD5 and is a different one.
-    Mismatch,
-    /// The ETag is not an MD5 (SSE-KMS, multipart form): nothing to compare;
-    /// the Content-MD5 the server checked still stands.
-    NotMd5,
-    /// No ETag came back.
-    Missing,
-}
-
-/// Compares the response's ETag with `sent`.
-#[must_use]
-pub fn check_etag(r: &HttpResponse, sent: [u8; 16]) -> EtagCheck {
-    let Some(raw) = r.header("etag") else {
-        return EtagCheck::Missing;
-    };
-    let text = raw.trim().trim_matches('"');
-    if text.len() != 32 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return EtagCheck::NotMd5;
-    }
-    if text.eq_ignore_ascii_case(&hex(&sent)) {
-        EtagCheck::Matches
-    } else {
-        EtagCheck::Mismatch
-    }
-}
-
 /// Lowercase hex, the form of a part's ETag.
 #[must_use]
 pub fn hex(bytes: &[u8]) -> String {
@@ -281,6 +246,7 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// The quoted hex MD5 of `body`, as a part's ETag reads on S3.
 #[must_use]
+#[cfg(feature = "testing")]
 pub fn quoted_md5(body: &[u8]) -> String {
     format!("\"{}\"", hex(&Md5::digest(body)))
 }
@@ -289,6 +255,15 @@ pub fn quoted_md5(body: &[u8]) -> String {
 mod tests {
     use super::*;
     use lsr_ltx::{Txid, TxidRange};
+    use std::io;
+
+    #[test]
+    fn the_bad_created_at_text_names_the_header() {
+        assert_eq!(
+            ResponseError::BadCreatedAt.to_string(),
+            "litestream-timestamp header does not parse"
+        );
+    }
 
     const NS: &str = "xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"";
 
@@ -453,33 +428,6 @@ mod tests {
             "<DeleteResult {NS}><Error><Key>a</Key><Code>NoSuchKey</Code><Message>m</Message></Error><Error><Key>b</Key><Code>AccessDenied</Code><Message>m</Message></Error></DeleteResult>"
         ));
         assert_eq!(parse_delete_failures(&mixed), Ok(1));
-    }
-
-    #[test]
-    fn etag_check_cases() {
-        let sent: [u8; 16] = Md5::digest(b"hello").into();
-        let quoted = quoted_md5(b"hello");
-        assert_eq!(quoted, "\"5d41402abc4b2a76b9719d911017c592\"");
-        assert_eq!(
-            check_etag(&with_headers(&[("ETag", &quoted)]), sent),
-            EtagCheck::Matches
-        );
-        assert_eq!(
-            check_etag(
-                &with_headers(&[("etag", "5D41402ABC4B2A76B9719D911017C592")]),
-                sent
-            ),
-            EtagCheck::Matches
-        );
-        assert_eq!(
-            check_etag(&with_headers(&[("etag", &quoted_md5(b"other"))]), sent),
-            EtagCheck::Mismatch
-        );
-        assert_eq!(
-            check_etag(&with_headers(&[("etag", "\"abc-2\"")]), sent),
-            EtagCheck::NotMd5
-        );
-        assert_eq!(check_etag(&with_headers(&[]), sent), EtagCheck::Missing);
     }
 
     #[test]

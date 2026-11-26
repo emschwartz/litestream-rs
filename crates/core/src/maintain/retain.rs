@@ -23,7 +23,8 @@
 //! measured from the anchor, computed afresh on every call. The anchor is
 //! `min(now, newest created-at time among the last file of each non-empty level and
 //! every snapshot start)`: a listing that carries no exact created-at times costs a
-//! request per file asked for, so only those files are read, plus the level 0
+//! request per file asked for (none for a file this process put itself, whose time the
+//! engine remembers from the put's answer, `crate::created_at`), so only those files are read, plus the level 0
 //! files a rule would delete, in key order up to and including the first young
 //! one (at most [`MAX_DELETE`], past which the job is full anyway). On a store
 //! that runs batches the anchors are read side by side, and the level 0 scan
@@ -150,10 +151,7 @@ pub(super) fn retention(
     state: &MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<Retention> {
-    match decide(inventory, now, config, published, state, resolved) {
-        Ok(retention) => Resolve::Done(retention),
-        Err(file) => Resolve::Need(file),
-    }
+    decide(inventory, now, config, published, state, resolved).into()
 }
 
 fn decide(
@@ -351,23 +349,15 @@ fn past_snapshot(info: &FileInfo, snapshot: Txid) -> bool {
 
 fn latest_unplannable(inventory: &Inventory) -> Option<RetentionHold> {
     let newest = inventory.newest()?;
-    match plan(inventory, KeyTarget::Latest) {
-        PlanOutcome::Plan(chain) if chain.reaches() == newest => None,
+    match plan(inventory, KeyTarget::Latest).into_chain() {
+        Ok(chain) if chain.reaches() == newest => None,
         // A plan that stops short is a missing tail; the planner never
         // returns one, and the hold must not claim a plan.
-        PlanOutcome::Plan(chain) => Some(RetentionHold::Hole {
+        Ok(chain) => Some(RetentionHold::Hole {
             after: chain.reaches(),
             next: None,
         }),
-        outcome @ (PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
-        | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => {
-            Some(RetentionHold::LatestUnplannable { outcome })
-        }
+        Err(outcome) => Some(RetentionHold::LatestUnplannable { outcome }),
     }
 }
 
@@ -552,7 +542,7 @@ fn levels_one_to_eight<'a>(
     out: &mut Vec<FileKey>,
 ) -> Vec<&'a [FileInfo]> {
     let mut kept = Vec::new();
-    for level in Level::ALL.iter().skip(1).take(8) {
+    for level in &Level::COMPACTION {
         let files = inventory.level(*level);
         let deletable = floor.map_or(0, |floor| {
             files
@@ -690,10 +680,7 @@ pub(super) fn short_level_zero(
     state: &MaintainState,
     resolved: &ResolvedCreatedAt,
 ) -> Resolve<ShortZero> {
-    match short_decide(listed, known, now, config, published, state, resolved) {
-        Ok(zero) => Resolve::Done(zero),
-        Err(file) => Resolve::Need(file),
-    }
+    short_decide(listed, known, now, config, published, state, resolved).into()
 }
 
 fn short_decide(
@@ -761,10 +748,8 @@ fn short_decide(
         Ok(None) | Err(_) => return Ok(nothing),
     };
     let floor = rule.floor;
-    let kept: Vec<FileInfo> = Level::ALL
+    let kept: Vec<FileInfo> = Level::COMPACTION
         .iter()
-        .skip(1)
-        .take(8)
         .flat_map(|level| listed.level(*level))
         .filter(|info| floor.is_none_or(|floor| info.key.range().max() >= floor))
         .copied()
@@ -883,24 +868,18 @@ fn pinned_chain(
     gone: &[FileKey],
     restore_point: Txid,
 ) -> Result<Vec<FileKey>, RetentionHold> {
-    match plan_without(inventory, gone, KeyTarget::Txid(restore_point)) {
-        PlanOutcome::Plan(chain) if chain.reaches() == restore_point => {
+    match plan_without(inventory, gone, KeyTarget::Txid(restore_point)).into_chain() {
+        Ok(chain) if chain.reaches() == restore_point => {
             Ok(chain.files().iter().map(|info| info.key).collect())
         }
-        PlanOutcome::Plan(chain) => Err(RetentionHold::RestorePointUnplannable {
+        Ok(chain) => Err(RetentionHold::RestorePointUnplannable {
             restore_point,
             outcome: PlanOutcome::BeyondNewest {
                 requested: restore_point,
                 newest: chain.reaches(),
             },
         }),
-        outcome @ (PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
-        | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => Err(RetentionHold::RestorePointUnplannable {
+        Err(outcome) => Err(RetentionHold::RestorePointUnplannable {
             restore_point,
             outcome,
         }),
@@ -919,21 +898,15 @@ fn self_check(
     {
         return Some(hold);
     }
-    match plan_without(inventory, job.keys(), KeyTarget::Latest) {
-        PlanOutcome::Plan(chain) if Some(chain.reaches()) == inventory.newest() => None,
+    match plan_without(inventory, job.keys(), KeyTarget::Latest).into_chain() {
+        Ok(chain) if Some(chain.reaches()) == inventory.newest() => None,
         // A plan that stops short of the newest transaction.
-        PlanOutcome::Plan(chain) => Some(RetentionHold::SelfCheck {
+        Ok(chain) => Some(RetentionHold::SelfCheck {
             outcome: PlanOutcome::BeyondNewest {
                 requested: inventory.newest().unwrap_or(chain.reaches()),
                 newest: chain.reaches(),
             },
         }),
-        outcome @ (PlanOutcome::EmptyReplica
-        | PlanOutcome::NoSnapshot { .. }
-        | PlanOutcome::BeyondNewest { .. }
-        | PlanOutcome::AsOfInsideFile { .. }
-        | PlanOutcome::Gap { .. }
-        | PlanOutcome::InsideFile { .. }
-        | PlanOutcome::MalformedSnapshot { .. }) => Some(RetentionHold::SelfCheck { outcome }),
+        Err(outcome) => Some(RetentionHold::SelfCheck { outcome }),
     }
 }

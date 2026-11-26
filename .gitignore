@@ -10,3 +10,6 @@
 *.sqlite-wal
 *.sqlite-shm
 .DS_Store
+
+# Python bytecode from running the scripts locally
+__pycache__/

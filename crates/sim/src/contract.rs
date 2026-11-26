@@ -32,7 +32,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use lsr_core::{CreatedAtSource, FileInfo, FileKey, PlanOutcome, is_snapshot_start};
+use lsr_core::{CreatedAtSource, FileInfo, FileKey, PlanOutcome};
 use lsr_ltx::{Timestamp, Txid};
 
 /// What the planner must answer for one target.
@@ -83,11 +83,18 @@ impl fmt::Display for Expected {
     }
 }
 
+/// Whether a file begins at transaction 1, restated from the contract: such a
+/// file can start a chain at any level.
+#[must_use]
+pub fn begins_at_one(file: &FileInfo) -> bool {
+    file.key.range().min() == Txid::MIN
+}
+
 /// Whether the listing keeps a file at all: a level-9 file that does not
 /// begin at transaction 1 is refused.
 #[must_use]
 pub fn usable(file: &FileInfo) -> bool {
-    !file.key.level().is_snapshot() || is_snapshot_start(file)
+    !file.key.level().is_snapshot() || begins_at_one(file)
 }
 
 /// Whether a file starting at `min` can follow a chain that ends at `end`
@@ -108,7 +115,7 @@ impl Reach {
         let admitted: Vec<&FileInfo> = files.iter().filter(|f| usable(f) && eligible(f)).collect();
         let mut ends: BTreeSet<Txid> = admitted
             .iter()
-            .filter(|f| is_snapshot_start(f))
+            .filter(|f| begins_at_one(f))
             .map(|f| f.key.range().max())
             .collect();
         let mut frontier: Vec<Txid> = ends.iter().copied().collect();
@@ -162,7 +169,7 @@ pub fn txid(files: &[FileInfo], reach: &Reach, target: Txid) -> Expected {
     if reach.contains(target) {
         return Expected::Plan(target);
     }
-    if !files.iter().any(is_snapshot_start) {
+    if !files.iter().any(begins_at_one) {
         return Expected::NoSnapshot;
     }
     let r = reach.furthest_upto(target);

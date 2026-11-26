@@ -1,10 +1,10 @@
 diff --git a/crates/core/src/actor.rs b/crates/core/src/actor.rs
-index 6cd9de794..67d3d12c2 100644
+index b5d69633b..e92d9b605 100644
 --- a/crates/core/src/actor.rs
 +++ b/crates/core/src/actor.rs
-@@ -2549,7 +2549,7 @@ impl Actor {
-         now: Timestamp,
-     ) -> Option<Tick> {
+@@ -2703,7 +2703,7 @@ impl Actor {
+     /// a sync, and stage a file, for every slice (`docs/decisions/D217.md`).
+     fn owed_upload(&mut self) -> bool {
          let owed = match self.engine.in_flight.sent() {
 -            Some(_) => self.engine.slices_ahead < state::FAIR_SHARE,
 +            Some(_) => true,
