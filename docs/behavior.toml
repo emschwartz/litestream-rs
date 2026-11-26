@@ -801,11 +801,11 @@ recovered_by = "sim::`truncate_threshold_crossed`"
 table = "Checkpoint"
 id = "CKPT-5"
 circumstance = "A fault after the seal staged a file: the checkpoint call fails (another connection is checkpointing, or an I/O error), the engine's own frame cannot be written, a barrier or lock cannot be released"
-response = "The sealed file is kept and uploaded from the last position that is true. After a PASSIVE that position stays pinned to the read transaction retaken under the barrier (all but a lost retake, CKPT-7), so a WAL restart before the retry costs no snapshot (D225). The checkpoint task retries. A failed release never replaces the fault that came first"
+response = "The sealed file is kept and uploaded from the last position that is true. That position stays pinned to the read transaction retaken under the barrier (all but a lost retake, CKPT-7), after a PASSIVE and after a TRUNCATE, which keeps that read, so a WAL restart before the retry costs no snapshot (D225, D263). The checkpoint task retries. A failed release never replaces the fault that came first"
 signal = "\"retrying\""
 at_risk = "None"
 recovery = "Automatic"
-detected_by = "sim::`sealed_then_checkpoint_busy`, sim::`sealed_then_checkpoint_io`, sim::`sealed_then_bump_io`, core::`every_passive_step_failure_releases_the_barrier_and_reports_the_fault`, core::`a_failed_release_never_replaces_the_first_fault`, core::`a_fault_after_the_passive_ran_leaves_the_position_pinned`, core::`a_passive_call_that_failed_leaves_the_position_pinned`, core::`a_fault_after_a_truncate_leaves_the_position_unpinned`"
+detected_by = "sim::`sealed_then_checkpoint_busy`, sim::`sealed_then_checkpoint_io`, sim::`sealed_then_bump_io`, core::`every_passive_step_failure_releases_the_barrier_and_reports_the_fault`, core::`a_failed_release_never_replaces_the_first_fault`, core::`a_fault_after_the_passive_ran_leaves_the_position_pinned`, core::`a_passive_call_that_failed_leaves_the_position_pinned`, core::`a_fault_after_a_truncate_keeps_the_position_pinned`"
 recovered_by = "sim::`sealed_then_checkpoint_busy`, sim::`sealed_then_checkpoint_io`, sim::`sealed_then_bump_io`"
 
 [[row]]
