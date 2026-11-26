@@ -1,0 +1,37 @@
+diff --git a/crates/core/src/actor/local.rs b/crates/core/src/actor/local.rs
+index c729a61..d0c42f1 100644
+--- a/crates/core/src/actor/local.rs
++++ b/crates/core/src/actor/local.rs
+@@ -65,7 +65,8 @@ use crate::recover::{
+ };
+ use crate::source::{Checkpointer, PageSource, WalSource};
+ use crate::store::{PageLimit, exists};
+-use crate::upload::{Unsent, drop_staged_from};
++use crate::inventory::Inventory;
++use crate::upload::{Unsent, drop_staged_from, inventory_fault};
+ use crate::witness::{Base, Witnessed, scan};
+ 
+ /// Whether this process may still try the local course.
+@@ -309,8 +310,20 @@ impl Actor {
+     {
+         let denied = &mut self.kept.scratch_sweep_denied;
+         let listed = boot_listing(env.staging, env.remote, denied, takeover).await?;
+-        self.settle_course(env.staging, listed.upload.confirmed(), unsent)
+-            .await?;
++        let slot = env
++            .staging
++            .list(Level::LOCAL_COURSE, None, PageLimit::ONE)
++            .await
++            .map_err(|err| L::fault(&err))?;
++        let held = if slot.files.is_empty() {
++            listed.upload.confirmed()
++        } else {
++            Inventory::load(env.remote)
++                .await
++                .map_err(|err| inventory_fault::<R>(&err))?
++                .newest()
++        };
++        self.settle_course(env.staging, held, unsent).await?;
+         Ok(listed)
+     }
+ 

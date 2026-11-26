@@ -1094,6 +1094,10 @@ pub struct RecorderCounts {
     /// The bytes of uploads whose commit the store took: `written_bytes` less these is what
     /// went to uploads aborted, failed or still open.
     pub committed_bytes: u64,
+    /// The bytes of uploads the store refused as `AlreadyExists` for a key the recorder already
+    /// holds a landed commit of: the object went up before, the engine could not know (a
+    /// commit that landed and answered with an error), and sending it again is how it finds out.
+    pub refused_held_bytes: u64,
     /// Second reads (a store reading back, through the source the engine gave it, bytes it
     /// was handed and let go of) that gave the bytes the engine first handed over.
     pub rereads_given: u64,
@@ -1636,6 +1640,14 @@ impl<S: ObjectStore> TapUpload<S> {
                 }
                 (Err(_), None) => false,
             };
+            let held = |s: &TapState| {
+                s.events
+                    .iter()
+                    .any(|event| matches!(event, RecorderEvent::Put { key: at, .. } if *at == key))
+            };
+            if matches!(outcome, Err(StoreError::AlreadyExists { .. })) && held(s) {
+                s.counts.refused_held_bytes = s.counts.refused_held_bytes.saturating_add(wrote);
+            }
             if landed {
                 s.counts.committed_bytes = s.counts.committed_bytes.saturating_add(wrote);
                 let (at, high) = s.times();
