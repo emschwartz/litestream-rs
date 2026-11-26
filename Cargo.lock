@@ -1035,6 +1035,7 @@ dependencies = [
  "lsr-store-s3",
  "percent-encoding",
  "proptest",
+ "rustls",
  "saphyr-parser",
  "tempfile",
  "thiserror",
