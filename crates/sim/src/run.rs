@@ -166,6 +166,9 @@ pub struct RunReport {
     /// Every commit and delete the replica accepted, when the run was asked to
     /// record.
     pub remote_events: Vec<crate::store::RecorderEvent>,
+    /// The replica's call counts after each operation, when the run was asked to record:
+    /// what one stretch of a history cost, for the request budgets Go's code fixes.
+    pub remote_counts: Vec<crate::store::RecorderCounts>,
     /// Every commit and delete staging accepted, when the run was asked to
     /// record.
     pub staging_events: Vec<crate::store::RecorderEvent>,
@@ -940,12 +943,10 @@ impl Runner {
             // A boot's spare is for its own tick: nothing after it may spend what is left.
             self.spare = crate::cost::Spare::default();
         }
-        let restoring = booting && self.w.staged_level_zero().is_empty();
-        if restoring {
+        if booting && self.w.staged_level_zero().is_empty() {
             self.restore_files = self
                 .restore_files
                 .saturating_add(self.w.remote_file_count());
-            self.allow_boot_restore();
         }
         let held = self.holding_writes();
         self.forcings_before_tick();
@@ -1006,7 +1007,7 @@ impl Runner {
             checkpoints: self.tally.total().saturating_sub(total0),
         };
         per_tick(&stats, self.limits())?;
-        self.judge_tick_cost(&stats, (at, staged_at), restoring)?;
+        self.judge_tick_cost(&stats, (at, staged_at))?;
         let replica_fired = self.remote_fired().all > fired0.0.all;
         let reach = &mut self.report.reach;
         // Every second read since the last tick was judged, the ones between ticks with it.
@@ -2562,6 +2563,11 @@ impl Runner {
         self.marks.begin(op);
         self.apply_op(op)?;
         self.marks.end(op);
+        if self.record {
+            self.report
+                .remote_counts
+                .push(self.w.remote_recorder.counts());
+        }
         // An operation that runs ticks between its edits (another writer's
         // file put, then removed after the engine ran) edits again after them.
         self.forcings.note_op(op);

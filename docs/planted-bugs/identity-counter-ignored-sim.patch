@@ -1,11 +1,11 @@
 diff --git a/crates/core/src/identity.rs b/crates/core/src/identity.rs
-index 0000000..0000000 100644
+index 3da6b86ad..594372b04 100644
 --- a/crates/core/src/identity.rs
 +++ b/crates/core/src/identity.rs
-@@ -186,7 +186,10 @@ pub(crate) async fn local_against_replica<W: WalSource, P: PageSource, R: Role>(
-     // An older copy of this database passes everything above; its counter is below the
+@@ -316,7 +316,10 @@ pub(crate) fn local_against_replica<W: WalSource, P: PageSource>(
      // replica's. A counter either side cannot read says nothing.
-     let older = match (counter, kept.as_deref().and_then(counter::value)) {
+     let theirs = image.kept.as_deref().and_then(counter::value);
+     let older = match (image.counter, theirs) {
 -        (Some((_, mine)), Some(theirs)) => mine < theirs,
 +        (Some((_, mine)), Some(theirs)) => {
 +            let _ = (mine, theirs);

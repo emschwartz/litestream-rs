@@ -1217,3 +1217,95 @@ proptest! {
         assert_matches_model(&model, model.states.len(), &sink.published().unwrap());
     }
 }
+
+/// One LTX file of `pages` pages of bytes that do not compress, for transactions `min..=max`.
+fn noisy(min: u64, max: u64, pages: u32) -> Vec<u8> {
+    let ps = PageSize::new(4096).unwrap();
+    let header = Header::new(HeaderFields {
+        tracked: false,
+        page_size: ps,
+        commit: pages,
+        txids: TxidRange::new(Txid::new(min).unwrap(), Txid::new(max).unwrap()).unwrap(),
+        timestamp: Timestamp::from_unix_millis(1_000),
+        pre_apply: None,
+        wal: None,
+        node_id: 0,
+    })
+    .unwrap();
+    let mut x = 0x9E37_79B9_7F4A_7C15_u64 ^ max;
+    let mut encoder = Encoder::new(Vec::new(), header).unwrap();
+    for n in 1..=pages {
+        let page: Vec<u8> = (0..ps.bytes())
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x.to_be_bytes()[0]
+            })
+            .collect();
+        encoder
+            .write_page(PageNo::new(n, ps).unwrap(), &page)
+            .unwrap();
+    }
+    encoder.finish(None).unwrap().0
+}
+
+/// A step of a restore reads at least 256 KiB however small its budget (a read of fewer costs
+/// only requests), and stops once its budget is spent.
+#[test]
+fn a_step_reads_at_least_its_floor_and_stops_at_its_budget() {
+    let store = MemStore::new();
+    put(&store, 9, 1, 1, &noisy(1, 1, 200));
+    put(&store, 0, 2, 2, &noisy(2, 2, 1));
+    let floor = 256 * 1024;
+    block_on(async {
+        let stepped = Stepped::begin(&store, txid(2), MemSink::new(), 1)
+            .await
+            .unwrap();
+        let Stepping::Going(stepped) = Box::new(stepped).step(&store, 1).await.unwrap() else {
+            panic!("one step restored it all");
+        };
+        assert_eq!(stepped.read.bytes_read(), floor, "{stepped:?}");
+        let Stepping::Going(stepped) = stepped.step(&store, floor).await.unwrap() else {
+            panic!("one step restored it all");
+        };
+        assert_eq!(stepped.read.bytes_read(), 2 * floor, "{stepped:?}");
+        assert!(format!("{stepped:?}").starts_with("Stepped"));
+        let Stepping::Done { last, .. } = stepped.step(&store, u64::MAX).await.unwrap() else {
+            panic!("the restore did not end");
+        };
+        assert_eq!(last.header().txids(), range(2, 2));
+    });
+}
+
+/// A step opens at most sixteen files however many bytes it may read: each costs a request or
+/// two, and a replica of many small files would make hundreds in one tick.
+#[test]
+fn a_step_opens_at_most_sixteen_files() {
+    let store = MemStore::new();
+    put(&store, 9, 1, 1, &noisy(1, 1, 1));
+    for n in 2..=40 {
+        put(&store, 0, n, n, &noisy(n, n, 1));
+    }
+    block_on(async {
+        let stepped = Stepped::begin(&store, txid(40), MemSink::new(), u64::MAX)
+            .await
+            .unwrap();
+        let Stepping::Going(stepped) = Box::new(stepped).step(&store, u64::MAX).await.unwrap()
+        else {
+            panic!("one step restored it all");
+        };
+        assert_eq!(
+            (stepped.key, stepped.read.bytes_read()),
+            (key(0, 17, 17), 0)
+        );
+        let Stepping::Going(stepped) = stepped.step(&store, u64::MAX).await.unwrap() else {
+            panic!("the second step restored it all");
+        };
+        assert_eq!(stepped.key, key(0, 33, 33));
+        let Stepping::Done { last, .. } = stepped.step(&store, u64::MAX).await.unwrap() else {
+            panic!("the restore did not end");
+        };
+        assert_eq!(last.header().txids(), range(40, 40));
+    });
+}

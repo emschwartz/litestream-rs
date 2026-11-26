@@ -1131,6 +1131,11 @@ pub type Landed = Arc<dyn Fn(&FileKey) -> Option<u64> + Send + Sync>;
 struct TapState {
     events: Vec<RecorderEvent>,
     counts: RecorderCounts,
+    /// The bytes written to each upload that has begun and neither committed, aborted nor
+    /// been dropped, by the id its [`Open`] holds.
+    open: BTreeMap<u64, u64>,
+    /// The id the next upload's [`Open`] takes.
+    next_open: u64,
     clock: Option<(Arc<FakeClock>, HighWater)>,
     landed: Option<Landed>,
     // Objects a commit reported failed that the bucket took all the same.
@@ -1200,6 +1205,16 @@ impl RecorderLog {
     #[must_use]
     pub fn counts(&self) -> RecorderCounts {
         lock(&self.state).counts
+    }
+
+    /// The bytes written to uploads still open: begun, and neither committed, aborted nor
+    /// dropped. Part of `written_bytes` less `committed_bytes` that is not yet wasted.
+    #[must_use]
+    pub fn open_bytes(&self) -> u64 {
+        lock(&self.state)
+            .open
+            .values()
+            .fold(0, |sum, bytes| sum.saturating_add(*bytes))
     }
 
     fn with(&self, f: impl FnOnce(&mut TapState)) {
@@ -1349,6 +1364,7 @@ impl<S: ObjectStore + 'static> ObjectStore for Recorder<S> {
             wrote: 0,
             digest: DIGEST_SEED,
             first: Arc::default(),
+            open: Open::new(&self.log),
             log: self.log.clone(),
         })
     }
@@ -1402,6 +1418,40 @@ pub struct TapUpload<S: ObjectStore> {
     /// a part in flight may read after the write that handed its bytes over.
     first: Arc<Mutex<Vec<u8>>>,
     log: RecorderLog,
+    /// Keeps the upload among the open ones until it ends, however it ends.
+    open: Open,
+}
+
+/// An upload's place among the recorder's open uploads ([`RecorderLog::open_bytes`]), left
+/// when it is dropped: by its commit or abort, or with the upload when the engine lets it go.
+#[derive(Debug)]
+struct Open {
+    id: u64,
+    log: RecorderLog,
+}
+
+impl Open {
+    fn new(log: &RecorderLog) -> Self {
+        let mut id = 0;
+        log.with(|s| {
+            id = s.next_open;
+            s.next_open = s.next_open.saturating_add(1);
+            s.open.insert(id, 0);
+        });
+        Self {
+            id,
+            log: log.clone(),
+        }
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        let id = self.id;
+        self.log.with(|s| {
+            s.open.remove(&id);
+        });
+    }
 }
 
 /// The source an engine gave with its bytes, watched: each later read through a reader it
@@ -1541,13 +1591,14 @@ impl<S: ObjectStore> TapUpload<S> {
         self.wrote = self
             .wrote
             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        let wrote = self.wrote;
+        let (wrote, open) = (self.wrote, self.open.id);
         let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
         self.log.with(|s| {
             bump(&mut s.counts.writes);
             s.counts.max_upload_bytes = s.counts.max_upload_bytes.max(wrote);
             s.counts.max_write_bytes = s.counts.max_write_bytes.max(chunk_len);
             s.counts.written_bytes = s.counts.written_bytes.saturating_add(chunk_len);
+            s.open.insert(open, wrote);
         });
         Ok(())
     }
@@ -1564,9 +1615,10 @@ impl<S: ObjectStore> TapUpload<S> {
             digest,
             first,
             log,
+            open,
         } = self;
         let header = parse_header(&head);
-        drop(first);
+        drop((first, open));
         let outcome = inner.commit().await;
         log.with(|s| {
             bump(&mut s.counts.commits);
