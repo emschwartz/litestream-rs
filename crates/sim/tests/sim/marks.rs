@@ -54,3 +54,41 @@ fn the_coverage_scenarios_reach_their_required_marks() {
         }
     }
 }
+
+/// The whole required population, closed: every mark the gate requires is named by a coverage
+/// scenario, or falls in a family `LEFT_TO_THE_SEEDS` gives a reason for, never both. A new
+/// mark of a family with no reason fails here until it has a scenario or one is written.
+#[test]
+fn every_required_mark_has_a_scenario_or_a_reason() {
+    let covered: Vec<String> = lsr_sim::scenario::coverage()
+        .iter()
+        .flat_map(|scenario| scenario.keys().to_vec())
+        .collect();
+    let family = |key: &str| {
+        lsr_sim::scenario::LEFT_TO_THE_SEEDS
+            .iter()
+            .find(|(prefix, _)| key.starts_with(prefix))
+    };
+    let required: Vec<String> = lsr_sim::marks::required_keys()
+        .into_iter()
+        .filter(|key| key != CANARY)
+        .collect();
+    assert!(!required.is_empty(), "the gate requires nothing");
+    let orphans: Vec<&String> = required
+        .iter()
+        .filter(|key| !covered.contains(key) && family(key).is_none())
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "no scenario and no reason for {orphans:?}"
+    );
+    let both: Vec<&String> = covered.iter().filter(|key| family(key).is_some()).collect();
+    assert!(both.is_empty(), "a scenario and a reason for {both:?}");
+    for (prefix, why) in lsr_sim::scenario::LEFT_TO_THE_SEEDS {
+        assert!(!why.is_empty(), "{prefix}");
+        assert!(
+            required.iter().any(|key| key.starts_with(prefix)),
+            "{prefix} names no required mark"
+        );
+    }
+}
